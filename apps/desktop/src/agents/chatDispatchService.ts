@@ -163,7 +163,7 @@ export interface ChatDispatchServiceOptions {
 }
 
 export interface ChatDispatchThreadState {
-  liveRun: boolean;
+  liveRunId: string | null;
   pendingCount: number;
   paused: boolean;
   pausedReason?: string;
@@ -1597,11 +1597,20 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     }
   }
 
-  async function stopAgentRun(workspaceId: string): Promise<boolean> {
+  async function stopAgentRun(
+    workspaceId: string,
+    expectedRunId: string,
+  ): Promise<boolean> {
     let stoppedRun = false;
     await enqueue(workspaceId, async () => {
       const live = liveRuns.get(workspaceId);
-      if (!live || live.finalized) return;
+      if (
+        !live ||
+        live.finalized ||
+        live.claim.run.runId !== expectedRunId
+      ) {
+        return;
+      }
       stoppedRun = true;
       live.finalized = true;
       live.terminalIntent = {
@@ -1672,8 +1681,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     ]);
     const live = liveRuns.get(workspaceId);
     return {
-      liveRun:
-        live?.claim.run.threadId === threadId && live.finalized === false,
+      liveRunId:
+        live?.claim.run.threadId === threadId && live.finalized === false
+          ? live.claim.run.runId
+          : null,
       pendingCount: pending
         .filter((pending) => pending.threadId === threadId).length,
       paused: pauseState?.paused ?? false,

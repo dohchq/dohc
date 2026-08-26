@@ -32,6 +32,7 @@ export function registerWorkspaceSearchIpcHandlers<
     event: Event,
     workspaceId: string,
   ): WorkspaceSearchAuthority<Workspace>;
+  authorizeCancel(event: Event): boolean;
   owner: Pick<WorkspaceSearchOwner<Workspace>, "start" | "cancel">;
 }): void {
   dependencies.registerHandler(
@@ -52,6 +53,7 @@ export function registerWorkspaceSearchIpcHandlers<
     (event, payload) => {
       dependencies.assertTrustedSender(event);
       const input = CancelWorkspaceSearchPayload.parse(payload);
+      if (!dependencies.authorizeCancel(event)) return;
       dependencies.owner.cancel(event.sender.id, input.searchId);
     },
   );

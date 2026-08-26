@@ -510,6 +510,16 @@ export const OpenWorkspacePayload = z.object({
 });
 export type OpenWorkspacePayload = z.infer<typeof OpenWorkspacePayload>;
 
+// Preload adds one identity for its renderer document. It is intentionally not
+// part of DohcDesktopBridge: renderer code cannot choose or reuse it across a
+// reload, while main can distinguish a late invoke from the outgoing document.
+export const OpenWorkspaceRequestPayload = OpenWorkspacePayload.extend({
+  rendererDocumentId: z.uuid(),
+});
+export const ReloadRendererRequestPayload = z.object({
+  rendererDocumentId: z.uuid(),
+});
+
 export const ReadWorkspaceTextPayload = z.object({
   workspaceId: WORKSPACE_ID,
   relativePath: PATH_STRING,
@@ -1764,7 +1774,11 @@ export type StartDmResult = z.infer<typeof StartDmResult>;
 // the bearer independently.
 export const PresenceScopeInput = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("workspace"), workspaceId: WORKSPACE_ID }),
-  z.object({ kind: z.literal("share"), shareId: z.string().min(1).max(200) }),
+  z.object({
+    kind: z.literal("share"),
+    workspaceId: WORKSPACE_ID,
+    shareId: z.string().min(1).max(200),
+  }),
 ]);
 export type PresenceScopeInput = z.infer<typeof PresenceScopeInput>;
 
@@ -1772,6 +1786,7 @@ export type PresenceScopeInput = z.infer<typeof PresenceScopeInput>;
 // MAX_CLIENT_ID_CHARS): reject early rather than round-trip an over-long value.
 const PRESENCE_TOPIC = z.string().min(1).max(1024);
 const PRESENCE_CLIENT_ID = z.string().min(1).max(128);
+const PRESENCE_INCARNATION_ID = z.uuid();
 const PRESENCE_POLL_ID = z.string().min(1).max(128);
 
 // Cap the opaque presence state at the IPC boundary, mirroring the relay's
@@ -1854,6 +1869,7 @@ export const PresencePublishPayload = z.object({
   scope: PresenceScopeInput,
   topic: PRESENCE_TOPIC,
   clientId: PRESENCE_CLIENT_ID,
+  incarnationId: PRESENCE_INCARNATION_ID,
   // Opaque display payload (e.g. { displayName, typing }) — forwarded verbatim
   // to the relay, which caps its serialized size. Absent on a leave; bounded
   // here so main never serializes an attacker-sized payload.
@@ -1866,6 +1882,9 @@ export const PresencePublishPayload = z.object({
   leave: z.boolean().optional(),
 });
 export type PresencePublishPayload = z.infer<typeof PresencePublishPayload>;
+export const PresencePublishRequestPayload = PresencePublishPayload.extend({
+  rendererDocumentId: z.uuid(),
+});
 
 export const PresencePollPayload = z.object({
   scope: PresenceScopeInput,
@@ -4158,6 +4177,7 @@ export type RunnerSelfTestPayload = z.infer<typeof RunnerSelfTestPayload>;
 
 export const StopAgentRunPayload = z.object({
   workspaceId: WORKSPACE_ID,
+  runId: z.string().min(1).max(200),
 }).strict();
 export type StopAgentRunPayload = z.infer<typeof StopAgentRunPayload>;
 
@@ -4178,7 +4198,7 @@ export type ChatDispatchStateForThreadPayload = z.infer<
 >;
 
 export const ChatDispatchStateForThreadResult = z.object({
-  liveRun: z.boolean(),
+  liveRunId: z.string().min(1).max(200).nullable(),
   pendingCount: z.number().int().nonnegative(),
   paused: z.boolean(),
   pausedReason: z.string().min(1).max(500).optional(),

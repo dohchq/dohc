@@ -73,18 +73,13 @@ function createFakeRegistry(
 }
 
 function createSender(id: number) {
-  const destroyed: Array<() => void> = [];
   let isDestroyed = false;
   return {
     id,
     isDestroyed: () => isDestroyed,
     send: vi.fn(),
-    once: vi.fn((event: "destroyed", listener: () => void) => {
-      if (event === "destroyed") destroyed.push(listener);
-    }),
     destroy() {
       isDestroyed = true;
-      for (const listener of destroyed.splice(0)) listener();
     },
   };
 }
@@ -631,7 +626,7 @@ describe("WorkspaceSearchOwner", () => {
     expect(registry.starts).toEqual([]);
   });
 
-  it("invalidates pending and active work when a sender is destroyed or disposed", async () => {
+  it("invalidates pending and active work through central sender disposal", async () => {
     const rootPath = await makeRoot();
     const registry = createFakeRegistry();
     const owner = new WorkspaceSearchOwner({
@@ -649,6 +644,7 @@ describe("WorkspaceSearchOwner", () => {
       searchPayload("destroyed"),
     );
     destroyed.destroy();
+    owner.disposeSender(destroyed.id);
     registry.starts[0]?.onBatch({
       searchId: "destroyed",
       entries: [],

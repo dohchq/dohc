@@ -72,7 +72,6 @@ import type {
 
 interface PluginIpcSender {
   readonly id: number;
-  isDestroyed(): boolean;
   getZoomFactor(): number;
 }
 
@@ -83,6 +82,12 @@ interface PluginIpcEvent<TSender extends PluginIpcSender> {
 interface PluginIpcWorkspace {
   readonly workspaceId: string;
   readonly rootPath: string;
+}
+
+interface PluginRendererWorkspaceSession {
+  readonly workspaceId: string;
+  readonly generation: number;
+  isCurrent(): boolean;
 }
 
 type PluginIpcHandler<TEvent> = (
@@ -142,11 +147,17 @@ interface RegisterPluginIpcHandlersOptions<
   registrar: PluginIpcRegistrar<TEvent>;
   assertTrustedSender(event: TEvent): void;
   workspaces: {
-    activeWorkspaceIdBySender: ReadonlyMap<number, string>;
     assertWritable(workspace: TWorkspace): void;
-    require(workspaceId: string): TWorkspace;
+    currentSession(sender: TSender): PluginRendererWorkspaceSession | undefined;
+    requireActive(
+      sender: TSender,
+      workspaceId: string,
+      inactiveMessage: string,
+    ): {
+      workspace: TWorkspace;
+      session: PluginRendererWorkspaceSession;
+    };
   };
-  rendererGeneration(senderId: number): number;
   runtimes: {
     current(workspaceId: string): PluginIpcRuntime | undefined;
     ensure(workspace: TWorkspace): Promise<PluginIpcRuntime>;
@@ -168,6 +179,7 @@ interface PluginIpcRuntime {
 
 interface ActiveWorkspacePolicy<TWorkspace extends PluginIpcWorkspace> {
   readonly workspace: TWorkspace;
+  readonly session: PluginRendererWorkspaceSession;
 }
 
 interface WritableActiveWorkspacePolicy<TWorkspace extends PluginIpcWorkspace>
@@ -201,7 +213,6 @@ export function registerPluginIpcHandlers<
     registrar: rawRegistrar,
     assertTrustedSender,
     workspaces,
-    rendererGeneration,
     runtimes,
     surfaces,
     platform,
@@ -220,11 +231,7 @@ export function registerPluginIpcHandlers<
     workspaceId: string,
     inactiveMessage = DEFAULT_INACTIVE_MESSAGE,
   ): ActiveWorkspacePolicy<TWorkspace> => {
-    const workspace = workspaces.require(workspaceId);
-    if (workspaces.activeWorkspaceIdBySender.get(event.sender.id) !== workspace.workspaceId) {
-      throw new Error(inactiveMessage);
-    }
-    return { workspace };
+    return workspaces.requireActive(event.sender, workspaceId, inactiveMessage);
   };
 
   const createWritableActiveWorkspacePolicy = (
@@ -232,29 +239,22 @@ export function registerPluginIpcHandlers<
     workspaceId: string,
     settings: {
       inactiveMessage?: string;
-      trackRenderer?: boolean;
     } = {},
   ): WritableActiveWorkspacePolicy<TWorkspace> => {
-    const { workspace } = createReadableActiveWorkspacePolicy(
+    const { workspace, session } = createReadableActiveWorkspacePolicy(
       event,
       workspaceId,
       settings.inactiveMessage,
     );
-    const generation = rendererGeneration(event.sender.id);
+    const generation = session.generation;
     const revalidate = (message = settings.inactiveMessage ?? DEFAULT_INACTIVE_MESSAGE) => {
-      if (
-        workspaces.activeWorkspaceIdBySender.get(event.sender.id) !==
-          workspace.workspaceId ||
-        (settings.trackRenderer &&
-          (event.sender.isDestroyed() ||
-            rendererGeneration(event.sender.id) !== generation))
-      ) {
+      if (!session.isCurrent()) {
         throw new Error(message);
       }
       workspaces.assertWritable(workspace);
     };
     revalidate();
-    return { workspace, generation, revalidate };
+    return { workspace, session, generation, revalidate };
   };
 
   const createExactSurfaceOwnershipPolicy = (
@@ -262,7 +262,7 @@ export function registerPluginIpcHandlers<
     workspaceId: string,
     inactiveMessage: string,
   ) => {
-    const { workspace } = createReadableActiveWorkspacePolicy(
+    const { workspace, session } = createReadableActiveWorkspacePolicy(
       event,
       workspaceId,
       inactiveMessage,
@@ -271,9 +271,25 @@ export function registerPluginIpcHandlers<
       workspace,
       owner: {
         senderId: event.sender.id,
-        generation: rendererGeneration(event.sender.id),
+        generation: session.generation,
       },
     };
+  };
+
+  const requireSurfaceSession = (
+    event: TEvent,
+    workspaceId: string,
+    inactiveMessage: string,
+  ): PluginRendererWorkspaceSession => {
+    const session = workspaces.currentSession(event.sender);
+    if (
+      !session ||
+      !session.isCurrent() ||
+      session.workspaceId !== workspaceId
+    ) {
+      throw new Error(inactiveMessage);
+    }
+    return session;
   };
 
   const registeredPlugin = (
@@ -346,7 +362,6 @@ export function registerPluginIpcHandlers<
     const input = OpenPluginPanelPayload.parse(payload);
     const policy = createWritableActiveWorkspacePolicy(event, input.workspaceId, {
       inactiveMessage: CURRENT_RENDERER_MESSAGE,
-      trackRenderer: true,
     });
     const { runtime, revalidate } = await ensureExactRuntime(
       policy,
@@ -375,7 +390,6 @@ export function registerPluginIpcHandlers<
     const input = StartPluginPanelPayload.parse(payload);
     const policy = createWritableActiveWorkspacePolicy(event, input.workspaceId, {
       inactiveMessage: CURRENT_RENDERER_MESSAGE,
-      trackRenderer: true,
     });
     const currentPipeline = runtimes.current(policy.workspace.workspaceId)
       ?.pipeline;
@@ -423,7 +437,6 @@ export function registerPluginIpcHandlers<
     const policy = createWritableActiveWorkspacePolicy(event, input.workspaceId, {
       inactiveMessage:
         "The plugin command request does not target the active workspace. Open the workspace and try again.",
-      trackRenderer: true,
     });
     const pipeline = (await runtimes.ensure(policy.workspace)).pipeline;
     policy.revalidate();
@@ -476,14 +489,19 @@ export function registerPluginIpcHandlers<
 
   registrar.handle(CHANNELS.invokePluginPanelSdk, async (event, payload) => {
     const input = InvokePluginPanelSdkPayload.parse(payload);
+    const session = requireSurfaceSession(
+      event,
+      input.workspaceId,
+      CURRENT_RENDERER_MESSAGE,
+    );
     const authorization = surfaces.authorizePanelSdk({
       workspaceId: input.workspaceId,
       pluginId: input.pluginId,
       panelId: input.panelId,
       senderId: event.sender.id,
-      currentGeneration: () => rendererGeneration(event.sender.id),
+      currentGeneration: () => session.generation,
       activeWorkspaceId: () =>
-        workspaces.activeWorkspaceIdBySender.get(event.sender.id),
+        session.isCurrent() ? session.workspaceId : undefined,
       liveSpawnId: () =>
         runtimes.current(input.workspaceId)?.pipeline.host.getSpawnId(
           input.pluginId,
@@ -501,7 +519,6 @@ export function registerPluginIpcHandlers<
     const input = OpenPluginWebAppPayload.parse(payload);
     const policy = createWritableActiveWorkspacePolicy(event, input.workspaceId, {
       inactiveMessage: CURRENT_RENDERER_MESSAGE,
-      trackRenderer: true,
     });
     const { runtime, revalidate } = await ensureExactRuntime(
       policy,
@@ -537,7 +554,6 @@ export function registerPluginIpcHandlers<
     const input = StartPluginWebAppPayload.parse(payload);
     const policy = createWritableActiveWorkspacePolicy(event, input.workspaceId, {
       inactiveMessage: CURRENT_RENDERER_MESSAGE,
-      trackRenderer: true,
     });
     const plugin = registeredPlugin(policy.workspace.workspaceId, input.pluginId);
     if (!plugin) {
@@ -590,13 +606,18 @@ export function registerPluginIpcHandlers<
 
   registrar.handle(CHANNELS.setPluginWebAppBounds, (event, payload) => {
     const input = SetPluginWebAppBoundsPayload.parse(payload);
+    const session = requireSurfaceSession(
+      event,
+      input.workspaceId,
+      CURRENT_RENDERER_MESSAGE,
+    );
     surfaces.applyWebAppBounds({
       workspaceId: input.workspaceId,
       pluginId: input.pluginId,
       webAppId: input.webAppId,
       instanceKey: input.instanceKey,
       senderId: event.sender.id,
-      generation: rendererGeneration(event.sender.id),
+      generation: session.generation,
       bounds: input.bounds,
       visible: input.visible,
       zoomFactor: event.sender.getZoomFactor(),

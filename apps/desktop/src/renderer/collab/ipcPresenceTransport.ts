@@ -1,6 +1,9 @@
-import type { PresenceResult } from "../../ipc/bridgeContract";
+import type {
+  PresenceResult,
+  PresenceScopeInput,
+} from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
-import type { PresenceScope, PresenceSnapshot, PresenceTransport } from "./presenceChannel";
+import type { PresenceSnapshot, PresenceTransport } from "./presenceChannel";
 
 // MU-C5 — the IPC-PROXIED presence transport.
 //
@@ -39,17 +42,31 @@ function toSnapshot(snapshot: Extract<PresenceResult, { ok: true }>["snapshot"])
   };
 }
 
-export function createIpcPresenceTransport(scope: PresenceScope): PresenceTransport {
+export function createIpcPresenceTransport(
+  scope: PresenceScopeInput,
+): PresenceTransport {
   return {
-    async publish({ topic, clientId, state }): Promise<PresenceSnapshot> {
-      const result = await bridge().presencePublish({ scope, topic, clientId, state });
+    async publish({ topic, clientId, incarnationId, state }): Promise<PresenceSnapshot> {
+      const result = await bridge().presencePublish({
+        scope,
+        topic,
+        clientId,
+        incarnationId,
+        state,
+      });
       if (!result.ok) throw new Error(`presence publish ${result.reason}`);
       return toSnapshot(result.snapshot);
     },
-    async leave({ topic, clientId }): Promise<void> {
+    async leave({ topic, clientId, incarnationId }): Promise<void> {
       // Best-effort: a failed leave is fine — the relay entry expires on TTL.
       await bridge()
-        .presencePublish({ scope, topic, clientId, leave: true })
+        .presencePublish({
+          scope,
+          topic,
+          clientId,
+          incarnationId,
+          leave: true,
+        })
         .catch(() => undefined);
     },
     async poll({ topic, since, signal }): Promise<PresenceSnapshot> {

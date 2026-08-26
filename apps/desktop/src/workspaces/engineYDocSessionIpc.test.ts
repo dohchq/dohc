@@ -93,6 +93,20 @@ interface TestHarnessOptions {
     workspace: { workspaceId: string; rootPath: string },
     path: string,
   ) => Promise<string | null>;
+  rendererWorkspaceId?: string;
+}
+
+function rendererSession(
+  generationOf: () => number = () => 1,
+  isAvailable: () => boolean = () => true,
+  workspaceId = "workspace-1",
+) {
+  const generation = generationOf();
+  return {
+    workspaceId,
+    generation,
+    isCurrent: () => isAvailable() && generationOf() === generation,
+  };
 }
 
 function harness(
@@ -102,6 +116,7 @@ function harness(
   const resolveDocumentPath =
     options.resolveDocumentPath ?? (async (_workspace, path: string) => path);
   let generation = 1;
+  let retired = false;
   let readOnly = false;
   let capturedOpen:
     | Parameters<EngineYDocSessionCapture["openYDocSession"]>[0]
@@ -114,7 +129,14 @@ function harness(
   };
   const onError = vi.fn();
   const ipc = createEngineYDocSessionIpc({
-    generationOf: () => generation,
+    sessionFor: () =>
+      retired
+        ? undefined
+        : rendererSession(
+            () => generation,
+            () => !retired,
+            options.rendererWorkspaceId,
+          ),
     requireWorkspace: (workspaceId) => ({
       workspaceId,
       rootPath: "C:/workspace",
@@ -133,6 +155,9 @@ function harness(
     capturedOpen: () => capturedOpen,
     setGeneration: (next: number) => {
       generation = next;
+    },
+    retireSession: () => {
+      retired = true;
     },
     setReadOnly: (next: boolean) => {
       readOnly = next;
@@ -185,6 +210,18 @@ describe("engine Y.Doc IPC adapter", () => {
       { sessionId: openPayload.sessionId, state: "settling", seq: 4 },
       { sessionId: openPayload.sessionId, state: "saved", seq: 4 },
     ]);
+  });
+
+  it("refuses an open outside the renderer session's workspace", async () => {
+    const sender = new FakeSender(7);
+    const h = harness(providerSession(), {
+      rendererWorkspaceId: "workspace-2",
+    });
+
+    await expect(h.ipc.open(sender, openPayload)).resolves.toEqual({
+      available: false,
+    });
+    expect(h.capture.openYDocSession).not.toHaveBeenCalled();
   });
 
   it("reports current remote-update delivery failures but ignores stale senders", async () => {
@@ -348,7 +385,7 @@ describe("engine Y.Doc IPC adapter", () => {
       captureAvailable = true;
     });
     const ipc = createEngineYDocSessionIpc({
-      generationOf: () => 1,
+      sessionFor: () => rendererSession(),
       requireWorkspace: (workspaceId) => ({
         workspaceId,
         rootPath: "C:/workspace",
@@ -419,7 +456,7 @@ describe("engine Y.Doc IPC adapter", () => {
       }),
     };
     const ipc = createEngineYDocSessionIpc({
-      generationOf: () => 1,
+      sessionFor: () => rendererSession(),
       requireWorkspace: (workspaceId) => ({
         workspaceId,
         rootPath: "C:/workspace",
@@ -668,7 +705,7 @@ describe("engine Y.Doc IPC adapter", () => {
       return captureReady.promise;
     });
     const ipc = createEngineYDocSessionIpc({
-      generationOf: () => generation,
+      sessionFor: () => rendererSession(() => generation),
       requireWorkspace: (workspaceId) => ({
         workspaceId,
         rootPath: "C:/workspace",
@@ -689,6 +726,18 @@ describe("engine Y.Doc IPC adapter", () => {
 
     await expect(opening).resolves.toEqual({ available: false });
     expect(capture.openYDocSession).not.toHaveBeenCalled();
+  });
+
+  it("denies a fresh open after reload retirement invalidates admission", async () => {
+    const sender = new FakeSender(7);
+    const h = harness();
+    h.retireSession();
+
+    await expect(h.ipc.open(sender, openPayload)).resolves.toEqual({
+      available: false,
+    });
+
+    expect(h.capture.openYDocSession).not.toHaveBeenCalled();
   });
 
   it("rechecks shared-view and deletion policy before every update", async () => {
@@ -866,7 +915,7 @@ describe("engine Y.Doc IPC adapter", () => {
       }),
     };
     const ipc = createEngineYDocSessionIpc({
-      generationOf: () => 1,
+      sessionFor: () => rendererSession(),
       requireWorkspace: (workspaceId) => ({
         workspaceId,
         rootPath: "C:/workspace",
@@ -954,7 +1003,7 @@ describe("engine Y.Doc IPC adapter", () => {
         }),
       };
       const ipc = createEngineYDocSessionIpc({
-        generationOf: () => 1,
+        sessionFor: () => rendererSession(),
         requireWorkspace: (workspaceId) => ({
           workspaceId,
           rootPath: "C:/workspace",
@@ -988,7 +1037,7 @@ describe("engine Y.Doc IPC adapter", () => {
     expect(ordinary.capture.openYDocSession).not.toHaveBeenCalled();
   });
 
-  it("retires a pending open when its exact sender is destroyed", async () => {
+  it("retires a pending open through the central sender-retirement adapter", async () => {
     const sender = new FakeSender(7);
     const openStarted = deferred<void>();
     const engineOpen = deferred<WorkspaceEngineYDocProviderSession>();
@@ -1000,7 +1049,7 @@ describe("engine Y.Doc IPC adapter", () => {
       }),
     };
     const ipc = createEngineYDocSessionIpc({
-      generationOf: () => 1,
+      sessionFor: () => rendererSession(),
       requireWorkspace: (workspaceId) => ({
         workspaceId,
         rootPath: "C:/workspace",
@@ -1014,10 +1063,11 @@ describe("engine Y.Doc IPC adapter", () => {
 
     const opening = ipc.open(sender, openPayload);
     await openStarted.promise;
-    sender.destroy();
+    const retirement = ipc.retireSender(sender, 1);
     engineOpen.resolve(providerSession({ close }));
 
     await expect(opening).resolves.toEqual({ available: false });
+    await retirement;
     expect(close).toHaveBeenCalledWith(undefined);
   });
 

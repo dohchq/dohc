@@ -71,18 +71,7 @@ describe("plugin web app main-process wiring", () => {
     expect(track).toContain("applyZoomLevelToWindows(application.applyEverywhere);");
   });
 
-  it("keeps surface teardown before pipeline disposal for one workspace and all workspaces", () => {
-    const stopWorkspace = functionSource("async function stopPluginWorkspace(");
-    const runtimeAt = stopWorkspace.indexOf(
-      "await pluginWorkspaceRuntimes.stop(",
-    );
-    const surfacesAt = stopWorkspace.indexOf(
-      'pluginSurfaces.stop({ kind: "workspace", workspaceId })',
-      runtimeAt,
-    );
-    expect(runtimeAt).toBeGreaterThan(-1);
-    expect(surfacesAt).toBeGreaterThan(runtimeAt);
-
+  it("keeps all-workspace surface teardown before pipeline disposal", () => {
     const stopAll = functionSource("async function stopAllPluginWorkspaces(");
     const closeAt = stopAll.indexOf("pluginWorkspaceRuntimes.close(");
     const surfacesCloseAt = stopAll.indexOf("pluginSurfaces.close()", closeAt);
@@ -98,7 +87,7 @@ describe("plugin web app main-process wiring", () => {
   it("generation-gates owner failure notification before sending", () => {
     const notify = functionSource("function notifyPluginWebAppFailed(");
     expect(notify).toContain(
-      "sender.isDestroyed() || rendererGeneration(sender.id) !== generation",
+      "rendererWorkspaceSessions.current(sender)?.generation !== generation",
     );
 
     const ownerAt = mainSource.indexOf(

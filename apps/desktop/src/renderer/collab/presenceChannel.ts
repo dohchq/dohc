@@ -30,9 +30,32 @@ export interface PresenceSnapshot {
 // The wire abstraction. publish/leave/poll map 1:1 to the relay routes but are
 // swappable for tests.
 export interface PresenceTransport {
-  publish(input: { topic: string; clientId: string; state: unknown }): Promise<PresenceSnapshot>;
-  leave(input: { topic: string; clientId: string }): Promise<void>;
+  publish(input: {
+    topic: string;
+    clientId: string;
+    incarnationId: string;
+    state: unknown;
+  }): Promise<PresenceSnapshot>;
+  leave(input: {
+    topic: string;
+    clientId: string;
+    incarnationId: string;
+  }): Promise<void>;
   poll(input: { topic: string; since: number; signal: AbortSignal }): Promise<PresenceSnapshot>;
+}
+
+export interface RelayPresenceTransport {
+  publish(input: {
+    topic: string;
+    clientId: string;
+    state: unknown;
+  }): Promise<PresenceSnapshot>;
+  leave(input: { topic: string; clientId: string }): Promise<void>;
+  poll(input: {
+    topic: string;
+    since: number;
+    signal: AbortSignal;
+  }): Promise<PresenceSnapshot>;
 }
 
 // The ONE guard between a peer's untrusted display payload and every UI
@@ -74,7 +97,9 @@ function parseSnapshot(value: unknown): PresenceSnapshot {
 // Build a relay-backed transport. The bearer token authenticates the actor;
 // the relay derives identity from it (never from the body), so this client
 // cannot claim another user's presence.
-export function createRelayPresenceTransport(config: RelayPresenceConfig): PresenceTransport {
+export function createRelayPresenceTransport(
+  config: RelayPresenceConfig,
+): RelayPresenceTransport {
   const doFetch = config.fetch ?? fetch;
   const authHeaders = { authorization: `Bearer ${config.token}` };
   return {
@@ -88,12 +113,12 @@ export function createRelayPresenceTransport(config: RelayPresenceConfig): Prese
       return parseSnapshot(await response.json());
     },
     async leave({ topic, clientId }) {
-      // Best-effort: a failed leave is fine — the entry expires on TTL anyway.
-      await doFetch(presenceUrl(config, topic, {}), {
+      const response = await doFetch(presenceUrl(config, topic, {}), {
         method: "POST",
         headers: { ...authHeaders, "content-type": "application/json" },
         body: JSON.stringify({ clientId, leave: true }),
-      }).catch(() => undefined);
+      });
+      if (!response.ok) throw new Error(`presence leave failed: ${response.status}`);
     },
     async poll({ topic, since, signal }) {
       const response = await doFetch(presenceUrl(config, topic, { since: String(since) }), {
@@ -147,6 +172,7 @@ const DEFAULT_RETRY_MS = 3_000;
 // Start a live presence channel. The first publish happens immediately so the
 // user appears "here" at once; the poll loop then tracks peers.
 export function createPresenceChannel(options: PresenceChannelOptions): PresenceChannel {
+  const incarnationId = crypto.randomUUID();
   const heartbeatMs = options.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
   const retryMs = options.retryMs ?? DEFAULT_RETRY_MS;
   let state = options.initialState;
@@ -187,6 +213,7 @@ export function createPresenceChannel(options: PresenceChannelOptions): Presence
         const snapshot = await options.transport.publish({
           topic: options.topic,
           clientId: options.clientId,
+          incarnationId,
           state,
         });
         emit(snapshot);
@@ -282,6 +309,7 @@ export function createPresenceChannel(options: PresenceChannelOptions): Presence
           await options.transport.leave({
             topic: options.topic,
             clientId: options.clientId,
+            incarnationId,
           });
         } catch {
           // Sync-throwing or rejecting transports get the same best-effort

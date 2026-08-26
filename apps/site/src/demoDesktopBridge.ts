@@ -671,7 +671,7 @@ const demoBridge = {
     return { runs: {} };
   },
   async chatDispatchStateForThread() {
-    return { liveRun: false, pendingCount: 0, paused: false };
+    return { liveRunId: null, pendingCount: 0, paused: false };
   },
   async markChatThreadRead() {
     return { lastReadSequence: 2, revision: 1 };

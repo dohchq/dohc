@@ -447,11 +447,40 @@ function createHarness() {
       if (!state.trusted) throw new Error("Untrusted sender");
     },
     workspaces: {
-      activeWorkspaceIdBySender,
       assertWritable,
-      require: requireWorkspace,
+      currentSession: (requestSender) => {
+        const workspaceId = activeWorkspaceIdBySender.get(requestSender.id);
+        if (!workspaceId) return undefined;
+        const generation = state.generation;
+        return {
+          workspaceId,
+          generation,
+          isCurrent: () =>
+            activeWorkspaceIdBySender.get(requestSender.id) === workspaceId &&
+            state.generation === generation,
+        };
+      },
+      requireActive: (requestSender, workspaceId, inactiveMessage) => {
+        const activeWorkspace = requireWorkspace(workspaceId);
+        if (
+          activeWorkspaceIdBySender.get(requestSender.id) !==
+          activeWorkspace.workspaceId
+        ) {
+          throw new Error(inactiveMessage);
+        }
+        const generation = state.generation;
+        return {
+          workspace: activeWorkspace,
+          session: {
+            workspaceId: activeWorkspace.workspaceId,
+            generation,
+            isCurrent: () =>
+              activeWorkspaceIdBySender.get(requestSender.id) ===
+                activeWorkspace.workspaceId && state.generation === generation,
+          },
+        };
+      },
     },
-    rendererGeneration: () => state.generation,
     runtimes,
     surfaces,
     platform: platform as never,

@@ -5532,7 +5532,7 @@ describe("ui-state merge-on-load", () => {
       listChatThreadAttachments: vi.fn(async () => ({ attachments: [] })),
       chatRunRecordsForThread: vi.fn(async () => ({ runs: {} })),
       chatDispatchStateForThread: vi.fn(async () => ({
-        liveRun: false,
+        liveRunId: null,
         pendingCount: 0,
         paused: false,
       })),

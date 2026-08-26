@@ -15,6 +15,7 @@ interface TestEvent {
 function harness() {
   const trace: string[] = [];
   let activeWorkspaceId = "workspace-1";
+  let rendererSessionCurrent = true;
   const handlers = new Map<
     string,
     (event: TestEvent, payload: unknown) => Promise<unknown> | unknown
@@ -27,6 +28,9 @@ function harness() {
     start: vi.fn(async () => undefined),
     cancel: vi.fn(),
   };
+  const authorizeCancel = vi.fn((_event: TestEvent) => {
+    return rendererSessionCurrent;
+  });
   registerWorkspaceSearchIpcHandlers<TestEvent, typeof workspace>({
     registerHandler: (channel, handler) => handlers.set(channel, handler),
     assertTrustedSender: (event) => {
@@ -38,14 +42,17 @@ function harness() {
       if (workspaceId !== workspace.workspaceId) {
         throw new Error("Renderer has no authority for this workspace.");
       }
-      if (activeWorkspaceId !== workspaceId) {
+      if (!rendererSessionCurrent || activeWorkspaceId !== workspaceId) {
         throw new Error("Search does not target the open workspace.");
       }
       return {
         workspace,
-        isCurrent: () => activeWorkspaceId === workspace.workspaceId,
+        isCurrent: () =>
+          rendererSessionCurrent &&
+          activeWorkspaceId === workspace.workspaceId,
       };
     },
+    authorizeCancel,
     owner,
   });
   const event: TestEvent = {
@@ -60,9 +67,13 @@ function harness() {
   return {
     trace,
     owner,
+    authorizeCancel,
     event,
     setActiveWorkspaceId(workspaceId: string) {
       activeWorkspaceId = workspaceId;
+    },
+    retireRendererSession() {
+      rendererSessionCurrent = false;
     },
     channels: [...handlers.keys()],
     invoke: async (channel: string, payload: unknown, invokedEvent = event) =>
@@ -166,12 +177,37 @@ describe("workspace search IPC registration", () => {
     );
   });
 
+  it("denies a fresh search as soon as reload retirement invalidates the lease", async () => {
+    const test = harness();
+    test.retireRendererSession();
+
+    await expect(
+      test.invoke(CHANNELS.searchWorkspace, {
+        workspaceId: "workspace-1",
+        searchId: "search-after-reload",
+        query: "needle",
+      }),
+    ).rejects.toThrow("does not target the open workspace");
+
+    expect(test.owner.start).not.toHaveBeenCalled();
+  });
+
   it("cancels only the caller's named search", async () => {
     const test = harness();
 
     await test.invoke(CHANNELS.cancelWorkspaceSearch, { searchId: "search-1" });
 
     expect(test.trace).toEqual(["trust"]);
+    expect(test.authorizeCancel).toHaveBeenCalledWith(test.event);
     expect(test.owner.cancel).toHaveBeenCalledWith(19, "search-1");
+  });
+
+  it("ignores a cancel after the caller's renderer session retires", async () => {
+    const test = harness();
+    test.retireRendererSession();
+
+    await test.invoke(CHANNELS.cancelWorkspaceSearch, { searchId: "search-1" });
+
+    expect(test.owner.cancel).not.toHaveBeenCalled();
   });
 });

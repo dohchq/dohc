@@ -27,6 +27,8 @@ import {
   ApplyEngineYDocUpdateResult,
   AcknowledgeEngineYDocLineageReplacementResult,
   OpenEngineYDocSessionResult,
+  OpenWorkspaceRequestPayload,
+  ReloadRendererRequestPayload,
   ReadEngineYDocArtifactAssetResult,
   ExportDocumentFilePayload,
   ExportDocumentFileResult,
@@ -41,6 +43,7 @@ import {
   SDK_PARAMS_MAX_DEPTH,
   SDK_PARAMS_MAX_VALUES,
   PresencePublishPayload,
+  PresencePublishRequestPayload,
   presenceStateWithinCap,
   RestoreEngineMomentFileResult,
   RunnerSelfTestPayload,
@@ -830,9 +833,12 @@ describe("settings IPC contract", () => {
   });
 
   it("keeps chat-run stop and resume controls workspace scoped", () => {
-    expect(StopAgentRunPayload.parse({ workspaceId: "ws-settings" })).toEqual({
-      workspaceId: "ws-settings",
-    });
+    expect(
+      StopAgentRunPayload.parse({
+        workspaceId: "ws-settings",
+        runId: "run-1",
+      }),
+    ).toEqual({ workspaceId: "ws-settings", runId: "run-1" });
     expect(
       StopAgentRunPayload.safeParse({
         workspaceId: "ws-settings",
@@ -860,14 +866,14 @@ describe("settings IPC contract", () => {
     ).toEqual({ workspaceId: "ws-settings", threadId: "thread-1" });
     expect(
       ChatDispatchStateForThreadResult.parse({
-        liveRun: true,
+        liveRunId: "run-1",
         pendingCount: 2,
         paused: false,
       }),
-    ).toEqual({ liveRun: true, pendingCount: 2, paused: false });
+    ).toEqual({ liveRunId: "run-1", pendingCount: 2, paused: false });
     expect(
       ChatDispatchStateForThreadResult.safeParse({
-        liveRun: false,
+        liveRunId: null,
         pendingCount: -1,
         paused: true,
       }).success,
@@ -2249,12 +2255,35 @@ describe("chat reaction emoji trust boundary (WS-MU-C2)", () => {
   });
 });
 
+describe("renderer document request identity", () => {
+  const rendererDocumentId = "123e4567-e89b-42d3-a456-426614174000";
+
+  it("requires preload's document id on workspace open and reload requests", () => {
+    expect(
+      OpenWorkspaceRequestPayload.parse({
+        workspaceId: "ws-1",
+        rendererDocumentId,
+      }),
+    ).toEqual({ workspaceId: "ws-1", rendererDocumentId });
+    expect(
+      ReloadRendererRequestPayload.parse({ rendererDocumentId }),
+    ).toEqual({ rendererDocumentId });
+    expect(
+      OpenWorkspaceRequestPayload.safeParse({ workspaceId: "ws-1" }).success,
+    ).toBe(false);
+    expect(ReloadRendererRequestPayload.safeParse({}).success).toBe(false);
+  });
+});
+
 describe("presence state size cap (MU-C5 DoS boundary)", () => {
+  const incarnationId = "123e4567-e89b-42d3-a456-426614174001";
+
   function publishPayload(state: unknown) {
     return PresencePublishPayload.safeParse({
       scope: { kind: "workspace", workspaceId: "ws-1" },
       topic: "chat:thread_1",
       clientId: "client-1",
+      incarnationId,
       state,
     });
   }
@@ -2268,9 +2297,52 @@ describe("presence state size cap (MU-C5 DoS boundary)", () => {
       scope: { kind: "workspace", workspaceId: "ws-1" },
       topic: "chat:thread_1",
       clientId: "client-1",
+      incarnationId,
       leave: true,
     });
     expect(result.success).toBe(true);
+  });
+
+  it("binds a share presence scope to its origin workspace", () => {
+    const base = {
+      topic: "chat:thread_1",
+      clientId: "client-1",
+      incarnationId,
+      state: null,
+    };
+    expect(
+      PresencePublishPayload.safeParse({
+        ...base,
+        scope: {
+          kind: "share",
+          workspaceId: "ws-1",
+          shareId: "share-1",
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      PresencePublishPayload.safeParse({
+        ...base,
+        scope: { kind: "share", shareId: "share-1" },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("requires preload's document identity only at the main request boundary", () => {
+    const payload = PresencePublishPayload.parse({
+      scope: { kind: "workspace", workspaceId: "ws-1" },
+      topic: "chat:thread_1",
+      clientId: "client-1",
+      incarnationId,
+      state: null,
+    });
+    expect(
+      PresencePublishRequestPayload.safeParse({
+        ...payload,
+        rendererDocumentId: "123e4567-e89b-42d3-a456-426614174002",
+      }).success,
+    ).toBe(true);
+    expect(PresencePublishRequestPayload.safeParse(payload).success).toBe(false);
   });
 
   it("rejects an oversized JSON state before main would serialize it", () => {

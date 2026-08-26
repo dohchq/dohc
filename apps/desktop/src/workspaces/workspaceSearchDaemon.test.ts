@@ -348,6 +348,7 @@ describe("desktop workspace-search owner wiring", () => {
           workspace: { workspaceId, rootPath },
           isCurrent: () => true,
         }),
+        authorizeCancel: () => true,
         owner,
       });
 
