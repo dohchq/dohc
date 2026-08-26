@@ -9,7 +9,12 @@ import type { OutlineHeading } from "./outline";
 type FrameCallback = (time: number) => void;
 type ResizeCallback = ResizeObserverCallback;
 type ObserverMutationCallback = MutationCallback;
-type TransactionCallback = (event: { transaction: { docChanged: boolean } }) => void;
+type TransactionCallback = (event: {
+  transaction: {
+    docChanged: boolean;
+    mapping: { map: (pos: number) => number };
+  };
+}) => void;
 
 const frames = new Map<number, FrameCallback>();
 const resizeObservers = new Map<ResizeCallback, Set<Element>>();
@@ -233,10 +238,21 @@ function renderActiveHeadingHarness(initialTops: readonly number[]) {
       });
       if (flush) act(flushFrames);
     },
-    emitDocumentTransaction(flush = true) {
+    emitDocumentTransaction({
+      flush = true,
+      mapPosition = (pos) => pos,
+    }: {
+      flush?: boolean;
+      mapPosition?: (pos: number) => number;
+    } = {}) {
       act(() => {
         for (const callback of [...transactionListeners]) {
-          callback({ transaction: { docChanged: true } });
+          callback({
+            transaction: {
+              docChanged: true,
+              mapping: { map: mapPosition },
+            },
+          });
         }
       });
       if (flush) act(flushFrames);
@@ -382,7 +398,7 @@ describe("OutlinePanel active heading measurements", () => {
     harness.advanceTimers(OUTLINE_GEOMETRY_HOT_MS + 1);
 
     harness.scrollTo(10);
-    expect(harness.coordsAtPos).toHaveBeenCalledTimes(1);
+    expect(harness.coordsAtPos).toHaveBeenCalledTimes(3);
     expect(harness.renderCommits).not.toHaveBeenCalled();
 
     harness.coordsAtPos.mockClear();
@@ -391,7 +407,7 @@ describe("OutlinePanel active heading measurements", () => {
     expect(harness.renderCommits).not.toHaveBeenCalled();
   });
 
-  it("spot-checks once at gesture start, then reads no layout on cold scroll frames", () => {
+  it("remeasures once at gesture start, then reads no layout on cold scroll frames", () => {
     const harness = renderActiveHeadingHarness([0, 200, 500]);
     expect(harness.coordsAtPos).toHaveBeenCalledTimes(3);
     harness.coordsAtPos.mockClear();
@@ -400,7 +416,11 @@ describe("OutlinePanel active heading measurements", () => {
     harness.scrollTo(250);
 
     expect(harness.activeText()).toBe("Plan");
-    expect(harness.coordsAtPos).toHaveBeenCalledTimes(1);
+    expect(harness.coordsAtPos.mock.calls.map(([pos]) => pos)).toEqual([
+      1,
+      10,
+      20,
+    ]);
     harness.coordsAtPos.mockClear();
 
     harness.scrollTo(350);
@@ -411,26 +431,11 @@ describe("OutlinePanel active heading measurements", () => {
 
     harness.advanceTimers(OUTLINE_GEOMETRY_HOT_MS + 1);
     harness.scrollTo(250);
-    expect(harness.coordsAtPos).toHaveBeenCalledTimes(1);
-  });
-
-  it("accepts one-pixel spot-check drift and remeasures beyond the tolerance", () => {
-    const harness = renderActiveHeadingHarness([0, 200, 400]);
-    harness.advanceTimers(OUTLINE_GEOMETRY_HOT_MS + 1);
-    harness.scrollTo(350);
-    expect(harness.activeText()).toBe("Review");
-
-    harness.coordsAtPos.mockClear();
-    harness.advanceTimers(OUTLINE_GEOMETRY_HOT_MS + 1);
-    harness.setTops([0, 200, 401]);
-    harness.scrollTo(351);
-    expect(harness.coordsAtPos).toHaveBeenCalledTimes(1);
-
-    harness.coordsAtPos.mockClear();
-    harness.advanceTimers(OUTLINE_GEOMETRY_HOT_MS + 1);
-    harness.setTops([0, 200, 402]);
-    harness.scrollTo(352);
-    expect(harness.coordsAtPos).toHaveBeenCalledTimes(4);
+    expect(harness.coordsAtPos.mock.calls.map(([pos]) => pos)).toEqual([
+      1,
+      10,
+      20,
+    ]);
   });
 
   it("measures hot scroll frames directly, then settles once and re-arms the cache", () => {
@@ -493,21 +498,25 @@ describe("OutlinePanel active heading measurements", () => {
     expect(harness.activeText()).toBe("Replacement");
   });
 
-  it("carries active identity through heading removal without a wrong index or blank frame", () => {
+  it("maps active identity through an insertion before the active heading", () => {
     const harness = renderActiveHeadingHarness([0, 200, 400, 700]);
     harness.scrollTo(350);
     expect(harness.activeText()).toBe("Review");
 
     harness.replaceHeadings(
       [
+        { level: 1, text: "Intro", pos: 1 },
         { level: 2, text: "Plan", pos: 10 },
-        { level: 2, text: "Review", pos: 20 },
-        { level: 2, text: "Done", pos: 30 },
+        { level: 2, text: "Inserted", pos: 20 },
+        { level: 2, text: "Review", pos: 30 },
+        { level: 2, text: "Done", pos: 40 },
       ],
-      [0, 400, 700],
+      [0, 200, 300, 400, 700],
     );
-    harness.emitDocumentTransaction(false);
+    const mapPosition = vi.fn((pos: number) => pos >= 20 ? pos + 10 : pos);
+    harness.emitDocumentTransaction({ flush: false, mapPosition });
 
+    expect(mapPosition).toHaveBeenCalledWith(20);
     expect(harness.activeText()).toBe("Review");
     harness.flushFrames();
     expect(harness.activeText()).toBe("Review");
@@ -526,8 +535,10 @@ describe("OutlinePanel active heading measurements", () => {
       ],
       [0, 200, 400],
     );
-    harness.emitDocumentTransaction(false);
+    const mapPosition = vi.fn((pos: number) => pos === 20 ? 25 : pos);
+    harness.emitDocumentTransaction({ flush: false, mapPosition });
 
+    expect(mapPosition).toHaveBeenCalledWith(20);
     expect(harness.activeText()).toBeUndefined();
     harness.flushFrames();
     expect(harness.activeText()).toBe("Done");
@@ -632,7 +643,7 @@ describe("OutlinePanel active heading measurements", () => {
     expect(harness.activeText()).toBe("Intro");
   });
 
-  it("corrects an unobservable idle layout shift on the first scroll frame", () => {
+  it("corrects an unobservable idle layout shift on the next gesture's first frame", () => {
     const harness = renderActiveHeadingHarness([0, 200, 400]);
     harness.scrollTo(350);
     expect(harness.activeText()).toBe("Review");
@@ -644,9 +655,9 @@ describe("OutlinePanel active heading measurements", () => {
     expect(harness.coordsAtPos).not.toHaveBeenCalled();
     harness.scrollTo(351);
 
-    // MUTATION: remove the gesture-start spot-check and the stale cache keeps
+    // MUTATION: remove the gesture-start remeasure and the stale cache keeps
     // Review active on this frame instead of correcting the idle shift.
     expect(harness.activeText()).toBe("Intro");
-    expect(harness.coordsAtPos).toHaveBeenCalledTimes(4);
+    expect(harness.coordsAtPos).toHaveBeenCalledTimes(3);
   });
 });
