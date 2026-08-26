@@ -57,7 +57,7 @@ describe("workspaceActivity startup ordering", () => {
       get(target, property) {
         if (property === "listTextFileMetadata") {
           return async (
-            input: Parameters<NonNullable<typeof liveStore.listTextFileMetadata>>[0],
+            input: Parameters<typeof liveStore.listTextFileMetadata>[0],
           ) => {
             // Reconciliation's final phase, so its disk scan has already run.
             // The batch's file lands HERE: a scan that saw live.md would
@@ -70,7 +70,7 @@ describe("workspaceActivity startup ordering", () => {
             // push below instead of racing it.
             await new Promise((resolve) => setTimeout(resolve, 50));
             order.push("reconcile:listTextFileMetadata");
-            return await liveStore.listTextFileMetadata!(input);
+            return await liveStore.listTextFileMetadata(input);
           };
         }
         if (property === "writeTextFile") {

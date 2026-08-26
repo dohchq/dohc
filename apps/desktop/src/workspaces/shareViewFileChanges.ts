@@ -1051,11 +1051,6 @@ async function shareViewPaths(
   workspaceId: string,
   versionId: string,
 ): Promise<Map<string, "text" | "binary">> {
-  if (store.listTextFileMetadata === undefined) {
-    throw new Error(
-      "Shared view file changes require engine metadata listing support.",
-    );
-  }
   const snapshots = await store.listTextFileMetadata({
     workspaceId,
     versionId,

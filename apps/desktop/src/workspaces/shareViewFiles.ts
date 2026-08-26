@@ -199,23 +199,7 @@ export interface ShareViewFiles {
   ): Promise<{ folderLeft: boolean; error?: unknown }>;
 }
 
-export type ShareViewFilesStore = CaptureVersionedTextStore & {
-  listTextFileMetadata: NonNullable<
-    CaptureVersionedTextStore["listTextFileMetadata"]
-  >;
-};
-
-export function shareViewFilesStore(
-  store: CaptureVersionedTextStore,
-): ShareViewFilesStore {
-  const listTextFileMetadata = store.listTextFileMetadata;
-  if (listTextFileMetadata === undefined) {
-    throw new Error(
-      "Received-share files require engine metadata listing support.",
-    );
-  }
-  return Object.assign(store, { listTextFileMetadata });
-}
+export type ShareViewFilesStore = CaptureVersionedTextStore;
 
 export interface ShareViewFilesDependencies {
   stateFor?(target: ResolvedShareViewFilesTarget): ShareViewFilesState;

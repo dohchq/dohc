@@ -34,7 +34,6 @@ import {
 import { createTestScratch } from "./testTemp";
 import {
   createShareViewFiles,
-  shareViewFilesStore,
   type ResolvedShareViewFilesTarget,
   type ShareViewFileChange,
   type ShareViewFileChangeValue,
@@ -222,7 +221,7 @@ function shareViewFilesOwner(
         candidate.workspaceId === requested.workspaceId
           ? resolved
           : null,
-      openStore: () => shareViewFilesStore(store),
+      openStore: () => store,
       resolveRelay: async () => null,
       pull: async () => {
         throw new Error("Unexpected pull");
@@ -496,7 +495,7 @@ async function storePaths(harnessed: Harness): Promise<string[]> {
   const main = await harnessed.store.ensureMainVersion({
     workspaceId: harnessed.workspaceId,
   });
-  const files = await harnessed.store.listTextFiles({
+  const files = await harnessed.store.listTextFileMetadata({
     workspaceId: harnessed.workspaceId,
     versionId: main.id,
   });

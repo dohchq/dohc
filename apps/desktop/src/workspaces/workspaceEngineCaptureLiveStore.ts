@@ -132,7 +132,7 @@ export interface CaptureTextFileMetadata {
 }
 
 export type CaptureVersionedTextStore = VersionedTextStore & {
-  listTextFileMetadata?(input: {
+  listTextFileMetadata(input: {
     workspaceId: string;
     versionId: string;
   }): Promise<CaptureTextFileMetadata[]>;
@@ -805,15 +805,6 @@ export function createCaptureLiveStores(
         latestMomentId: row.latestMomentId,
         hasYdocMarker: row.hasYdocMarker,
       }));
-    },
-
-    async listTextFiles(input: {
-      workspaceId: string;
-      versionId: string }) {
-      const values = await runRead(
-        async (adapter) => await adapter.listTextFiles(input),
-      );
-      return values.map((value) => snapshotFromWire(value));
     },
 
     async writeTextFile(input: {

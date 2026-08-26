@@ -1245,7 +1245,8 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(listIndex).toBeGreaterThanOrEqual(0);
     // The one read belongs to deleteIfTracked's presence check. The live
     // facade must use the mutation's atomic preimage, not race it with a
-    // second pre-delete read. Hydrating listTextFiles would add another read.
+    // second pre-delete read. Hydrating a full-text listing would add another
+    // read.
     expect(readIndexes).toHaveLength(1);
     expect(readIndexes.every((index) => index > listIndex)).toBe(true);
     await engine.stop();
@@ -2410,9 +2411,7 @@ describe("workspaceEngineCapture startup reconciliation", () => {
       get(target, property) {
         if (property === "listTextFileMetadata") {
           return async (
-            input: Parameters<
-              NonNullable<typeof liveStore.listTextFileMetadata>
-            >[0],
+            input: Parameters<typeof liveStore.listTextFileMetadata>[0],
           ) => {
             // Reconciliation's final phase, so its disk scan has already run.
             // The watcher's file lands HERE, not before start(): a scan that
@@ -2426,7 +2425,7 @@ describe("workspaceEngineCapture startup reconciliation", () => {
             // push below instead of racing it.
             await new Promise((resolve) => setTimeout(resolve, 50));
             order.push("reconcile:listTextFileMetadata");
-            return await liveStore.listTextFileMetadata!(input);
+            return await liveStore.listTextFileMetadata(input);
           };
         }
         if (property === "writeTextFile") {

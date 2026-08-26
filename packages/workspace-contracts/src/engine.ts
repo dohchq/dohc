@@ -985,10 +985,6 @@ export interface VersionedTextStore {
       | { kind: "apply-merged"; text: string };
     metadata: ActorNeutralWriteMetadata;
   }): Promise<VersionedTextConflictResolveResult>;
-  listTextFiles(input: {
-    workspaceId: WorkspaceId;
-    versionId: VersionId;
-  }): Promise<TextFileSnapshot[]>;
   renameTextFile(input: {
     workspaceId: WorkspaceId;
     versionId: VersionId;

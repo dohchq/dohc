@@ -660,7 +660,6 @@ import {
 import {
   createShareViewFiles,
   ShareViewFilesState,
-  shareViewFilesStore,
   type ShareViewFileChangeOutcome,
   type ShareViewFiles,
   type ShareViewFilesTarget,
@@ -3283,7 +3282,7 @@ function agentDispatchStoreHandleFor(workspace: {
 // This used to call the legacy TypeScript store factory, which opened another
 // node:sqlite connection to the engine.db the daemon owns -- exactly the second
 // writable connection workspaceEngineCapture.ts warns can deadlock. It also
-// hydrated every file's CONTENT via listTextFiles just to read two string
+// hydrated every file's CONTENT via a full-text listing just to read two string
 // fields off each row.
 //
 // listTextFileMetadata is the right call: it pages (limit 500 + afterPath) so
@@ -5136,15 +5135,13 @@ function createShareViewFilesForOperation(
       return resolveRegisteredShareViewFilesTarget(currentWorkspace(), target);
     },
     openStore: (target) =>
-      shareViewFilesStore(
-        receivedShareEngine.storeFor({
-          engineWorkspaceId: target.storeWorkspaceId,
-          rootPath: target.rootPath,
-          ...(target.storeWorkspaceId === operation.workspace.workspaceId
-            ? { attachmentId: operation.workspace.attachmentId }
-            : {}),
-        }),
-      ),
+      receivedShareEngine.storeFor({
+        engineWorkspaceId: target.storeWorkspaceId,
+        rootPath: target.rootPath,
+        ...(target.storeWorkspaceId === operation.workspace.workspaceId
+          ? { attachmentId: operation.workspace.attachmentId }
+          : {}),
+      }),
     resolveRelay: async (target) => {
       await warmCredentialCache().catch(() => undefined);
       const credentials = cachedCredentials;

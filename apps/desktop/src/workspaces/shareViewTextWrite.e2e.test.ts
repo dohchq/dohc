@@ -28,7 +28,6 @@ import { createTestScratch } from "./testTemp";
 import {
   createShareViewFiles,
   ShareViewFilesTargetMissingError,
-  shareViewFilesStore,
   type ResolvedShareViewFilesTarget,
 } from "./shareViewFiles";
 
@@ -202,7 +201,7 @@ function shareViewFilesOwner(input: {
       candidate.workspaceId === requested.workspaceId
         ? resolved
         : null,
-    openStore: () => shareViewFilesStore(input.shareViewStore()),
+    openStore: () => input.shareViewStore(),
     resolveRelay: async () => null,
     pull: async () => {
       throw new Error("Unexpected pull");

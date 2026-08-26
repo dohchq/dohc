@@ -1602,7 +1602,7 @@ describe("createCaptureLiveStores", () => {
     );
 
     await expect(
-      store.listTextFileMetadata?.({
+      store.listTextFileMetadata({
         workspaceId: WORKSPACE_ID,
         versionId: "main",
       }),
