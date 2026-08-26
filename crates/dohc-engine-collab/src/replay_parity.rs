@@ -83,7 +83,7 @@ use yrs::types::{
     TYPE_REFS_XML_ELEMENT, TYPE_REFS_XML_FRAGMENT, TYPE_REFS_XML_HOOK, TYPE_REFS_XML_TEXT,
 };
 use yrs::updates::decoder::{Decoder, DecoderV1};
-use yrs::{Any, ClientID};
+use yrs::{Any, ClientID, IdSet, StateVector};
 
 use crate::{CollabError, Ydoc};
 
@@ -112,7 +112,7 @@ enum ClockIdentity {
 /// identical canonical structure — the exact thing the gate consumes — even
 /// though their raw re-encodes can differ (yrs `Any::Map` is HashMap-backed,
 /// so map-key ORDER in a re-encode is nondeterministic per doc instance).
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 struct WireStructure {
     unsafe_boundaries: BTreeSet<ID>,
     insertion_boundaries: Vec<ID>,
@@ -147,6 +147,53 @@ struct WireStructure {
     /// delete-set BOUNDARY endpoints consumed elsewhere are recorded separately
     /// (and unnormalized) in `deletion_boundaries`.
     deleted_ranges: BTreeMap<ClientID, Vec<(u32, u32)>>,
+    /// The v2 differential oracle's complete client-local block topology. The
+    /// gate's v1 scan leaves this empty, preserving its verdict fingerprint.
+    blocks: BTreeMap<ClientID, Vec<BlockDescriptor>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanVersion {
+    V1,
+    V2,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BlockDescriptor {
+    id: ID,
+    len: u32,
+    kind: BlockKind,
+    left_origin: Option<ID>,
+    right_origin: Option<ID>,
+    parent: Option<ParentDescriptor>,
+    parent_sub: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockKind {
+    Gc,
+    Skip,
+    Item,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ParentDescriptor {
+    Root(String),
+    Item(ID),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PendingStructureV2 {
+    update: WireStructure,
+    missing: StateVector,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct DocumentStructureV2 {
+    wire: WireStructure,
+    state_vector: StateVector,
+    pending: Option<PendingStructureV2>,
+    pending_ds: Option<IdSet>,
 }
 
 impl WireStructure {
@@ -710,25 +757,22 @@ fn safe_read_type_ref_fingerprint(decoder: &mut DecoderV1<'_>) -> Result<Vec<u8>
 }
 
 /// A SAFE reimplementation of `Options::decode`'s wire shape (a guid string
-/// plus an `Any` map of sub-document options). The subdocument's IDENTITY for
-/// the content-parity check is its GUID alone; the options `Any` is consumed
-/// and validated (so the wire position stays correct and a malformed options
-/// payload is still rejected) but deliberately NOT folded into the fingerprint.
-/// yrs fills option defaults (`gc`/`encoding`/`shouldLoad`, and drops fields it
-/// ignores) when it re-encodes an integrated `ContentDoc`, so `encode_full_state`
-/// presents a different options payload than an honest Yjs full-state resend of
-/// the same subdocument — hashing the raw options would false-reject that honest
-/// resend as a hostile redefinition. A genuine redefinition changes the GUID
-/// (a different subdocument), which the fingerprint still catches. Reimplemented
-/// rather than calling `Options::decode` because it reads the guid via yrs'
-/// unsafe `read_string` (see [`safe_read_string`]).
-fn safe_read_options_fingerprint(decoder: &mut DecoderV1<'_>) -> Result<Vec<u8>, CollabError> {
+/// plus an `Any` map of sub-document options). The gate's v1 content identity
+/// remains GUID-only. The v2 cache oracle also appends the canonical, tagged
+/// options payload, whose map keys are sorted by [`append_canonical_any`].
+/// Reimplemented rather than calling `Options::decode` because it reads the
+/// guid via yrs' unsafe `read_string` (see [`safe_read_string`]).
+fn safe_read_options_fingerprint(
+    decoder: &mut DecoderV1<'_>,
+    version: ScanVersion,
+) -> Result<Vec<u8>, CollabError> {
     let guid = safe_read_string(decoder)?;
     let mut canonical = (guid.len() as u64).to_be_bytes().to_vec();
     canonical.extend_from_slice(guid.as_bytes());
-    // Consume + validate the options `Any` (wire position + well-formedness);
-    // see the doc comment for why it is NOT part of the fingerprint.
-    let _ = safe_read_any(decoder, 0)?;
+    let options = safe_read_any(decoder, 0)?;
+    if version == ScanVersion::V2 {
+        append_canonical_any(&mut canonical, &options);
+    }
     Ok(canonical)
 }
 
@@ -804,6 +848,17 @@ fn safe_read_id(decoder: &mut DecoderV1<'_>) -> Result<ID, CollabError> {
 /// used to call `Update::decode_v1`/`Ydoc::validate_update` on untrusted bytes
 /// now calls this (or the wrapper) FIRST.
 fn scan_v1(bytes: &[u8]) -> Result<WireStructure, CollabError> {
+    scan(bytes, ScanVersion::V1)
+}
+
+/// Retain the complete ordered block topology and canonical subdocument
+/// options for the doc cache's differential oracle. Gate verdicts never use
+/// this scan.
+fn scan_v2(bytes: &[u8]) -> Result<WireStructure, CollabError> {
+    scan(bytes, ScanVersion::V2)
+}
+
+fn scan(bytes: &[u8], version: ScanVersion) -> Result<WireStructure, CollabError> {
     let mut decoder = DecoderV1::from(bytes);
     let mut structure = WireStructure::default();
     let clients_len: u32 = decoder.read_var().map_err(parity_decode_error)?;
@@ -812,28 +867,55 @@ fn scan_v1(bytes: &[u8]) -> Result<WireStructure, CollabError> {
         let client = safe_read_client(&mut decoder)?;
         let mut clock: u32 = decoder.read_var().map_err(parity_decode_error)?;
         for _ in 0..blocks_len {
+            let id = ID::new(client, clock);
             let info = decoder.read_info().map_err(parity_decode_error)?;
-            let len = match info {
-                BLOCK_SKIP_REF_NUMBER => decoder.read_var().map_err(parity_decode_error)?,
-                BLOCK_GC_REF_NUMBER => decoder.read_len().map_err(parity_decode_error)?,
-                item_info => scan_item(
-                    &mut decoder,
-                    item_info,
-                    ID::new(client, clock),
-                    &mut structure,
-                )?,
+            let scanned = match info {
+                BLOCK_SKIP_REF_NUMBER => ScannedBlock {
+                    len: decoder.read_var().map_err(parity_decode_error)?,
+                    kind: BlockKind::Skip,
+                    left_origin: None,
+                    right_origin: None,
+                    parent: None,
+                    parent_sub: None,
+                },
+                BLOCK_GC_REF_NUMBER => ScannedBlock {
+                    len: decoder.read_len().map_err(parity_decode_error)?,
+                    kind: BlockKind::Gc,
+                    left_origin: None,
+                    right_origin: None,
+                    parent: None,
+                    parent_sub: None,
+                },
+                item_info => scan_item(&mut decoder, item_info, id, &mut structure, version)?,
             };
             // A zero-length structural block is a degenerate wire claim no
             // honest encoder ever produces, and is the wire-visible
             // precondition of at least one internal yrs unwind (a
             // zero-length item slice) — reject it here, before this update
             // ever reaches an `apply`.
-            if len == 0 {
+            if scanned.len == 0 {
                 return Err(CollabError::ReplayParityViolation {
                     reason: "the update contains a zero-length structural block".to_owned(),
                 });
             }
-            clock = clock.checked_add(len).ok_or_else(parity_clock_overflow)?;
+            if version == ScanVersion::V2 {
+                structure
+                    .blocks
+                    .entry(client)
+                    .or_default()
+                    .push(BlockDescriptor {
+                        id,
+                        len: scanned.len,
+                        kind: scanned.kind,
+                        left_origin: scanned.left_origin,
+                        right_origin: scanned.right_origin,
+                        parent: scanned.parent,
+                        parent_sub: scanned.parent_sub,
+                    });
+            }
+            clock = clock
+                .checked_add(scanned.len)
+                .ok_or_else(parity_clock_overflow)?;
         }
         structure
             .claimed_clocks
@@ -891,8 +973,42 @@ fn scan_v1(bytes: &[u8]) -> Result<WireStructure, CollabError> {
 }
 
 /// Compare the canonical wire structure that the replay-parity gate consumes.
-pub(crate) fn structurally_equal_v1(left: &[u8], right: &[u8]) -> Result<bool, CollabError> {
+#[cfg(test)]
+fn structurally_equal_v1(left: &[u8], right: &[u8]) -> Result<bool, CollabError> {
     Ok(scan_v1(left)? == scan_v1(right)?)
+}
+
+/// Compare every wire and decoded state dimension that a cache-served
+/// projection, resync, or later integration can observe.
+pub(crate) fn structurally_equal_v2(left: &Ydoc, right: &Ydoc) -> Result<bool, CollabError> {
+    Ok(document_structure_v2(left)? == document_structure_v2(right)?)
+}
+
+fn document_structure_v2(doc: &Ydoc) -> Result<DocumentStructureV2, CollabError> {
+    let pending = if let Some((update, missing)) = doc.pending_update_v1_with_missing() {
+        Some(PendingStructureV2 {
+            // The binding decision keeps pending.update on v1 semantics.
+            update: scan_v1(&update)?,
+            missing,
+        })
+    } else {
+        None
+    };
+    Ok(DocumentStructureV2 {
+        wire: scan_v2(&doc.encode_full_state())?,
+        state_vector: doc.state_vector(),
+        pending,
+        pending_ds: doc.pending_delete_set(),
+    })
+}
+
+struct ScannedBlock {
+    len: u32,
+    kind: BlockKind,
+    left_origin: Option<ID>,
+    right_origin: Option<ID>,
+    parent: Option<ParentDescriptor>,
+    parent_sub: Option<String>,
 }
 
 fn scan_item(
@@ -900,10 +1016,11 @@ fn scan_item(
     info: u8,
     id: ID,
     structure: &mut WireStructure,
-) -> Result<u32, CollabError> {
+    version: ScanVersion,
+) -> Result<ScannedBlock, CollabError> {
     let has_origin = info & HAS_ORIGIN != 0;
     let has_right_origin = info & HAS_RIGHT_ORIGIN != 0;
-    if has_origin {
+    let left_origin = if has_origin {
         let origin = safe_read_id(decoder)?;
         let boundary_clock = origin
             .clock
@@ -912,21 +1029,44 @@ fn scan_item(
         structure
             .insertion_boundaries
             .push(ID::new(origin.client, boundary_clock));
-    }
-    if has_right_origin {
-        structure.insertion_boundaries.push(safe_read_id(decoder)?);
-    }
-    if !has_origin && !has_right_origin {
-        if decoder.read_parent_info().map_err(parity_decode_error)? {
-            let _ = safe_read_string(decoder)?;
+        Some(origin)
+    } else {
+        None
+    };
+    let right_origin = if has_right_origin {
+        let origin = safe_read_id(decoder)?;
+        structure.insertion_boundaries.push(origin);
+        Some(origin)
+    } else {
+        None
+    };
+    let (parent, parent_sub) = if !has_origin && !has_right_origin {
+        let parent = if decoder.read_parent_info().map_err(parity_decode_error)? {
+            let root = safe_read_string(decoder)?;
+            (version == ScanVersion::V2).then(|| ParentDescriptor::Root(root.to_owned()))
         } else {
-            let _ = safe_read_id(decoder)?;
-        }
-        if info & HAS_PARENT_SUB != 0 {
-            let _ = safe_read_string(decoder)?;
-        }
-    }
-    scan_content(decoder, info & 0b0000_1111, id, structure)
+            let parent = safe_read_id(decoder)?;
+            (version == ScanVersion::V2).then_some(ParentDescriptor::Item(parent))
+        };
+        let parent_sub = if info & HAS_PARENT_SUB != 0 {
+            let parent_sub = safe_read_string(decoder)?;
+            (version == ScanVersion::V2).then(|| parent_sub.to_owned())
+        } else {
+            None
+        };
+        (parent, parent_sub)
+    } else {
+        (None, None)
+    };
+    let len = scan_content(decoder, info & 0b0000_1111, id, structure, version)?;
+    Ok(ScannedBlock {
+        len,
+        kind: BlockKind::Item,
+        left_origin,
+        right_origin,
+        parent,
+        parent_sub,
+    })
 }
 
 fn scan_content(
@@ -934,6 +1074,7 @@ fn scan_content(
     content_ref: u8,
     id: ID,
     structure: &mut WireStructure,
+    version: ScanVersion,
 ) -> Result<u32, CollabError> {
     match content_ref {
         BLOCK_ITEM_DELETED_REF_NUMBER => {
@@ -1085,7 +1226,7 @@ fn scan_content(
             Ok(len)
         }
         BLOCK_ITEM_DOC_REF_NUMBER => {
-            let fingerprint = safe_read_options_fingerprint(decoder)?;
+            let fingerprint = safe_read_options_fingerprint(decoder, version)?;
             record_identity(
                 structure,
                 id.client,
@@ -1118,6 +1259,159 @@ fn parity_clock_overflow() -> CollabError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn doc_from_update(bytes: &[u8]) -> Ydoc {
+        let doc = Ydoc::wire();
+        doc.apply(bytes).expect("test update must apply or park");
+        doc
+    }
+
+    fn structurally_equal_docs_v1(left: &Ydoc, right: &Ydoc) -> bool {
+        if !structurally_equal_v1(&left.encode_full_state(), &right.encode_full_state())
+            .expect("full states must scan")
+        {
+            return false;
+        }
+        match (left.pending_update_v1(), right.pending_update_v1()) {
+            (None, None) => true,
+            (Some(left), Some(right)) => {
+                structurally_equal_v1(&left, &right).expect("pending updates must scan")
+            }
+            _ => false,
+        }
+    }
+
+    fn assert_v1_blind_to_wire_v2_difference(left: &[u8], right: &[u8]) {
+        assert!(
+            structurally_equal_v1(left, right).expect("v1 scans must succeed"),
+            "mutation must preserve every v1 wire surface"
+        );
+        assert_ne!(
+            scan_v2(left).expect("left v2 scan must succeed"),
+            scan_v2(right).expect("right v2 scan must succeed"),
+            "v2 must detect the mutated wire dimension"
+        );
+    }
+
+    fn assert_v1_blind_to_document_v2_difference(left: &Ydoc, right: &Ydoc) {
+        assert!(
+            structurally_equal_docs_v1(left, right),
+            "mutation must preserve every v1 document-oracle surface"
+        );
+        assert!(
+            !structurally_equal_v2(left, right).expect("v2 comparison must succeed"),
+            "v2 must detect the mutated document dimension"
+        );
+    }
+
+    #[test]
+    fn v2_detects_left_vs_right_origin_attribution_ignored_by_v1() {
+        let left_origin = vec![
+            0x01, // clients_len
+            0x01, // blocks_len
+            0x0a, // item client
+            0x00, // item clock
+            0x84, // string item with left origin
+            0x09, // origin client
+            0x00, // origin clock; v1 records boundary 9:1
+            0x01, b'x', // string content
+            0x00, // empty delete set
+        ];
+        let right_origin = vec![
+            0x01, // clients_len
+            0x01, // blocks_len
+            0x0a, // item client
+            0x00, // item clock
+            0x44, // string item with right origin
+            0x09, // right-origin client
+            0x01, // right-origin clock; v1 records the same boundary 9:1
+            0x01, b'x', // string content
+            0x00, // empty delete set
+        ];
+
+        assert_v1_blind_to_wire_v2_difference(&left_origin, &right_origin);
+        assert_v1_blind_to_document_v2_difference(
+            &doc_from_update(&left_origin),
+            &doc_from_update(&right_origin),
+        );
+    }
+
+    #[test]
+    fn v2_detects_parent_and_parent_sub_attachment_ignored_by_v1() {
+        let root_parent = vec![
+            0x01, 0x01, 0x09, 0x00, 0x04, // one string item at 9:0
+            0x01, 0x01, b'r', // named root "r"
+            0x01, b'x', // string content
+            0x00,
+        ];
+        let item_parent = vec![
+            0x01, 0x01, 0x09, 0x00, 0x04, // same item identity
+            0x00, 0x07, 0x01, // parent item 7:1
+            0x01, b'x', // same string content
+            0x00,
+        ];
+        assert_v1_blind_to_wire_v2_difference(&root_parent, &item_parent);
+
+        let parent_sub_a = vec![
+            0x01, 0x01, 0x09, 0x00, 0x24, // string item with parent_sub
+            0x01, 0x01, b'r', // named root "r"
+            0x01, b'a', // parent_sub "a"
+            0x01, b'x', // string content
+            0x00,
+        ];
+        let parent_sub_b = vec![
+            0x01, 0x01, 0x09, 0x00, 0x24, // same item identity
+            0x01, 0x01, b'r', // same named root
+            0x01, b'b', // parent_sub "b"
+            0x01, b'x', // same string content
+            0x00,
+        ];
+        assert_v1_blind_to_wire_v2_difference(&parent_sub_a, &parent_sub_b);
+        assert_v1_blind_to_document_v2_difference(
+            &doc_from_update(&parent_sub_a),
+            &doc_from_update(&parent_sub_b),
+        );
+    }
+
+    #[test]
+    fn v2_detects_block_kind_and_split_ignored_by_v1() {
+        let whole = vec![
+            0x01, 0x01, 0x09, 0x00, // one client, one block, client 9 at 0
+            0x04, 0x01, 0x01, b'r', 0x02, b'a', b'b', // one len-2 string item
+            0x00,
+        ];
+        let split = vec![
+            0x01, 0x02, 0x09, 0x00, // one client, two blocks, client 9 at 0
+            0x04, 0x01, 0x01, b'r', 0x01, b'a', // first len-1 item
+            0x04, 0x01, 0x01, b'r', 0x01, b'b', // second len-1 item
+            0x00,
+        ];
+        assert_v1_blind_to_wire_v2_difference(&whole, &split);
+        assert_v1_blind_to_document_v2_difference(
+            &doc_from_update(&whole),
+            &doc_from_update(&split),
+        );
+
+        let gc = vec![
+            0x01,
+            0x01,
+            0x09,
+            0x00,
+            BLOCK_GC_REF_NUMBER,
+            0x01, // length = 1
+            0x00,
+        ];
+        let skip = vec![
+            0x01,
+            0x01,
+            0x09,
+            0x00,
+            BLOCK_SKIP_REF_NUMBER,
+            0x01, // raw length = 1
+            0x00,
+        ];
+        assert_v1_blind_to_wire_v2_difference(&gc, &skip);
+    }
 
     /// An internal unwind during replay validation (which can originate inside
     /// yrs on some malformed inputs) must be contained and mapped to a
@@ -1341,13 +1635,10 @@ mod tests {
         assert!(matches!(error, CollabError::ReplayParityViolation { .. }));
     }
 
-    /// A `ContentDoc` sub-document whose GUID matches but whose options `Any`
-    /// differs (as happens when yrs fills option defaults on re-encode) must
-    /// fingerprint IDENTICALLY — the guid is the identity, the options are not
-    /// part of it — so an honest full-state resend is never false-rejected.
+    /// V1 keeps its GUID-only gate identity. V2 fingerprints the canonical
+    /// options payload and ignores only map-key encoding order.
     #[test]
-    fn sub_document_fingerprint_ignores_options_payload() {
-        // Two ContentDoc blocks, same guid "g", different options maps.
+    fn v2_canonicalizes_subdoc_options_and_detects_payload_changes() {
         let with_opts = |opts: &[u8]| -> Vec<u8> {
             let mut b: Vec<u8> = vec![
                 0x01, // clients_len
@@ -1363,12 +1654,100 @@ mod tests {
             b.push(0x00); // empty delete set
             b
         };
-        // Options A: empty map. Options B: a map with one bool entry.
-        let a = scan_v1(&with_opts(&[0x76, 0x00])).expect("A valid");
-        let b = scan_v1(&with_opts(&[0x76, 0x01, 0x02, b'g', b'c', 0x78])).expect("B valid");
-        let ida = &a.identities[&ClientID::new(9)][&0];
-        let idb = &b.identities[&ClientID::new(9)][&0];
-        assert!(ida == idb, "same-guid subdocs must fingerprint identically");
+        let gc_true = with_opts(&[0x76, 0x01, 0x02, b'g', b'c', 0x78]);
+        let gc_false = with_opts(&[0x76, 0x01, 0x02, b'g', b'c', 0x79]);
+        assert_v1_blind_to_wire_v2_difference(&gc_true, &gc_false);
+        assert_v1_blind_to_document_v2_difference(
+            &doc_from_update(&gc_true),
+            &doc_from_update(&gc_false),
+        );
+
+        let keys_ab = with_opts(&[0x76, 0x02, 0x01, b'a', 0x78, 0x01, b'b', 0x79]);
+        let keys_ba = with_opts(&[0x76, 0x02, 0x01, b'b', 0x79, 0x01, b'a', 0x78]);
+        assert_eq!(
+            scan_v2(&keys_ab).expect("AB options valid"),
+            scan_v2(&keys_ba).expect("BA options valid"),
+            "v2 subdoc options must compare independently of map-key order"
+        );
+    }
+
+    #[test]
+    fn v2_detects_decoded_state_vector_mutation_outside_v1_surfaces() {
+        let bytes = vec![
+            0x01, 0x01, 0x09, 0x00, 0x04, // one string item at 9:0
+            0x01, 0x01, b'r', // named root "r"
+            0x01, b'x', // string content
+            0x00,
+        ];
+        let baseline = document_structure_v2(&doc_from_update(&bytes)).expect("baseline scans");
+        let mut mutated = baseline.clone();
+        mutated.state_vector.set_max(ClientID::new(42), 1);
+
+        assert_eq!(baseline.wire, mutated.wire);
+        assert_eq!(baseline.pending, mutated.pending);
+        assert_eq!(baseline.pending_ds, mutated.pending_ds);
+        assert_ne!(
+            baseline, mutated,
+            "decoded state-vector equality must be a distinct v2 dimension"
+        );
+    }
+
+    #[test]
+    fn v2_detects_pending_missing_and_pending_ds_ignored_by_v1() {
+        let parked = vec![
+            0x01, 0x01, 0x09, 0x00, 0x04, // one string item at 9:0
+            0x00, 0x0a, 0x00, // missing parent item 10:0
+            0x01, b'x', // string content
+            0x00,
+        ];
+        let missing_left = doc_from_update(&parked);
+        let missing_right = doc_from_update(&parked);
+        let mut changed_missing = missing_right
+            .pending_update_v1_with_missing()
+            .expect("update must park")
+            .1;
+        changed_missing.set_max(ClientID::new(11), 1);
+        missing_right.replace_pending_missing_for_test(changed_missing);
+        assert_v1_blind_to_document_v2_difference(&missing_left, &missing_right);
+
+        let no_pending_ds = Ydoc::wire();
+        let empty_pending_ds = Ydoc::wire();
+        let missing_delete = vec![
+            0x00, // no blocks
+            0x01, // one delete-set client
+            0x2a, // client 42
+            0x01, // one range
+            0x00, 0x01, // [0, 1)
+        ];
+        empty_pending_ds
+            .apply(&missing_delete)
+            .expect("missing delete must park");
+        empty_pending_ds.replace_pending_delete_set_for_test(IdSet::new());
+        assert_v1_blind_to_document_v2_difference(&no_pending_ds, &empty_pending_ds);
+
+        let producer = Ydoc::wire();
+        let insert = producer.plaintext_insert(0, "xy");
+        let delete = producer.plaintext_delete(0, 2);
+        let integrated_client = *producer
+            .state_vector()
+            .iter()
+            .next()
+            .expect("producer has one client")
+            .0;
+        let with_redundant_pending = |range: std::ops::Range<u32>| {
+            let doc = Ydoc::wire();
+            doc.apply(&insert).expect("insert applies");
+            doc.apply(&delete).expect("delete applies");
+            doc.apply(&missing_delete).expect("missing delete parks");
+            doc.replace_pending_delete_set_for_test(IdSet::from_iter([(
+                integrated_client,
+                [range],
+            )]));
+            doc
+        };
+        let pending_subset = with_redundant_pending(0..1);
+        let pending_full = with_redundant_pending(0..2);
+        assert_v1_blind_to_document_v2_difference(&pending_subset, &pending_full);
     }
 
     #[test]

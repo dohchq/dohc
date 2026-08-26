@@ -235,41 +235,20 @@ impl WriterDocCache {
 
         // Differential check: in every test/debug build, a hit re-proves
         // CACHE-VALID against a fresh reconstruction, so the whole debug test
-        // fleet checks the invariant on every cache-served gate. The compared
-        // predicate is the CANONICAL wire structure the gate consumes
-        // (`replay_parity::scan_v1`), not the raw re-encode bytes: yrs
-        // `Any::Map` is HashMap-backed, so two byte-replay-identical docs can
-        // legitimately re-encode an embed's map keys in different orders — and
-        // the gate itself fingerprints such payloads order-independently. This
-        // is verdict-sufficient for gate-only serving but ignores origin and
-        // block-order differences; PR3 must strengthen the oracle before
-        // projections or resync use cached docs.
+        // fleet checks the invariant on every cache-served gate. The v2
+        // predicate compares canonical full-state wire topology, decoded state
+        // vectors, and pending internals. It never compares raw re-encode or
+        // encoded state-vector bytes because HashMap key order is semantically
+        // inert and can differ across Y.Doc instances.
         #[cfg(any(test, debug_assertions))]
         {
-            use crate::replay_parity::structurally_equal_v1;
+            use crate::replay_parity::structurally_equal_v2;
             let fresh = crate::durable::load_for_replay_gate(conn, key)?;
             assert!(
-                structurally_equal_v1(&fresh.encode_full_state(), &entry.doc.encode_full_state(),)?,
-                "CACHE-VALID violated: cached Y.Doc full-state structure \
+                structurally_equal_v2(&fresh, &entry.doc)?,
+                "CACHE-VALID violated: cached Y.Doc structure \
                  diverges from load_for_replay_gate for {key:?}"
             );
-            let fresh_pending = fresh.pending_update_v1();
-            let cached_pending = entry.doc.pending_update_v1();
-            match (&fresh_pending, &cached_pending) {
-                (None, None) => {}
-                (Some(fresh_bytes), Some(cached_bytes)) => assert!(
-                    structurally_equal_v1(fresh_bytes, cached_bytes)?,
-                    "CACHE-VALID violated: cached Y.Doc pending structure \
-                     diverges from load_for_replay_gate for {key:?}"
-                ),
-                _ => panic!(
-                    "CACHE-VALID violated: cached Y.Doc pending presence \
-                     diverges from load_for_replay_gate for {key:?} \
-                     (fresh: {}, cached: {})",
-                    fresh_pending.is_some(),
-                    cached_pending.is_some(),
-                ),
-            }
         }
 
         self.hits.set(self.hits.get() + 1);

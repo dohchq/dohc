@@ -37,8 +37,8 @@ use yrs::types::text::YChange;
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
 use yrs::{
-    Any, Array, Doc, GetString, Map, Options, Out, ReadTxn, StateVector, Text, Transact, Update,
-    Xml, XmlElementPrelim, XmlFragment, XmlOut, XmlTextPrelim,
+    Any, Array, Doc, GetString, IdSet, Map, Options, Out, ReadTxn, StateVector, Text, Transact,
+    Update, Xml, XmlElementPrelim, XmlFragment, XmlOut, XmlTextPrelim,
 };
 
 use crate::error::CollabError;
@@ -442,6 +442,41 @@ impl Ydoc {
         txn.store()
             .pending_update()
             .map(|pending| pending.update.encode_v1())
+    }
+
+    pub(crate) fn pending_update_v1_with_missing(&self) -> Option<(Vec<u8>, StateVector)> {
+        let txn = self.doc.transact();
+        txn.store()
+            .pending_update()
+            .map(|pending| (pending.update.encode_v1(), pending.missing.clone()))
+    }
+
+    pub(crate) fn pending_delete_set(&self) -> Option<IdSet> {
+        self.doc.transact().store().pending_ds().cloned()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_pending_delete_set_for_test(&self, replacement: IdSet) {
+        use yrs::WriteTxn;
+
+        let mut txn = self.doc.transact_mut();
+        let pending = txn
+            .store_mut()
+            .pending_ds_mut()
+            .expect("test document must already have a pending delete set");
+        *pending = replacement;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_pending_missing_for_test(&self, replacement: StateVector) {
+        use yrs::WriteTxn;
+
+        let mut txn = self.doc.transact_mut();
+        let pending = txn
+            .store_mut()
+            .pending_update_mut()
+            .expect("test document must already have a pending update");
+        pending.missing = replacement;
     }
 
     pub(crate) fn state_vector(&self) -> StateVector {
