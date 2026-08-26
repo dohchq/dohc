@@ -94,7 +94,6 @@ import { NewFileDialog } from "./NewFileDialog";
 import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
 import { useGuestBlockingUi } from "./guestBlockingUi";
-import { DesktopSettings } from "./settings/DesktopSettings";
 import {
   DEFAULT_SETTINGS_SECTION,
   type SettingsSectionId,
@@ -669,6 +668,11 @@ export type Workspace = WorkspaceSummary;
 
 const LazyRelayShareDialog = lazy(() =>
   import("./RelayShareDialog").then((mod) => ({ default: mod.RelayShareDialog })),
+);
+const LazyDesktopSettings = lazy(() =>
+  import("./settings/DesktopSettings").then((mod) => ({
+    default: mod.DesktopSettings,
+  })),
 );
 const MARKDOWN_PRELOAD_IDLE_DELAY_MS = 150;
 
@@ -6550,35 +6554,37 @@ export function DesktopWorkspaceShell(props: {
       ) : null}
       {settingsSection ? (
         <Overlay onClose={closeSettings}>
-          <DesktopSettings
-            workspaceId={workspaceId}
-            workspacePath={props.workspace.rootPath}
-            sharedView={isShareView}
-            // Main's own decision, not the renderer's settings read (#542):
-            // only main knows whether a recorder exists for this session, and
-            // a failed capture build is as recorder-less as the opt-out.
-            sessionRecorderOn={
-              syncStatus ? !statusSaysNoRecorder(syncStatus) : undefined
-            }
-            initialSection={settingsSection}
-            onClose={closeSettings}
-            onAgentActiveChange={onSettingsAgentActiveChange}
-            onWorkspaceFilesChanged={(outcome) => {
-              // A Settings removal that left its folder behind reports the
-              // share id here, BEFORE the reload below sees the record
-              // vanish — otherwise that reload projects a folder delete over
-              // files that are still on disk.
-              if (outcome?.folderLeftShareId) {
-                foldersLeftBehind.current.add(outcome.folderLeftShareId);
+          <Suspense fallback={null}>
+            <LazyDesktopSettings
+              workspaceId={workspaceId}
+              workspacePath={props.workspace.rootPath}
+              sharedView={isShareView}
+              // Main's own decision, not the renderer's settings read (#542):
+              // only main knows whether a recorder exists for this session, and
+              // a failed capture build is as recorder-less as the opt-out.
+              sessionRecorderOn={
+                syncStatus ? !statusSaysNoRecorder(syncStatus) : undefined
               }
-              void reloadShareMounts();
-              void refreshFiles().catch(() => undefined);
-            }}
-            onOpenCloud={() => {
-              closeSettings();
-              setCloudOpen(true);
-            }}
-          />
+              initialSection={settingsSection}
+              onClose={closeSettings}
+              onAgentActiveChange={onSettingsAgentActiveChange}
+              onWorkspaceFilesChanged={(outcome) => {
+                // A Settings removal that left its folder behind reports the
+                // share id here, BEFORE the reload below sees the record
+                // vanish — otherwise that reload projects a folder delete over
+                // files that are still on disk.
+                if (outcome?.folderLeftShareId) {
+                  foldersLeftBehind.current.add(outcome.folderLeftShareId);
+                }
+                void reloadShareMounts();
+                void refreshFiles().catch(() => undefined);
+              }}
+              onOpenCloud={() => {
+                closeSettings();
+                setCloudOpen(true);
+              }}
+            />
+          </Suspense>
         </Overlay>
       ) : null}
       {shareTarget ? (

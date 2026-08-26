@@ -29,8 +29,6 @@ import {
 import type * as Y from "yjs";
 import type { ChatFileMentionRecord } from "../ipc/bridgeContract";
 import { rendererMarks } from "../performance/rendererMarks";
-import { IncrementalMarkdownDocument } from "./markdown/IncrementalMarkdownDocument";
-import { MARKDOWN_COMPONENTS } from "./markdown/markdownComponents";
 import { bridge } from "./bridge";
 import { binaryFileDataFromArtifact } from "./excalidrawAssets";
 import {
@@ -50,7 +48,7 @@ import type {
   MarkdownEditorHandle,
   MarkdownEditorProps,
 } from "./editor/MarkdownEditor";
-import type { WorkspaceLinkTarget } from "./editor/linkMenu";
+import type { WorkspaceLinkTarget } from "./linkActivation";
 import { blockTargetForLine } from "./editor/intraBlock";
 import type { HeadingNavigationTarget } from "./editor/OutlinePanel";
 import type { PropertiesPanelProps } from "./PropertiesPanel";
@@ -405,6 +403,9 @@ const LazySourceCodeEditor = lazy(() =>
 );
 const LazyExcalidrawCanvas = lazy(() => import("./ExcalidrawCanvas")) as
   LazyExoticComponent<(props: ExcalidrawCanvasProps) => React.ReactElement>;
+const LazyMarkdownReadView = lazy(() =>
+  import("./markdown/IncrementalMarkdownDocument"),
+);
 
 // The source view needs editor/import-export only on demand. Cache the module
 // after the first toggle so later toggles reuse it.
@@ -2144,11 +2145,12 @@ function MarkdownView(props: {
   };
   const renderedDocument = useMemo(
     () => (
-      <IncrementalMarkdownDocument
-        body={markdownEditorBody(savedBody)}
-        components={MARKDOWN_COMPONENTS}
-        onOpenWorkspaceLink={(target) => openWorkspaceLinkRef.current(target)}
-      />
+      <Suspense fallback={null}>
+        <LazyMarkdownReadView
+          body={markdownEditorBody(savedBody)}
+          onOpenWorkspaceLink={(target) => openWorkspaceLinkRef.current(target)}
+        />
+      </Suspense>
     ),
     [savedBody],
   );

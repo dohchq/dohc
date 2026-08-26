@@ -62,8 +62,8 @@ import {
   makeLinkMenuExtension,
   makeLinkMenuPlugin,
   type LinkMenuState,
-  type WorkspaceLinkTarget,
 } from "./linkMenu";
+import type { WorkspaceLinkTarget } from "../linkActivation";
 import {
   makeWikilinkPlugin,
   type AutocompleteState,
