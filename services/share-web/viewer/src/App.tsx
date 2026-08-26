@@ -1,12 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { MarkdownContent } from "./MarkdownContent";
 import {
-  filesFromLog,
+  filesFromAccumulator,
+  foldLogOps,
   isMarkdown,
   isRasterImage,
   isSvg,
   resolveSharedFile,
   resolveSharedImage,
+  type FileAccumulator,
   type RelayOp,
   type SharedFile,
   type ViewMeta,
@@ -23,7 +25,21 @@ const LOG_RETRY_BUDGET_MS = 120_000;
 type ViewerState =
   | { status: "loading" }
   | { status: "refused" }
-  | { status: "ready"; session: string; meta: ViewMeta; files: SharedFile[] };
+  | {
+      status: "ready";
+      session: string;
+      meta: ViewMeta;
+      fileAccumulator: FileAccumulator;
+      files: SharedFile[];
+      nextCursor: number;
+    };
+
+type ReadyState = Extract<ViewerState, { status: "ready" }>;
+
+interface LoadedLog {
+  fileAccumulator: FileAccumulator;
+  nextCursor: number;
+}
 
 async function api(session: string, path: string): Promise<Response> {
   return fetch(path, {
@@ -32,10 +48,16 @@ async function api(session: string, path: string): Promise<Response> {
   });
 }
 
-async function loadLog(session: string): Promise<RelayOp[]> {
-  let cursor = 0;
-  const ops: RelayOp[] = [];
-  for (let pageNumber = 0; pageNumber < MAX_LOG_PAGES; pageNumber += 1) {
+async function loadLog(
+  session: string,
+  initialCursor: number,
+  fileAccumulator: FileAccumulator,
+  maxPages?: number,
+): Promise<LoadedLog> {
+  let cursor = initialCursor;
+  let pageNumber = 0;
+  while (maxPages === undefined || pageNumber < maxPages) {
+    pageNumber += 1;
     let retryDelayMs = LOG_RETRY_INITIAL_MS;
     let retryWaitedMs = 0;
     let response: Response;
@@ -58,10 +80,16 @@ async function loadLog(session: string): Promise<RelayOp[]> {
     if (!Array.isArray(page.ops) || typeof page.nextCursor !== "number") {
       throw new Error("refused");
     }
-    ops.push(...(page.ops as RelayOp[]));
-    if (page.hasMore !== true) return ops;
-    if (!Number.isSafeInteger(page.nextCursor) || page.nextCursor <= cursor) {
+    foldLogOps(fileAccumulator, page.ops as RelayOp[]);
+    if (
+      !Number.isSafeInteger(page.nextCursor) ||
+      page.nextCursor < cursor ||
+      (page.hasMore === true && page.nextCursor === cursor)
+    ) {
       throw new Error("refused");
+    }
+    if (page.hasMore !== true) {
+      return { fileAccumulator, nextCursor: page.nextCursor };
     }
     cursor = page.nextCursor;
   }
@@ -285,19 +313,27 @@ function Unavailable() {
 export function App() {
   const [state, setState] = useState<ViewerState>({ status: "loading" });
   const [selectedPath, setSelectedPath] = useState("");
+  const readyStateRef = useRef<ReadyState | null>(null);
   useEffect(() => {
     let current = true;
     void (async () => {
       try {
         const session = await establishSession();
-        const [meta, ops] = await Promise.all([
+        const [meta, log] = await Promise.all([
           loadMeta(session),
-          loadLog(session),
+          loadLog(session, 0, new Map(), MAX_LOG_PAGES),
         ]);
-        const files = filesFromLog(ops);
+        const files = filesFromAccumulator(log.fileAccumulator);
         if (current) {
           setSelectedPath(files[0]?.path ?? "");
-          setState({ status: "ready", session, meta, files });
+          setState({
+            status: "ready",
+            session,
+            meta,
+            fileAccumulator: log.fileAccumulator,
+            files,
+            nextCursor: log.nextCursor,
+          });
         }
       } catch {
         if (current) setState({ status: "refused" });
@@ -309,6 +345,9 @@ export function App() {
   const readySession = state.status === "ready" ? state.session : null;
   const readyFiles = state.status === "ready" ? state.files : null;
   useEffect(() => {
+    readyStateRef.current = state.status === "ready" ? state : null;
+  }, [state]);
+  useEffect(() => {
     if (readyFiles === null) return;
     setSelectedPath((path) => readyFiles.some((file) => file.path === path)
       ? path
@@ -318,17 +357,43 @@ export function App() {
   useEffect(() => {
     if (readySession === null) return;
     let current = true;
+    let refreshInFlight = false;
     const interval = window.setInterval(() => {
-      void Promise.all([loadMeta(readySession), loadLog(readySession)])
-        .then(([meta, ops]) => {
+      const previous = readyStateRef.current;
+      if (
+        refreshInFlight ||
+        previous === null ||
+        previous.session !== readySession
+      ) {
+        return;
+      }
+      refreshInFlight = true;
+      const fileAccumulator = new Map(previous.fileAccumulator);
+      void Promise.all([
+        loadMeta(readySession),
+        loadLog(readySession, previous.nextCursor, fileAccumulator),
+      ])
+        .then(([meta, log]) => {
           if (!current) return;
-          const files = filesFromLog(ops);
-          setState((value) => value.status === "ready" && value.session === readySession
-            ? { ...value, meta, files }
-            : value);
+          const nextState: ReadyState = {
+            ...previous,
+            meta,
+            fileAccumulator: log.fileAccumulator,
+            files: filesFromAccumulator(log.fileAccumulator),
+            nextCursor: log.nextCursor,
+          };
+          readyStateRef.current = nextState;
+          setState((value) =>
+            value.status === "ready" && value.session === readySession
+              ? nextState
+              : value
+          );
         })
         .catch(() => {
           if (current) setState({ status: "refused" });
+        })
+        .finally(() => {
+          refreshInFlight = false;
         });
     }, VIEW_HEARTBEAT_INTERVAL_MS);
     return () => {

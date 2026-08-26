@@ -852,6 +852,86 @@ describe("share-web sessions", () => {
     }
   });
 
+  it("limits in-flight blob streams across sessions for one grant", async () => {
+    const blobSha = "d".repeat(64);
+    let tokenId = 0;
+    let blobReads = 0;
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      publicHosts: new Set([HOST]),
+      nowMs: () => 1_000,
+      newSessionToken: () => Buffer.alloc(32, ++tokenId).toString("base64url"),
+      fetchRelay: async (relayRequest) => {
+        if (new URL(relayRequest.url).pathname === "/sync/link-exchange") {
+          return Response.json({
+            ok: true,
+            grantId: "grant-shared-blob-budget",
+            capabilityToken: CAP_ALPHA_1,
+            capabilityExpiresAtMs: 901_000,
+          });
+        }
+        blobReads += 1;
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new Uint8Array(12));
+            },
+          }),
+        );
+      },
+    });
+    const exchanged = await Promise.all(
+      Array.from({ length: 4 }, () =>
+        handler(request("/api/exchange", exchange(SECRET_ALPHA))),
+      ),
+    );
+    const sessionHeaders = await Promise.all(
+      exchanged.map(async (exchangeResponse) => {
+        const body = (await exchangeResponse.json()) as { session: string };
+        return {
+          cookie: cookiePair(exchangeResponse),
+          "x-dohc-link-session": body.session,
+        };
+      }),
+    );
+    const held = await Promise.all(
+      sessionHeaders.slice(0, 3).flatMap((headers) =>
+        Array.from({ length: 8 }, () =>
+          handler(request(`/api/view/blob/${blobSha}`, { headers })),
+        ),
+      ),
+    );
+    const twentyFifth = await handler(
+      request(`/api/view/blob/${blobSha}`, { headers: sessionHeaders[3] }),
+    );
+    let admittedAfterRelease: Response | null = null;
+
+    try {
+      expect(held.map(({ status }) => status)).toEqual(Array(24).fill(200));
+      expect(twentyFifth.status).toBe(429);
+      expect(await twentyFifth.text()).toBe(shareWebRefusalBody);
+      expect(blobReads).toBe(24);
+
+      await held[0]!.body?.cancel();
+      admittedAfterRelease = await handler(
+        request(`/api/view/blob/${blobSha}`, { headers: sessionHeaders[3] }),
+      );
+
+      expect(admittedAfterRelease.status).toBe(200);
+      expect(blobReads).toBe(25);
+    } finally {
+      await Promise.all(
+        [
+          ...held,
+          twentyFifth.status === 200 ? twentyFifth : null,
+          admittedAfterRelease,
+        ]
+          .filter((response): response is Response => response !== null)
+          .map((response) => response.body?.cancel()),
+      );
+    }
+  });
+
   it("serves only raster signatures inline and forces SVG and other bytes to download", async () => {
     const pngSha = "a".repeat(64);
     const svgSha = "b".repeat(64);

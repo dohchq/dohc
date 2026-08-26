@@ -841,6 +841,56 @@ describe("relay capability reads", () => {
     ).toBe(`404:${LINK_REFUSAL_BODY}`);
   });
 
+  it("scopes path-share blob candidates before the cap without admitting prefix neighbors", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h);
+    const docs2OnlyContent = "# docs2 only\n";
+    const docs2OnlySha = await putBlob(h, docs2OnlyContent);
+    const privateCopies = Array.from(
+      { length: SHARED_BLOB_CANDIDATE_LIMIT + 1 },
+      (_, index) =>
+        moment(
+          index + 3,
+          `docs2/private-copy-${index}.md`,
+          "# shared\n",
+          1_300 + index,
+          { objectId: `object-private-copy-${index}` },
+        ),
+    );
+    privateCopies.push(
+      moment(
+        SHARED_BLOB_CANDIDATE_LIMIT + 4,
+        "docs2/private-only.md",
+        docs2OnlyContent,
+        1_400 + SHARED_BLOB_CANDIDATE_LIMIT,
+        { objectId: "object-docs2-only" },
+      ),
+    );
+    await appendMoments(h, privateCopies);
+
+    const sharedBlob = await h(
+      linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`),
+    );
+    expect(sharedBlob.status).toBe(200);
+    expect(await sharedBlob.text()).toBe("# shared\n");
+
+    expect(
+      await denialBytes(
+        await h(
+          linkRequest(
+            seeded.capability,
+            `/sync/link/blobs/${docs2OnlySha}`,
+          ),
+        ),
+      ),
+    ).toBe(`404:${LINK_REFUSAL_BODY}`);
+    const sharedLog = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100")),
+    );
+    expect(JSON.stringify(sharedLog)).not.toContain("docs2/");
+  });
+
   it("deduplicates and caps blob candidates when one file returns to earlier content", async () => {
     const storage = await newStorage();
     const h = handler(storage);

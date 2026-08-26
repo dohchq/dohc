@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
-import type { SharedFile, ViewMeta } from "./model";
+import { filesFromLog, type RelayOp, type SharedFile, type ViewMeta } from "./model";
 
 const SESSION = "abcdefghijkl";
 
@@ -32,9 +32,21 @@ function requestPath(input: RequestInfo | URL): string {
   return `${url.pathname}${url.search}`;
 }
 
-function logPage(files: readonly SharedFile[]): Response {
+function logOpsPage(
+  ops: readonly RelayOp[],
+  nextCursor: number,
+  hasMore = false,
+): Response {
   return jsonResponse({
-    ops: files.length === 0
+    ops,
+    nextCursor,
+    hasMore,
+  });
+}
+
+function logPage(files: readonly SharedFile[]): Response {
+  return logOpsPage(
+    files.length === 0
       ? []
       : [{
           relaySeq: 1,
@@ -42,9 +54,8 @@ function logPage(files: readonly SharedFile[]): Response {
           payload: { forkSnapshots: files },
           recordedAtMs: 1,
         }],
-    nextCursor: files.length,
-    hasMore: false,
-  });
+    files.length,
+  );
 }
 
 describe("App", () => {
@@ -371,6 +382,225 @@ describe("App", () => {
     );
   });
 
+  it("requests heartbeat log deltas from the last cursor", async () => {
+    vi.useFakeTimers();
+    const file: SharedFile = {
+      path: "note.txt",
+      blobSha256: "e".repeat(64),
+      contentKind: "text",
+    };
+    const logPaths: string[] = [];
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path.startsWith("/api/view/log?")) {
+        logPaths.push(path);
+        if (logPaths.length === 1) {
+          return logOpsPage([{
+            relaySeq: 17,
+            opKind: "version.create",
+            payload: { forkSnapshots: [file] },
+            recordedAtMs: 1,
+          }], 17);
+        }
+        return logOpsPage([], 17);
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+
+    expect(logPaths).toEqual([
+      "/api/view/log?since=0&limit=500",
+    ]);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+    });
+
+    expect(logPaths).toEqual([
+      "/api/view/log?since=0&limit=500",
+      "/api/view/log?since=17&limit=500",
+    ]);
+  });
+
+  it("folds heartbeat renames, additions, and deletions onto the initial files", async () => {
+    vi.useFakeTimers();
+    const fileA: SharedFile = {
+      path: "a.txt",
+      blobSha256: "1".repeat(64),
+      contentKind: "text",
+    };
+    const fileB: SharedFile = {
+      path: "b.txt",
+      blobSha256: "2".repeat(64),
+      contentKind: "text",
+    };
+    const initialOps: RelayOp[] = [{
+      relaySeq: 1,
+      opKind: "version.create",
+      payload: { forkSnapshots: [fileA, fileB] },
+      recordedAtMs: 1,
+    }];
+    const deltaOps: RelayOp[] = [
+      {
+        relaySeq: 2,
+        opKind: "moment.append",
+        payload: {
+          operation: "rename",
+          payloadBeforePath: fileB.path,
+          payloadAfterPath: "renamed-b.txt",
+          payloadAfterBlobSha256: fileB.blobSha256,
+          payloadAfterContentKind: fileB.contentKind,
+        },
+        recordedAtMs: 2,
+      },
+      {
+        relaySeq: 3,
+        opKind: "moment.append",
+        payload: {
+          operation: "write",
+          payloadAfterPath: "c.txt",
+          payloadAfterBlobSha256: "3".repeat(64),
+          payloadAfterContentKind: "text",
+        },
+        recordedAtMs: 3,
+      },
+    ];
+    const deleteOps: RelayOp[] = [{
+      relaySeq: 4,
+      opKind: "moment.append",
+      payload: {
+        operation: "delete",
+        payloadBeforePath: fileA.path,
+        path: fileA.path,
+      },
+      recordedAtMs: 4,
+    }];
+    const logPaths: string[] = [];
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path.startsWith("/api/view/log?")) logPaths.push(path);
+      if (path === "/api/view/log?since=0&limit=500") {
+        return logOpsPage(initialOps, 1);
+      }
+      if (path === "/api/view/log?since=1&limit=500") {
+        return logOpsPage(deltaOps, 3);
+      }
+      if (path === "/api/view/log?since=3&limit=500") {
+        return logOpsPage(deleteOps, 4);
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+    expect(renderedFilePaths()).toEqual(["a.txt", "b.txt"]);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+    });
+
+    const afterFirstDelta = filesFromLog([...initialOps, ...deltaOps])
+      .map((file) => file.path);
+    expect(afterFirstDelta).toEqual(["a.txt", "c.txt", "renamed-b.txt"]);
+    expect(renderedFilePaths()).toEqual(afterFirstDelta);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+    });
+
+    const afterDelete = filesFromLog([...initialOps, ...deltaOps, ...deleteOps])
+      .map((file) => file.path);
+    expect(afterDelete).toEqual(["c.txt", "renamed-b.txt"]);
+    expect(renderedFilePaths()).toEqual(afterDelete);
+    expect(logPaths).toEqual([
+      "/api/view/log?since=0&limit=500",
+      "/api/view/log?since=1&limit=500",
+      "/api/view/log?since=3&limit=500",
+    ]);
+  });
+
+  it("matches a full replay when the initial log spans pages", async () => {
+    const fileA: SharedFile = {
+      path: "a.txt",
+      blobSha256: "4".repeat(64),
+      contentKind: "text",
+    };
+    const fileB: SharedFile = {
+      path: "b.txt",
+      blobSha256: "5".repeat(64),
+      contentKind: "text",
+    };
+    const firstPageOps: RelayOp[] = [{
+      relaySeq: 7,
+      opKind: "version.create",
+      payload: { forkSnapshots: [fileA, fileB] },
+      recordedAtMs: 1,
+    }];
+    const secondPageOps: RelayOp[] = [
+      {
+        relaySeq: 8,
+        opKind: "moment.append",
+        payload: {
+          operation: "rename",
+          payloadBeforePath: fileB.path,
+          payloadAfterPath: "renamed.txt",
+          payloadAfterBlobSha256: fileB.blobSha256,
+          payloadAfterContentKind: fileB.contentKind,
+        },
+        recordedAtMs: 2,
+      },
+      {
+        relaySeq: 9,
+        opKind: "moment.append",
+        payload: {
+          operation: "delete",
+          payloadBeforePath: fileA.path,
+        },
+        recordedAtMs: 3,
+      },
+      {
+        relaySeq: 10,
+        opKind: "moment.append",
+        payload: {
+          operation: "write",
+          payloadAfterPath: "new.txt",
+          payloadAfterBlobSha256: "6".repeat(64),
+          payloadAfterContentKind: "text",
+        },
+        recordedAtMs: 4,
+      },
+    ];
+    const logPaths: string[] = [];
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path.startsWith("/api/view/log?")) logPaths.push(path);
+      if (path === "/api/view/log?since=0&limit=500") {
+        return logOpsPage(firstPageOps, 7, true);
+      }
+      if (path === "/api/view/log?since=7&limit=500") {
+        return logOpsPage(secondPageOps, 10);
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+
+    const fullReplay = filesFromLog([...firstPageOps, ...secondPageOps])
+      .map((file) => file.path);
+    expect(fullReplay).toEqual(["new.txt", "renamed.txt"]);
+    expect(renderedFilePaths()).toEqual(fullReplay);
+    expect(logPaths).toEqual([
+      "/api/view/log?since=0&limit=500",
+      "/api/view/log?since=7&limit=500",
+    ]);
+  });
+
   it("refreshes files and meta every four minutes and stops on unmount", async () => {
     vi.useFakeTimers();
     const startedAt = new Date("2026-08-26T06:00:00.000Z").getTime();
@@ -385,6 +615,17 @@ describe("App", () => {
       blobSha256: "f".repeat(64),
       contentKind: "text",
     };
+    const addedFileOp: RelayOp = {
+      relaySeq: 2,
+      opKind: "moment.append",
+      payload: {
+        operation: "write",
+        payloadAfterPath: addedFile.path,
+        payloadAfterBlobSha256: addedFile.blobSha256,
+        payloadAfterContentKind: addedFile.contentKind,
+      },
+      recordedAtMs: 2,
+    };
     const metaPaths: string[] = [];
     const logPaths: string[] = [];
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
@@ -395,11 +636,15 @@ describe("App", () => {
           ? DEFAULT_META
           : { ...DEFAULT_META, lastSettledAtMs: startedAt + 4 * 60_000 });
       }
+      if (path.startsWith("/api/view/log?")) logPaths.push(path);
       if (path === "/api/view/log?since=0&limit=500") {
-        logPaths.push(path);
-        return logPage(logPaths.length === 1
-          ? [initialFile]
-          : [initialFile, addedFile]);
+        return logPage([initialFile]);
+      }
+      if (path === "/api/view/log?since=1&limit=500") {
+        return logOpsPage([addedFileOp], 2);
+      }
+      if (path === "/api/view/log?since=2&limit=500") {
+        return logOpsPage([], 2);
       }
       throw new Error(`Unexpected request: ${path}`);
     });
@@ -466,6 +711,18 @@ describe("App", () => {
       blobSha256: selectedFile.blobSha256,
       contentKind: "text",
     };
+    const renameOp: RelayOp = {
+      relaySeq: 3,
+      opKind: "moment.append",
+      payload: {
+        operation: "rename",
+        payloadBeforePath: selectedFile.path,
+        payloadAfterPath: renamedFile.path,
+        payloadAfterBlobSha256: renamedFile.blobSha256,
+        payloadAfterContentKind: renamedFile.contentKind,
+      },
+      recordedAtMs: 3,
+    };
     let metaRequests = 0;
     let logRequests = 0;
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
@@ -481,9 +738,15 @@ describe("App", () => {
       }
       if (path === "/api/view/log?since=0&limit=500") {
         logRequests += 1;
-        if (logRequests === 1) return logPage([firstFile, selectedFile]);
-        if (logRequests === 2) return logPage([firstFile, renamedFile]);
-        return logPage([firstFile, selectedFile, renamedFile]);
+        return logPage([firstFile, selectedFile]);
+      }
+      if (path === "/api/view/log?since=2&limit=500") {
+        logRequests += 1;
+        return logOpsPage([renameOp], 3);
+      }
+      if (path === "/api/view/log?since=3&limit=500") {
+        logRequests += 1;
+        return logOpsPage([], 3);
       }
       throw new Error(`Unexpected request: ${path}`);
     });

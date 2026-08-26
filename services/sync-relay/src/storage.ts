@@ -364,11 +364,13 @@ export interface SyncRelayStorage {
   // Idempotent; returns false only when the share does not exist.
   revokeShare(shareId: string, revokedAtMs: number): boolean;
   // Candidate moment rows for the shared-blob allowlist, found by the exact
-  // blob index. The share filter still makes the authorization decision.
+  // blob index. selectorPaths narrows path-share work before the cap; the
+  // share filter still makes the authorization decision.
   listObjectMomentLogRowsByBlob(input: {
     workspaceId: string;
     versionId: string;
     sha256: string;
+    selectorPaths?: readonly string[];
   }): SyncRelayLogRow[];
   // version.create snapshot candidates use their own exact-hash index. The
   // share filter still decides which snapshots the selector exposes.
@@ -2850,13 +2852,30 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     workspaceId: string;
     versionId: string;
     sha256: string;
+    selectorPaths?: readonly string[];
   }): SyncRelayLogRow[] {
+    if (input.selectorPaths?.length === 0) return [];
+    const selectorPathsCte = input.selectorPaths
+      ? `selector_paths(path) AS (
+           VALUES ${input.selectorPaths.map(() => "(?)").join(", ")}
+         ),`
+      : "";
+    const selectorPathsCondition = input.selectorPaths
+      ? `AND EXISTS (
+             SELECT 1
+             FROM selector_paths selected
+             WHERE m.path = selected.path
+                OR substr(m.path, 1, length(selected.path) + 1) = selected.path || '/'
+           )`
+      : "";
     return this.db
       .prepare(
-        `WITH candidates AS (
+        `WITH ${selectorPathsCte}
+         candidates AS (
            SELECT MAX(m.relay_seq) AS relay_seq
            FROM sync_relay_object_moments m
            WHERE m.workspace_id = ? AND m.version_id = ? AND m.blob_sha256 = ?
+             ${selectorPathsCondition}
            GROUP BY m.object_id
            ORDER BY relay_seq DESC
            LIMIT ?
@@ -2868,6 +2887,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
          ORDER BY c.relay_seq DESC`,
       )
       .all(
+        ...(input.selectorPaths ?? []),
         input.workspaceId,
         input.versionId,
         input.sha256,

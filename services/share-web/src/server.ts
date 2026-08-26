@@ -14,6 +14,7 @@ const EXCHANGE_REFILL_PER_SECOND = 0.2;
 const EXCHANGE_MAX_IPS = 10_000;
 const DEFAULT_MAX_SESSIONS = 10_000;
 const MAX_BLOB_PROXIES_PER_SESSION = 8;
+const MAX_BLOB_PROXIES_PER_GRANT = 24;
 const LINK_REFRESH_WINDOW_MS = 5 * 60 * 1_000;
 const RASTER_SIGNATURE_BYTES = 12;
 const SESSION_DISCRIMINATOR = /^[A-Za-z0-9_-]{12}$/u;
@@ -148,22 +149,35 @@ class ShareWebExchangeRateLimiter {
 
 class ShareWebBlobProxyLimiter {
   private readonly inFlightBySession = new Map<string, number>();
+  private readonly inFlightByGrant = new Map<string, number>();
 
-  acquire(sessionIdentity: string): (() => void) | null {
-    const inFlight = this.inFlightBySession.get(sessionIdentity) ?? 0;
-    if (inFlight >= MAX_BLOB_PROXIES_PER_SESSION) return null;
-    this.inFlightBySession.set(sessionIdentity, inFlight + 1);
+  acquire(sessionIdentity: string, grantIdentity: string): (() => void) | null {
+    const sessionInFlight = this.inFlightBySession.get(sessionIdentity) ?? 0;
+    const grantInFlight = this.inFlightByGrant.get(grantIdentity) ?? 0;
+    if (
+      sessionInFlight >= MAX_BLOB_PROXIES_PER_SESSION ||
+      grantInFlight >= MAX_BLOB_PROXIES_PER_GRANT
+    ) {
+      return null;
+    }
+    this.inFlightBySession.set(sessionIdentity, sessionInFlight + 1);
+    this.inFlightByGrant.set(grantIdentity, grantInFlight + 1);
     let released = false;
     return () => {
       if (released) return;
       released = true;
-      const remaining = (this.inFlightBySession.get(sessionIdentity) ?? 1) - 1;
-      if (remaining === 0) {
-        this.inFlightBySession.delete(sessionIdentity);
-      } else {
-        this.inFlightBySession.set(sessionIdentity, remaining);
-      }
+      this.release(this.inFlightBySession, sessionIdentity);
+      this.release(this.inFlightByGrant, grantIdentity);
     };
+  }
+
+  private release(inFlightByIdentity: Map<string, number>, identity: string): void {
+    const remaining = (inFlightByIdentity.get(identity) ?? 1) - 1;
+    if (remaining === 0) {
+      inFlightByIdentity.delete(identity);
+    } else {
+      inFlightByIdentity.set(identity, remaining);
+    }
   }
 }
 
@@ -640,6 +654,7 @@ export function createShareWebHandler({
       const releaseBlobProxy = isBlob
         ? blobProxyLimiter.acquire(
             sessionKey(authenticated.discriminator, authenticated.token),
+            authenticated.discriminator,
           )
         : null;
       if (isBlob && !releaseBlobProxy) return refused(429, refreshedCookieHeaders);

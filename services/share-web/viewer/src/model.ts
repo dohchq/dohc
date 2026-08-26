@@ -24,6 +24,8 @@ export interface SharedFile {
   contentKind: "text" | "binary";
 }
 
+export type FileAccumulator = Map<string, SharedFile>;
+
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -50,8 +52,10 @@ function storedFile(value: unknown): SharedFile | null {
   };
 }
 
-export function filesFromLog(ops: readonly RelayOp[]): SharedFile[] {
-  const files = new Map<string, SharedFile>();
+export function foldLogOps(
+  files: FileAccumulator,
+  ops: readonly RelayOp[],
+): void {
   for (const op of ops) {
     const payload = record(op.payload);
     if (!payload) continue;
@@ -84,7 +88,18 @@ export function filesFromLog(ops: readonly RelayOp[]): SharedFile[] {
       contentKind: payload.payloadAfterContentKind === "binary" ? "binary" : "text",
     });
   }
+}
+
+export function filesFromAccumulator(
+  files: ReadonlyMap<string, SharedFile>,
+): SharedFile[] {
   return [...files.values()].sort((left, right) => left.path.localeCompare(right.path));
+}
+
+export function filesFromLog(ops: readonly RelayOp[]): SharedFile[] {
+  const files: FileAccumulator = new Map();
+  foldLogOps(files, ops);
+  return filesFromAccumulator(files);
 }
 
 export function isMarkdown(path: string): boolean {

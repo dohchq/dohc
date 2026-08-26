@@ -827,7 +827,14 @@ export function createSyncRelayHandler({
     if (isChatChannelSelector(selector)) return null;
     const versionId = targetVersionId(selector);
     const candidates = [
-      ...storage.listObjectMomentLogRowsByBlob({ workspaceId, versionId, sha256 }),
+      ...storage.listObjectMomentLogRowsByBlob({
+        workspaceId,
+        versionId,
+        sha256,
+        ...(selector.versionId === null
+          ? { selectorPaths: selector.paths }
+          : {}),
+      }),
       ...storage.listVersionCreateLogRowsByBlob({ workspaceId, versionId, sha256 }),
     ]
       .sort((left, right) => right.relaySeq - left.relaySeq)
