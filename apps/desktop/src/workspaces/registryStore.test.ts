@@ -17,6 +17,7 @@ import {
   acknowledgeShareSkips,
   createRegistryStore,
   mergeShareSkippedOps,
+  type RemoteIdentity,
 } from "./registryStore";
 // The predicate the RENDERER acts on, asserted here against the records this
 // store produces: one rule, and the surfaces that show the warning read it
@@ -47,6 +48,15 @@ const personal = {
   kind: "personal" as const,
   mode: "local-first" as const,
 };
+
+type RemoteIdentityHasWorkspaceAlias =
+  "remoteWorkspaceId" extends keyof RemoteIdentity ? true : false;
+
+const remoteIdentityHasWorkspaceAlias: RemoteIdentityHasWorkspaceAlias = false;
+
+it("keeps one workspace coordinate in each registry entry", () => {
+  expect(remoteIdentityHasWorkspaceAlias).toBe(false);
+});
 
 beforeEach(async () => {
   vi.mocked(closeSync).mockClear();
@@ -560,38 +570,34 @@ describe("registry store", () => {
     expect(reopened.find("ws-1")?.rootPath).toBe(personal.rootPath);
   });
 
-  it("local-only workspaces carry no account or remote identity", () => {
+  it("local-only workspaces carry no cloud binding", () => {
     store.register(personal);
     const entry = store.find("ws-1");
     expect(entry).toBeTruthy();
     expect(entry && "remote" in entry && entry.remote).toBeFalsy();
   });
 
-  it("records remote identity only when sync is explicitly enabled", () => {
+  it("records a cloud binding only when sync is explicitly enabled", () => {
     store.register({ ...personal, kind: "shared", mode: "cloud-first-local-copy" });
     expect(store.find("ws-1")?.remote).toBeUndefined();
 
     store.setRemote("ws-1", {
       serverUrl: "https://cloud.dohc.example",
-      remoteWorkspaceId: "rw-99",
       ownerUserId: "user-99",
     });
     expect(store.find("ws-1")?.remote).toEqual({
       serverUrl: "https://cloud.dohc.example",
-      remoteWorkspaceId: "rw-99",
       ownerUserId: "user-99",
     });
   });
 
-  it("keeps the remote identity truthful when its atomic rename fails", () => {
+  it("keeps the cloud binding truthful when its atomic rename fails", () => {
     const original = {
       serverUrl: "https://cloud.dohc.example",
-      remoteWorkspaceId: "rw-original",
       ownerUserId: "user-original",
     };
     const replacement = {
       serverUrl: "https://other.dohc.example",
-      remoteWorkspaceId: "rw-replacement",
       ownerUserId: "user-replacement",
     };
     store.register(personal);
@@ -906,7 +912,6 @@ describe("registry store", () => {
     try {
       store.setRemote(personal.workspaceId, {
         serverUrl: "https://cloud.dohc.example",
-        remoteWorkspaceId: "rw-99",
         ownerUserId: "user-99",
       });
     } catch (error) {
@@ -935,7 +940,6 @@ describe("registry store", () => {
     expect(() =>
       store.setRemote(personal.workspaceId, {
         serverUrl: "https://cloud.dohc.example",
-        remoteWorkspaceId: "rw-99",
         ownerUserId: "user-99",
       }),
     ).toThrow(renameFailure);
@@ -1005,12 +1009,10 @@ describe("registry store", () => {
   it("keeps cache and disk unchanged when the temp-file sync fails", async () => {
     const original = {
       serverUrl: "https://cloud.dohc.example",
-      remoteWorkspaceId: "rw-original",
       ownerUserId: "user-original",
     };
     const replacement = {
       serverUrl: "https://other.dohc.example",
-      remoteWorkspaceId: "rw-replacement",
       ownerUserId: "user-replacement",
     };
     store.register(personal);
@@ -1045,15 +1047,13 @@ describe("registry store", () => {
   it("invalidates the cache when the parent-directory sync fails after rename", async () => {
     const original = {
       serverUrl: "https://cloud.dohc.example",
-      remoteWorkspaceId: "rw-original",
       ownerUserId: "user-original",
     };
     const replacement = {
       serverUrl: "https://other.dohc.example",
-      remoteWorkspaceId: "rw-replacement",
       ownerUserId: "user-replacement",
     };
-    const retried = { ...replacement, remoteWorkspaceId: "rw-retried" };
+    const retried = { ...replacement, ownerUserId: "user-retried" };
     store.register(personal);
     store.setRemote(personal.workspaceId, original);
     vi.mocked(readFileSync).mockClear();

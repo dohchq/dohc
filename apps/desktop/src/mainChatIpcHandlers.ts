@@ -364,7 +364,7 @@ export async function readRelayChatShareLanes(input: {
     granted?: Array<Record<string, unknown>>;
     received?: Array<Record<string, unknown>>;
   }>;
-  remoteWorkspaceId: string | null;
+  workspaceId: string | null;
   // Received shares that belong to ANOTHER local workspace: already joined
   // there. A received grant is
   // account-wide, so without this the lane is the same in every workspace —
@@ -395,7 +395,7 @@ export async function readRelayChatShareLanes(input: {
   try {
     const mapped = mapRelayShareListing(
       listing,
-      input.remoteWorkspaceId,
+      input.workspaceId,
       input.shareIdsClaimedElsewhere,
     );
     // Size is validated HERE, not by the contract schema. Every row can be
@@ -455,7 +455,7 @@ function mapRelayShareListing(
     granted?: Array<Record<string, unknown>>;
     received?: Array<Record<string, unknown>>;
   },
-  remoteWorkspaceId: string | null,
+  workspaceId: string | null,
   shareIdsClaimedElsewhere: ReadonlySet<string>,
 ): {
   granted: Array<Record<string, unknown>>;
@@ -489,10 +489,10 @@ function mapRelayShareListing(
   const received: Array<Record<string, unknown>> = [];
   for (const row of grantedRows) {
     const selector = chatSelector(row);
-    // Grants are scoped to THIS workspace's remote identity: a channel shared
+    // Grants are scoped to this workspace: a channel shared
     // from another workspace is managed there.
-    if (!selector || remoteWorkspaceId === null) continue;
-    if (row.workspaceId !== remoteWorkspaceId) continue;
+    if (!selector || workspaceId === null) continue;
+    if (row.workspaceId !== workspaceId) continue;
     // REVOKED grants are the granted lane's tombstones, and they are dropped
     // rather than listed. The relay keeps returning them to the granter, so
     // counting them made the cap measure an account's LIFETIME grants: past

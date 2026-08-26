@@ -20,7 +20,6 @@ export interface RelaySyncOperations {
 
 export interface CloudSyncEngineOptions {
   rootDir: string;
-  remoteWorkspaceId: string;
   relay: SyncRelayConnection;
   // Selected once at the factory boundary and required for every rooted
   // engine. One bound daemon object serves the entire lifetime, so an

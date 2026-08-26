@@ -232,7 +232,7 @@ async function bindCloudWorkspace(
   ctx: ToolContext,
   options: {
     serverUrl?: string;
-    remoteWorkspaceId?: string;
+    workspaceId?: string;
     ownerUserId?: string;
     credentialUserId?: string | null;
     token?: string;
@@ -240,7 +240,7 @@ async function bindCloudWorkspace(
   } = {},
 ) {
   const serverUrl = options.serverUrl ?? "http://cloud.test";
-  const remoteWorkspaceId = options.remoteWorkspaceId ?? "ws-1";
+  const workspaceId = options.workspaceId ?? "ws-1";
   const ownerUserId = options.ownerUserId ?? "user-1";
   const credentialUserId =
     options.credentialUserId === undefined ? "user-1" : options.credentialUserId;
@@ -250,13 +250,12 @@ async function bindCloudWorkspace(
       version: 1,
       workspaces: [
         {
-          workspaceId: "local-ws",
+          workspaceId,
           rootPath: ctx.root,
           kind: "personal",
           mode: "local-first",
           remote: {
             serverUrl,
-            remoteWorkspaceId,
             ownerUserId,
           },
         },
@@ -1035,7 +1034,7 @@ describe("mcp tools operate on allowed paths", () => {
       await mkdir(join(ctx.root, ".dohc"), { recursive: true });
       await writeFile(
         join(ctx.root, ".dohc", "sync-manifest.json"),
-        JSON.stringify({ workspaceId: "ws-a", remoteWorkspaceId: "ws-a", serverUrl: "https://x" }),
+        JSON.stringify({ workspaceId: "ws-a", serverUrl: "https://x" }),
       );
       expect(await workspaceStatus(ctx)).toMatchObject({ synced: true, scope: "cloud" });
     });
@@ -1047,11 +1046,12 @@ describe("mcp tools operate on allowed paths", () => {
       expect(await workspaceStatus(ctx)).toMatchObject({
         synced: true,
         scope: "cloud",
-        remoteWorkspaceId: "ws-1",
+        workspaceId: "ws-1",
         serverUrl: "http://cloud.test",
         cloudConnected: true,
         credentialStatus: "available",
       });
+      expect(await workspaceStatus(ctx)).not.toHaveProperty("remoteWorkspaceId");
     });
   });
 

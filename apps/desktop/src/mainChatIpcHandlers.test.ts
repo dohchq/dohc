@@ -507,7 +507,7 @@ describe("readRelayChatShareLanes", () => {
     const lanes = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () => Promise.reject(new Error("relay down")),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(lanes).toEqual({ state: "unreachable" });
   });
@@ -521,7 +521,7 @@ describe("readRelayChatShareLanes", () => {
             "Your dohc Cloud session expired. Sign in again, then retry.",
           ),
         ),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(lanes).toEqual({ state: "signed-out" });
   });
@@ -530,12 +530,12 @@ describe("readRelayChatShareLanes", () => {
     const lanes = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () => Promise.resolve({}),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(lanes).toEqual({ state: "answered", granted: [], received: [] });
   });
 
-  it("maps chat-channel rows and scopes grants to this workspace's remote identity", async () => {
+  it("maps chat-channel rows and scopes grants to this workspace coordinate", async () => {
     const lanes = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () =>
@@ -543,7 +543,7 @@ describe("readRelayChatShareLanes", () => {
           granted: [
             {
               shareId: "share-mine",
-              workspaceId: "remote-1",
+              workspaceId: "workspace-1",
               recipientEmail: "ana@example.com",
               revokedAtMs: null,
               selector: {
@@ -564,7 +564,7 @@ describe("readRelayChatShareLanes", () => {
               access: "read-write",
             },
             // Not a chat-channel share.
-            { shareId: "share-doc", workspaceId: "remote-1", selector: { kind: "document" } },
+            { shareId: "share-doc", workspaceId: "workspace-1", selector: { kind: "document" } },
           ],
           received: [
             {
@@ -576,7 +576,7 @@ describe("readRelayChatShareLanes", () => {
             { shareId: "share-other", selector: { kind: "document" } },
           ],
         }),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(lanes).toEqual({
       state: "answered",
@@ -608,7 +608,7 @@ describe("readRelayChatShareLanes", () => {
           granted: [
             {
               shareId: "share-corrupt",
-              workspaceId: "remote-1",
+              workspaceId: "workspace-1",
               recipientEmail: "ana@example.com",
               revokedAtMs: null,
               selector: { kind: "chat-channel", channelWireId: "wire-corrupt" },
@@ -616,7 +616,7 @@ describe("readRelayChatShareLanes", () => {
             },
           ],
         }),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
 
     expect(lanes).toEqual({ state: "unreachable" });
@@ -642,7 +642,7 @@ describe("readRelayChatShareLanes", () => {
             },
           ],
         }),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
 
     expect(lanes).toEqual({
@@ -659,7 +659,7 @@ describe("readRelayChatShareLanes", () => {
     });
   });
 
-  it("drops every grant when the workspace has no remote identity", async () => {
+  it("drops every grant when the workspace has no cloud binding", async () => {
     const lanes = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () =>
@@ -667,7 +667,7 @@ describe("readRelayChatShareLanes", () => {
           granted: [
             {
               shareId: "share-mine",
-              workspaceId: "remote-1",
+              workspaceId: "workspace-1",
               recipientEmail: "ana@example.com",
               revokedAtMs: null,
               selector: { kind: "chat-channel", channelWireId: "wire-1" },
@@ -675,7 +675,7 @@ describe("readRelayChatShareLanes", () => {
             },
           ],
         }),
-      remoteWorkspaceId: null,
+      workspaceId: null,
     });
     expect(lanes).toEqual({ state: "answered", granted: [], received: [] });
   });
@@ -689,7 +689,7 @@ describe("readRelayChatShareLanes", () => {
     const over = MAX_CHAT_CHANNEL_SHARE_ROWS + 1;
     const rows = Array.from({ length: over }, (_, index) => ({
       shareId: `share-${index}`,
-      workspaceId: "remote-1",
+      workspaceId: "workspace-1",
       recipientEmail: "ana@example.com",
       granterEmail: "owner@example.com",
       revokedAtMs: null,
@@ -706,7 +706,7 @@ describe("readRelayChatShareLanes", () => {
         const lanes = await readRelayChatShareLanes({
           shareIdsClaimedElsewhere: new Set<string>(),
           fetchListing: () => Promise.resolve(relayRowsOverCap(lane)),
-          remoteWorkspaceId: "remote-1",
+          workspaceId: "workspace-1",
         });
         // NOT "unreachable": that word means dohc could not read the answer,
         // and it earns a Try again. This answer arrived and will arrive again
@@ -752,7 +752,7 @@ describe("readRelayChatShareLanes", () => {
             ...relayRowsOverCap("granted"),
             ...relayRowsOverCap("received"),
           }),
-        remoteWorkspaceId: "remote-1",
+        workspaceId: "workspace-1",
       });
       expect(lanes).toEqual({
         state: "over-limit",
@@ -779,7 +779,7 @@ describe("readRelayChatShareLanes", () => {
   it("answers a lane that sits exactly at the cap", async () => {
     const rows = Array.from({ length: MAX_CHAT_CHANNEL_SHARE_ROWS }, (_, index) => ({
       shareId: `share-${index}`,
-      workspaceId: "remote-1",
+      workspaceId: "workspace-1",
       recipientEmail: "ana@example.com",
       revokedAtMs: null,
       selector: { kind: "chat-channel", channelWireId: `wire-${index}` },
@@ -788,7 +788,7 @@ describe("readRelayChatShareLanes", () => {
     const lanes = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () => Promise.resolve({ granted: rows }),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(lanes.state).toBe("answered");
     expect(lanes.state === "answered" && lanes.granted).toHaveLength(
@@ -809,7 +809,7 @@ describe("readRelayChatShareLanes", () => {
   it("counts what it will list, not what the relay sent", async () => {
     const listed = Array.from({ length: 10 }, (_, index) => ({
       shareId: `share-${index}`,
-      workspaceId: "remote-1",
+      workspaceId: "workspace-1",
       recipientEmail: "ana@example.com",
       revokedAtMs: null,
       selector: { kind: "chat-channel", channelWireId: `wire-${index}` },
@@ -819,14 +819,14 @@ describe("readRelayChatShareLanes", () => {
       { length: MAX_CHAT_CHANNEL_SHARE_ROWS + 1 },
       (_, index) => ({
         shareId: `doc-${index}`,
-        workspaceId: "remote-1",
+        workspaceId: "workspace-1",
         selector: { kind: "document" },
       }),
     );
     const lanes = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () => Promise.resolve({ granted: [...listed, ...filteredOut] }),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(lanes.state).toBe("answered");
     expect(lanes.state === "answered" && lanes.granted).toHaveLength(10);
@@ -855,7 +855,7 @@ describe("readRelayChatShareLanes", () => {
             },
           ],
         }),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(lanes.state === "answered" && lanes.received).toEqual([
       {
@@ -877,7 +877,7 @@ describe("readRelayChatShareLanes", () => {
     const grantRows = (revokedFrom: number) =>
       Array.from({ length: MAX_CHAT_CHANNEL_SHARE_ROWS + 1 }, (_, index) => ({
         shareId: `share-${index}`,
-        workspaceId: "remote-1",
+        workspaceId: "workspace-1",
         recipientEmail: "ana@example.com",
         revokedAtMs: index >= revokedFrom ? 1_700_000_000_000 : null,
         selector: { kind: "chat-channel", channelWireId: `wire-${index}` },
@@ -891,7 +891,7 @@ describe("readRelayChatShareLanes", () => {
         shareIdsClaimedElsewhere: new Set<string>(),
         fetchListing: () =>
           Promise.resolve({ granted: grantRows(MAX_CHAT_CHANNEL_SHARE_ROWS + 1) }),
-        remoteWorkspaceId: "remote-1",
+        workspaceId: "workspace-1",
       });
       expect(allLive.state).toBe("over-limit");
     } finally {
@@ -904,7 +904,7 @@ describe("readRelayChatShareLanes", () => {
       shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () =>
         Promise.resolve({ granted: grantRows(MAX_CHAT_CHANNEL_SHARE_ROWS) }),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(afterOneRevoke.state).toBe("answered");
     expect(
@@ -940,7 +940,7 @@ describe("readRelayChatShareLanes", () => {
     const whileHeld = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set(["share-left-elsewhere"]),
       fetchListing: listing,
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(whileHeld.state === "answered" && whileHeld.received).toHaveLength(0);
 
@@ -949,7 +949,7 @@ describe("readRelayChatShareLanes", () => {
     const afterLeave = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: listing,
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(
       afterLeave.state === "answered" && afterLeave.received.map((row) => row.shareId),
@@ -977,7 +977,7 @@ describe("readRelayChatShareLanes", () => {
           granted: [
             {
               shareId: "share-mine",
-              workspaceId: "remote-1",
+              workspaceId: "workspace-1",
               recipientEmail: "ana@example.com",
               revokedAtMs: null,
               selector: { kind: "chat-channel", channelWireId: "wire-mine" },
@@ -994,7 +994,7 @@ describe("readRelayChatShareLanes", () => {
             },
           ],
         }),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(lanes.state).toBe("answered");
     expect(lanes.state === "answered" && lanes.granted).toHaveLength(1);
@@ -1196,7 +1196,7 @@ describe("readRelayChatShareLanes session classification", () => {
             sessionWasCurrent: false,
           }),
         ),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(lanes).toEqual({ state: "unreachable" });
   });
@@ -1209,7 +1209,7 @@ describe("readRelayChatShareLanes session classification", () => {
       shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () =>
         Promise.resolve(null as unknown as { granted?: Array<Record<string, unknown>> }),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(nullBody).toEqual({ state: "unreachable" });
 
@@ -1219,7 +1219,7 @@ describe("readRelayChatShareLanes session classification", () => {
         Promise.resolve({ granted: 3 } as unknown as {
           granted?: Array<Record<string, unknown>>;
         }),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(nonArray).toEqual({ state: "unreachable" });
 
@@ -1232,7 +1232,7 @@ describe("readRelayChatShareLanes session classification", () => {
         Promise.resolve({ granted: "malformed" } as unknown as {
           granted?: Array<Record<string, unknown>>;
         }),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(stringLane).toEqual({ state: "unreachable" });
 
@@ -1242,7 +1242,7 @@ describe("readRelayChatShareLanes session classification", () => {
         Promise.resolve({ received: "malformed" } as unknown as {
           received?: Array<Record<string, unknown>>;
         }),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(stringReceived).toEqual({ state: "unreachable" });
   });
@@ -1258,7 +1258,7 @@ describe("readRelayChatShareLanes session classification", () => {
         Promise.resolve({
           granted: [
             {
-              workspaceId: "remote-1",
+              workspaceId: "workspace-1",
               recipientEmail: "ana@example.com",
               revokedAtMs: null,
               selector: { kind: "chat-channel", channelWireId: "wire-1" },
@@ -1266,7 +1266,7 @@ describe("readRelayChatShareLanes session classification", () => {
             },
           ],
         }),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(missingShareId).toEqual({ state: "unreachable" });
 
@@ -1284,7 +1284,7 @@ describe("readRelayChatShareLanes session classification", () => {
             },
           ],
         }),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(badEmail).toEqual({ state: "unreachable" });
   });

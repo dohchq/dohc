@@ -170,7 +170,6 @@ export async function seedWorkspaceRegistry(
     rootPath: string;
     remote?: {
       serverUrl: string;
-      remoteWorkspaceId: string;
       ownerUserId: string;
     };
   }>,

@@ -80,7 +80,6 @@ function engine(input: {
 }) {
   return createRelaySyncEngine({
     rootDir: "/tmp/workspace",
-    remoteWorkspaceId: "workspace-a",
     relay: { baseUrl: "http://relay.test", token: "token" },
     capture: input.capture,
     onChange: input.onChange ?? vi.fn(),
@@ -468,7 +467,6 @@ describe("relaySyncEngine", () => {
       .mockImplementation(async () => pullResult());
     const sync = createRelaySyncEngine({
       rootDir: "/tmp/workspace",
-      remoteWorkspaceId: "workspace-a",
       relay: { baseUrl: "http://relay.test", token: "token" },
       operations: mockOperations(),
       capture: cap,
@@ -495,7 +493,6 @@ describe("relaySyncEngine", () => {
   it("join bootstrap pulls before any push and only pushes after the first successful pull", async () => {
     const sync = createRelaySyncEngine({
       rootDir: "/tmp/workspace",
-      remoteWorkspaceId: "workspace-a",
       relay: { baseUrl: "http://relay.test", token: "token" },
       operations: mockOperations(),
       capture: capture(),
@@ -527,7 +524,6 @@ describe("relaySyncEngine", () => {
     });
     const sync = createRelaySyncEngine({
       rootDir: "/tmp/workspace",
-      remoteWorkspaceId: "workspace-a",
       relay: { baseUrl: "http://relay.test", token: "token" },
       operations: mockOperations(),
       capture: capture(),
@@ -559,7 +555,6 @@ describe("relaySyncEngine", () => {
       .mockResolvedValue(pullResult());
     const sync = createRelaySyncEngine({
       rootDir: "/tmp/workspace",
-      remoteWorkspaceId: "workspace-a",
       relay: { baseUrl: "http://relay.test", token: "token" },
       operations: mockOperations(),
       capture: capture(),

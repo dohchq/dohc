@@ -17,7 +17,6 @@ describe("mcpCloudEnvironment", () => {
         workspace: {
           remote: {
             serverUrl: "https://cloud.test/",
-            remoteWorkspaceId: "remote-workspace-1",
             ownerUserId: "user-1",
           },
         },
@@ -33,7 +32,6 @@ describe("mcpCloudEnvironment", () => {
     const workspace = {
       remote: {
         serverUrl: "https://cloud.test",
-        remoteWorkspaceId: "remote-workspace-1",
         ownerUserId: "user-1",
       },
     };

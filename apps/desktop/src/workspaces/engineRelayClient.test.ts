@@ -1033,7 +1033,7 @@ describe("EngineRelayClient", () => {
     expect(register).toContain("removeWorkspace(workspace.workspaceId);");
   });
 
-  it("reads current exact relay metadata when retiring an attachment", async () => {
+  it("retires the registered relay under the attachment's one workspace coordinate", async () => {
     const source = (await readFile(
       new URL("../main.ts", import.meta.url),
       "utf8",
@@ -1051,7 +1051,12 @@ describe("EngineRelayClient", () => {
     expect(owner).toContain(
       "disposeState: async (state, binding, workspaceAtDisposal)",
     );
-    expect(owner).toContain("workspaceAtDisposal.remote?.remoteWorkspaceId");
+    expect(owner).toContain("...workspaceAtDisposal");
+    expect(owner).toContain("attachmentId: binding.attachmentId");
+    expect(owner).toContain(
+      "relayCloseTargetsForPhysicalWorkspace(physicalWorkspace)",
+    );
+    expect(owner).not.toContain("remoteWorkspaceId");
     expect(owner).not.toContain("binding.workspace.remote");
   });
 

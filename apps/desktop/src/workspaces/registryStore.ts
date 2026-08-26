@@ -18,7 +18,6 @@ import type { ShareViewSelector } from "./shareViewInfo";
 
 export interface RemoteIdentity {
   serverUrl: string;
-  remoteWorkspaceId: string;
   ownerUserId: string;
 }
 

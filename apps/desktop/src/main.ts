@@ -381,11 +381,11 @@ import {
 } from "./workspaces/sharedChannels";
 import {
   assertSharedChannelMessageIdentity,
+  assertSyncEnrollmentCredentials,
   joinedChannelMatchesCredentials,
   resolveChatRelayIdentity,
   resolveShareViewRelayAuthorId,
   resolveWorkspaceRelayAuthorId,
-  syncEnrollmentRemoteWorkspaceId,
   workspaceRemoteMatchesCredentials,
   type ChatRelayIdentityTarget,
 } from "./workspaces/chatRelayIdentity";
@@ -1642,7 +1642,7 @@ async function remoteForWorkspace(workspace: RegistryEntry) {
     }
     throw new Error("Sign in to the account that synced this workspace.");
   }
-  return { workspace, remote, credentials, credentialGeneration };
+  return { credentials, credentialGeneration };
 }
 
 // Relay-share HTTP (PR 18): grant-side calls go to the SYNC RELAY (not the
@@ -1832,7 +1832,7 @@ function createDesktopWorkspaceAuthorityState(
 
 type PhysicalRelayWorkspace = Pick<
   RegistryEntry,
-  "workspaceId" | "rootPath" | "remote" | "shareMounts"
+  "workspaceId" | "rootPath" | "shareMounts"
 > & { attachmentId: symbol };
 
 function workspaceSessionTargetForPhysicalWorkspace(
@@ -1850,21 +1850,17 @@ function workspaceSessionTargetForPhysicalWorkspace(
 function relayCloseTargetsForPhysicalWorkspace(
   workspace: PhysicalRelayWorkspace,
 ): Array<string | EngineWorkspace> {
-  const workspaceIds = new Set<string>([
-    ...(workspace.remote?.remoteWorkspaceId
-      ? [workspace.remote.remoteWorkspaceId]
-      : []),
-    ...storedShareMounts(workspace).map((mount) =>
+  const mountStoreWorkspaceIds = new Set(
+    storedShareMounts(workspace).map((mount) =>
       mountStoreWorkspaceIdFor(workspace.workspaceId, mount.shareId),
     ),
-  ]);
-  workspaceIds.delete(workspace.workspaceId);
+  );
   return [
     workspaceSessionTargetForPhysicalWorkspace(
       workspace.workspaceId,
       workspace,
     ),
-    ...workspaceIds,
+    ...mountStoreWorkspaceIds,
   ];
 }
 
@@ -2313,7 +2309,7 @@ async function presenceRelayTransportForScope(
     }
     relayScope = {
       kind: "workspace",
-      workspaceId: remote.remoteWorkspaceId,
+      workspaceId: entry.workspaceId,
     };
   } else {
     const joined = (findWorkspace(scope.workspaceId)?.sharedChannels ?? []).some(
@@ -2737,6 +2733,9 @@ function engineForWorkspace(
   const credentials = cachedCredentials;
   if (!remote || !credentials) return null;
   if (!capture || !credentials.relayUrl) return null;
+  if (!workspace.attachmentId) {
+    throw new Error("Cloud sync requires a registered workspace attachment.");
+  }
   // Only sync when the session belongs to the server this workspace is bound
   // to; a mismatch keeps it local-only (no token leak, no mass-delete).
   if (!workspaceRemoteMatchesCredentials(remote, credentials)) return null;
@@ -2745,16 +2744,13 @@ function engineForWorkspace(
     token: credentials.token,
   };
   const daemonRelay = relayClientForWorkspace({
-    workspaceId: remote.remoteWorkspaceId,
+    workspaceId: workspace.workspaceId,
     rootPath: workspace.rootPath,
-    ...(remote.remoteWorkspaceId === workspace.workspaceId && workspace.attachmentId
-      ? { attachmentId: workspace.attachmentId }
-      : {}),
+    attachmentId: workspace.attachmentId,
     relay,
   });
   return createRelaySyncEngine({
     rootDir: workspace.rootPath,
-    remoteWorkspaceId: remote.remoteWorkspaceId,
     relay,
     operations: {
       push: () => daemonRelay.push(),
@@ -3592,10 +3588,9 @@ async function syncWorkspaceForDispatch(
               return true;
               } finally {
                 await engine.stop().catch(() => undefined);
-                const relayWorkspaceId = workspace.remote?.remoteWorkspaceId;
-                const relayCloseTarget = relayWorkspaceId
+                const relayCloseTarget = workspace.remote
                   ? workspaceSessionTargetForPhysicalWorkspace(
-                      relayWorkspaceId,
+                      workspace.workspaceId,
                       workspace,
                     )
                   : null;
@@ -3716,9 +3711,8 @@ async function closeDispatchRunActivity(
       const existing = lease.state.activityClosing;
   if (existing) return await existing;
       const current = canonicalWorkspaceFor(lease);
-  const relayWorkspaceId = current.remote?.remoteWorkspaceId;
-  const relayCloseTarget = relayWorkspaceId
-    ? workspaceSessionTargetForPhysicalWorkspace(relayWorkspaceId, current)
+  const relayCloseTarget = current.remote
+    ? workspaceSessionTargetForPhysicalWorkspace(current.workspaceId, current)
     : null;
   const closing = closeWorkspaceActivityAndRelay({
     closeActivity: async () => {
@@ -3735,7 +3729,7 @@ async function closeDispatchRunActivity(
       : {}),
     onRelayCloseError: (error) =>
       console.error(
-        `[desktop] relay workspace close failed for ${relayWorkspaceId}:`,
+        `[desktop] relay workspace close failed for ${current.workspaceId}:`,
         error,
       ),
   });
@@ -7032,10 +7026,9 @@ function registerIpcHandlers(
     });
   });
 
-  // Enabling sync claims the recorded remote workspace id, or the local id on
-  // first enrollment. The first claimant owns it; the owner can retry, and a
-  // different account gets the relay's fixed 404. The handler then records the
-  // verified binding and starts the merge engine.
+  // Enabling sync claims the workspace id. The first claimant owns it. The
+  // owner can retry, and another account gets the relay's fixed 404. The
+  // handler then records the verified binding and starts the merge engine.
   //
   // The relay's POST /sync/workspaces is the SOLE claim authority: workspace-api
   // is now auth-only and 404s every non-auth route, so there is no separate
@@ -7060,20 +7053,15 @@ function registerIpcHandlers(
         if (!credentials.relayUrl) {
           throw new Error("Cloud sync requires a relay URL");
         }
-        const remoteWorkspaceId = syncEnrollmentRemoteWorkspaceId(
-          workspace,
-          credentials,
-        );
+        assertSyncEnrollmentCredentials(workspace, credentials);
         const relay = {
           baseUrl: credentials.relayUrl,
           token: credentials.token,
         };
         const daemonRelay = relayClientForWorkspace({
-          workspaceId: remoteWorkspaceId,
+          workspaceId: workspace.workspaceId,
           rootPath: workspace.rootPath,
-          ...(remoteWorkspaceId === workspace.workspaceId
-            ? { attachmentId: workspace.attachmentId }
-            : {}),
+          attachmentId: workspace.attachmentId,
           relay,
         });
         try {
@@ -7097,7 +7085,7 @@ function registerIpcHandlers(
         );
         operation.assertCurrent();
         await enrollWorkspaceKeyEnvelope({
-          workspaceId: remoteWorkspaceId,
+          workspaceId: workspace.workspaceId,
           dataKey,
           ...(input.passphrase === undefined
             ? {}
@@ -7109,7 +7097,6 @@ function registerIpcHandlers(
         operation.assertCurrent();
         setWorkspaceRemote(workspace.workspaceId, {
           serverUrl: credentials.serverUrl,
-          remoteWorkspaceId,
           ownerUserId: credentials.userId,
         });
         await activity.enableCloud(workspace);
@@ -7241,7 +7228,6 @@ function registerIpcHandlers(
         afterActivityOpen: async () => {
           setWorkspaceRemote(created.workspaceId, {
             serverUrl: credentials.serverUrl,
-            remoteWorkspaceId: parsed.workspaceId,
             ownerUserId: credentials.userId,
           });
           await activity.enableCloud(created, { joinBootstrap: true });
@@ -7323,7 +7309,7 @@ function registerIpcHandlers(
             "This is a shared view — only the original workspace can be shared.",
           );
         }
-        const { remote, credentials, credentialGeneration } =
+        const { credentials, credentialGeneration } =
           await remoteForWorkspace(workspace);
         operation.assertCurrent();
         const created = await awaitCredentialGeneration({
@@ -7333,7 +7319,7 @@ function registerIpcHandlers(
             operation.assertCurrent();
             return relayShareJsonWithCredentials<{ shareId: string }>(
               credentials,
-              `/sync/${encodeURIComponent(remote.remoteWorkspaceId)}/shares`,
+              `/sync/${encodeURIComponent(workspace.workspaceId)}/shares`,
               {
                 method: "POST",
                 body: JSON.stringify({
@@ -7438,7 +7424,7 @@ function registerIpcHandlers(
             "This channel was shared with you — ask the person who shared it to add more people.",
           );
         }
-        const { remote, credentials, credentialGeneration } =
+        const { credentials, credentialGeneration } =
           await remoteForWorkspace(workspace);
         operation.assertCurrent();
         const created = await awaitCredentialGeneration({
@@ -7448,7 +7434,7 @@ function registerIpcHandlers(
             operation.assertCurrent();
             return relayShareJsonWithCredentials<{ shareId: string }>(
               credentials,
-              `/sync/${encodeURIComponent(remote.remoteWorkspaceId)}/shares`,
+              `/sync/${encodeURIComponent(workspace.workspaceId)}/shares`,
               {
                 method: "POST",
                 body: JSON.stringify({
@@ -7587,12 +7573,16 @@ function registerIpcHandlers(
       },
       pull: async ({ workspaceId, rootPath, relay, shareId, channelWireId }) => {
         assertCurrent();
+        if (
+          workspaceId !== workspace.workspaceId ||
+          rootPath !== workspace.rootPath
+        ) {
+          throw new Error("Shared channel pull targeted a different workspace.");
+        }
         const result = await relayClientForWorkspace({
-          workspaceId,
-          rootPath,
-          ...(workspaceId === workspace.workspaceId
-            ? { attachmentId: workspace.attachmentId }
-            : {}),
+          workspaceId: workspace.workspaceId,
+          rootPath: workspace.rootPath,
+          attachmentId: workspace.attachmentId,
           relay,
         }).pullSharedChannel({
           shareId,
@@ -7703,7 +7693,7 @@ function registerIpcHandlers(
             }
             return listing;
           },
-          remoteWorkspaceId: workspace.remote?.remoteWorkspaceId ?? null,
+          workspaceId: workspace.remote ? workspace.workspaceId : null,
           shareIdsClaimedElsewhere,
         });
         assertCurrentShareSession();
@@ -7901,7 +7891,6 @@ function registerIpcHandlers(
     readonly attachmentId: symbol;
     readonly rootPath: string;
     relay: SyncRelayConnection;
-    remoteWorkspaceId: string;
     credentialGeneration: number;
   }
 
@@ -7913,7 +7902,6 @@ function registerIpcHandlers(
       left.workspaceId === right.workspaceId &&
       left.attachmentId === right.attachmentId &&
       left.rootPath === right.rootPath &&
-      left.remoteWorkspaceId === right.remoteWorkspaceId &&
       left.relay.baseUrl === right.relay.baseUrl &&
       left.relay.token === right.relay.token &&
       left.credentialGeneration === right.credentialGeneration
@@ -7968,7 +7956,6 @@ function registerIpcHandlers(
               token: credentials.token,
               fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
             },
-            remoteWorkspaceId: remote.remoteWorkspaceId,
             credentialGeneration: credentialCacheGeneration,
           };
         };
@@ -8087,7 +8074,7 @@ function registerIpcHandlers(
   // no to something they cannot see.
   async function shareProposalIncomingText(
     relay: SyncRelayConnection,
-    remoteWorkspaceId: string,
+    workspaceId: string,
     op: ShareProposalOp,
   ): Promise<string | null> {
     // A delete has no after side, and binary content is not something a text
@@ -8096,7 +8083,7 @@ function registerIpcHandlers(
     if (op.afterContentKind !== "text") return null;
     try {
       const response = await (relay.fetch ?? fetch)(
-        `${relay.baseUrl}/sync/${encodeURIComponent(remoteWorkspaceId)}/blobs/` +
+        `${relay.baseUrl}/sync/${encodeURIComponent(workspaceId)}/blobs/` +
           encodeURIComponent(op.afterBlobSha256),
         { headers: { authorization: `Bearer ${relay.token}` } },
       );
@@ -8139,7 +8126,7 @@ function registerIpcHandlers(
         const scope = operation.resolve();
         const proposals = await listShareProposals({
           relay: scope.relay,
-          workspaceId: scope.remoteWorkspaceId,
+          workspaceId: scope.workspaceId,
         });
         operation.assert(scope);
         return ListShareProposalsResult.parse({
@@ -8165,7 +8152,7 @@ function registerIpcHandlers(
         const scope = operation.resolve();
         const proposal = await readShareProposal({
           relay: scope.relay,
-          workspaceId: scope.remoteWorkspaceId,
+          workspaceId: scope.workspaceId,
           proposalId: input.proposalId,
         });
         operation.assert(scope);
@@ -8193,7 +8180,7 @@ function registerIpcHandlers(
         const scope = operation.resolve();
         const op = await readShareProposalOp({
           relay: scope.relay,
-          workspaceId: scope.remoteWorkspaceId,
+          workspaceId: scope.workspaceId,
           proposalId: input.proposalId,
           opIndex: input.opIndex,
         });
@@ -8208,7 +8195,7 @@ function registerIpcHandlers(
         operation.assert(scope);
         const incomingText = await shareProposalIncomingText(
           scope.relay,
-          scope.remoteWorkspaceId,
+          scope.workspaceId,
           op,
         );
         operation.assert(scope);
@@ -8230,7 +8217,7 @@ function registerIpcHandlers(
         const scope = operation.resolve();
         const settled = await settleShareProposal({
           relay: scope.relay,
-          workspaceId: scope.remoteWorkspaceId,
+          workspaceId: scope.workspaceId,
           proposalId: input.proposalId,
           decision: input.decision,
         });
@@ -11003,7 +10990,7 @@ function registerIpcHandlers(
         // physical root used by both the local engine and relay work.
         const workspace = operation.workspace;
         assertWritableWorkspace(workspace);
-        const { remote, credentials, credentialGeneration } =
+        const { credentials, credentialGeneration } =
           await remoteForWorkspace(workspace);
         operation.assertCurrent();
         function assertCurrentDmSession(): void {
@@ -11134,7 +11121,7 @@ function registerIpcHandlers(
               shareId?: string;
             }>(
               credentials,
-              `/sync/${encodeURIComponent(remote.remoteWorkspaceId)}/shares`,
+              `/sync/${encodeURIComponent(workspace.workspaceId)}/shares`,
               {
                 method: "POST",
                 body: JSON.stringify({

@@ -16,7 +16,7 @@ function sourceBetween(startMarker: string, endMarker: string): string {
 }
 
 describe("main-process engine store rebuild wiring", () => {
-  it("keeps physical relay teardown on the attachment unless the relay id is an alias", () => {
+  it("keeps physical relay teardown on one attachment coordinate", () => {
     const target = sourceBetween(
       "function workspaceSessionTargetForPhysicalWorkspace(",
       "function relayCloseTargetsForPhysicalWorkspace(",
@@ -47,12 +47,12 @@ describe("main-process engine store rebuild wiring", () => {
         "    )",
     );
     expect(targets).toContain(
-      "storedShareMounts(workspace).map((mount) =>\n" +
+      "const mountStoreWorkspaceIds = new Set(\n" +
+        "    storedShareMounts(workspace).map((mount) =>\n" +
         "      mountStoreWorkspaceIdFor(workspace.workspaceId, mount.shareId),",
     );
-    expect(targets).toContain("const workspaceIds = new Set<string>([");
-    expect(targets).toContain("workspace.remote.remoteWorkspaceId");
-    expect(targets).toContain("workspaceIds.delete(workspace.workspaceId)");
+    expect(targets).toContain("...mountStoreWorkspaceIds");
+    expect(targets).not.toContain("workspace.remote");
     expect(owner).toContain("attachmentId: binding.attachmentId");
     expect(owner).toContain(
       "relayCloseTargetsForPhysicalWorkspace(physicalWorkspace)",
@@ -66,6 +66,29 @@ describe("main-process engine store rebuild wiring", () => {
     );
     expect(transportClose).toContain(
       "await rustEngineWorkspaceSessions?.closeWorkspace(workspace)",
+    );
+  });
+
+  it("binds registered relay work to the workspace attachment", () => {
+    const engine = sourceBetween(
+      "function engineForWorkspace(",
+      "const workspaceActivity = createWorkspaceActivity(",
+    );
+    const sharedChannel = sourceBetween(
+      "function reserveAndPullSharedChannelForWorkspace(",
+      "ipcMain.handle(CHANNELS.listChatChannelShares",
+    );
+
+    for (const source of [engine, sharedChannel]) {
+      expect(source).toMatch(
+        /relayClientForWorkspace\(\{[\s\S]*?workspaceId: workspace\.workspaceId,[\s\S]*?rootPath: workspace\.rootPath,[\s\S]*?attachmentId: workspace\.attachmentId,/,
+      );
+    }
+    expect(engine).toContain(
+      "Cloud sync requires a registered workspace attachment.",
+    );
+    expect(sharedChannel).toContain(
+      'throw new Error("Shared channel pull targeted a different workspace.");',
     );
   });
 
@@ -103,7 +126,7 @@ describe("main-process engine store rebuild wiring", () => {
       /closeActivity: async \(\) => \{\s*await activity\.close\(current\.workspaceId, \{\s*expectedRootPath: current\.rootPath,\s*preserveStatus: true,\s*notify: options\.notifyRenderer,/,
     );
     expect(close).toMatch(
-      /workspaceSessionTargetForPhysicalWorkspace\(\s*relayWorkspaceId,\s*current,?\s*\)/,
+      /workspaceSessionTargetForPhysicalWorkspace\(\s*current\.workspaceId,\s*current,?\s*\)/,
     );
     expect(close).toContain(
       "closeRelay: () => closeRelayTransportWorkspace(relayCloseTarget)",
@@ -142,7 +165,7 @@ describe("main-process engine store rebuild wiring", () => {
       /captureForFlaggedWorkspace\(\s*\{\s*\.\.\.workspace,[\s\S]*?shareView: false,/,
     );
     expect(dispatch).toMatch(
-      /const relayWorkspaceId = workspace\.remote\?\.remoteWorkspaceId;[\s\S]*?workspaceSessionTargetForPhysicalWorkspace\(\s*relayWorkspaceId,\s*workspace,\s*\)/,
+      /const relayCloseTarget = workspace\.remote[\s\S]*?workspaceSessionTargetForPhysicalWorkspace\(\s*workspace\.workspaceId,\s*workspace,\s*\)/,
     );
     expect(dispatch).toContain(
       "await closeRelayTransportWorkspace(relayCloseTarget).catch(",

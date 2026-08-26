@@ -601,7 +601,6 @@ it.skipIf(engine.missing)(
 
       const sync = createRelaySyncEngine({
         rootDir: rootA,
-        remoteWorkspaceId: workspaceId,
         relay: relayConnection,
         operations: daemonA.relay,
         capture: daemonA.capture,

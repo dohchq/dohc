@@ -161,7 +161,6 @@ test("owner + participant chat and co-presence converge in the real app", async 
         rootPath: temp.rootPath,
         remote: {
           serverUrl: relay.baseUrl,
-          remoteWorkspaceId: workspaceId,
           ownerUserId: GRANTER_USER,
         },
       },

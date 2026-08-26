@@ -205,15 +205,43 @@ describe("main-process chat authorization", () => {
       previousStep = index;
     }
     expect(mainSource).not.toContain("pinLegacyWorkspaceRemotesForCurrentAccount");
-    expect(handlerSource("cloudEnableSync")).toContain(
-      "syncEnrollmentRemoteWorkspaceId(",
+    const enableSync = handlerSource("cloudEnableSync");
+    expect(enableSync).toContain("assertWritableWorkspace(workspace);");
+    expect(enableSync).toContain("workspaceId: workspace.workspaceId");
+    expect(enableSync).toContain("attachmentId: workspace.attachmentId");
+    expect(enableSync).not.toContain("remoteWorkspaceId");
+
+    const joinWorkspace = handlerSource("cloudJoinWorkspace");
+    expect(joinWorkspace).not.toContain("remoteWorkspaceId");
+  });
+
+  it("uses the registry workspace coordinate for cloud collaboration", () => {
+    const presenceStart = mainSource.indexOf(
+      "async function presenceRelayTransportForScope(",
     );
-    expect(handlerSource("cloudEnableSync")).toContain(
-      "assertWritableWorkspace(workspace);",
+    const presenceEnd = mainSource.indexOf(
+      "async function presenceRelayTransportForWindow(",
+      presenceStart,
     );
-    expect(handlerSource("cloudEnableSync")).toContain(
-      "workspaceId: remoteWorkspaceId",
-    );
+    const presence = mainSource.slice(presenceStart, presenceEnd);
+    expect(presence).toContain("workspaceId: entry.workspaceId");
+
+    for (const channel of ["createRelayShare", "shareChatChannel", "startDm"]) {
+      expect(handlerSource(channel), channel).toContain(
+        "/sync/${encodeURIComponent(workspace.workspaceId)}/shares",
+      );
+    }
+
+    for (const channel of [
+      "listShareProposals",
+      "readShareProposalChanges",
+      "readShareProposalFileContent",
+      "settleShareProposal",
+    ]) {
+      expect(handlerSource(channel), channel).toContain(
+        "workspaceId: scope.workspaceId",
+      );
+    }
   });
 
   it("admits renderer workspace requests through one exact physical operation", () => {

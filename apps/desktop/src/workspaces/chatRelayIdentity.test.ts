@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import {
+  assertSyncEnrollmentCredentials,
   assertSharedChannelMessageIdentity,
   joinedChannelMatchesCredentials,
   resolveChatRelayIdentity,
   resolveShareViewRelayAuthorId,
   resolveWorkspaceRelayAuthorId,
-  syncEnrollmentRemoteWorkspaceId,
   workspaceRemoteMatchesCredentials,
   type ChatRelayIdentityStore,
 } from "./chatRelayIdentity";
@@ -38,7 +38,6 @@ function workspace(
     workspaceId: "workspace-1",
     remote: {
       serverUrl: "https://cloud.test/",
-      remoteWorkspaceId: "remote-workspace-1",
       ownerUserId: "user-1",
     },
     sharedChannels: [joinedChannel],
@@ -86,7 +85,6 @@ describe("persisted relay account pins", () => {
       workspaceRemoteMatchesCredentials(
         {
           serverUrl: "https://cloud.test/",
-          remoteWorkspaceId: "remote-workspace-1",
           ownerUserId: "user-2",
         },
         credentials,
@@ -118,7 +116,6 @@ describe("resolveChatRelayIdentity", () => {
         workspace: workspace({
           remote: {
             serverUrl: "https://other-cloud.test",
-            remoteWorkspaceId: "remote-workspace-1",
             ownerUserId: "user-1",
           },
         }),
@@ -231,28 +228,28 @@ describe("assertSharedChannelMessageIdentity", () => {
   });
 });
 
-describe("syncEnrollmentRemoteWorkspaceId", () => {
-  it("reuses the current account's remote id", () => {
-    expect(syncEnrollmentRemoteWorkspaceId(workspace(), credentials)).toBe(
-      "remote-workspace-1",
-    );
-    expect(
-      syncEnrollmentRemoteWorkspaceId(
+describe("assertSyncEnrollmentCredentials", () => {
+  it("allows a new binding and the current account's binding", () => {
+    expect(() =>
+      assertSyncEnrollmentCredentials(workspace(), credentials),
+    ).not.toThrow();
+    expect(() =>
+      assertSyncEnrollmentCredentials(
         workspace({ remote: undefined }),
         credentials,
       ),
-    ).toBe("workspace-1");
+    ).not.toThrow();
   });
 
   it("rejects a different server or account", () => {
     expect(() =>
-      syncEnrollmentRemoteWorkspaceId(workspace(), {
+      assertSyncEnrollmentCredentials(workspace(), {
         ...credentials,
         serverUrl: "https://other-cloud.test",
       }),
     ).toThrowError("Sign in to the cloud server this workspace uses.");
     expect(() =>
-      syncEnrollmentRemoteWorkspaceId(workspace(), {
+      assertSyncEnrollmentCredentials(workspace(), {
         ...credentials,
         userId: "user-2",
       }),
