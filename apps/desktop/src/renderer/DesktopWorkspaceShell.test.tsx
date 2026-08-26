@@ -36,6 +36,8 @@ import type {
   ListFileChatsResult,
   ListMyShareChangesResult,
   ListShareProposalsResult,
+  ListWorkspaceFilesPayload,
+  ListWorkspaceFilesResult,
   ListWorkspaceVersionsResult,
   ReadShareProposalChangesResult,
   ReadShareProposalFileContentResult,
@@ -345,13 +347,17 @@ function makeBridge(
     setWorkspaceUiState: vi.fn(
       async (_payload: { workspaceId: string; state: WorkspaceUiState }) => undefined,
     ),
-    listWorkspaceFiles: vi.fn(async () => ({
-      files: [
-        { path: "a.md", kind: "file" as const },
-        { path: "b.md", kind: "file" as const },
-      ],
-      folders: [] as string[],
-    })),
+    listWorkspaceFiles: vi.fn(
+      async (
+        _payload: ListWorkspaceFilesPayload,
+      ): Promise<ListWorkspaceFilesResult> => ({
+        files: [
+          { path: "a.md", kind: "file" },
+          { path: "b.md", kind: "file" },
+        ],
+        folders: [],
+      }),
+    ),
     openWorkspace: vi.fn(async () => SYNC_STATUS),
     getSyncStatus: vi.fn(async () => SYNC_STATUS),
     // #874: the refused-store rebuild. Typed to the contract, not to this
@@ -3868,6 +3874,143 @@ describe("workspace switch admission", () => {
     expect(bridge.getWorkspaceUiState).toHaveBeenCalledTimes(2);
     expect(bridge.getWorkspaceSettings).toHaveBeenCalledTimes(2);
     expect(bridge.openWorkspace).toHaveBeenCalledOnce();
+  });
+});
+
+describe("workspace switch-back file listing", () => {
+  it("paints a completed cached listing before the forced disk walk replaces it", async () => {
+    const revalidation = deferred<ListWorkspaceFilesResult>();
+    const bridge = makeBridge(Promise.resolve(null));
+    let workspaceACalls = 0;
+    bridge.listWorkspaceFiles = vi.fn(
+      async (
+        payload: ListWorkspaceFilesPayload,
+      ): Promise<ListWorkspaceFilesResult> => {
+        if (payload.workspaceId === OTHER_WORKSPACE.workspaceId) {
+          return {
+            files: [{ path: "other.md", kind: "file" }],
+            folders: [],
+          };
+        }
+        workspaceACalls += 1;
+        if (workspaceACalls === 1) {
+          return {
+            files: [{ path: "cached.md", kind: "file" }],
+            folders: [],
+          };
+        }
+        if (workspaceACalls === 2) {
+          return {
+            files: [{ path: "cached.md", kind: "file" }],
+            folders: [],
+            cached: true,
+          };
+        }
+        return revalidation.promise;
+      },
+    );
+    const shell = (workspace: Workspace) => (
+      <DesktopWorkspaceShell
+        key={workspace.workspaceId}
+        workspace={workspace}
+        workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+        onSwitchWorkspace={() => {}}
+      />
+    );
+    vi.stubGlobal("dohcDesktop", bridge);
+    const view = render(shell(WORKSPACE));
+    expect(await screen.findByText("cached.md")).toBeTruthy();
+
+    view.rerender(shell(OTHER_WORKSPACE));
+    expect(await screen.findByText("other.md")).toBeTruthy();
+
+    view.rerender(shell(WORKSPACE));
+    expect(await screen.findByText("cached.md")).toBeTruthy();
+    await waitFor(() => expect(workspaceACalls).toBe(3));
+    expect(screen.queryByText("fresh.md")).toBeNull();
+
+    await act(async () => {
+      revalidation.resolve({
+        files: [{ path: "fresh.md", kind: "file" }],
+        folders: [],
+      });
+      await revalidation.promise;
+    });
+    expect(await screen.findByText("fresh.md")).toBeTruthy();
+    expect(screen.queryByText("cached.md")).toBeNull();
+
+    const workspaceARequests = bridge.listWorkspaceFiles.mock.calls
+      .map(([payload]) => payload)
+      .filter((payload) => payload.workspaceId === WORKSPACE.workspaceId);
+    expect(workspaceARequests).toEqual([
+      { workspaceId: WORKSPACE.workspaceId, allowCached: true },
+      { workspaceId: WORKSPACE.workspaceId, allowCached: true },
+      { workspaceId: WORKSPACE.workspaceId },
+    ]);
+  });
+
+  it("does not prune a restored tab from the cached paint alone", async () => {
+    const revalidation = deferred<ListWorkspaceFilesResult>();
+    const bridge = makeBridge(
+      Promise.resolve(
+        storedStateWithTabs(["survivor.md", "gone.md"], "survivor.md"),
+      ),
+    );
+    bridge.listWorkspaceFiles = vi
+      .fn()
+      .mockResolvedValueOnce({
+        files: [{ path: "survivor.md", kind: "file" as const }],
+        folders: [],
+        cached: true,
+      })
+      .mockImplementationOnce(() => revalidation.promise);
+    renderShell(bridge);
+
+    expect(
+      (await screen.findAllByText("survivor.md")).length,
+    ).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2),
+    );
+    expect(await screen.findByTestId("tab-gone.md")).toBeTruthy();
+
+    await act(async () => {
+      revalidation.resolve({
+        files: [{ path: "survivor.md", kind: "file" }],
+        folders: [],
+      });
+      await revalidation.promise;
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("tab-gone.md")).toBeNull();
+    });
+    expect(screen.getByTestId("tab-survivor.md")).toBeTruthy();
+  });
+
+  it("performs one disk listing when the permitted cache read misses", async () => {
+    const walk = deferred<ListWorkspaceFilesResult>();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listWorkspaceFiles.mockImplementation(() => walk.promise);
+    renderShell(bridge);
+
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledOnce());
+    expect(screen.queryByText("cold.md")).toBeNull();
+    await act(async () => {
+      walk.resolve({
+        files: [{ path: "cold.md", kind: "file" }],
+        folders: [],
+      });
+      await walk.promise;
+    });
+    expect(await screen.findByText("cold.md")).toBeTruthy();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(bridge.listWorkspaceFiles).toHaveBeenCalledOnce();
+    expect(bridge.listWorkspaceFiles).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE.workspaceId,
+      allowCached: true,
+    });
   });
 });
 
