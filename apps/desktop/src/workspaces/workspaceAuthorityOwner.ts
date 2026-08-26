@@ -85,6 +85,13 @@ interface PreparedWorkspaceIdentity<Workspace, State> {
   readonly canonicalRootPath: string;
 }
 
+interface WorkspaceAuthorityReservationState {
+  readonly settled: Promise<void>;
+  resolve(): void;
+  reject(error: unknown): void;
+  cleanup: Promise<void> | null;
+}
+
 function bindingMatchesWorkspace<Workspace extends { rootPath: string }>(
   binding: Pick<WorkspaceAuthorityBinding<Workspace>, "registeredRootPath">,
   workspace: Workspace,
@@ -107,10 +114,29 @@ export function createWorkspaceAuthorityOwner<
   const slots = new Map<string, AuthoritySlot<Workspace, State>>();
   const recordsByCanonicalRoot = new Map<string, AuthorityRecord<Workspace, State>>();
   const blockedCanonicalRoots = new Map<string, WorkspaceAuthorityReservation>();
-  const pendingReservationCleanups = new Map<
+  const reservationStates = new Map<
     WorkspaceAuthorityReservation,
-    Promise<void>
+    WorkspaceAuthorityReservationState
   >();
+  let closing = false;
+  let closeOperation: Promise<void> | null = null;
+
+  function assertRegistrationOpen(): void {
+    if (closing) {
+      throw new Error("Workspace authority owner is closing.");
+    }
+  }
+
+  function createReservationState(): WorkspaceAuthorityReservationState {
+    let resolve!: () => void;
+    let reject!: (error: unknown) => void;
+    const settled = new Promise<void>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    });
+    void settled.catch(() => undefined);
+    return { settled, resolve, reject, cleanup: null };
+  }
 
   function slotFor(workspaceId: string): AuthoritySlot<Workspace, State> {
     const existing = slots.get(workspaceId);
@@ -397,6 +423,7 @@ export function createWorkspaceAuthorityOwner<
     reserveBinding(
       workspace: { workspaceId: string; rootPath: string },
     ): WorkspaceAuthorityReservation {
+      assertRegistrationOpen();
       const prepared = prepareWorkspaceIdentity(workspace);
       const reservation = Object.freeze({
         reservationId: Symbol(`workspace-reservation:${workspace.workspaceId}`),
@@ -406,6 +433,7 @@ export function createWorkspaceAuthorityOwner<
       });
       prepared.slot.reservation = reservation;
       blockedCanonicalRoots.set(prepared.canonicalRootPath, reservation);
+      reservationStates.set(reservation, createReservationState());
       return reservation;
     },
 
@@ -413,6 +441,7 @@ export function createWorkspaceAuthorityOwner<
       workspace: Workspace,
       registration: WorkspaceBindingRegistration,
     ): WorkspaceAuthorityBinding<Workspace> {
+      assertRegistrationOpen();
       return runRegistration(
         prepareRegistration(workspace),
         registration,
@@ -425,6 +454,7 @@ export function createWorkspaceAuthorityOwner<
       workspace: Workspace,
       registration: WorkspaceBindingRegistration,
     ): WorkspaceAuthorityBinding<Workspace> {
+      assertRegistrationOpen();
       const slot = slots.get(reservation.workspaceId);
       if (
         !slot ||
@@ -433,6 +463,13 @@ export function createWorkspaceAuthorityOwner<
         workspace.rootPath !== reservation.registeredRootPath
       ) {
         throw new Error("This workspace registration reservation is no longer current.");
+      }
+      const reservationState = reservationStates.get(reservation);
+      if (!reservationState) {
+        throw new Error("This workspace registration reservation cannot be settled.");
+      }
+      if (reservationState.cleanup) {
+        throw new Error("This workspace registration reservation is being released.");
       }
       const binding = runRegistration(
         {
@@ -450,6 +487,8 @@ export function createWorkspaceAuthorityOwner<
       ) {
         blockedCanonicalRoots.delete(reservation.canonicalRootPath);
       }
+      reservationState.resolve();
+      reservationStates.delete(reservation);
       return binding;
     },
 
@@ -461,7 +500,15 @@ export function createWorkspaceAuthorityOwner<
       if (!slot || slot.reservation !== reservation) {
         throw new Error("This workspace registration reservation is no longer current.");
       }
-      const cleanupOperation = (async () => {
+      const reservationState = reservationStates.get(reservation);
+      if (!reservationState) {
+        throw new Error("This workspace registration reservation cannot be settled.");
+      }
+      if (reservationState.cleanup) {
+        await reservationState.cleanup;
+        return;
+      }
+      const cleanupOperation = Promise.resolve().then(async () => {
         if (options.findWorkspace(reservation.workspaceId)) {
           throw new Error(
             "Workspace registration cleanup cannot run while its registry binding remains.",
@@ -480,15 +527,23 @@ export function createWorkspaceAuthorityOwner<
         ) {
           blockedCanonicalRoots.delete(reservation.canonicalRootPath);
         }
-      })();
-      pendingReservationCleanups.set(reservation, cleanupOperation);
-      try {
-        await cleanupOperation;
-      } finally {
-        if (pendingReservationCleanups.get(reservation) === cleanupOperation) {
-          pendingReservationCleanups.delete(reservation);
-        }
-      }
+      });
+      reservationState.cleanup = cleanupOperation;
+      void cleanupOperation.then(
+        () => {
+          reservationState.resolve();
+          if (reservationStates.get(reservation) === reservationState) {
+            reservationStates.delete(reservation);
+          }
+        },
+        (error: unknown) => {
+          reservationState.reject(error);
+          if (reservationStates.get(reservation) === reservationState) {
+            reservationStates.delete(reservation);
+          }
+        },
+      );
+      await cleanupOperation;
     },
 
     acquire(workspaceId: string): WorkspaceAuthorityLease<Workspace, State> {
@@ -576,7 +631,9 @@ export function createWorkspaceAuthorityOwner<
       }
     },
 
-    async close(): Promise<void> {
+    close(): Promise<void> {
+      if (closeOperation) return closeOperation;
+      closing = true;
       const drains: Promise<void>[] = [];
       for (const slot of slots.values()) {
         const current = slot.current;
@@ -585,13 +642,22 @@ export function createWorkspaceAuthorityOwner<
           drains.push(current.drained);
         }
       }
-      await Promise.all([
+      const ownedWork = [
         ...drains,
-        ...pendingReservationCleanups.values(),
-      ]);
-      slots.clear();
-      recordsByCanonicalRoot.clear();
-      blockedCanonicalRoots.clear();
+        ...[...reservationStates.values()].map((state) => state.settled),
+      ];
+      closeOperation = Promise.allSettled(ownedWork).then((results) => {
+        const failed = results.find(
+          (result): result is PromiseRejectedResult =>
+            result.status === "rejected",
+        );
+        if (failed) throw failed.reason;
+        slots.clear();
+        recordsByCanonicalRoot.clear();
+        blockedCanonicalRoots.clear();
+        reservationStates.clear();
+      });
+      return closeOperation;
     },
   };
 }

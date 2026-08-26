@@ -622,6 +622,161 @@ describe("workspace authority owner", () => {
     expect(closed).toBe(true);
   });
 
+  it("waits for an uncommitted reservation to settle before closing", async () => {
+    const owner = createWorkspaceAuthorityOwner({
+      findWorkspace: () => null,
+      canonicalizeRoot: (rootPath) => `real:${rootPath}`,
+      createState: () => ({}),
+    });
+    const workspace = {
+      workspaceId: "workspace",
+      rootPath: "root",
+      label: "reserved",
+    };
+    const reservation = owner.reserveBinding(workspace);
+    let closed = false;
+    const closing = owner.close().then(() => {
+      closed = true;
+    });
+
+    await Promise.resolve();
+    expect(closed).toBe(false);
+
+    const persist = vi.fn();
+    const rollback = vi.fn();
+    expect(() =>
+      owner.registerReservedBinding(reservation, workspace, {
+        persist,
+        rollback,
+      }),
+    ).toThrow("closing");
+    expect(persist).not.toHaveBeenCalled();
+    expect(rollback).not.toHaveBeenCalled();
+
+    const cleanup = vi.fn();
+    await owner.releaseReservation(reservation, cleanup);
+    await closing;
+    expect(cleanup).toHaveBeenCalledOnce();
+    expect(closed).toBe(true);
+  });
+
+  it("reports reserved cleanup failure to a concurrent close", async () => {
+    const owner = createWorkspaceAuthorityOwner({
+      findWorkspace: () => null,
+      canonicalizeRoot: (rootPath) => `real:${rootPath}`,
+      createState: () => ({}),
+    });
+    const reservation = owner.reserveBinding({
+      workspaceId: "workspace",
+      rootPath: "root",
+    });
+    const closing = owner.close().then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    await expect(
+      owner.releaseReservation(reservation, async () => {
+        throw new Error("cleanup failed");
+      }),
+    ).rejects.toThrow("cleanup failed");
+    await expect(closing).resolves.toMatchObject({ message: "cleanup failed" });
+  });
+
+  it("waits for every reservation cleanup before reporting a close failure", async () => {
+    const owner = createWorkspaceAuthorityOwner({
+      findWorkspace: () => null,
+      canonicalizeRoot: (rootPath) => `real:${rootPath}`,
+      createState: () => ({}),
+    });
+    const failedReservation = owner.reserveBinding({
+      workspaceId: "failed",
+      rootPath: "failed-root",
+    });
+    const pendingReservation = owner.reserveBinding({
+      workspaceId: "pending",
+      rootPath: "pending-root",
+    });
+    let closeSettled = false;
+    const closing = owner.close().then(
+      () => null,
+      (error: unknown) => error,
+    );
+    void closing.then(() => {
+      closeSettled = true;
+    });
+    let finishPending!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      finishPending = resolve;
+    });
+
+    await expect(
+      owner.releaseReservation(failedReservation, async () => {
+        throw new Error("first cleanup failed");
+      }),
+    ).rejects.toThrow("first cleanup failed");
+    const pendingRelease = owner.releaseReservation(
+      pendingReservation,
+      async () => await pending,
+    );
+    await Promise.resolve();
+    expect(closeSettled).toBe(false);
+
+    finishPending();
+    await pendingRelease;
+    await expect(closing).resolves.toMatchObject({
+      message: "first cleanup failed",
+    });
+  });
+
+  it("claims reservation cleanup once before invoking it", async () => {
+    let workspace: Workspace | null = null;
+    const owner = createWorkspaceAuthorityOwner({
+      findWorkspace: () => workspace,
+      canonicalizeRoot: (rootPath) => `real:${rootPath}`,
+      createState: () => ({}),
+    });
+    const attempted = {
+      workspaceId: "workspace",
+      rootPath: "root",
+      label: "attempted",
+    };
+    const reservation = owner.reserveBinding(attempted);
+    let cleanupCalls = 0;
+    let cleanupStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      cleanupStarted = resolve;
+    });
+    let finishCleanup!: () => void;
+    const finish = new Promise<void>((resolve) => {
+      finishCleanup = resolve;
+    });
+    const cleanup = async () => {
+      cleanupCalls += 1;
+      cleanupStarted();
+      await finish;
+    };
+
+    const firstRelease = owner.releaseReservation(reservation, cleanup);
+    await started;
+    const secondRelease = owner.releaseReservation(reservation, cleanup);
+    expect(() =>
+      owner.registerReservedBinding(reservation, attempted, {
+        persist: () => {
+          workspace = attempted;
+        },
+        rollback: () => {
+          workspace = null;
+        },
+      }),
+    ).toThrow("being released");
+
+    finishCleanup();
+    await Promise.all([firstRelease, secondRelease]);
+    expect(cleanupCalls).toBe(1);
+    expect(workspace).toBeNull();
+  });
+
   it("keeps the id and canonical-root tombstone when reservation cleanup fails", async () => {
     const owner = createWorkspaceAuthorityOwner({
       findWorkspace: () => null,
