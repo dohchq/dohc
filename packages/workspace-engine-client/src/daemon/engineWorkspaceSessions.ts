@@ -741,25 +741,40 @@ export class EngineWorkspaceSessions {
     const key = this.sessionKey(workspace);
     this.captureAuthors.delete(key);
     this.shareMounts.delete(key);
-    const entry = this.entries.get(key);
-    if (!entry) return;
-    if (entry.closing) {
-      await entry.closing;
-      return;
-    }
+    await this.closeWorkspaceEntry(key, true);
+  }
 
-    const closing = this.closeEntry(entry);
-    entry.closing = closing;
-    try {
-      await closing;
-    } finally {
-      if (entry.closing === closing) entry.closing = null;
-      if (this.entries.get(key) === entry) {
-        this.entries.delete(key);
-        if (this.workspaceEntries.get(entry.workspaceId) === entry) {
-          this.workspaceEntries.delete(entry.workspaceId);
+  /** Closes the daemon binding but preserves its session claim and policy. */
+  async closeWorkspaceBinding(workspace: EngineWorkspace): Promise<void> {
+    await this.closeWorkspaceEntry(this.sessionKey(workspace), false);
+  }
+
+  private async closeWorkspaceEntry(
+    key: string | symbol,
+    retire: boolean,
+  ): Promise<void> {
+    for (;;) {
+      const entry = this.entries.get(key);
+      if (!entry) return;
+      if (entry.closing) {
+        await entry.closing;
+        continue;
+      }
+
+      const closing = this.closeEntry(entry);
+      entry.closing = closing;
+      try {
+        await closing;
+      } finally {
+        if (entry.closing === closing) entry.closing = null;
+        if (retire && this.entries.get(key) === entry) {
+          this.entries.delete(key);
+          if (this.workspaceEntries.get(entry.workspaceId) === entry) {
+            this.workspaceEntries.delete(entry.workspaceId);
+          }
         }
       }
+      return;
     }
   }
 

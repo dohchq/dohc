@@ -737,7 +737,7 @@ export class EngineRelayClient {
       await this.serialize(workspaceKey, async () => {
         if (this.activeLocations.get(workspaceKey) !== connectionKey) {
           await this.sessions
-            .closeWorkspace(workspace)
+            .closeWorkspaceBinding(workspace)
             .catch(() => undefined);
           this.activeLocations.set(workspaceKey, connectionKey);
         }
@@ -963,7 +963,7 @@ export class EngineRelayClient {
           // The bootstrap session is intentionally capture-free. Close it so
           // activity.open creates the ordinary captured session only after the
           // authoritative coordinate is durable.
-          await this.sessions.closeWorkspace(workspace);
+          await this.closeWorkspace(workspace);
         }
       },
       probe: async () => {

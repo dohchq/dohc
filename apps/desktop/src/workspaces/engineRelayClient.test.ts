@@ -1664,6 +1664,26 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
+  it("retires the bare bootstrap owner before an exact successor closes", async () => {
+    const { rootPath, routes, sessions, live, relay, client } = await harness();
+    const closeWorkspace = vi.spyOn(sessions, "closeWorkspace");
+
+    await client.bootstrapJoinIdentity(null);
+    const workspace = {
+      workspaceId: "workspace-a",
+      rootPath,
+      attachmentId: Symbol("post-bootstrap-attachment"),
+    };
+    const exact = live.bind({ ...workspace, relay });
+    await exact.push();
+    await live.closeWorkspace(workspace);
+
+    expect(routes.modeFor(workspace.workspaceId)).toBeNull();
+    closeWorkspace.mockClear();
+    await live.closeAll();
+    expect(closeWorkspace).not.toHaveBeenCalled();
+  });
+
   it("rebinds the attachment-keyed session before and after a transport restart", async () => {
     const rootPath = await createTestScratch("dohc-relay-attachment-rebind-");
     roots.push(rootPath);
@@ -1767,17 +1787,17 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
-  it("closes the attachment-keyed session before a token refresh", async () => {
+  it("rebinds the attachment-keyed session before a token refresh", async () => {
     const { rootPath, live, relay, sessions } = await harness();
     const workspace = {
       workspaceId: "workspace-attached-refresh",
       rootPath,
       attachmentId: Symbol("relay-refresh-attachment"),
     };
-    const closeWorkspace = vi.spyOn(sessions, "closeWorkspace");
+    const closeWorkspaceBinding = vi.spyOn(sessions, "closeWorkspaceBinding");
     const first = live.bind({ ...workspace, relay });
     await first.push();
-    closeWorkspace.mockClear();
+    closeWorkspaceBinding.mockClear();
 
     const refreshed = live.bind({
       ...workspace,
@@ -1785,7 +1805,80 @@ describe("EngineRelayClient", () => {
     });
     await refreshed.push();
 
-    expect(closeWorkspace).toHaveBeenCalledWith(workspace);
+    expect(closeWorkspaceBinding).toHaveBeenCalledWith(workspace);
+    await live.closeWorkspace(workspace);
+  });
+
+  it("keeps exact capture authorship through relay token refresh", async () => {
+    const { rootPath, daemon, live, relay, sessions } = await harness();
+    const workspace = {
+      workspaceId: "workspace-capture-refresh",
+      rootPath,
+      attachmentId: Symbol("relay-capture-refresh"),
+    };
+    const author = {
+      kind: "agent" as const,
+      agentId: "agent",
+      onBehalfOf: "local",
+      agentRunId: "run",
+    };
+    sessions.rememberCaptureAuthor(workspace, author);
+
+    const first = live.bind({ ...workspace, relay });
+    await first.push();
+    const refreshed = live.bind({
+      ...workspace,
+      relay: { ...relay, token: "refreshed-token" },
+    });
+    await refreshed.push();
+
+    const opens = daemon.requests.filter(
+      (request) => request.method === "workspace.open",
+    );
+    expect(opens).toHaveLength(2);
+    expect(opens.map((request) => request.params)).toEqual([
+      expect.objectContaining({
+        workspaceId: workspace.workspaceId,
+        captureAuthor: author,
+      }),
+      expect.objectContaining({
+        workspaceId: workspace.workspaceId,
+        captureAuthor: author,
+      }),
+    ]);
+    await live.closeWorkspace(workspace);
+  });
+
+  it("keeps exact share-mount policy through relay token refresh", async () => {
+    const { rootPath, daemon, live, relay } = await harness();
+    const workspace = {
+      workspaceId: "workspace-share-refresh",
+      rootPath,
+      attachmentId: Symbol("relay-share-refresh"),
+    };
+
+    const first = live.bind({ ...workspace, shareMount: true, relay });
+    await first.push();
+    const refreshed = live.bind({
+      ...workspace,
+      relay: { ...relay, token: "refreshed-token" },
+    });
+    await refreshed.push();
+
+    const opens = daemon.requests.filter(
+      (request) => request.method === "workspace.open",
+    );
+    expect(opens).toHaveLength(2);
+    expect(opens.map((request) => request.params)).toEqual([
+      expect.objectContaining({
+        workspaceId: workspace.workspaceId,
+        captureMode: "none",
+      }),
+      expect.objectContaining({
+        workspaceId: workspace.workspaceId,
+        captureMode: "none",
+      }),
+    ]);
     await live.closeWorkspace(workspace);
   });
 
