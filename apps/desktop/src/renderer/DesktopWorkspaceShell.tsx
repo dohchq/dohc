@@ -1513,18 +1513,11 @@ export function DesktopWorkspaceShell(props: {
   // resolving is the answer, and it is the only one available here — main
   // awaits the capture build before it returns, and `getSyncStatus` does not
   // await anything at all (its handler reads the entry as it stands).
-  //
-  // This shell opens the workspace TWICE — the effect below re-runs when the
-  // settings read changes `refreshHistory`'s identity — and both calls answer
-  // after the decision because main hands a concurrent second open the first
-  // one's promise (`main.ts`, `ensureWorkspaceActivityOpen`). That invariant
-  // is what makes this fact a fact; the pins below drive it the way main
-  // behaves, with one promise answering every call.
   const [captureDecidedFor, setCaptureDecidedForState] = useState<string | null>(null);
   // Mirror of the same fact, for the callbacks that must consult it without
-  // listing it as a dependency — the same reason `syncStatusRef` exists
-  // beside it (#542): `refreshHistory` is a dependency of the workspace-open
-  // effect, so an identity change there re-opens the workspace.
+  // recreating `refreshHistory`. The workspace-open effect is owned by the
+  // renderer selection alone, so a settings-driven callback change cannot
+  // open the workspace again.
   const captureDecidedRef = useRef<string | null>(null);
   const setCaptureDecidedFor = useCallback((decidedFor: string) => {
     captureDecidedRef.current = decidedFor;
@@ -1790,6 +1783,59 @@ export function DesktopWorkspaceShell(props: {
   }, [flushStableDrafts]);
 
   const workspaceId = props.workspace.workspaceId;
+  // `openWorkspace` installs main's exact renderer session before it waits
+  // for watcher readiness. Its response is the renderer's existing proof that
+  // both happened; there is no separate admission IPC. Exact-session bootstrap
+  // reads that lose the admission race retry after that proof. The local
+  // generation also keeps an A -> B -> A prop sequence from reusing A's earlier
+  // proof (DesktopRoot normally gives each workspace a fresh keyed shell).
+  const workspaceSelection = useRef({ workspaceId, generation: 0 });
+  if (workspaceSelection.current.workspaceId !== workspaceId) {
+    workspaceSelection.current = {
+      workspaceId,
+      generation: workspaceSelection.current.generation + 1,
+    };
+  }
+  const workspaceSelectionGeneration = workspaceSelection.current.generation;
+  const workspaceReadyGate = useRef<{
+    workspaceId: string;
+    selectionGeneration: number;
+    promise: Promise<void>;
+    resolve: () => void;
+    superseded: boolean;
+  } | null>(null);
+  if (
+    workspaceReadyGate.current?.workspaceId !== workspaceId ||
+    workspaceReadyGate.current.selectionGeneration !== workspaceSelectionGeneration
+  ) {
+    if (workspaceReadyGate.current) {
+      workspaceReadyGate.current.superseded = true;
+      workspaceReadyGate.current.resolve();
+    }
+    const { promise, resolve } = Promise.withResolvers<void>();
+    workspaceReadyGate.current = {
+      workspaceId,
+      selectionGeneration: workspaceSelectionGeneration,
+      promise,
+      resolve,
+      superseded: false,
+    };
+  }
+  const workspaceAdmission = workspaceReadyGate.current!;
+  useEffect(
+    () => () => {
+      workspaceAdmission.superseded = true;
+      workspaceAdmission.resolve();
+    },
+    [workspaceAdmission],
+  );
+  const [workspaceReadyFor, setWorkspaceReadyFor] = useState<{
+    workspaceId: string;
+    selectionGeneration: number;
+  } | null>(null);
+  const workspaceIsReady =
+    workspaceReadyFor?.workspaceId === workspaceId &&
+    workspaceReadyFor.selectionGeneration === workspaceSelectionGeneration;
   // Set-aside recovery markers (#567): every path holding a draft marks its
   // tab and Open Editors row — inactive tabs included, because the store is
   // knowable for all of them (#579 review, r4). Deliberately NOT part of
@@ -2201,7 +2247,15 @@ export function DesktopWorkspaceShell(props: {
   );
 
   useAsyncResponseEffect(
-    () => bridge().getWorkspaceUiState({ workspaceId }),
+    async () => {
+      try {
+        return await bridge().getWorkspaceUiState({ workspaceId });
+      } catch (error) {
+        await workspaceAdmission.promise;
+        if (workspaceAdmission.superseded) throw error;
+        return bridge().getWorkspaceUiState({ workspaceId });
+      }
+    },
     {
       onSuccess: (stored) => {
         if (stored && !userTouchedWb.current) {
@@ -2224,7 +2278,7 @@ export function DesktopWorkspaceShell(props: {
         uiStateLoaded.current = true;
       },
     },
-    [workspaceId],
+    [workspaceAdmission, workspaceId, workspaceSelectionGeneration],
   );
 
   // Debounced persist (500ms): tabs, view, panel visibility/width, rail.
@@ -2993,7 +3047,15 @@ export function DesktopWorkspaceShell(props: {
   // whether anything is recorded. This read only drives which engine
   // surfaces the shell offers (versions and chats).
   useAsyncResponseEffect(
-    () => bridge().getWorkspaceSettings({ workspaceId }),
+    async () => {
+      try {
+        return await bridge().getWorkspaceSettings({ workspaceId });
+      } catch (error) {
+        await workspaceAdmission.promise;
+        if (workspaceAdmission.superseded) throw error;
+        return bridge().getWorkspaceSettings({ workspaceId });
+      }
+    },
     {
       onSuccess: (result) => {
         setEngineRead({
@@ -3013,8 +3075,17 @@ export function DesktopWorkspaceShell(props: {
         setEngineRead({ workspaceId, enabled: false });
       },
     },
-    [workspaceId],
+    [workspaceAdmission, workspaceId, workspaceSelectionGeneration],
   );
+  // History needs both main's capture decision and the renderer's settings
+  // answer. This used to happen accidentally because the settings answer
+  // changed `refreshHistory` and re-ran the whole workspace-open effect.
+  useEffect(() => {
+    if (!workspaceIsReady || engineReadForWorkspace === null) return;
+    void refreshHistory().catch((error) =>
+      reportShellError("Could not refresh history.", error),
+    );
+  }, [engineReadForWorkspace, refreshHistory, reportShellError, workspaceIsReady]);
   // Conflict review (0P-C): opened from the notice center's conflict notice.
   // Lists every open conflict — two machines editing apart, or a merge left
   // with "Finish later" — with the same side-by-side cards as the merge flow.
@@ -4428,42 +4499,56 @@ export function DesktopWorkspaceShell(props: {
     if (syncStatus) rendererMarks.markOnce("workspace-shell-interactive");
   }, [syncStatus]);
 
-  // Open the workspace (starts the file watcher in main), load the initial
-  // file tree + history, and refresh everything whenever a settled batch is
-  // recorded — the timeline and status stay live without polling.
+  // Open the workspace exactly once for this renderer selection. Main admits
+  // the exact session before watcher readiness, then returns the capture
+  // decision and status once the workspace is ready.
   useEffect(() => {
     let cancelled = false;
     // The open carries a status, so it takes its place in the same issue order
-    // as every other read of that lane. This effect re-runs when
-    // refreshHistory's identity changes, and the second open used to write its
-    // status untimed — leaving the lane's watermark where it was, so the first
-    // run's refresh could still land its older status on top (#636).
+    // as every other read of that lane.
     const token = ++engineHistoryToken.current;
     void (async () => {
       try {
         const status = await bridge().openWorkspace({ workspaceId });
+        if (cancelled) return;
         // Main awaits the capture build before it answers, so this is the
         // moment the decision exists — and the status committed beside it is
         // the first one that describes a decided workspace (#626). The two
         // commit together, so "decided" never runs ahead of what it decided.
-        // Recorded per workspace, so a switch cannot inherit it, and never
-        // retracted: this effect re-runs whenever refreshHistory's identity
-        // changes, and retracting here would blink every version surface off
-        // and on when the settings read lands.
-        //
         // The lane may refuse this status, and the decision still stands: what
         // outranks it is a NEWER status, which describes a workspace at least
         // as decided as this one.
-        if (!cancelled) {
-          syncStatusLane.commit(token, status);
-          setCaptureDecidedFor(workspaceId);
-        }
+        syncStatusLane.commit(token, status);
+        setCaptureDecidedFor(workspaceId);
+        workspaceAdmission.resolve();
+        setWorkspaceReadyFor({
+          workspaceId,
+          selectionGeneration: workspaceSelectionGeneration,
+        });
         await refreshFiles();
-        await refreshHistory();
       } catch (error) {
         if (!cancelled) reportShellError("Could not open this workspace.", error);
       }
     })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    workspaceId,
+    workspaceSelectionGeneration,
+    refreshFiles,
+    reportShellError,
+    setCaptureDecidedFor,
+    syncStatusLane,
+    workspaceAdmission,
+  ]);
+
+  // Once open has established watcher readiness, refresh everything whenever
+  // a settled batch is recorded. The timeline and status stay live without
+  // polling. Callback identity changes may replace this subscription, but can
+  // never reopen the workspace.
+  useEffect(() => {
+    if (!workspaceIsReady) return;
     // Trailing-edge coalescing (D2#8): main emits one activity event per
     // settled batch, and a burst (an import, an agent writing many files)
     // used to issue a listing + four history reads PER event. One refresh
@@ -4524,11 +4609,16 @@ export function DesktopWorkspaceShell(props: {
       },
     );
     return () => {
-      cancelled = true;
       if (refreshTimer !== null) clearTimeout(refreshTimer);
       unsubscribe();
     };
-  }, [workspaceId, refreshFiles, refreshHistory, reportShellError, syncStatusLane]);
+  }, [
+    workspaceId,
+    workspaceIsReady,
+    refreshFiles,
+    refreshHistory,
+    reportShellError,
+  ]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -4972,9 +5062,11 @@ export function DesktopWorkspaceShell(props: {
   }, [shareView?.shareId, shareViewEnded, workspaceId, reloadShareSkipped]);
   useEffect(() => {
     // One automatic refresh when a shared view opens; afterwards on demand.
-    if (shareView && !shareViewEnded && !shareViewDamaged) void refreshShareView();
+    if (workspaceIsReady && shareView && !shareViewEnded && !shareViewDamaged) {
+      void refreshShareView();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceId]);
+  }, [workspaceId, workspaceIsReady]);
 
   // ---- The recipient's own submitted changes (#646 PR3a) ----
   // A submission exists only from Send changes: there is no draft at the
@@ -5126,7 +5218,7 @@ export function DesktopWorkspaceShell(props: {
   const pollsShareMounts = mountCount > 0;
   const pollsShareProposals = !isShareView;
   useEffect(() => {
-    if (!pollsShareMounts && !pollsShareProposals) return;
+    if (!workspaceIsReady || (!pollsShareMounts && !pollsShareProposals)) return;
     const pull = () => {
       if (pollsShareMounts) void refreshShareMounts();
       if (pollsShareProposals) void reloadShareProposals().catch(() => undefined);
@@ -5134,7 +5226,13 @@ export function DesktopWorkspaceShell(props: {
     pull();
     const timer = setInterval(pull, SHARE_RELAY_POLL_MS);
     return () => clearInterval(timer);
-  }, [pollsShareMounts, pollsShareProposals, refreshShareMounts, reloadShareProposals]);
+  }, [
+    pollsShareMounts,
+    pollsShareProposals,
+    refreshShareMounts,
+    reloadShareProposals,
+    workspaceIsReady,
+  ]);
   const shareChangeNotices = useMemo(
     () =>
       shareProposals.map((proposal) => ({
