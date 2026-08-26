@@ -1,8 +1,22 @@
 // @vitest-environment jsdom
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { DecorationSet, type EditorView, type NodeView } from "@tiptap/pm/view";
-import { makeMathNodeView } from "./mathRender";
+import { makeMathNodeView, renderMathInto } from "./mathRender";
+
+describe("renderMathInto", () => {
+  it("renders TeX through the real KaTeX package", async () => {
+    const target = document.createElement("span");
+
+    renderMathInto(target, String.raw`\frac{x^2}{y}`, false);
+
+    await vi.waitFor(() => {
+      expect(target.querySelector(":scope > .katex")).not.toBeNull();
+    });
+    expect(target.querySelector("math")).not.toBeNull();
+    expect(target.classList.contains("dohc-math--error")).toBe(false);
+  });
+});
 
 /** The NodeView.update contract takes (node, decorations, innerDecorations);
  *  this NodeView only inspects the node, so the decoration args are inert. */

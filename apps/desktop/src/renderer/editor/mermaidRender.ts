@@ -286,8 +286,9 @@ async function loadMermaid(): Promise<MermaidModule> {
   return mermaid
 }
 
-/** The production `MermaidRenderFn` — tests inject a fake instead (mermaid
- *  can't render in jsdom) or mock the `mermaid` import directly. */
+/** The production `MermaidRenderFn`. Most tests inject a fake or mock the
+ *  import; the focused math integration test supplies jsdom's missing SVG
+ *  layout APIs and exercises the real package. */
 export async function renderMermaidDiagram(id: string, source: string): Promise<{ svg: string }> {
   const mermaid = await loadMermaid()
   return mermaid.render(id, source)
