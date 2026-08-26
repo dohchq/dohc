@@ -167,6 +167,10 @@ const VERSIONED_REQUEST_CASES: VersionedRequestCase[] = [
   { method: VERSIONED_METHOD.momentsList, params: {} },
   { method: VERSIONED_METHOD.momentsGet, params: { momentId: "moment" } },
   {
+    method: VERSIONED_METHOD.historyPage,
+    params: { workspaceId: WORKSPACE },
+  },
+  {
     method: VERSIONED_METHOD.searchEnsureIndex,
     params: { workspaceId: WORKSPACE, versionId: "main" },
   },
@@ -285,6 +289,60 @@ describe("VersionedLiveAdapter", () => {
       new VersionedLiveAdapter(captureClient(requests), WORKSPACE);
     }).toThrow(VersionedAdapterCapabilityError);
     expect(requests).toEqual([]);
+  });
+
+  it("reads one aggregate history page with one daemon request", async () => {
+    const requests: Request[] = [];
+    const client: MinimalDaemonClient = {
+      close: () => undefined,
+      async sendRequest(request): Promise<Response> {
+        requests.push(request);
+        return {
+          id: request.id,
+          result: {
+            activeVersion: {
+              id: "main",
+              workspaceId: WORKSPACE,
+              kind: "main",
+              name: "Main",
+              createdAtMs: 1,
+            },
+            textMomentPage: {
+              moments: [],
+              nextBeforeMomentOrder: null,
+              latestMomentOrder: -1,
+            },
+            protectedMoments: [],
+            protectedTruncated: true,
+          },
+        };
+      },
+    };
+    const adapter = new VersionedLiveAdapter(client, WORKSPACE, {
+      workspaceId: WORKSPACE,
+    });
+
+    await expect(
+      adapter.readHistoryPage({
+        workspaceId: WORKSPACE,
+        limit: 200,
+        beforeMomentOrder: 41,
+      }),
+    ).resolves.toMatchObject({
+      activeVersion: { id: "main" },
+      textMomentPage: { moments: [] },
+      protectedMoments: [],
+      protectedTruncated: true,
+    });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      method: VERSIONED_METHOD.historyPage,
+      params: {
+        workspaceId: WORKSPACE,
+        limit: 200,
+        beforeMomentOrder: 41,
+      },
+    });
   });
 
   it("passes ONE conflicts.list page through with the daemon's continuation", async () => {
@@ -1232,7 +1290,7 @@ describe("VersionedLiveAdapter", () => {
   });
 
   it("encodes every one of the 33 versioned methods with exact params", async () => {
-    expect(VERSIONED_REQUEST_CASES).toHaveLength(33);
+    expect(VERSIONED_REQUEST_CASES).toHaveLength(34);
     const requests: Request[] = [];
     const adapter = new VersionedLiveAdapter(
       captureClient(requests),

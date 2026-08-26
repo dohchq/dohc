@@ -63,6 +63,8 @@ const MAX_SECRET_FILE_BYTES = 1024 * 1024;
 const MAX_CAPTURE_BINARY_FILE_BYTES = 5 * 1024 * 1024;
 const COMPARE_PAGE_SIZE = 200;
 const MAX_MERGE_LINES = 2_000;
+const HISTORY_PROTECTED_MOMENT_LIMIT = 500;
+const HISTORY_PROTECTED_BYTE_BUDGET = 256 * 1024;
 // Mirrors MAX_METADATA_FIELD_BYTES in crates/dohc-workspace-engine/src/lib.rs.
 const MAX_METADATA_FIELD_BYTES = 16 * 1024;
 
@@ -330,6 +332,10 @@ const VERSIONED_PARAM_SHAPES = {
     optionalI64: ["limit", "beforeMomentOrder"],
   },
   [VERSIONED_METHOD.momentsGet]: { requiredStrings: ["momentId"] },
+  [VERSIONED_METHOD.historyPage]: {
+    requiredStrings: ["workspaceId"],
+    optionalI64: ["limit", "beforeMomentOrder"],
+  },
   [VERSIONED_METHOD.searchEnsureIndex]: {
     requiredStrings: ["workspaceId", "versionId"],
   },
@@ -1300,6 +1306,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
         return this.momentsList(state, params);
       case VERSIONED_METHOD.momentsGet:
         return this.momentsGet(state, params);
+      case VERSIONED_METHOD.historyPage:
+        return this.historyPage(state, params);
       case VERSIONED_METHOD.searchEnsureIndex:
         this.version(state, requiredString(params, "versionId", request.method));
         return {};
@@ -2649,6 +2657,73 @@ export class VersionedLoopbackEngine implements EngineTransport {
   private momentsGet(state: WorkspaceState, params: JsonObject): JsonValue {
     const moment = state.moments.get(requiredString(params, "momentId", "moment get"));
     return moment ? this.capMoment(moment.wire) : null;
+  }
+
+  private historyPage(state: WorkspaceState, params: JsonObject): JsonValue {
+    const activeVersionId = state.activeVersionId;
+    if (!state.versioned || activeVersionId === undefined) {
+      throw new Error("workspace-not-found");
+    }
+    const textMomentPage = this.momentsList(state, {
+      versionId: activeVersionId,
+      ...(params.limit !== undefined ? { limit: params.limit } : {}),
+      ...(params.beforeMomentOrder !== undefined
+        ? { beforeMomentOrder: params.beforeMomentOrder }
+        : {}),
+    }) as JsonObject;
+    const textMoments = textMomentPage.moments as unknown as MomentRecord[];
+    const beforeMomentOrder = optionalNumber(params, "beforeMomentOrder");
+    const upperRecordedAtMs =
+      beforeMomentOrder === undefined
+        ? Number.POSITIVE_INFINITY
+        : [...state.moments.values()]
+            .map((moment) => moment.wire)
+            .filter(
+              (moment) =>
+                moment.versionId === activeVersionId &&
+                moment.momentOrder <= beforeMomentOrder,
+            )
+            .sort((left, right) => right.momentOrder - left.momentOrder)[0]
+            ?.recordedAtMs ?? Number.POSITIVE_INFINITY;
+    const lowerRecordedAtMs =
+      textMomentPage.nextBeforeMomentOrder === null
+        ? Number.NEGATIVE_INFINITY
+        : (textMoments.at(-1)?.recordedAtMs ?? Number.NEGATIVE_INFINITY);
+    const protectedMomentsInWindow = [...state.secretMoments.values()]
+      .map((moment) => moment.wire)
+      .filter(
+        (moment) =>
+          moment.versionId === activeVersionId &&
+          moment.recordedAtMs > lowerRecordedAtMs &&
+          moment.recordedAtMs <= upperRecordedAtMs,
+      )
+      .sort(
+        (left, right) =>
+          right.recordedAtMs - left.recordedAtMs ||
+          right.momentOrder - left.momentOrder ||
+          left.id.localeCompare(right.id),
+      );
+    const rowLimited = protectedMomentsInWindow.slice(
+      0,
+      HISTORY_PROTECTED_MOMENT_LIMIT,
+    );
+    let included = 0;
+    let remaining = HISTORY_PROTECTED_BYTE_BUDGET;
+    for (const moment of rowLimited) {
+      const bytes = utf8Length(JSON.stringify(moment));
+      if (included > 0 && bytes > remaining) break;
+      included += 1;
+      remaining -= bytes;
+    }
+    const protectedMoments = rowLimited.slice(0, included);
+    return {
+      activeVersion: this.versionJson(this.version(state, activeVersionId)),
+      textMomentPage,
+      protectedMoments,
+      protectedTruncated:
+        protectedMomentsInWindow.length > rowLimited.length ||
+        protectedMoments.length < rowLimited.length,
+    };
   }
 
   private workspace(id: string): WorkspaceState {

@@ -273,6 +273,7 @@ export interface WorkspaceEngineMomentPage {
   nextBeforeMomentOrder: number | null;
   latestMomentOrder: number;
   activeVersionId: string;
+  protectedTruncated: boolean;
 }
 
 // The diff page's payload: a text moment carries its full before/after
@@ -5487,61 +5488,22 @@ export function createWorkspaceEngineCapture(
     async listMoments(input = {}) {
       await chain;
       const engine = await engineStore();
-      if (options.daemonOwnsCapture) {
-        await engine.flushCapture?.();
-      }
-      const activeVersionId = await activeVersionIdOf(engine);
-      const page = await engine.listMoments({
+      const history = await engine.listHistoryPage({
         workspaceId,
-        versionId: activeVersionId,
         ...(input.limit !== undefined ? { limit: input.limit } : {}),
         ...(input.beforeMomentOrder !== undefined
           ? { beforeMomentOrder: input.beforeMomentOrder }
           : {}),
       });
+      const activeVersionId = history.activeVersion.id;
+      const page = history.textMomentPage;
       const textMoments: WorkspaceEngineMomentSummary[] = page.moments.map(
         (moment) => ({ ...moment, protected: false }),
       );
-      // Interleave PROTECTED (secret) moments by recording time (PR 08).
-      // Pagination stays keyed on the text timeline's momentOrder; each page
-      // carries the secret moments recorded inside its half-open time window
-      // (oldest-text-moment, previous-page-cursor-moment] so pages never
-      // duplicate or drop a protected row. The secret timeline is short by
-      // nature (.env edits are rare), so it is read whole per page.
-      //
-      // The OPEN end is the older one, because a tie can outlast a page: one
-      // reconcile pass can stamp more text moments with a millisecond than a
-      // page holds, and the shell appends each later page. Holding a tied
-      // protected moment back until the page where the tie group ends keeps
-      // text before protected across the assembled timeline, not just inside
-      // one page. The last page's lower bound is -Infinity, so nothing is
-      // held back forever.
-      let upperMs = Number.POSITIVE_INFINITY;
-      if (input.beforeMomentOrder !== undefined) {
-        // The cursor is the previous page's oldest text moment; its
-        // timestamp bounds this page's window from above (inclusive).
-        const cursorPage = await engine.listMoments({
-          workspaceId,
-          versionId: activeVersionId,
-          limit: 1,
-          beforeMomentOrder: input.beforeMomentOrder + 1,
-        });
-        upperMs = cursorPage.moments[0]?.recordedAtMs ?? Number.POSITIVE_INFINITY;
-      }
-      const lowerMs =
-        page.nextBeforeMomentOrder === null
-          ? Number.NEGATIVE_INFINITY
-          : (page.moments[page.moments.length - 1]?.recordedAtMs ??
-            Number.NEGATIVE_INFINITY);
-      const secretMoments = await secretStoreFor().listSecretMoments({
-        workspaceId,
-        versionId: activeVersionId,
-      });
-      const protectedInWindow: WorkspaceEngineMomentSummary[] = secretMoments
-        .filter(
-          (moment) => moment.recordedAtMs > lowerMs && moment.recordedAtMs <= upperMs,
-        )
-        .map((moment) => ({
+      // The daemon already restricted protected moments to this text page's
+      // half-open time window. The desktop owns only the visible merge order.
+      const protectedInWindow: WorkspaceEngineMomentSummary[] =
+        history.protectedMoments.map((moment) => ({
           id: moment.id,
           versionId: moment.versionId,
           path: moment.path,
@@ -5572,6 +5534,7 @@ export function createWorkspaceEngineCapture(
         nextBeforeMomentOrder: page.nextBeforeMomentOrder,
         latestMomentOrder: page.latestMomentOrder,
         activeVersionId,
+        protectedTruncated: history.protectedTruncated,
       };
     },
 

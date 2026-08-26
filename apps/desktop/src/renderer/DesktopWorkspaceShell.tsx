@@ -2673,6 +2673,7 @@ export function DesktopWorkspaceShell(props: {
     moments: EngineMomentRecord[];
     nextBeforeMomentOrder: number | null;
     latestMomentOrder: number;
+    protectedTruncated: boolean;
   } | null>(null);
   const [engineHistoryLoadingMore, setEngineHistoryLoadingMore] = useState(false);
   // Why there is no page. A null timeline is not "no changes": it is also a
@@ -2974,6 +2975,7 @@ export function DesktopWorkspaceShell(props: {
           moments: page.moments,
           nextBeforeMomentOrder: page.nextBeforeMomentOrder,
           latestMomentOrder: page.latestMomentOrder,
+          protectedTruncated: page.protectedTruncated,
         });
       };
       // Blocked by a newer pagination: hold this answer instead of throwing it
@@ -3058,6 +3060,8 @@ export function DesktopWorkspaceShell(props: {
                   current.latestMomentOrder,
                   page.latestMomentOrder,
                 ),
+                protectedTruncated:
+                  current.protectedTruncated || page.protectedTruncated,
               }
             : current,
         );
@@ -5393,6 +5397,7 @@ export function DesktopWorkspaceShell(props: {
         moments={engineHistory.moments}
         hasMore={engineHistory.nextBeforeMomentOrder != null}
         loadingMore={engineHistoryLoadingMore}
+        protectedTruncated={engineHistory.protectedTruncated}
         onLoadMore={() => void loadMoreEngineHistory()}
         onOpenMoment={openMomentDiffTab}
       />

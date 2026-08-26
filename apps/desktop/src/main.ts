@@ -9608,6 +9608,7 @@ function registerIpcHandlers(
       nextBeforeMomentOrder: page.nextBeforeMomentOrder,
       latestMomentOrder: page.latestMomentOrder,
       activeVersionId: page.activeVersionId,
+      protectedTruncated: page.protectedTruncated,
     });
   });
 

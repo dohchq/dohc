@@ -1026,6 +1026,7 @@ export const ListEngineMomentsResult = z.object({
   // timeline; anything below that is malformed.
   latestMomentOrder: z.number().int().min(-1),
   activeVersionId: z.string().min(1).max(200),
+  protectedTruncated: z.boolean(),
 });
 export type ListEngineMomentsResult = z.infer<typeof ListEngineMomentsResult>;
 

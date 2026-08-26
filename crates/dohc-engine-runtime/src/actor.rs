@@ -68,11 +68,11 @@ use dohc_engine_domain::{
     delete_secret_file_keyless_with, derive_capture_object_id, enqueue_binary_delete,
     enqueue_binary_rename, enqueue_write, fork_version_keyless_with, get_secret_moment_keyless,
     has_secret_state, insert_text_conflict_if_absent, list_secret_files_keyless,
-    list_secret_files_keyless_page, list_secret_moments_page_keyless,
-    restore_secret_file_verbatim_with_metadata_and_after, rollback_compensating_moment_id,
-    secret_file_len_keyless, select_snapshot_by_path_in_tx, validate_addressable_plaintext_path,
-    validate_plaintext_storable_path, write_binary_in_tx, write_projected_text_in_tx,
-    write_text_in_tx,
+    list_secret_files_keyless_page, list_secret_moments_in_time_window_keyless,
+    list_secret_moments_page_keyless, restore_secret_file_verbatim_with_metadata_and_after,
+    rollback_compensating_moment_id, secret_file_len_keyless, select_snapshot_by_path_in_tx,
+    validate_addressable_plaintext_path, validate_plaintext_storable_path, write_binary_in_tx,
+    write_projected_text_in_tx, write_text_in_tx,
 };
 use dohc_engine_files::{
     DurabilityPolicy, JobOutcome, MaterializeError, ProjectionTargetKind, ProjectionTargetState,
@@ -147,6 +147,18 @@ pub struct RollbackExecutionResult {
     pub materialize_enqueued: bool,
     pub materialized: bool,
     pub materialize_outcome: PostCommitMaterializeOutcome,
+}
+
+/// One active-version history page read in a single actor turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryPageRead {
+    pub active_version: VersionRecord,
+    pub text_moment_page: MomentPage,
+    /// A limit+1 probe. The protocol layer applies the row and wire-byte cuts
+    /// and reports whether either cut omitted protected activity in the time
+    /// window.
+    pub protected_moments: Vec<SecretMomentRecord>,
+    pub upper_recorded_at_ms: Option<i64>,
 }
 
 pub struct ActiveVersionSwitch {
@@ -1077,6 +1089,13 @@ enum Command {
     ListMoments {
         query: Box<ListMomentsQuery>,
         reply: oneshot::Sender<Result<MomentPage, RuntimeError>>,
+    },
+    HistoryPage {
+        workspace_id: String,
+        limit: i64,
+        before_moment_order: Option<i64>,
+        protected_probe_limit: usize,
+        reply: oneshot::Sender<Result<HistoryPageRead, RuntimeError>>,
     },
     GetMoment {
         workspace_id: String,
@@ -2714,6 +2733,27 @@ impl ActorHandle {
         self.tx
             .send(Command::ListMoments {
                 query: Box::new(query),
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn history_page(
+        &self,
+        workspace_id: String,
+        limit: i64,
+        before_moment_order: Option<i64>,
+        protected_probe_limit: usize,
+    ) -> Result<HistoryPageRead, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::HistoryPage {
+                workspace_id,
+                limit,
+                before_moment_order,
+                protected_probe_limit,
                 reply,
             })
             .await
@@ -7274,6 +7314,68 @@ fn worker_main(
                 let outcome = VersionedTextStore::new(&mut store)
                     .list_moments(&query)
                     .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::HistoryPage {
+                workspace_id,
+                limit,
+                before_moment_order,
+                protected_probe_limit,
+                reply,
+            } => {
+                let outcome = (|| {
+                    let versioned = VersionedTextStore::new(&mut store);
+                    let active_version = versioned.get_active_version(&workspace_id)?;
+                    let text_moment_page = versioned.list_moments(&ListMomentsQuery {
+                        workspace_id: workspace_id.clone(),
+                        version_id: Some(active_version.version_id.clone()),
+                        object_id: None,
+                        limit,
+                        before_moment_order,
+                    })?;
+                    let upper_recorded_at_ms = before_moment_order
+                        .map(|cursor| {
+                            let through_cursor =
+                                cursor.checked_add(1).ok_or(DomainError::InvalidInput {
+                                    reason: "before_moment_order is too large",
+                                })?;
+                            versioned
+                                .list_moments(&ListMomentsQuery {
+                                    workspace_id: workspace_id.clone(),
+                                    version_id: Some(active_version.version_id.clone()),
+                                    object_id: None,
+                                    limit: 1,
+                                    before_moment_order: Some(through_cursor),
+                                })
+                                .map(|page| {
+                                    page.moments.first().map(|moment| moment.recorded_at_ms)
+                                })
+                        })
+                        .transpose()?
+                        .flatten();
+                    let lower_recorded_at_ms =
+                        text_moment_page.next_before_moment_order.and_then(|_| {
+                            text_moment_page
+                                .moments
+                                .last()
+                                .map(|moment| moment.recorded_at_ms)
+                        });
+                    let protected_moments = list_secret_moments_in_time_window_keyless(
+                        &store,
+                        &workspace_id,
+                        &active_version.version_id,
+                        lower_recorded_at_ms,
+                        upper_recorded_at_ms,
+                        protected_probe_limit,
+                    )?;
+                    Ok::<HistoryPageRead, DomainError>(HistoryPageRead {
+                        active_version,
+                        text_moment_page,
+                        protected_moments,
+                        upper_recorded_at_ms,
+                    })
+                })()
+                .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
             Command::GetMoment {

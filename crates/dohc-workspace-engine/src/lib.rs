@@ -26,11 +26,11 @@ use dohc_engine_domain::{
     ConflictStatus, CreateFileThread, CreateNamedVersion, DeleteTextFile, DispatchClaim,
     DispatchRecord, DomainError, FeedCursorValue, FollowState, FollowTargetKind,
     LocalAttachmentInput, MentionCursor, MergeTextFileFromVersion, MergeTextFileResult,
-    MergeUnchangedReason, MomentOp, RenameTextFile, ResolveConflictKind, ResolveDecision,
-    ResolveTextConflict, RollbackTextFileMutation, SaveBookmark, SecretDelete, SecretDiskIntent,
-    SecretMomentRecord, SecretWrite, SendMessage, SetFollow, SetReaction, StartChannelThread,
-    TextConflict, TextSnapshot, ThreadDispatchPause, VersionFileChangeStatus, VersionRecord,
-    WriteBinary, WriteText, validate_addressable_plaintext_path,
+    MergeUnchangedReason, MomentOp, MomentPage, RenameTextFile, ResolveConflictKind,
+    ResolveDecision, ResolveTextConflict, RollbackTextFileMutation, SaveBookmark, SecretDelete,
+    SecretDiskIntent, SecretMomentRecord, SecretWrite, SendMessage, SetFollow, SetReaction,
+    StartChannelThread, TextConflict, TextSnapshot, ThreadDispatchPause, VersionFileChangeStatus,
+    VersionRecord, WriteBinary, WriteText, validate_addressable_plaintext_path,
 };
 use dohc_engine_protocol::{
     error::{ErrorCode, WireError},
@@ -56,7 +56,7 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{Arc, Mutex, MutexGuard},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 const MAX_OPEN_HANDLES: usize = 64;
@@ -237,6 +237,26 @@ fn resolve_answer_beside_conflict_bytes(local: &LocalResolveDto) -> usize {
 /// never bound the frame — the page cuts when the running estimate would
 /// pass this, well under the 1 MiB frame limit.
 const MOMENTS_PAGE_BYTE_BUDGET: usize = 256 * 1024;
+const HISTORY_PROTECTED_MOMENT_LIMIT: usize = 500;
+const HISTORY_PAGE_FLUSH_RETRIES: usize = 50;
+const HISTORY_PAGE_FLUSH_RETRY_DELAY: Duration = Duration::from_millis(20);
+
+struct EncodedMomentPage {
+    rows: Vec<Value>,
+    included: usize,
+    next_before_moment_order: Option<i64>,
+    latest_moment_order: i64,
+}
+
+impl EncodedMomentPage {
+    fn into_json(self) -> Value {
+        json!({
+            "moments": self.rows[..self.included].to_vec(),
+            "nextBeforeMomentOrder": self.next_before_moment_order,
+            "latestMomentOrder": self.latest_moment_order,
+        })
+    }
+}
 
 /// How many leading serialized rows fit a byte budget (at least one always
 /// ships — every string is wire-capped, so a single row fits). MEASURED on
@@ -1079,6 +1099,10 @@ impl EngineService {
             }
             "moments.list" => {
                 self.moments_list(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "history.page" => {
+                self.history_page(&ctx, request.workspace, request.params)
                     .await?
             }
             "moments.get" => {
@@ -3683,13 +3707,31 @@ impl EngineService {
         handle: Option<WorkspaceHandle>,
     ) -> Result<Value, WireError> {
         let open = self.open(handle.as_ref())?;
+        let outcome = self.capture_flush_once(ctx, &open, "capture.flush").await?;
+        Ok(json!({
+            "settled": outcome.settled,
+            "running": outcome.running,
+            "degraded": outcome.degraded,
+        }))
+    }
+
+    async fn capture_flush_once(
+        &self,
+        ctx: &RequestContext,
+        open: &OpenWorkspace,
+        operation: &'static str,
+    ) -> Result<capture_driver::FlushOutcome, WireError> {
         // Clone the sender OUT of the lock and await OUTSIDE it: a flush can
         // legitimately take many reconcile cycles, and the workspace table
         // must not be blocked for its duration.
         let sender = lock(&open.capture)
             .as_ref()
             .map(capture_driver::CaptureDriver::flush_sender);
-        let unavailable = json!({ "settled": false, "running": false, "degraded": true });
+        let unavailable = capture_driver::FlushOutcome {
+            settled: false,
+            running: false,
+            degraded: true,
+        };
         let Some(sender) = sender else {
             return Ok(unavailable);
         };
@@ -3703,7 +3745,7 @@ impl EngineService {
         tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
-                return Err(cancellation.interruption("capture.flush (queued)"));
+                return Err(cancellation.interruption(&format!("{operation} (queued)")));
             }
             sent = sender.send(reply_tx) => {
                 if sent.is_err() {
@@ -3714,16 +3756,9 @@ impl EngineService {
         tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
-                Err(cancellation.interruption("capture.flush"))
+                Err(cancellation.interruption(operation))
             }
-            outcome = reply_rx => match outcome {
-                Ok(outcome) => Ok(json!({
-                    "settled": outcome.settled,
-                    "running": outcome.running,
-                    "degraded": outcome.degraded,
-                })),
-                Err(_) => Ok(unavailable),
-            }
+            outcome = reply_rx => Ok(outcome.unwrap_or(unavailable)),
         }
     }
 
@@ -4331,45 +4366,87 @@ impl EngineService {
                 }),
         )
         .await?;
-        // A row COUNT cannot bound the frame: authorJson alone may be a
-        // 64 KiB string. Cut the page when the running size estimate would
-        // pass the budget (at least one row always ships — a single row
-        // fits by construction, every string being wire-capped).
-        let mut rows: Vec<Value> = page.moments.iter().map(moment_json).collect();
-        // A single row can legitimately exceed the page budget (several
-        // wire-legal strings plus escaping). The page must still make
-        // progress: degrade THAT row to metadata (texts nulled — their
-        // byte lengths remain) rather than ship an over-frame page or
-        // dead-end the cursor.
-        if let Some(first) = rows.first_mut() {
-            if serde_json::to_string(first).map_or(0, |s| s.len()) > MOMENTS_PAGE_BYTE_BUDGET {
-                first["afterText"] = Value::Null;
-                first["beforeText"] = Value::Null;
-                first["afterInbandLimitBytes"] = json!(MAX_INBAND_CONTENT_BYTES);
-                first["beforeInbandLimitBytes"] = json!(MAX_INBAND_CONTENT_BYTES);
+        Ok(encode_moment_page(&page)?.into_json())
+    }
+
+    async fn history_page(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: HistoryPageParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+
+        let mut flush = self
+            .capture_flush_once(ctx, &open, "history.page capture flush")
+            .await?;
+        for _ in 0..HISTORY_PAGE_FLUSH_RETRIES {
+            if flush.settled {
+                break;
             }
+            let cancellation = OperationCancellation::new(ctx);
+            tokio::select! {
+                biased;
+                () = cancellation.token.cancelled() => {
+                    return Err(cancellation.interruption("history.page capture flush retry"));
+                }
+                () = tokio::time::sleep(HISTORY_PAGE_FLUSH_RETRY_DELAY) => {}
+            }
+            flush = self
+                .capture_flush_once(ctx, &open, "history.page capture flush")
+                .await?;
         }
-        let included = byte_budget_cut_serialized(&rows, MOMENTS_PAGE_BYTE_BUDGET);
-        if included == 0 && !rows.is_empty() {
+        if !flush.settled {
             return Err(wire(
-                ErrorCode::Internal,
-                "a moment row exceeds the response frame budget",
+                ErrorCode::Overloaded,
+                "History is still updating. Try again.",
             ));
         }
-        let truncated = included < rows.len();
-        let next_before = if truncated {
-            page.moments[..included]
-                .last()
-                .map(|moment| moment.moment_order)
-        } else {
-            page.next_before_moment_order
-        };
+
+        let cancellation = OperationCancellation::new(ctx);
+        let read = Self::read_under_ctx(
+            &cancellation,
+            "history.page",
+            open.actor.history_page(
+                open.workspace_id,
+                params.limit.unwrap_or(200).min(500),
+                params.before_moment_order,
+                HISTORY_PROTECTED_MOMENT_LIMIT + 1,
+            ),
+        )
+        .await?;
+        let text_page = encode_moment_page(&read.text_moment_page)?;
+        let lower_recorded_at_ms = text_page.next_before_moment_order.and_then(|_| {
+            read.text_moment_page
+                .moments
+                .get(text_page.included.saturating_sub(1))
+                .map(|moment| moment.recorded_at_ms)
+        });
+        let protected_moments: Vec<&SecretMomentRecord> = read
+            .protected_moments
+            .iter()
+            .filter(|moment| {
+                lower_recorded_at_ms.is_none_or(|lower| moment.recorded_at_ms > lower)
+                    && read
+                        .upper_recorded_at_ms
+                        .is_none_or(|upper| moment.recorded_at_ms <= upper)
+            })
+            .collect();
+        let row_truncated = protected_moments.len() > HISTORY_PROTECTED_MOMENT_LIMIT;
+        let protected_rows: Vec<Value> = protected_moments
+            .into_iter()
+            .take(HISTORY_PROTECTED_MOMENT_LIMIT)
+            .map(secret_moment_json)
+            .collect();
+        let included = byte_budget_cut_serialized(&protected_rows, MOMENTS_PAGE_BYTE_BUDGET);
+        let byte_truncated = included < protected_rows.len();
         Ok(json!({
-            "moments": rows[..included].to_vec(),
-            "nextBeforeMomentOrder": next_before,
-            // The TS contract's numeric sentinel: -1 for an empty timeline,
-            // never null (numeric comparisons drive polling/cursor state).
-            "latestMomentOrder": page.latest_moment_order.unwrap_or(-1),
+            "activeVersion": version_record_json(&read.active_version),
+            "textMomentPage": text_page.into_json(),
+            "protectedMoments": &protected_rows[..included],
+            "protectedTruncated": row_truncated || byte_truncated,
         }))
     }
 
@@ -9502,6 +9579,16 @@ struct MomentsListParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HistoryPageParams {
+    workspace_id: String,
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    before_moment_order: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct MomentsGetParams {
     moment_id: String,
 }
@@ -10946,6 +11033,45 @@ fn moment_json(moment: &dohc_engine_domain::MomentRecord) -> Value {
         "beforeByteLength": moment.before_byte_length,
         "beforeInbandLimitBytes": before_inband_limit,
         "beforePath": moment.before_path,
+    })
+}
+
+fn encode_moment_page(page: &MomentPage) -> Result<EncodedMomentPage, WireError> {
+    // A row COUNT cannot bound the frame: authorJson alone may be a 64 KiB
+    // string. The measured serialized cut is shared by moments.list and the
+    // aggregate history page so their text page and cursor stay identical.
+    let mut rows: Vec<Value> = page.moments.iter().map(moment_json).collect();
+    // A first row may legitimately exceed the page budget. Degrade that row
+    // to metadata so the cursor still makes progress, exactly as moments.list
+    // did before the history aggregate existed.
+    if let Some(first) = rows.first_mut() {
+        if serde_json::to_string(first).map_or(0, |s| s.len()) > MOMENTS_PAGE_BYTE_BUDGET {
+            first["afterText"] = Value::Null;
+            first["beforeText"] = Value::Null;
+            first["afterInbandLimitBytes"] = json!(MAX_INBAND_CONTENT_BYTES);
+            first["beforeInbandLimitBytes"] = json!(MAX_INBAND_CONTENT_BYTES);
+        }
+    }
+    let included = byte_budget_cut_serialized(&rows, MOMENTS_PAGE_BYTE_BUDGET);
+    if included == 0 && !rows.is_empty() {
+        return Err(wire(
+            ErrorCode::Internal,
+            "a moment row exceeds the response frame budget",
+        ));
+    }
+    let next_before_moment_order = if included < rows.len() {
+        page.moments[..included]
+            .last()
+            .map(|moment| moment.moment_order)
+    } else {
+        page.next_before_moment_order
+    };
+    Ok(EncodedMomentPage {
+        rows,
+        included,
+        next_before_moment_order,
+        // The TS contract uses -1 for an empty timeline, never null.
+        latest_moment_order: page.latest_moment_order.unwrap_or(-1),
     })
 }
 

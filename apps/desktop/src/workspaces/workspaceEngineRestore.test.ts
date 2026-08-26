@@ -79,7 +79,7 @@ describe("engine history reads", () => {
     const methods = requests.map((request) => request.method);
     expect(methods).toContain("workspace.open");
     expect(methods).toContain(VERSIONED_METHOD.textWrite);
-    expect(methods).toContain(VERSIONED_METHOD.momentsList);
+    expect(methods).toContain(VERSIONED_METHOD.historyPage);
     expect(page.activeVersionId).toBe("main");
     expect(page.moments).toHaveLength(2);
     expect(page.moments[0].recordedAtMs).toBeGreaterThanOrEqual(

@@ -2048,12 +2048,6 @@ export interface SecretFileStore {
     workspaceId: WorkspaceId;
     versionId: VersionId;
   }): Promise<SecretFileStat[]>;
-  // Newest first (descending momentOrder). The secret timeline is expected
-  // to stay short; callers merge it into paged text timelines by time range.
-  listSecretMoments(input: {
-    workspaceId: WorkspaceId;
-    versionId?: VersionId;
-  }): Promise<SecretFileMoment[]>;
   getSecretMoment(input: {
     workspaceId: WorkspaceId;
     momentId: string;
