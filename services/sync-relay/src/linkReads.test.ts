@@ -8,7 +8,11 @@ import {
   LINK_SESSION_TTL_MS,
 } from "./linkSecurity";
 import { filterOpForShare, type ShareSelector } from "./shareFilter";
-import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
+import {
+  createSyncRelayHandler,
+  LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET,
+  type SyncRelayHandler,
+} from "./server";
 import { openSyncRelayStorage, type SyncRelayStorage } from "./storage";
 
 const OWNER = "owner";
@@ -49,6 +53,7 @@ function handler(
     nowMs?: () => number;
     linkReadRateLimiter?: LinkReadRateLimiter;
     linkLogReadRateLimiter?: LinkReadRateLimiter;
+    linkCapabilityReadFallbackPageSize?: number;
   } = {},
 ): SyncRelayHandler {
   let id = 0;
@@ -66,6 +71,8 @@ function handler(
     linkKey: LINK_KEY,
     linkReadRateLimiter: options.linkReadRateLimiter,
     linkLogReadRateLimiter: options.linkLogReadRateLimiter,
+    linkCapabilityReadFallbackPageSize:
+      options.linkCapabilityReadFallbackPageSize,
   });
 }
 
@@ -115,7 +122,7 @@ async function putBlob(h: SyncRelayHandler, content: string): Promise<string> {
 
 type MomentOptions = {
   versionId?: string;
-  objectId?: string;
+  objectId?: string | null;
   operation?: "write" | "rename" | "delete";
   beforePath?: string | null;
   beforeContent?: string | null;
@@ -141,7 +148,8 @@ function moment(
     payload: {
       momentId: `moment-${originSeq}`,
       versionId: options.versionId ?? "main",
-      objectId: options.objectId ?? `object-${originSeq}`,
+      objectId:
+        options.objectId === undefined ? `object-${originSeq}` : options.objectId,
       path,
       recordedAtMs,
       operation: options.operation ?? "write",
@@ -186,7 +194,12 @@ async function appendMoments(
 async function seed(
   h: SyncRelayHandler,
   access: "view" | "comment" | "edit" = "view",
-  selector: { paths?: string[]; versionId?: string; sharedVersionId?: string } = {},
+  selector: {
+    paths?: string[];
+    versionId?: string;
+    sharedVersionId?: string;
+    sharedObjectId?: string | null;
+  } = {},
   identity?: TestWorkspaceIdentity,
 ): Promise<{ capability: string; grantId: string; sharedSha: string; hiddenSha: string }> {
   expect(
@@ -206,7 +219,10 @@ async function seed(
               { originSeq: 0, opKind: "workspace.init", payload: { private: true }, recordedAtMs: 900 },
               moment(1, "docs/shared.md", "# shared\n", 1_100, {
                 versionId: selector.sharedVersionId,
-                objectId: "object-shared",
+                objectId:
+                  selector.sharedObjectId === undefined
+                    ? "object-shared"
+                    : selector.sharedObjectId,
               }),
               moment(2, "private/hidden.md", "hidden\n", 1_200),
             ],
@@ -478,6 +494,20 @@ describe("relay capability reads", () => {
         (op) => !Object.hasOwn(op, "originId"),
       ),
     ).toBe(true);
+    // The excluded kinds by name: a widened accountless boundary must fail
+    // here even if the expected-list above is ever derived from the server.
+    const chatKinds = [
+      "chat.thread.create",
+      "chat.message.append",
+      "chat.reaction.set",
+      "chat.decision.set",
+      "chat.attachment.add",
+    ];
+    expect(
+      (linkLog.ops as Array<{ opKind: string }>).some((op) =>
+        chatKinds.includes(op.opKind),
+      ),
+    ).toBe(false);
 
     const skippedThreadPage = await json(
       await h(linkRequest(seeded.capability, "/sync/link/log?since=3&limit=1")),
@@ -794,6 +824,86 @@ describe("relay capability reads", () => {
           : `/sync/link/blobs/${seeded.sharedSha}`;
       expect((await h(linkRequest(seeded.capability, path))).status).toBe(401);
     }
+  });
+
+  it("returns null freshness when the first shared row is beyond the fallback page budget", async () => {
+    const pageSize = 2;
+    const storage = await newStorage();
+    const h = handler(storage, {
+      linkCapabilityReadFallbackPageSize: pageSize,
+    });
+    const seeded = await seed(h);
+    const rowsPerBudget =
+      LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET * pageSize;
+    await appendMoments(
+      h,
+      Array.from({ length: rowsPerBudget - 1 }, (_, index) =>
+        moment(
+          index + 3,
+          `private/freshness-noise-${index}.md`,
+          "hidden\n",
+          1_300 + index,
+        ),
+      ),
+    );
+
+    const metadata = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/share")),
+    );
+
+    expect(metadata.lastSettledAtMs).toBeNull();
+  });
+
+  it("refuses a fallback blob when the forward walk exceeds the page budget", async () => {
+    const pageSize = 2;
+    const storage = await newStorage();
+    const h = handler(storage, {
+      linkCapabilityReadFallbackPageSize: pageSize,
+    });
+    const seeded = await seed(h, "view", { sharedObjectId: null });
+    const rowsPerBudget =
+      LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET * pageSize;
+    await appendMoments(
+      h,
+      Array.from({ length: rowsPerBudget }, (_, index) =>
+        moment(
+          index + 3,
+          `private/blob-noise-${index}.md`,
+          "hidden\n",
+          1_300 + index,
+        ),
+      ),
+    );
+
+    expect(
+      await denialBytes(
+        await h(
+          linkRequest(
+            seeded.capability,
+            `/sync/link/blobs/${seeded.sharedSha}`,
+          ),
+        ),
+      ),
+    ).toBe(`404:${LINK_REFUSAL_BODY}`);
+  });
+
+  it("keeps freshness and fallback blobs unchanged when the log fits the page budget", async () => {
+    const storage = await newStorage();
+    const h = handler(storage, {
+      linkCapabilityReadFallbackPageSize: 2,
+    });
+    const seeded = await seed(h, "view", { sharedObjectId: null });
+
+    const metadata = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/share")),
+    );
+    expect(metadata.lastSettledAtMs).toBe(1_100);
+
+    const blob = await h(
+      linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`),
+    );
+    expect(blob.status).toBe(200);
+    expect(await blob.text()).toBe("# shared\n");
   });
 
   it("keeps file-link freshness on the latest artifact operation when chat is newer", async () => {

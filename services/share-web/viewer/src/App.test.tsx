@@ -7,7 +7,7 @@ import type { SharedFile, ViewMeta } from "./model";
 
 const SESSION = "abcdefghijkl";
 
-const DEFAULT_META: ViewMeta & { granterEmail: string } = {
+const DEFAULT_META: ViewMeta = {
   access: "view",
   effectiveSelector: {
     paths: [],
@@ -15,7 +15,6 @@ const DEFAULT_META: ViewMeta & { granterEmail: string } = {
     access: "view",
   },
   lastSettledAtMs: null,
-  granterEmail: "owner@example.com",
 };
 
 function jsonResponse(value: unknown, status = 200): Response {
@@ -205,8 +204,14 @@ describe("App", () => {
     await act(async () => {
       if (!finishExchange) throw new Error("Exchange request did not start");
       finishExchange(jsonResponse({ session: SESSION }));
-      for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
     });
+    // Wait for the condition, not a turn count: the exchange, metadata load,
+    // and log load settle when the address carries the session path.
+    for (let turn = 0; turn < 200 && location.pathname !== `/s/${SESSION}`; turn += 1) {
+      await act(async () => {
+        await Promise.resolve();
+      });
+    }
 
     expect(location.pathname).toBe(`/s/${SESSION}`);
     expect(location.hash).toBe("");

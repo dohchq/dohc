@@ -102,6 +102,7 @@ export interface CreateSyncRelayHandlerOptions {
   linkExchangeRateLimiter?: LinkExchangeRateLimiter;
   linkReadRateLimiter?: LinkReadRateLimiter;
   linkLogReadRateLimiter?: LinkReadRateLimiter;
+  linkCapabilityReadFallbackPageSize?: number;
   newLinkBearer?: () => string;
 }
 
@@ -182,6 +183,8 @@ export const MAX_KEY_ENVELOPE_BYTES = 16 * 1024;
 export const MAX_OPS_PER_REQUEST = 500;
 export const DEFAULT_LOG_PAGE_SIZE = 100;
 export const MAX_LOG_PAGE_SIZE = 500;
+// Capability reads may synchronously inspect at most 10,000 fallback rows.
+export const LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET = 20;
 // Presence (ephemeral awareness) transport limits.
 export const MAX_PRESENCE_TOPIC_CHARS = 1024;
 export const MAX_CLIENT_ID_CHARS = 128;
@@ -290,6 +293,7 @@ export function createSyncRelayHandler({
     LINK_LOG_READ_BUCKET_CAPACITY,
     LINK_LOG_READ_REFILL_PER_SECOND,
   ),
+  linkCapabilityReadFallbackPageSize = MAX_LOG_PAGE_SIZE,
   newLinkBearer = () => mintLinkBearer(),
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler {
   const relayExchangeKeyHash =
@@ -679,11 +683,15 @@ export function createSyncRelayHandler({
   ): number | null => {
     let beforeRelaySeq: number | null = null;
     const chatResolver = chatResolverFor(workspaceId);
-    while (true) {
+    for (
+      let pagesRead = 0;
+      pagesRead < LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET;
+      pagesRead += 1
+    ) {
       const rows = storage.fetchLogPageDescending({
         workspaceId,
         beforeRelaySeq,
-        limit: MAX_LOG_PAGE_SIZE,
+        limit: linkCapabilityReadFallbackPageSize,
       });
       for (const row of rows) {
         if (row.relaySeq <= epochLogFloor) return null;
@@ -697,26 +705,31 @@ export function createSyncRelayHandler({
           return row.recordedAtMs;
         }
       }
-      if (rows.length < MAX_LOG_PAGE_SIZE) return null;
+      if (rows.length < linkCapabilityReadFallbackPageSize) return null;
       beforeRelaySeq = rows[rows.length - 1]!.relaySeq;
     }
+    return null;
   };
 
   const latestPathRelatedMoment = (
     workspaceId: string,
     candidate: SyncRelayLogRow,
     candidateIdentity: SettledMomentIdentity,
-  ): SyncRelayLogRow => {
+  ): SyncRelayLogRow | null => {
     let latest = candidate;
     let trackedObjectId = candidateIdentity.objectId;
     let trackedPath =
       candidateIdentity.settledPath ?? candidateIdentity.referencedPaths[0] ?? null;
     let cursor = candidate.relaySeq;
-    while (true) {
+    for (
+      let pagesRead = 0;
+      pagesRead < LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET;
+      pagesRead += 1
+    ) {
       const page = storage.fetchLogPage({
         workspaceId,
         sinceRelaySeq: cursor,
-        limit: MAX_LOG_PAGE_SIZE,
+        limit: linkCapabilityReadFallbackPageSize,
       });
       for (const row of page.rows) {
         const identity = settledMomentIdentity(row);
@@ -733,6 +746,7 @@ export function createSyncRelayHandler({
       if (!page.hasMore) return latest;
       cursor = page.nextCursor;
     }
+    return null;
   };
 
   const currentSettledBlobMoment = (

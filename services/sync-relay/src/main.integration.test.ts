@@ -541,9 +541,18 @@ describe("sync relay main process", () => {
       ),
     );
 
+    // Prove the shared bucket is empty at observation time before asserting
+    // the spoofed address shares it — the limiter refills 0.2 tokens/second,
+    // so real HTTP scheduling could otherwise admit one refilled token.
+    const exhaustedFirstClient = await exchangeLink(baseUrl, secret, "203.0.113.10");
     const spoofedSecondClient = await exchangeLink(baseUrl, secret, "203.0.113.11");
-    expect({ firstClientStatuses, secondClientStatus: spoofedSecondClient.status }).toEqual({
+    expect({
+      firstClientStatuses,
+      exhaustedFirstClientStatus: exhaustedFirstClient.status,
+      secondClientStatus: spoofedSecondClient.status,
+    }).toEqual({
       firstClientStatuses: Array.from({ length: LINK_EXCHANGE_BUCKET_CAPACITY }, () => 200),
+      exhaustedFirstClientStatus: 404,
       secondClientStatus: 404,
     });
   });
