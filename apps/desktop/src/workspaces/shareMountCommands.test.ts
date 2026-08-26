@@ -417,6 +417,30 @@ describe("share mount commands", () => {
     ]);
   });
 
+  it("keeps a durable mount when presentation failure reporting also fails", async () => {
+    const h = harness();
+    h.dependencies.notifyRenderer = () => {
+      throw new Error("notify failed");
+    };
+    h.dependencies.logError = () => {
+      throw new Error("logger failed");
+    };
+
+    await expect(
+      h.commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent }),
+    ).resolves.toEqual({
+      workspace: { id: WORKSPACE.workspaceId },
+      mount: {
+        shareId: SHARE_ID,
+        label: "alex",
+        status: "updated",
+        changedPaths: 2,
+      },
+    });
+    expect(h.files.unmount).not.toHaveBeenCalled();
+    expect(h.mounts).toHaveLength(1);
+  });
+
   it("preserves incomplete post-commit cleanup evidence", async () => {
     const h = harness();
     const responseFailure = new Error("workspace summary failed");

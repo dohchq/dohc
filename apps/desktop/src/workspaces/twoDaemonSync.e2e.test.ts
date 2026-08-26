@@ -41,11 +41,14 @@ async function openLiveDaemonCapture(input: {
   const capture = createWorkspaceEngineCapture({
     workspaceId: input.workspaceId,
     rootPath: input.rootPath,
-    attachmentId: Symbol("test-workspace-attachment"),
+    attachmentId: workspace.workspace.attachmentId,
     rustEngineSessions: workspace.sessions,
     daemonOwnsCapture: true,
   });
-  const relay = workspace.relay.bind(input);
+  const relay = workspace.relay.bind({
+    ...input,
+    attachmentId: workspace.workspace.attachmentId,
+  });
   return {
     capture,
     chats: workspace.chats,
@@ -67,7 +70,10 @@ async function openJoinedDaemonCapture(input: {
   passphrase?: string;
 }): Promise<LiveDaemonCapture> {
   const workspace = await openLiveDaemonWorkspace(input, { maxRestarts: 0 });
-  const relay = workspace.relay.bind(input);
+  const relay = workspace.relay.bind({
+    ...input,
+    attachmentId: workspace.workspace.attachmentId,
+  });
   const probe = await probeRelayWorkspace({
     workspaceId: input.workspaceId,
     relay: input.relay,
@@ -90,7 +96,7 @@ async function openJoinedDaemonCapture(input: {
   const capture = createWorkspaceEngineCapture({
     workspaceId: input.workspaceId,
     rootPath: input.rootPath,
-    attachmentId: Symbol("test-workspace-attachment"),
+    attachmentId: workspace.workspace.attachmentId,
     rustEngineSessions: workspace.sessions,
     daemonOwnsCapture: true,
   });

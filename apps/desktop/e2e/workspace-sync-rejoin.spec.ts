@@ -156,7 +156,7 @@ test("offline edits reach the Electron conflict review and its resolution surviv
     const capture = createWorkspaceEngineCapture({
       workspaceId,
       rootPath: sourceRoot,
-      attachmentId: Symbol("test-source-workspace-attachment"),
+      attachmentId: liveSource.workspace.attachmentId,
       rustEngineSessions: liveSource.sessions,
       daemonOwnsCapture: true,
     });
@@ -164,6 +164,7 @@ test("offline edits reach the Electron conflict review and its resolution surviv
     const sourceRelay = liveSource.relay.bind({
       workspaceId,
       rootPath: sourceRoot,
+      attachmentId: liveSource.workspace.attachmentId,
       relay: relayConfig,
     });
 
@@ -568,13 +569,14 @@ test("protected join rolls back for a missing passphrase, then restores exact se
     sourceCapture = createWorkspaceEngineCapture({
       workspaceId,
       rootPath: sourceRoot,
-      attachmentId: Symbol("test-source-workspace-attachment"),
+      attachmentId: sourceWorkspace.workspace.attachmentId,
       rustEngineSessions: sourceWorkspace.sessions,
       daemonOwnsCapture: true,
     });
     const sourceRelay = sourceWorkspace.relay.bind({
       workspaceId,
       rootPath: sourceRoot,
+      attachmentId: sourceWorkspace.workspace.attachmentId,
       relay: relayConfig,
     });
     await sourceRelay.claim();

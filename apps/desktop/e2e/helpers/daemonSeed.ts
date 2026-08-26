@@ -1,5 +1,6 @@
 import {
   EngineDaemonLifecycle,
+  type AttachedEngineWorkspace,
   type EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import { resolveEngineBinary } from "../../src/testing/engineBinary";
@@ -33,6 +34,7 @@ export interface DaemonSeedStores {
 }
 
 export interface LiveDaemonWorkspace {
+  workspace: AttachedEngineWorkspace;
   chats: DesktopLinkedChatStore;
   relay: EngineRelayClient;
   sessions: EngineWorkspaceSessions;
@@ -51,6 +53,12 @@ export async function openLiveDaemonWorkspace(
   const routes = new RelayTransportRouteGuard();
   const source = new RelayConfiguredDaemonClientSource(lifecycle, routes);
   const sessions = createRealDaemonWorkspaceSessions(source);
+  const attachedWorkspace = {
+    ...workspace,
+    attachmentId: Symbol(
+      `test-workspace-attachment:${workspace.workspaceId}`,
+    ),
+  };
   const relay = new EngineRelayClient({
     sessions,
     routes,
@@ -58,7 +66,8 @@ export async function openLiveDaemonWorkspace(
   });
   let closed = false;
   return {
-    chats: createLiveLinkedChatStore(workspace, sessions),
+    workspace: attachedWorkspace,
+    chats: createLiveLinkedChatStore(attachedWorkspace, sessions),
     relay,
     sessions,
     close: async () => {
