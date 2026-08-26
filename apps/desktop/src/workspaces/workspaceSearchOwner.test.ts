@@ -39,6 +39,8 @@ interface FakeStart {
   searchId: string;
   request: WorkspaceSearchRequest;
   onBatch(batch: SearchBatch): void;
+  attachmentId: symbol;
+  signal: AbortSignal;
   isCurrent(): boolean;
   allowPath?: (path: string) => boolean;
 }
@@ -57,6 +59,8 @@ function createFakeRegistry(
         request: WorkspaceSearchRequest,
         onBatch: (batch: SearchBatch) => void,
         options: {
+          attachmentId: symbol;
+          signal: AbortSignal;
           isCurrent: () => boolean;
           allowPath?: (path: string) => boolean;
         },
@@ -64,10 +68,11 @@ function createFakeRegistry(
         const next = { ownerId, searchId, request, onBatch, ...options };
         starts.push(next);
         await onStart?.(next);
+        return { settled: new Promise<void>(() => undefined) };
       },
-      cancel: vi.fn(),
-      disposeOwner: vi.fn(),
-      killAll: vi.fn(),
+      cancel: vi.fn(async () => undefined),
+      disposeOwner: vi.fn(async () => undefined),
+      killAll: vi.fn(async () => undefined),
     },
   };
 }
@@ -99,7 +104,13 @@ function authority<
     shareMounts?: unknown;
   },
 >(workspace: Workspace, isCurrent: () => boolean = () => true) {
-  return { workspace, isCurrent };
+  const controller = new AbortController();
+  return {
+    workspace,
+    attachmentId: Symbol(workspace.workspaceId),
+    signal: controller.signal,
+    isCurrent: () => !controller.signal.aborted && isCurrent(),
+  };
 }
 
 function engineResult(path: string): SearchResult {
@@ -122,7 +133,7 @@ const readablePolicy = {
   errors: [],
 };
 
-function expectStopped(search: Promise<void>): Promise<void> {
+function expectStopped(search: Promise<unknown>): Promise<void> {
   return expect(search).rejects.toThrow(
     "Workspace search stopped because it is no longer current.",
   );

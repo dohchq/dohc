@@ -307,7 +307,7 @@ describe("desktop workspace-search owner wiring", () => {
         });
       const owner = new WorkspaceSearchOwner({
         searchRegistry: {
-          startSearch: vi.fn(async () => undefined),
+          startSearch: vi.fn(async () => null),
           cancel: vi.fn(),
           disposeOwner: vi.fn(),
           killAll: vi.fn(),
@@ -344,12 +344,16 @@ describe("desktop workspace-search owner wiring", () => {
       >({
         registerHandler: (channel, handler) => handlers.set(channel, handler),
         assertTrustedSender: () => undefined,
-        authorizeWorkspace: (_event, workspaceId) => ({
-          workspace: { workspaceId, rootPath },
-          isCurrent: () => true,
-        }),
+        withWorkspaceOperation: async (_event, workspaceId, work) =>
+          work({
+            workspace: { workspaceId, rootPath },
+            attachmentId: Symbol.for(workspaceId),
+            signal: new AbortController().signal,
+            isCurrent: () => true,
+          }),
         authorizeCancel: () => true,
         owner,
+        onActivityError: vi.fn(),
       });
 
       await handlers.get(CHANNELS.searchWorkspace)!({ sender }, {

@@ -28,23 +28,44 @@ export function registerWorkspaceSearchIpcHandlers<
     handler: WorkspaceSearchIpcHandler<Event>,
   ): void;
   assertTrustedSender(event: Event): void;
-  authorizeWorkspace(
+  withWorkspaceOperation<Result>(
     event: Event,
     workspaceId: string,
-  ): WorkspaceSearchAuthority<Workspace>;
+    work: (authority: WorkspaceSearchAuthority<Workspace>) => Promise<Result>,
+  ): Promise<Result>;
   authorizeCancel(event: Event): boolean;
   owner: Pick<WorkspaceSearchOwner<Workspace>, "start" | "cancel">;
+  onActivityError(error: unknown): void;
 }): void {
   dependencies.registerHandler(
     CHANNELS.searchWorkspace,
     async (event, payload) => {
       dependencies.assertTrustedSender(event);
       const input = WorkspaceSearchPayload.parse(payload);
-      const authority = dependencies.authorizeWorkspace(
+      const accepted = Promise.withResolvers<void>();
+      let wasAccepted = false;
+      const activity = dependencies.withWorkspaceOperation(
         event,
         input.workspaceId,
+        async (authority) => {
+          const started = await dependencies.owner.start(
+            event.sender,
+            authority,
+            input,
+          );
+          wasAccepted = true;
+          accepted.resolve();
+          await started.settled;
+        },
       );
-      await dependencies.owner.start(event.sender, authority, input);
+      void activity.catch((error: unknown) => {
+        if (!wasAccepted) {
+          accepted.reject(error);
+          return;
+        }
+        dependencies.onActivityError(error);
+      });
+      await accepted.promise;
     },
   );
 

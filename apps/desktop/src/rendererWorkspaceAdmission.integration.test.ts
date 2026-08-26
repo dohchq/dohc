@@ -25,6 +25,16 @@ function sender(id: number) {
   };
 }
 
+const attachments = new Map<string, symbol>();
+function physical(workspaceId: string) {
+  let attachmentId = attachments.get(workspaceId);
+  if (!attachmentId) {
+    attachmentId = Symbol(workspaceId);
+    attachments.set(workspaceId, attachmentId);
+  }
+  return { workspaceId, attachmentId };
+}
+
 describe("renderer reload admission", () => {
   it("denies fresh work and displaced search and presence cancels", async () => {
     const senderDrain = deferred();
@@ -40,7 +50,7 @@ describe("renderer reload admission", () => {
       workspaceId: "workspace-1",
       rootPath: "C:/workspace-1",
     };
-    await sessions.open(renderer, workspace.workspaceId, "document-1");
+    await sessions.open(renderer, physical(workspace.workspaceId), "document-1");
 
     const siteLifecycle = createSitePreviewLifecycle({
       allowOrigin: () => () => undefined,
@@ -49,10 +59,10 @@ describe("renderer reload admission", () => {
     const startSitePreview = createStartSitePreviewHandler({
       authority: {
         requireTrustedSender: (event: { sender: typeof renderer }) => event.sender,
-        requireActiveWorkspace: (requestSender: typeof renderer) => {
+        withActiveWorkspace: async (requestSender: typeof renderer, _workspaceId, _subject, _action, work) => {
           const session = sessions.current(requestSender);
           if (!session) throw new Error("Site preview has no active lease.");
-          return { workspace, session };
+          return work({ workspace, session });
         },
       },
       catalog: { list: async () => [], get: catalogGet },
@@ -83,7 +93,7 @@ describe("renderer reload admission", () => {
       string,
       (event: { sender: typeof renderer }, payload: unknown) => unknown
     >();
-    const searchStart = vi.fn(async () => undefined);
+    const searchStart = vi.fn(async () => ({ settled: Promise.resolve() }));
     const searchCancel = vi.fn();
     registerWorkspaceSearchIpcHandlers<
       { sender: typeof renderer },
@@ -91,17 +101,23 @@ describe("renderer reload admission", () => {
     >({
       registerHandler: (channel, handler) => searchHandlers.set(channel, handler),
       assertTrustedSender: () => undefined,
-      authorizeWorkspace: (event, workspaceId) => {
+      withWorkspaceOperation: async (event, workspaceId, work) => {
         const session = sessions.current(event.sender);
         if (!session || session.workspaceId !== workspaceId) {
           throw new Error("Search has no active lease.");
         }
-        return { workspace, isCurrent: () => session.isCurrent() };
+        return work({
+          workspace,
+          attachmentId: session.attachmentId,
+          signal: new AbortController().signal,
+          isCurrent: () => session.isCurrent(),
+        });
       },
       authorizeCancel: (event) => {
         return sessions.current(event.sender) !== undefined;
       },
       owner: { start: searchStart, cancel: searchCancel },
+      onActivityError: vi.fn(),
     });
 
     const reload = sessions.retireForReload(renderer, "document-1");
@@ -139,7 +155,7 @@ describe("renderer reload admission", () => {
     await reload;
 
     const replacement = sender(renderer.id);
-    await sessions.open(replacement, workspace.workspaceId, "document-2");
+    await sessions.open(replacement, physical(workspace.workspaceId), "document-2");
     await searchHandlers.get(CHANNELS.cancelWorkspaceSearch)!(
       { sender: renderer },
       { searchId: "reused-search-id" },
@@ -215,7 +231,7 @@ describe("presence mutation admission", () => {
         : "noop";
     };
 
-    await sessions.open(renderer, "workspace-a", documentId);
+    await sessions.open(renderer, physical("workspace-a"), documentId);
     const retiredLeave = vi.fn(async () => undefined);
     await expect(
       invokePublish({
@@ -226,8 +242,8 @@ describe("presence mutation admission", () => {
       }),
     ).resolves.toBe("old");
 
-    await sessions.open(renderer, "workspace-b", documentId);
-    await sessions.open(renderer, "workspace-a", documentId);
+    await sessions.open(renderer, physical("workspace-b"), documentId);
+    await sessions.open(renderer, physical("workspace-a"), documentId);
     expect(retiredLeave).toHaveBeenCalledOnce();
     const currentLeave = vi.fn(async () => undefined);
     await expect(
@@ -269,11 +285,11 @@ describe("presence mutation admission", () => {
         retireWorkspace: async () => undefined,
       },
     });
-    await sessions.open(renderer, "workspace-a", "document-1");
+    await sessions.open(renderer, physical("workspace-a"), "document-1");
     await sessions.retireForReload(renderer, "document-1");
     const successor = await sessions.open(
       renderer,
-      "workspace-a",
+      physical("workspace-a"),
       "document-2",
     );
 

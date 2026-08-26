@@ -77,8 +77,13 @@ describe("workspace-activity main-process wiring", () => {
     const cli = sourceBlock("onWrite: (workspace, target) => {", "\n    },");
     expect(cli).toContain("queueChatBookmarkProjection(workspace.workspaceId);");
     // Rows a previous session left pending: once per workspace open.
-    const open = sourceBlock("async function openWorkspaceActivityWith(", "\n}\n");
-    expect(open).toContain("queueChatBookmarkProjection(workspace.workspaceId);");
+    const open = sourceBlock(
+      "async function openWorkspaceActivityForOperation(",
+      "\n}\n",
+    );
+    expect(open).toContain(
+      "queueChatBookmarkProjection(canonicalWorkspace.workspaceId);",
+    );
     // A failed post-pull projection retries through the worker.
     const pull = sourceBlock(
       "async function projectPendingChatBookmarksAfterPull(",

@@ -19,11 +19,12 @@ export interface SitesIpcHandlers<Event> {
 export interface SitesIpcDependencies<Event, Sender, Workspace> {
   authority: {
     requireTrustedSender(event: Event): Sender;
-    requireActiveWorkspace(
+    withActiveWorkspace<Result>(
       sender: Sender,
       workspaceId: string,
       subject: string,
-    ): Workspace;
+      work: (workspace: Workspace) => Promise<Result>,
+    ): Promise<Result>;
   };
   catalog: OwnedSiteCatalog<Workspace>;
 }
@@ -47,12 +48,12 @@ export function createSitesIpcHandlers<
     async (event, rawPayload) => {
       const sender = dependencies.authority.requireTrustedSender(event);
       const payload = input.parse(rawPayload);
-      const workspace = dependencies.authority.requireActiveWorkspace(
+      const result = await dependencies.authority.withActiveWorkspace(
         sender,
         payload.workspaceId,
         "sites request",
+        (workspace) => input.run(workspace, payload),
       );
-      const result = await input.run(workspace, payload);
       return input.validate(result);
     };
 

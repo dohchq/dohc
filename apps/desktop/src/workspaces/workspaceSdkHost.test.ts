@@ -395,6 +395,7 @@ describe("workspace SDK host authority", () => {
       signalStarted?.();
       return {
         searchId,
+        settled: new Promise<void>(() => undefined),
         kill() {
           killCount += 1;
         },

@@ -414,11 +414,17 @@ describe("startRipgrepSearch (real rg)", () => {
 });
 
 describe("createSearchRegistry", () => {
-  const current = { isCurrent: () => true };
+  const attachmentId = Symbol("workspace-attachment");
+  const current = () => ({
+    attachmentId,
+    signal: new AbortController().signal,
+    isCurrent: () => true,
+  });
 
   function fakeStart(killed: string[]): typeof startRipgrepSearch {
     return (options) => ({
       searchId: options.searchId,
+      settled: new Promise<void>(() => undefined),
       kill: () => killed.push(options.searchId),
     });
   }
@@ -427,8 +433,8 @@ describe("createSearchRegistry", () => {
     const killed: string[] = [];
     const registry = createSearchRegistry({ rgPath: "/unused", start: fakeStart(killed) });
     const root = await createTestScratch("dohc-reg-");
-    await registry.startSearch(1, root, "s1", { query: "a" }, () => {}, current);
-    await registry.startSearch(1, root, "s2", { query: "b" }, () => {}, current);
+    await registry.startSearch(1, root, "s1", { query: "a" }, () => {}, current());
+    await registry.startSearch(1, root, "s2", { query: "b" }, () => {}, current());
     expect(killed).toEqual(["s1"]);
     await rm(root, { recursive: true, force: true });
   });
@@ -453,6 +459,8 @@ describe("createSearchRegistry", () => {
           },
           {
             isCurrent: () => true,
+            attachmentId,
+            signal: new AbortController().signal,
             allowPath: (path) => path === "canonical.md",
           },
         )
@@ -474,6 +482,7 @@ describe("createSearchRegistry", () => {
         started.push(options.searchId);
         return {
           searchId: options.searchId,
+          settled: new Promise<void>(() => undefined),
           kill: () => killed.push(options.searchId),
         };
       },
@@ -485,7 +494,7 @@ describe("createSearchRegistry", () => {
       "current",
       { query: "a" },
       () => {},
-      current,
+      current(),
     );
     await registry.startSearch(
       1,
@@ -493,7 +502,11 @@ describe("createSearchRegistry", () => {
       "stale",
       { query: "b" },
       () => {},
-      { isCurrent: () => false },
+      {
+        attachmentId,
+        signal: new AbortController().signal,
+        isCurrent: () => false,
+      },
     );
     expect(started).toEqual(["current"]);
     expect(killed).toEqual([]);
@@ -512,13 +525,14 @@ describe("createSearchRegistry", () => {
         batches.push(options.onBatch);
         return {
           searchId: options.searchId,
+          settled: new Promise<void>(() => undefined),
           kill: () => killed.push(handleName),
         };
       },
     });
     const root = await createTestScratch("dohc-reg-");
-    await registry.startSearch(1, root, "same-id", { query: "a" }, () => {}, current);
-    await registry.startSearch(1, root, "same-id", { query: "b" }, () => {}, current);
+    await registry.startSearch(1, root, "same-id", { query: "a" }, () => {}, current());
+    await registry.startSearch(1, root, "same-id", { query: "b" }, () => {}, current());
 
     batches[0]?.({
       searchId: "same-id",
@@ -536,17 +550,66 @@ describe("createSearchRegistry", () => {
     const killed: string[] = [];
     const registry = createSearchRegistry({ rgPath: "/unused", start: fakeStart(killed) });
     const root = await createTestScratch("dohc-reg-");
-    await registry.startSearch(1, root, "s1", { query: "a" }, () => {}, current);
+    await registry.startSearch(1, root, "s1", { query: "a" }, () => {}, current());
     registry.cancel(1, "wrong-id");
     expect(killed).toEqual([]);
     registry.cancel(1, "s1");
     expect(killed).toEqual(["s1"]);
-    await registry.startSearch(2, root, "s3", { query: "c" }, () => {}, current);
+    await registry.startSearch(2, root, "s3", { query: "c" }, () => {}, current());
     registry.disposeOwner(2);
     expect(killed).toEqual(["s1", "s3"]);
-    await registry.startSearch(3, root, "s4", { query: "d" }, () => {}, current);
+    await registry.startSearch(3, root, "s4", { query: "d" }, () => {}, current());
     registry.killAll();
     expect(killed).toEqual(["s1", "s3", "s4"]);
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("aborts and drains the exact attachment child while dropping its late batches", async () => {
+    const childClosed = Promise.withResolvers<void>();
+    const killed: symbol[] = [];
+    let emit!: (batch: SearchBatch) => void;
+    const delivered: SearchBatch[] = [];
+    const controller = new AbortController();
+    const exactAttachment = Symbol("exact-attachment");
+    const registry = createSearchRegistry({
+      rgPath: "/unused",
+      start: (options) => {
+        emit = options.onBatch;
+        return {
+          searchId: options.searchId,
+          settled: childClosed.promise,
+          kill: () => killed.push(exactAttachment),
+        };
+      },
+    });
+    const root = await createTestScratch("dohc-reg-");
+    const execution = await registry.startSearch(
+      1,
+      root,
+      "held",
+      { query: "a" },
+      (batch) => delivered.push(batch),
+      {
+        attachmentId: exactAttachment,
+        signal: controller.signal,
+        isCurrent: () => !controller.signal.aborted,
+      },
+    );
+
+    controller.abort();
+    let drained = false;
+    void execution?.settled.then(() => {
+      drained = true;
+    });
+    emit({ searchId: "held", entries: [], done: true, limitHit: false });
+    await Promise.resolve();
+
+    expect(killed).toEqual([exactAttachment]);
+    expect(drained).toBe(false);
+    expect(delivered).toEqual([]);
+    childClosed.resolve();
+    await execution?.settled;
+    expect(drained).toBe(true);
     await rm(root, { recursive: true, force: true });
   });
 
@@ -559,7 +622,7 @@ describe("createSearchRegistry", () => {
         "s1",
         { query: "a" },
         () => {},
-        current,
+        current(),
       ),
     ).rejects.toThrow();
   });

@@ -109,6 +109,155 @@ describe("workspace authority owner", () => {
     expect(test.disposed).toEqual([retiredIdentity]);
   });
 
+  it("runs physical work against the canonical attachment and rechecks it before returning", async () => {
+    const test = testOwner({
+      workspaceId: "workspace",
+      rootPath: "alias",
+      label: "A",
+    });
+    const entered = Promise.withResolvers<void>();
+    const resume = Promise.withResolvers<void>();
+    let attachmentId!: symbol;
+    const running = test.owner.withOperation("workspace", async (operation) => {
+      attachmentId = operation.workspace.attachmentId;
+      expect(operation.workspace).toMatchObject({
+        workspaceId: "workspace",
+        rootPath: "real:alias",
+        label: "A",
+        attachmentId: operation.workspace.attachmentId,
+      });
+      entered.resolve();
+      await resume.promise;
+      return operation.workspace.rootPath;
+    });
+
+    await entered.promise;
+    test.replace(null);
+    const retiring = test.owner.invalidate("workspace");
+    resume.resolve();
+
+    await expect(running).rejects.toThrow("retired workspace authority");
+    await retiring;
+    expect(test.disposed).toEqual([attachmentId]);
+  });
+
+  it("keeps the admitted canonical root when its registry alias is retargeted", async () => {
+    const workspace = {
+      workspaceId: "workspace",
+      rootPath: "alias",
+      label: "A",
+    };
+    let aliasTarget = "canonical-c";
+    const owner = createWorkspaceAuthorityOwner({
+      findWorkspace: () => workspace,
+      canonicalizeRoot: () => aliasTarget,
+      createState: () => ({}),
+      disposeState: () => undefined,
+    });
+    const entered = Promise.withResolvers<void>();
+    const resume = Promise.withResolvers<void>();
+    const running = owner.withOperation("workspace", async (operation) => {
+      entered.resolve();
+      await resume.promise;
+      operation.assertCurrent();
+      return operation.workspace.rootPath;
+    });
+
+    await entered.promise;
+    aliasTarget = "canonical-d";
+    resume.resolve();
+
+    await expect(running).resolves.toBe("canonical-c");
+    await owner.invalidate("workspace");
+  });
+
+  it("aborts a held physical operation so retirement can kill and drain its exact work", async () => {
+    const test = testOwner({
+      workspaceId: "workspace",
+      rootPath: "alias",
+      label: "A",
+    });
+    const entered = Promise.withResolvers<void>();
+    const childClosed = Promise.withResolvers<void>();
+    const killed: symbol[] = [];
+    let attachmentId!: symbol;
+    const running = test.owner.withOperation("workspace", async (operation) => {
+      attachmentId = operation.workspace.attachmentId;
+      operation.signal.addEventListener(
+        "abort",
+        () => {
+          killed.push(operation.workspace.attachmentId);
+          childClosed.resolve();
+        },
+        { once: true },
+      );
+      entered.resolve();
+      await childClosed.promise;
+    });
+
+    await entered.promise;
+    test.replace(null);
+    const retiring = test.owner.invalidate("workspace");
+
+    expect(killed).toEqual([attachmentId]);
+    await expect(running).rejects.toThrow("retired workspace authority");
+    await retiring;
+  });
+
+  it("blocks replacement B until held startup work for attachment A drains", async () => {
+    const test = testOwner({
+      workspaceId: "workspace",
+      rootPath: "root-a",
+      label: "A",
+    });
+    const entered = Promise.withResolvers<void>();
+    const daemonReady = Promise.withResolvers<void>();
+    let attachmentA!: symbol;
+    const opening = test.owner.withOperation("workspace", async (operation) => {
+      attachmentA = operation.workspace.attachmentId;
+      entered.resolve();
+      await daemonReady.promise;
+    });
+
+    await entered.promise;
+    test.replace({ workspaceId: "workspace", rootPath: "root-b", label: "B" });
+    const retirement = test.owner.invalidate("workspace");
+    expect(() => test.owner.acquire("workspace")).toThrow(
+      "retiring or blocked",
+    );
+
+    daemonReady.resolve();
+    await expect(opening).rejects.toThrow("retired workspace authority");
+    await retirement;
+    const attachmentB = test.owner.acquire("workspace");
+    expect(attachmentB.binding.attachmentId).not.toBe(attachmentA);
+    expect(attachmentB.binding.canonicalRootPath).toBe("real:root-b");
+    attachmentB.release();
+  });
+
+  it("releases the lease when operation construction loses registry currentness", async () => {
+    const workspace = {
+      workspaceId: "workspace",
+      rootPath: "root",
+      label: "A",
+    };
+    let reads = 0;
+    const disposeState = vi.fn();
+    const owner = createWorkspaceAuthorityOwner({
+      findWorkspace: () => (++reads < 3 ? workspace : null),
+      canonicalizeRoot: (rootPath) => rootPath,
+      createState: () => ({}),
+      disposeState,
+    });
+
+    await expect(
+      owner.withOperation("workspace", async () => undefined),
+    ).rejects.toThrow("retired workspace authority");
+
+    await owner.invalidate("workspace");
+    expect(disposeState).toHaveBeenCalledOnce();
+  });
+
   it("lets a cached adapter reacquire only its exact binding", async () => {
     const test = testOwner({
       workspaceId: "workspace",

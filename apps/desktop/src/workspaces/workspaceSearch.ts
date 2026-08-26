@@ -246,7 +246,12 @@ export function toSearchEntries(data: RgMatchData): SearchResultEntry[] {
 
 export interface SearchHandle {
   searchId: string;
+  settled: Promise<void>;
   kill(): void;
+}
+
+export interface SearchExecution {
+  readonly settled: Promise<void>;
 }
 
 // Spawns rg for one search and streams bounded batches to onBatch. The
@@ -277,6 +282,7 @@ export function startRipgrepSearch(options: {
   let finished = false;
   let pending: SearchResultEntry[] = [];
   let flushTimer: NodeJS.Timeout | null = null;
+  const settled = Promise.withResolvers<void>();
 
   function flush(done: boolean): void {
     if (flushTimer) {
@@ -293,6 +299,7 @@ export function startRipgrepSearch(options: {
     if (finished) return;
     finished = true;
     flush(true);
+    settled.resolve();
   }
 
   const lines = createInterface({ input: child.stdout });
@@ -331,6 +338,7 @@ export function startRipgrepSearch(options: {
 
   return {
     searchId,
+    settled: settled.promise,
     kill: () => {
       // Idempotent: kill() after exit is a no-op. SIGTERM is enough — rg
       // exits promptly; the close handler emits the final done batch.
@@ -347,7 +355,14 @@ export function createSearchRegistry(deps: {
   rgPath: string;
   start?: typeof startRipgrepSearch;
 }) {
-  const active = new Map<number, SearchHandle>();
+  const active = new Map<
+    number,
+    {
+      readonly attachmentId: symbol;
+      readonly handle: SearchHandle;
+      readonly settled: Promise<void>;
+    }
+  >();
   const start = deps.start ?? startRipgrepSearch;
 
   return {
@@ -361,11 +376,13 @@ export function createSearchRegistry(deps: {
       request: WorkspaceSearchRequest,
       onBatch: (batch: SearchBatch) => void,
       options: {
+        attachmentId: symbol;
+        signal: AbortSignal;
         isCurrent: () => boolean;
         allowPath?: (path: string) => boolean;
       },
-    ): Promise<void> {
-      const { isCurrent, allowPath } = options;
+    ): Promise<SearchExecution | null> {
+      const { attachmentId, signal, isCurrent, allowPath } = options;
       const realRoot = await realpath(rootPath);
       if (!(await stat(realRoot)).isDirectory()) {
         throw new Error("Workspace root is not a directory");
@@ -373,8 +390,8 @@ export function createSearchRegistry(deps: {
       // Root validation is async. A renderer reload/newer generation can win
       // while it is in flight; the stale call must not kill or replace that
       // generation's active search when validation eventually finishes.
-      if (!isCurrent()) return;
-      active.get(ownerId)?.kill();
+      if (!isCurrent() || signal.aborted) return null;
+      active.get(ownerId)?.handle.kill();
       let handle: SearchHandle | null = null;
       handle = start({
         rgPath: deps.rgPath,
@@ -383,36 +400,63 @@ export function createSearchRegistry(deps: {
         request,
         allowPath,
         onBatch: (batch) => {
-          // Drop the registry entry when the CURRENT search finishes (a
-          // superseded search's late done-batch must not delete its
-          // replacement's handle).
-          if (batch.done && active.get(ownerId) === handle) {
-            active.delete(ownerId);
+          const current = active.get(ownerId);
+          if (
+            signal.aborted ||
+            current?.handle !== handle ||
+            current.attachmentId !== attachmentId
+          ) {
+            return;
           }
           onBatch(batch);
         },
       });
-      active.set(ownerId, handle);
+      const onAbort = (): void => {
+        const current = active.get(ownerId);
+        if (
+          current?.handle !== handle ||
+          current.attachmentId !== attachmentId
+        ) {
+          return;
+        }
+        handle?.kill();
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      const settled = handle.settled.finally(() => {
+        signal.removeEventListener("abort", onAbort);
+        if (active.get(ownerId)?.handle === handle) active.delete(ownerId);
+      });
+      active.set(ownerId, { attachmentId, handle, settled });
+      if (signal.aborted) onAbort();
+      return { settled };
     },
-    cancel(ownerId: number, searchId: string): void {
-      const handle = active.get(ownerId);
-      if (handle && handle.searchId === searchId) {
-        handle.kill();
+    cancel(ownerId: number, searchId: string): Promise<void> {
+      const activeSearch = active.get(ownerId);
+      if (activeSearch?.handle.searchId === searchId) {
+        activeSearch.handle.kill();
         active.delete(ownerId);
+        return activeSearch.settled;
       }
+      return Promise.resolve();
     },
     // Renderer went away (window closed / reloaded): kill its child.
-    disposeOwner(ownerId: number): void {
-      const handle = active.get(ownerId);
-      if (handle) {
-        handle.kill();
+    disposeOwner(ownerId: number): Promise<void> {
+      const activeSearch = active.get(ownerId);
+      if (activeSearch) {
+        activeSearch.handle.kill();
         active.delete(ownerId);
+        return activeSearch.settled;
       }
+      return Promise.resolve();
     },
     // App quit: kill every tracked child (and only those).
-    killAll(): void {
-      for (const handle of active.values()) handle.kill();
+    killAll(): Promise<void> {
+      const settlements = [...active.values()].map((search) => {
+        search.handle.kill();
+        return search.settled;
+      });
       active.clear();
+      return Promise.all(settlements).then(() => undefined);
     },
   };
 }

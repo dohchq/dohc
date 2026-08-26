@@ -336,6 +336,7 @@ import {
   createWorkspaceAuthorityOwner,
   type WorkspaceAuthorityBinding,
   type WorkspaceAuthorityLease,
+  type WorkspaceAuthorityOperation,
   type WorkspaceAuthorityReservation,
 } from "./workspaces/workspaceAuthorityOwner";
 import type { JoinedSharedChannel, RegistryEntry } from "./workspaces/registryStore";
@@ -1114,7 +1115,7 @@ async function executePreviewForSite(input: SitePreviewExecutionInput) {
       site: input.site,
       sharedView: input.sharedView,
       resolveOwner: (path) =>
-        shareViewFilesTargetForPath(requireWorkspace(input.workspaceId), path),
+        shareViewFilesTargetForPath({ workspaceId: input.workspaceId }, path),
       readOwner: async (ownerTarget, ownerPath) => {
         const read = await shareViewFiles.read(ownerTarget, {
           kind: "asset",
@@ -1751,13 +1752,18 @@ type DesktopWorkspaceAuthorityLease = WorkspaceAuthorityLease<
   DesktopWorkspaceAuthorityState
 >;
 
+type DesktopWorkspaceOperation = WorkspaceAuthorityOperation<
+  RegistryEntry,
+  DesktopWorkspaceAuthorityState
+>;
+
 function createDesktopWorkspaceAuthorityState(
   binding: WorkspaceAuthorityBinding<RegistryEntry>,
 ): DesktopWorkspaceAuthorityState {
   const pluginRuntimes = new PluginWorkspaceRuntimes<CreatedWorkspace>({
     assertWritable: assertWritableWorkspace,
-    isOpen: (workspaceId) =>
-      rendererWorkspaceSessions.isWorkspaceOpen(workspaceId),
+    isOpen: () =>
+      rendererWorkspaceSessions.isAttachmentOpen(binding.attachmentId),
     create: createPluginWorkspaceRuntimeParts,
     onPipelineStatus: (workspaceId, event) => {
       withWorkspaceAttachment(
@@ -1850,6 +1856,74 @@ function requireWorkspaceAuthority(
   return workspaceAuthorities.acquire(workspaceId);
 }
 
+function withPhysicalWorkspaceOperation<Result>(
+  workspaceId: string,
+  work: (operation: DesktopWorkspaceOperation) => Result | Promise<Result>,
+): Promise<Result> {
+  return workspaceAuthorities.withOperation(workspaceId, work);
+}
+
+type DesktopRendererWorkspaceOperation = DesktopWorkspaceOperation & {
+  readonly session: NonNullable<
+    ReturnType<RendererWorkspaceSessionOwner<WebContents>["current"]>
+  >;
+  assertCurrent(): void;
+};
+
+function withRendererWorkspaceOperation<Result>(
+  sender: WebContents,
+  workspaceId: string,
+  inactiveMessage: string,
+  work: (
+    operation: DesktopRendererWorkspaceOperation,
+  ) => Result | Promise<Result>,
+): Promise<Result> {
+  const session = rendererWorkspaceSessions.current(sender);
+  return withPhysicalWorkspaceOperation(workspaceId, async (physical) => {
+    const assertCurrent = (): void => {
+      physical.assertCurrent();
+      if (
+        !session?.isCurrent() ||
+        session.workspaceId !== physical.workspace.workspaceId ||
+        session.attachmentId !== physical.workspace.attachmentId
+      ) {
+        throw new Error(inactiveMessage);
+      }
+    };
+    assertCurrent();
+    if (!session) throw new Error(inactiveMessage);
+    const operation = Object.freeze({
+      ...physical,
+      session,
+      assertCurrent,
+    });
+    const result = await work(operation);
+    assertCurrent();
+    return result;
+  });
+}
+
+function withCurrentWorkspaceAttachmentOperation<Result>(
+  workspace: { workspaceId: string; attachmentId: symbol },
+  work: (operation: DesktopWorkspaceOperation) => Result | Promise<Result>,
+): Promise<Result | undefined> {
+  let began = false;
+  try {
+    return withPhysicalWorkspaceOperation(workspace.workspaceId, (operation) => {
+      if (operation.workspace.attachmentId !== workspace.attachmentId) {
+        return undefined;
+      }
+      began = true;
+      return work(operation);
+    }).catch((error) => {
+      if (!began) return undefined;
+      throw error;
+    });
+  } catch {
+    return Promise.resolve(undefined);
+  }
+}
+
 function withWorkspaceAttachment<Result>(
   workspace: { workspaceId: string; attachmentId?: symbol },
   work: (lease: DesktopWorkspaceAuthorityLease) => Result,
@@ -1889,38 +1963,65 @@ function withWorkspaceAttachmentAsync<Result>(
   });
 }
 
-const pluginWorkspaceRuntimes: Pick<
+type DesktopPluginWorkspaceRuntimes = Omit<
+  Pick<
   PluginWorkspaceRuntimes<CreatedWorkspace>,
   "current" | "ensure" | "stop"
-> = {
+  >,
+  "stop"
+> & {
+  stop(
+    workspace: string | { workspaceId: string; attachmentId: symbol },
+    beforeDispose: () => Promise<void>,
+  ): Promise<void>;
+};
+
+const pluginWorkspaceRuntimes: DesktopPluginWorkspaceRuntimes = {
   current(workspaceId) {
     return withWorkspaceAttachment({ workspaceId }, (lease) =>
       lease.state.pluginRuntimes.current(workspaceId),
     );
   },
   ensure(workspace) {
-    return workspaceAuthorities.withAuthority(workspace.workspaceId, (lease) => {
-      if (lease.binding.registeredRootPath !== workspace.rootPath) {
+    return withPhysicalWorkspaceOperation(workspace.workspaceId, (operation) => {
+      if (
+        operation.workspace.rootPath !== workspace.rootPath ||
+        ("attachmentId" in workspace &&
+          workspace.attachmentId !== operation.workspace.attachmentId)
+      ) {
         throw new Error("Plugin runtime request belongs to a retired workspace.");
       }
-      return lease.state.pluginRuntimes.ensure(canonicalWorkspaceFor(lease));
+      return operation.state.pluginRuntimes.ensure(operation.workspace);
     });
   },
-  stop(workspaceId, beforeDispose) {
-    return workspaceAuthorities.withAuthority(workspaceId, (lease) =>
-      lease.state.pluginRuntimes.stop(workspaceId, beforeDispose),
-    );
+  stop(workspace, beforeDispose) {
+    if (typeof workspace === "string") {
+      return workspaceAuthorities.withAuthority(workspace, (lease) =>
+        lease.state.pluginRuntimes.stop(workspace, beforeDispose),
+      );
+    }
+    return withCurrentWorkspaceAttachmentOperation(workspace, (operation) =>
+      operation.state.pluginRuntimes.stop(workspace.workspaceId, beforeDispose),
+    ).then(() => undefined);
   },
 };
 
-type WorkspacePluginSurfaces = Pick<
-  PluginSurfaces<WebContentsView>,
+type WorkspacePluginSurfaceTarget =
+  | Parameters<PluginSurfaces<WebContentsView>["stop"]>[0]
+  | { kind: "workspace"; workspaceId: string; attachmentId: symbol };
+
+type WorkspacePluginSurfaces = Omit<
+  Pick<
+    PluginSurfaces<WebContentsView>,
   | "applyWebAppBounds"
   | "authorizePanelSdk"
   | "startPanel"
   | "startWebApp"
   | "stop"
+  >,
+  "stop"
 > & {
+  stop(target: WorkspacePluginSurfaceTarget): Promise<void>;
   applyWebAppZoom(level: number): void;
   close(): Promise<void>;
   withPluginSdkGrantSuspensions<Result extends { readonly ok: boolean }>(
@@ -1965,6 +2066,14 @@ const pluginSurfaces: WorkspacePluginSurfaces = {
     }
   },
   stop(target) {
+    if (target.kind === "workspace" && "attachmentId" in target) {
+      return withCurrentWorkspaceAttachmentOperation(target, (operation) =>
+        operation.state.pluginSurfaces.stop({
+          kind: "workspace",
+          workspaceId: target.workspaceId,
+        }),
+      ).then(() => undefined);
+    }
     if (target.kind !== "sender") {
       return workspaceAuthorities.withAuthority(target.workspaceId, (lease) =>
         lease.state.pluginSurfaces.stop(target),
@@ -1994,7 +2103,14 @@ const pluginSurfaces: WorkspacePluginSurfaces = {
   },
 };
 
-type SitePreviewLifecycle = ReturnType<typeof createSitePreviewLifecycle>;
+type SitePreviewLifecycle = Omit<
+  ReturnType<typeof createSitePreviewLifecycle>,
+  "stopWorkspace"
+> & {
+  stopWorkspace(
+    workspace: string | { workspaceId: string; attachmentId: symbol },
+  ): Promise<void>;
+};
 
 const sitePreviews: SitePreviewLifecycle = {
   start: (input) =>
@@ -2021,10 +2137,15 @@ const sitePreviews: SitePreviewLifecycle = {
       );
     }
   },
-  stopWorkspace(workspaceId) {
-    return workspaceAuthorities.withAuthority(workspaceId, (lease) =>
-      lease.state.sitePreviews.stopWorkspace(workspaceId),
-    );
+  stopWorkspace(workspace) {
+    if (typeof workspace === "string") {
+      return workspaceAuthorities.withAuthority(workspace, (lease) =>
+        lease.state.sitePreviews.stopWorkspace(workspace),
+      );
+    }
+    return withCurrentWorkspaceAttachmentOperation(workspace, (operation) =>
+      operation.state.sitePreviews.stopWorkspace(workspace.workspaceId),
+    ).then(() => undefined);
   },
   stopAll() {
     return Promise.all(
@@ -3808,8 +3929,8 @@ function createWorkspaceChatLifecycleFor(
   });
 }
 
-async function openWorkspaceActivityWith(
-  workspace: CreatedWorkspace,
+async function openWorkspaceActivityForOperation(
+  operation: DesktopWorkspaceOperation,
   options: WorkspaceActivityOpenOptions,
   ensureOpen: (
     workspace: CreatedWorkspace,
@@ -3820,25 +3941,35 @@ async function openWorkspaceActivityWith(
   // handshaking (the window loads during it). Wait for the handshake instead
   // of building a capture over null engine sessions.
   await engineDaemonStartup;
-  return workspaceAuthorities.withAuthority(workspace.workspaceId,
-    async (lease) => {
-      const canonicalWorkspace = canonicalWorkspaceFor(lease);
-      lease.state.retainedActivity = true;
-  const result = await lease.state.workspaceChatLifecycle.open(
-        canonicalWorkspace,
+  operation.assertCurrent();
+  const canonicalWorkspace = operation.workspace;
+  operation.state.retainedActivity = true;
+  const result = await operation.state.workspaceChatLifecycle.open(
+    canonicalWorkspace,
     () => ensureOpen(canonicalWorkspace, options),
     options.afterActivityOpen,
-      );
-      lease.assertCurrent();
+  );
+  operation.assertCurrent();
   void chatDispatchService.scanWorkspace(
-    workspace.workspaceId,
-    lease.binding.attachmentId,
+    canonicalWorkspace.workspaceId,
+    canonicalWorkspace.attachmentId,
   ).catch((error) => {
     console.error("[desktop] chat dispatch workspace-open scan:", error);
   });
-      queueChatBookmarkProjection(workspace.workspaceId);
+  queueChatBookmarkProjection(canonicalWorkspace.workspaceId);
   return result;
-    },
+}
+
+function openWorkspaceActivityWith(
+  workspace: CreatedWorkspace,
+  options: WorkspaceActivityOpenOptions,
+  ensureOpen: (
+    workspace: CreatedWorkspace,
+    options: WorkspaceActivityOpenOptions,
+  ) => Promise<SyncStatusResult>,
+): Promise<SyncStatusResult> {
+  return withPhysicalWorkspaceOperation(workspace.workspaceId, (operation) =>
+    openWorkspaceActivityForOperation(operation, options, ensureOpen),
   );
 }
 
@@ -4060,9 +4191,16 @@ function createPluginSurfaces(
   });
 }
 
-async function requirePluginEngineCapture(workspaceId: string) {
-  const workspace = requireWorkspace(workspaceId);
-  await openWorkspaceActivity(workspace);
+async function requirePluginEngineCaptureForOperation(
+  operation: DesktopWorkspaceOperation,
+) {
+  await openWorkspaceActivityForOperation(
+    operation,
+    {},
+    ensureWorkspaceActivityOpen,
+  );
+  operation.assertCurrent();
+  const workspace = operation.workspace;
   const capture = activity.engineCaptureFor(workspace.workspaceId);
   if (!capture) {
     throw new Error(
@@ -4089,48 +4227,59 @@ async function invokeWorkspacePluginSdk(input: {
   method: string;
   params?: unknown;
 }): Promise<unknown> {
-  const workspace = requireWorkspace(input.workspaceId);
-  return invokePluginSdkHost(
-    {
-      pluginId: input.pluginId,
-      workspaceRoot: workspace.rootPath,
-      spawnId: input.spawnId,
-      requestPath: input.requestPath,
-      // Read from the registration main holds, never from the request: what a
-      // plugin may open is what its approved manifest declares.
-      declaredWebApps: registeredPlugin(input.workspaceId, input.pluginId)
-        ?.manifest.webApps,
-      isWritable: input.isWritable,
-      /** Main supplies this read authority. Plugins cannot select or widen it. */
-      reads: ownedWorkspaceReads(workspace),
-      writeAvailable: async () => {
-        try {
-          const workspaceForWrite = requireWorkspace(input.workspaceId);
-          await openWorkspaceActivity(workspaceForWrite);
-          return Boolean(activity.engineCaptureFor(input.workspaceId));
-        } catch {
-          return false;
-        }
-      },
-      signal: input.signal,
-      invokeChildProcess: input.invokeChildProcess,
-      subscribeFileWatch: input.subscribeFileWatch,
-      unsubscribeFileWatch: input.unsubscribeFileWatch,
-      writeAuthoredText: createPluginAuthoredTextWriter({
-        signal: input.signal,
-        requireWritableCapture: async () => {
-          const { workspace: workspaceForWrite, capture } =
-            await requirePluginEngineCapture(input.workspaceId);
-          assertWritableWorkspace(workspaceForWrite);
-          return { workspaceRoot: workspaceForWrite.rootPath, capture };
+  return withPhysicalWorkspaceOperation(input.workspaceId, async (operation) => {
+    const workspace = operation.workspace;
+    const signal = input.signal
+      ? AbortSignal.any([input.signal, operation.signal])
+      : operation.signal;
+    return invokePluginSdkHost(
+      {
+        pluginId: input.pluginId,
+        workspaceRoot: workspace.rootPath,
+        spawnId: input.spawnId,
+        requestPath: input.requestPath,
+        // Read from the registration main holds, never from the request: what a
+        // plugin may open is what its approved manifest declares.
+        declaredWebApps: operation.state.pluginRuntimes
+          .current(input.workspaceId)
+          ?.registeredPlugin(input.pluginId)
+          ?.manifest.webApps,
+        isWritable: input.isWritable,
+        /** Main supplies this read authority. Plugins cannot select or widen it. */
+        reads: ownedWorkspaceReadsFor(workspace),
+        writeAvailable: async () => {
+          try {
+            await openWorkspaceActivityForOperation(
+              operation,
+              {},
+              ensureWorkspaceActivityOpen,
+            );
+            operation.assertCurrent();
+            return Boolean(activity.engineCaptureFor(input.workspaceId));
+          } catch {
+            return false;
+          }
         },
-        pipeline: () =>
-          pluginWorkspaceRuntimes.current(input.workspaceId)?.pipeline,
-      }),
-    },
-    input.method,
-    input.params,
-  );
+        signal,
+        invokeChildProcess: input.invokeChildProcess,
+        subscribeFileWatch: input.subscribeFileWatch,
+        unsubscribeFileWatch: input.unsubscribeFileWatch,
+        writeAuthoredText: createPluginAuthoredTextWriter({
+          signal,
+          requireWritableCapture: async () => {
+            const { workspace: workspaceForWrite, capture } =
+              await requirePluginEngineCaptureForOperation(operation);
+            assertWritableWorkspace(workspaceForWrite);
+            return { workspaceRoot: workspaceForWrite.rootPath, capture };
+          },
+          pipeline: () =>
+            operation.state.pluginRuntimes.current(input.workspaceId)?.pipeline,
+        }),
+      },
+      input.method,
+      input.params,
+    );
+  });
 }
 
 async function routePluginPanelSdk(input: {
@@ -4717,15 +4866,6 @@ function engineWorkspaceForRegistryIdentity(
   return receivedShareEngine.workspaceForRegistered(registered);
 }
 
-function resolveShareViewFilesTarget(
-  target: ShareViewFilesTarget,
-) {
-  return resolveRegisteredShareViewFilesTarget(
-    findWorkspace(target.workspaceId),
-    target,
-  );
-}
-
 let shareViewFiles: ShareViewFiles;
 function createShareMountCommandsFor(
   binding: WorkspaceAuthorityBinding<RegistryEntry>,
@@ -4763,161 +4903,224 @@ function createShareMountCommandsFor(
   });
 }
 
-const shareMountCommands: ReturnType<typeof createShareMountCommandsFor> = {
+const shareMountCommands: Pick<
+  ReturnType<typeof createShareMountCommandsFor>,
+  "mount" | "refresh" | "unmount"
+> = {
   mount(input) {
-    return workspaceAuthorities.withAuthority(
+    return withPhysicalWorkspaceOperation(
       input.workspace.workspaceId,
-      (lease) =>
-        lease.state.shareMountCommands.mount({
+      async (operation) => {
+        await engineDaemonStartup;
+        operation.assertCurrent();
+        return operation.state.shareMountCommands.mount({
           ...input,
-          workspace: canonicalWorkspaceFor(lease),
-        }),
+          workspace: operation.workspace,
+        });
+      },
     );
   },
   refresh(input) {
-    return workspaceAuthorities.withAuthority(
+    return withPhysicalWorkspaceOperation(
       input.workspace.workspaceId,
-      (lease) =>
-        lease.state.shareMountCommands.refresh({
-          workspace: canonicalWorkspaceFor(lease),
-        }),
+      async (operation) => {
+        await engineDaemonStartup;
+        operation.assertCurrent();
+        return operation.state.shareMountCommands.refresh({
+          workspace: operation.workspace,
+        });
+      },
     );
   },
   unmount(input) {
-    return workspaceAuthorities.withAuthority(
+    return withPhysicalWorkspaceOperation(
       input.workspace.workspaceId,
-      (lease) =>
-        lease.state.shareMountCommands.unmount({
+      async (operation) => {
+        await engineDaemonStartup;
+        operation.assertCurrent();
+        return operation.state.shareMountCommands.unmount({
           ...input,
-          workspace: canonicalWorkspaceFor(lease),
-        }),
+          workspace: operation.workspace,
+        });
+      },
     );
-  },
-  filesLifecycle: {
-    createMount(owner, target) {
-      return workspaceAuthorities.withAuthority(target.workspaceId, (lease) =>
-        lease.state.shareMountCommands.filesLifecycle.createMount(owner, target),
-      );
-    },
-    removeMount(owner, target) {
-      return workspaceAuthorities.withAuthority(target.workspaceId, (lease) =>
-        lease.state.shareMountCommands.filesLifecycle.removeMount(owner, target),
-      );
-    },
   },
 };
 
-shareViewFiles = createShareViewFiles({
-  stateFor: (target) => {
-    const lease = requireWorkspaceAuthority(target.workspaceId);
-    try {
-      if (target.schedulingRootPath !== lease.binding.canonicalRootPath) {
-        throw new Error("Share file cache request belongs to a retired workspace.");
+function createShareViewFilesForOperation(
+  operation: DesktopWorkspaceOperation,
+): ShareViewFiles {
+  const assertCurrent = (): void => operation.assertCurrent();
+  const currentWorkspace = () => {
+    assertCurrent();
+    return operation.workspace;
+  };
+  return createShareViewFiles({
+    stateFor: (target) => {
+      assertCurrent();
+      if (
+        target.workspaceId !== operation.workspace.workspaceId ||
+        target.schedulingRootPath !== operation.workspace.rootPath
+      ) {
+        throw new Error(
+          "Share file cache request belongs to a retired workspace.",
+        );
       }
-      return lease.state.shareViewFiles;
-    } finally {
-      lease.release();
-    }
-  },
-  resolveTarget: resolveShareViewFilesTarget,
-  openStore: (target) =>
-    shareViewFilesStore(
-      receivedShareEngine.storeFor({
-        engineWorkspaceId: target.storeWorkspaceId,
-        rootPath: target.rootPath,
-      }),
-    ),
-  resolveRelay: async (target) => {
-    await warmCredentialCache().catch(() => undefined);
-    const credentials = cachedCredentials;
-    if (!credentials?.relayUrl) {
-      if (target.kind === "standalone") {
-        throw new Error("Sign in to dohc Cloud first.");
-      }
-      return null;
-    }
-    if (
-      (target.relayUrl &&
-        !relayUrlsMatch(credentials.relayUrl, target.relayUrl)) ||
-      (target.kind === "mount" &&
-        target.recipientEmail != null &&
-        credentials.email != null &&
-        credentials.email !== target.recipientEmail)
-    ) {
-      return null;
-    }
-    return { baseUrl: credentials.relayUrl, token: credentials.token };
-  },
-  pull: async (target, relay, input) =>
-    receivedShareEngine.relayFor({
-      engineWorkspaceId: target.storeWorkspaceId,
-      rootPath: target.rootPath,
-      relay,
-    }).pullShareView({
-      shareId: target.shareId,
-      grantedSelector: input.grantedSelector,
-      recordRefusals: input.recordRefusals,
-      recordCollisions: input.recordCollisions,
-      recordChangedPaths: input.recordChangedPaths,
-    }),
-  recordRefusals: async (target, refusals) => {
-    const recorder =
-      target.kind === "standalone"
-        ? createShareSkipRecorder({
-            current: () => findWorkspace(target.workspaceId)?.shareView,
-            persist: (next) => setWorkspaceShareView(target.workspaceId, next),
-          })
-        : createShareSkipRecorder({
-            current: () => {
-              const mounts = storedShareMounts(
-                findWorkspace(target.workspaceId) ?? {},
-              );
-              return shareMountRecordsForId(mounts, target.shareId)[0];
-            },
-            persist: (next) => {
-              const mounts = storedShareMounts(
-                findWorkspace(target.workspaceId) ?? {},
-              );
-              const matches = new Set(
-                shareMountRecordsForId(mounts, target.shareId),
-              );
-              setWorkspaceShareMounts(
-                target.workspaceId,
-                mounts.map((mount) => (matches.has(mount) ? next : mount)),
-              );
-            },
-          });
-    await recorder([...refusals]);
-  },
-  markEnded: async (target) => {
-    if (target.kind === "standalone") {
-      endWorkspaceShareView(target.workspaceId);
-      return;
-    }
-    const mounts = storedShareMounts(
-      findWorkspace(target.workspaceId) ?? {},
-    );
-    const matches = new Set(shareMountRecordsForId(mounts, target.shareId));
-    setWorkspaceShareMounts(
-      target.workspaceId,
-      mounts.map((mount) =>
-        matches.has(mount) ? { ...mount, ended: true } : mount,
+      return operation.state.shareViewFiles;
+    },
+    resolveTarget: (target) => {
+      if (target.workspaceId !== operation.workspace.workspaceId) return null;
+      return resolveRegisteredShareViewFilesTarget(currentWorkspace(), target);
+    },
+    openStore: (target) =>
+      shareViewFilesStore(
+        receivedShareEngine.storeFor({
+          engineWorkspaceId: target.storeWorkspaceId,
+          rootPath: target.rootPath,
+        }),
       ),
-    );
-  },
-  retireTarget: async (target) => {
-    await closeRelayTransportWorkspace(target.storeWorkspaceId).catch(
-      () => undefined,
-    );
-  },
-  assertProjectionRoot: async (target) => {
-    if (target.kind !== "mount") return;
-    if (!target.mountLabel) throw new Error("Share mount record has no label.");
-    await assertRealMountRoot(target.schedulingRootPath, target.mountLabel);
-  },
-  createMount: shareMountCommands.filesLifecycle.createMount,
-  removeMount: shareMountCommands.filesLifecycle.removeMount,
-});
+    resolveRelay: async (target) => {
+      await warmCredentialCache().catch(() => undefined);
+      const credentials = cachedCredentials;
+      if (!credentials?.relayUrl) {
+        if (target.kind === "standalone") {
+          throw new Error("Sign in to dohc Cloud first.");
+        }
+        return null;
+      }
+      if (
+        (target.relayUrl &&
+          !relayUrlsMatch(credentials.relayUrl, target.relayUrl)) ||
+        (target.kind === "mount" &&
+          target.recipientEmail != null &&
+          credentials.email != null &&
+          credentials.email !== target.recipientEmail)
+      ) {
+        return null;
+      }
+      return { baseUrl: credentials.relayUrl, token: credentials.token };
+    },
+    pull: async (target, relay, input) =>
+      receivedShareEngine
+        .relayFor({
+          engineWorkspaceId: target.storeWorkspaceId,
+          rootPath: target.rootPath,
+          relay,
+        })
+        .pullShareView({
+          shareId: target.shareId,
+          grantedSelector: input.grantedSelector,
+          recordRefusals: input.recordRefusals,
+          recordCollisions: input.recordCollisions,
+          recordChangedPaths: input.recordChangedPaths,
+        }),
+    recordRefusals: async (target, refusals) => {
+      const recorder =
+        target.kind === "standalone"
+          ? createShareSkipRecorder({
+              current: () => currentWorkspace().shareView,
+              persist: (next) => {
+                assertCurrent();
+                setWorkspaceShareView(target.workspaceId, next);
+              },
+            })
+          : createShareSkipRecorder({
+              current: () => {
+                const mounts = storedShareMounts(currentWorkspace());
+                return shareMountRecordsForId(mounts, target.shareId)[0];
+              },
+              persist: (next) => {
+                const mounts = storedShareMounts(currentWorkspace());
+                const matches = new Set(
+                  shareMountRecordsForId(mounts, target.shareId),
+                );
+                assertCurrent();
+                setWorkspaceShareMounts(
+                  target.workspaceId,
+                  mounts.map((mount) => (matches.has(mount) ? next : mount)),
+                );
+              },
+            });
+      await recorder([...refusals]);
+    },
+    markEnded: async (target) => {
+      assertCurrent();
+      if (target.kind === "standalone") {
+        endWorkspaceShareView(target.workspaceId);
+        return;
+      }
+      const mounts = storedShareMounts(currentWorkspace());
+      const matches = new Set(shareMountRecordsForId(mounts, target.shareId));
+      assertCurrent();
+      setWorkspaceShareMounts(
+        target.workspaceId,
+        mounts.map((mount) =>
+          matches.has(mount) ? { ...mount, ended: true } : mount,
+        ),
+      );
+    },
+    retireTarget: async (target) => {
+      await closeRelayTransportWorkspace(target.storeWorkspaceId).catch(
+        () => undefined,
+      );
+    },
+    assertProjectionRoot: async (target) => {
+      if (target.kind !== "mount") return;
+      if (!target.mountLabel) {
+        throw new Error("Share mount record has no label.");
+      }
+      await assertRealMountRoot(target.schedulingRootPath, target.mountLabel);
+    },
+    createMount: (owner, target) => {
+      assertCurrent();
+      return operation.state.shareMountCommands.filesLifecycle.createMount(
+        owner,
+        target,
+      );
+    },
+    removeMount: (owner, target) => {
+      assertCurrent();
+      return operation.state.shareMountCommands.filesLifecycle.removeMount(
+        owner,
+        target,
+      );
+    },
+  });
+}
+
+function withShareViewFilesOperation<Result>(
+  target: ShareViewFilesTarget,
+  work: (files: ShareViewFiles) => Promise<Result>,
+): Promise<Result> {
+  return withPhysicalWorkspaceOperation(target.workspaceId, (operation) =>
+    work(createShareViewFilesForOperation(operation)),
+  );
+}
+
+shareViewFiles = {
+  mount: (lease, target) =>
+    withShareViewFilesOperation(target, (files) => files.mount(lease, target)),
+  change: (lease, target, change) =>
+    withShareViewFilesOperation(target, (files) =>
+      files.change(lease, target, change),
+    ),
+  read: (target, request) =>
+    withShareViewFilesOperation(target, (files) => files.read(target, request)),
+  list: (target) =>
+    withShareViewFilesOperation(target, (files) => files.list(target)),
+  projectionStatus: (target) =>
+    withShareViewFilesOperation(target, (files) =>
+      files.projectionStatus(target),
+    ),
+  reconcile: (lease, target, request) =>
+    withShareViewFilesOperation(target, (files) =>
+      files.reconcile(lease, target, request),
+    ),
+  unmount: (lease, target) =>
+    withShareViewFilesOperation(target, (files) =>
+      files.unmount(lease, target),
+    ),
+};
 const workspaceFileMutations = createWorkspaceFileMutationOwner({
   assertTrustedSender,
   withWorkspaceAuthority: (workspaceId, work) =>
@@ -4939,13 +5142,15 @@ const ensureOwnedProjectionTargetCurrent =
   createOwnedProjectionRepairer(shareViewFiles);
 
 async function shareViewFilesTargetForPath(
-  workspace: NonNullable<ReturnType<typeof findWorkspace>>,
+  workspace: { workspaceId: string },
   relativePath: string,
 ): Promise<{ target: ShareViewFilesTarget; path: string } | null> {
-  return createOwnedWorkspaceFileReader({
-    workspace,
-    files: shareViewFiles,
-  }).resolveShare(relativePath);
+  return withPhysicalWorkspaceOperation(workspace.workspaceId, (operation) =>
+    createOwnedWorkspaceFileReader({
+      workspace: operation.workspace,
+      files: shareViewFiles,
+    }).resolveShare(relativePath),
+  );
 }
 
 // Share-backed reads answer from the engine share store, and a restored
@@ -4962,7 +5167,16 @@ const gatedShareViewFileReads: Pick<ShareViewFiles, "read"> = {
 };
 
 async function readOwnedWorkspaceText(
-  workspace: NonNullable<ReturnType<typeof findWorkspace>>,
+  workspace: { workspaceId: string },
+  relativePath: string,
+) {
+  return withPhysicalWorkspaceOperation(workspace.workspaceId, (operation) =>
+    readOwnedWorkspaceTextFor(operation.workspace, relativePath),
+  );
+}
+
+function readOwnedWorkspaceTextFor(
+  workspace: RegistryEntry & { readonly attachmentId: symbol },
   relativePath: string,
 ) {
   return createOwnedWorkspaceFileReader({
@@ -4972,7 +5186,16 @@ async function readOwnedWorkspaceText(
 }
 
 async function readOwnedWorkspaceAsset(
-  workspace: NonNullable<ReturnType<typeof findWorkspace>>,
+  workspace: { workspaceId: string },
+  relativePath: string,
+) {
+  return withPhysicalWorkspaceOperation(workspace.workspaceId, (operation) =>
+    readOwnedWorkspaceAssetFor(operation.workspace, relativePath),
+  );
+}
+
+function readOwnedWorkspaceAssetFor(
+  workspace: RegistryEntry & { readonly attachmentId: symbol },
   relativePath: string,
 ) {
   return createOwnedWorkspaceFileReader({
@@ -4981,8 +5204,8 @@ async function readOwnedWorkspaceAsset(
   }).readAsset(relativePath);
 }
 
-async function listOwnedWorkspaceFiles(
-  workspace: NonNullable<ReturnType<typeof findWorkspace>>,
+async function listOwnedWorkspaceFilesFor(
+  workspace: RegistryEntry & { readonly attachmentId: symbol },
 ) {
   if (shareViewIsPresent(workspace.shareView)) {
     // The shell lists at mount, which can precede the daemon handshake now
@@ -5019,13 +5242,19 @@ async function listOwnedWorkspaceFiles(
   });
 }
 
-function ownedWorkspaceReads(
-  workspace: NonNullable<ReturnType<typeof findWorkspace>>,
+function listOwnedWorkspaceFiles(workspace: { workspaceId: string }) {
+  return withPhysicalWorkspaceOperation(workspace.workspaceId, (operation) =>
+    listOwnedWorkspaceFilesFor(operation.workspace),
+  );
+}
+
+function ownedWorkspaceReadsFor(
+  workspace: RegistryEntry & { readonly attachmentId: symbol },
 ) {
   return createOwnedWorkspaceSdkReads({
     workspace,
     files: shareViewFiles,
-    listFiles: () => listOwnedWorkspaceFiles(workspace),
+    listFiles: () => listOwnedWorkspaceFilesFor(workspace),
     repairProjection: (target) =>
       ensureOwnedProjectionTargetCurrent({
         rootPath: workspace.rootPath,
@@ -5040,11 +5269,11 @@ function ownedWorkspaceReads(
 }
 
 const workspaceSearchOwner = new WorkspaceSearchOwner<
-  NonNullable<ReturnType<typeof findWorkspace>>
+  RegistryEntry & { readonly attachmentId: symbol }
 >({
   searchRegistry: createSearchRegistry({ rgPath }),
   prepareOwnedSearch: async (workspace) =>
-    await ownedWorkspaceReads(workspace).prepareSearch(),
+    await ownedWorkspaceReadsFor(workspace).prepareSearch(),
   engineCaptureFor: (workspaceId) => activity.engineCaptureFor(workspaceId),
   queryEngine: createWorkspaceSearchDaemonQuery(
     () => rustEngineWorkspaceSessions,
@@ -5083,7 +5312,7 @@ const rendererWorkspaceSessions: RendererWorkspaceSessionOwner<WebContents> =
   });
 
 const ownedSiteCatalog = createOwnedSiteCatalog({
-  reads: ownedWorkspaceReads,
+  reads: ownedWorkspaceReadsFor,
 });
 
 function ownedWorkspaceGraphSource(
@@ -5176,14 +5405,19 @@ async function collectOwnedZipEntries(
 }
 
 async function ensureOwnedProjectionCurrent(
-  workspace: NonNullable<ReturnType<typeof findWorkspace>>,
+  workspace: { workspaceId: string },
   relativePath: string,
 ): Promise<void> {
-  const routed = await shareViewFilesTargetForPath(workspace, relativePath);
-  if (routed === null) return;
-  await ensureOwnedProjectionTargetCurrent({
-    rootPath: workspace.rootPath,
-    target: routed.target,
+  await withPhysicalWorkspaceOperation(workspace.workspaceId, async (operation) => {
+    const routed = await createOwnedWorkspaceFileReader({
+      workspace: operation.workspace,
+      files: shareViewFiles,
+    }).resolveShare(relativePath);
+    if (routed === null) return;
+    await ensureOwnedProjectionTargetCurrent({
+      rootPath: operation.workspace.rootPath,
+      target: routed.target,
+    });
   });
 }
 
@@ -5276,7 +5510,7 @@ app.on("will-quit", (event) => {
   // leaves it: its update exists only in the canonical in-memory Y.Doc, so
   // abandoning that retry would discard the edit (codex P1).
   rustEngineWorkspaceSessions?.beginShutdown();
-  workspaceSearchOwner.dispose();
+  const searchStop = workspaceSearchOwner.dispose().catch(() => undefined);
   // Here, not at before-quit: every window has closed, so every beforeunload
   // has had its chance to veto and this quit is now certain (#579 review,
   // r19). Fire-and-forget — skip locks and do not await async stops so
@@ -5296,6 +5530,7 @@ app.on("will-quit", (event) => {
   const engineYDocStop = closeAllEngineYDocSessions();
   const captureStop = engineYDocStop
       .then(() => chatDispatchStop)
+      .then(() => searchStop)
       .then(() => agentIntegrationStop)
       .then(() => pluginStop)
       .then(() => workspaceAuthorityStop);
@@ -5312,6 +5547,7 @@ app.on("will-quit", (event) => {
       pluginStop,
       cliServerStop,
       chatDispatchStop,
+      searchStop,
       agentIntegrationStop,
       captureStop,
       rustEngineStop,
@@ -5482,54 +5718,54 @@ const senderWorkspaceAuthority = {
     return event.sender;
   },
 
-  requireActiveWorkspace(
+  withActiveWorkspace<Result>(
     sender: WebContents,
     workspaceId: string,
     subject: string,
-    action = "try again",
-  ) {
-    const workspace = requireWorkspace(workspaceId);
-    const session = rendererWorkspaceSessions.current(sender);
-    assertActiveWorkspaceForSite(
-      session?.workspaceId,
-      workspace.workspaceId,
-      subject,
-      action,
+    work: (workspace: CreatedWorkspace) => Promise<Result>,
+  ): Promise<Result> {
+    return withRendererWorkspaceOperation(
+      sender,
+      workspaceId,
+      `The ${subject} does not target the active workspace. Open the workspace and try again.`,
+      (operation) => work(operation.workspace),
     );
-    return workspace;
   },
 };
 
 const sitePreviewSenderWorkspaceAuthority = {
   requireTrustedSender: senderWorkspaceAuthority.requireTrustedSender,
-  requireActiveWorkspace(
+  withActiveWorkspace<Result>(
     sender: WebContents,
     workspaceId: string,
     subject: string,
     action: string,
-  ) {
-    const workspace = senderWorkspaceAuthority.requireActiveWorkspace(
+    work: (input: {
+      workspace: CreatedWorkspace;
+      session: { isCurrent(): boolean };
+    }) => Promise<Result>,
+  ): Promise<Result> {
+    return withRendererWorkspaceOperation(
       sender,
       workspaceId,
-      subject,
-      action,
+      `The ${subject} does not target the active workspace. Open the workspace and ${action}.`,
+      (operation) =>
+        work({
+          workspace: operation.workspace,
+          session: {
+            isCurrent: () => {
+              try {
+                operation.assertCurrent();
+                return true;
+              } catch {
+                return false;
+              }
+            },
+          },
+        }),
     );
-    const session = rendererWorkspaceSessions.current(sender);
-    if (!session) throw new Error(`${subject} has no active renderer session.`);
-    return { workspace, session };
   },
 };
-
-function requireAuthorizedWorkspace(
-  event: IpcMainInvokeEvent,
-  workspaceId: string,
-) {
-  assertTrustedSender(event);
-  // Desktop authorization is main-process owned: the renderer may name a
-  // workspace, but only registered workspaces in this local profile resolve,
-  // and workspaceAssets re-checks filesystem containment before reading.
-  return requireWorkspace(workspaceId);
-}
 
 // Injectable clock/id seams (oracle/tests) for renderer-initiated database
 // edits, whose nowMs becomes appliedAt (and createId the operationId) in the
@@ -5703,9 +5939,14 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.listWorkspaceFiles, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListWorkspaceFilesPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    return ListWorkspaceFilesResult.parse(
-      await listOwnedWorkspaceFiles(workspace),
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "File listing stopped because this window changed workspaces.",
+      async (operation) =>
+        ListWorkspaceFilesResult.parse(
+          await listOwnedWorkspaceFilesFor(operation.workspace),
+        ),
     );
   });
 
@@ -5720,12 +5961,14 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.exportWorkspaceZip, async (event, payload) => {
     assertTrustedSender(event);
     const input = ExportWorkspaceZipPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
     // Gather + bound BEFORE asking where to save: an over-limit export
     // refuses without ever showing a dialog.
-    const { entries, baseName } = await collectOwnedZipEntries(
-      workspace,
-      input.relativePath,
+    const { entries, baseName } = await withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Export stopped because this window changed workspaces.",
+      (operation) =>
+        collectOwnedZipEntries(operation.workspace, input.relativePath),
     );
     // Test seam (DOHC_TEST_PICK_PATH precedent): native save dialogs cannot
     // be driven by Playwright. Read per-invoke so a spec can repoint it.
@@ -5886,15 +6129,23 @@ function registerIpcHandlers(
     });
 
     if (chosen === "open-externally" && input.path) {
-      // Containment before the OS sees the path (resolveWorkspaceFile:
-      // validate + realpath + inside-root), same rule as openFileExternally.
-      await ensureOwnedProjectionCurrent(workspace, input.path);
-      const { realTarget } = await resolveWorkspaceFile(
-        workspace.rootPath,
-        input.path,
-        "read",
+      await withRendererWorkspaceOperation(
+        event.sender,
+        input.workspaceId,
+        "External file open stopped because this window changed workspaces.",
+        async (operation) => {
+          // Containment before the OS sees the path (resolveWorkspaceFile:
+          // validate + realpath + inside-root), same rule as openFileExternally.
+          await ensureOwnedProjectionCurrent(operation.workspace, input.path!);
+          const { realTarget } = await resolveWorkspaceFile(
+            operation.workspace.rootPath,
+            input.path!,
+            "read",
+          );
+          operation.assertCurrent();
+          shell.showItemInFolder(realTarget);
+        },
       );
-      shell.showItemInFolder(realTarget);
     }
     return ShowExplorerMenuResult.parse(chosen);
   });
@@ -6055,9 +6306,18 @@ function registerIpcHandlers(
   // the equivalent assertTrustedSender + requireWorkspace steps separate.
   ipcMain.handle(CHANNELS.readWorkspaceText, async (event, payload) => {
     const input = ReadWorkspaceTextPayload.parse(payload);
-    const workspace = requireAuthorizedWorkspace(event, input.workspaceId);
-    return ReadWorkspaceTextResult.parse(
-      await readOwnedWorkspaceText(workspace, input.relativePath),
+    assertTrustedSender(event);
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "File read stopped because this window changed workspaces.",
+      async (operation) =>
+        ReadWorkspaceTextResult.parse(
+          await readOwnedWorkspaceTextFor(
+            operation.workspace,
+            input.relativePath,
+          ),
+        ),
     );
   });
 
@@ -6126,18 +6386,28 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.openFileExternally, async (event, payload) => {
     assertTrustedSender(event);
     const input = OpenFileExternallyPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    // Resolve+contain first: only a real file inside the workspace can be
-    // handed to the OS opener — never an arbitrary path or URL. window.open
-    // remains fully denied; this is the only sanctioned external-open path.
-    await ensureOwnedProjectionCurrent(workspace, input.relativePath);
-    const { realTarget } = await resolveWorkspaceFile(
-      workspace.rootPath,
-      input.relativePath,
-      "read",
+    await withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "External file open stopped because this window changed workspaces.",
+      async (operation) => {
+        // Resolve+contain first: only a real file inside the workspace can be
+        // handed to the OS opener — never an arbitrary path or URL. window.open
+        // remains fully denied; this is the only sanctioned external-open path.
+        await ensureOwnedProjectionCurrent(
+          operation.workspace,
+          input.relativePath,
+        );
+        const { realTarget } = await resolveWorkspaceFile(
+          operation.workspace.rootPath,
+          input.relativePath,
+          "read",
+        );
+        operation.assertCurrent();
+        const error = await shell.openPath(realTarget);
+        if (error) throw new Error(error);
+      },
     );
-    const error = await shell.openPath(realTarget);
-    if (error) throw new Error(error);
   });
 
   ipcMain.handle(CHANNELS.readWorkspaceGraph, async (event, payload) => {
@@ -7584,71 +7854,86 @@ function registerIpcHandlers(
 
   ipcMain.handle(CHANNELS.refreshSharedView, async (event, payload) => {
     assertTrustedSender(event);
-    // The shell's on-open auto-refresh can run during the daemon handshake
-    // now that the window loads during it; the reconcile needs sessions.
-    await engineDaemonStartup;
     const input = RefreshSharedViewPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    if (!shareViewIsPresent(workspace.shareView)) {
-      throw new Error("This workspace is not a shared view.");
-    }
-    if (!workspace.shareView) {
-      throw new Error(
-        "This shared view's record is damaged, so it can't refresh safely. Remove it, then open the share code again.",
-      );
-    }
-    // #646 PR2: the backstop this share's chat push docstring claims. A push
-    // that failed — offline, a rotated session, a relay blip — is retried
-    // here, before the pull, so a refresh drains the backlog instead of
-    // leaving it until the recipient happens to write again.
-    // Before the push, because the push needs the identity this writes. A
-    // share view opened before #646 PR3-1 has none, and this is where it gains
-    // one.
-    if (!workspace.shareView.ended) {
-      await recordShareViewIdentity(workspace).catch((error) => {
-        console.error("[desktop] share view enrolment:", error);
-      });
-      await pushShareViewChat(workspace).catch((error) => {
-        console.error("[desktop] share view chat push (refresh backstop):", error);
-      });
-    }
-    let outcome;
-    try {
-      const reconciled = await withStaleSensitiveWorkspaceOperation(
-        workspace.rootPath,
-        (lease) =>
-          shareViewFiles.reconcile(
-            lease,
-            { kind: "standalone", workspaceId: workspace.workspaceId },
-            "refresh",
-          ),
-      );
-      if (reconciled.kind !== "refresh") {
-        throw new Error("Shared view refresh returned an invalid result.");
-      }
-      outcome = reconciled.outcome;
-    } catch (error) {
-      // A pull that failed on a later page still persisted the refusals its
-      // earlier pages recorded, so the renderer is told once here too.
-      notifyRenderer({ workspaceId: workspace.workspaceId });
-      // A damaged pin does not heal on the next try, and re-asking the relay
-      // for one would let it restate a wider scope. Say so instead of
-      // reporting "refreshed, nothing new" forever.
-      if (error instanceof SharePinInvalidError) {
-        throw new Error(
-          "This shared view's record is damaged, so it can't refresh safely. " +
-            "Remove it, then open the share code again.",
-        );
-      }
-      throw error;
-    }
-    if ("ok" in outcome && !outcome.ok) {
-      notifyRenderer({ workspaceId: workspace.workspaceId });
-      return RefreshSharedViewResult.parse(outcome);
-    }
-    if (outcome.status === "ended") refreshNativeWorkspaceSurfaces();
-    notifyRenderer({ workspaceId: workspace.workspaceId });
-    return RefreshSharedViewResult.parse(outcome);
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Shared view refresh stopped because this window changed workspaces.",
+      async (operation) => {
+        // The shell's on-open auto-refresh can run during the daemon handshake
+        // now that the window loads during it; the reconcile needs sessions. The
+        // physical operation is already held before this wait begins.
+        await engineDaemonStartup;
+        operation.assertCurrent();
+        const workspace = operation.workspace;
+        if (!shareViewIsPresent(workspace.shareView)) {
+          throw new Error("This workspace is not a shared view.");
+        }
+        if (!workspace.shareView) {
+          throw new Error(
+            "This shared view's record is damaged, so it can't refresh safely. Remove it, then open the share code again.",
+          );
+        }
+        // #646 PR2: the backstop this share's chat push docstring claims. A push
+        // that failed — offline, a rotated session, a relay blip — is retried
+        // here, before the pull, so a refresh drains the backlog instead of
+        // leaving it until the recipient happens to write again.
+        // Before the push, because the push needs the identity this writes. A
+        // share view opened before #646 PR3-1 has none, and this is where it gains
+        // one.
+        if (!workspace.shareView.ended) {
+          await recordShareViewIdentity(workspace).catch((error) => {
+            console.error("[desktop] share view enrolment:", error);
+          });
+          await pushShareViewChat(workspace).catch((error) => {
+            console.error(
+              "[desktop] share view chat push (refresh backstop):",
+              error,
+            );
+          });
+        }
+        let outcome;
+        try {
+          const reconciled = await withStaleSensitiveWorkspaceOperation(
+            workspace.rootPath,
+            (lease) =>
+              shareViewFiles.reconcile(
+                lease,
+                { kind: "standalone", workspaceId: workspace.workspaceId },
+                "refresh",
+              ),
+          );
+          if (reconciled.kind !== "refresh") {
+            throw new Error("Shared view refresh returned an invalid result.");
+          }
+          outcome = reconciled.outcome;
+        } catch (error) {
+          operation.assertCurrent();
+          // A pull that failed on a later page still persisted the refusals its
+          // earlier pages recorded, so the renderer is told once here too.
+          notifyRenderer({ workspaceId: workspace.workspaceId });
+          // A damaged pin does not heal on the next try, and re-asking the relay
+          // for one would let it restate a wider scope. Say so instead of
+          // reporting "refreshed, nothing new" forever.
+          if (error instanceof SharePinInvalidError) {
+            throw new Error(
+              "This shared view's record is damaged, so it can't refresh safely. " +
+                "Remove it, then open the share code again.",
+            );
+          }
+          throw error;
+        }
+        if ("ok" in outcome && !outcome.ok) {
+          operation.assertCurrent();
+          notifyRenderer({ workspaceId: workspace.workspaceId });
+          return RefreshSharedViewResult.parse(outcome);
+        }
+        operation.assertCurrent();
+        if (outcome.status === "ended") refreshNativeWorkspaceSurfaces();
+        notifyRenderer({ workspaceId: workspace.workspaceId });
+        return RefreshSharedViewResult.parse(outcome);
+      },
+    );
   });
 
   // ---- Share mounts ----
@@ -7661,15 +7946,7 @@ function registerIpcHandlers(
   // host's history or its synced copy.
 
   registerShareMountIpcHandlers({
-    // Every mount lane reaches the engine store, and the shell's on-open
-    // refresh can run during the daemon handshake — without this gate the
-    // reconcile throw is classified "unchanged" and the pull silently waits
-    // for the next poll.
-    registerHandler: (channel, handler) =>
-      ipcMain.handle(channel, async (event, payload) => {
-        await engineDaemonStartup;
-        return handler(event, payload);
-      }),
+    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     assertTrustedSender,
     requireWorkspace,
     assertWritableWorkspace,
@@ -7679,9 +7956,16 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.readWorkspaceDatabase, async (event, payload) => {
     assertTrustedSender(event);
     const input = ReadWorkspaceDatabasePayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    return DatabaseSnapshotResult.parse(
-      await ownedWorkspaceReads(workspace).readDatabase(input.relativePath),
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Database read stopped because this window changed workspaces.",
+      async (operation) =>
+        DatabaseSnapshotResult.parse(
+          await ownedWorkspaceReadsFor(operation.workspace).readDatabase(
+            input.relativePath,
+          ),
+        ),
     );
   });
 
@@ -7705,16 +7989,22 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.importToDatabase, async (event, payload) => {
     assertTrustedSender(event);
     const input = ImportToDatabasePayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    assertWritableWorkspace(workspace);
-    return ImportToDatabaseResult.parse(
-      await importOwnedWorkspaceDatabase({
-        workspace,
-        files: shareViewFiles,
-        sourcePath: input.sourceRelativePath,
-        databasePath: input.databaseRelativePath,
-        tableName: input.tableName,
-      }),
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Database import stopped because this window changed workspaces.",
+      async (operation) => {
+        assertWritableWorkspace(operation.workspace);
+        return ImportToDatabaseResult.parse(
+          await importOwnedWorkspaceDatabase({
+            workspace: operation.workspace,
+            files: shareViewFiles,
+            sourcePath: input.sourceRelativePath,
+            databasePath: input.databaseRelativePath,
+            tableName: input.tableName,
+          }),
+        );
+      },
     );
   });
 
@@ -7737,29 +8027,41 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.getSitePreviewLogs, async (event, payload) => {
     assertTrustedSender(event);
     const input = GetSitePreviewLogsPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    if (
-      rendererWorkspaceSessions.current(event.sender)?.workspaceId !==
-      workspace.workspaceId
-    ) {
-      throw new Error(
-        "The Site preview logs request does not target the active workspace. Open the workspace and try again.",
-      );
-    }
-    const status = sitePreviews.status(workspace.workspaceId, input.siteRoot);
-    return GetSitePreviewLogsResult.parse(status);
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "The Site preview logs request does not target the active workspace. Open the workspace and try again.",
+      (operation) =>
+        GetSitePreviewLogsResult.parse(
+          operation.state.sitePreviews.status(
+            operation.workspace.workspaceId,
+            input.siteRoot,
+          ),
+        ),
+    );
   });
 
   ipcMain.handle(CHANNELS.stopSitePreview, async (event, payload) => {
     assertTrustedSender(event);
     const input = StopSitePreviewPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    await sitePreviews.stop({
-      getActiveWorkspaceId: () =>
-        rendererWorkspaceSessions.current(event.sender)?.workspaceId,
-      workspaceId: workspace.workspaceId,
-      siteRoot: input.siteRoot,
-    });
+    await withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "The Site preview stop request does not target the active workspace. Open the workspace and try again.",
+      (operation) =>
+        operation.state.sitePreviews.stop({
+          getActiveWorkspaceId: () => {
+            try {
+              operation.assertCurrent();
+              return operation.workspace.workspaceId;
+            } catch {
+              return undefined;
+            }
+          },
+          workspaceId: operation.workspace.workspaceId,
+          siteRoot: input.siteRoot,
+        }),
+    );
   });
 
   registerPluginIpcHandlers<
@@ -7776,17 +8078,28 @@ function registerIpcHandlers(
     assertTrustedSender,
     workspaces: {
       assertWritable: assertWritableWorkspace,
-      currentSession: (sender) => rendererWorkspaceSessions.current(sender),
-      requireActive: (sender, workspaceId, inactiveMessage) => {
-        const workspace = requireWorkspace(workspaceId);
-        const session = rendererWorkspaceSessions.current(sender);
-        if (!session || session.workspaceId !== workspace.workspaceId) {
-          throw new Error(inactiveMessage);
-        }
-        return { workspace, session };
-      },
-      withAuthority: (workspaceId, work) =>
-        workspaceAuthorities.withAuthority(workspaceId, work),
+      withActive: (sender, workspaceId, inactiveMessage, work) =>
+        withRendererWorkspaceOperation(
+          sender,
+          workspaceId,
+          inactiveMessage,
+          (operation) =>
+            work({
+              workspace: operation.workspace,
+              session: {
+                workspaceId: operation.session.workspaceId,
+                generation: operation.session.generation,
+                isCurrent: () => {
+                  try {
+                    operation.assertCurrent();
+                    return true;
+                  } catch {
+                    return false;
+                  }
+                },
+              },
+            }),
+        ),
     },
     runtimes: pluginWorkspaceRuntimes,
     surfaces: pluginSurfaces,
@@ -7803,40 +8116,50 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.openWorkspace, async (event, payload) => {
     assertTrustedSender(event);
     const input = OpenWorkspaceRequestPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    const rendererSession = await rendererWorkspaceSessions.open(
-      event.sender,
-      workspace.workspaceId,
-      input.rendererDocumentId,
-    );
-    preferredWorkspaceId = workspace.workspaceId;
-    refreshNativeWorkspaceSurfaces();
-    const status = SyncStatusResult.parse(
-      await syncStatusWithOwnedProjection(
+    return withPhysicalWorkspaceOperation(input.workspaceId, async (operation) => {
+      const workspace = operation.workspace;
+      const rendererSession = await rendererWorkspaceSessions.open(
+        event.sender,
         workspace,
-        await openWorkspaceActivity(workspace),
-      ),
-    );
-    // A later openWorkspace call can retire this lease while workspace
-    // activity opens. Do not warm a pipeline for a workspace this renderer no
-    // longer owns.
-    if (rendererSession.isCurrent() && !sharedViewOf(workspace.workspaceId)) {
-      // A plugin-pipeline start failure must not fail the whole handler —
-      // the workspace itself already opened. listPlugins and friends
-      // separately convert a failed plugin runtime warmup into a structured
-      // pluginIpcError; this is best-effort warmup, and the renderer's file
-      // tree must not wait on it (fire-and-forget, like the dispatch scan in
-      // openWorkspaceActivityWith).
-      void workspaceAuthorities.withAuthority(workspace.workspaceId, (lease) =>
-        pluginWorkspaceRuntimes.ensure(canonicalWorkspaceFor(lease)),
-      ).catch((error: unknown) => {
-        console.error(
-          `[desktop] plugin pipeline warmup failed for ${workspace.workspaceId}:`,
-          error,
+        input.rendererDocumentId,
+      );
+      preferredWorkspaceId = workspace.workspaceId;
+      refreshNativeWorkspaceSurfaces();
+      const status = SyncStatusResult.parse(
+        await syncStatusWithOwnedProjection(
+          workspace,
+          await openWorkspaceActivityForOperation(
+            operation,
+            {},
+            ensureWorkspaceActivityOpen,
+          ),
+        ),
+      );
+      operation.assertCurrent();
+      if (!rendererSession.isCurrent()) {
+        throw new Error(
+          "Workspace open stopped because this window changed workspaces.",
         );
-      });
-    }
-    return status;
+      }
+      if (!sharedViewOf(workspace.workspaceId)) {
+        // A plugin-pipeline start failure must not fail the whole handler —
+        // the workspace itself already opened. listPlugins and friends
+        // separately convert a failed plugin runtime warmup into a structured
+        // pluginIpcError; this is best-effort warmup, and the renderer's file
+        // tree must not wait on it (fire-and-forget, like the dispatch scan in
+        // openWorkspaceActivityWith).
+        void withPhysicalWorkspaceOperation(workspace.workspaceId, (warmup) => {
+          if (warmup.workspace.attachmentId !== workspace.attachmentId) return;
+          return warmup.state.pluginRuntimes.ensure(warmup.workspace);
+        }).catch((error: unknown) => {
+          console.error(
+            `[desktop] plugin pipeline warmup failed for ${workspace.workspaceId}:`,
+            error,
+          );
+        });
+      }
+      return status;
+    });
   });
 
   // Named versions (PR 0M-4). Every handler resolves the workspace through
@@ -10373,12 +10696,14 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.stopAgentRun, async (event, payload) => {
     assertTrustedSender(event);
     const input = StopAgentRunPayload.parse(payload);
-    senderWorkspaceAuthority.requireActiveWorkspace(
+    await senderWorkspaceAuthority.withActiveWorkspace(
       event.sender,
       input.workspaceId,
       "Agent run stop",
+      async () => {
+        await chatDispatchService.stopAgentRun(input.workspaceId, input.runId);
+      },
     );
-    await chatDispatchService.stopAgentRun(input.workspaceId, input.runId);
   });
 
   ipcMain.handle(CHANNELS.chatDispatchStateForThread, async (event, payload) => {
@@ -10552,27 +10877,36 @@ function registerIpcHandlers(
 
   registerWorkspaceSearchIpcHandlers<
     IpcMainInvokeEvent,
-    NonNullable<ReturnType<typeof findWorkspace>>
+    RegistryEntry & { readonly attachmentId: symbol }
   >({
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     assertTrustedSender,
-    authorizeWorkspace: (event, workspaceId) => {
-      const workspace = requireWorkspace(workspaceId);
-      const rendererSession = rendererWorkspaceSessions.current(event.sender);
-      const isCurrent = () =>
-        rendererSession?.workspaceId === workspace.workspaceId &&
-        rendererSession.isCurrent() &&
-        findWorkspace(workspace.workspaceId) === workspace;
-      if (!isCurrent()) {
-        throw new Error(
-          "Search stopped because this window changed workspaces. Search the open workspace instead.",
-        );
-      }
-      return { workspace, isCurrent };
-    },
+    withWorkspaceOperation: (event, workspaceId, work) =>
+      withRendererWorkspaceOperation(
+        event.sender,
+        workspaceId,
+        "Search stopped because this window changed workspaces. Search the open workspace instead.",
+        (operation) =>
+          work({
+            workspace: operation.workspace,
+            attachmentId: operation.workspace.attachmentId,
+            signal: operation.signal,
+            isCurrent: () => {
+              try {
+                operation.assertCurrent();
+                return true;
+              } catch {
+                return false;
+              }
+            },
+          }),
+      ),
     authorizeCancel: (event) =>
       rendererWorkspaceSessions.current(event.sender) !== undefined,
     owner: workspaceSearchOwner,
+    onActivityError: (error) => {
+      console.error("[desktop] workspace search activity:", error);
+    },
   });
 
   ipcMain.handle(CHANNELS.engineYDocOpen, async (event, payload) => {

@@ -19,6 +19,17 @@ export interface WorkspaceAuthorityLease<Workspace, State> {
   release(): void;
 }
 
+export type PhysicalWorkspace<Workspace> = Readonly<
+  Workspace & { readonly attachmentId: symbol; readonly rootPath: string }
+>;
+
+export interface WorkspaceAuthorityOperation<Workspace, State> {
+  readonly workspace: PhysicalWorkspace<Workspace>;
+  readonly state: State;
+  readonly signal: AbortSignal;
+  assertCurrent(): void;
+}
+
 export interface WorkspaceAuthorityOwnerOptions<
   Workspace extends { workspaceId: string; rootPath: string },
   State,
@@ -40,6 +51,7 @@ interface AuthorityRecord<Workspace, State> {
   held: number;
   retired: boolean;
   disposalStarted: boolean;
+  readonly retirement: AbortController;
   readonly drained: Promise<void>;
   readonly resolveDrained: () => void;
   readonly rejectDrained: (error: unknown) => void;
@@ -135,6 +147,7 @@ export function createWorkspaceAuthorityOwner<
   function retire(record: AuthorityRecord<Workspace, State>): void {
     if (record.retired) return;
     record.retired = true;
+    record.retirement.abort();
     dispose(record);
   }
 
@@ -174,6 +187,7 @@ export function createWorkspaceAuthorityOwner<
       held: 0,
       retired: false,
       disposalStarted: false,
+      retirement: new AbortController(),
       drained,
       resolveDrained,
       rejectDrained,
@@ -253,6 +267,28 @@ export function createWorkspaceAuthorityOwner<
       throw new Error("This work belongs to a retired workspace authority.");
     }
     return record;
+  }
+
+  function operationForLease(
+    lease: WorkspaceAuthorityLease<Workspace, State>,
+  ): WorkspaceAuthorityOperation<Workspace, State> {
+    lease.assertCurrent();
+    const record = recordForBinding(lease.binding);
+    const workspace = options.findWorkspace(lease.binding.workspaceId);
+    if (!workspace || !bindingMatchesWorkspace(lease.binding, workspace)) {
+      throw new Error("This work belongs to a retired workspace authority.");
+    }
+    const physicalWorkspace = Object.freeze({
+      ...workspace,
+      rootPath: lease.binding.canonicalRootPath,
+      attachmentId: lease.binding.attachmentId,
+    }) as PhysicalWorkspace<Workspace>;
+    return Object.freeze({
+      workspace: physicalWorkspace,
+      state: lease.state,
+      signal: record.retirement.signal,
+      assertCurrent: () => lease.assertCurrent(),
+    });
   }
 
   function prepareWorkspaceIdentity(
@@ -483,6 +519,27 @@ export function createWorkspaceAuthorityOwner<
       const lease = this.acquireBinding(binding);
       try {
         return Promise.resolve(work(lease)).finally(() => lease.release());
+      } catch (error) {
+        lease.release();
+        return Promise.reject(error);
+      }
+    },
+
+    withOperation<Result>(
+      workspaceId: string,
+      work: (
+        operation: WorkspaceAuthorityOperation<Workspace, State>,
+      ) => Result | Promise<Result>,
+    ): Promise<Result> {
+      const lease = this.acquire(workspaceId);
+      try {
+        const operation = operationForLease(lease);
+        return Promise.resolve(work(operation))
+          .then((result) => {
+            operation.assertCurrent();
+            return result;
+          })
+          .finally(() => lease.release());
       } catch (error) {
         lease.release();
         return Promise.reject(error);

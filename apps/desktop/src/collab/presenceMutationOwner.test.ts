@@ -24,6 +24,15 @@ function sender(id: number) {
 }
 
 type TestSender = ReturnType<typeof sender>;
+const attachments = new Map<string, symbol>();
+function physical(workspaceId: string) {
+  let attachmentId = attachments.get(workspaceId);
+  if (!attachmentId) {
+    attachmentId = Symbol(workspaceId);
+    attachments.set(workspaceId, attachmentId);
+  }
+  return { workspaceId, attachmentId };
+}
 const OLD_INCARNATION = "123e4567-e89b-42d3-a456-426614174001";
 const NEW_INCARNATION = "123e4567-e89b-42d3-a456-426614174002";
 
@@ -41,7 +50,7 @@ describe("PresenceMutationOwner", () => {
     const presence = new PresenceMutationOwner<TestSender>();
     const sessions = sessionOwner(presence);
     const webContents = sender(7);
-    const first = await sessions.open(webContents, "workspace-a", "document-1");
+    const first = await sessions.open(webContents, physical("workspace-a"), "document-1");
     const publishDrain = deferred();
     const leaveDrain = deferred();
     const publish = vi.fn(async () => {
@@ -58,7 +67,7 @@ describe("PresenceMutationOwner", () => {
     await vi.waitFor(() => expect(publish).toHaveBeenCalledOnce());
     const replacementOpen = sessions.open(
       webContents,
-      "workspace-b",
+      physical("workspace-b"),
       "document-1",
     );
 
@@ -83,7 +92,7 @@ describe("PresenceMutationOwner", () => {
     const presence = new PresenceMutationOwner<TestSender>();
     const sessions = sessionOwner(presence);
     const webContents = sender(7);
-    const first = await sessions.open(webContents, "workspace-a", "document-1");
+    const first = await sessions.open(webContents, physical("workspace-a"), "document-1");
     const publishDrain = deferred();
     const leaveDrain = deferred();
     const oldLeave = vi.fn(async () => {
@@ -114,11 +123,11 @@ describe("PresenceMutationOwner", () => {
 
     const reload = sessions.retireForReload(webContents, "document-1");
     const staleOpen = sessions
-      .open(webContents, "workspace-a", "document-1")
+      .open(webContents, physical("workspace-a"), "document-1")
       .catch((error: unknown) => error);
     const replacementOpen = sessions.open(
       webContents,
-      "workspace-a",
+      physical("workspace-a"),
       "document-2",
     );
     publishDrain.resolve();
@@ -154,7 +163,7 @@ describe("PresenceMutationOwner", () => {
   it("serializes an explicit leave behind its in-flight publish", async () => {
     const presence = new PresenceMutationOwner<TestSender>();
     const sessions = sessionOwner(presence);
-    const active = await sessions.open(sender(7), "workspace-a", "document-1");
+    const active = await sessions.open(sender(7), physical("workspace-a"), "document-1");
     const publishDrain = deferred();
     const order: string[] = [];
     const leave = vi.fn(async () => {
@@ -190,7 +199,7 @@ describe("PresenceMutationOwner", () => {
   it("drops an old leave queued before a replacement publish claims the key", async () => {
     const presence = new PresenceMutationOwner<TestSender>();
     const sessions = sessionOwner(presence);
-    const active = await sessions.open(sender(7), "workspace-a", "document-1");
+    const active = await sessions.open(sender(7), physical("workspace-a"), "document-1");
     const oldPublishDrain = deferred();
     const oldLeave = vi.fn(async () => undefined);
     const runOldPublish = vi.fn(async () => {
@@ -245,7 +254,7 @@ describe("PresenceMutationOwner", () => {
     const oldSender = sender(7);
     const oldSession = await sessions.open(
       oldSender,
-      "workspace-a",
+      physical("workspace-a"),
       "document-1",
     );
     const retryDrain = deferred();
@@ -264,12 +273,12 @@ describe("PresenceMutationOwner", () => {
 
     const firstSuccessor = await sessions.open(
       sender(8),
-      "workspace-b",
+      physical("workspace-b"),
       "document-2",
     );
     const secondSuccessor = await sessions.open(
       sender(9),
-      "workspace-b",
+      physical("workspace-b"),
       "document-3",
     );
     const firstPublish = vi.fn(async () => "first");
@@ -297,7 +306,7 @@ describe("PresenceMutationOwner", () => {
     expire();
     const thirdSuccessor = await sessions.open(
       sender(10),
-      "workspace-b",
+      physical("workspace-b"),
       "document-4",
     );
     const thirdPublish = vi.fn(async () => "third");
@@ -333,7 +342,7 @@ describe("PresenceMutationOwner", () => {
     const oldSender = sender(7);
     const oldSession = await sessions.open(
       oldSender,
-      "workspace-a",
+      physical("workspace-a"),
       "document-1",
     );
     const oldLeave = vi.fn(async () => {
@@ -351,7 +360,7 @@ describe("PresenceMutationOwner", () => {
     expire();
     const successor = await sessions.open(
       sender(8),
-      "workspace-a",
+      physical("workspace-a"),
       "document-2",
     );
     await expect(
