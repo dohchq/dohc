@@ -60,7 +60,10 @@ function harness(input: { capture: boolean; rootPath: string }) {
           request,
           allowPath: options.allowPath ?? (() => true),
         });
-        return { settled: new Promise<void>(() => undefined) };
+        return {
+          settled: new Promise<void>(() => undefined),
+          cancel: async () => undefined,
+        };
       },
       cancel: vi.fn(),
       disposeOwner: vi.fn(),
@@ -113,10 +116,17 @@ describe("ShareViewFiles workspace search wiring", () => {
         rgPath: "/unused",
         start: (options) => {
           emit.push(options.onBatch);
+          const settled = Promise.withResolvers<void>();
+          let wasKilled = false;
           return {
             searchId: options.searchId,
-            kill: () => killed.push(options.searchId),
-            settled: new Promise<void>(() => undefined),
+            kill: () => {
+              if (wasKilled) return;
+              wasKilled = true;
+              killed.push(options.searchId);
+              settled.resolve();
+            },
+            settled: settled.promise,
           };
         },
       }),
@@ -146,8 +156,8 @@ describe("ShareViewFiles workspace search wiring", () => {
       },
     );
 
-    owner.disposeSender(sender.id);
-    owner.disposeSender(sender.id);
+    await owner.disposeSender(sender.id);
+    await owner.disposeSender(sender.id);
     await owner.start(
       sender,
       {

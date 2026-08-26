@@ -216,13 +216,17 @@ class StructuredPluginFailure {
   constructor(readonly result: unknown) {}
 }
 
-function preserveStructuredPluginFailure(result: unknown): unknown {
+function preserveStructuredPluginFailure(
+  result: unknown,
+  isCurrent: () => boolean,
+): unknown {
   if (
     typeof result === "object" &&
     result !== null &&
     "ok" in result &&
     result.ok === false
   ) {
+    if (!isCurrent()) throw new Error(DEFAULT_INACTIVE_MESSAGE);
     throw new StructuredPluginFailure(result);
   }
   return result;
@@ -262,6 +266,7 @@ export function registerPluginIpcHandlers<
             async (active) =>
               preserveStructuredPluginFailure(
                 await handler(event, payload, active),
+                () => active.session.isCurrent(),
               ),
           )
           .catch((error: unknown) => {

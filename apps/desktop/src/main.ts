@@ -267,6 +267,7 @@ import { createPresencePollRegistry } from "./collab/presencePollRegistry";
 import { PresenceMutationOwner } from "./collab/presenceMutationOwner";
 import { createDesktopRendererWorkspaceRetirement } from "./mainRendererWorkspaceRetirement";
 import { RendererWorkspaceSessionOwner } from "./window/rendererWorkspaceSessionOwner";
+import { createExactRendererWorkspaceReferenceOwner } from "./window/exactRendererWorkspaceReference";
 import { desktopMarks } from "./performance/desktopMarks";
 import { launchMarks, logLaunchMarksOnce } from "./performance/launchMarks";
 import {
@@ -354,9 +355,11 @@ import {
   assertShareProposalGranter,
   requireShareViewMembership,
   requireShareViewProposalScope,
+  sameShareViewProposalScope,
   shareProposalOpPath,
   type ShareViewProposalScope,
 } from "./workspaces/shareProposals";
+import { createShareProposalOperationScope } from "./workspaces/shareProposalOperationScope";
 import { pathShareLanes } from "./workspaces/relayShareLanes";
 import {
   workspaceSummariesFrom,
@@ -478,7 +481,6 @@ import {
   SharedFileReadOnlyError,
   type RelayWorkspaceBootstrapResult,
   type ShareProposal,
-  type ShareProposalSummary,
   type ShareProposalOp,
   type ShareViewRefusal,
   type SyncRelayConnection,
@@ -5321,17 +5323,31 @@ const rendererWorkspaceSessions: RendererWorkspaceSessionOwner<WebContents> =
     },
   });
 
+const exactRendererWorkspaceReferences =
+  createExactRendererWorkspaceReferenceOwner<
+    WebContents,
+    DesktopRendererWorkspaceOperation["workspace"],
+    DesktopRendererWorkspaceOperation
+  >((sender, workspaceId, inactiveMessage, work) =>
+    withRendererWorkspaceOperation(
+      sender,
+      workspaceId,
+      inactiveMessage,
+      work,
+    ),
+  );
+
 const ownedSiteCatalog = createOwnedSiteCatalog({
   reads: ownedWorkspaceReadsFor,
 });
 
 function ownedWorkspaceGraphSource(
-  workspace: NonNullable<ReturnType<typeof findWorkspace>>,
+  workspace: RegistryEntry & { readonly attachmentId: symbol },
 ) {
   if (!workspaceHasReceivedShareState(workspace)) return undefined;
   return {
-    list: () => listOwnedWorkspaceFiles(workspace),
-    readText: (path: string) => readOwnedWorkspaceText(workspace, path),
+    list: () => listOwnedWorkspaceFilesFor(workspace),
+    readText: (path: string) => readOwnedWorkspaceTextFor(workspace, path),
   };
 }
 
@@ -6068,7 +6084,45 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.showExplorerMenu, async (event, payload) => {
     assertTrustedSender(event);
     const input = ShowExplorerMenuPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
+    const inactiveMessage =
+      "Explorer action stopped because this window changed workspaces.";
+    const workspaceReference = await exactRendererWorkspaceReferences.capture(
+      event.sender,
+      input.workspaceId,
+      inactiveMessage,
+    );
+    const menuContext = await exactRendererWorkspaceReferences.withReference(
+      event.sender,
+      workspaceReference,
+      inactiveMessage,
+      (operation) => {
+        const registryEntry = operation.workspace;
+        const shareView = sharedViewOf(registryEntry.workspaceId);
+        const isSharedView = shareView !== null;
+        const isMountPath =
+          !isSharedView && !!input.path && isSharedWithMePath(input.path);
+        const mountForPath = isMountPath
+          ? (() => {
+              const mounts = storedShareMounts(registryEntry);
+              return mounts
+                .filter((mount) => usableShareMountRecord(mounts, mount))
+                .find(
+                  (mount) => input.path === `shared-with-me/${mount.label}`,
+                );
+            })()
+          : undefined;
+        return {
+          shareView,
+          isMountPath,
+          hasMountRecord: mountForPath !== undefined,
+          canShare:
+            !isSharedView &&
+            !isMountPath &&
+            !!registryEntry.remote &&
+            input.kind !== "root",
+        };
+      },
+    );
 
     const chosen = await new Promise<ExplorerMenuCommand | null>((resolve) => {
       // Test seam (DOHC_TEST_PICK_PATH precedent): a NATIVE menu cannot be
@@ -6096,35 +6150,19 @@ function registerIpcHandlers(
       // The menu's shape is decided by `explorerMenuEntries`, where it can be
       // driven at every level; main owns only the Electron plumbing. main
       // still owns the MENU, so a renderer cannot add an item back.
-      const registryEntry = findWorkspace(input.workspaceId);
-      const shareView = sharedViewOf(input.workspaceId);
-      const isSharedView = shareView !== null;
       // Share-mount paths (shared-with-me/…) are a read-only projection of
       // someone else's files. The mount root itself (shared-with-me/<label>
       // with a matching mount record) additionally offers refresh and removal.
-      const isMountPath =
-        !isSharedView && !!input.path && isSharedWithMePath(input.path);
-      const mountForPath = isMountPath
-        ? (() => {
-            const mounts = storedShareMounts(registryEntry ?? {});
-            return mounts
-              .filter((mount) => usableShareMountRecord(mounts, mount))
-              .find(
-                (mount) => input.path === `shared-with-me/${mount.label}`,
-              );
-          })()
-        : undefined;
       const template: Electron.MenuItemConstructorOptions[] = explorerMenuEntries({
         kind: input.kind,
         pinned: input.pinned === true,
-        isMountPath,
-        hasMountRecord: mountForPath !== undefined,
+        isMountPath: menuContext.isMountPath,
+        hasMountRecord: menuContext.hasMountRecord,
         // Sharing onward is offered nowhere in a share view or a mount:
         // someone else's files are not this account's to grant, and a share
         // needs a relay-side workspace to grant from.
-        canShare:
-          !isSharedView && !isMountPath && !!registryEntry?.remote && input.kind !== "root",
-        shareView,
+        canShare: menuContext.canShare,
+        shareView: menuContext.shareView,
       }).map((entry) =>
         entry.kind === "separator" ? { type: "separator" as const } : item(entry.label, entry.id),
       );
@@ -6138,12 +6176,12 @@ function registerIpcHandlers(
       });
     });
 
-    if (chosen === "open-externally" && input.path) {
-      await withRendererWorkspaceOperation(
-        event.sender,
-        input.workspaceId,
-        "External file open stopped because this window changed workspaces.",
-        async (operation) => {
+    return exactRendererWorkspaceReferences.withReference(
+      event.sender,
+      workspaceReference,
+      inactiveMessage,
+      async (operation) => {
+        if (chosen === "open-externally" && input.path) {
           // Containment before the OS sees the path (resolveWorkspaceFile:
           // validate + realpath + inside-root), same rule as openFileExternally.
           await ensureOwnedProjectionCurrent(operation.workspace, input.path!);
@@ -6154,16 +6192,22 @@ function registerIpcHandlers(
           );
           operation.assertCurrent();
           shell.showItemInFolder(realTarget);
-        },
-      );
-    }
-    return ShowExplorerMenuResult.parse(chosen);
+        }
+        return ShowExplorerMenuResult.parse(chosen);
+      },
+    );
   });
 
   ipcMain.handle(CHANNELS.showWorkbenchMenu, async (event, payload) => {
     assertTrustedSender(event);
     const input = ShowWorkbenchMenuPayload.parse(payload);
-    requireWorkspace(input.workspaceId);
+    const inactiveMessage =
+      "Workbench menu stopped because this window changed workspaces.";
+    const workspaceReference = await exactRendererWorkspaceReferences.capture(
+      event.sender,
+      input.workspaceId,
+      inactiveMessage,
+    );
 
     const chosen = await new Promise<WorkbenchMenuCommand | null>((resolve) => {
       if (process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged) {
@@ -6233,56 +6277,65 @@ function registerIpcHandlers(
       });
     });
 
-    return ShowWorkbenchMenuResult.parse(chosen);
+    return exactRendererWorkspaceReferences.withReference(
+      event.sender,
+      workspaceReference,
+      inactiveMessage,
+      () => ShowWorkbenchMenuResult.parse(chosen),
+    );
   });
 
   ipcMain.handle(CHANNELS.importWorkspaceFiles, async (event, payload) => {
     assertTrustedSender(event);
     const input = ImportWorkspaceFilesPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    const shareView = sharedViewOf(workspace.workspaceId);
-    if (shareView === null) assertWritableWorkspace(workspace);
     const importInto = (
+      operation: DesktopRendererWorkspaceOperation,
       absolutePaths: string[],
       screenAgainstRoots: string[] | null,
-    ) =>
-      withStaleSensitiveWorkspaceOperation(workspace.rootPath, async (lease) => {
-        if (shareView === null) {
-          const currentWorkspace =
-            findWorkspace(workspace.workspaceId) ?? workspace;
-          await refuseImportIntoShareProjection(
-            workspace.rootPath,
-            input.targetDir,
-            storedShareMounts(currentWorkspace),
-            shareMountRegistryIsPresent(currentWorkspace),
-          );
-          return screenAgainstRoots === null
-            ? copyIntoWorkspace(
-                workspace.rootPath,
-                absolutePaths,
-                input.targetDir,
-              )
-            : importDroppedPaths(
-                workspace.rootPath,
+    ) => {
+      const workspace = operation.workspace;
+      return withStaleSensitiveWorkspaceOperation(
+        workspace.rootPath,
+        async (lease) => {
+          const currentWorkspace = operation.workspace;
+          const isShareView = shareViewIsPresent(currentWorkspace.shareView);
+          if (!isShareView) {
+            assertWritableWorkspace(currentWorkspace);
+            await refuseImportIntoShareProjection(
+              workspace.rootPath,
+              input.targetDir,
+              storedShareMounts(currentWorkspace),
+              shareMountRegistryIsPresent(currentWorkspace),
+            );
+            return screenAgainstRoots === null
+              ? copyIntoWorkspace(
+                  workspace.rootPath,
+                  absolutePaths,
+                  input.targetDir,
+                )
+              : importDroppedPaths(
+                  workspace.rootPath,
+                  absolutePaths,
+                  screenAgainstRoots,
+                  input.targetDir,
+                );
+          }
+          return shareViewImportResult(
+            workspace.workspaceId,
+            await shareViewFiles.change(
+              lease,
+              { kind: "standalone", workspaceId: workspace.workspaceId },
+              {
+                kind: "import",
                 absolutePaths,
                 screenAgainstRoots,
-                input.targetDir,
-              );
-        }
-        return shareViewImportResult(
-          workspace.workspaceId,
-          await shareViewFiles.change(
-            lease,
-            { kind: "standalone", workspaceId: workspace.workspaceId },
-            {
-              kind: "import",
-              absolutePaths,
-              screenAgainstRoots,
-              targetDir: input.targetDir,
-            },
-          ),
-        );
-      });
+                targetDir: input.targetDir,
+              },
+            ),
+          );
+        },
+      );
+    };
     // OS drag-in path: renderer-supplied absolute paths (see the trust-delta
     // note on the payload) re-validated by the drag-in screen — regular
     // files only, never any registered workspace's .dohc metadata. The
@@ -6290,13 +6343,27 @@ function registerIpcHandlers(
     // (resolveImportDestination) before any copy.
     const droppedPaths = input.droppedPaths;
     if (droppedPaths !== undefined) {
-      return ImportWorkspaceFilesResult.parse(
-        await importInto(
-          droppedPaths,
-          listWorkspaces().map((ws) => ws.rootPath),
-        ),
+      return withRendererWorkspaceOperation(
+        event.sender,
+        input.workspaceId,
+        "File import stopped because this window changed workspaces.",
+        async (operation) =>
+          ImportWorkspaceFilesResult.parse(
+            await importInto(
+              operation,
+              droppedPaths,
+              listWorkspaces().map((ws) => ws.rootPath),
+            ),
+          ),
       );
     }
+    const inactiveMessage =
+      "File import stopped because this window changed workspaces.";
+    const workspaceReference = await exactRendererWorkspaceReferences.capture(
+      event.sender,
+      input.workspaceId,
+      inactiveMessage,
+    );
     const picked = testImportPaths();
     const result =
       picked === null
@@ -6305,10 +6372,17 @@ function registerIpcHandlers(
             title: "Import files into workspace",
           })
         : { canceled: false, filePaths: picked };
-    if (result.canceled) {
-      return ImportWorkspaceFilesResult.parse({ imported: [], skipped: 0 });
-    }
-    return ImportWorkspaceFilesResult.parse(await importInto(result.filePaths, null));
+    return exactRendererWorkspaceReferences.withReference(
+      event.sender,
+      workspaceReference,
+      inactiveMessage,
+      async (operation) =>
+        result.canceled
+          ? ImportWorkspaceFilesResult.parse({ imported: [], skipped: 0 })
+          : ImportWorkspaceFilesResult.parse(
+              await importInto(operation, result.filePaths, null),
+            ),
+    );
   });
 
   // Plugin SDK reads use the combined helper to make the main-process
@@ -6344,8 +6418,19 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.pickImageFiles, async (event, payload) => {
     assertTrustedSender(event);
     const input = PickImageFilesPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    assertWritableWorkspace(workspace);
+    const inactiveMessage =
+      "Image selection stopped because this window changed workspaces.";
+    const workspaceReference = await exactRendererWorkspaceReferences.capture(
+      event.sender,
+      input.workspaceId,
+      inactiveMessage,
+    );
+    await exactRendererWorkspaceReferences.withReference(
+      event.sender,
+      workspaceReference,
+      inactiveMessage,
+      (operation) => assertWritableWorkspace(operation.workspace),
+    );
 
     const seam = testAbsolutePaths("DOHC_TEST_PICK_IMAGE_PATHS", MAX_PICKED_IMAGES);
     let picked: string[];
@@ -6356,7 +6441,7 @@ function registerIpcHandlers(
         title: "Insert image",
         // The workspace directory — where a user's own images live — instead
         // of wherever the OS last happened to leave the dialog.
-        defaultPath: workspace.rootPath,
+        defaultPath: workspaceReference.canonicalRootPath,
         properties: ["openFile", "multiSelections"],
         filters: [
           {
@@ -6368,29 +6453,41 @@ function registerIpcHandlers(
       picked = result.canceled ? [] : result.filePaths;
     }
 
-    const { readFile, stat } = await import("node:fs/promises");
-    const files: PickImageFilesResult["files"] = [];
-    for (const path of picked.slice(0, MAX_PICKED_IMAGES)) {
-      try {
-        const info = await stat(path);
-        // Oversize picks are refused the same QUIET way paste refuses them:
-        // skipped with a warning, never a thrown dialog in the user's face.
-        if (!info.isFile() || info.size === 0 || info.size > WRITE_ASSET_MAX_BYTES) {
-          console.warn(
-            `[desktop] skipping picked image "${path}" (${info.size} bytes; max ${WRITE_ASSET_MAX_BYTES}).`,
-          );
-          continue;
+    return exactRendererWorkspaceReferences.withReference(
+      event.sender,
+      workspaceReference,
+      inactiveMessage,
+      async (operation) => {
+        assertWritableWorkspace(operation.workspace);
+        const { readFile, stat } = await import("node:fs/promises");
+        const files: PickImageFilesResult["files"] = [];
+        for (const path of picked.slice(0, MAX_PICKED_IMAGES)) {
+          try {
+            const info = await stat(path);
+            // Oversize picks are refused the same QUIET way paste refuses them:
+            // skipped with a warning, never a thrown dialog in the user's face.
+            if (
+              !info.isFile() ||
+              info.size === 0 ||
+              info.size > WRITE_ASSET_MAX_BYTES
+            ) {
+              console.warn(
+                `[desktop] skipping picked image "${path}" (${info.size} bytes; max ${WRITE_ASSET_MAX_BYTES}).`,
+              );
+              continue;
+            }
+            files.push({
+              name: basename(path),
+              mediaType: mediaTypeForExtension(path),
+              bytes: new Uint8Array(await readFile(path)),
+            });
+          } catch (error) {
+            console.warn(`[desktop] could not read picked image "${path}":`, error);
+          }
         }
-        files.push({
-          name: basename(path),
-          mediaType: mediaTypeForExtension(path),
-          bytes: new Uint8Array(await readFile(path)),
-        });
-      } catch (error) {
-        console.warn(`[desktop] could not read picked image "${path}":`, error);
-      }
-    }
-    return PickImageFilesResult.parse({ files });
+        return PickImageFilesResult.parse({ files });
+      },
+    );
   });
 
   ipcMain.handle(CHANNELS.openFileExternally, async (event, payload) => {
@@ -6423,16 +6520,21 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.readWorkspaceGraph, async (event, payload) => {
     assertTrustedSender(event);
     const input = ReadWorkspaceGraphPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    const graph = await readWorkspaceGraph(
-      workspace.rootPath,
-      ownedWorkspaceGraphSource(workspace),
-    );
-    if (!input.includeChatMentions) return WorkspaceGraphResult.parse(graph);
-    const { workspace: engineWorkspace } = await requireEngineCapture(
+    return withRendererWorkspaceOperation(
+      event.sender,
       input.workspaceId,
-      "Chat mentions",
-    );
+      "Workspace graph read stopped because this window changed workspaces.",
+      async (operation) => {
+        const workspace = operation.workspace;
+        const graph = await readWorkspaceGraph(
+          workspace.rootPath,
+          ownedWorkspaceGraphSource(workspace),
+        );
+        if (!input.includeChatMentions) return WorkspaceGraphResult.parse(graph);
+        const { workspace: engineWorkspace } = await requireEngineCapture(
+          workspace.workspaceId,
+          "Chat mentions",
+        );
     const rowsUncovered = await syncWorkspaceSharedChannels(
       engineWorkspace.workspaceId,
     );
@@ -6521,7 +6623,7 @@ function registerIpcHandlers(
         .filter((node) => node.kind === "file")
         .map((node) => [node.id, node.path] as const),
     );
-    return WorkspaceGraphResult.parse({
+        return WorkspaceGraphResult.parse({
       ...(rowsUncovered > 0 ? { sharedChannelRowsUncovered: rowsUncovered } : {}),
       ...overlaid,
       nodes: overlaid.nodes.map((node) =>
@@ -6569,30 +6671,46 @@ function registerIpcHandlers(
         target: filePathsById.get(edge.target) ?? edge.target,
         kind: edge.kind,
       })),
-    });
+        });
+      },
+    );
   });
 
   ipcMain.handle(CHANNELS.getBacklinks, async (event, payload) => {
     assertTrustedSender(event);
     const input = GetBacklinksPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    return GetBacklinksResult.parse({
-      sources: await readWorkspaceBacklinks(
-        workspace.rootPath,
-        input.path,
-        ownedWorkspaceGraphSource(workspace),
-      ),
-    });
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Backlink read stopped because this window changed workspaces.",
+      async (operation) =>
+        GetBacklinksResult.parse({
+          sources: await readWorkspaceBacklinks(
+            operation.workspace.rootPath,
+            input.path,
+            ownedWorkspaceGraphSource(operation.workspace),
+          ),
+        }),
+    );
   });
 
   ipcMain.handle(CHANNELS.listWorkspaceHeadings, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListWorkspaceHeadingsPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    const source = await readOwnedWorkspaceText(workspace, input.path);
-    return ListWorkspaceHeadingsResult.parse({
-      headings: workspaceHeadingRecords(extractWorkspaceHeadings(source.text)),
-    });
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Heading read stopped because this window changed workspaces.",
+      async (operation) => {
+        const source = await readOwnedWorkspaceTextFor(
+          operation.workspace,
+          input.path,
+        );
+        return ListWorkspaceHeadingsResult.parse({
+          headings: workspaceHeadingRecords(extractWorkspaceHeadings(source.text)),
+        });
+      },
+    );
   });
 
   // The ONLY path from renderer to the OS browser (window.open is a pure
@@ -7363,26 +7481,98 @@ function registerIpcHandlers(
   // workspace; the registry answers which share that workspace is, and at
   // what level.
 
-  // The GRANTER lane's target. `remoteForWorkspace` already refuses an
-  // unsynced workspace, a signed-out session, and a session on the wrong
-  // account or server, so the only rule this adds is the lane split.
-  async function requireShareProposalGranter(workspaceId: string): Promise<{
+  interface ShareProposalGranterScope {
+    readonly workspaceId: string;
+    readonly attachmentId: symbol;
+    readonly rootPath: string;
     relay: SyncRelayConnection;
     remoteWorkspaceId: string;
-  }> {
-    assertShareProposalGranter(requireWorkspace(workspaceId).shareView);
-    const { remote, credentials } = await remoteForWorkspace(workspaceId);
-    if (!credentials.relayUrl) {
-      throw new Error("Reconnect dohc Cloud with a sync relay URL, then try again.");
-    }
-    return {
-      relay: {
-        baseUrl: normalizeServerUrl(credentials.relayUrl),
-        token: credentials.token,
-        fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
+    credentialGeneration: number;
+  }
+
+  function sameShareProposalGranterScope(
+    left: ShareProposalGranterScope,
+    right: ShareProposalGranterScope,
+  ): boolean {
+    return (
+      left.workspaceId === right.workspaceId &&
+      left.attachmentId === right.attachmentId &&
+      left.rootPath === right.rootPath &&
+      left.remoteWorkspaceId === right.remoteWorkspaceId &&
+      left.relay.baseUrl === right.relay.baseUrl &&
+      left.relay.token === right.relay.token &&
+      left.credentialGeneration === right.credentialGeneration
+    );
+  }
+
+  function withShareProposalGranterOperation<Result>(
+    sender: WebContents,
+    workspaceId: string,
+    work: (scope: {
+      resolve(): ShareProposalGranterScope;
+      assert(scope: ShareProposalGranterScope): void;
+      readText(path: string): ReturnType<typeof readOwnedWorkspaceTextFor>;
+      queueCloudSync(): void;
+    }) => Promise<Result>,
+  ): Promise<Result> {
+    return withRendererWorkspaceOperation(
+      sender,
+      workspaceId,
+      "Share changes stopped because this window changed workspaces.",
+      async (operation) => {
+        await warmCredentialCache();
+        operation.assertCurrent();
+        const resolve = (): ShareProposalGranterScope => {
+          operation.assertCurrent();
+          const workspace = operation.workspace;
+          assertShareProposalGranter(workspace.shareView);
+          const remote = workspace.remote;
+          if (!remote) throw new Error("Sync this workspace before sharing.");
+          const credentials = cachedCredentials;
+          if (!credentials) throw new Error("Sign in to dohc Cloud first.");
+          if (!workspaceRemoteMatchesCredentials(remote, credentials)) {
+            if (
+              normalizeServerUrl(credentials.serverUrl) !==
+              normalizeServerUrl(remote.serverUrl)
+            ) {
+              throw new Error("Sign in to the cloud server this workspace uses.");
+            }
+            throw new Error("Sign in to the account that synced this workspace.");
+          }
+          if (!credentials.relayUrl) {
+            throw new Error(
+              "Reconnect dohc Cloud with a sync relay URL, then try again.",
+            );
+          }
+          return {
+            workspaceId: workspace.workspaceId,
+            attachmentId: workspace.attachmentId,
+            rootPath: workspace.rootPath,
+            relay: {
+              baseUrl: normalizeServerUrl(credentials.relayUrl),
+              token: credentials.token,
+              fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
+            },
+            remoteWorkspaceId: remote.remoteWorkspaceId,
+            credentialGeneration: credentialCacheGeneration,
+          };
+        };
+        const scope = createShareProposalOperationScope({
+          resolve,
+          same: sameShareProposalGranterScope,
+          changedMessage:
+            "Share changes stopped because this workspace's cloud binding changed.",
+        });
+        return await work({
+          ...scope,
+          readText: (path) => readOwnedWorkspaceTextFor(operation.workspace, path),
+          queueCloudSync: () => {
+            operation.assertCurrent();
+            activity.queueCloudSync(operation.workspace.workspaceId);
+          },
+        });
       },
-      remoteWorkspaceId: remote.remoteWorkspaceId,
-    };
+    );
   }
 
   // The RECIPIENT lane's scope. The pinned grant and the share id come from
@@ -7394,18 +7584,37 @@ function registerIpcHandlers(
   // share's ORIGIN relay. The refresh SKIPS a session on another relay because
   // it runs on a cadence; this refuses, because a person pressed a button and
   // is owed an answer.
+  interface ShareProposalRecipientScope {
+    workspaceId: string;
+    attachmentId: symbol;
+    rootPath: string;
+    shareId: string;
+    grant: ShareViewSelector;
+    relay: SyncRelayConnection;
+    credentialGeneration: number;
+  }
+
   function withShareProposalRecipientOperation<Result>(
     sender: WebContents,
     workspaceId: string,
     resolveScope: (shareView: unknown) => ShareViewProposalScope,
     work: (scope: {
-      workspaceId: string;
-      rootPath: string;
-      shareId: string;
-      grant: ShareViewSelector;
-      relay: SyncRelayConnection;
+      resolve(): ShareProposalRecipientScope;
+      assert(scope: ShareProposalRecipientScope): void;
     }) => Promise<Result>,
   ): Promise<Result> {
+    const sameScope = (
+      left: ShareProposalRecipientScope,
+      right: ShareProposalRecipientScope,
+    ): boolean =>
+      left.workspaceId === right.workspaceId &&
+      left.attachmentId === right.attachmentId &&
+      left.rootPath === right.rootPath &&
+      left.shareId === right.shareId &&
+      sameShareViewProposalScope(left, right) &&
+      left.relay.baseUrl === right.relay.baseUrl &&
+      left.relay.token === right.relay.token &&
+      left.credentialGeneration === right.credentialGeneration;
     return withRendererWorkspaceOperation(
       sender,
       workspaceId,
@@ -7413,31 +7622,42 @@ function registerIpcHandlers(
       async (operation) => {
         await warmCredentialCache();
         operation.assertCurrent();
-        const workspace = operation.workspace;
-        const scope = resolveScope(workspace.shareView);
-        const credentials = cachedCredentials;
-        if (!credentials?.relayUrl) {
-          throw new Error("Sign in to dohc Cloud first.");
-        }
-        const shareRelayUrl = isRecordValue(workspace.shareView)
-          ? workspace.shareView.relayUrl
-          : undefined;
-        if (
-          typeof shareRelayUrl === "string" &&
-          !relayUrlsMatch(credentials.relayUrl, shareRelayUrl)
-        ) {
-          throw new Error("Sign in to the cloud server this share came from.");
-        }
-        return await work({
-          workspaceId: workspace.workspaceId,
-          rootPath: workspace.rootPath,
-          ...scope,
-          relay: {
-            baseUrl: normalizeServerUrl(credentials.relayUrl),
-            token: credentials.token,
-            fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
-          },
-        });
+        const resolve = (): ShareProposalRecipientScope => {
+          operation.assertCurrent();
+          const workspace = operation.workspace;
+          const proposalScope = resolveScope(workspace.shareView);
+          const credentials = cachedCredentials;
+          if (!credentials?.relayUrl) {
+            throw new Error("Sign in to dohc Cloud first.");
+          }
+          const shareRelayUrl = isRecordValue(workspace.shareView)
+            ? workspace.shareView.relayUrl
+            : undefined;
+          if (
+            typeof shareRelayUrl === "string" &&
+            !relayUrlsMatch(credentials.relayUrl, shareRelayUrl)
+          ) {
+            throw new Error("Sign in to the cloud server this share came from.");
+          }
+          return {
+            workspaceId: workspace.workspaceId,
+            attachmentId: workspace.attachmentId,
+            rootPath: workspace.rootPath,
+            ...proposalScope,
+            relay: {
+              baseUrl: normalizeServerUrl(credentials.relayUrl),
+              token: credentials.token,
+              fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
+            },
+            credentialGeneration: credentialCacheGeneration,
+          };
+        };
+        return await work(createShareProposalOperationScope({
+          resolve,
+          same: sameScope,
+          changedMessage:
+            "Share changes stopped because this shared view changed.",
+        }));
       },
     );
   }
@@ -7481,25 +7701,6 @@ function registerIpcHandlers(
     }
   }
 
-  // The proposals waiting on this granter, as SUMMARIES. Opening one review
-  // reads that proposal by id rather than this whole set.
-  async function openShareProposals(workspaceId: string): Promise<{
-    workspace: RegistryEntry;
-    target: { relay: SyncRelayConnection; remoteWorkspaceId: string };
-    proposals: ShareProposalSummary[];
-  }> {
-    const workspace = requireWorkspace(workspaceId);
-    const target = await requireShareProposalGranter(workspaceId);
-    return {
-      workspace,
-      target,
-      proposals: await listShareProposals({
-        relay: target.relay,
-        workspaceId: target.remoteWorkspaceId,
-      }),
-    };
-  }
-
   // The opened proposal's file rows, from ops that name a path. An op naming
   // none describes no file this surface can show, and is left out rather than
   // rendered as a blank row. Only the review builds these; the polled listing
@@ -7516,98 +7717,116 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.listShareProposals, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListShareProposalsPayload.parse(payload);
-    const { proposals } = await openShareProposals(input.workspaceId);
-    return ListShareProposalsResult.parse({
-      proposals: proposals.map((proposal) => ({
-        proposalId: proposal.proposalId,
-        shareId: proposal.shareId,
-        proposedByEmail: proposal.proposedByEmail,
-        createdAtMs: proposal.createdAtMs,
-        ops: proposal.ops,
-      })),
-    });
+    return withShareProposalGranterOperation(
+      event.sender,
+      input.workspaceId,
+      async (operation) => {
+        const scope = operation.resolve();
+        const proposals = await listShareProposals({
+          relay: scope.relay,
+          workspaceId: scope.remoteWorkspaceId,
+        });
+        operation.assert(scope);
+        return ListShareProposalsResult.parse({
+          proposals: proposals.map((proposal) => ({
+            proposalId: proposal.proposalId,
+            shareId: proposal.shareId,
+            proposedByEmail: proposal.proposedByEmail,
+            createdAtMs: proposal.createdAtMs,
+            ops: proposal.ops,
+          })),
+        });
+      },
+    );
   });
 
   ipcMain.handle(CHANNELS.readShareProposalChanges, async (event, payload) => {
     assertTrustedSender(event);
     const input = ReadShareProposalChangesPayload.parse(payload);
-    const target = await requireShareProposalGranter(input.workspaceId);
-    // ONE proposal, named. Reading the whole open set to find it made opening
-    // a review cost every other review's file rows as well.
-    const proposal = await readShareProposal({
-      relay: target.relay,
-      workspaceId: target.remoteWorkspaceId,
-      proposalId: input.proposalId,
-    });
-    // Metadata only. Content is fetched per file, when the granter opens it.
-    return ReadShareProposalChangesResult.parse({
-      proposedByEmail: proposal.proposedByEmail,
-      files: shareProposalFileRows(proposal).map(({ op, path }) => ({
-        opIndex: op.opIndex,
-        path,
-        operation: op.operation,
-        drifted: op.drifted,
-        afterByteLength: op.afterByteLength,
-      })),
-    });
+    return withShareProposalGranterOperation(
+      event.sender,
+      input.workspaceId,
+      async (operation) => {
+        const scope = operation.resolve();
+        const proposal = await readShareProposal({
+          relay: scope.relay,
+          workspaceId: scope.remoteWorkspaceId,
+          proposalId: input.proposalId,
+        });
+        operation.assert(scope);
+        return ReadShareProposalChangesResult.parse({
+          proposedByEmail: proposal.proposedByEmail,
+          files: shareProposalFileRows(proposal).map(({ op, path }) => ({
+            opIndex: op.opIndex,
+            path,
+            operation: op.operation,
+            drifted: op.drifted,
+            afterByteLength: op.afterByteLength,
+          })),
+        });
+      },
+    );
   });
 
   ipcMain.handle(CHANNELS.readShareProposalFileContent, async (event, payload) => {
     assertTrustedSender(event);
     const input = ReadShareProposalFileContentPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    const target = await requireShareProposalGranter(input.workspaceId);
-    // ONE op, resolved by the relay from ids this process holds. The renderer
-    // states a position, never a path — the granter's own files are what the
-    // local half of this read opens.
-    const op = await readShareProposalOp({
-      relay: target.relay,
-      workspaceId: target.remoteWorkspaceId,
-      proposalId: input.proposalId,
-      opIndex: input.opIndex,
-    });
-    // The two sides come from two different places on purpose: the granter's
-    // own file is read locally, at the path the granter holds it NOW, and the
-    // incoming side is the proposal's after-blob, which lives at the relay and
-    // has never touched this machine's files.
-    return ReadShareProposalFileContentResult.parse({
-      currentText:
-        op.currentPath === null
-          ? null
-          : await readOwnedWorkspaceText(workspace, op.currentPath).then(
-              (read) => (read.truncated ? null : read.text),
-              // A file this surface cannot read as text is "no current side",
-              // which the review states rather than failing.
-              () => null,
-            ),
-      incomingText: await shareProposalIncomingText(
-        target.relay,
-        target.remoteWorkspaceId,
-        op,
-      ),
-    });
+    return withShareProposalGranterOperation(
+      event.sender,
+      input.workspaceId,
+      async (operation) => {
+        const scope = operation.resolve();
+        const op = await readShareProposalOp({
+          relay: scope.relay,
+          workspaceId: scope.remoteWorkspaceId,
+          proposalId: input.proposalId,
+          opIndex: input.opIndex,
+        });
+        operation.assert(scope);
+        const currentText =
+          op.currentPath === null
+            ? null
+            : await operation.readText(op.currentPath).then(
+                (read) => (read.truncated ? null : read.text),
+                () => null,
+              );
+        operation.assert(scope);
+        const incomingText = await shareProposalIncomingText(
+          scope.relay,
+          scope.remoteWorkspaceId,
+          op,
+        );
+        operation.assert(scope);
+        return ReadShareProposalFileContentResult.parse({
+          currentText,
+          incomingText,
+        });
+      },
+    );
   });
 
   ipcMain.handle(CHANNELS.settleShareProposal, async (event, payload) => {
     assertTrustedSender(event);
     const input = SettleShareProposalPayload.parse(payload);
-    const target = await requireShareProposalGranter(input.workspaceId);
-    const settled = await settleShareProposal({
-      relay: target.relay,
-      workspaceId: target.remoteWorkspaceId,
-      proposalId: input.proposalId,
-      decision: input.decision,
-    });
-    if (settled.state !== "accepted" && settled.state !== "declined") {
-      // The relay answered with a state this decision cannot have produced —
-      // a withdraw that won the race, or a protocol this client does not
-      // speak. Either way the granter's screen must not claim it settled.
-      throw new Error("Those changes are no longer open. Refresh, then try again.");
-    }
-    // Accepted changes reach this workspace over the owner lane it already
-    // polls, so nudge that lane instead of applying anything here.
-    if (settled.state === "accepted") activity.queueCloudSync(input.workspaceId);
-    return SettleShareProposalResult.parse({ state: settled.state });
+    return withShareProposalGranterOperation(
+      event.sender,
+      input.workspaceId,
+      async (operation) => {
+        const scope = operation.resolve();
+        const settled = await settleShareProposal({
+          relay: scope.relay,
+          workspaceId: scope.remoteWorkspaceId,
+          proposalId: input.proposalId,
+          decision: input.decision,
+        });
+        operation.assert(scope);
+        if (settled.state !== "accepted" && settled.state !== "declined") {
+          throw new Error("Those changes are no longer open. Refresh, then try again.");
+        }
+        if (settled.state === "accepted") operation.queueCloudSync();
+        return SettleShareProposalResult.parse({ state: settled.state });
+      },
+    );
   });
 
   ipcMain.handle(CHANNELS.submitShareChanges, async (event, payload) => {
@@ -7618,16 +7837,22 @@ function registerIpcHandlers(
       event.sender,
       input.workspaceId,
       requireShareViewProposalScope,
-      async (scope) => {
+      async (operation) => {
+        const beforeReconcile = operation.resolve();
         const reconciled = await withStaleSensitiveWorkspaceOperation(
-          scope.rootPath,
+          beforeReconcile.rootPath,
           (lease) =>
             shareViewFiles.reconcile(
               lease,
-              { kind: "standalone", workspaceId: scope.workspaceId },
+              {
+                kind: "standalone",
+                workspaceId: beforeReconcile.workspaceId,
+              },
               "settle",
             ),
         );
+        operation.assert(beforeReconcile);
+        const scope = operation.resolve();
         if (reconciled.kind !== "settle") {
           throw new Error("Shared file settlement returned an invalid result.");
         }
@@ -7639,7 +7864,7 @@ function registerIpcHandlers(
         assertShareChangesJournalable(reconciled.unjournalablePaths);
         // The engine owns the submit: it reads this replica's own journal, so it
         // has to be the process holding the store.
-        return resolveSubmitShareChangesResult(
+        const result = await resolveSubmitShareChangesResult(
           reconciled.capturedPaths + reconciled.repairedPaths,
           () =>
             receivedShareEngine.relayFor({
@@ -7656,6 +7881,8 @@ function registerIpcHandlers(
               submitId: randomUUID(),
             }),
         );
+        operation.assert(scope);
+        return result;
       },
     );
   });
@@ -7669,11 +7896,13 @@ function registerIpcHandlers(
       event.sender,
       input.workspaceId,
       requireShareViewMembership,
-      async (scope) => {
+      async (operation) => {
+        const scope = operation.resolve();
         const proposals = await listMyShareProposals({
           relay: scope.relay,
           shareId: scope.shareId,
         });
+        operation.assert(scope);
         return ListMyShareChangesResult.parse({
           proposals: proposals.map((proposal) => ({
             proposalId: proposal.proposalId,
@@ -7694,12 +7923,14 @@ function registerIpcHandlers(
       event.sender,
       input.workspaceId,
       requireShareViewMembership,
-      async (scope) => {
+      async (operation) => {
+        const scope = operation.resolve();
         const settled = await withdrawShareProposal({
           relay: scope.relay,
           shareId: scope.shareId,
           proposalId: input.proposalId,
         });
+        operation.assert(scope);
         if (settled.state !== "withdrawn") {
           // The granter settled it first. Saying "withdrawn" here would tell the
           // recipient their changes are back when the granter already has them.
@@ -10837,27 +11068,45 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.getWorkspaceSettings, async (event, payload) => {
     assertTrustedSender(event);
     const input = WorkspaceSettingsPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    return WorkspaceSettingsResult.parse(
-      await readWorkspaceSettingsFile(workspace.rootPath),
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Workspace settings read stopped because this window changed workspaces.",
+      async (operation) =>
+        WorkspaceSettingsResult.parse(
+          await readWorkspaceSettingsFile(operation.workspace.rootPath),
+        ),
     );
   });
 
   ipcMain.handle(CHANNELS.setWorkspaceSettings, async (event, payload) => {
     assertTrustedSender(event);
     const input = SetWorkspaceSettingsPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    return WorkspaceSettingsResult.parse(
-      await saveWorkspaceSettingsFile(workspace.rootPath, input.patch),
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Workspace settings save stopped because this window changed workspaces.",
+      async (operation) =>
+        WorkspaceSettingsResult.parse(
+          await saveWorkspaceSettingsFile(
+            operation.workspace.rootPath,
+            input.patch,
+          ),
+        ),
     );
   });
 
   ipcMain.handle(CHANNELS.resetWorkspaceSettings, async (event, payload) => {
     assertTrustedSender(event);
     const input = WorkspaceSettingsPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    return WorkspaceSettingsResult.parse(
-      await resetWorkspaceSettingsFile(workspace.rootPath),
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Workspace settings reset stopped because this window changed workspaces.",
+      async (operation) =>
+        WorkspaceSettingsResult.parse(
+          await resetWorkspaceSettingsFile(operation.workspace.rootPath),
+        ),
     );
   });
 

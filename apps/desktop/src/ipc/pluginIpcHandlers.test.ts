@@ -566,7 +566,7 @@ describe("plugin IPC handlers", () => {
   });
 
   it.each([CHANNELS.listPlugins, CHANNELS.installPlugin])(
-    "keeps %s runtime failures structured when the workspace retires with them",
+    "rejects %s currentness failures even when a runtime catch makes them structured",
     async (channel) => {
       const harness = createHarness();
       const runtime = Promise.withResolvers<typeof harness.runtime>();
@@ -577,10 +577,9 @@ describe("plugin IPC handlers", () => {
       harness.state.generation += 1;
       runtime.reject(new Error("runtime unavailable"));
 
-      await expect(request).resolves.toMatchObject({
-        ok: false,
-        error: { code: "pipeline-unavailable" },
-      });
+      await expect(request).rejects.toThrow(
+        "does not target the active workspace",
+      );
     },
   );
 

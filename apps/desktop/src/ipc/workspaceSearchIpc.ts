@@ -75,7 +75,7 @@ export function registerWorkspaceSearchIpcHandlers<
       dependencies.assertTrustedSender(event);
       const input = CancelWorkspaceSearchPayload.parse(payload);
       if (!dependencies.authorizeCancel(event)) return;
-      dependencies.owner.cancel(event.sender.id, input.searchId);
+      return dependencies.owner.cancel(event.sender.id, input.searchId);
     },
   );
 }

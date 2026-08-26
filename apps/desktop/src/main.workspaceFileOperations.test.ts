@@ -64,5 +64,52 @@ describe("workspace file operation wiring", () => {
     const dialogAt = handler.indexOf("await dialog.showOpenDialog(");
     expect(dialogAt).toBeGreaterThan(importAt);
     expect(handler.lastIndexOf("await importInto(")).toBeGreaterThan(dialogAt);
+    expect(handler).toContain("exactRendererWorkspaceReferences.capture(");
+    expect(
+      handler.lastIndexOf("exactRendererWorkspaceReferences.withReference("),
+    ).toBeGreaterThan(dialogAt);
+    expect(handler.indexOf("withRendererWorkspaceOperation(")).toBeGreaterThan(-1);
+  });
+
+  it("holds modal picks and menu results to one exact renderer workspace", () => {
+    for (const channel of [
+      "pickImageFiles",
+      "showExplorerMenu",
+      "showWorkbenchMenu",
+    ]) {
+      const handler = handlerSource(channel);
+      const captureAt = handler.indexOf("exactRendererWorkspaceReferences.capture(");
+      const modalAt =
+        channel === "pickImageFiles"
+          ? handler.indexOf("await dialog.showOpenDialog(")
+          : channel === "showExplorerMenu"
+            ? handler.indexOf("await new Promise<ExplorerMenuCommand | null>")
+            : handler.indexOf("await new Promise<WorkbenchMenuCommand | null>");
+      const reacquireAt = handler.lastIndexOf(
+        "exactRendererWorkspaceReferences.withReference(",
+      );
+      expect(captureAt, channel).toBeGreaterThan(-1);
+      expect(modalAt, channel).toBeGreaterThan(captureAt);
+      expect(reacquireAt, channel).toBeGreaterThan(modalAt);
+    }
+  });
+
+  it("holds graph, heading, backlink, and settings I/O under renderer authority", () => {
+    const helpers = new Map([
+      ["readWorkspaceGraph", "readWorkspaceGraph("],
+      ["getBacklinks", "readWorkspaceBacklinks("],
+      ["listWorkspaceHeadings", "readOwnedWorkspaceTextFor("],
+      ["getWorkspaceSettings", "readWorkspaceSettingsFile("],
+      ["setWorkspaceSettings", "saveWorkspaceSettingsFile("],
+      ["resetWorkspaceSettings", "resetWorkspaceSettingsFile("],
+    ]);
+    for (const [channel, helper] of helpers) {
+      const handler = handlerSource(channel);
+      const operationAt = handler.indexOf("withRendererWorkspaceOperation(");
+      expect(operationAt, channel).toBeGreaterThan(-1);
+      expect(handler.indexOf(helper), channel).toBeGreaterThan(operationAt);
+      expect(handler, channel).toContain("operation.workspace");
+      expect(handler, channel).not.toContain("requireWorkspace(input.workspaceId)");
+    }
   });
 });

@@ -1,7 +1,7 @@
 import { rgPath } from "@vscode/ripgrep";
 import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import {
   buildRipgrepArgs,
   createSearchRegistry,
@@ -422,11 +422,20 @@ describe("createSearchRegistry", () => {
   });
 
   function fakeStart(killed: string[]): typeof startRipgrepSearch {
-    return (options) => ({
-      searchId: options.searchId,
-      settled: new Promise<void>(() => undefined),
-      kill: () => killed.push(options.searchId),
-    });
+    return (options) => {
+      const settled = Promise.withResolvers<void>();
+      let wasKilled = false;
+      return {
+        searchId: options.searchId,
+        settled: settled.promise,
+        kill: () => {
+          if (wasKilled) return;
+          wasKilled = true;
+          killed.push(options.searchId);
+          settled.resolve();
+        },
+      };
+    };
   }
 
   it("kills the previous search when an owner starts a new one", async () => {
@@ -436,6 +445,53 @@ describe("createSearchRegistry", () => {
     await registry.startSearch(1, root, "s1", { query: "a" }, () => {}, current());
     await registry.startSearch(1, root, "s2", { query: "b" }, () => {}, current());
     expect(killed).toEqual(["s1"]);
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("does not overwrite a killed child until that exact child settles", async () => {
+    const children: Array<{
+      searchId: string;
+      killed: boolean;
+      close(): void;
+    }> = [];
+    const registry = createSearchRegistry({
+      rgPath: "/unused",
+      start: (options) => {
+        const closed = Promise.withResolvers<void>();
+        const child = {
+          searchId: options.searchId,
+          killed: false,
+          close: () => closed.resolve(),
+        };
+        children.push(child);
+        return {
+          searchId: options.searchId,
+          settled: closed.promise,
+          kill: () => {
+            child.killed = true;
+          },
+        };
+      },
+    });
+    const root = await createTestScratch("dohc-reg-");
+    await registry.startSearch(1, root, "old", { query: "a" }, () => {}, current());
+
+    const replacement = registry.startSearch(
+      1,
+      root,
+      "new",
+      { query: "b" },
+      () => {},
+      current(),
+    );
+    await vi.waitFor(() => expect(children[0]?.killed).toBe(true));
+    expect(children.map((child) => child.searchId)).toEqual(["old"]);
+
+    children[0]!.close();
+    await replacement;
+    expect(children.map((child) => child.searchId)).toEqual(["old", "new"]);
+    children[1]!.close();
+    await registry.killAll();
     await rm(root, { recursive: true, force: true });
   });
 
@@ -523,10 +579,17 @@ describe("createSearchRegistry", () => {
         started += 1;
         const handleName = `handle-${started}`;
         batches.push(options.onBatch);
+        const settled = Promise.withResolvers<void>();
+        let wasKilled = false;
         return {
           searchId: options.searchId,
-          settled: new Promise<void>(() => undefined),
-          kill: () => killed.push(handleName),
+          settled: settled.promise,
+          kill: () => {
+            if (wasKilled) return;
+            wasKilled = true;
+            killed.push(handleName);
+            settled.resolve();
+          },
         };
       },
     });
@@ -540,7 +603,7 @@ describe("createSearchRegistry", () => {
       done: true,
       limitHit: false,
     });
-    registry.cancel(1, "same-id");
+    await registry.cancel(1, "same-id");
 
     expect(killed).toEqual(["handle-1", "handle-2"]);
     await rm(root, { recursive: true, force: true });
@@ -551,15 +614,15 @@ describe("createSearchRegistry", () => {
     const registry = createSearchRegistry({ rgPath: "/unused", start: fakeStart(killed) });
     const root = await createTestScratch("dohc-reg-");
     await registry.startSearch(1, root, "s1", { query: "a" }, () => {}, current());
-    registry.cancel(1, "wrong-id");
+    await registry.cancel(1, "wrong-id");
     expect(killed).toEqual([]);
-    registry.cancel(1, "s1");
+    await registry.cancel(1, "s1");
     expect(killed).toEqual(["s1"]);
     await registry.startSearch(2, root, "s3", { query: "c" }, () => {}, current());
-    registry.disposeOwner(2);
+    await registry.disposeOwner(2);
     expect(killed).toEqual(["s1", "s3"]);
     await registry.startSearch(3, root, "s4", { query: "d" }, () => {}, current());
-    registry.killAll();
+    await registry.killAll();
     expect(killed).toEqual(["s1", "s3", "s4"]);
     await rm(root, { recursive: true, force: true });
   });

@@ -866,9 +866,13 @@ describe("main-process chat authorization", () => {
   // own answer, and that main does not re-spell a level beside it.
   it("builds a shared view's explorer menu from the one rule, not from a level of its own", () => {
     const handler = handlerSource("showExplorerMenu");
-    expect(handler).toContain("const shareView = sharedViewOf(input.workspaceId);");
+    expect(handler).toContain(
+      "const shareView = sharedViewOf(registryEntry.workspaceId);",
+    );
     expect(handler).toContain("explorerMenuEntries({");
-    expect(handler).toContain("shareView,");
+    expect(handler).toContain("shareView: menuContext.shareView,");
+    expect(handler).toContain("exactRendererWorkspaceReferences.capture(");
+    expect(handler).toContain("exactRendererWorkspaceReferences.withReference(");
     expect(
       handler,
       "MUTATION: a second copy of the level rule in main is a copy that drifts",
@@ -919,7 +923,7 @@ describe("main-process chat authorization", () => {
     // projection of its engine store, so a write here would leave content no
     // moment states. The next pull would overwrite it.
     const rawDiskWriters = [
-      ["pickImageFiles", "workspace"],
+      ["pickImageFiles", "operation.workspace"],
       ["applyDatabaseEdit", "operation.workspace"],
       ["importToDatabase", "operation.workspace"],
     ] as const;
@@ -952,7 +956,8 @@ describe("main-process chat authorization", () => {
     expect(
       routedImport,
       "MUTATION: an unrouted share view takes the blanket refusal and its write never becomes a change",
-    ).toContain("if (shareView === null) assertWritableWorkspace(workspace);");
+    ).toContain("if (!isShareView) {");
+    expect(routedImport).toContain("assertWritableWorkspace(currentWorkspace);");
     expect(routedImport).toContain("await shareViewFiles.change(");
     expect(routedImport).toContain('kind: "import"');
     expect(routedImport).not.toContain(
@@ -989,26 +994,18 @@ describe("main-process chat authorization", () => {
     const granterLane = [
       "listShareProposals",
       "readShareProposalChanges",
+      "readShareProposalFileContent",
       "settleShareProposal",
     ];
     for (const channel of granterLane) {
       const handler = handlerSource(channel);
-      // Directly, or through the one reader both review surfaces share —
-      // which is itself pinned to the granter gate below.
-      expect(
-        handler.includes("await requireShareProposalGranter(") ||
-          handler.includes("await openShareProposals("),
-        channel,
-      ).toBe(true);
+      expect(handler, channel).toContain("withShareProposalGranterOperation(");
       expect(handler, `${channel}: a share view is never the granter`).not.toContain(
         "withShareProposalRecipientOperation(",
       );
     }
-    const openAt = mainSource.indexOf("async function openShareProposals(");
-    expect(
-      mainSource.slice(openAt, openAt + 700),
-      "MUTATION: the shared reader is where two granter surfaces would lose their gate together",
-    ).toContain("await requireShareProposalGranter(workspaceId)");
+    expect(mainSource).not.toContain("function requireShareProposalGranter(");
+    expect(mainSource).not.toContain("function openShareProposals(");
 
     const recipientLane = ["submitShareChanges", "listMyShareChanges", "withdrawShareChanges"];
     for (const channel of recipientLane) {
@@ -1017,7 +1014,9 @@ describe("main-process chat authorization", () => {
       expect(handler, `${channel}: shareId: input.` ).not.toContain("shareId: input.");
     }
 
-    const granterAt = mainSource.indexOf("async function requireShareProposalGranter(");
+    const granterAt = mainSource.indexOf(
+      "function withShareProposalGranterOperation<Result>(",
+    );
     const granter = mainSource.slice(
       granterAt,
       mainSource.indexOf(
@@ -1028,7 +1027,7 @@ describe("main-process chat authorization", () => {
     expect(
       granter,
       "MUTATION: a share view accepting its own changes writes into someone else's workspace",
-    ).toContain("assertShareProposalGranter(requireWorkspace(workspaceId).shareView)");
+    ).toContain("assertShareProposalGranter(workspace.shareView)");
 
     // Which rule each recipient channel asks for. Sending needs the edit
     // level; seeing and taking back what was already sent need membership
@@ -1052,7 +1051,7 @@ describe("main-process chat authorization", () => {
       "MUTATION: submitting without a final disk capture drops edits made after the last refresh",
     ).toContain("const reconciled = await withStaleSensitiveWorkspaceOperation(");
     expect(submit).toContain("shareViewFiles.reconcile(");
-    expect(submit).toContain('{ kind: "standalone", workspaceId: scope.workspaceId },');
+    expect(submit).toContain("workspaceId: beforeReconcile.workspaceId,");
     expect(submit).toContain('"settle",');
     const schedulerAt = submit.indexOf(
       "const reconciled = await withStaleSensitiveWorkspaceOperation(",
@@ -1071,7 +1070,9 @@ describe("main-process chat authorization", () => {
     expect(schedulerAt).toBeLessThan(reconcileAt);
     expect(reconcileAt).toBeLessThan(refusalAt);
     expect(refusalAt).toBeLessThan(submitAt);
-    expect(submit).toContain("return resolveSubmitShareChangesResult(");
+    expect(submit).toContain(
+      "const result = await resolveSubmitShareChangesResult(",
+    );
     expect(submit).toContain(
       "reconciled.capturedPaths + reconciled.repairedPaths,",
     );
@@ -1083,11 +1084,13 @@ describe("main-process chat authorization", () => {
     const recipient = mainSource.slice(recipientAt, recipientEnd);
     const operationAt = recipient.indexOf("withRendererWorkspaceOperation(");
     const credentialsAt = recipient.indexOf("await warmCredentialCache()");
-    const metadataAt = recipient.indexOf("const workspace = operation.workspace;");
+    const metadataAt = recipient.indexOf("const resolve = (): ShareProposalRecipientScope");
     expect(operationAt).toBeGreaterThan(-1);
     expect(credentialsAt).toBeGreaterThan(operationAt);
     expect(metadataAt).toBeGreaterThan(credentialsAt);
     expect(recipient).toContain("rootPath: workspace.rootPath,");
+    expect(recipient).toContain("createShareProposalOperationScope({");
+    expect(recipient).toContain("same: sameScope,");
     expect(recipient).not.toContain("workspace: RegistryEntry;");
     expect(recipient).not.toContain("requireWorkspace(workspaceId)");
   });

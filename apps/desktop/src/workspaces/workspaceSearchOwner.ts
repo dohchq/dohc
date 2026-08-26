@@ -82,6 +82,7 @@ export interface WorkspaceSearchOwnerDependencies<
 interface SearchIdentity {
   searchId: string;
   settled: boolean;
+  execution?: SearchExecution;
 }
 
 function stoppedSearchError(): Error {
@@ -117,9 +118,6 @@ export class WorkspaceSearchOwner<
     };
     const previous = this.#latest.get(sender.id);
     this.#latest.set(sender.id, identity);
-    if (previous) {
-      void this.#dependencies.searchRegistry.cancel(sender.id, previous.searchId);
-    }
 
     const ownsSearch = () =>
       !this.#disposed && this.#latest.get(sender.id) === identity;
@@ -128,6 +126,18 @@ export class WorkspaceSearchOwner<
     const assertCurrent = () => {
       if (!isCurrent()) throw stoppedSearchError();
     };
+
+    if (previous) {
+      if (previous.execution) {
+        await previous.execution.cancel();
+      } else {
+        await this.#dependencies.searchRegistry.cancel(
+          sender.id,
+          previous.searchId,
+        );
+      }
+      assertCurrent();
+    }
 
     const ownedSearchView =
       await this.#dependencies.prepareOwnedSearch(workspace);
@@ -250,22 +260,33 @@ export class WorkspaceSearchOwner<
     });
   }
 
-  cancel(senderId: number, searchId: string): void {
+  async cancel(senderId: number, searchId: string): Promise<void> {
     const latest = this.#latest.get(senderId);
-    if (latest?.searchId === searchId) this.#latest.delete(senderId);
-    void this.#dependencies.searchRegistry.cancel(senderId, searchId);
-  }
-
-  disposeSender(senderId: number): Promise<void> {
+    if (latest?.searchId !== searchId) return;
     this.#latest.delete(senderId);
-    return this.#dependencies.searchRegistry.disposeOwner(senderId);
+    if (latest.execution) {
+      await latest.execution.cancel();
+      return;
+    }
+    await this.#dependencies.searchRegistry.cancel(senderId, searchId);
   }
 
-  dispose(): Promise<void> {
-    if (this.#disposed) return Promise.resolve();
+  async disposeSender(senderId: number): Promise<void> {
+    const latest = this.#latest.get(senderId);
+    this.#latest.delete(senderId);
+    if (latest?.execution) await latest.execution.cancel();
+    await this.#dependencies.searchRegistry.disposeOwner(senderId);
+  }
+
+  async dispose(): Promise<void> {
+    if (this.#disposed) return;
     this.#disposed = true;
+    const executions = [...this.#latest.values()].flatMap((identity) =>
+      identity.execution ? [identity.execution] : [],
+    );
     this.#latest.clear();
-    return this.#dependencies.searchRegistry.killAll();
+    await Promise.all(executions.map((execution) => execution.cancel()));
+    await this.#dependencies.searchRegistry.killAll();
   }
 
   async #startRipgrep(input: {
@@ -308,6 +329,7 @@ export class WorkspaceSearchOwner<
         allowPath: input.allowPath,
       },
     );
+    if (execution !== null) input.identity.execution = execution;
     if (execution === null || !input.isCurrent()) {
       // This invocation is still pending, so its rejection settles the
       // renderer. Mark it first so cancellation cannot also emit a terminal
@@ -316,12 +338,7 @@ export class WorkspaceSearchOwner<
       // Root validation can finish after this workspace loses authority. Kill
       // only this invocation's handle. A superseding search owns a different
       // identity and has already replaced or cancelled this handle.
-      if (input.ownsSearch()) {
-        void this.#dependencies.searchRegistry.cancel(
-          input.sender.id,
-          input.input.searchId,
-        );
-      }
+      if (execution !== null) await execution.cancel();
       throw stoppedSearchError();
     }
     return execution;
@@ -389,7 +406,12 @@ export class WorkspaceSearchOwner<
     // live sender authorize an empty terminal event, never result data.
     if (identity.settled || !ownsSearch() || sender.isDestroyed()) return;
     identity.settled = true;
-    void this.#dependencies.searchRegistry.cancel(sender.id, identity.searchId);
+    void identity.execution?.cancel().catch((error: unknown) => {
+      this.#dependencies.logError(
+        "Workspace search could not settle its stale child.",
+        error,
+      );
+    });
     this.#send(
       sender,
       {

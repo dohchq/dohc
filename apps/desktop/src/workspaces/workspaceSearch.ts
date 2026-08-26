@@ -252,6 +252,7 @@ export interface SearchHandle {
 
 export interface SearchExecution {
   readonly settled: Promise<void>;
+  cancel(): Promise<void>;
 }
 
 // Spawns rg for one search and streams bounded batches to onBatch. The
@@ -355,14 +356,12 @@ export function createSearchRegistry(deps: {
   rgPath: string;
   start?: typeof startRipgrepSearch;
 }) {
-  const active = new Map<
-    number,
-    {
-      readonly attachmentId: symbol;
-      readonly handle: SearchHandle;
-      readonly settled: Promise<void>;
-    }
-  >();
+  interface ActiveSearch {
+    readonly attachmentId: symbol;
+    readonly handle: SearchHandle;
+    readonly settled: Promise<void>;
+  }
+  const active = new Map<number, ActiveSearch>();
   const start = deps.start ?? startRipgrepSearch;
 
   return {
@@ -391,7 +390,12 @@ export function createSearchRegistry(deps: {
       // while it is in flight; the stale call must not kill or replace that
       // generation's active search when validation eventually finishes.
       if (!isCurrent() || signal.aborted) return null;
-      active.get(ownerId)?.handle.kill();
+      const previous = active.get(ownerId);
+      if (previous) {
+        previous.handle.kill();
+        await previous.settled;
+        if (!isCurrent() || signal.aborted) return null;
+      }
       let handle: SearchHandle | null = null;
       handle = start({
         rgPath: deps.rgPath,
@@ -422,41 +426,44 @@ export function createSearchRegistry(deps: {
         handle?.kill();
       };
       signal.addEventListener("abort", onAbort, { once: true });
+      let entry!: ActiveSearch;
       const settled = handle.settled.finally(() => {
         signal.removeEventListener("abort", onAbort);
-        if (active.get(ownerId)?.handle === handle) active.delete(ownerId);
+        if (active.get(ownerId) === entry) active.delete(ownerId);
       });
-      active.set(ownerId, { attachmentId, handle, settled });
+      entry = { attachmentId, handle, settled };
+      active.set(ownerId, entry);
       if (signal.aborted) onAbort();
-      return { settled };
+      return {
+        settled,
+        cancel: async () => {
+          handle.kill();
+          await settled;
+        },
+      };
     },
-    cancel(ownerId: number, searchId: string): Promise<void> {
+    async cancel(ownerId: number, searchId: string): Promise<void> {
       const activeSearch = active.get(ownerId);
       if (activeSearch?.handle.searchId === searchId) {
         activeSearch.handle.kill();
-        active.delete(ownerId);
-        return activeSearch.settled;
+        await activeSearch.settled;
       }
-      return Promise.resolve();
     },
     // Renderer went away (window closed / reloaded): kill its child.
-    disposeOwner(ownerId: number): Promise<void> {
+    async disposeOwner(ownerId: number): Promise<void> {
       const activeSearch = active.get(ownerId);
       if (activeSearch) {
         activeSearch.handle.kill();
-        active.delete(ownerId);
-        return activeSearch.settled;
+        await activeSearch.settled;
       }
-      return Promise.resolve();
     },
     // App quit: kill every tracked child (and only those).
-    killAll(): Promise<void> {
+    async killAll(): Promise<void> {
       const settlements = [...active.values()].map((search) => {
         search.handle.kill();
         return search.settled;
       });
-      active.clear();
-      return Promise.all(settlements).then(() => undefined);
+      await Promise.all(settlements);
     },
   };
 }

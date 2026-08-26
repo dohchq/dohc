@@ -43,6 +43,7 @@ interface FakeStart {
   signal: AbortSignal;
   isCurrent(): boolean;
   allowPath?: (path: string) => boolean;
+  cancel: ReturnType<typeof vi.fn<() => Promise<void>>>;
 }
 
 function createFakeRegistry(
@@ -65,10 +66,21 @@ function createFakeRegistry(
           allowPath?: (path: string) => boolean;
         },
       ) {
-        const next = { ownerId, searchId, request, onBatch, ...options };
+        const cancel = vi.fn(async () => undefined);
+        const next = {
+          ownerId,
+          searchId,
+          request,
+          onBatch,
+          ...options,
+          cancel,
+        };
         starts.push(next);
         await onStart?.(next);
-        return { settled: new Promise<void>(() => undefined) };
+        return {
+          settled: new Promise<void>(() => undefined),
+          cancel,
+        };
       },
       cancel: vi.fn(async () => undefined),
       disposeOwner: vi.fn(async () => undefined),
@@ -140,6 +152,167 @@ function expectStopped(search: Promise<unknown>): Promise<void> {
 }
 
 describe("WorkspaceSearchOwner", () => {
+  it("waits for the replaced exact child before starting its successor", async () => {
+    const rootPath = await makeRoot();
+    const firstCancelled = deferred<void>();
+    const cancelStarted = deferred<void>();
+    const starts: string[] = [];
+    const owner = new WorkspaceSearchOwner({
+      searchRegistry: {
+        async startSearch(_ownerId, _rootPath, searchId) {
+          starts.push(searchId);
+          return {
+            settled: new Promise<void>(() => undefined),
+            cancel: async () => {
+              if (searchId === "first") {
+                cancelStarted.resolve();
+                await firstCancelled.promise;
+              }
+            },
+          };
+        },
+        cancel: vi.fn(async () => undefined),
+        disposeOwner: vi.fn(async () => undefined),
+        killAll: vi.fn(async () => undefined),
+      },
+      prepareOwnedSearch: async () => ({ allowPath: () => true }),
+      engineCaptureFor: () => null,
+      queryEngine: vi.fn(async () => []),
+      logError: vi.fn(),
+    });
+    const sender = createSender(31);
+    const workspace = { workspaceId: "workspace-1", rootPath };
+    await owner.start(sender, authority(workspace), searchPayload("first"));
+
+    const replacement = owner.start(
+      sender,
+      authority(workspace),
+      searchPayload("second"),
+    );
+    await cancelStarted.promise;
+    expect(starts).toEqual(["first"]);
+
+    firstCancelled.resolve();
+    await replacement;
+    expect(starts).toEqual(["first", "second"]);
+  });
+
+  it("awaits exact child settlement when startup becomes stale after spawn", async () => {
+    const rootPath = await makeRoot();
+    const spawned = deferred<void>();
+    const returnExecution = deferred<void>();
+    const cancelStarted = deferred<void>();
+    const cancelled = deferred<void>();
+    let workspaceIsCurrent = true;
+    const owner = new WorkspaceSearchOwner({
+      searchRegistry: {
+        async startSearch() {
+          spawned.resolve();
+          await returnExecution.promise;
+          return {
+            settled: cancelled.promise,
+            cancel: async () => {
+              cancelStarted.resolve();
+              await cancelled.promise;
+            },
+          };
+        },
+        cancel: vi.fn(async () => undefined),
+        disposeOwner: vi.fn(async () => undefined),
+        killAll: vi.fn(async () => undefined),
+      },
+      prepareOwnedSearch: async () => ({ allowPath: () => true }),
+      engineCaptureFor: () => null,
+      queryEngine: vi.fn(async () => []),
+      logError: vi.fn(),
+    });
+    const sender = createSender(32);
+    const pending = owner.start(
+      sender,
+      authority(
+        { workspaceId: "workspace-1", rootPath },
+        () => workspaceIsCurrent,
+      ),
+      searchPayload("stale-after-spawn"),
+    );
+    await spawned.promise;
+    workspaceIsCurrent = false;
+    returnExecution.resolve();
+    await cancelStarted.promise;
+    let stopped = false;
+    void pending.catch(() => {
+      stopped = true;
+    });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+
+    cancelled.resolve();
+    await expectStopped(pending);
+  });
+
+  it("keeps authority activity unsettled until a retired child closes", async () => {
+    const rootPath = await makeRoot();
+    const childClosed = deferred<void>();
+    const cancelStarted = deferred<void>();
+    let emit!: (batch: SearchBatch) => void;
+    let workspaceIsCurrent = true;
+    const owner = new WorkspaceSearchOwner({
+      searchRegistry: {
+        async startSearch(
+          _ownerId,
+          _rootPath,
+          _searchId,
+          _request,
+          onBatch,
+        ) {
+          emit = onBatch;
+          return {
+            settled: childClosed.promise,
+            cancel: async () => {
+              cancelStarted.resolve();
+              await childClosed.promise;
+            },
+          };
+        },
+        cancel: vi.fn(async () => undefined),
+        disposeOwner: vi.fn(async () => undefined),
+        killAll: vi.fn(async () => undefined),
+      },
+      prepareOwnedSearch: async () => ({ allowPath: () => true }),
+      engineCaptureFor: () => null,
+      queryEngine: vi.fn(async () => []),
+      logError: vi.fn(),
+    });
+    const sender = createSender(33);
+    const activity = await owner.start(
+      sender,
+      authority(
+        { workspaceId: "workspace-1", rootPath },
+        () => workspaceIsCurrent,
+      ),
+      searchPayload("retired-child"),
+    );
+
+    workspaceIsCurrent = false;
+    emit({
+      searchId: "retired-child",
+      entries: [],
+      done: false,
+      limitHit: false,
+    });
+    await cancelStarted.promise;
+    let settled = false;
+    void activity.settled.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    childClosed.resolve();
+    await activity.settled;
+    expect(settled).toBe(true);
+  });
+
   it("rejects a replaced engine search without emitting or starting its late mount pass", async () => {
     const rootPath = await makeRoot();
     const oldResult = deferred<SearchResult[]>();
@@ -295,10 +468,7 @@ describe("WorkspaceSearchOwner", () => {
     validation.resolve();
     await expectStopped(pending);
 
-    expect(registry.adapter.cancel).toHaveBeenCalledWith(
-      sender.id,
-      "validation-stale",
-    );
+    expect(registry.starts[0]?.cancel).toHaveBeenCalledOnce();
     expect(sender.send).not.toHaveBeenCalled();
   });
 
@@ -454,11 +624,7 @@ describe("WorkspaceSearchOwner", () => {
       done: true,
       limitHit: false,
     });
-    expect(registry.adapter.cancel).toHaveBeenCalledWith(
-      sender.id,
-      "workspace-changed",
-    );
-    expect(registry.adapter.cancel).toHaveBeenCalledTimes(1);
+    expect(registry.starts[0]?.cancel).toHaveBeenCalledOnce();
   });
 
   it("does not cancel or settle a superseded ripgrep search", async () => {
@@ -475,7 +641,7 @@ describe("WorkspaceSearchOwner", () => {
     const workspace = { workspaceId: "workspace-1", rootPath };
     await owner.start(sender, authority(workspace), searchPayload("older"));
     await owner.start(sender, authority(workspace), searchPayload("newer"));
-    registry.adapter.cancel.mockClear();
+    registry.starts[0]!.cancel.mockClear();
 
     registry.starts[0]?.onBatch({
       searchId: "older",
@@ -484,7 +650,7 @@ describe("WorkspaceSearchOwner", () => {
       limitHit: false,
     });
 
-    expect(registry.adapter.cancel).not.toHaveBeenCalled();
+    expect(registry.starts[0]?.cancel).not.toHaveBeenCalled();
     expect(sender.send).not.toHaveBeenCalled();
 
     const currentBatch: SearchBatch = {
@@ -516,7 +682,7 @@ describe("WorkspaceSearchOwner", () => {
     await owner.start(first, authority(workspace), searchPayload("shared-id"));
     await owner.start(second, authority(workspace), searchPayload("shared-id"));
 
-    owner.cancel(first.id, "shared-id");
+    await owner.cancel(first.id, "shared-id");
     const batch: SearchBatch = {
       searchId: "shared-id",
       entries: [],
@@ -526,7 +692,7 @@ describe("WorkspaceSearchOwner", () => {
     registry.starts[0]?.onBatch(batch);
     registry.starts[1]?.onBatch(batch);
 
-    expect(registry.adapter.cancel).toHaveBeenCalledWith(1, "shared-id");
+    expect(registry.starts[0]?.cancel).toHaveBeenCalledOnce();
     expect(first.send).not.toHaveBeenCalled();
     expect(second.send).toHaveBeenCalledWith(CHANNELS.searchResults, batch);
   });
@@ -553,7 +719,7 @@ describe("WorkspaceSearchOwner", () => {
       authority(workspace),
       searchPayload("reused", "second"),
     );
-    registry.adapter.cancel.mockClear();
+    registry.starts[0]!.cancel.mockClear();
     const batch: SearchBatch = {
       searchId: "reused",
       entries: [],
@@ -563,7 +729,7 @@ describe("WorkspaceSearchOwner", () => {
 
     registry.starts[0]?.onBatch(batch);
     expect(sender.send).not.toHaveBeenCalled();
-    expect(registry.adapter.cancel).not.toHaveBeenCalled();
+    expect(registry.starts[0]?.cancel).not.toHaveBeenCalled();
     registry.starts[1]?.onBatch(batch);
     expect(sender.send).toHaveBeenCalledWith(CHANNELS.searchResults, batch);
   });
@@ -590,14 +756,14 @@ describe("WorkspaceSearchOwner", () => {
     const workspace = { workspaceId: "workspace-1", rootPath };
     await owner.start(sender, authority(workspace), searchPayload("before"));
 
-    owner.disposeSender(sender.id);
+    await owner.disposeSender(sender.id);
     const duringTeardown = owner.start(
       sender,
       authority(workspace),
       searchPayload("during-teardown"),
     );
     await preparationStarted.promise;
-    owner.disposeSender(sender.id);
+    await owner.disposeSender(sender.id);
     preparation.resolve({ allowPath: () => true });
     await expectStopped(duringTeardown);
 
@@ -629,7 +795,7 @@ describe("WorkspaceSearchOwner", () => {
     );
     await queryStarted.promise;
 
-    owner.cancel(sender.id, "cancelled");
+    await owner.cancel(sender.id, "cancelled");
     result.resolve([engineResult("late.md")]);
     await expectStopped(pending);
 
@@ -655,7 +821,7 @@ describe("WorkspaceSearchOwner", () => {
       searchPayload("destroyed"),
     );
     destroyed.destroy();
-    owner.disposeSender(destroyed.id);
+    await owner.disposeSender(destroyed.id);
     registry.starts[0]?.onBatch({
       searchId: "destroyed",
       entries: [],
@@ -672,7 +838,7 @@ describe("WorkspaceSearchOwner", () => {
       authority(workspace),
       searchPayload("disposed"),
     );
-    owner.dispose();
+    await owner.dispose();
     registry.starts[1]?.onBatch({
       searchId: "disposed",
       entries: [],
@@ -701,8 +867,8 @@ describe("WorkspaceSearchOwner", () => {
       searchPayload("disposed-sender"),
     );
 
-    owner.disposeSender(sender.id);
-    registry.adapter.cancel.mockClear();
+    await owner.disposeSender(sender.id);
+    registry.starts[0]!.cancel.mockClear();
     registry.starts[0]?.onBatch({
       searchId: "disposed-sender",
       entries: [],
@@ -710,7 +876,7 @@ describe("WorkspaceSearchOwner", () => {
       limitHit: false,
     });
 
-    expect(registry.adapter.cancel).not.toHaveBeenCalled();
+    expect(registry.starts[0]?.cancel).not.toHaveBeenCalled();
     expect(sender.send).not.toHaveBeenCalled();
   });
 
@@ -866,10 +1032,7 @@ describe("WorkspaceSearchOwner", () => {
       limitHit: false,
     });
 
-    expect(registry.adapter.cancel).toHaveBeenCalledWith(
-      sender.id,
-      "authority-flip",
-    );
+    expect(registry.starts[0]?.cancel).toHaveBeenCalledOnce();
     expect(sender.send).toHaveBeenCalledExactlyOnceWith(
       CHANNELS.searchResults,
       {
