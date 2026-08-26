@@ -34,6 +34,7 @@ overrides:
   '@tiptap/y-tiptap': 3.0.8
   '@excalidraw/excalidraw>nanoid': 3.3.18
   '@excalidraw/mermaid-to-excalidraw>nanoid': 5.1.16
+  mermaid>katex: ^0.18.1
   lodash-es: 4.18.1
   prosemirror-model: 1.25.11
   prosemirror-view: 1.42.2
@@ -4455,10 +4456,6 @@ packages:
 
   jsonfile@6.2.1:
     resolution: {integrity: sha512-zwOTdL3rFQ/lRdBnntKVOX6k5cKJwEc1HdilT71BWEu7J41gXIB2MRp+vxduPSwZJPWBxEzv4yH1wYLJGUHX4Q==}
-
-  katex@0.16.47:
-    resolution: {integrity: sha512-Eeo8Ys1doU1z+x8AZsPpQu+p/QcZBI5PeOo7QGQdy2x2m0MU/hYagBbGOmXwr5KVbEfVuWv9LpnQWeehogurjg==}
-    hasBin: true
 
   katex@0.18.1:
     resolution: {integrity: sha512-Td8GCYSxDAoMhHOlKmCFMJ/hz5qlAAb71n66Dryw9nfCVfumLo7nhuotbvKom/XPADmrYC3O5QR71EPq4DarJQ==}
@@ -9965,10 +9962,6 @@ snapshots:
     optionalDependencies:
       graceful-fs: 4.2.11
 
-  katex@0.16.47:
-    dependencies:
-      commander: 8.3.0
-
   katex@0.18.1:
     dependencies:
       commander: 8.3.0
@@ -10331,7 +10324,7 @@ snapshots:
       dayjs: 1.11.21
       dompurify: 3.4.13
       es-toolkit: 1.50.0
-      katex: 0.16.47
+      katex: 0.18.1
       khroma: 2.1.0
       marked: 16.4.2
       roughjs: 4.6.6
