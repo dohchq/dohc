@@ -99,7 +99,7 @@ describe("renderer reload admission", () => {
       owner: { start: searchStart, cancel: searchCancel },
     });
 
-    const reload = sessions.retireForReload(renderer);
+    const reload = sessions.retireForReload(renderer, "document-1");
 
     await expect(
       startSitePreview(

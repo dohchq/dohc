@@ -3568,8 +3568,8 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
 
 async function prepareForRendererReload(
   sender: WebContents,
-  rendererDocumentId?: string,
-): Promise<void> {
+  rendererDocumentId: string,
+): Promise<boolean> {
   // `openWorkspace` records the active workspace before awaiting watcher
   // startup. Re-prioritize that sender's workspace so its replacement renderer
   // boots back into the same place, while closing every main-owned resource
@@ -3577,10 +3577,22 @@ async function prepareForRendererReload(
   const activeWorkspaceId =
     rendererWorkspaceSessions.current(sender)?.workspaceId ??
     preferredWorkspaceId;
-  if (activeWorkspaceId) preferredWorkspaceId = activeWorkspaceId;
   // retireForReload invalidates the lease before returning its promise. The
   // outgoing document cannot admit fresh work while these owners drain.
-  await rendererWorkspaceSessions.retireForReload(sender, rendererDocumentId);
+  const accepted = await rendererWorkspaceSessions.retireForReload(
+    sender,
+    rendererDocumentId,
+  );
+  if (accepted && activeWorkspaceId) preferredWorkspaceId = activeWorkspaceId;
+  return accepted;
+}
+
+async function prepareAfterRendererCrash(sender: WebContents): Promise<void> {
+  const activeWorkspaceId =
+    rendererWorkspaceSessions.current(sender)?.workspaceId ??
+    preferredWorkspaceId;
+  if (activeWorkspaceId) preferredWorkspaceId = activeWorkspaceId;
+  await rendererWorkspaceSessions.retireAfterCrash(sender);
 }
 
 // Close every live engine Y.Doc session (app quit) BEFORE the engine stores are
@@ -3668,7 +3680,7 @@ async function showOrCreateMainWindow(): Promise<void> {
     return;
   }
   const window = trackWorkspaceWindow(
-    createMainWindow({ beforeRendererReload: prepareForRendererReload }),
+    createMainWindow({ beforeRendererReload: prepareAfterRendererCrash }),
   );
   window.show();
   window.focus();
@@ -4625,8 +4637,11 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = ReloadRendererRequestPayload.parse(payload);
     const sender = event.sender;
-    await prepareForRendererReload(sender, input.rendererDocumentId);
-    if (!sender.isDestroyed()) sender.reload();
+    const accepted = await prepareForRendererReload(
+      sender,
+      input.rendererDocumentId,
+    );
+    if (accepted && !sender.isDestroyed()) sender.reload();
   });
 
   ipcMain.handle(CHANNELS.pickWorkspaceRoot, async (event) => {
@@ -9897,7 +9912,7 @@ if (!app.requestSingleInstanceLock()) {
     // The window exists and its renderer loads WHILE the daemon handshakes;
     // everything below that needs the daemon still waits for it.
     const window = trackWorkspaceWindow(
-      createMainWindow({ beforeRendererReload: prepareForRendererReload }),
+      createMainWindow({ beforeRendererReload: prepareAfterRendererCrash }),
     );
     // Same tick as the window, so the load cannot finish before this listener.
     // The activation send chains on it below, once the daemon is up and the

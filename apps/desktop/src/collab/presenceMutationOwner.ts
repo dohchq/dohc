@@ -17,7 +17,14 @@ interface PresenceMutationSessionState {
 
 interface RetiredPresenceLeave {
   readonly leave: () => Promise<void>;
+  readonly expiry: unknown;
   draining: Promise<void> | undefined;
+}
+
+export interface PresenceMutationOwnerOptions {
+  tombstoneTtlMs?: number;
+  scheduleExpiry?: (callback: () => void, delayMs: number) => unknown;
+  cancelExpiry?: (handle: unknown) => void;
 }
 
 export interface PresencePublishOperations<Snapshot> {
@@ -34,6 +41,21 @@ export class PresenceMutationOwner<Sender extends RendererWorkspaceSender> {
     PresenceMutationSessionState
   >();
   readonly #retiredLeaves = new Map<string, RetiredPresenceLeave>();
+  readonly #tombstoneTtlMs: number;
+  readonly #scheduleExpiry: (callback: () => void, delayMs: number) => unknown;
+  readonly #cancelExpiry: (handle: unknown) => void;
+
+  constructor(options: PresenceMutationOwnerOptions = {}) {
+    // Relay entries expire after 30 seconds today. Keep this desktop-owned
+    // bound explicit instead of importing service internals into the app.
+    this.#tombstoneTtlMs = options.tombstoneTtlMs ?? 30_000;
+    this.#scheduleExpiry =
+      options.scheduleExpiry ??
+      ((callback, delayMs) => globalThis.setTimeout(callback, delayMs));
+    this.#cancelExpiry =
+      options.cancelExpiry ??
+      ((handle) => globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>));
+  }
 
   publish<Snapshot>(
     session: RendererWorkspaceSession<Sender>,
@@ -119,10 +141,7 @@ export class PresenceMutationOwner<Sender extends RendererWorkspaceSender> {
           // Do not let a failed best-effort leave erase ownership. A successor
           // using the same request identity must retry this exact transport
           // before it can publish or leave under its own session.
-          this.#retiredLeaves.set(key, {
-            leave: entry.leave,
-            draining: undefined,
-          });
+          this.#rememberRetiredLeave(key, entry.leave);
           throw error;
         }
       });
@@ -192,7 +211,28 @@ export class PresenceMutationOwner<Sender extends RendererWorkspaceSender> {
     }
     await drain;
     if (this.#retiredLeaves.get(key) === tombstone) {
-      this.#retiredLeaves.delete(key);
+      this.#forgetRetiredLeave(key, tombstone);
     }
+  }
+
+  #rememberRetiredLeave(key: string, leave: () => Promise<void>): void {
+    const prior = this.#retiredLeaves.get(key);
+    if (prior) this.#forgetRetiredLeave(key, prior);
+    let tombstone!: RetiredPresenceLeave;
+    tombstone = {
+      leave,
+      draining: undefined,
+      expiry: this.#scheduleExpiry(() => {
+        if (this.#retiredLeaves.get(key) === tombstone) {
+          this.#retiredLeaves.delete(key);
+        }
+      }, this.#tombstoneTtlMs),
+    };
+    this.#retiredLeaves.set(key, tombstone);
+  }
+
+  #forgetRetiredLeave(key: string, tombstone: RetiredPresenceLeave): void {
+    this.#retiredLeaves.delete(key);
+    this.#cancelExpiry(tombstone.expiry);
   }
 }

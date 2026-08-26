@@ -230,4 +230,52 @@ describe("PresenceMutationOwner", () => {
     await expect(second).resolves.toBe("second");
     expect(oldLeave).toHaveBeenCalledTimes(2);
   });
+
+  it("forgets a failed leave after the relay entry's bounded lifetime", async () => {
+    let expire: () => void = () => undefined;
+    const cancelExpiry = vi.fn();
+    const presence = new PresenceMutationOwner<TestSender>({
+      tombstoneTtlMs: 30_000,
+      scheduleExpiry: (callback) => {
+        expire = callback;
+        return "expiry-1";
+      },
+      cancelExpiry,
+    });
+    const sessions = sessionOwner(presence);
+    const oldSender = sender(7);
+    const oldSession = await sessions.open(
+      oldSender,
+      "workspace-a",
+      "document-1",
+    );
+    const oldLeave = vi.fn(async () => {
+      throw new Error("relay unavailable");
+    });
+    await presence.publish(oldSession, "old-client-key", {
+      resolve: async () => ({
+        publish: async () => "old-snapshot",
+        leave: oldLeave,
+      }),
+    });
+    await sessions.retireForReload(oldSender, "document-1");
+    expect(oldLeave).toHaveBeenCalledOnce();
+
+    expire();
+    const successor = await sessions.open(
+      sender(8),
+      "workspace-a",
+      "document-2",
+    );
+    await expect(
+      presence.publish(successor, "old-client-key", {
+        resolve: async () => ({
+          publish: async () => "new-snapshot",
+          leave: async () => undefined,
+        }),
+      }),
+    ).resolves.toBe("new-snapshot");
+    expect(oldLeave).toHaveBeenCalledOnce();
+    expect(cancelExpiry).not.toHaveBeenCalled();
+  });
 });

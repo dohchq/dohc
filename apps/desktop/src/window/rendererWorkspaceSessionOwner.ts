@@ -125,17 +125,37 @@ export class RendererWorkspaceSessionOwner<
     return (this.#workspaceMembers.get(workspaceId)?.size ?? 0) > 0;
   }
 
-  retireForReload(sender: Sender, rendererDocumentId?: string): Promise<void> {
+  retireForReload(
+    sender: Sender,
+    rendererDocumentId: string,
+  ): Promise<boolean> {
     let state = this.#statesBySender.get(sender);
-    if (!state && rendererDocumentId && !sender.isDestroyed()) {
+    if (!state && !sender.isDestroyed()) {
       state = this.#stateFor(sender);
     }
     if (!state || this.#stateBySenderId.get(sender.id) !== state) {
+      return Promise.resolve(false);
+    }
+    if (
+      state.retiredRendererDocumentIds.has(rendererDocumentId) ||
+      (state.rendererDocumentId !== undefined &&
+        state.rendererDocumentId !== rendererDocumentId)
+    ) {
+      return Promise.resolve(false);
+    }
+    state.rendererDocumentId = rendererDocumentId;
+    return this.#retireCurrentDocument(state).then(() => true);
+  }
+
+  retireAfterCrash(sender: Sender): Promise<void> {
+    const state = this.#statesBySender.get(sender);
+    if (!state || this.#stateBySenderId.get(sender.id) !== state) {
       return Promise.resolve();
     }
-    if (rendererDocumentId) {
-      state.retiredRendererDocumentIds.add(rendererDocumentId);
-    }
+    return this.#retireCurrentDocument(state);
+  }
+
+  #retireCurrentDocument(state: SenderState<Sender>): Promise<void> {
     if (state.rendererDocumentId) {
       state.retiredRendererDocumentIds.add(state.rendererDocumentId);
       state.rendererDocumentId = undefined;
