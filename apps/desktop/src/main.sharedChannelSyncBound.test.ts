@@ -43,6 +43,18 @@ function handlerSource(channel: string): string {
 }
 
 describe("the shared-channel sync pass is bounded in production", () => {
+  it("carries the physical attachment into the registered relay", () => {
+    expect(passSource).toMatch(
+      /attachmentId:\s*operation\s*\? operation\.workspace\.attachmentId\s*: binding!\.attachmentId,/,
+    );
+    expect(passSource).toContain(
+      "const daemonRelay = receivedShareEngine.relayForRegistered({\n" +
+        "      ...entry,\n" +
+        "      relay,\n" +
+        "    });",
+    );
+  });
+
   it("bounds one pass to a small, finite number of live rows", () => {
     expect(Number.isInteger(SHARED_CHANNEL_SYNC_PASS_ROWS)).toBe(true);
     expect(SHARED_CHANNEL_SYNC_PASS_ROWS).toBeGreaterThan(0);

@@ -1829,6 +1829,24 @@ function createDesktopWorkspaceAuthorityState(
   };
 }
 
+type PhysicalRelayWorkspace = Pick<
+  RegistryEntry,
+  "workspaceId" | "rootPath" | "remote"
+> & { attachmentId: symbol };
+
+function relayCloseTargetForPhysicalWorkspace(
+  workspace: PhysicalRelayWorkspace,
+): string | EngineWorkspace | null {
+  const relayWorkspaceId = workspace.remote?.remoteWorkspaceId;
+  if (!relayWorkspaceId) return null;
+  if (relayWorkspaceId !== workspace.workspaceId) return relayWorkspaceId;
+  return {
+    workspaceId: workspace.workspaceId,
+    rootPath: workspace.rootPath,
+    attachmentId: workspace.attachmentId,
+  };
+}
+
 const workspaceAuthorities = createWorkspaceAuthorityOwner({
   findWorkspace,
   canonicalizeRoot: (rootPath) => realpathSync.native(rootPath),
@@ -1837,7 +1855,10 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
     const physicalWorkspace = {
       ...workspaceAtDisposal,
       rootPath: binding.canonicalRootPath,
+      attachmentId: binding.attachmentId,
     };
+    const relayCloseTarget =
+      relayCloseTargetForPhysicalWorkspace(physicalWorkspace);
     const results = await Promise.allSettled([
       state.linkedChatStore?.close() ?? Promise.resolve(),
       state.agentDispatchStoreHandle?.close() ?? Promise.resolve(),
@@ -1853,10 +1874,8 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
       state.sitePreviews.stopWorkspace(binding.workspaceId),
       state.tryInVersionSessions.settled(),
       state.workspaceChatLifecycle.settled(),
-      workspaceAtDisposal.remote?.remoteWorkspaceId
-        ? closeRelayTransportWorkspace(
-            workspaceAtDisposal.remote.remoteWorkspaceId,
-          )
+      relayCloseTarget
+        ? closeRelayTransportWorkspace(relayCloseTarget)
         : Promise.resolve(),
       engineYDocSessionIpc.retireAuthority(binding.attachmentId),
       workspaceActivity.close(physicalWorkspace, state.activity, {
@@ -2456,6 +2475,9 @@ async function runSharedChannelSyncPass(
     const entry = current
       ? {
           ...current,
+          attachmentId: operation
+            ? operation.workspace.attachmentId
+            : binding!.attachmentId,
           rootPath: operation
             ? current.rootPath
             : binding!.canonicalRootPath,
@@ -3531,8 +3553,7 @@ async function syncWorkspaceForDispatch(
             }
             const { capture } = await captureForFlaggedWorkspace(
               {
-                workspaceId: workspace.workspaceId,
-                rootPath: workspace.rootPath,
+                ...workspace,
                 // Guarded above: a shared view already returned false.
                 shareView: false,
               },
@@ -3552,9 +3573,10 @@ async function syncWorkspaceForDispatch(
               return true;
               } finally {
                 await engine.stop().catch(() => undefined);
-                const relayWorkspaceId = workspace.remote?.remoteWorkspaceId;
-                if (relayWorkspaceId) {
-                  await closeRelayTransportWorkspace(relayWorkspaceId).catch(
+                const relayCloseTarget =
+                  relayCloseTargetForPhysicalWorkspace(workspace);
+                if (relayCloseTarget) {
+                  await closeRelayTransportWorkspace(relayCloseTarget).catch(
                     () => undefined,
                   );
                 }
@@ -3671,6 +3693,7 @@ async function closeDispatchRunActivity(
   if (existing) return await existing;
       const current = canonicalWorkspaceFor(lease);
   const relayWorkspaceId = current.remote?.remoteWorkspaceId;
+  const relayCloseTarget = relayCloseTargetForPhysicalWorkspace(current);
   const closing = closeWorkspaceActivityAndRelay({
     closeActivity: async () => {
           await activity.close(current.workspaceId, {
@@ -3679,9 +3702,9 @@ async function closeDispatchRunActivity(
         notify: options.notifyRenderer,
       });
         },
-    ...(relayWorkspaceId
+    ...(relayCloseTarget
       ? {
-          closeRelay: () => closeRelayTransportWorkspace(relayWorkspaceId),
+          closeRelay: () => closeRelayTransportWorkspace(relayCloseTarget),
         }
       : {}),
     onRelayCloseError: (error) =>
@@ -5624,12 +5647,16 @@ function shareViewImportResult(
   );
 }
 
-async function closeRelayTransportWorkspace(workspaceId: string): Promise<void> {
+async function closeRelayTransportWorkspace(
+  workspace: string | EngineWorkspace,
+): Promise<void> {
+  const workspaceId =
+    typeof workspace === "string" ? workspace : workspace.workspaceId;
   if (rustEngineRelayClient) {
-    await rustEngineRelayClient.closeWorkspace(workspaceId);
+    await rustEngineRelayClient.closeWorkspace(workspace);
     return;
   }
-  await rustEngineWorkspaceSessions?.closeWorkspace(workspaceId);
+  await rustEngineWorkspaceSessions?.closeWorkspace(workspace);
   relayTransportRoutes.releaseWorkspace(workspaceId);
 }
 

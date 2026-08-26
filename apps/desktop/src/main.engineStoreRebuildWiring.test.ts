@@ -16,6 +16,40 @@ function sourceBetween(startMarker: string, endMarker: string): string {
 }
 
 describe("main-process engine store rebuild wiring", () => {
+  it("keeps physical relay teardown on the attachment unless the relay id is an alias", () => {
+    const target = sourceBetween(
+      "function relayCloseTargetForPhysicalWorkspace(",
+      "const workspaceAuthorities = createWorkspaceAuthorityOwner({",
+    );
+    const owner = sourceBetween(
+      "const workspaceAuthorities = createWorkspaceAuthorityOwner({",
+      "function requireWorkspaceAuthority(",
+    );
+    const transportClose = sourceBetween(
+      "async function closeRelayTransportWorkspace(",
+      "async function closeAllRelayTransportWorkspaces(",
+    );
+
+    expect(target).toContain(
+      "if (relayWorkspaceId !== workspace.workspaceId) return relayWorkspaceId;",
+    );
+    expect(target).toContain("workspaceId: workspace.workspaceId");
+    expect(target).toContain("rootPath: workspace.rootPath");
+    expect(target).toContain("attachmentId: workspace.attachmentId");
+    expect(owner).toContain("attachmentId: binding.attachmentId");
+    expect(owner).toContain(
+      "relayCloseTargetForPhysicalWorkspace(physicalWorkspace)",
+    );
+    expect(owner).toContain("closeRelayTransportWorkspace(relayCloseTarget)");
+    expect(transportClose).toContain("workspace: string | EngineWorkspace");
+    expect(transportClose).toContain(
+      "await rustEngineRelayClient.closeWorkspace(workspace)",
+    );
+    expect(transportClose).toContain(
+      "await rustEngineWorkspaceSessions?.closeWorkspace(workspace)",
+    );
+  });
+
   it("treats relay teardown as non-fatal after local activity closes", () => {
     const close = sourceBetween(
       "async function closeDispatchRunActivity(",
@@ -27,7 +61,10 @@ describe("main-process engine store rebuild wiring", () => {
       /closeActivity: async \(\) => \{\s*await activity\.close\(current\.workspaceId, \{\s*expectedRootPath: current\.rootPath,\s*preserveStatus: true,\s*notify: options\.notifyRenderer,/,
     );
     expect(close).toContain(
-      "closeRelay: () => closeRelayTransportWorkspace(relayWorkspaceId)",
+      "const relayCloseTarget = relayCloseTargetForPhysicalWorkspace(current)",
+    );
+    expect(close).toContain(
+      "closeRelay: () => closeRelayTransportWorkspace(relayCloseTarget)",
     );
     expect(close).toContain("onRelayCloseError: (error) =>");
     expect(close).toContain("console.error(");
@@ -59,6 +96,15 @@ describe("main-process engine store rebuild wiring", () => {
     expect(recovery).toContain("sessions.beginRebuild(workspace)");
     expect(recovery).toContain("sessions.endRebuild(workspace)");
     expect(dispatch).toContain("withEngineStoreRecoveredForAuthority(lease,");
+    expect(dispatch).toMatch(
+      /captureForFlaggedWorkspace\(\s*\{\s*\.\.\.workspace,[\s\S]*?shareView: false,/,
+    );
+    expect(dispatch).toMatch(
+      /const relayCloseTarget =\s*relayCloseTargetForPhysicalWorkspace\(workspace\)/,
+    );
+    expect(dispatch).toContain(
+      "await closeRelayTransportWorkspace(relayCloseTarget).catch(",
+    );
     expect(ordinaryOpen).toContain("withEngineStoreRecoveredForAuthority(lease,");
     expect(lockedOpen).toContain(
       "withEngineStoreRecoveredUnderEngineStoreLock(",
