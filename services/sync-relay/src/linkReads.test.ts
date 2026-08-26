@@ -304,6 +304,11 @@ async function seedThenRotate(h: SyncRelayHandler) {
     replicationEpoch: EPOCH_1,
     streamIdentity: STREAM_1,
   });
+  await rotateWorkspaceIdentity(h);
+  return seeded;
+}
+
+async function rotateWorkspaceIdentity(h: SyncRelayHandler): Promise<void> {
   expect(
     (
       await h(
@@ -315,7 +320,6 @@ async function seedThenRotate(h: SyncRelayHandler) {
       )
     ).status,
   ).toBe(200);
-  return seeded;
 }
 
 async function appendAfterRotation(h: SyncRelayHandler): Promise<string> {
@@ -410,7 +414,7 @@ describe("relay capability reads", () => {
     const linkOps = (recipientLog.ops as Array<Record<string, unknown>>).map(
       ({ originId: _originId, ...op }) => op,
     );
-    expect(linkLog).toEqual({ ...recipientLog, ops: linkOps });
+    expect(linkLog).toEqual({ ...recipientLog, ops: linkOps, epochLogFloor: 0 });
     expect(linkOps.every((op) => !Object.hasOwn(op, "originId"))).toBe(true);
     expect(JSON.stringify(linkLog)).not.toContain("private/hidden.md");
 
@@ -521,6 +525,7 @@ describe("relay capability reads", () => {
       ops: expectedLinkOps,
       nextCursor: authenticatedLog.nextCursor,
       hasMore: authenticatedLog.hasMore,
+      epochLogFloor: 0,
     });
     expect(
       (linkLog.ops as Array<Record<string, unknown>>).every(
@@ -545,22 +550,49 @@ describe("relay capability reads", () => {
     const skippedThreadPage = await json(
       await h(linkRequest(seeded.capability, "/sync/link/log?since=3&limit=1")),
     );
-    expect(skippedThreadPage).toEqual({ ok: true, ops: [], nextCursor: 4, hasMore: true });
+    expect(skippedThreadPage).toEqual({
+      ok: true,
+      ops: [],
+      nextCursor: 4,
+      hasMore: true,
+      epochLogFloor: 0,
+    });
     const skippedMessagePage = await json(
       await h(linkRequest(seeded.capability, "/sync/link/log?since=4&limit=1")),
     );
-    expect(skippedMessagePage).toEqual({ ok: true, ops: [], nextCursor: 5, hasMore: false });
+    expect(skippedMessagePage).toEqual({
+      ok: true,
+      ops: [],
+      nextCursor: 5,
+      hasMore: false,
+      epochLogFloor: 0,
+    });
   });
 
   it("keeps link log pages and freshness above the workspace epoch floor", async () => {
     const storage = await newStorage();
     const h = handler(storage);
-    const seeded = await seedThenRotate(h);
+    const seeded = await seed(h, "view", {}, {
+      replicationEpoch: EPOCH_1,
+      streamIdentity: STREAM_1,
+    });
+
+    const originalLog = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100")),
+    );
+    expect(originalLog.epochLogFloor).toBe(0);
+
+    await rotateWorkspaceIdentity(h);
 
     const rotatedLog = await json(
       await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100")),
     );
-    expect(rotatedLog).toMatchObject({ ok: true, ops: [], hasMore: false });
+    expect(rotatedLog).toMatchObject({
+      ok: true,
+      epochLogFloor: 3,
+      ops: [],
+      hasMore: false,
+    });
 
     const rotatedShare = await json(
       await h(linkRequest(seeded.capability, "/sync/link/share")),
@@ -572,6 +604,7 @@ describe("relay capability reads", () => {
     const currentLog = await json(
       await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100")),
     );
+    expect(currentLog.epochLogFloor).toBe(3);
     expect(
       (currentLog.ops as Array<{ payload: { payloadAfterPath?: string } }>).map(
         (op) => op.payload.payloadAfterPath,

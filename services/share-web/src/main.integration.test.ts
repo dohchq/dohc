@@ -16,6 +16,8 @@ const MAX_REQUEST_BODY_BYTES = 16 * 1024;
 const EXCHANGE_SECRET = Buffer.alloc(32, 11).toString("base64url");
 const CAPABILITY_TOKEN = Buffer.alloc(32, 12).toString("base64url");
 const BLOB_SHA = "a".repeat(64);
+const SHUTDOWN_GRACE_PERIOD_MS = 10_000;
+const SHUTDOWN_MARGIN_MS = 2_000;
 const PNG_CHUNK = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4, 5, 6, 7, 8,
 ]);
@@ -77,6 +79,55 @@ afterEach(async () => {
 });
 
 describe("share-web Node request adapter", () => {
+  it("force-closes a stalled blob response after the shutdown grace period", async () => {
+    const relay = await startControlledBlobRelay();
+    const server = await startShareWeb({ relayUrl: relay.url });
+    const session = await exchangeSession(server.port);
+    const blobRequest = requestBlob(server.port, session);
+
+    await relay.waitForBlobRequests(1);
+    relay.startBlob(0);
+    const response = await blobRequest.response;
+    expect(response.statusCode).toBe(200);
+    expect(await readFirstChunk(response)).toEqual(PNG_CHUNK);
+
+    try {
+      const exited = waitForExit(server.child);
+      sendTerminationSignal(server.child);
+
+      expect(await settleWithin(exited, SHUTDOWN_GRACE_PERIOD_MS - 1_000)).toEqual({
+        kind: "timeout",
+      });
+      const forcedExit = await settleWithin(exited, SHUTDOWN_MARGIN_MS + 1_000);
+      expect(
+        forcedExit,
+        `share-web remained alive after its shutdown grace period\n${server.stderr()}`,
+      ).toEqual({
+        kind: "settled",
+        value: { code: 0, signal: null },
+      });
+    } finally {
+      response.destroy();
+      blobRequest.destroy();
+      relay.finishAllBlobs();
+    }
+  }, 15_000);
+
+  it("shuts down promptly when no responses are active", async () => {
+    const server = await startShareWeb();
+    const exited = waitForExit(server.child);
+
+    sendTerminationSignal(server.child);
+
+    expect(
+      await settleWithin(exited, 1_000),
+      `quiet share-web did not exit promptly\n${server.stderr()}`,
+    ).toEqual({
+      kind: "settled",
+      value: { code: 0, signal: null },
+    });
+  });
+
   it("refuses and closes a streaming request as soon as it crosses the body cap", async () => {
     const server = await startShareWeb();
     const upload = streamChunkedRequestWithoutEnd(
@@ -268,7 +319,10 @@ describe("share-web Node request adapter", () => {
     expect(secondClient).toMatchObject({ kind: "response", status: 200 });
   });
 
-  it("limits each session to 8 blob proxies and releases settled slots", async () => {
+  // Eight real concurrent streams through the spawned adapter: under full
+  // package-suite parallelism the default 5s budget starves (twice observed;
+  // isolated it finishes in <200ms). The wider budget is capacity, not a wait.
+  it("limits each session to 8 blob proxies and releases settled slots", { timeout: 30_000 }, async () => {
     const relay = await startControlledBlobRelay();
     const server = await startShareWeb({ relayUrl: relay.url });
     const session = await exchangeSession(server.port);
@@ -386,9 +440,20 @@ async function startShareWeb(
   if (options.trustedProxies !== undefined) {
     env.DOHC_SHARE_WEB_TRUSTED_PROXIES = options.trustedProxies;
   }
+  const mainUrl = new URL("./main.ts", import.meta.url);
+  const childArguments =
+    process.platform === "win32"
+      ? [
+          "--import",
+          "tsx",
+          "--input-type=module",
+          "--eval",
+          `process.on("message", (message) => { if (message === "SIGTERM") process.emit("SIGTERM"); }); await import(${JSON.stringify(mainUrl.href)});`,
+        ]
+      : ["--import", "tsx", fileURLToPath(mainUrl)];
   const child = spawn(
     process.execPath,
-    ["--import", "tsx", fileURLToPath(new URL("./main.ts", import.meta.url))],
+    childArguments,
     {
       env: {
         ...env,
@@ -399,10 +464,10 @@ async function startShareWeb(
         DOHC_SHARE_WEB_PORT: "0",
         DOHC_SHARE_WEB_BIND: "127.0.0.1",
       },
-      stdio: ["pipe", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe", "ipc"],
       windowsHide: true,
     },
-  );
+  ) as ChildProcessWithoutNullStreams;
   children.add(child);
   child.stdin.end();
   child.stdout.setEncoding("utf8");
@@ -761,6 +826,23 @@ async function stopShareWeb(child: ChildProcessWithoutNullStreams): Promise<void
   const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
   child.kill();
   await exited;
+}
+
+function waitForExit(
+  child: ChildProcessWithoutNullStreams,
+): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
+  }
+  return new Promise((resolve) => {
+    child.once("exit", (code, signal) => resolve({ code, signal }));
+  });
+}
+
+function sendTerminationSignal(child: ChildProcessWithoutNullStreams): void {
+  const sent =
+    process.platform === "win32" ? child.send("SIGTERM") : child.kill("SIGTERM");
+  if (!sent) throw new Error("failed to send SIGTERM to share-web");
 }
 
 async function stopRelay(server: Server): Promise<void> {

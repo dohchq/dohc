@@ -21,6 +21,7 @@ const MAX_LOG_PAGES = 10_000;
 const LOG_RETRY_INITIAL_MS = 1_000;
 const LOG_RETRY_MAX_MS = 15_000;
 const LOG_RETRY_BUDGET_MS = 120_000;
+export const MARKDOWN_PREVIEW_BYTE_CAP = 2 * 1024 * 1024;
 
 type ViewerState =
   | { status: "loading" }
@@ -32,6 +33,7 @@ type ViewerState =
       fileAccumulator: FileAccumulator;
       files: SharedFile[];
       nextCursor: number;
+      epochLogFloor: number;
     };
 
 type ReadyState = Extract<ViewerState, { status: "ready" }>;
@@ -39,13 +41,86 @@ type ReadyState = Extract<ViewerState, { status: "ready" }>;
 interface LoadedLog {
   fileAccumulator: FileAccumulator;
   nextCursor: number;
+  epochLogFloor: number;
 }
+
+type MarkdownPreview =
+  | { status: "ready"; markdown: string }
+  | { status: "too-large" };
 
 async function api(session: string, path: string): Promise<Response> {
   return fetch(path, {
     credentials: "same-origin",
     headers: { [SESSION_HEADER]: session },
   });
+}
+
+function waitForRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error("cancelled"));
+      return;
+    }
+    let timeoutId = 0;
+    const cancel = () => {
+      window.clearTimeout(timeoutId);
+      reject(new Error("cancelled"));
+    };
+    timeoutId = window.setTimeout(() => {
+      signal?.removeEventListener("abort", cancel);
+      resolve();
+    }, delayMs);
+    signal?.addEventListener("abort", cancel, { once: true });
+  });
+}
+
+async function apiWithThrottleRetry(
+  session: string,
+  path: string,
+  signal?: AbortSignal,
+): Promise<Response> {
+  let retryDelayMs = LOG_RETRY_INITIAL_MS;
+  let retryWaitedMs = 0;
+  while (true) {
+    if (signal?.aborted) throw new Error("cancelled");
+    const response = await api(session, path);
+    if (response.status !== 429) return response;
+    if (retryWaitedMs + retryDelayMs > LOG_RETRY_BUDGET_MS) {
+      throw new Error("refused");
+    }
+    await waitForRetry(retryDelayMs, signal);
+    retryWaitedMs += retryDelayMs;
+    retryDelayMs = Math.min(retryDelayMs * 2, LOG_RETRY_MAX_MS);
+  }
+}
+
+async function readMarkdownPreview(response: Response): Promise<MarkdownPreview> {
+  if (!response.body) return { status: "ready", markdown: "" };
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const textChunks: string[] = [];
+  let bytesRead = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        textChunks.push(decoder.decode());
+        return { status: "ready", markdown: textChunks.join("") };
+      }
+      bytesRead += value.byteLength;
+      if (bytesRead > MARKDOWN_PREVIEW_BYTE_CAP) {
+        try {
+          await reader.cancel();
+        } catch {
+          // The preview remains too large even if the transport cannot cancel.
+        }
+        return { status: "too-large" };
+      }
+      textChunks.push(decoder.decode(value, { stream: true }));
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 async function loadLog(
@@ -58,26 +133,24 @@ async function loadLog(
   let pageNumber = 0;
   while (maxPages === undefined || pageNumber < maxPages) {
     pageNumber += 1;
-    let retryDelayMs = LOG_RETRY_INITIAL_MS;
-    let retryWaitedMs = 0;
-    let response: Response;
-    while (true) {
-      response = await api(session, `/api/view/log?since=${cursor}&limit=500`);
-      if (response.status !== 429) break;
-      if (retryWaitedMs + retryDelayMs > LOG_RETRY_BUDGET_MS) {
-        throw new Error("refused");
-      }
-      await new Promise<void>((resolve) => window.setTimeout(resolve, retryDelayMs));
-      retryWaitedMs += retryDelayMs;
-      retryDelayMs = Math.min(retryDelayMs * 2, LOG_RETRY_MAX_MS);
-    }
+    const response = await apiWithThrottleRetry(
+      session,
+      `/api/view/log?since=${cursor}&limit=500`,
+    );
     if (!response.ok) throw new Error("refused");
     const page = (await response.json()) as {
       ops?: unknown;
       nextCursor?: unknown;
       hasMore?: unknown;
+      epochLogFloor?: unknown;
     };
-    if (!Array.isArray(page.ops) || typeof page.nextCursor !== "number") {
+    if (
+      !Array.isArray(page.ops) ||
+      typeof page.nextCursor !== "number" ||
+      typeof page.epochLogFloor !== "number" ||
+      !Number.isSafeInteger(page.epochLogFloor) ||
+      page.epochLogFloor < 0
+    ) {
       throw new Error("refused");
     }
     foldLogOps(fileAccumulator, page.ops as RelayOp[]);
@@ -89,7 +162,11 @@ async function loadLog(
       throw new Error("refused");
     }
     if (page.hasMore !== true) {
-      return { fileAccumulator, nextCursor: page.nextCursor };
+      return {
+        fileAccumulator,
+        nextCursor: page.nextCursor,
+        epochLogFloor: page.epochLogFloor,
+      };
     }
     cursor = page.nextCursor;
   }
@@ -245,6 +322,7 @@ function FileView(props: {
   onSelect: (path: string) => void;
 }) {
   const [markdown, setMarkdown] = useState<string | null>(null);
+  const [markdownTooLarge, setMarkdownTooLarge] = useState(false);
   const [failed, setFailed] = useState(false);
   const rendersMarkdown = props.file.contentKind === "text" && isMarkdown(props.file.path);
   const fileMap = useMemo(
@@ -254,22 +332,39 @@ function FileView(props: {
   useEffect(() => {
     let current = true;
     setMarkdown(null);
+    setMarkdownTooLarge(false);
     setFailed(false);
     if (!rendersMarkdown) return () => { current = false; };
-    void api(props.session, `/api/view/blob/${props.file.blobSha256}`)
+    const abortController = new AbortController();
+    void apiWithThrottleRetry(
+      props.session,
+      `/api/view/blob/${props.file.blobSha256}`,
+      abortController.signal,
+    )
       .then(async (response) => {
         if (!response.ok) throw new Error("refused");
-        const text = await response.text();
-        if (current) setMarkdown(text);
+        const preview = await readMarkdownPreview(response);
+        if (!current) return;
+        if (preview.status === "too-large") {
+          setMarkdownTooLarge(true);
+        } else {
+          setMarkdown(preview.markdown);
+        }
       })
       .catch(() => {
         if (current) setFailed(true);
       });
-    return () => { current = false; };
+    return () => {
+      current = false;
+      abortController.abort();
+    };
   }, [props.file, props.session, rendersMarkdown]);
 
   if (failed) return <Unavailable />;
   if (rendersMarkdown) {
+    if (markdownTooLarge) {
+      return <DownloadCard file={props.file} session={props.session} />;
+    }
     if (markdown === null) return <p className="muted">Loading file</p>;
     return (
       <MarkdownContent
@@ -293,6 +388,10 @@ function FileView(props: {
       />
     );
   }
+  return <DownloadCard file={props.file} session={props.session} />;
+}
+
+function DownloadCard(props: { file: SharedFile; session: string }) {
   return (
     <div className="download-card">
       <p>{isSvg(props.file.path) ? "SVG files open as downloads." : "This file opens as a download."}</p>
@@ -333,6 +432,7 @@ export function App() {
             fileAccumulator: log.fileAccumulator,
             files,
             nextCursor: log.nextCursor,
+            epochLogFloor: log.epochLogFloor,
           });
         }
       } catch {
@@ -373,14 +473,24 @@ export function App() {
         loadMeta(readySession),
         loadLog(readySession, previous.nextCursor, fileAccumulator),
       ])
-        .then(([meta, log]) => {
+        .then(async ([meta, log]) => {
+          if (!current) return;
+          const currentLog = log.epochLogFloor === previous.epochLogFloor
+            ? log
+            : await loadLog(
+                readySession,
+                log.epochLogFloor,
+                new Map(),
+                MAX_LOG_PAGES,
+              );
           if (!current) return;
           const nextState: ReadyState = {
             ...previous,
             meta,
-            fileAccumulator: log.fileAccumulator,
-            files: filesFromAccumulator(log.fileAccumulator),
-            nextCursor: log.nextCursor,
+            fileAccumulator: currentLog.fileAccumulator,
+            files: filesFromAccumulator(currentLog.fileAccumulator),
+            nextCursor: currentLog.nextCursor,
+            epochLogFloor: currentLog.epochLogFloor,
           };
           readyStateRef.current = nextState;
           setState((value) =>

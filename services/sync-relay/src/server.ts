@@ -1144,7 +1144,7 @@ export function createSyncRelayHandler({
             "accountless",
           );
           requireFreshLinkRead(capabilityToken, capability);
-          return jsonResponse({ ok: true, ...page });
+          return jsonResponse({ ok: true, ...page, epochLogFloor });
         }
 
         assertSha256(route.sha256);

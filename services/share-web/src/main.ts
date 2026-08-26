@@ -8,6 +8,8 @@ import {
   shareWebRefusalBody,
 } from "./server";
 
+const SHUTDOWN_GRACE_PERIOD_MS = 10_000;
+
 const config = loadConfig();
 const viewerAssetsDir = fileURLToPath(new URL("../viewer/dist", import.meta.url));
 
@@ -107,7 +109,19 @@ server.listen(config.port, config.bind, () => {
 });
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.on(signal, () => server.close(() => process.exit(0)));
+  process.on(signal, shutdown);
+}
+
+function shutdown(): void {
+  let forceCloseTimer: ReturnType<typeof setTimeout> | undefined;
+  server.close(() => {
+    if (forceCloseTimer !== undefined) clearTimeout(forceCloseTimer);
+    process.exit(0);
+  });
+  forceCloseTimer = setTimeout(() => {
+    server.closeAllConnections();
+  }, SHUTDOWN_GRACE_PERIOD_MS);
+  forceCloseTimer.unref();
 }
 
 function loadConfig() {

@@ -2,7 +2,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { App } from "./App";
+import { App, MARKDOWN_PREVIEW_BYTE_CAP } from "./App";
 import { filesFromLog, type RelayOp, type SharedFile, type ViewMeta } from "./model";
 
 const SESSION = "abcdefghijkl";
@@ -36,11 +36,13 @@ function logOpsPage(
   ops: readonly RelayOp[],
   nextCursor: number,
   hasMore = false,
+  epochLogFloor = 0,
 ): Response {
   return jsonResponse({
     ops,
     nextCursor,
     hasMore,
+    epochLogFloor,
   });
 }
 
@@ -259,6 +261,121 @@ describe("App", () => {
       .toContain(file.path);
   });
 
+  it("retries a throttled file blob and renders it when capacity becomes available", async () => {
+    vi.useFakeTimers();
+    const file: SharedFile = {
+      path: "readme.md",
+      blobSha256: "8".repeat(64),
+      contentKind: "text",
+    };
+    let blobRequests = 0;
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
+      if (path === `/api/view/blob/${file.blobSha256}`) {
+        blobRequests += 1;
+        return blobRequests === 1
+          ? new Response(null, { status: 429 })
+          : new Response("# Retried file\n\nContent after retry.");
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+
+    expect(container.querySelector("main.content")?.textContent).toContain(
+      "Content after retry.",
+    );
+    expect(blobRequests).toBe(2);
+  });
+
+  it("stops retrying a persistently throttled file blob when the budget is exhausted", async () => {
+    vi.useFakeTimers();
+    const file: SharedFile = {
+      path: "readme.md",
+      blobSha256: "7".repeat(64),
+      contentKind: "text",
+    };
+    let blobRequests = 0;
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
+      if (path === `/api/view/blob/${file.blobSha256}`) {
+        blobRequests += 1;
+        return new Response(null, { status: 429 });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(120_000);
+    });
+
+    expect(blobRequests).toBe(12);
+    expect(container.querySelector("main.content")?.textContent).toBe(
+      "This link isn't available.",
+    );
+  });
+
+  it("cancels a throttled file blob retry when the selection changes", async () => {
+    vi.useFakeTimers();
+    const firstFile: SharedFile = {
+      path: "a.md",
+      blobSha256: "6".repeat(64),
+      contentKind: "text",
+    };
+    const secondFile: SharedFile = {
+      path: "b.md",
+      blobSha256: "5".repeat(64),
+      contentKind: "text",
+    };
+    let firstFileRequests = 0;
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/log?since=0&limit=500") {
+        return logPage([firstFile, secondFile]);
+      }
+      if (path === `/api/view/blob/${firstFile.blobSha256}`) {
+        firstFileRequests += 1;
+        return new Response(null, { status: 429 });
+      }
+      if (path === `/api/view/blob/${secondFile.blobSha256}`) {
+        return new Response("# Current file\n\nSecond file content.");
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+    const secondFileButton = [...container.querySelectorAll("button.file")]
+      .find((button) => button.textContent === secondFile.path);
+    await act(async () => {
+      secondFileButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(container.querySelector("article.markdown")?.textContent).toContain(
+      "Second file content.",
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+
+    expect(firstFileRequests).toBe(1);
+    expect(container.querySelector("article.markdown")?.textContent).toContain(
+      "Second file content.",
+    );
+  });
+
   it.each([
     [`/s/${SESSION}#section`, `/s/${SESSION}`],
     [`/s/${SESSION}?view=compact#section`, `/s/${SESSION}?view=compact`],
@@ -346,6 +463,102 @@ describe("App", () => {
     );
   });
 
+  it("pins the Markdown preview byte cap", () => {
+    expect(MARKDOWN_PREVIEW_BYTE_CAP).toBe(2 * 1024 * 1024);
+  });
+
+  it("offers oversized Markdown files as downloads without rendering them", async () => {
+    const file: SharedFile = {
+      path: "oversized.md",
+      blobSha256: "1".repeat(64),
+      contentKind: "text",
+    };
+    const encoder = new TextEncoder();
+    const markdownChunks = [
+      encoder.encode("# Oversized Markdown\n\n"),
+      new Uint8Array(MARKDOWN_PREVIEW_BYTE_CAP),
+      encoder.encode("# Must not render"),
+    ];
+    expect(
+      markdownChunks.reduce((size, chunk) => size + chunk.byteLength, 0),
+    ).toBeGreaterThan(
+      MARKDOWN_PREVIEW_BYTE_CAP,
+    );
+    let nextChunk = 0;
+    let streamCancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const chunk = markdownChunks[nextChunk];
+        nextChunk += 1;
+        if (chunk) {
+          controller.enqueue(chunk);
+        } else {
+          controller.close();
+        }
+      },
+      cancel() {
+        streamCancelled = true;
+      },
+    });
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
+      if (path === `/api/view/blob/${file.blobSha256}`) {
+        return new Response(body);
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+
+    const downloadCard = container.querySelector(".download-card");
+    expect({
+      renderedHeading: container.querySelector("article.markdown h1")?.textContent,
+      downloadCopy: downloadCard?.querySelector("p")?.textContent,
+      downloadLabel: downloadCard?.querySelector("a[download]")?.textContent,
+      streamCancelled,
+    }).toEqual({
+      renderedHeading: undefined,
+      downloadCopy: "This file opens as a download.",
+      downloadLabel: "Download file",
+      streamCancelled: true,
+    });
+  });
+
+  it("renders Markdown files at or under the preview byte cap", async () => {
+    const file: SharedFile = {
+      path: "preview.md",
+      blobSha256: "2".repeat(64),
+      contentKind: "text",
+    };
+    const markdown = "# Previewed Markdown\n\nStill rendered.";
+    expect(new TextEncoder().encode(markdown).byteLength).toBeLessThanOrEqual(
+      MARKDOWN_PREVIEW_BYTE_CAP,
+    );
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
+      if (path === `/api/view/blob/${file.blobSha256}`) {
+        return new Response(markdown);
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+
+    expect(container.querySelector("article.markdown h1")?.textContent).toBe(
+      "Previewed Markdown",
+    );
+    expect(container.querySelector("article.markdown")?.textContent).toContain(
+      "Still rendered.",
+    );
+    expect(container.querySelector(".download-card")).toBeNull();
+  });
+
   it("refreshes the last-settled age every minute", async () => {
     vi.useFakeTimers();
     const now = new Date("2026-08-26T06:00:00.000Z");
@@ -422,6 +635,74 @@ describe("App", () => {
     expect(logPaths).toEqual([
       "/api/view/log?since=0&limit=500",
       "/api/view/log?since=17&limit=500",
+    ]);
+  });
+
+  it("rebuilds the file tree when a heartbeat observes a new epoch floor", async () => {
+    vi.useFakeTimers();
+    const removedFile: SharedFile = {
+      path: "gone.txt",
+      blobSha256: "4".repeat(64),
+      contentKind: "text",
+    };
+    const survivingFile: SharedFile = {
+      path: "survives.txt",
+      blobSha256: "5".repeat(64),
+      contentKind: "text",
+    };
+    const initialOps: RelayOp[] = [{
+      relaySeq: 7,
+      opKind: "version.create",
+      payload: { forkSnapshots: [removedFile, survivingFile] },
+      recordedAtMs: 1,
+    }];
+    const postRotationOps: RelayOp[] = [{
+      relaySeq: 11,
+      opKind: "moment.append",
+      payload: {
+        operation: "write",
+        payloadAfterPath: survivingFile.path,
+        payloadAfterBlobSha256: "6".repeat(64),
+        payloadAfterContentKind: "text",
+      },
+      recordedAtMs: 2,
+    }];
+    const logPaths: string[] = [];
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path.startsWith("/api/view/log?")) logPaths.push(path);
+      if (path === "/api/view/log?since=0&limit=500") {
+        return logOpsPage(initialOps, 7);
+      }
+      if (path === "/api/view/log?since=7&limit=500") {
+        return logOpsPage(postRotationOps, 11, false, 10);
+      }
+      if (path === "/api/view/log?since=10&limit=500") {
+        return logOpsPage(postRotationOps, 11, false, 10);
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+    expect(renderedFilePaths()).toEqual(["gone.txt", "survives.txt"]);
+    const survivingButton = [...container.querySelectorAll("button.file")]
+      .find((button) => button.textContent === "survives.txt");
+    await act(async () => {
+      survivingButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+    });
+
+    expect(renderedFilePaths()).toEqual(["survives.txt"]);
+    expect(container.querySelector("h1")?.textContent).toBe("survives.txt");
+    expect(logPaths).toEqual([
+      "/api/view/log?since=0&limit=500",
+      "/api/view/log?since=7&limit=500",
+      "/api/view/log?since=10&limit=500",
     ]);
   });
 
