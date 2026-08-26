@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { classifyPath, hasEngineIgnoredSegment } from "@dohc/workspace-core";
 import {
   lstat,
   mkdtemp,
@@ -50,6 +51,114 @@ async function caseInsensitiveFs(): Promise<boolean> {
 const rejectingTrash = async () => {
   throw new Error("g_file_trash: Unable to find or create trash directory");
 };
+
+type FileListing = Awaited<ReturnType<typeof listFiles>>;
+
+async function listFilesSerialReference(
+  rootPath: string,
+  platform: NodeJS.Platform,
+): Promise<FileListing> {
+  const files: FileListing["files"] = [];
+  const folders: string[] = [];
+
+  async function walk(dir: string, prefix: string): Promise<void> {
+    const dirents = await readdir(dir, { withFileTypes: true });
+    for (const dirent of dirents) {
+      const rel = prefix ? `${prefix}/${dirent.name}` : dirent.name;
+      if (hasEngineIgnoredSegment(rel, platform) || dirent.isSymbolicLink()) continue;
+      if (dirent.isDirectory()) {
+        folders.push(rel);
+        await walk(join(dir, dirent.name), rel);
+      } else if (dirent.isFile()) {
+        const kind = classifyPath(rel).kind;
+        const entry: FileListing["files"][number] = { path: rel, kind };
+        if (kind === "file" && /\.(md|markdown)$/i.test(rel)) {
+          const head = await readFile(join(dir, dirent.name)).catch(() => undefined);
+          const icon = head
+            ? extractFrontmatterIcon(head.subarray(0, 1024).toString("utf8"))
+            : undefined;
+          if (icon) entry.icon = icon;
+        }
+        files.push(entry);
+      }
+    }
+  }
+
+  await walk(rootPath, "");
+  files.sort((a, b) => a.path.localeCompare(b.path));
+  folders.sort((a, b) => a.localeCompare(b));
+  return { files, folders };
+}
+
+function seededIndex(seed: number): (limit: number) => number {
+  let state = seed >>> 0;
+  return (limit) => {
+    state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0;
+    return state % limit;
+  };
+}
+
+async function populateGeneratedListingTree(
+  treeRoot: string,
+  seed: number,
+): Promise<void> {
+  const next = seededIndex(seed);
+  const extensions = [".md", ".markdown", ".md", ".txt", ".json", ".sqlite"];
+
+  await mkdir(join(treeRoot, "empty", "nested"), { recursive: true });
+  await mkdir(join(treeRoot, `.hidden-${seed}`), { recursive: true });
+  await writeFile(
+    join(treeRoot, `.hidden-${seed}`, "visible.md"),
+    "---\nicon: 👁️\n---\n",
+  );
+
+  for (let index = 0; index < 48; index += 1) {
+    const depth = index < 12 ? 1 : 1 + next(5);
+    const segments = index < 12
+      ? ["flat"]
+      : Array.from({ length: depth }, (_, level) =>
+          `d${level}-${next(5)}`,
+        );
+    const dir = join(treeRoot, ...segments);
+    await mkdir(dir, { recursive: true });
+    const extension = extensions[next(extensions.length)] ?? ".md";
+    const path = join(dir, `item-${String(index).padStart(2, "0")}${extension}`);
+    const iconCase = next(4);
+    const contents = /\.(md|markdown)$/i.test(extension)
+      ? iconCase === 0
+        ? "---\nicon: 🚀\n---\n# Generated\n"
+        : iconCase === 1
+          ? "---\nicon: \"📄\"\n---\n# Generated\n"
+          : iconCase === 2
+            ? "---\nicon: 📝 # generated\n---\n# Generated\n"
+            : "# No frontmatter\n"
+      : `generated-${seed}-${index}\n`;
+    await writeFile(path, contents);
+  }
+
+  await mkdir(join(treeRoot, ".dohc", "nested"), { recursive: true });
+  await writeFile(join(treeRoot, ".dohc", "nested", "ignored.md"), "---\nicon: ❌\n---\n");
+  await mkdir(join(treeRoot, ".git"), { recursive: true });
+  await writeFile(join(treeRoot, ".git", "ignored.md"), "ignored");
+  await mkdir(join(treeRoot, "kept", "node_modules", "pkg"), { recursive: true });
+  await writeFile(join(treeRoot, "kept", "node_modules", "pkg", "ignored.md"), "ignored");
+  await writeFile(join(treeRoot, ".dohc-write-listing.tmp"), "ignored");
+  await mkdir(join(treeRoot, SHARED_WITH_ME_FOLDER, "alex"), { recursive: true });
+  await writeFile(
+    join(treeRoot, SHARED_WITH_ME_FOLDER, "alex", "brief.md"),
+    "---\nicon: 🤝\n---\n",
+  );
+
+  const linkTarget = join(treeRoot, "link-target");
+  await mkdir(linkTarget, { recursive: true });
+  await writeFile(join(linkTarget, "owned.md"), "owned");
+  await symlink(linkTarget, join(treeRoot, "linked-directory"), "dir");
+  await symlink(
+    join(linkTarget, "owned.md"),
+    join(treeRoot, "linked-file.md"),
+    "file",
+  );
+}
 
 describe("createFile", () => {
   it("creates nested files through validated paths", async () => {
@@ -110,6 +219,44 @@ describe("extractFrontmatterIcon", () => {
 });
 
 describe("listFiles", () => {
+  it("matches the serial walker byte-for-byte across generated trees", async () => {
+    for (const seed of [1, 7, 19, 41, 73, 101]) {
+      const treeRoot = join(root, `generated-${seed}`);
+      await mkdir(treeRoot, { recursive: true });
+      await populateGeneratedListingTree(treeRoot, seed);
+
+      const expected = await listFilesSerialReference(treeRoot, "linux");
+      const actual = await listFiles(treeRoot, { platform: "linux" });
+
+      expect(JSON.stringify(actual)).toBe(JSON.stringify(expected));
+    }
+  });
+
+  it("keeps serial ordering across concurrent walks of a deep tree", async () => {
+    for (const branch of ["z", "a", "m", "b", "y", "c", "x", "d"]) {
+      let dir = join(root, branch);
+      for (let depth = 0; depth < 12; depth += 1) {
+        dir = join(dir, `d${String(depth).padStart(2, "0")}`);
+        await mkdir(dir, { recursive: true });
+        await writeFile(join(dir, `z-${depth}.txt`), "text");
+        await writeFile(
+          join(dir, `a-${depth}.md`),
+          `---\nicon: ${depth % 2 === 0 ? "🌲" : "🌿"}\n---\n`,
+        );
+      }
+      await mkdir(join(dir, "empty"), { recursive: true });
+    }
+
+    const expected = JSON.stringify(await listFilesSerialReference(root, "linux"));
+    const listings = await Promise.all(
+      Array.from({ length: 4 }, () => listFiles(root, { platform: "linux" })),
+    );
+
+    for (const listing of listings) {
+      expect(JSON.stringify(listing)).toBe(expected);
+    }
+  });
+
   it("lists files and folders but skips internal directories", async () => {
     await mkdir(join(root, ".dohc"), { recursive: true });
     await writeFile(join(root, ".dohc", "manifest.json"), "{}");

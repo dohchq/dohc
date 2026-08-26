@@ -118,8 +118,7 @@ async function readMarkdownIcon(absolutePath: string): Promise<string | undefine
   }
 }
 
-// Icon cache: readMarkdownIcon does an open+read+close per markdown file, and
-// listFiles' walk awaits it serially for every .md/.markdown file it visits.
+// Icon cache: readMarkdownIcon does an open+read+close per markdown file.
 // Without a cache, a full re-listing (e.g. after every save, via the
 // fs-watch -> refreshFiles path) re-pays that IO for the ENTIRE tree even
 // when nothing changed. Keyed by absolute path + (mtimeMs, size) — a plain
@@ -167,6 +166,48 @@ async function getCachedMarkdownIcon(absolutePath: string): Promise<string | und
   return icon;
 }
 
+// Both queues are process-wide: overlapping forced listings still stay at a
+// small, predictable IO width instead of multiplying the limit per request.
+// Directories and icons use separate lanes so a flat markdown-heavy directory
+// cannot put every descendant readdir behind thousands of icon reads.
+const LISTING_DIRECTORY_CONCURRENCY = 8;
+const LISTING_MARKDOWN_ICON_CONCURRENCY = 8;
+
+function createBoundedTaskQueue(concurrency: number) {
+  let active = 0;
+  const waiting = new Set<() => void>();
+
+  function startWaitingTasks(): void {
+    while (active < concurrency) {
+      const start = waiting.values().next().value;
+      if (!start) return;
+      waiting.delete(start);
+      active += 1;
+      start();
+    }
+  }
+
+  return function run<T>(task: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      waiting.add(() => {
+        void Promise.resolve()
+          .then(task)
+          .then(resolve, reject)
+          .finally(() => {
+            active -= 1;
+            startWaitingTasks();
+          });
+      });
+      startWaitingTasks();
+    });
+  };
+}
+
+const runDirectoryRead = createBoundedTaskQueue(LISTING_DIRECTORY_CONCURRENCY);
+const runMarkdownIconRead = createBoundedTaskQueue(
+  LISTING_MARKDOWN_ICON_CONCURRENCY,
+);
+
 export async function listFiles(
   rootPath: string,
   options: { platform?: NodeJS.Platform } = {},
@@ -178,7 +219,10 @@ export async function listFiles(
   const folders: string[] = [];
 
   async function walk(dir: string, prefix: string): Promise<void> {
-    const dirents = await readdir(dir, { withFileTypes: true });
+    const dirents = await runDirectoryRead(() =>
+      readdir(dir, { withFileTypes: true }),
+    );
+    const pending: Promise<void>[] = [];
     for (const dirent of dirents) {
       const rel = prefix ? `${prefix}/${dirent.name}` : dirent.name;
       // Never follow symlinks: a dir/file symlink could point outside the
@@ -186,17 +230,23 @@ export async function listFiles(
       if (hasEngineIgnoredSegment(rel, platform) || dirent.isSymbolicLink()) continue;
       if (dirent.isDirectory()) {
         folders.push(rel);
-        await walk(join(dir, dirent.name), rel);
+        pending.push(walk(join(dir, dirent.name), rel));
       } else if (dirent.isFile()) {
         const kind = classifyPath(rel).kind;
         const entry: WorkspaceFileEntry = { path: rel, kind };
         if (kind === "file" && /\.(md|markdown)$/i.test(rel)) {
-          const icon = await getCachedMarkdownIcon(join(dir, dirent.name));
-          if (icon) entry.icon = icon;
+          pending.push(
+            runMarkdownIconRead(() =>
+              getCachedMarkdownIcon(join(dir, dirent.name)),
+            ).then((icon) => {
+              if (icon) entry.icon = icon;
+            }),
+          );
         }
         entries.push(entry);
       }
     }
+    await Promise.all(pending);
   }
 
   await walk(rootPath, "");
