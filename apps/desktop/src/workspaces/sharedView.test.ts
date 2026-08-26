@@ -254,9 +254,8 @@ async function denyFileContentRead(absolutePath: string): Promise<void> {
 // held by the #402 ratchet, which fails if sharedView.ts ever gains a runtime
 // import of the legacy package.
 //
-// materializeSharedViewPaths touches exactly two store methods
-// (sharedView.ts:68 ensureMainVersion, :91-104 readTextFile/readBinaryFile), so
-// the two tests that drive it directly need nothing more than this.
+// materializeSharedViewPaths touches only ensureMainVersion and the two read
+// methods, so the tests that drive it directly need nothing more than this.
 function stubStore(
   readTextFile: () => Promise<{ text: string }>,
 ): Parameters<typeof materializeSharedViewPaths>[3] {

@@ -107,10 +107,9 @@ class CapturePartialFailureError extends Error {
   }
 }
 
-// A failure while resolving the target, before any lock or store mutation
-// runs. This lets callers distinguish an unreachable path from a failure
-// inside the locked operation while preserving the cause's message.
-class SharedViewTargetResolutionError extends Error {
+// A failure while resolving or inspecting the target before a mutation runs.
+// This keeps path access failures distinct from failures inside the store.
+class SharedViewTargetAccessError extends Error {
   constructor(options: { cause: unknown }) {
     super(
       options.cause instanceof Error
@@ -118,19 +117,7 @@ class SharedViewTargetResolutionError extends Error {
         : String(options.cause),
       options,
     );
-    this.name = "SharedViewTargetResolutionError";
-  }
-}
-
-class CapturePathObservationError extends Error {
-  constructor(options: { cause: unknown }) {
-    super(
-      options.cause instanceof Error
-        ? options.cause.message
-        : String(options.cause),
-      options,
-    );
-    this.name = "CapturePathObservationError";
+    this.name = "SharedViewTargetAccessError";
   }
 }
 
@@ -235,7 +222,7 @@ async function withCaptureMutationLock<T>(
   try {
     resolvedTarget = await resolvedShareViewTarget(rootDir, path);
   } catch (error) {
-    throw new SharedViewTargetResolutionError({ cause: error });
+    throw new SharedViewTargetAccessError({ cause: error });
   }
   const run = () => operation(resolvedTarget);
   return workspaceLease === undefined
@@ -745,14 +732,6 @@ export function shareViewFilesProjection(owner: ShareViewFilesOwnerCapability) {
     ) =>
       active({ rootPath: rootDir, shareId }, () =>
         recordCollisionPaths(rootDir, shareId, paths),
-      ),
-    clearCollisions: (
-      rootDir: string,
-      shareId: string,
-      paths: readonly string[],
-    ) =>
-      active({ rootPath: rootDir, shareId }, () =>
-        clearCollisionRecordPaths(rootDir, shareId, paths),
       ),
   };
 }
@@ -1272,12 +1251,6 @@ function classifyCaptureObservation(
           path: unjournalableFromDisk(observation.path, observation.disk),
         };
       }
-      if (
-        observation.disk.kind !== "text" &&
-        observation.disk.kind !== "binary"
-      ) {
-        return unreachableCaptureState(observation.disk);
-      }
       return allowLocalJournaling
         ? {
             kind: "captured",
@@ -1497,31 +1470,26 @@ async function captureSharedViewLocalDivergence(input: {
       collision: collisionRecordedPaths.has(entry.path),
     });
   }
-  for (const path of pendingPaths) {
+  const markDebt = (path: string, debt: "pending" | "collision") => {
     const existing = workByPath.get(path);
-    if (existing === undefined) {
-      workByPath.set(path, {
-        path,
-        tracked: null,
-        pending: true,
-        collision: false,
-      });
-    } else {
-      existing.pending = true;
+    if (existing !== undefined) {
+      existing[debt] = true;
+      return;
     }
+    const inserted: CaptureWorkItem = {
+      path,
+      tracked: null,
+      pending: false,
+      collision: false,
+    };
+    inserted[debt] = true;
+    workByPath.set(path, inserted);
+  };
+  for (const path of pendingPaths) {
+    markDebt(path, "pending");
   }
   for (const path of collisionRecordedPaths) {
-    const existing = workByPath.get(path);
-    if (existing === undefined) {
-      workByPath.set(path, {
-        path,
-        tracked: null,
-        pending: false,
-        collision: true,
-      });
-    } else {
-      existing.collision = true;
-    }
+    markDebt(path, "collision");
   }
 
   const settlement = {
@@ -1578,7 +1546,7 @@ async function captureSharedViewLocalDivergence(input: {
         try {
           incoming = await inspectIncomingPath(resolvedTarget);
         } catch (error) {
-          throw new CapturePathObservationError({ cause: error });
+          throw new SharedViewTargetAccessError({ cause: error });
         }
         const disk: DiskTextState =
           incoming === "non-file"
@@ -1776,7 +1744,7 @@ async function captureSharedViewLocalDivergence(input: {
       );
     } catch (error) {
       if (
-        error instanceof SharedViewTargetResolutionError &&
+        error instanceof SharedViewTargetAccessError &&
         (row === "tracked-collision" || row === "untracked-collision")
       ) {
         return unjournalableVerdict(work.path, "unreadable");
@@ -1854,8 +1822,7 @@ async function captureSharedViewLocalDivergence(input: {
       settlement.capturedPaths,
       settlement.repairedPaths,
       failurePath,
-      error instanceof SharedViewTargetResolutionError ||
-        error instanceof CapturePathObservationError
+      error instanceof SharedViewTargetAccessError
         ? "unreadable"
         : "other",
       { cause: error },
@@ -1951,6 +1918,7 @@ async function refreshSharedViewOnce(input: {
         for (const path of newPaths) recordedChangedPaths.add(path);
       }
     : undefined;
+  const preTrackedPaths = input.preTrackedPaths;
   let pull;
   try {
     pull = await input.pull({
@@ -1962,12 +1930,12 @@ async function refreshSharedViewOnce(input: {
       recordRefusals: input.recordRefusals,
       recordChangedPaths,
       recordCollisions:
-        input.preTrackedPaths === undefined
+        preTrackedPaths === undefined
           ? undefined
           : async (paths: readonly string[]) => {
               const newlyColliding: string[] = [];
               for (const path of paths) {
-                if (input.preTrackedPaths!.has(path)) continue;
+                if (preTrackedPaths.has(path)) continue;
                 const target = await resolvedShareViewTarget(
                   input.rootDir,
                   path,
@@ -2172,12 +2140,9 @@ async function reconcileStandaloneShareView(
 ): Promise<StandaloneShareViewRefreshOutcome> {
   let totalLocalChanges = 0;
   try {
-    const { captured, ...refreshInput } = input;
+    const { captured } = input;
     totalLocalChanges = captured.capturedPaths + captured.repairedPaths;
-    const outcome = await refreshCapturedShareView({
-      ...refreshInput,
-      captured,
-    });
+    const outcome = await refreshCapturedShareView(input);
     return {
       ok: true,
       ...outcome,
