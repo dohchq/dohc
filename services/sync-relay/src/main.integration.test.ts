@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { LINK_EXCHANGE_BUCKET_CAPACITY } from "./linkSecurity";
 
 // This file's spawn helper allows 45s for the relay to report a port (tsx compiles
 // on startup), and the package default is 30s — so a slow launch would be killed by
@@ -493,7 +494,7 @@ describe("sync relay main process", () => {
 
     const secret = await seedExchangeLink(baseUrl, "workspace-keyed-exchange-buckets");
     const firstClientStatuses = await Promise.all(
-      Array.from({ length: 12 }, async () =>
+      Array.from({ length: LINK_EXCHANGE_BUCKET_CAPACITY }, async () =>
         (
           await exchangeLink(
             baseUrl,
@@ -512,7 +513,7 @@ describe("sync relay main process", () => {
       relayExchangeKey,
     );
     expect({ firstClientStatuses, secondClientStatus: secondClient.status }).toEqual({
-      firstClientStatuses: Array.from({ length: 12 }, () => 200),
+      firstClientStatuses: Array.from({ length: LINK_EXCHANGE_BUCKET_CAPACITY }, () => 200),
       secondClientStatus: 200,
     });
   });
@@ -535,14 +536,14 @@ describe("sync relay main process", () => {
 
     const secret = await seedExchangeLink(baseUrl, "workspace-unkeyed-exchange-bucket");
     const firstClientStatuses = await Promise.all(
-      Array.from({ length: 12 }, async () =>
+      Array.from({ length: LINK_EXCHANGE_BUCKET_CAPACITY }, async () =>
         (await exchangeLink(baseUrl, secret, "203.0.113.10")).status,
       ),
     );
 
     const spoofedSecondClient = await exchangeLink(baseUrl, secret, "203.0.113.11");
     expect({ firstClientStatuses, secondClientStatus: spoofedSecondClient.status }).toEqual({
-      firstClientStatuses: Array.from({ length: 12 }, () => 200),
+      firstClientStatuses: Array.from({ length: LINK_EXCHANGE_BUCKET_CAPACITY }, () => 200),
       secondClientStatus: 404,
     });
   });

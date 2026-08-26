@@ -36,15 +36,19 @@ const server = createServer((incoming, outgoing) => {
   });
   incoming.on("error", () => outgoing.destroy());
   incoming.on("data", (chunk: Buffer) => {
+    if (oversized) return;
     received += chunk.length;
     if (received > 16 * 1024) {
       oversized = true;
       chunks.length = 0;
+      outgoing.shouldKeepAlive = false;
+      refuse(outgoing);
       return;
     }
-    if (!oversized) chunks.push(Buffer.from(chunk));
+    chunks.push(Buffer.from(chunk));
   });
   incoming.on("end", () => {
+    if (oversized) return;
     let request: Request;
     try {
       const url = new URL(
@@ -66,7 +70,7 @@ const server = createServer((incoming, outgoing) => {
         headers,
         signal: abortRelay.signal,
         body:
-          method === "GET" || method === "HEAD" || oversized || chunks.length === 0
+          method === "GET" || method === "HEAD" || chunks.length === 0
             ? undefined
             : Buffer.concat(chunks),
       });

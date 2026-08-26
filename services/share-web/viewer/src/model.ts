@@ -12,7 +12,7 @@ export interface ViewMeta {
 
 export interface RelayOp {
   relaySeq: number;
-  opKind: string;
+  opKind: "workspace.init" | "moment.append" | "version.create";
   payload: unknown;
   recordedAtMs: number;
 }

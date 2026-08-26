@@ -641,6 +641,7 @@ export function createSyncRelayHandler({
     selector: AnyShareSelector,
     since: number,
     limit: number,
+    audience: "authenticated" | "accountless",
   ): {
     ops: Array<Record<string, unknown>>;
     nextCursor: number;
@@ -654,11 +655,14 @@ export function createSyncRelayHandler({
     const chatResolver = chatResolverFor(workspaceId);
     const ops: Array<Record<string, unknown>> = [];
     for (const row of page.rows) {
+      if (audience === "accountless" && !FILE_FRESHNESS_OP_KINDS.has(row.opKind)) {
+        continue;
+      }
       const decision = filterOpForShare(selector, row.opKind, row.payloadJson, chatResolver);
       if (!decision.allowed) continue;
       ops.push({
         relaySeq: row.relaySeq,
-        originId: row.originId,
+        ...(audience === "authenticated" ? { originId: row.originId } : {}),
         originSeq: row.originSeq,
         opKind: row.opKind,
         payload: decision.payload,
@@ -1084,6 +1088,7 @@ export function createSyncRelayHandler({
             capability.effectiveSelector,
             since,
             limit,
+            "accountless",
           );
           requireFreshLinkRead(capabilityToken, capability);
           return jsonResponse({ ok: true, ...page });
@@ -1292,9 +1297,15 @@ export function createSyncRelayHandler({
         }
         const since = parseCursor(url.searchParams.get("since"));
         const limit = parseLimit(url.searchParams.get("limit"));
-        // THE share security boundary is shared with capability reads. Both
-        // callers get the same cursor behavior, allowlist, and redacted copy.
-        const page = filteredLogPage(share.workspaceId, share.selector, since, limit);
+        // Both routes share selector filtering and cursor behavior. The
+        // accountless route applies a narrower metadata boundary afterward.
+        const page = filteredLogPage(
+          share.workspaceId,
+          share.selector,
+          since,
+          limit,
+          "authenticated",
+        );
         // Re-check revocation immediately before returning the body: a revoke
         // that raced with this in-flight read (after the entry check, while
         // the page was assembled) must abort the response, not leak a final

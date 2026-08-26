@@ -157,6 +157,62 @@ describe("App", () => {
     expect(location.pathname).toBe(`/s/${SESSION}`);
   });
 
+  it.each([
+    [`/s/${SESSION}#section`, `/s/${SESSION}`],
+    [`/s/${SESSION}?view=compact#section`, `/s/${SESSION}?view=compact`],
+  ])("scrubs an in-page fragment without changing %s", async (address, scrubbed) => {
+    history.replaceState(null, "", address);
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/log?since=0&limit=500") return logPage([]);
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+
+    expect(`${location.pathname}${location.search}${location.hash}`).toBe(scrubbed);
+    expect(container.textContent).not.toContain("This link isn't available.");
+  });
+
+  it("scrubs the secret fragment without changing the exchange address", async () => {
+    const secret = "s".repeat(43);
+    history.replaceState(null, "", `/s/?view=compact#${secret}`);
+    let finishExchange: ((response: Response) => void) | undefined;
+    const exchangeResponse = new Promise<Response>((resolve) => {
+      finishExchange = resolve;
+    });
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/exchange") return exchangeResponse;
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/log?since=0&limit=500") return logPage([]);
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(<App />);
+      await Promise.resolve();
+    });
+
+    expect(`${location.pathname}${location.search}${location.hash}`).toBe(
+      "/s/?view=compact",
+    );
+
+    await act(async () => {
+      if (!finishExchange) throw new Error("Exchange request did not start");
+      finishExchange(jsonResponse({ session: SESSION }));
+      for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+    });
+
+    expect(location.pathname).toBe(`/s/${SESSION}`);
+    expect(location.hash).toBe("");
+    expect(container.textContent).not.toContain("This link isn't available.");
+  });
+
   it("offers binary Markdown files as downloads", async () => {
     const file: SharedFile = {
       path: "payload.md",
@@ -216,6 +272,84 @@ describe("App", () => {
     expect(container.querySelector(".freshness")?.textContent).toBe(
       "Last settled 2 minutes ago",
     );
+  });
+
+  it("requests fresh meta every four minutes and stops on unmount", async () => {
+    vi.useFakeTimers();
+    const startedAt = new Date("2026-08-26T06:00:00.000Z").getTime();
+    vi.setSystemTime(startedAt);
+    const metaPaths: string[] = [];
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") {
+        metaPaths.push(path);
+        return jsonResponse(metaPaths.length === 1
+          ? DEFAULT_META
+          : { ...DEFAULT_META, lastSettledAtMs: startedAt + 4 * 60_000 });
+      }
+      if (path === "/api/view/log?since=0&limit=500") return logPage([]);
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+
+    expect(metaPaths).toHaveLength(1);
+    expect(container.querySelector(".freshness")?.textContent).toBe(
+      "No settled changes",
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+    });
+
+    expect(metaPaths).toHaveLength(2);
+    expect(container.querySelector(".freshness")?.textContent).toBe(
+      "Last settled now",
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+    });
+
+    expect(metaPaths).toHaveLength(3);
+    act(() => root?.unmount());
+    root = null;
+    expect(vi.getTimerCount()).toBe(0);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+    });
+
+    expect(metaPaths).toHaveLength(3);
+  });
+
+  it("shows the unavailable state when a meta heartbeat is refused", async () => {
+    vi.useFakeTimers();
+    let metaRequests = 0;
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") {
+        metaRequests += 1;
+        return metaRequests === 1
+          ? jsonResponse(DEFAULT_META)
+          : new Response(null, { status: 404 });
+      }
+      if (path === "/api/view/log?since=0&limit=500") return logPage([]);
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+
+    expect(container.textContent).not.toContain("This link isn't available.");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+    });
+
+    expect(metaRequests).toBe(2);
+    expect(container.textContent).toContain("This link isn't available.");
   });
 
   describe("log rate limits", () => {

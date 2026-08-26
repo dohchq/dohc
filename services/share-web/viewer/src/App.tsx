@@ -14,6 +14,7 @@ import {
 
 const SESSION_HEADER = "x-dohc-link-session";
 const SESSION_PATH = /^\/s\/([A-Za-z0-9_-]{12})\/?$/u;
+const META_HEARTBEAT_INTERVAL_MS = 4 * 60_000;
 const MAX_LOG_PAGES = 10_000;
 const LOG_RETRY_INITIAL_MS = 1_000;
 const LOG_RETRY_MAX_MS = 15_000;
@@ -67,6 +68,20 @@ async function loadLog(session: string): Promise<RelayOp[]> {
   throw new Error("refused");
 }
 
+async function loadMeta(session: string): Promise<ViewMeta> {
+  const response = await api(session, "/api/view/meta");
+  if (!response.ok) throw new Error("refused");
+  const meta = (await response.json()) as ViewMeta;
+  if (meta.access !== "view" || meta.effectiveSelector.access !== "view") {
+    throw new Error("refused");
+  }
+  return meta;
+}
+
+function scrubFragment(): void {
+  history.replaceState(history.state, "", `${location.pathname}${location.search}`);
+}
+
 async function establishSession(): Promise<string> {
   const secret = location.hash.slice(1);
   if (/^[A-Za-z0-9_-]{43}$/u.test(secret)) {
@@ -76,7 +91,7 @@ async function establishSession(): Promise<string> {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ secret }),
     });
-    history.replaceState(null, "", "/s/");
+    scrubFragment();
     const response = await exchange;
     if (!response.ok) throw new Error("refused");
     const body = (await response.json()) as { session?: unknown };
@@ -86,7 +101,7 @@ async function establishSession(): Promise<string> {
     history.replaceState(null, "", `/s/${body.session}`);
     return body.session;
   }
-  if (location.hash) history.replaceState(null, "", "/s/");
+  if (location.hash) scrubFragment();
   const pathSession = SESSION_PATH.exec(location.pathname)?.[1];
   if (!pathSession) throw new Error("refused");
   return pathSession;
@@ -107,6 +122,7 @@ function Freshness(props: { lastSettledAtMs: number | null }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (props.lastSettledAtMs === null) return;
+    setNow(Date.now());
     const interval = window.setInterval(() => setNow(Date.now()), 60_000);
     return () => window.clearInterval(interval);
   }, [props.lastSettledAtMs]);
@@ -269,15 +285,10 @@ export function App() {
     void (async () => {
       try {
         const session = await establishSession();
-        const [metaResponse, ops] = await Promise.all([
-          api(session, "/api/view/meta"),
+        const [meta, ops] = await Promise.all([
+          loadMeta(session),
           loadLog(session),
         ]);
-        if (!metaResponse.ok) throw new Error("refused");
-        const meta = (await metaResponse.json()) as ViewMeta;
-        if (meta.access !== "view" || meta.effectiveSelector.access !== "view") {
-          throw new Error("refused");
-        }
         const files = filesFromLog(ops);
         if (current) {
           setSelectedPath(files[0]?.path ?? "");
@@ -289,6 +300,28 @@ export function App() {
     })();
     return () => { current = false; };
   }, []);
+
+  const readySession = state.status === "ready" ? state.session : null;
+  useEffect(() => {
+    if (readySession === null) return;
+    let current = true;
+    const interval = window.setInterval(() => {
+      void loadMeta(readySession)
+        .then((meta) => {
+          if (!current) return;
+          setState((value) => value.status === "ready" && value.session === readySession
+            ? { ...value, meta }
+            : value);
+        })
+        .catch(() => {
+          if (current) setState({ status: "refused" });
+        });
+    }, META_HEARTBEAT_INTERVAL_MS);
+    return () => {
+      current = false;
+      window.clearInterval(interval);
+    };
+  }, [readySession]);
 
   if (state.status === "refused") return <Unavailable />;
   if (state.status === "loading") return <main className="state"><p>Opening shared files</p></main>;

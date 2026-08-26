@@ -329,7 +329,7 @@ describe("relay capability reads", () => {
     });
   });
 
-  it("matches the view recipient log and blob boundary", async () => {
+  it("matches the view recipient file and blob boundary without its identity metadata", async () => {
     const storage = await newStorage();
     const h = handler(storage);
     const { capability, sharedSha, hiddenSha } = await seed(h, "view");
@@ -358,7 +358,11 @@ describe("relay capability reads", () => {
     const linkLog = await json(
       await h(linkRequest(capability, "/sync/link/log?since=0&limit=100")),
     );
-    expect(linkLog).toEqual(recipientLog);
+    const linkOps = (recipientLog.ops as Array<Record<string, unknown>>).map(
+      ({ originId: _originId, ...op }) => op,
+    );
+    expect(linkLog).toEqual({ ...recipientLog, ops: linkOps });
+    expect(linkOps.every((op) => !Object.hasOwn(op, "originId"))).toBe(true);
     expect(JSON.stringify(linkLog)).not.toContain("private/hidden.md");
 
     const recipientBlob = await h(
@@ -378,6 +382,111 @@ describe("relay capability reads", () => {
     expect(
       await denialBytes(await h(linkRequest(capability, `/sync/link/blobs/${missingSha}`))),
     ).toBe(recipientMissing);
+  });
+
+  it("keeps accountless log pages to viewer artifact rows without changing authenticated logs", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h, "view");
+    expect(
+      (
+        await h(
+          request(
+            OWNER,
+            `/sync/${WORKSPACE}/log`,
+            jsonBody({
+              originId: "origin-a",
+              ops: [
+                {
+                  originSeq: 3,
+                  opKind: "chat.thread.create",
+                  payload: {
+                    threadId: "thread-shared",
+                    title: "About the shared file",
+                    createdAtMs: 1_300,
+                    linkedAtMs: 1_300,
+                    linkedObjectId: "object-shared",
+                    linkedPathHint: "docs/shared.md",
+                  },
+                  recordedAtMs: 1_300,
+                },
+                {
+                  originSeq: 4,
+                  opKind: "chat.message.append",
+                  payload: {
+                    messageId: "message-shared",
+                    threadId: "thread-shared",
+                    authorKind: "human",
+                    authorDisplayName: "Owner",
+                    authorUserId: OWNER,
+                    body: "The file looks ready.",
+                    createdAtMs: 1_400,
+                  },
+                  recordedAtMs: 1_400,
+                },
+              ],
+            }),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+
+    const authenticatedLog = await json(
+      await h(request(RECIPIENT, "/sync/shares/share-0/log?since=0&limit=100")),
+    );
+    const authenticatedOps = authenticatedLog.ops as Array<{
+      relaySeq: number;
+      originId: string;
+      originSeq: number;
+      opKind: string;
+      payload: Record<string, unknown>;
+      recordedAtMs: number;
+    }>;
+    expect(authenticatedOps.find((op) => op.opKind === "chat.message.append")).toEqual({
+      relaySeq: 5,
+      originId: "origin-a",
+      originSeq: 4,
+      opKind: "chat.message.append",
+      payload: {
+        messageId: "message-shared",
+        threadId: "thread-shared",
+        authorKind: "human",
+        authorDisplayName: "Owner",
+        authorUserId: OWNER,
+        body: "The file looks ready.",
+        createdAtMs: 1_400,
+      },
+      recordedAtMs: 1_400,
+    });
+
+    const linkLog = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100")),
+    );
+    const expectedLinkOps = authenticatedOps
+      .filter((op) =>
+        ["workspace.init", "moment.append", "version.create"].includes(op.opKind),
+      )
+      .map(({ originId: _originId, ...op }) => op);
+    expect(linkLog).toEqual({
+      ok: true,
+      ops: expectedLinkOps,
+      nextCursor: authenticatedLog.nextCursor,
+      hasMore: authenticatedLog.hasMore,
+    });
+    expect(
+      (linkLog.ops as Array<Record<string, unknown>>).every(
+        (op) => !Object.hasOwn(op, "originId"),
+      ),
+    ).toBe(true);
+
+    const skippedThreadPage = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/log?since=3&limit=1")),
+    );
+    expect(skippedThreadPage).toEqual({ ok: true, ops: [], nextCursor: 4, hasMore: true });
+    const skippedMessagePage = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/log?since=4&limit=1")),
+    );
+    expect(skippedMessagePage).toEqual({ ok: true, ops: [], nextCursor: 5, hasMore: false });
   });
 
   it("keeps link log pages and freshness above the workspace epoch floor", async () => {

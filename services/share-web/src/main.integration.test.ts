@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { shareWebRefusalBody } from "./server";
 
 const PUBLIC_HOST = "share.example.test";
+const MAX_REQUEST_BODY_BYTES = 16 * 1024;
 const EXCHANGE_SECRET = Buffer.alloc(32, 11).toString("base64url");
 const CAPABILITY_TOKEN = Buffer.alloc(32, 12).toString("base64url");
 const BLOB_SHA = "a".repeat(64);
@@ -42,6 +43,12 @@ interface PendingBlobRequest {
   response: Promise<IncomingMessage>;
 }
 
+interface StreamingRequest {
+  destroy: () => void;
+  finishBody: () => void;
+  response: Promise<RawSocketResult>;
+}
+
 interface ControlledBlobRelay {
   url: string;
   finishBlob: (index: number) => void;
@@ -70,6 +77,97 @@ afterEach(async () => {
 });
 
 describe("share-web Node request adapter", () => {
+  it("refuses and closes a streaming request as soon as it crosses the body cap", async () => {
+    const server = await startShareWeb();
+    const upload = streamChunkedRequestWithoutEnd(
+      server.port,
+      Buffer.alloc(MAX_REQUEST_BODY_BYTES + 1, "x"),
+    );
+
+    try {
+      const beforeEnd = await settleWithin(upload.response, 1_000);
+      if (beforeEnd.kind === "timeout") {
+        upload.finishBody();
+        const afterEnd = await settleWithin(upload.response, 1_000);
+        const afterEndResult =
+          afterEnd.kind === "settled"
+            ? `${afterEnd.value.kind}${
+                afterEnd.value.kind === "response"
+                  ? ` status=${String(afterEnd.value.status)}`
+                  : ""
+              }`
+            : "timeout";
+        throw new Error(
+          "oversized upload received no response within 1000 ms before request end; " +
+            `after sending end: ${afterEndResult}\n${server.stderr()}`,
+        );
+      }
+
+      expect(beforeEnd.value).toMatchObject({ kind: "response", status: 404 });
+      if (beforeEnd.value.kind !== "response") return;
+      expect(beforeEnd.value.raw).toContain(shareWebRefusalBody);
+      expect(beforeEnd.value.raw).toMatch(/\r\nconnection: close\r\n/iu);
+
+      for (let exchangeNumber = 1; exchangeNumber <= 12; exchangeNumber += 1) {
+        const response = await sendExchange(server.port, "198.51.100.1");
+        expect(response, `follow-up exchange ${exchangeNumber}`).toMatchObject({
+          kind: "response",
+          status: 200,
+        });
+      }
+    } finally {
+      upload.destroy();
+    }
+  });
+
+  it("accepts a request body exactly at the cap", async () => {
+    const relay = await startControlledJsonRelay();
+    const server = await startShareWeb({ relayUrl: relay.url });
+    const session = await exchangeSession(server.port);
+    const requestBody = "x".repeat(MAX_REQUEST_BODY_BYTES);
+    expect(Buffer.byteLength(requestBody)).toBe(MAX_REQUEST_BODY_BYTES);
+
+    const responsePromise = sendHttpRequest(server.port, "/api/view/meta", {
+      method: "GET",
+      headers: {
+        host: PUBLIC_HOST,
+        cookie: session.cookie,
+        "x-dohc-link-session": session.discriminator,
+        "content-length": Buffer.byteLength(requestBody),
+      },
+      body: requestBody,
+    });
+
+    try {
+      const admission = await settleWithin(
+        Promise.race([
+          relay.waitForRequests(1).then(() => ({ kind: "relayed" as const })),
+          responsePromise.then((response) => ({
+            kind: "response" as const,
+            response,
+          })),
+        ]),
+        1_000,
+      );
+      if (admission.kind === "timeout") {
+        throw new Error("exact-cap request neither reached the relay nor responded within 1000 ms");
+      }
+      if (admission.value.kind === "response") {
+        const status = admission.value.response.statusCode;
+        await readResponse(admission.value.response);
+        throw new Error(
+          `exact-cap request responded with status ${String(status)} before reaching the relay`,
+        );
+      }
+      relay.finishResponse(0);
+      const response = await responsePromise;
+      expect(response.statusCode).toBe(200);
+      await readResponse(response);
+    } finally {
+      relay.finishAllResponses();
+    }
+  });
+
   it("keeps serving after a request with an invalid Host authority", async () => {
     const server = await startShareWeb();
 
@@ -716,6 +814,68 @@ function sendRawRequest(port: number, request: string): Promise<RawSocketResult>
       });
     });
   });
+}
+
+function streamChunkedRequestWithoutEnd(
+  port: number,
+  body: Buffer,
+): StreamingRequest {
+  const socket = connect({ host: "127.0.0.1", port });
+  const chunks: Buffer[] = [];
+  let settled = false;
+  let finishedBody = false;
+  let socketError: string | undefined;
+  let resolveResponse: (result: RawSocketResult) => void = () => undefined;
+  const response = new Promise<RawSocketResult>((resolve) => {
+    resolveResponse = resolve;
+  });
+  const settle = (result: RawSocketResult): void => {
+    if (settled) return;
+    settled = true;
+    resolveResponse(result);
+  };
+  socket.once("connect", () => {
+    socket.write(
+      "POST /api/exchange HTTP/1.1\r\n" +
+        `Host: ${PUBLIC_HOST}\r\n` +
+        "Content-Type: application/json\r\n" +
+        "Transfer-Encoding: chunked\r\n" +
+        "Connection: close\r\n\r\n" +
+        `${body.length.toString(16)}\r\n`,
+    );
+    socket.write(body);
+    socket.write("\r\n");
+  });
+  socket.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+  socket.once("error", (error) => {
+    socketError = error.message;
+  });
+  socket.once("close", () => {
+    if (chunks.length === 0) {
+      settle(
+        socketError === undefined
+          ? { kind: "socket-close" }
+          : { kind: "socket-error", error: socketError },
+      );
+      return;
+    }
+    const raw = Buffer.concat(chunks).toString("utf8");
+    const status = /^HTTP\/1\.1 (\d{3})/u.exec(raw);
+    settle({
+      kind: "response",
+      raw,
+      status: status ? Number(status[1]) : null,
+    });
+  });
+  return {
+    destroy: () => socket.destroy(),
+    finishBody: () => {
+      if (finishedBody || socket.destroyed) return;
+      finishedBody = true;
+      socket.write("0\r\n\r\n");
+    },
+    response,
+  };
 }
 
 function isRefusalOrSocketClose(result: RawSocketResult): boolean {

@@ -287,6 +287,8 @@ describe("relay link grants", () => {
       access: "comment",
       generation: 2,
     });
+    // Two causes share this 404: the retune moved the credential away from
+    // firstSecret, and accountless exchange refuses the grant's comment level.
     expect(
       (
         await h(request(null, "/sync/link-exchange", jsonBody({ secret: firstSecret })))
@@ -1016,6 +1018,8 @@ describe("relay link grants", () => {
         }),
       ).toMatchObject({ ok: true, grant: { access: "comment", generation: 17 } });
       expect(credentialCounts()).toEqual({ total: 11, retired: 10, current: 1 });
+      // Two causes share this refusal: the widening retune retired the old
+      // credential, and accountless exchange refuses the comment level.
       expect(
         (
           await h(
