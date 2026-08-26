@@ -16,11 +16,11 @@
 //!
 //! ## Containment
 //!
-//! The cache serves the local parity-gate base and read-only PR3 consumers:
-//! settle projection, resync, deferred-update validation, and final drain
-//! projection. Forced compaction, close, `claim_base`, origination, lineage
-//! successor, and ordinary remote apply always fully reconstruct. Durable
-//! lineage bytes are never derived from the cache.
+//! The cache serves local and ordinary remote parity-gate bases plus read-only
+//! consumers: settle projection, resync, deferred-update validation, and final
+//! drain projection. Forced compaction, close, `claim_base`, origination, and
+//! lineage successor always fully reconstruct. Durable lineage bytes are never
+//! derived from the cache.
 //! The cache is never mutated inside a transaction: `base_for_gate` takes
 //! `&self`; advancement happens only after `TxnOutcome::Committed`.
 //!
@@ -162,6 +162,29 @@ pub(crate) enum GateBaseSource {
     /// The rebuilt PRE-APPEND base doc, read inside the append transaction and
     /// handed out for a post-commit install.
     Rebuilt(Ydoc),
+}
+
+/// Proof carried from an ordinary remote admission transaction to post-commit
+/// cache maintenance. The gate records the exact pre-append base and the sync
+/// caller captures the transaction's final replay tuple after projection.
+#[derive(Default)]
+#[doc(hidden)]
+pub struct RemoteAppendProbe {
+    pub(crate) served: Option<ServedGateBase>,
+    pub(crate) applied_seq: Option<i64>,
+    commit: Option<CacheCommitToken>,
+}
+
+impl RemoteAppendProbe {
+    /// Capture the transaction's final replay coordinates. Call this after all
+    /// envelope-side work that can affect the lineage and before returning the
+    /// retained mutation outcome.
+    #[doc(hidden)]
+    pub fn capture_commit(&mut self, conn: &Connection, key: &DocKey) {
+        self.commit = Some(CacheCommitToken(
+            CacheTuple::read_current(conn, key).ok().flatten(),
+        ));
+    }
 }
 
 /// The final replay coordinates observed after all in-transaction append work.
@@ -323,6 +346,36 @@ impl WriterDocCache {
         }
     }
 
+    /// Advance or install the entry after an ordinary remote append and its
+    /// admission transaction committed. The final tuple proves that the
+    /// transaction changed the replay path by exactly the gated candidate.
+    /// This includes a retained mutation whose projection was refused.
+    #[doc(hidden)]
+    pub fn finish_remote_append(&mut self, key: &DocKey, update: &[u8], probe: RemoteAppendProbe) {
+        let RemoteAppendProbe {
+            served,
+            applied_seq,
+            commit,
+        } = probe;
+        let Some(served) = served else {
+            return;
+        };
+        let (Some(seq), Some(CacheCommitToken(Some(fresh)))) = (applied_seq, commit) else {
+            self.remove(key);
+            return;
+        };
+        let update_sha = crate::hex_sha256(update);
+        let expected = CacheTuple::after_append(&served.observed, seq, &update_sha);
+        if seq != served.observed.head_update_seq + 1 || fresh != expected {
+            self.remove(key);
+            return;
+        }
+        match served.source {
+            GateBaseSource::Hit => self.advance_committed(key, update, fresh),
+            GateBaseSource::Rebuilt(doc) => self.install_committed(key, doc, update, fresh),
+        }
+    }
+
     /// Advance or install the entry for one COMMITTED, genuinely-new local
     /// append. The end-of-transaction token proves that the commit changed the
     /// replay path by exactly this append: the head advanced by one, its row
@@ -423,7 +476,8 @@ impl WriterDocCache {
     /// the whole replay path (head == snapshot seq), so rebuilding from its
     /// bytes preserves replay-path equality. Anything unexpected (a torn read,
     /// a different latest snapshot, a head past the fold) removes the entry.
-    pub(crate) fn note_compacted(
+    #[doc(hidden)]
+    pub fn note_compacted(
         &mut self,
         store: &EngineStore,
         key: &DocKey,

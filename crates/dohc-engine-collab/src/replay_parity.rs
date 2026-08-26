@@ -284,6 +284,18 @@ pub(crate) fn with_armed_gate<T>(f: impl FnOnce() -> T) -> T {
 /// and the durable store is untouched here, so returning `Err` rolls the caller's
 /// transaction back cleanly.
 pub fn validate_replay_parity(base: &Ydoc, candidate: &[u8]) -> Result<(), CollabError> {
+    validate_replay_parity_with_scratch(base, candidate).map(drop)
+}
+
+/// [`validate_replay_parity`] plus the isolated post-candidate document the
+/// gate already builds for its integration checks. Callers may use this doc
+/// for the same envelope's projection. It is a full-state fork of `base`, not
+/// a byte-replay-identical continuation, so it must never replace a writer
+/// cache entry or become the source of durable lineage bytes.
+pub fn validate_replay_parity_with_scratch(
+    base: &Ydoc,
+    candidate: &[u8],
+) -> Result<Ydoc, CollabError> {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         validate_replay_parity_inner(base, candidate)
     }));
@@ -295,7 +307,7 @@ pub fn validate_replay_parity(base: &Ydoc, candidate: &[u8]) -> Result<(), Colla
     }
 }
 
-fn validate_replay_parity_inner(base: &Ydoc, candidate: &[u8]) -> Result<(), CollabError> {
+fn validate_replay_parity_inner(base: &Ydoc, candidate: &[u8]) -> Result<Ydoc, CollabError> {
     #[cfg(test)]
     if PANIC_INJECT.with(std::cell::Cell::get) {
         panic!("injected replay-gate unwind for fail-closed test");
@@ -419,7 +431,7 @@ fn validate_replay_parity_inner(base: &Ydoc, candidate: &[u8]) -> Result<(), Col
             });
         }
     }
-    Ok(())
+    Ok(scratch)
 }
 
 /// True when `candidate` redefines a clock the ESTABLISHED side (`base` or a

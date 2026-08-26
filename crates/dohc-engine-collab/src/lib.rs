@@ -34,7 +34,7 @@ pub mod scene;
 mod scene_lifecycle;
 pub mod ydoc;
 
-pub use doc_cache::{CacheStats, WriterDocCache};
+pub use doc_cache::{CacheStats, RemoteAppendProbe, WriterDocCache};
 pub use durable::{
     archive_active_lineage_in_tx, claim_base, claim_base_at_relay, claim_base_at_relay_in_tx,
     claim_base_in_tx, close_session, encode_origination_base_in_tx, ensure_marker,
@@ -54,10 +54,12 @@ pub use durable::{
 };
 pub use error::CollabError;
 pub use lease::{Lease, LeaseRegistry};
-pub use replay_parity::validate_replay_parity;
+pub use replay_parity::{validate_replay_parity, validate_replay_parity_with_scratch};
 pub use replication::{
     apply_remote_update, apply_remote_update_for_deferred_drain,
-    apply_remote_update_in_transaction, RemoteUpdate, ReplicationApplyOutcome, UpdateOrigin,
+    apply_remote_update_in_transaction, apply_remote_update_in_transaction_cached_with_projection,
+    apply_remote_update_in_transaction_with_projection, RemoteApplyProjection, RemoteUpdate,
+    ReplicationApplyOutcome, UpdateOrigin,
 };
 pub use scene::{
     encode_scene_asset_record, encode_scene_asset_records, fold_scene, import_portable_scene,

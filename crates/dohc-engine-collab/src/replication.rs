@@ -22,12 +22,14 @@
 use dohc_engine_storage::{put_binary_blob_with_sha, EngineStore, FaultInjector, TxnOutcome};
 use rusqlite::Transaction;
 
+use crate::doc_cache::{GateBaseSource, RemoteAppendProbe, ServedGateBase};
 use crate::durable::{
     append_row, blob_seq_in_log, load_for_replay_gate, maybe_compact, query_marker,
     validate_update_bytes, CompactOutcome, Regime,
 };
 use crate::error::CollabError;
 use crate::limits::DEFAULT_COMPACTION_THRESHOLD;
+use crate::ydoc::{ContentKind, Ydoc};
 use crate::{DocKey, WriterDocCache};
 
 /// Who produced an update — the actor tag journaled into `ydoc_updates`.
@@ -75,6 +77,15 @@ pub enum ReplicationApplyOutcome {
     /// The update bytes were already in the log (content-addressed dedup): an
     /// idempotent no-op that was NOT re-journaled and is NOT re-emitted.
     Deduped { seq: i64 },
+}
+
+/// One remote admission result plus the gate's isolated post-candidate doc for
+/// projection in the same transaction. The projection doc is never a cache
+/// adoption candidate or a source of durable lineage bytes.
+pub struct RemoteApplyProjection {
+    pub outcome: ReplicationApplyOutcome,
+    pub doc: Ydoc,
+    pub content_kind: ContentKind,
 }
 
 /// Apply a remote `ydoc.update` op into a replicated durable lineage.
@@ -197,6 +208,126 @@ pub fn apply_remote_update_in_transaction(
     Ok(ReplicationApplyOutcome::Applied {
         seq,
         emit_outbound: false,
+    })
+}
+
+/// Transaction-composable remote admission that returns the gate's scratch
+/// document for per-envelope projection. This cold form preserves the existing
+/// reconstruction path when no writer cache is available.
+pub fn apply_remote_update_in_transaction_with_projection(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    remote: &RemoteUpdate,
+    now_ms: i64,
+) -> Result<RemoteApplyProjection, CollabError> {
+    validate_update_bytes(&remote.bytes)?;
+    if remote.origin_id.is_empty()
+        || remote.origin_id.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES
+    {
+        return Err(CollabError::InvalidIdentifier {
+            reason: "remote origin_id must be non-empty and bounded".to_owned(),
+        });
+    }
+    let sha = crate::hex_sha256(&remote.bytes);
+    let origin = UpdateOrigin::Remote {
+        origin_id: remote.origin_id.clone(),
+    };
+    let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
+    if marker.regime != Regime::Replicated {
+        return Err(CollabError::InvalidIdentifier {
+            reason: "remote update applied to a non-replicated lineage".to_owned(),
+        });
+    }
+    if let Some(existing) = blob_seq_in_log(tx, key, &sha, &remote.bytes)? {
+        // There is no gate scratch on a dedupe. Reconstruct the byte-replay
+        // base instead of forking a full-state encode: merged forks can split
+        // delete-set endpoints differently from an incremental rebuild.
+        return Ok(RemoteApplyProjection {
+            outcome: ReplicationApplyOutcome::Deduped { seq: existing },
+            doc: load_for_replay_gate(tx, key)?,
+            content_kind: marker.content_kind,
+        });
+    }
+    let base = load_for_replay_gate(tx, key)?;
+    let projection = crate::validate_replay_parity_with_scratch(&base, &remote.bytes)?;
+    put_binary_blob_with_sha(tx, &remote.bytes, &sha)?;
+    let seq = append_row(tx, key, &sha, origin.actor_id(), now_ms)?;
+    Ok(RemoteApplyProjection {
+        outcome: ReplicationApplyOutcome::Applied {
+            seq,
+            emit_outbound: false,
+        },
+        doc: projection,
+        content_kind: marker.content_kind,
+    })
+}
+
+/// Cache-backed form of [`apply_remote_update_in_transaction_with_projection`].
+/// The cache serves only the read-only integration base. The returned document
+/// is the gate's scratch, while `probe` carries the byte-replay-identical base
+/// to post-commit cache maintenance.
+pub fn apply_remote_update_in_transaction_cached_with_projection(
+    tx: &Transaction<'_>,
+    cache: &WriterDocCache,
+    probe: &mut RemoteAppendProbe,
+    key: &DocKey,
+    remote: &RemoteUpdate,
+    now_ms: i64,
+) -> Result<RemoteApplyProjection, CollabError> {
+    validate_update_bytes(&remote.bytes)?;
+    if remote.origin_id.is_empty()
+        || remote.origin_id.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES
+    {
+        return Err(CollabError::InvalidIdentifier {
+            reason: "remote origin_id must be non-empty and bounded".to_owned(),
+        });
+    }
+    let sha = crate::hex_sha256(&remote.bytes);
+    let origin = UpdateOrigin::Remote {
+        origin_id: remote.origin_id.clone(),
+    };
+    let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
+    if marker.regime != Regime::Replicated {
+        return Err(CollabError::InvalidIdentifier {
+            reason: "remote update applied to a non-replicated lineage".to_owned(),
+        });
+    }
+    if let Some(existing) = blob_seq_in_log(tx, key, &sha, &remote.bytes)? {
+        // A dedupe never reached the gate, so it has no gate scratch. Keep the
+        // projection on the byte-replay-identical cold base; do not synthesize
+        // an owned doc by applying a cached full-state encode.
+        return Ok(RemoteApplyProjection {
+            outcome: ReplicationApplyOutcome::Deduped { seq: existing },
+            doc: load_for_replay_gate(tx, key)?,
+            content_kind: marker.content_kind,
+        });
+    }
+
+    let (projection, source) = match cache.base_for_gate(tx, key, &marker)? {
+        Some(base) => (
+            crate::validate_replay_parity_with_scratch(base, &remote.bytes)?,
+            GateBaseSource::Hit,
+        ),
+        None => {
+            let base = load_for_replay_gate(tx, key)?;
+            let projection = crate::validate_replay_parity_with_scratch(&base, &remote.bytes)?;
+            (projection, GateBaseSource::Rebuilt(base))
+        }
+    };
+    put_binary_blob_with_sha(tx, &remote.bytes, &sha)?;
+    let seq = append_row(tx, key, &sha, origin.actor_id(), now_ms)?;
+    probe.served = Some(ServedGateBase {
+        source,
+        observed: marker.clone(),
+    });
+    probe.applied_seq = Some(seq);
+    Ok(RemoteApplyProjection {
+        outcome: ReplicationApplyOutcome::Applied {
+            seq,
+            emit_outbound: false,
+        },
+        doc: projection,
+        content_kind: marker.content_kind,
     })
 }
 
