@@ -619,6 +619,201 @@ describe("EngineWorkspaceSessions", () => {
     expect(secondOperation).toHaveBeenCalledOnce();
   });
 
+  it("rejects a bare session after an attachment claims the workspace", async () => {
+    const workspace = {
+      ...(await tempWorkspace()),
+      attachmentId: Symbol("attachment"),
+    };
+    const client = new MockClient("attachment-handle");
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+
+    await expect(
+      sessions.run(workspace, async ({ workspace: handle }) => handle),
+    ).resolves.toBe("attachment-handle");
+    const bareOperation = vi.fn(async () => "bare");
+    await expect(
+      sessions.run(
+        { workspaceId: workspace.workspaceId, rootPath: workspace.rootPath },
+        bareOperation,
+      ),
+    ).rejects.toThrow("different session key");
+    await expect(
+      sessions.run(workspace, async ({ workspace: handle }) => handle),
+    ).resolves.toBe("attachment-handle");
+
+    expect(bareOperation).not.toHaveBeenCalled();
+    expect(
+      client.requests.filter((request) => request.method === "workspace.open"),
+    ).toHaveLength(1);
+    expect(
+      client.requests.filter((request) => request.method === "workspace.close"),
+    ).toHaveLength(0);
+  });
+
+  it("rejects an attachment session after a bare key claims the workspace", async () => {
+    const bareWorkspace = await tempWorkspace();
+    const attachmentWorkspace = {
+      ...bareWorkspace,
+      attachmentId: Symbol("attachment"),
+    };
+    const client = new MockClient("bare-handle");
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+
+    await expect(
+      sessions.run(bareWorkspace, async ({ workspace: handle }) => handle),
+    ).resolves.toBe("bare-handle");
+    const attachmentOperation = vi.fn(async () => "attachment");
+    await expect(
+      sessions.run(attachmentWorkspace, attachmentOperation),
+    ).rejects.toThrow("different session key");
+    await expect(
+      sessions.run(bareWorkspace, async ({ workspace: handle }) => handle),
+    ).resolves.toBe("bare-handle");
+
+    expect(attachmentOperation).not.toHaveBeenCalled();
+    expect(
+      client.requests.filter((request) => request.method === "workspace.open"),
+    ).toHaveLength(1);
+    expect(
+      client.requests.filter((request) => request.method === "workspace.close"),
+    ).toHaveLength(0);
+  });
+
+  it("keeps the attachment claim while an active run and its close drain", async () => {
+    const workspace = {
+      ...(await tempWorkspace()),
+      attachmentId: Symbol("attachment"),
+    };
+    const bareWorkspace = {
+      workspaceId: workspace.workspaceId,
+      rootPath: workspace.rootPath,
+    };
+    const operationStarted = deferred<void>();
+    const finishOperation = deferred<void>();
+    const closeStarted = deferred<void>();
+    const finishClose = deferred<void>();
+    const requests: Request[] = [];
+    let openCount = 0;
+    const client: EngineDaemonClient = {
+      close() {},
+      async sendRequest(request) {
+        requests.push(request);
+        if (request.method === "workspace.open") {
+          openCount += 1;
+          return {
+            id: request.id,
+            result: { workspace: `handle-${openCount}` },
+          };
+        }
+        if (request.method === "workspace.close") {
+          closeStarted.resolve();
+          await finishClose.promise;
+          return { id: request.id, result: { closed: true } };
+        }
+        throw new Error(`Unexpected request: ${request.method}`);
+      },
+    };
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+    const activeRun = sessions.run(workspace, async () => {
+      operationStarted.resolve();
+      await finishOperation.promise;
+      return "finished";
+    });
+    await operationStarted.promise;
+
+    const closing = sessions.closeWorkspace(workspace);
+    const whileActive = await sessions
+      .run(bareWorkspace, async () => "unexpected")
+      .catch((error: unknown) => error);
+    finishOperation.resolve();
+    await expect(activeRun).resolves.toBe("finished");
+    await closeStarted.promise;
+    const whileDaemonClose = await sessions
+      .run(bareWorkspace, async () => "unexpected")
+      .catch((error: unknown) => error);
+    finishClose.resolve();
+    await closing;
+
+    expect(whileActive).toEqual(expect.any(Error));
+    expect((whileActive as Error).message).toContain("different session key");
+    expect(whileDaemonClose).toEqual(expect.any(Error));
+    expect((whileDaemonClose as Error).message).toContain(
+      "different session key",
+    );
+    expect(openCount).toBe(1);
+    expect(
+      requests.filter((request) => request.method === "workspace.close"),
+    ).toHaveLength(1);
+  });
+
+  it("hands the workspace to a bare key after the attachment closes", async () => {
+    const workspace = {
+      ...(await tempWorkspace()),
+      attachmentId: Symbol("attachment"),
+    };
+    let openCount = 0;
+    const client: EngineDaemonClient = {
+      close() {},
+      async sendRequest(request) {
+        if (request.method === "workspace.open") {
+          openCount += 1;
+          return {
+            id: request.id,
+            result: { workspace: `handle-${openCount}` },
+          };
+        }
+        if (request.method === "workspace.close") {
+          return { id: request.id, result: { closed: true } };
+        }
+        throw new Error(`Unexpected request: ${request.method}`);
+      },
+    };
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+
+    await expect(
+      sessions.run(workspace, async ({ workspace: handle }) => handle),
+    ).resolves.toBe("handle-1");
+    await sessions.closeWorkspace(workspace);
+    await expect(
+      sessions.run(
+        { workspaceId: workspace.workspaceId, rootPath: workspace.rootPath },
+        async ({ workspace: handle }) => handle,
+      ),
+    ).resolves.toBe("handle-2");
+
+    expect(openCount).toBe(2);
+  });
+
+  it("keeps claims for different workspaces independent", async () => {
+    const attachmentWorkspace = {
+      ...(await tempWorkspace("workspace-attachment")),
+      attachmentId: Symbol("attachment"),
+    };
+    const bareWorkspace = await tempWorkspace("workspace-bare");
+    const client = new MockClient("workspace-handle");
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+
+    await expect(
+      Promise.all([
+        sessions.run(attachmentWorkspace, async () => "attachment"),
+        sessions.run(bareWorkspace, async () => "bare"),
+      ]),
+    ).resolves.toEqual(["attachment", "bare"]);
+    expect(
+      client.requests.filter((request) => request.method === "workspace.open"),
+    ).toHaveLength(2);
+  });
+
   it("does not let a workspace-id close discover a token-bound attachment", async () => {
     const workspace = {
       ...(await tempWorkspace()),

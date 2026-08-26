@@ -293,6 +293,7 @@ async function defaultSleep(ms: number): Promise<void> {
 
 export class EngineWorkspaceSessions {
   private readonly entries = new Map<string | symbol, SessionEntry>();
+  private readonly workspaceEntries = new Map<string, SessionEntry>();
   private readonly preparations = new Map<string, Promise<void>>();
   private readonly captureAuthors = new Map<string | symbol, AgentAuthor | null>();
   private readonly shareMounts = new Set<string | symbol>();
@@ -755,6 +756,9 @@ export class EngineWorkspaceSessions {
       if (entry.closing === closing) entry.closing = null;
       if (this.entries.get(key) === entry) {
         this.entries.delete(key);
+        if (this.workspaceEntries.get(entry.workspaceId) === entry) {
+          this.workspaceEntries.delete(entry.workspaceId);
+        }
       }
     }
   }
@@ -787,6 +791,11 @@ export class EngineWorkspaceSessions {
     const key = this.sessionKey(workspace);
     let entry = this.entries.get(key);
     if (!entry) {
+      if (this.workspaceEntries.has(workspace.workspaceId)) {
+        throw new Error(
+          `Rust engine workspace ${workspace.workspaceId} is already attached under a different session key.`,
+        );
+      }
       entry = {
         workspaceId: workspace.workspaceId,
         rootPath: workspace.rootPath,
@@ -797,6 +806,7 @@ export class EngineWorkspaceSessions {
         idleWaiters: new Set(),
       };
       this.entries.set(key, entry);
+      this.workspaceEntries.set(workspace.workspaceId, entry);
     } else if (
       entry.workspaceId !== workspace.workspaceId ||
       entry.rootPath !== workspace.rootPath
