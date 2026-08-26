@@ -4,7 +4,10 @@ import { describe, expect, it } from "vitest";
 // main.ts is the Electron entry point: it cannot be imported under vitest, so
 // this suite guards the bootstrap gate the way main.chatSecurity.test.ts guards
 // chat authorization — by reading the source it protects.
-const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
+const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8").replaceAll(
+  "\r\n",
+  "\n",
+);
 
 function ipcHandlerSource(channel: string): string {
   const marker = `ipcMain.handle(CHANNELS.${channel},`;
@@ -151,7 +154,7 @@ describe("bootstrap window gate", () => {
     );
     expect(openActivityAt).toBeGreaterThanOrEqual(0);
     const retainAt = mainSource.indexOf(
-      "retainedWorkspaceActivities.add",
+      "lease.state.retainedActivity = true;",
       openActivityAt,
     );
     expect(retainAt).toBeGreaterThan(openActivityAt);
@@ -245,12 +248,13 @@ describe("bootstrap window gate", () => {
     const ownerAt = mainSource.indexOf("const engineYDocSessionIpc =");
     expect(ownerAt).toBeGreaterThanOrEqual(0);
     const owner = mainSource.slice(ownerAt, mainSource.indexOf("\n});", ownerAt));
+    expect(owner).toContain("const lease = requireWorkspaceAuthority(workspaceId);");
     expect(owner).toContain(
-      "captureFor: (workspaceId) => activity.engineCaptureFor(workspaceId)",
+      "captureFor: (workspace) => activity.engineCaptureFor(workspace.workspaceId, workspace.rootPath)",
     );
-    expect(owner).toContain("ensureCaptureFor: async (workspaceId) => {");
+    expect(owner).toContain("ensureCaptureFor: async (workspace) => {");
     expect(owner).toContain(
-      "await openWorkspaceActivity(requireWorkspace(workspaceId));",
+      "await openWorkspaceActivity(requireWorkspace(workspace.workspaceId));",
     );
 
     const handler = ipcHandlerSource("engineYDocOpen");

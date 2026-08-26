@@ -889,6 +889,25 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
+  it("orders join identity bootstrap before physical registration and activity capture", async () => {
+    const source = (await readFile(
+      new URL("../main.ts", import.meta.url),
+      "utf8",
+    )).replaceAll("\r\n", "\n");
+    const bootstrap = source.indexOf("await bootstrapJoinedWorkspace({");
+    const registration = source.indexOf(
+      "registerPhysicalWorkspace({ ...created, joinBootstrapPending: true });",
+      bootstrap,
+    );
+    const activityOpen = source.indexOf(
+      "await openWorkspaceActivity(created",
+      bootstrap,
+    );
+    expect(bootstrap).toBeGreaterThanOrEqual(0);
+    expect(registration).toBeGreaterThan(bootstrap);
+    expect(activityOpen).toBeGreaterThan(registration);
+  });
+
   it("refreshes a share view and commits its opaque daemon cursor", async () => {
     const { rootPath, daemon, sessions, client, relay } = await harness();
     const store = createCaptureLiveStores(

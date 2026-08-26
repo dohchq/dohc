@@ -1,7 +1,10 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
+const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8").replaceAll(
+  "\r\n",
+  "\n",
+);
 const dmRequestsSource = readFileSync(
   new URL("./workspaces/dmRequests.ts", import.meta.url),
   "utf8",
@@ -212,7 +215,7 @@ describe("main-process chat authorization", () => {
   });
 
   it("revalidates owner agent-message authorship after the authorization await", () => {
-    const start = mainSource.indexOf("authorizeServiceNote: async");
+    const start = mainSource.indexOf("authorizeServiceNote: (");
     const end = mainSource.indexOf("onMessagePosted:", start);
     const authorizeServiceNote = mainSource.slice(start, end);
 
@@ -231,7 +234,7 @@ describe("main-process chat authorization", () => {
 
   it("projects pending chat bookmarks immediately after workspace and shared-channel pulls", () => {
     expect(mainSource).toContain(
-      "afterSuccessfulPull: () =>\n      projectPendingChatBookmarksAfterPull(workspace.workspaceId)",
+      "afterSuccessfulPull: () =>\n      withWorkspaceAttachmentAsync(workspace, () =>\n        projectPendingChatBookmarksAfterPull(workspace.workspaceId)",
     );
     expect(mainSource).toContain(
       "if (result.changed) await projectPendingChatBookmarksAfterPull(workspaceId);",
@@ -318,7 +321,9 @@ describe("main-process chat authorization", () => {
     expect(helper).toContain(
       "writeSharedChannels: setWorkspaceSharedChannels",
     );
-    expect(helper).toContain("serialize: serializeSharedChannelSync");
+    expect(helper).toContain("serialize: (workspaceId, run) =>");
+    expect(helper).toContain("workspaceAuthorities.withAuthority(workspaceId, (lease) =>");
+    expect(helper).toContain("serializeWorkspaceAuthorityWork(lease, run)");
     for (const [label, source] of [
       ["joinSharedChannel", handlerSource("joinSharedChannel")],
       ["acceptDm", handlerSource("acceptDm")],
@@ -366,7 +371,7 @@ describe("main-process chat authorization", () => {
   // Both join paths run outside a pass, so this queues rather than deadlocking.
   it("runs each join's first pull under the same per-workspace serializer as the sync pass", () => {
     expect(mainSource).toContain(
-      "return serializeSharedChannelSync(workspaceId, () =>\n    runSharedChannelSyncPass(workspaceId, priorityChannelWireId),",
+      "return workspaceAuthorities.withAuthority(workspaceId, (lease) =>\n    serializeWorkspaceAuthorityWork(lease, () =>\n    runSharedChannelSyncPass(lease, priorityChannelWireId),",
     );
 
     const serializeAt = dmRequestsSource.indexOf("await input.serialize(");
@@ -794,7 +799,7 @@ describe("main-process chat authorization", () => {
   // history and chats. engineStoreRebuild.test.ts behavior-tests ordering.
   it("gates the engine-store rebuild on main's own refusal fact", () => {
     const handler = handlerSource("rebuildEngineStore");
-    const gateAt = handler.indexOf("assertWritableWorkspace(workspace);");
+    const gateAt = handler.indexOf("assertWritableWorkspace(registered);");
     expect(gateAt).toBeGreaterThan(-1);
     expect(handler.indexOf("await ")).toBeGreaterThan(gateAt);
     expect(handler).toContain("isStoreRefused: () =>");
@@ -931,7 +936,7 @@ describe("main-process chat authorization", () => {
     // The plugin runtime installs and runs plugin code against the workspace
     // root, so its owner takes the same gate before it builds a record.
     const runtimeAt = mainSource.indexOf(
-      "const pluginWorkspaceRuntimes = new PluginWorkspaceRuntimes<CreatedWorkspace>({",
+      "const pluginRuntimes = new PluginWorkspaceRuntimes<CreatedWorkspace>({",
     );
     expect(runtimeAt).toBeGreaterThan(-1);
     const runtime = mainSource.slice(runtimeAt, runtimeAt + 700);

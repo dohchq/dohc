@@ -1,7 +1,10 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
+const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8").replaceAll(
+  "\r\n",
+  "\n",
+);
 
 function sourceBetween(startMarker: string, endMarker: string): string {
   const start = mainSource.indexOf(startMarker);
@@ -21,7 +24,7 @@ describe("main-process engine store rebuild wiring", () => {
 
     expect(close).toContain("closeWorkspaceActivityAndRelay({");
     expect(close).toMatch(
-      /closeActivity: \(\) =>\s*activity\.close\(workspaceId, \{\s*preserveStatus: true,\s*notify: options\.notifyRenderer,/,
+      /closeActivity: async \(\) => \{\s*await activity\.close\(current\.workspaceId, \{\s*expectedRootPath: current\.rootPath,\s*preserveStatus: true,\s*notify: options\.notifyRenderer,/,
     );
     expect(close).toContain(
       "closeRelay: () => closeRelayTransportWorkspace(relayWorkspaceId)",
@@ -55,8 +58,8 @@ describe("main-process engine store rebuild wiring", () => {
     expect(recovery).toContain("completePendingEngineStoreMove(rootPath");
     expect(recovery).toContain("sessions.beginRebuild(workspace.workspaceId)");
     expect(recovery).toContain("sessions.endRebuild(workspace.workspaceId)");
-    expect(dispatch).toContain("withEngineStoreRecovered(");
-    expect(ordinaryOpen).toContain("withEngineStoreRecovered(");
+    expect(dispatch).toContain("withEngineStoreRecoveredForAuthority(lease,");
+    expect(ordinaryOpen).toContain("withEngineStoreRecoveredForAuthority(lease,");
     expect(lockedOpen).toContain(
       "withEngineStoreRecoveredUnderEngineStoreLock(",
     );
@@ -69,7 +72,7 @@ describe("main-process engine store rebuild wiring", () => {
     expect(
       lockedOpen.indexOf("completePendingEngineStoreMoveForWorkspace("),
     ).toBeLessThan(lockedOpen.indexOf("options.afterReopenRecoverySettled?.()"));
-    expect(rebuild).toContain("runInKeyedLane(");
+    expect(rebuild).toContain("inWorkspaceEngineStoreLane(lease,");
     expect(rebuild).toContain("openWorkspaceActivityUnderEngineStoreLock(");
     expect(rebuild).toContain("begin: () => sessions.beginRebuild(");
     expect(rebuild).toContain("end: () => sessions.endRebuild(");
@@ -87,15 +90,15 @@ describe("main-process engine store rebuild wiring", () => {
     );
     const helper = sourceBetween(
       "async function startAgentRunWithWorkspaceActivity(",
-      "const lastEngineStoreRebuildResult",
+      "function createPluginSurfaceHostLease(",
     );
     const tryInVersion = sourceBetween(
-      "const tryInVersionSessions = createTryInVersionSessions({",
-      "async function workspaceAgentDefaults(",
+      "function createTryInVersionSessionsFor(",
+      "const tryInVersionSessions = {",
     );
     const sessionManager = sourceBetween(
       "async function agentSessionManager(",
-      "// Linked Chats",
+      "function linkedChatStoreFor(",
     );
     const ipc = sourceBetween(
       "ipcMain.handle(CHANNELS.startAgentRun,",
