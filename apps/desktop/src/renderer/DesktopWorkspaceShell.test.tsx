@@ -763,6 +763,31 @@ function renderShell(
   );
 }
 
+describe("workspace switch performance timeline", () => {
+  it("records the existing shell readiness commits for a restored file", async () => {
+    const previousOrdinal = rendererMarks.readSwitchTimeline().at(-1)?.ordinal ?? 0;
+    renderShell(makeBridge(Promise.resolve(STORED_STATE)));
+
+    await screen.findByTestId("view-markdown");
+    await waitFor(() => {
+      const timeline = rendererMarks
+        .readSwitchTimeline()
+        .find((entry) => entry.ordinal > previousOrdinal);
+      expect(timeline).toMatchObject({
+        listingSource: "fresh",
+        phases: {
+          "switch-start": expect.any(Number),
+          "session-admitted": expect.any(Number),
+          "files-painted": expect.any(Number),
+          "files-revalidated": expect.any(Number),
+          "history-ready": expect.any(Number),
+          "restored-active-surface-ready": expect.any(Number),
+        },
+      });
+    });
+  });
+});
+
 describe("direct message workspace picker", () => {
   it("does not offer shared-view workspaces for acceptance", async () => {
     const user = userEvent.setup();

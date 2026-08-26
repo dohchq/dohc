@@ -4744,6 +4744,10 @@ type FileInspectorProps = {
   // Editor groups keep inactive inspectors mounted. They pass false so a
   // source textarea mounting there cannot steal focus from the active group.
   autoFocus?: boolean;
+  // Workspace-switch instrumentation waits for the restored active file to
+  // finish its read and, when applicable, bind its live document session.
+  surfaceKey?: string;
+  onSurfaceReady?: (path: string, surfaceKey: string) => void;
 };
 
 function useRetainedLocalDocument(key: string): SharedLocalDocument {
@@ -4976,6 +4980,11 @@ export const FileInspector = memo(function FileInspector(
   const { scrollTarget, onScrollConsumed } = props;
   const textReady =
     !isText || engineDocBound || (text !== null && loadedPath === props.path);
+  const activeSurfaceReady = textReady && !engine.opening;
+  useEffect(() => {
+    if (!activeSurfaceReady || !props.surfaceKey) return;
+    props.onSurfaceReady?.(props.path, props.surfaceKey);
+  }, [activeSurfaceReady, props.onSurfaceReady, props.path, props.surfaceKey]);
   useEffect(() => {
     if (scrollTarget && scrollTarget.path === props.path && textReady) {
       onScrollConsumed?.(scrollTarget.nonce);
