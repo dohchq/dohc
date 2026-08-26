@@ -83,6 +83,7 @@ import {
   type SharedLocalDocument,
 } from "./sharedLocalDocument";
 import { documentVersionKey } from "./documentVersionKey";
+import { LazyMarkdownReadView } from "./markdown/LazyMarkdownReadView";
 
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
 
@@ -403,10 +404,6 @@ const LazySourceCodeEditor = lazy(() =>
 );
 const LazyExcalidrawCanvas = lazy(() => import("./ExcalidrawCanvas")) as
   LazyExoticComponent<(props: ExcalidrawCanvasProps) => React.ReactElement>;
-const LazyMarkdownReadView = lazy(() =>
-  import("./markdown/IncrementalMarkdownDocument"),
-);
-
 // The source view needs editor/import-export only on demand. Cache the module
 // after the first toggle so later toggles reuse it.
 let importExportPromise: Promise<typeof import("./editor/import-export")> | null = null;
@@ -1557,6 +1554,11 @@ const READ_ONLY_TRANSITION_CHIP = {
     "This document became read-only. Your edit was set aside in the notice below.",
 };
 
+function MarkdownRenderCommitted(props: { onRendered: () => void }) {
+  useEffect(() => props.onRendered(), [props.onRendered]);
+  return null;
+}
+
 function MarkdownView(props: {
   body: string;
   contentHash: string | null;
@@ -2143,16 +2145,28 @@ function MarkdownView(props: {
     );
     props.onOpenPath?.(navigation.path, navigation.headingTarget);
   };
+  const markdownOpenMarkedRef = useRef(false);
+  // Complete the open from the first real Markdown surface that commits. The
+  // read view reports after its lazy chunk parses the visible window; small
+  // files report from the editor after its own lazy chunk resolves.
+  const onMarkdownRendered = useCallback(() => {
+    if (markdownOpenMarkedRef.current) return;
+    markdownOpenMarkedRef.current = true;
+    rendererMarks.measureSince("markdown-open", props.fileOpenStartMark);
+    // Last-wins: readers poll this epoch to know the measure above belongs to
+    // the open they triggered (never a stale value from the previous file).
+    rendererMarks.mark("markdown-opened");
+  }, [props.fileOpenStartMark, props.path]);
   const renderedDocument = useMemo(
     () => (
-      <Suspense fallback={null}>
-        <LazyMarkdownReadView
-          body={markdownEditorBody(savedBody)}
-          onOpenWorkspaceLink={(target) => openWorkspaceLinkRef.current(target)}
-        />
-      </Suspense>
+      <LazyMarkdownReadView
+        body={markdownEditorBody(savedBody)}
+        resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}`}
+        onOpenWorkspaceLink={(target) => openWorkspaceLinkRef.current(target)}
+        onRendered={onMarkdownRendered}
+      />
     ),
-    [savedBody],
+    [onMarkdownRendered, props.path, props.reopenKey, props.workspaceId, savedBody],
   );
   const onShareCurrentPath = props.onSharePath
     ? () => props.onSharePath?.(props.path)
@@ -2620,16 +2634,6 @@ function MarkdownView(props: {
     if (!readOnly) return;
     setMode("read");
   }, [readOnly]);
-
-  // Performance measure: MarkdownView only mounts once the document body is
-  // loaded, so this post-commit effect brackets click → IPC read → markdown
-  // parse → rendered document.
-  useEffect(() => {
-    rendererMarks.measureSince("markdown-open", props.fileOpenStartMark);
-    // Last-wins: readers poll this epoch to know the measure above belongs to
-    // the open they triggered (never a stale value from the previous file).
-    rendererMarks.mark("markdown-opened");
-  }, [props.fileOpenStartMark, props.path]);
 
   async function writeDraftNow(
     options: {
@@ -3332,6 +3336,7 @@ function MarkdownView(props: {
                   synced: true,
                 }}
               />
+              <MarkdownRenderCommitted onRendered={onMarkdownRendered} />
             </Suspense>
           </EditorErrorBoundary>
           {backlinks}
@@ -3468,24 +3473,27 @@ function MarkdownView(props: {
       ) : null}
       {documentNotices}
       {surfaceMode === "source" ? (
-        <textarea
-          data-testid="markdown-editor"
-          ref={editorRef}
-          autoFocus={props.autoFocus ?? true}
-          value={draft}
-          readOnly={readOnly}
-          onFocus={onLocalEditorFocus}
-          onChange={(e) => onDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if ((e.metaKey || e.ctrlKey) && e.key === "s") {
-              e.preventDefault();
-              if (saveTimer.current) clearTimeout(saveTimer.current);
-              void saveNow();
-            }
-          }}
-          spellCheck={false}
-          className="min-h-0 flex-1 resize-none bg-bg p-6 font-mono text-[14px] leading-relaxed text-ink outline-none"
-        />
+        <>
+          <textarea
+            data-testid="markdown-editor"
+            ref={editorRef}
+            autoFocus={props.autoFocus ?? true}
+            value={draft}
+            readOnly={readOnly}
+            onFocus={onLocalEditorFocus}
+            onChange={(e) => onDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+                e.preventDefault();
+                if (saveTimer.current) clearTimeout(saveTimer.current);
+                void saveNow();
+              }
+            }}
+            spellCheck={false}
+            className="min-h-0 flex-1 resize-none bg-bg p-6 font-mono text-[14px] leading-relaxed text-ink outline-none"
+          />
+          <MarkdownRenderCommitted onRendered={onMarkdownRendered} />
+        </>
       ) : surfaceMode === "wysiwyg" ? (
         // data-dohc-doc-pane: see the note on the engine pane above.
         <div
@@ -3537,6 +3545,7 @@ function MarkdownView(props: {
                 readOnly={readOnly}
                 collab={null}
               />
+              <MarkdownRenderCommitted onRendered={onMarkdownRendered} />
             </Suspense>
           </EditorErrorBoundary>
           {backlinks}

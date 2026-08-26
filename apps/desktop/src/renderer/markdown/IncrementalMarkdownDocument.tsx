@@ -145,9 +145,16 @@ export function IncrementalMarkdownDocument(props: {
 export type MarkdownReadViewProps = {
   body: string;
   onOpenWorkspaceLink?: (target: WorkspaceLinkTarget) => void;
+  onRendered?: () => void;
 };
 
 export default function MarkdownReadView(props: MarkdownReadViewProps) {
+  // This effect runs after the initial visible Markdown window has parsed and
+  // committed. Idle backfill is deliberately outside the open-time measure.
+  useEffect(() => {
+    props.onRendered?.();
+  }, [props.onRendered]);
+
   return (
     <IncrementalMarkdownDocument
       body={props.body}
