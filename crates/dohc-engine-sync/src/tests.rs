@@ -9148,7 +9148,14 @@ fn cached_defer_and_drain_match_the_cold_path() {
     assert_eq!(warm_head.text, "local remote final");
 
     let stats = warm_cache.stats();
-    assert_eq!(stats.hits, 3, "two defer gates plus final drain projection");
+    // The second defer gate has a queued predecessor, and the cached form
+    // deliberately reconstructs cold for a non-empty queue: a scratch forked
+    // from the cached full state can re-encode delete-set endpoints the gate
+    // reads differently than the cold incremental rebuild.
+    assert_eq!(
+        stats.hits, 2,
+        "empty-queue defer gate plus final drain projection"
+    );
     assert_eq!(stats.misses, 1, "only the first local append reconstructs");
     assert_eq!(stats.installs, 1);
     assert_eq!(stats.advances, 2, "both committed drain deltas advance");
