@@ -581,6 +581,7 @@ function desktopOwnedLoopbackCapture(root: string, options: {
   return createWorkspaceEngineCapture({
     workspaceId: WORKSPACE_ID,
     rootPath: root,
+    attachmentId: Symbol("test-workspace-attachment"),
     rustEngineSessions:
       rustEngineSessions ?? mockLiveSessions(new VersionedLoopbackEngine()),
     ...rest,
@@ -794,7 +795,11 @@ describe("switchVersion", () => {
     const loopback = new VersionedLoopbackEngine();
     const sessions = mockLiveSessions(loopback);
     const store = createCaptureLiveStores(
-      { workspaceId: WORKSPACE_ID, rootPath: root },
+      {
+        workspaceId: WORKSPACE_ID,
+        rootPath: root,
+        attachmentId: Symbol("test-workspace-attachment"),
+      },
       sessions,
     ).store;
     let planReads = 0;

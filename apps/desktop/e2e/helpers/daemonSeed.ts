@@ -83,9 +83,15 @@ export async function seedThroughDaemon<T>(
   try {
     await lifecycle.start();
     sessions = createRealDaemonWorkspaceSessions(lifecycle);
+    const attachedWorkspace = {
+      ...workspace,
+      attachmentId: Symbol(
+        `test-workspace-attachment:${workspace.workspaceId}`,
+      ),
+    };
     return await seed({
-      chats: createLiveLinkedChatStore(workspace, sessions),
-      files: createCaptureLiveStores(workspace, sessions).store,
+      chats: createLiveLinkedChatStore(attachedWorkspace, sessions),
+      files: createCaptureLiveStores(attachedWorkspace, sessions).store,
     });
   } finally {
     await sessions?.closeAll();

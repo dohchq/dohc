@@ -220,6 +220,7 @@ async function openDaemon(
   const capture = createWorkspaceEngineCapture({
     workspaceId: input.workspaceId,
     rootPath: input.rootPath,
+    attachmentId: Symbol("test-workspace-attachment"),
     rustEngineSessions: workspace.sessions,
     daemonOwnsCapture: true,
   });

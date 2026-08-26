@@ -21,7 +21,7 @@ import {
 // Legacy history left on disk by pre-flip versions is a read-only relic.
 
 export interface ActivityWorkspace extends CreatedWorkspace {
-  attachmentId?: symbol;
+  attachmentId: symbol;
 }
 
 interface WatchedWorkspace {
@@ -363,7 +363,7 @@ export function createWorkspaceActivity(
   // succeeds (0P-C gate fix) — so a start() failure here means "nothing
   // arrived yet" and the join handler can roll the whole join back cleanly.
   async function enableCloud(
-    workspace: CreatedWorkspace,
+    workspace: ActivityWorkspace,
     state: WorkspaceActivityState,
     engineOptions: { joinBootstrap?: boolean } = {},
   ): Promise<void> {

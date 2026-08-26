@@ -724,7 +724,7 @@ export class EngineRelayClient {
         allowInsecureLoopbackRelayForTests(input.relay.baseUrl),
     });
     if (workspace.shareMount === true) {
-      this.sessions.rememberShareMount(workspace);
+      this.sessions.rememberShareMount({ ...workspace, shareMount: true });
     }
     const workspaceKey = this.workspaceKey(workspace);
     this.boundWorkspaces.set(workspaceKey, workspace);

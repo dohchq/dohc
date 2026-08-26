@@ -76,6 +76,7 @@ function captureWith(
   return createWorkspaceEngineCapture({
     workspaceId: WORKSPACE_ID,
     rootPath: root,
+    attachmentId: Symbol("test-workspace-attachment"),
     rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
     daemonOwnsCapture: true,
     store,

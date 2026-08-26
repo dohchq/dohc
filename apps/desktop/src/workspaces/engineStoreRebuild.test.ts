@@ -128,7 +128,11 @@ function mockRebuildGate() {
 }
 
 function createRealRebuildGate() {
-  const workspace = { workspaceId: "workspace", rootPath: root };
+  const workspace = {
+    workspaceId: "workspace",
+    rootPath: root,
+    attachmentId: Symbol("test-workspace-attachment"),
+  };
   const client: EngineDaemonClient = {
     close() {},
     async sendRequest(request) {
@@ -436,7 +440,11 @@ describe("moveEngineStoreAside", () => {
   });
 
   it("does not raise the rebuild gate when no pending move exists", async () => {
-    const workspace = { workspaceId: "workspace", rootPath: root };
+    const workspace = {
+      workspaceId: "workspace",
+      rootPath: root,
+      attachmentId: Symbol("test-workspace-attachment"),
+    };
     const recoveryInspected = deferred();
     const finishRecoveryInspection = deferred();
     const client: EngineDaemonClient = {
@@ -1108,6 +1116,7 @@ describe("moveEngineStoreAside", () => {
     const workspace = {
       workspaceId: "workspace",
       rootPath: root,
+      attachmentId: Symbol("test-workspace-attachment"),
       kind: "personal" as const,
       mode: "local-first" as const,
     };
@@ -1154,7 +1163,11 @@ describe("moveEngineStoreAside", () => {
     await seedStore({ "engine.db": "refused-store" });
     await mkdir(backupDir);
     await writeMoveManifest(["engine.db"]);
-    const workspace = { workspaceId: "workspace", rootPath: root };
+    const workspace = {
+      workspaceId: "workspace",
+      rootPath: root,
+      attachmentId: Symbol("test-workspace-attachment"),
+    };
     const renameError = new Error("rename denied");
     const client: EngineDaemonClient = {
       close() {},
@@ -1312,6 +1325,7 @@ describe("moveEngineStoreAside", () => {
     const workspace = {
       workspaceId: "workspace",
       rootPath: root,
+      attachmentId: Symbol("test-workspace-attachment"),
       kind: "personal" as const,
       mode: "local-first" as const,
     };
@@ -1556,6 +1570,7 @@ describe("rebuildEngineStore", () => {
     const workspace = {
       workspaceId: "workspace",
       rootPath: root,
+      attachmentId: Symbol("test-workspace-attachment"),
       kind: "personal" as const,
       mode: "local-first" as const,
     };
@@ -1617,6 +1632,7 @@ describe("rebuildEngineStore", () => {
     const workspace = {
       workspaceId: "workspace",
       rootPath: root,
+      attachmentId: Symbol("test-workspace-attachment"),
       kind: "personal" as const,
       mode: "local-first" as const,
     };
@@ -1713,7 +1729,11 @@ describe("rebuildEngineStore", () => {
       "engine.db-wal": "wal",
       "engine.db-shm": "shm",
     });
-    const workspace = { workspaceId: "workspace", rootPath: root };
+    const workspace = {
+      workspaceId: "workspace",
+      rootPath: root,
+      attachmentId: Symbol("test-workspace-attachment"),
+    };
     const recoveryStarted = deferred();
     const finishRecovery = deferred();
     const requests: Parameters<EngineDaemonClient["sendRequest"]>[0][] = [];
@@ -1766,12 +1786,12 @@ describe("rebuildEngineStore", () => {
       hasActiveAgentRun: () => false,
       previousResult: () => undefined,
       rememberResult: vi.fn(),
-      closeActivity: () => sessions.closeWorkspace(workspace.workspaceId),
+      closeActivity: () => sessions.closeWorkspace(workspace),
       probeStoreRefusal: async () => {
         await sessions.run(workspace, async () => {
           operations.push("probe");
         });
-        await sessions.closeWorkspace(workspace.workspaceId);
+        await sessions.closeWorkspace(workspace);
         return "foreign-database";
       },
       moveStoreAside: async (rootPath) => {

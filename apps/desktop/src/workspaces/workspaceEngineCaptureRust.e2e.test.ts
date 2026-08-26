@@ -15,8 +15,9 @@ import {
 } from "@dohc/workspace-engine-client";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import {
-  createWorkspaceEngineCapture,
+  createWorkspaceEngineCapture as createAttachedWorkspaceEngineCapture,
   isYDocPathNotInVersionError,
+  type WorkspaceEngineCaptureOptions,
   YDocUncapturedArtifactError,
 } from "./workspaceEngineCapture";
 import { createInMemoryWorkspaceActivity as createWorkspaceActivity } from "./workspaceActivity.testSupport";
@@ -25,6 +26,15 @@ import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import { createRealDaemonWorkspaceSessions } from "../testing/realDaemonWorkspaceSessions";
 import { createTestScratch } from "./testTemp";
 import { waitForPathMoments } from "./waitForPathMoments";
+
+function createWorkspaceEngineCapture(
+  options: Omit<WorkspaceEngineCaptureOptions, "attachmentId">,
+) {
+  return createAttachedWorkspaceEngineCapture({
+    ...options,
+    attachmentId: Symbol(`test-workspace-attachment:${options.workspaceId}`),
+  });
+}
 
 // This suite looked only under the repo root, so it SKIPPED everywhere from the
 // day it was written and its coverage came and went with whoever last ran

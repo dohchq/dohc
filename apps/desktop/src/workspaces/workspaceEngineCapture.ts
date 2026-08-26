@@ -75,7 +75,7 @@ import {
   isEngineWorkspaceOpenRefusedError,
   TRANSPORT_REBIND_MAX_BACKOFF_MS,
   WORKSPACE_OPEN_DEADLINE_MS,
-  type EngineWorkspace,
+  type AttachedEngineWorkspace,
   type EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import {
@@ -95,7 +95,7 @@ export {
 export const DAEMON_CAPTURE_HEALTH_POLL_MS = 5_000;
 
 export async function probeEngineStoreRefusal(
-  workspace: EngineWorkspace,
+  workspace: AttachedEngineWorkspace,
   rustEngineSessions: EngineWorkspaceSessions,
 ): Promise<EngineStoreRefusal | null> {
   try {
@@ -609,7 +609,7 @@ export interface WorkspaceEngineCapture {
 export interface WorkspaceEngineCaptureOptions {
   workspaceId: string;
   rootPath: string;
-  attachmentId?: symbol;
+  attachmentId: symbol;
   // Injectable for tests; production uses the required Rust workspace sessions.
   store?: VersionedTextStore;
   // Injectable for tests; production uses the daemon's encrypted secret store.
@@ -1465,7 +1465,7 @@ export function createWorkspaceEngineCapture(
   let liveStores: ReturnType<typeof createCaptureLiveStores> | null = null;
   function daemonStores() {
     liveStores ??= createCaptureLiveStores(
-      { workspaceId, rootPath, ...(attachmentId ? { attachmentId } : {}) },
+      { workspaceId, rootPath, attachmentId },
       options.rustEngineSessions,
     );
     return liveStores;
@@ -1816,7 +1816,7 @@ export function createWorkspaceEngineCapture(
     const workspace = {
       workspaceId,
       rootPath,
-      ...(attachmentId ? { attachmentId } : {}),
+      attachmentId,
     };
     let canonicalDoc: Y.Doc | null = null;
     let canonicalLineageClaimId: string | null = null;

@@ -29,6 +29,7 @@ import {
   EngineWorkspaceSessions,
   EngineWorkspaceShuttingDownError,
   isEngineWorkspaceOpenRefusedError,
+  type EngineWorkspace,
   WORKSPACE_OPEN_DEADLINE_MS,
 } from "./engineWorkspaceSessions";
 
@@ -119,6 +120,26 @@ function daemonRefusal(
 }
 
 describe("EngineWorkspaceSessions", () => {
+  it("requires an exact policy identity while preserving explicit synthetic shares", () => {
+    const sessions = {} as EngineWorkspaceSessions;
+    const bare: EngineWorkspace = {
+      workspaceId: "bare-policy-workspace",
+      rootPath: "/unused",
+    };
+    if (false) {
+      // @ts-expect-error Capture policy belongs to one physical attachment.
+      sessions.rememberCaptureAuthor(bare, null);
+      // @ts-expect-error Rebuild policy belongs to one physical attachment.
+      sessions.beginRebuild(bare);
+      // @ts-expect-error Rebuild policy belongs to one physical attachment.
+      sessions.endRebuild(bare);
+      // @ts-expect-error Share policy requires an explicit share-mount descriptor.
+      sessions.rememberShareMount(bare);
+      sessions.rememberShareMount({ ...bare, shareMount: true });
+    }
+    expect(true).toBe(true);
+  });
+
   it("keeps a committed scene read-only while asset materialization is pending", () => {
     const refusal = daemonRefusal(
       "OVERLOADED",
@@ -518,7 +539,11 @@ describe("EngineWorkspaceSessions", () => {
       onBehalfOf: "local",
       agentRunId: "run",
     };
-    const workspace = { workspaceId: "workspace", rootPath };
+    const workspace = {
+      workspaceId: "workspace",
+      rootPath,
+      attachmentId: Symbol("capture-author"),
+    };
     sessions.rememberCaptureAuthor(workspace, author);
 
     await sessions.run(
@@ -777,7 +802,7 @@ describe("EngineWorkspaceSessions", () => {
     const sessions = new EngineWorkspaceSessions({
       currentClient: () => client,
     });
-    sessions.rememberShareMount(workspace);
+    sessions.rememberShareMount({ ...workspace, shareMount: true });
 
     await sessions.run(workspace, async () => undefined);
     await sessions.closeWorkspaceBinding(workspace);
@@ -797,6 +822,74 @@ describe("EngineWorkspaceSessions", () => {
       (request) => request.method === "workspace.open",
     ).at(-1);
     expect(finalOpen?.params).not.toHaveProperty("captureMode");
+    await sessions.closeAll();
+  });
+
+  it("isolates engine policy between attachments that reuse one workspace id", async () => {
+    const base = await tempWorkspace("workspace-policy-attachments");
+    const workspaceA = { ...base, attachmentId: Symbol("attachment-a") };
+    const workspaceB = { ...base, attachmentId: Symbol("attachment-b") };
+    const authorA = {
+      kind: "agent" as const,
+      agentId: "agent-a",
+      onBehalfOf: "local",
+      agentRunId: "run-a",
+    };
+    const authorB = {
+      kind: "agent" as const,
+      agentId: "agent-b",
+      onBehalfOf: "local",
+      agentRunId: "run-b",
+    };
+    const client = new MockClient("policy-handle");
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+    sessions.rememberCaptureAuthor(workspaceA, authorA);
+    sessions.rememberCaptureAuthor(workspaceB, authorB);
+    sessions.rememberShareMount({ ...workspaceA, shareMount: true });
+    sessions.beginRebuild(workspaceA);
+
+    await expect(
+      sessions.run(workspaceA, async () => "unexpected"),
+    ).rejects.toEqual(new EngineWorkspaceRebuildingError(base.workspaceId));
+    await expect(
+      sessions.run(workspaceB, async () => "attachment-b"),
+    ).resolves.toBe("attachment-b");
+    expect(client.requests.at(-1)?.params).toEqual(
+      expect.objectContaining({ captureAuthor: authorB }),
+    );
+    expect(client.requests.at(-1)?.params).not.toHaveProperty("captureMode");
+
+    await sessions.closeWorkspace(workspaceB);
+    sessions.endRebuild(workspaceA);
+    await sessions.run(workspaceA, async () => undefined);
+    expect(client.requests.at(-1)?.params).toEqual(
+      expect.objectContaining({ captureMode: "none" }),
+    );
+    expect(client.requests.at(-1)?.params).not.toHaveProperty("captureAuthor");
+    await sessions.closeAll();
+  });
+
+  it("preserves explicit share policy for an unattached synthetic session", async () => {
+    const workspace = {
+      ...(await tempWorkspace("synthetic-share-policy")),
+      shareMount: true as const,
+    };
+    const client = new MockClient("synthetic-share-handle");
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+    sessions.rememberShareMount(workspace);
+
+    await sessions.run(
+      { workspaceId: workspace.workspaceId, rootPath: workspace.rootPath },
+      async () => undefined,
+    );
+
+    expect(client.requests.at(-1)?.params).toEqual(
+      expect.objectContaining({ captureMode: "none" }),
+    );
     await sessions.closeAll();
   });
 
@@ -1088,7 +1181,10 @@ describe("EngineWorkspaceSessions", () => {
   });
 
   it("refuses one workspace while its store is rebuilding", async () => {
-    const workspace = await tempWorkspace();
+    const workspace = {
+      ...(await tempWorkspace()),
+      attachmentId: Symbol("rebuild-workspace"),
+    };
     const otherWorkspace = await tempWorkspace("other-workspace");
     const requests: Request[] = [];
     const client: EngineDaemonClient = {
@@ -1132,7 +1228,10 @@ describe("EngineWorkspaceSessions", () => {
   });
 
   it("refuses a run that was waiting for close when rebuilding starts", async () => {
-    const workspace = await tempWorkspace();
+    const workspace = {
+      ...(await tempWorkspace()),
+      attachmentId: Symbol("queued-rebuild-workspace"),
+    };
     const closeStarted = deferred<void>();
     const finishClose = deferred<void>();
     let openCount = 0;
@@ -1159,7 +1258,7 @@ describe("EngineWorkspaceSessions", () => {
     });
     await sessions.run(workspace, async () => undefined);
 
-    const closing = sessions.closeWorkspace(workspace.workspaceId);
+    const closing = sessions.closeWorkspace(workspace);
     await closeStarted.promise;
     const operation = vi.fn(async () => "unexpected");
     const queuedRun = sessions.run(workspace, operation);

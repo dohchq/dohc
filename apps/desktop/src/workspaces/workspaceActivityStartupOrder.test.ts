@@ -45,7 +45,11 @@ describe("workspaceActivity startup ordering", () => {
     const order: string[] = [];
     const sessions = mockLiveSessions(new VersionedLoopbackEngine());
     const liveStore = createCaptureLiveStores(
-      { workspaceId: WORKSPACE_ID, rootPath: root },
+      {
+        workspaceId: WORKSPACE_ID,
+        rootPath: root,
+        attachmentId: Symbol("test-workspace-attachment"),
+      },
       sessions,
     ).store;
     const trackedStore = new Proxy(liveStore, {
@@ -103,6 +107,7 @@ describe("workspaceActivity startup ordering", () => {
         capture: createWorkspaceEngineCapture({
           workspaceId: WORKSPACE_ID,
           rootPath: root,
+          attachmentId: Symbol("test-workspace-attachment"),
           store: trackedStore,
           rustEngineSessions: sessions,
         }),

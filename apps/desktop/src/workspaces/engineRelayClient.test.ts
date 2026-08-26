@@ -198,6 +198,7 @@ afterEach(async () => {
 
 async function harness(daemon = new MockDaemon()) {
   const rootPath = await createTestScratch("dohc-relay-client-unit-");
+  const attachmentId = Symbol("test-workspace-attachment");
   roots.push(rootPath);
   const routes = new RelayTransportRouteGuard();
   const source = new RelayConfiguredDaemonClientSource(
@@ -216,9 +217,19 @@ async function harness(daemon = new MockDaemon()) {
   const client = live.bind({
     workspaceId: "workspace-a",
     rootPath,
+    attachmentId,
     relay,
   });
-  return { rootPath, daemon, routes, sessions, live, relay, client };
+  return {
+    rootPath,
+    attachmentId,
+    daemon,
+    routes,
+    sessions,
+    live,
+    relay,
+    client,
+  };
 }
 
 function expectStatefulRequestsScoped(requests: Request[]): void {
@@ -1069,9 +1080,10 @@ describe("EngineRelayClient", () => {
   });
 
   it("refreshes a share view and commits its opaque daemon cursor", async () => {
-    const { rootPath, daemon, sessions, client, relay } = await harness();
+    const { rootPath, attachmentId, daemon, sessions, client, relay } =
+      await harness();
     const store = createCaptureLiveStores(
-      { workspaceId: "workspace-a", rootPath },
+      { workspaceId: "workspace-a", rootPath, attachmentId },
       sessions,
     ).store;
     const outcome = await refreshStandaloneShareThroughOwnerForTest({
@@ -1131,9 +1143,10 @@ describe("EngineRelayClient", () => {
   // either one widens the grant: no paths reads as "the whole workspace", and
   // no version reads as "any version's fork".
   it("sends the accepted selector's paths AND version to the engine", async () => {
-    const { rootPath, daemon, sessions, client, relay } = await harness();
+    const { rootPath, attachmentId, daemon, sessions, client, relay } =
+      await harness();
     const store = createCaptureLiveStores(
-      { workspaceId: "workspace-a", rootPath },
+      { workspaceId: "workspace-a", rootPath, attachmentId },
       sessions,
     ).store;
     await refreshStandaloneShareThroughOwnerForTest({
@@ -1452,9 +1465,10 @@ describe("EngineRelayClient", () => {
       }
       return undefined;
     });
-    const { rootPath, sessions, client, relay } = await harness(daemon);
+    const { rootPath, attachmentId, sessions, client, relay } =
+      await harness(daemon);
     const store = createCaptureLiveStores(
-      { workspaceId: "workspace-a", rootPath },
+      { workspaceId: "workspace-a", rootPath, attachmentId },
       sessions,
     ).store;
 
@@ -1571,9 +1585,10 @@ describe("EngineRelayClient", () => {
       }
       return undefined;
     });
-    const { rootPath, client, relay, sessions } = await harness(daemon);
+    const { rootPath, attachmentId, client, relay, sessions } =
+      await harness(daemon);
     const store = createCaptureLiveStores(
-      { workspaceId: "workspace-a", rootPath },
+      { workspaceId: "workspace-a", rootPath, attachmentId },
       sessions,
     ).store;
 

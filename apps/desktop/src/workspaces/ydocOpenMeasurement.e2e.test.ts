@@ -121,6 +121,7 @@ it.skipIf(engine.missing)(
     let capture = createWorkspaceEngineCapture({
       workspaceId: WORKSPACE_ID,
       rootPath: root,
+      attachmentId: Symbol("test-workspace-attachment"),
       rustEngineSessions: sessions,
       daemonOwnsCapture: true,
     });
@@ -217,6 +218,7 @@ it.skipIf(engine.missing)(
       capture = createWorkspaceEngineCapture({
         workspaceId: WORKSPACE_ID,
         rootPath: root,
+        attachmentId: Symbol("test-workspace-attachment"),
         rustEngineSessions: sessions,
         daemonOwnsCapture: true,
       });

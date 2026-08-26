@@ -195,6 +195,7 @@ beforeEach(async () => {
   capture = createWorkspaceEngineCapture({
     workspaceId: WORKSPACE_ID,
     rootPath: root,
+    attachmentId: Symbol("test-workspace-attachment"),
     rustEngineSessions: sessions,
     onError: (context) => captureErrors.push(context),
   });
@@ -694,6 +695,7 @@ it("never reports a save seq the settled file does not back", async () => {
   const honest = createWorkspaceEngineCapture({
     workspaceId: WORKSPACE_ID,
     rootPath: root,
+    attachmentId: Symbol("test-workspace-attachment"),
     rustEngineSessions: sessions,
     openRustYDocProviderSession: async (options) =>
       await openEngineYdocProviderSession({ ...options, settleDebounceMs }),

@@ -105,7 +105,11 @@ async function harness(
     new RelayConfiguredDaemonClientSource(lifecycle, routes),
   );
   sessionSets.push(sessions);
-  const workspace = { workspaceId, rootPath };
+  const workspace = {
+    workspaceId,
+    rootPath,
+    attachmentId: Symbol("test-workspace-attachment"),
+  };
   const receivedShareLocation = { engineWorkspaceId: workspaceId, rootPath };
   const relayClient = new EngineRelayClient({
     sessions,

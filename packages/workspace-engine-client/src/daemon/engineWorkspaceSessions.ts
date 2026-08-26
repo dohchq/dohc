@@ -43,6 +43,14 @@ export interface EngineWorkspace {
   captureMode?: "none";
 }
 
+export type AttachedEngineWorkspace = EngineWorkspace & {
+  attachmentId: symbol;
+};
+
+export type ShareMountEngineWorkspace = EngineWorkspace & {
+  shareMount: true;
+};
+
 export interface EngineWorkspaceBinding {
   client: EngineDaemonClient;
   workspace: WorkspaceHandle;
@@ -721,21 +729,21 @@ export class EngineWorkspaceSessions {
   }
 
   rememberCaptureAuthor(
-    workspace: EngineWorkspace,
+    workspace: AttachedEngineWorkspace,
     author: AgentAuthor | null,
   ): void {
     this.captureAuthors.set(this.sessionKey(workspace), author);
   }
 
-  rememberShareMount(workspace: EngineWorkspace): void {
+  rememberShareMount(workspace: ShareMountEngineWorkspace): void {
     this.shareMounts.add(this.sessionKey(workspace));
   }
 
-  beginRebuild(workspace: EngineWorkspace): void {
+  beginRebuild(workspace: AttachedEngineWorkspace): void {
     this.rebuildingWorkspaces.add(this.sessionKey(workspace));
   }
 
-  endRebuild(workspace: EngineWorkspace): void {
+  endRebuild(workspace: AttachedEngineWorkspace): void {
     this.rebuildingWorkspaces.delete(this.sessionKey(workspace));
   }
 

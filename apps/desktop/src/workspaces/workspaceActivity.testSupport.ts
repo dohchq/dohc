@@ -1,11 +1,14 @@
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import type { ActiveAgentRun } from "./workspaceWatcher";
+import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import {
   createWorkspaceActivity,
   WorkspaceActivityState,
   type ActivityWorkspace,
   type WorkspaceActivityOptions,
 } from "./workspaceActivity";
+
+type TestActivityWorkspace = CreatedWorkspace & { attachmentId?: symbol };
 
 /** Test-only registry adapter for the single-attachment activity service. */
 export function createInMemoryWorkspaceActivity(
@@ -18,17 +21,29 @@ export function createInMemoryWorkspaceActivity(
     { workspace: ActivityWorkspace; state: WorkspaceActivityState }
   >();
 
-  function authorityFor(workspace: ActivityWorkspace) {
+  function authorityFor(workspace: TestActivityWorkspace) {
     const current = authorities.get(workspace.workspaceId);
     if (
       current &&
       (current.workspace.rootPath === workspace.rootPath ||
         service.isOpen(current.state))
     ) {
-      current.workspace = workspace;
+      current.workspace = {
+        ...workspace,
+        attachmentId:
+          workspace.attachmentId ?? current.workspace.attachmentId,
+      };
       return current;
     }
-    const created = { workspace, state: new WorkspaceActivityState() };
+    const created = {
+      workspace: {
+        ...workspace,
+        attachmentId:
+          workspace.attachmentId ??
+          Symbol(`test-workspace-attachment:${workspace.workspaceId}`),
+      },
+      state: new WorkspaceActivityState(),
+    };
     authorities.set(workspace.workspaceId, created);
     return created;
   }
@@ -37,7 +52,13 @@ export function createInMemoryWorkspaceActivity(
     const current = authorities.get(workspaceId);
     if (current) return current;
     const created = {
-      workspace: { workspaceId, rootPath: "" } as ActivityWorkspace,
+      workspace: {
+        workspaceId,
+        rootPath: "",
+        kind: "personal",
+        mode: "local-first",
+        attachmentId: Symbol(`test-workspace-attachment:${workspaceId}`),
+      } as ActivityWorkspace,
       state: new WorkspaceActivityState(),
     };
     authorities.set(workspaceId, created);
@@ -45,9 +66,9 @@ export function createInMemoryWorkspaceActivity(
   }
 
   return {
-    open: (workspace: ActivityWorkspace) => {
+    open: (workspace: TestActivityWorkspace) => {
       const authority = authorityFor(workspace);
-      return service.open(workspace, authority.state);
+      return service.open(authority.workspace, authority.state);
     },
     close: (
       workspaceId: string,
@@ -62,11 +83,15 @@ export function createInMemoryWorkspaceActivity(
       return service.close(authority.workspace, authority.state, closeOptions);
     },
     enableCloud: (
-      workspace: ActivityWorkspace,
+      workspace: TestActivityWorkspace,
       engineOptions?: { joinBootstrap?: boolean },
     ) => {
       const authority = authorityFor(workspace);
-      return service.enableCloud(workspace, authority.state, engineOptions);
+      return service.enableCloud(
+        authority.workspace,
+        authority.state,
+        engineOptions,
+      );
     },
     reconcileCloud: (
       engineFor: Parameters<typeof service.reconcileCloud>[1],

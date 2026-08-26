@@ -18,7 +18,7 @@ import {
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
+import { createCaptureLiveStores as createAttachedCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 
 const WORKSPACE_ID = "workspace";
 const WORKSPACE_HANDLE = "workspace-handle";
@@ -38,6 +38,21 @@ const OVER_CAP_SHA256 = createHash("sha256")
 // exceeded 5 seconds under the eight-worker desktop suite on 2026-08-13.
 // Keep the contention budget local to tests that process the large bodies.
 const BLOB_HYDRATION_TEST_TIMEOUT_MS = 15_000;
+
+function createCaptureLiveStores(
+  workspace: EngineWorkspace,
+  sessions: EngineWorkspaceSessions,
+) {
+  return createAttachedCaptureLiveStores(
+    {
+      ...workspace,
+      attachmentId:
+        workspace.attachmentId ??
+        Symbol(`test-workspace-attachment:${workspace.workspaceId}`),
+    },
+    sessions,
+  );
+}
 
 function sessionsFor(
   client: EngineDaemonClient,
@@ -259,6 +274,35 @@ function conflict(status: "open" | "resolved" = "open"): ConflictRecord {
 }
 
 describe("createCaptureLiveStores", () => {
+  it("remembers capture authors only for an attached non-share workspace", () => {
+    const remembered: Array<[EngineWorkspace, AgentAuthor | null]> = [];
+    const sessions = {
+      rememberCaptureAuthor(
+        workspace: EngineWorkspace,
+        author: AgentAuthor | null,
+      ) {
+        remembered.push([workspace, author]);
+      },
+    } as unknown as EngineWorkspaceSessions;
+    const attached = {
+      workspaceId: WORKSPACE_ID,
+      rootPath: "/attached",
+      attachmentId: Symbol("attached-workspace"),
+    };
+
+    createAttachedCaptureLiveStores(attached, sessions);
+    createAttachedCaptureLiveStores(
+      {
+        workspaceId: "synthetic-share",
+        rootPath: "/share",
+        shareMount: true,
+      },
+      sessions,
+    );
+
+    expect(remembered).toEqual([[attached, null]]);
+  });
+
   it("mutation proof: remembers capture authorship across later session generations", async () => {
     const captureAuthorsSeen: Array<AgentAuthor | null> = [];
     const client = clientFor(async (request) => ({

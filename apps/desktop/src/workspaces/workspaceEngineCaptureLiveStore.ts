@@ -30,8 +30,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   EngineWorkspaceSessions,
-  type EngineWorkspace,
+  type AttachedEngineWorkspace,
   type EngineWorkspaceBinding,
+  type ShareMountEngineWorkspace,
 } from "@dohc/workspace-engine-client/daemon";
 
 // A manifest rebuild after a version switch costs ONE unsettled pass, so this
@@ -513,11 +514,13 @@ function adapterAuthor(author: MomentAuthor): AgentAuthor {
 }
 
 export function createCaptureLiveStores(
-  workspace: EngineWorkspace,
+  workspace: AttachedEngineWorkspace | ShareMountEngineWorkspace,
   sessions: EngineWorkspaceSessions,
 ): CaptureLiveStores {
   const adapters = new WeakMap<object, Map<string, VersionedLiveAdapter>>();
-  sessions.rememberCaptureAuthor(workspace, null);
+  if (workspace.shareMount !== true) {
+    sessions.rememberCaptureAuthor(workspace, null);
+  }
 
   function adapterFor(binding: EngineWorkspaceBinding): VersionedLiveAdapter {
     const clientKey = binding.client as object;
@@ -1267,7 +1270,9 @@ export function createCaptureLiveStores(
       });
       // Reopen replay is a cache of daemon-accepted state, not caller intent.
       // Remember only after the mutation succeeds.
-      sessions.rememberCaptureAuthor(workspace, desired);
+      if (workspace.shareMount !== true) {
+        sessions.rememberCaptureAuthor(workspace, desired);
+      }
     },
 
     close: async () => await sessions.closeWorkspace(workspace),

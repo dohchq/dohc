@@ -565,6 +565,7 @@ import {
 } from "./workspaces/shareProposalRelay";
 import {
   EngineWorkspaceSessions,
+  type AttachedEngineWorkspace,
   type EngineWorkspace,
 } from "@dohc/workspace-engine-client/daemon";
 import {
@@ -2817,9 +2818,7 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
       {
         workspaceId: workspace.workspaceId,
         rootPath: workspace.rootPath,
-        ...(workspace.attachmentId
-          ? { attachmentId: workspace.attachmentId }
-          : {}),
+        attachmentId: workspace.attachmentId,
         shareView: sharedViewOf(workspace.workspaceId) !== null,
       },
       hooks,
@@ -3530,7 +3529,7 @@ function withEngineStoreRecoveredForAuthority<Result>(
 }
 
 function completePendingEngineStoreMoveForWorkspace(
-  workspace: EngineWorkspace,
+  workspace: AttachedEngineWorkspace,
   rootPath: string,
 ): Promise<void> {
   const sessions = requireEngineSessions();

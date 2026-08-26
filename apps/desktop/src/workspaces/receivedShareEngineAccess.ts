@@ -1,7 +1,8 @@
 import type { SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import type {
-  EngineWorkspace,
+  AttachedEngineWorkspace,
   EngineWorkspaceSessions,
+  ShareMountEngineWorkspace,
 } from "@dohc/workspace-engine-client/daemon";
 import type {
   EngineRelayClient,
@@ -39,19 +40,27 @@ export function createReceivedShareEngineAccess(dependencies: {
   relayClient(): Pick<EngineRelayClient, "bind">;
   createStores: typeof createCaptureLiveStores;
 }): {
-  workspaceFor(location: ReceivedShareEngineLocation): EngineWorkspace;
+  workspaceFor(
+    location: ReceivedShareEngineLocation,
+  ): ShareMountEngineWorkspace;
   workspaceForRegistered(
     location: RegisteredWorkspaceEngineLocation,
-  ): EngineWorkspace;
+  ): AttachedEngineWorkspace;
   storeFor(location: ReceivedShareEngineLocation): CaptureStores["store"];
   relayFor(location: ReceivedShareRelayLocation): EngineRelayWorkspaceClient;
   relayForRegistered(
     location: RegisteredWorkspaceRelayLocation,
   ): EngineRelayWorkspaceClient;
 } {
-  const workspaceFor = (
+  function workspaceFor(
+    location: ReceivedShareEngineLocation & { attachmentId: symbol },
+  ): ShareMountEngineWorkspace & AttachedEngineWorkspace;
+  function workspaceFor(
     location: ReceivedShareEngineLocation,
-  ): EngineWorkspace => {
+  ): ShareMountEngineWorkspace;
+  function workspaceFor(
+    location: ReceivedShareEngineLocation,
+  ): ShareMountEngineWorkspace {
     const sessions = dependencies.sessions();
     // This is stronger than carrying `shareMount` on one descriptor. Sessions
     // are keyed by physical attachment when one is present, and otherwise by
@@ -66,10 +75,10 @@ export function createReceivedShareEngineAccess(dependencies: {
     } as const;
     sessions.rememberShareMount(workspace);
     return workspace;
-  };
+  }
   const workspaceForRegistered = (
     location: RegisteredWorkspaceEngineLocation,
-  ): EngineWorkspace =>
+  ): AttachedEngineWorkspace =>
     shareViewIsPresent(location.shareView)
       ? workspaceFor({
           engineWorkspaceId: location.workspaceId,
@@ -81,7 +90,10 @@ export function createReceivedShareEngineAccess(dependencies: {
           rootPath: location.rootPath,
           attachmentId: location.attachmentId,
         };
-  const bind = (workspace: EngineWorkspace, relay: SyncRelayConnection) =>
+  const bind = (
+    workspace: AttachedEngineWorkspace | ShareMountEngineWorkspace,
+    relay: SyncRelayConnection,
+  ) =>
     dependencies.relayClient().bind({
       ...workspace,
       relay,

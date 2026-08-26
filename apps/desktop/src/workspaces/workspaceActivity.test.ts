@@ -5,11 +5,11 @@ import {
   closeWorkspaceActivityAndRelay,
   createWorkspaceActivity as createPhysicalWorkspaceActivity,
   WorkspaceActivityState,
+  type ActivityWorkspace,
   type WorkspaceCaptureHooks,
 } from "./workspaceActivity";
 import { createInMemoryWorkspaceActivity as createWorkspaceActivity } from "./workspaceActivity.testSupport";
 import { captureForFlaggedWorkspace } from "./engineCaptureGate";
-import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createTestScratch } from "./testTemp";
 
@@ -38,10 +38,13 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-function workspace(): CreatedWorkspace {
+const ATTACHMENT_ID = Symbol("activity-test-attachment");
+
+function workspace(): ActivityWorkspace {
   return {
     workspaceId: "activity-test",
     rootPath: root,
+    attachmentId: ATTACHMENT_ID,
     kind: "personal",
     mode: "local-first",
   };
@@ -204,7 +207,12 @@ describe("workspaceActivity history-off status (retirement Phase C)", () => {
     const activity = createWorkspaceActivity(() => {}, {
       captureFor: (w, hooks) =>
         captureForFlaggedWorkspace(
-          { workspaceId: w.workspaceId, rootPath: w.rootPath, shareView: true },
+          {
+            workspaceId: w.workspaceId,
+            rootPath: w.rootPath,
+            attachmentId: w.attachmentId,
+            shareView: true,
+          },
           hooks,
           engineUnreachableSessions,
         ),

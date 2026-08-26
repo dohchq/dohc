@@ -1794,6 +1794,7 @@ describe("PluginHost", () => {
     const engine = createWorkspaceEngineCapture({
       workspaceId: "workspace-a",
       rootPath: root,
+      attachmentId: Symbol("test-workspace-attachment"),
       rustEngineSessions: mockLiveSessions(loopback),
     });
     await writeFile(join(root, "queue-blocker.txt"), "block\n", "utf8");
@@ -1903,6 +1904,7 @@ describe("PluginHost", () => {
     const engine = createWorkspaceEngineCapture({
       workspaceId: "workspace-a",
       rootPath: root,
+      attachmentId: Symbol("test-workspace-attachment"),
       rustEngineSessions: mockLiveSessions(loopback),
     });
     await writeFile(join(root, "queue-blocker.txt"), "block\n", "utf8");
