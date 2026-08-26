@@ -17,7 +17,7 @@ interface PresenceMutationSessionState {
 
 interface RetiredPresenceLeave {
   readonly leave: () => Promise<void>;
-  readonly expiry: unknown;
+  expiry: unknown | undefined;
   draining: Promise<void> | undefined;
 }
 
@@ -198,6 +198,10 @@ export class PresenceMutationOwner<Sender extends RendererWorkspaceSender> {
     if (!tombstone) return;
     let drain = tombstone.draining;
     if (!drain) {
+      if (tombstone.expiry !== undefined) {
+        this.#cancelExpiry(tombstone.expiry);
+        tombstone.expiry = undefined;
+      }
       drain = Promise.resolve().then(tombstone.leave);
       tombstone.draining = drain;
       void drain.then(
@@ -205,7 +209,12 @@ export class PresenceMutationOwner<Sender extends RendererWorkspaceSender> {
           if (tombstone.draining === drain) tombstone.draining = undefined;
         },
         () => {
-          if (tombstone.draining === drain) tombstone.draining = undefined;
+          if (tombstone.draining === drain) {
+            tombstone.draining = undefined;
+            if (this.#retiredLeaves.get(key) === tombstone) {
+              this.#armRetiredLeaveExpiry(key, tombstone);
+            }
+          }
         },
       );
     }
@@ -218,21 +227,38 @@ export class PresenceMutationOwner<Sender extends RendererWorkspaceSender> {
   #rememberRetiredLeave(key: string, leave: () => Promise<void>): void {
     const prior = this.#retiredLeaves.get(key);
     if (prior) this.#forgetRetiredLeave(key, prior);
-    let tombstone!: RetiredPresenceLeave;
-    tombstone = {
+    const tombstone: RetiredPresenceLeave = {
       leave,
       draining: undefined,
-      expiry: this.#scheduleExpiry(() => {
-        if (this.#retiredLeaves.get(key) === tombstone) {
-          this.#retiredLeaves.delete(key);
-        }
-      }, this.#tombstoneTtlMs),
+      expiry: undefined,
     };
     this.#retiredLeaves.set(key, tombstone);
+    this.#armRetiredLeaveExpiry(key, tombstone);
   }
 
   #forgetRetiredLeave(key: string, tombstone: RetiredPresenceLeave): void {
     this.#retiredLeaves.delete(key);
-    this.#cancelExpiry(tombstone.expiry);
+    if (tombstone.expiry !== undefined) {
+      this.#cancelExpiry(tombstone.expiry);
+      tombstone.expiry = undefined;
+    }
+  }
+
+  #armRetiredLeaveExpiry(
+    key: string,
+    tombstone: RetiredPresenceLeave,
+  ): void {
+    let expiry: unknown;
+    expiry = this.#scheduleExpiry(() => {
+      if (
+        this.#retiredLeaves.get(key) === tombstone &&
+        tombstone.expiry === expiry &&
+        !tombstone.draining
+      ) {
+        tombstone.expiry = undefined;
+        this.#retiredLeaves.delete(key);
+      }
+    }, this.#tombstoneTtlMs);
+    tombstone.expiry = expiry;
   }
 }

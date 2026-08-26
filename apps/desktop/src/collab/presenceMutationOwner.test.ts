@@ -175,7 +175,15 @@ describe("PresenceMutationOwner", () => {
   });
 
   it("coalesces a failed retired leave before same-key successors publish", async () => {
-    const presence = new PresenceMutationOwner<TestSender>();
+    let expire: () => void = () => undefined;
+    const cancelExpiry = vi.fn();
+    const presence = new PresenceMutationOwner<TestSender>({
+      scheduleExpiry: (callback) => {
+        expire = callback;
+        return "expiry-1";
+      },
+      cancelExpiry,
+    });
     const sessions = sessionOwner(presence);
     const oldSender = sender(7);
     const oldSession = await sessions.open(
@@ -225,9 +233,31 @@ describe("PresenceMutationOwner", () => {
     await vi.waitFor(() => expect(oldLeave).toHaveBeenCalledTimes(2));
     expect(firstPublish).not.toHaveBeenCalled();
     expect(secondPublish).not.toHaveBeenCalled();
+
+    // Model a timer callback that was already queued when the retry cancelled
+    // its expiry. It must not delete the in-flight obligation and let a later
+    // same-key successor cross the stale leave.
+    expire();
+    const thirdSuccessor = await sessions.open(
+      sender(10),
+      "workspace-b",
+      "document-4",
+    );
+    const thirdPublish = vi.fn(async () => "third");
+    const third = presence.publish(thirdSuccessor, "same-key", {
+      resolve: async () => ({
+        publish: thirdPublish,
+        leave: async () => undefined,
+      }),
+    });
+    await Promise.resolve();
+    expect(thirdPublish).not.toHaveBeenCalled();
+    expect(cancelExpiry).toHaveBeenCalledWith("expiry-1");
+
     retryDrain.resolve();
     await expect(first).resolves.toBe("first");
     await expect(second).resolves.toBe("second");
+    await expect(third).resolves.toBe("third");
     expect(oldLeave).toHaveBeenCalledTimes(2);
   });
 
