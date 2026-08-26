@@ -56,8 +56,8 @@ describe("main-process engine store rebuild wiring", () => {
     );
 
     expect(recovery).toContain("completePendingEngineStoreMove(rootPath");
-    expect(recovery).toContain("sessions.beginRebuild(workspace.workspaceId)");
-    expect(recovery).toContain("sessions.endRebuild(workspace.workspaceId)");
+    expect(recovery).toContain("sessions.beginRebuild(workspace)");
+    expect(recovery).toContain("sessions.endRebuild(workspace)");
     expect(dispatch).toContain("withEngineStoreRecoveredForAuthority(lease,");
     expect(ordinaryOpen).toContain("withEngineStoreRecoveredForAuthority(lease,");
     expect(lockedOpen).toContain(
@@ -77,7 +77,7 @@ describe("main-process engine store rebuild wiring", () => {
     expect(rebuild).toContain("begin: () => sessions.beginRebuild(");
     expect(rebuild).toContain("end: () => sessions.endRebuild(");
     expect(rebuild).toMatch(
-      /afterReopenRecoverySettled: \(\) =>\s*sessions\.endRebuild\(workspace\.workspaceId\),/,
+      /afterReopenRecoverySettled: \(\) =>\s*sessions\.endRebuild\(workspace\),/,
     );
     expect(rebuild).toContain("moveStoreAside: moveEngineStoreAside");
     expect(rebuild).not.toContain("requireEngineSessions().beginRebuild(");

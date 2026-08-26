@@ -3487,14 +3487,14 @@ function withEngineStoreRecoveredForAuthority<Result>(
 }
 
 function completePendingEngineStoreMoveForWorkspace(
-  workspace: Pick<CreatedWorkspace, "workspaceId">,
+  workspace: EngineWorkspace,
   rootPath: string,
 ): Promise<void> {
   const sessions = requireEngineSessions();
   return completePendingEngineStoreMove(rootPath, {
     rebuildGate: {
-      begin: () => sessions.beginRebuild(workspace.workspaceId),
-      end: () => sessions.endRebuild(workspace.workspaceId),
+      begin: () => sessions.beginRebuild(workspace),
+      end: () => sessions.endRebuild(workspace),
     },
   });
 }
@@ -11356,20 +11356,19 @@ function registerIpcHandlers(
             },
             probeStoreRefusal: () =>
               probeEngineStoreRefusal(
-                workspace.workspaceId,
-                workspace.rootPath,
+                workspace,
                 sessions,
               ),
             rebuildGate: {
-              begin: () => sessions.beginRebuild(workspace.workspaceId),
-              end: () => sessions.endRebuild(workspace.workspaceId),
+              begin: () => sessions.beginRebuild(workspace),
+              end: () => sessions.endRebuild(workspace),
             },
             moveStoreAside: moveEngineStoreAside,
             reopenActivity: async () => {
               try {
                 await openWorkspaceActivityUnderEngineStoreLock(workspace, {
                   afterReopenRecoverySettled: () =>
-                    sessions.endRebuild(workspace.workspaceId),
+                    sessions.endRebuild(workspace),
                 });
               } finally {
                 notifyRenderer({ workspaceId: workspace.workspaceId });

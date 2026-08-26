@@ -128,6 +128,26 @@ function capture(root: string, options: CaptureOptions = {}) {
 }
 
 describe("probeEngineStoreRefusal", () => {
+  it("probes through the exact attachment session key", async () => {
+    const root = await tempRoot();
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const run = vi.spyOn(sessions, "run");
+    const attachmentId = Symbol("attachment");
+
+    await expect(
+      probeEngineStoreRefusal(
+        { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId },
+        sessions,
+      ),
+    ).resolves.toBeNull();
+    expect(run).toHaveBeenCalled();
+    expect(run.mock.calls[0]?.[0]).toMatchObject({
+      workspaceId: WORKSPACE_ID,
+      rootPath: root,
+      attachmentId,
+    });
+  });
+
   it("rethrows an unrecognized engine error", async () => {
     const root = await tempRoot();
     const probeError = Object.assign(new Error("permission denied"), {
@@ -143,7 +163,10 @@ describe("probeEngineStoreRefusal", () => {
     );
 
     await expect(
-      probeEngineStoreRefusal(WORKSPACE_ID, root, sessions),
+      probeEngineStoreRefusal(
+        { workspaceId: WORKSPACE_ID, rootPath: root },
+        sessions,
+      ),
     ).rejects.toBe(probeError);
   });
 });

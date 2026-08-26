@@ -75,6 +75,7 @@ import {
   isEngineWorkspaceOpenRefusedError,
   TRANSPORT_REBIND_MAX_BACKOFF_MS,
   WORKSPACE_OPEN_DEADLINE_MS,
+  type EngineWorkspace,
   type EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import {
@@ -94,15 +95,14 @@ export {
 export const DAEMON_CAPTURE_HEALTH_POLL_MS = 5_000;
 
 export async function probeEngineStoreRefusal(
-  workspaceId: string,
-  rootPath: string,
+  workspace: EngineWorkspace,
   rustEngineSessions: EngineWorkspaceSessions,
 ): Promise<EngineStoreRefusal | null> {
   try {
     await createCaptureLiveStores(
-      { workspaceId, rootPath },
+      workspace,
       rustEngineSessions,
-    ).store.ensureMainVersion({ workspaceId });
+    ).store.ensureMainVersion({ workspaceId: workspace.workspaceId });
     return null;
   } catch (error) {
     const refusal = engineStoreRefusalOf(error);
