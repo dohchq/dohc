@@ -40,16 +40,11 @@ describe("main-process engine store rebuild wiring", () => {
     expect(target).toContain("workspaceId: workspace.workspaceId");
     expect(target).toContain("rootPath: workspace.rootPath");
     expect(target).toContain("attachmentId: workspace.attachmentId");
-    expect(targets).toContain(
-      "workspaceSessionTargetForPhysicalWorkspace(\n" +
-        "      workspace.workspaceId,\n" +
-        "      workspace,\n" +
-        "    )",
+    expect(targets).toMatch(
+      /workspaceSessionTargetForPhysicalWorkspace\(\s*workspace\.workspaceId,\s*workspace,\s*\)/,
     );
-    expect(targets).toContain(
-      "const mountStoreWorkspaceIds = new Set(\n" +
-        "    storedShareMounts(workspace).map((mount) =>\n" +
-        "      mountStoreWorkspaceIdFor(workspace.workspaceId, mount.shareId),",
+    expect(targets).toMatch(
+      /const mountStoreWorkspaceIds = new Set\(\s*storedShareMounts\(workspace\)\.map\(\(mount\)\s*=>\s*mountStoreWorkspaceIdFor\(workspace\.workspaceId,\s*mount\.shareId\),/,
     );
     expect(targets).toContain("...mountStoreWorkspaceIds");
     expect(targets).not.toContain("workspace.remote");

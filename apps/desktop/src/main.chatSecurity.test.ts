@@ -314,8 +314,8 @@ describe("main-process chat authorization", () => {
   });
 
   it("projects pending chat bookmarks immediately after workspace and shared-channel pulls", () => {
-    expect(mainSource).toContain(
-      "afterSuccessfulPull: () =>\n      withWorkspaceAttachmentAsync(workspace, () =>\n        projectPendingChatBookmarksAfterPull(workspace.workspaceId)",
+    expect(mainSource).toMatch(
+      /afterSuccessfulPull:\s*\(\)\s*=>\s*withWorkspaceAttachmentAsync\(\s*workspace,\s*\(\)\s*=>\s*projectPendingChatBookmarksAfterPull\(workspace\.workspaceId\)/,
     );
     expect(mainSource).toContain(
       "await projectPendingChatBookmarksAfterPull(workspaceId);",

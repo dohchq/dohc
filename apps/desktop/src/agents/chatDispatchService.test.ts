@@ -159,6 +159,7 @@ interface Fixture {
   errors: unknown[];
   requeues: Array<{
     workspaceId: string;
+    attachmentId?: symbol;
     triggerMessageId: string;
     runId: string;
   }>;
@@ -2015,7 +2016,8 @@ describe("chatDispatchService", () => {
   });
 
   it("fails an interrupted startup run and re-dispatches its trigger once", async () => {
-    const fixture = await createFixture();
+    const attachmentId = Symbol("startup attachment");
+    const fixture = await createFixture({ workspaceAttachmentId: attachmentId });
     const trigger = await createAgentThread(fixture, {
       body: "Resume this after restart.",
       authorUserId: "user_local",
@@ -2036,6 +2038,7 @@ describe("chatDispatchService", () => {
     expect(fixture.requeues).toEqual([
       {
         workspaceId: WORKSPACE_ID,
+        attachmentId,
         triggerMessageId: trigger.messageId,
         runId: interrupted.run.runId,
       },

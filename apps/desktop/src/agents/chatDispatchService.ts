@@ -206,6 +206,7 @@ interface PendingInterruptedRequeue {
   workspace: ChatDispatchWorkspace;
   input: {
     workspaceId: string;
+    attachmentId?: symbol;
     triggerMessageId: string;
     runId: string;
   };
