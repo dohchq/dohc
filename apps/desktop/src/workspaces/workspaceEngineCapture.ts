@@ -609,6 +609,7 @@ export interface WorkspaceEngineCapture {
 export interface WorkspaceEngineCaptureOptions {
   workspaceId: string;
   rootPath: string;
+  attachmentId?: symbol;
   // Injectable for tests; production uses the required Rust workspace sessions.
   store?: VersionedTextStore;
   // Injectable for tests; production uses the daemon's encrypted secret store.
@@ -1438,7 +1439,7 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
 export function createWorkspaceEngineCapture(
   options: WorkspaceEngineCaptureOptions,
 ): WorkspaceEngineCapture {
-  const { workspaceId, rootPath } = options;
+  const { workspaceId, rootPath, attachmentId } = options;
   const now = options.now ?? (() => Date.now());
   const createId = options.createId ?? (() => randomUUID());
   const reportError =
@@ -1464,7 +1465,7 @@ export function createWorkspaceEngineCapture(
   let liveStores: ReturnType<typeof createCaptureLiveStores> | null = null;
   function daemonStores() {
     liveStores ??= createCaptureLiveStores(
-      { workspaceId, rootPath },
+      { workspaceId, rootPath, ...(attachmentId ? { attachmentId } : {}) },
       options.rustEngineSessions,
     );
     return liveStores;
@@ -1812,7 +1813,11 @@ export function createWorkspaceEngineCapture(
     const openProvider =
       options.openRustYDocProviderSession ??
       openEngineYdocProviderSession;
-    const workspace = { workspaceId, rootPath };
+    const workspace = {
+      workspaceId,
+      rootPath,
+      ...(attachmentId ? { attachmentId } : {}),
+    };
     let canonicalDoc: Y.Doc | null = null;
     let canonicalLineageClaimId: string | null = null;
     let current: EngineYdocProviderSession | null = null;

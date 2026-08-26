@@ -55,9 +55,14 @@ function toAgentDispatchClaims(
 export function createLiveAgentDispatchStore(
   workspace: EngineWorkspace,
   sessions: EngineWorkspaceSessions,
-  options: { createRunId?: () => string } = {},
+  options: { createRunId?: () => string;
+    runWithAuthority?<Result>(work: () => Promise<Result>): Promise<Result>;
+  } = {},
 ): LiveAgentDispatchStoreHandle {
   const createRunId = options.createRunId ?? (() => `run_${randomUUID()}`);
+  const runWithAuthority =
+    options.runWithAuthority ??
+    (async <Result>(work: () => Promise<Result>) => await work());
   const unresolvedClaimRunIds = new Map<string, string>();
   const assertWorkspaceId = (workspaceId: string): void => {
     if (workspaceId !== workspace.workspaceId) {
@@ -74,7 +79,9 @@ export function createLiveAgentDispatchStore(
       retryTransportErrors?: boolean;
     } = {},
   ): Promise<T> =>
-    await sessions.run(workspace, async ({ client, workspace: handle }) => {
+    await runWithAuthority(
+      async () =>
+        await sessions.run(workspace, async ({ client, workspace: handle }) => {
       const adapter = new ChatsLiveAdapter(client, handle, {
         workspaceId: workspace.workspaceId,
         ...(invokeOptions.runId
@@ -89,7 +96,9 @@ export function createLiveAgentDispatchStore(
       return await operation(adapter);
     }, {
       retryTransportErrors: invokeOptions.retryTransportErrors,
-    });
+    },
+        ),
+    );
 
   const claimPending = async (
     workspaceId: string,
@@ -469,6 +478,6 @@ export function createLiveAgentDispatchStore(
         { retryTransportErrors: true },
       );
     },
-    close: async () => await sessions.closeWorkspace(workspace.workspaceId),
+    close: async () => await sessions.closeWorkspace(workspace),
   };
 }

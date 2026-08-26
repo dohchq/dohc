@@ -36,7 +36,7 @@ import {
   type IpcMainInvokeEvent,
   type WebContents,
 } from "electron";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { mkdir, readdir, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
@@ -315,7 +315,6 @@ import {
   EngineStoreRecoveryFailedError,
   moveEngineStoreAside,
   rebuildEngineStoreRequest,
-  withEngineStoreRecovered,
   withEngineStoreRecoveredUnderEngineStoreLock,
 } from "./workspaces/engineStoreRebuild";
 import {
@@ -333,6 +332,11 @@ import {
   setWorkspaceSharedChannels,
   stateDir,
 } from "./workspaces/WorkspaceRegistry";
+import {
+  createWorkspaceAuthorityOwner,
+  type WorkspaceAuthorityBinding,
+  type WorkspaceAuthorityLease,
+} from "./workspaces/workspaceAuthorityOwner";
 import type { JoinedSharedChannel, RegistryEntry } from "./workspaces/registryStore";
 import {
   readableShareLevel,
@@ -358,7 +362,6 @@ import {
 } from "./workspaces/workspaceSummaryProjection";
 import {
   assertSharedChannelWritable,
-  createKeyedSerializer,
   createPassCoverageReporter,
   endJoinedChannel,
   joinedSharedChannelForTarget,
@@ -562,7 +565,6 @@ import {
   engineOffRefusal,
   releaseAndRefuseWithoutCapture,
 } from "./workspaces/engineCaptureGate";
-import { coalesceDispatchScopedSync } from "./workspaces/dispatchScopedSync";
 import {
   createAgentIntegration,
   type AgentRunRecord,
@@ -598,7 +600,6 @@ import {
   assertActiveWorkspaceForSite,
   createSitePreviewLifecycle,
 } from "./workspaces/sitePreviewLifecycle";
-import { runInKeyedLane } from "./keyedLane";
 import { startStaticDirectoryPreview } from "./security/staticDirectoryPreview";
 import { PluginHost } from "./plugins/PluginHost";
 import { PluginHostOwnership } from "./plugins/pluginHostOwnership";
@@ -1675,8 +1676,8 @@ async function relayShareJsonWithCredentials<T>(
       { sessionWasCurrent },
     );
   }
-  const data = (await response.json().catch(() => null)) as
-    | { ok?: boolean; error?: string; code?: string }
+  const data = (await response.json().catch(() => null)) as { ok?: boolean; error?: string; code?: string;
+  }
     | null;
   if (!response.ok || data?.ok === false) {
     throw new Error(relayShareErrorCopy(response.status, data));
@@ -1705,6 +1706,124 @@ async function relayShareJson<T>(path: string, init?: RequestInit): Promise<T> {
 // (queued, never dropped). Every relay request inside a pass is also bounded
 // by a timeout so a hung relay can't block the awaited listChatChannels path.
 const SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS = 15_000;
+
+interface DesktopWorkspaceAuthorityState {
+  sharedChannelWork: Promise<void>;
+  sharedChannelSyncCursor: string | null;
+  bookmarkProjectionPending: boolean;
+  bookmarkProjectionRunning: boolean;
+  panelAgentRunId: string | null;
+  linkedChatStore: DesktopLinkedChatStore | null;
+  agentDispatchStoreHandle: LiveAgentDispatchStoreHandle | null;
+  dispatchAgentRunId: string | null;
+  dispatchSync: Promise<boolean> | null;
+  retainedActivity: boolean;
+  activityOpening: Promise<SyncStatusResult> | null;
+  activityClosing: Promise<void> | null;
+  pendingCliRunMessageLinks: Set<string>;
+  engineStoreRebuild: Promise<void> | null;
+  lastEngineStoreRebuildResult: RebuildEngineStoreResult | null;
+  chatBookmarkRuns: Map<string, Promise<void>>;
+}
+
+type DesktopWorkspaceAuthorityLease = WorkspaceAuthorityLease<
+  RegistryEntry,
+  DesktopWorkspaceAuthorityState
+>;
+
+function createDesktopWorkspaceAuthorityState(): DesktopWorkspaceAuthorityState {
+  return {
+    sharedChannelWork: Promise.resolve(),
+    sharedChannelSyncCursor: null,
+    bookmarkProjectionPending: false,
+    bookmarkProjectionRunning: false,
+    panelAgentRunId: null,
+    linkedChatStore: null,
+    agentDispatchStoreHandle: null,
+    dispatchAgentRunId: null,
+    dispatchSync: null,
+    retainedActivity: false,
+    activityOpening: null,
+    activityClosing: null,
+    pendingCliRunMessageLinks: new Set(),
+    engineStoreRebuild: null,
+    lastEngineStoreRebuildResult: null,
+    chatBookmarkRuns: new Map(),
+  };
+}
+
+const workspaceAuthorities = createWorkspaceAuthorityOwner({
+  findWorkspace,
+  canonicalizeRoot: (rootPath) => realpathSync.native(rootPath),
+  createState: createDesktopWorkspaceAuthorityState,
+  disposeState: async (state, binding) => {
+    const results = await Promise.allSettled([
+      state.linkedChatStore?.close() ?? Promise.resolve(),
+      state.agentDispatchStoreHandle?.close() ?? Promise.resolve(),
+      engineYDocSessionIpc.retireAuthority(binding.attachmentId),
+      activity.close(binding.workspaceId, {
+        expectedRootPath: binding.canonicalRootPath,
+        preserveStatus: false,
+      }),
+    ]);
+    const failed = results.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    if (failed) throw failed.reason;
+  },
+});
+function requireWorkspaceAuthority(
+  workspaceId: string,
+): DesktopWorkspaceAuthorityLease {
+  return workspaceAuthorities.acquire(workspaceId);
+}
+
+type DesktopWorkspaceAuthorityBinding =
+  WorkspaceAuthorityBinding<RegistryEntry>;
+
+function registerPhysicalWorkspace(
+  workspace: RegistryEntry,
+): DesktopWorkspaceAuthorityBinding {
+  registerWorkspace(workspace);
+  const lease = requireWorkspaceAuthority(workspace.workspaceId);
+  const binding = lease.binding;
+  lease.release();
+  return binding;
+}
+
+function removePhysicalWorkspace(
+  binding: DesktopWorkspaceAuthorityBinding,
+): Promise<void> {
+  return workspaceAuthorities.retireBinding(binding, () => {
+    const current = findWorkspace(binding.workspaceId);
+    if (!current || current.rootPath !== binding.registeredRootPath) {
+      throw new Error(
+        "The workspace registry binding changed before removal completed.",
+      );
+    }
+    removeWorkspace(binding.workspaceId);
+  });
+}
+
+function serializeWorkspaceAuthorityWork<Result>(
+  lease: DesktopWorkspaceAuthorityLease,
+  run: () => Promise<Result>,
+): Promise<Result> {
+  const state = lease.state;
+  const result = state.sharedChannelWork
+    .catch(() => undefined)
+    .then(async () => {
+      lease.assertCurrent();
+      const value = await run();
+      lease.assertCurrent();
+      return value;
+    });
+  state.sharedChannelWork = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
 
 // Presence (MU-C5) relay bounds. Publish/leave are quick, so a 15s cap frees a
 // hung socket. The poll is a long-poll: its own AbortSignal (presenceCancel)
@@ -1770,10 +1889,6 @@ async function presenceRelayTransportForScope(
   });
 }
 
-const serializeSharedChannelSync = createKeyedSerializer();
-// Where each workspace's rotation stopped, by CHANNEL wire id — the identity
-// that survives a channel being revoked and re-granted under a new share.
-const sharedChannelSyncCursors = new Map<string, string>();
 const reportSharedChannelPassCoverage = createPassCoverageReporter((message) =>
   console.info(message),
 );
@@ -1788,9 +1903,11 @@ let materializePendingChatBookmarksForWorkspace:
 // workspace here. The slow background worker below only visits flagged
 // workspaces — plus each workspace once on open, for rows a previous
 // session left behind.
-const pendingChatBookmarkProjectionWorkspaceIds = new Set<string>();
 function queueChatBookmarkProjection(workspaceId: string): void {
-  pendingChatBookmarkProjectionWorkspaceIds.add(workspaceId);
+  if (!findWorkspace(workspaceId)) return;
+  const lease = requireWorkspaceAuthority(workspaceId);
+  lease.state.bookmarkProjectionPending = true;
+  lease.release();
 }
 
 async function projectPendingChatBookmarksAfterPull(workspaceId: string): Promise<void> {
@@ -1814,8 +1931,10 @@ function syncWorkspaceSharedChannels(
   workspaceId: string,
   priorityChannelWireId?: string,
 ): Promise<number> {
-  return serializeSharedChannelSync(workspaceId, () =>
-    runSharedChannelSyncPass(workspaceId, priorityChannelWireId),
+  return workspaceAuthorities.withAuthority(workspaceId, (lease) =>
+    serializeWorkspaceAuthorityWork(lease, () =>
+    runSharedChannelSyncPass(lease, priorityChannelWireId),
+    ),
   );
 }
 
@@ -1829,28 +1948,27 @@ async function syncSharedChannelsForChatTarget(
 ): Promise<number> {
   const entry = findWorkspace(workspaceId);
   if (!entry) return 0;
-  if (!target) return await syncWorkspaceSharedChannels(workspaceId);
+  return workspaceAuthorities.withAuthority(workspaceId, async (lease) => {
+    lease.assertCurrent();
+    if (!target) return await syncWorkspaceSharedChannels(workspaceId);
   let joinedChannel: JoinedSharedChannel | null;
   try {
     joinedChannel = await joinedSharedChannelForTarget({
       workspaceId,
       sharedChannels: entry.sharedChannels,
-      store: linkedChatStoreFor(entry),
+      store: linkedChatStoreFor(lease),
       target,
     });
-  } catch {
-    // The LOOKUP failed (the engine is restarting, say). That says nothing
-    // about the target, so fall back to an ordinary pass rather than reading
-    // the failure as "this channel is local" and syncing nothing.
-    return await syncWorkspaceSharedChannels(workspaceId);
+      lease.assertCurrent();
+    } catch {
+      // The lookup failed. That says nothing about the target, so an ordinary
+      // pass is safer than treating the channel as local.
+      return await syncWorkspaceSharedChannels(workspaceId);
   }
-  // A target holding no live grant has nothing to sync. A local channel's
-  // threads never came from the relay, and running a pass for it would put a
-  // whole window of relay round trips in front of a purely local read.
-  if (!joinedChannel || joinedChannel.ended === true) return 0;
-  // The CHANNEL, not its grant: this pass may sit in the per-workspace queue,
-  // and a revoke plus re-grant while it waits replaces the share id.
-  return await syncWorkspaceSharedChannels(workspaceId, joinedChannel.channelWireId);
+    if (!joinedChannel || joinedChannel.ended === true) return 0;
+    return await syncWorkspaceSharedChannels(workspaceId, joinedChannel.channelWireId,
+    );
+  });
 }
 
 // A pass with no rows to cover left nothing behind. Clearing the remainder this
@@ -1866,16 +1984,21 @@ function reportSharedChannelPassCoveredEverything(workspaceId: string): void {
 }
 
 async function runSharedChannelSyncPass(
-  workspaceId: string,
+  lease: DesktopWorkspaceAuthorityLease,
   priorityChannelWireId?: string,
 ): Promise<number> {
+  const workspaceId = lease.binding.workspaceId;
   // Live rows this pass is responsible for. A pass that dies before finishing —
   // or never starts, because the account is signed out — refreshed none of them,
   // and must say so rather than report a clean sweep. Seeded before the
   // credential work so a rejection there still knows the count.
   let liveRows = 0;
   try {
-    const entry = findWorkspace(workspaceId);
+    lease.assertCurrent();
+    const current = findWorkspace(workspaceId);
+    const entry = current
+      ? { ...current, rootPath: lease.binding.canonicalRootPath }
+      : null;
     // The registry, unfiltered: the pass needs a row's PLACE even after the row
     // stops being syncable, or a revoked cursor sends the rotation back to the
     // front. Only `channels` below is filtered down to the work set.
@@ -1887,6 +2010,7 @@ async function runSharedChannelSyncPass(
     }
     liveRows = channels.length;
     await warmCredentialCache();
+    lease.assertCurrent();
     const syncCredentials = cachedCredentials;
     // Signed out, or signed in to a server this workspace does not sync with:
     // the rows are joined and none of them got refreshed.
@@ -1919,7 +2043,8 @@ async function runSharedChannelSyncPass(
       channels: matching,
       registryOrder,
       passRows: SHARED_CHANNEL_SYNC_PASS_ROWS,
-      resumeAfterChannelWireId: sharedChannelSyncCursors.get(workspaceId),
+      resumeAfterChannelWireId:
+        lease.state.sharedChannelSyncCursor ?? undefined,
       priorityChannelWireId,
       pull: async (input) =>
         await daemonRelay.pullSharedChannel({
@@ -1932,10 +2057,11 @@ async function runSharedChannelSyncPass(
           channelWireId: input.channelWireId,
         }),
     });
+    lease.assertCurrent();
     if (result.resumeAfterChannelWireId === null) {
-      sharedChannelSyncCursors.delete(workspaceId);
+      lease.state.sharedChannelSyncCursor = null;
     } else {
-      sharedChannelSyncCursors.set(workspaceId, result.resumeAfterChannelWireId);
+      lease.state.sharedChannelSyncCursor = result.resumeAfterChannelWireId;
     }
     // Rows this pass did not leave fresh: the ones the rotation never reached,
     // plus the ones it reached and could not sync.
@@ -2156,6 +2282,9 @@ const activity = createWorkspaceActivity(notifyRenderer, {
       {
         workspaceId: workspace.workspaceId,
         rootPath: workspace.rootPath,
+        ...(workspace.attachmentId
+          ? { attachmentId: workspace.attachmentId }
+          : {}),
         shareView: sharedViewOf(workspace.workspaceId) !== null,
       },
       hooks,
@@ -2168,7 +2297,6 @@ const activity = createWorkspaceActivity(notifyRenderer, {
       ?.handleWatcherEvents(events);
   },
 });
-const panelAgentRunSlots = new Map<string, string>();
 // Local agent integration: owns the per-workspace MCP child + active-run slot
 // and persists agent-run records. The run slot is wired into the watcher
 // (workspaceActivity.setAgentRun) so a run's writes are attributed to the
@@ -2178,18 +2306,36 @@ const panelAgentRunSlots = new Map<string, string>();
 const agentIntegration = createAgentIntegration({
   rootFor: (workspaceId) => findWorkspace(workspaceId)?.rootPath ?? null,
   setAgentRun: async (workspaceId, run) => {
-    if (run) {
-      const previous = panelAgentRunSlots.get(workspaceId);
-      if (previous) await activity.clearAgentRun(workspaceId, previous);
-      if (!(await activity.claimAgentRun(workspaceId, run))) {
+    const lease = requireWorkspaceAuthority(workspaceId);
+    try {
+      if (run) {
+      const previous = lease.state.panelAgentRunId;
+      if (previous) {
+          await activity.clearAgentRun(workspaceId, previous,
+            lease.binding.canonicalRootPath,
+          );
+        }
+        lease.assertCurrent();
+      if (!(await activity.claimAgentRun(workspaceId, run,
+            lease.binding.canonicalRootPath,
+          ))) {
         throw new Error("Another agent run is already active in this workspace.");
       }
-      panelAgentRunSlots.set(workspaceId, run.agentRunId);
+        lease.assertCurrent();
+        lease.state.panelAgentRunId = run.agentRunId;
       return;
     }
-    const ownedRunId = panelAgentRunSlots.get(workspaceId);
-    if (ownedRunId) await activity.clearAgentRun(workspaceId, ownedRunId);
-    panelAgentRunSlots.delete(workspaceId);
+    const ownedRunId = lease.state.panelAgentRunId;
+    if (ownedRunId) {
+        await activity.clearAgentRun(workspaceId, ownedRunId,
+          lease.binding.canonicalRootPath,
+        );
+      }
+      lease.assertCurrent();
+      lease.state.panelAgentRunId = null;
+    } finally {
+      lease.release();
+    }
   },
   home: stateDir(),
   // Every terminal run path funnels through endAgentRun (driver
@@ -2304,42 +2450,75 @@ async function agentSessionManager(): Promise<AgentSessionManager> {
   return cachedAgentSessions;
 }
 
-// Linked Chats (PR 0M-5): one lazy Rust-backed store per workspace.
-const linkedChatStores = new Map<string, DesktopLinkedChatStore>();
-function linkedChatStoreFor(workspace: EngineWorkspace): DesktopLinkedChatStore {
-  const engineWorkspace = engineWorkspaceForRegistryIdentity(workspace);
-  const existing = linkedChatStores.get(workspace.workspaceId);
+// Linked chats and dispatch use the same physical authority as every other
+// workspace-owned resource. Each call into either store reacquires that exact
+// binding, so a detached and reattached workspace cannot reuse the old store.
+function linkedChatStoreFor(
+  workspaceOrLease: EngineWorkspace | DesktopWorkspaceAuthorityLease,
+): DesktopLinkedChatStore {
+  const ownsLease = !("binding" in workspaceOrLease);
+  const lease = ownsLease
+    ? requireWorkspaceAuthority(workspaceOrLease.workspaceId)
+    : workspaceOrLease;
+  try {
+    lease.assertCurrent();
+  const existing = lease.state.linkedChatStore;
   if (existing) return existing;
   if (!rustEngineWorkspaceSessions) {
     throw new Error("Rust engine workspace sessions are unavailable.");
   }
-  const store = createDesktopLinkedChatStore(engineWorkspace, {
+  const current = findWorkspace(lease.binding.workspaceId);
+    if (!current) {
+      throw new Error(`Unknown workspace: ${lease.binding.workspaceId}`);
+    }
+    const binding = lease.binding;
+    const engineWorkspace = receivedShareEngine.workspaceForRegistered({
+      ...current,
+      rootPath: binding.canonicalRootPath,
+      attachmentId: binding.attachmentId,
+    });
+    const store = createDesktopLinkedChatStore(engineWorkspace, {
     sessions: rustEngineWorkspaceSessions,
-  });
-  linkedChatStores.set(workspace.workspaceId, store);
+      runWithAuthority: (work) =>
+        workspaceAuthorities.withBinding(binding, () => work()),
+    });
+    lease.state.linkedChatStore = store;
   return store;
+} finally {
+    if (ownsLease) lease.release();
+  }
 }
 
-const agentDispatchStoreHandles = new Map<
-  string,
-  LiveAgentDispatchStoreHandle
->();
-const dispatchAgentRunSlots = new Map<string, string>();
 function agentDispatchStoreHandleFor(workspace: {
   workspaceId: string;
   rootPath: string;
 }): LiveAgentDispatchStoreHandle {
-  const existing = agentDispatchStoreHandles.get(workspace.workspaceId);
+  const lease = requireWorkspaceAuthority(workspace.workspaceId);
+  try {
+    lease.assertCurrent();
+    const existing = lease.state.agentDispatchStoreHandle;
   if (existing) return existing;
   if (!rustEngineWorkspaceSessions) {
     throw new Error("Rust engine workspace sessions are unavailable.");
   }
-  const handle = createLiveAgentDispatchStore(
-    workspace,
+  const binding = lease.binding;
+    const handle = createLiveAgentDispatchStore(
+      {
+        workspaceId: binding.workspaceId,
+        rootPath: binding.canonicalRootPath,
+        attachmentId: binding.attachmentId,
+      },
     rustEngineWorkspaceSessions,
-  );
-  agentDispatchStoreHandles.set(workspace.workspaceId, handle);
+      {
+        runWithAuthority: (work) =>
+          workspaceAuthorities.withBinding(binding, () => work()),
+      },
+    );
+    lease.state.agentDispatchStoreHandle = handle;
   return handle;
+  } finally {
+    lease.release();
+  }
 }
 
 // The object-id <-> path index the search surfaces need, read through the
@@ -2356,7 +2535,8 @@ function agentDispatchStoreHandleFor(workspace: {
 // hydrates file bodies.
 async function engineSearchIndexFor(
   workspace: EngineWorkspace,
-): Promise<{ versionId: string; files: { objectId: string; path: string }[] } | null> {
+): Promise<{ versionId: string; files: { objectId: string; path: string }[];
+} | null> {
   const sessions = rustEngineWorkspaceSessions;
   if (!sessions) return null;
   const engineWorkspace = engineWorkspaceForRegistryIdentity(workspace);
@@ -2521,14 +2701,58 @@ function syncDispatchWorkspaces(): ChatDispatchWorkspace[] {
 // Tray-only scans use a scoped capture instead of retaining a file watcher.
 // Actual runs acquire activity temporarily so their writes are captured and
 // attributed. Normal renderer/CLI opens retain activity for the app session.
-const dispatchScopedSyncs = new Map<string, Promise<boolean>>();
-const retainedWorkspaceActivities = new Set<string>();
-const engineStoreRebuildLocks = new Map<string, Promise<void>>();
-const workspaceActivityOpenPromises = new Map<
-  string,
-  Promise<SyncStatusResult>
->();
-const workspaceActivityClosePromises = new Map<string, Promise<void>>();
+function canonicalWorkspaceFor(
+  lease: DesktopWorkspaceAuthorityLease,
+): RegistryEntry & { attachmentId: symbol } {
+  lease.assertCurrent();
+const workspace = findWorkspace(lease.binding.workspaceId);
+  if (!workspace) {
+    throw new Error(`Unknown workspace: ${lease.binding.workspaceId}`);
+  }
+  return {
+    ...workspace,
+    rootPath: lease.binding.canonicalRootPath,
+    attachmentId: lease.binding.attachmentId,
+  };
+}
+
+async function inWorkspaceEngineStoreLane<Result>(
+  lease: DesktopWorkspaceAuthorityLease,
+  work: () => Promise<Result>,
+): Promise<Result> {
+  const state = lease.state;
+  const previous = state.engineStoreRebuild ?? Promise.resolve();
+const result = previous
+    .catch(() => undefined)
+    .then(async () => {
+      lease.assertCurrent();
+const value = await work();
+      lease.assertCurrent();
+      return value;
+    });
+  const settled = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  state.engineStoreRebuild = settled;
+  try {
+    return await result;
+  } finally {
+    if (state.engineStoreRebuild === settled) state.engineStoreRebuild = null;
+  }
+}
+
+function withEngineStoreRecoveredForAuthority<Result>(
+  lease: DesktopWorkspaceAuthorityLease,
+  body: () => Promise<Result>,
+): Promise<Result> {
+  const workspace = canonicalWorkspaceFor(lease);
+  return inWorkspaceEngineStoreLane(lease, () =>
+    withEngineStoreRecoveredUnderEngineStoreLock(workspace, body, (rootPath) =>
+      completePendingEngineStoreMoveForWorkspace(workspace, rootPath),
+    ),
+  );
+}
 
 function completePendingEngineStoreMoveForWorkspace(
   workspace: Pick<CreatedWorkspace, "workspaceId">,
@@ -2544,22 +2768,31 @@ function completePendingEngineStoreMoveForWorkspace(
 }
 
 async function syncWorkspaceForDispatch(workspaceId: string): Promise<boolean> {
-  return coalesceDispatchScopedSync(
-    dispatchScopedSyncs,
-    workspaceId,
-    async () => {
-      const closing = workspaceActivityClosePromises.get(workspaceId);
+  return workspaceAuthorities.withAuthority(workspaceId, async (lease) => {
+    const existing = lease.state.dispatchSync;
+    if (existing) return await existing;
+    const pending = Promise.resolve().then(async () => {
+      const closing = lease.state.activityClosing;
       if (closing) await closing.catch(() => undefined);
-      const workspace = findWorkspace(workspaceId);
-      if (!workspace || sharedViewOf(workspaceId)) return false;
+      lease.assertCurrent();
+      const workspace = canonicalWorkspaceFor(lease);
+      if (sharedViewOf(workspaceId)) return false;
       try {
-        return await withEngineStoreRecovered(
-          engineStoreRebuildLocks,
-          workspace,
+        return await withEngineStoreRecoveredForAuthority(lease,
           async () => {
-            if (activity.listOpenWorkspaceIds().includes(workspaceId)) {
-              activity.queueCloudSync(workspaceId);
-              return activity.engineCaptureFor(workspaceId) !== null;
+          lease.assertCurrent();
+          if (activity.listOpenWorkspaceIds().includes(workspaceId)) {
+            if (
+              activity.workspaceRootPath(workspaceId) !== workspace.rootPath
+            ) {
+              throw new Error(
+                "This sync belongs to a retired workspace authority.",
+              );
+            }
+            activity.queueCloudSync(workspaceId);
+              return (
+              activity.engineCaptureFor(workspaceId, workspace.rootPath) !== null
+            );
             }
             const { capture } = await captureForFlaggedWorkspace(
               {
@@ -2580,7 +2813,8 @@ async function syncWorkspaceForDispatch(workspaceId: string): Promise<boolean> {
               if (!engine) return false;
               try {
                 await engine.start();
-                return true;
+              lease.assertCurrent();
+              return true;
               } finally {
                 await engine.stop().catch(() => undefined);
                 const relayWorkspaceId = workspace.remote?.remoteWorkspaceId;
@@ -2593,10 +2827,7 @@ async function syncWorkspaceForDispatch(workspaceId: string): Promise<boolean> {
             } finally {
               await capture.stop().catch(() => undefined);
             }
-          },
-          (rootPath) =>
-            completePendingEngineStoreMoveForWorkspace(workspace, rootPath),
-        );
+          });
       } catch (error) {
         if (!(error instanceof EngineStoreRecoveryFailedError)) throw error;
         // The dispatch pump stops on false. A thrown sync error is logged, then
@@ -2604,6 +2835,15 @@ async function syncWorkspaceForDispatch(workspaceId: string): Promise<boolean> {
         console.error("[desktop] pending engine store move:", error);
         return false;
       }
+    });
+    lease.state.dispatchSync = pending;
+    try {
+      return await pending;
+    } finally {
+      if (lease.state.dispatchSync === pending) {
+        lease.state.dispatchSync = null;
+      }
+    }
     },
   );
 }
@@ -2621,29 +2861,33 @@ interface WorkspaceActivityOpenOptions {
 }
 
 async function ensureWorkspaceActivityOpenBody(
-  workspace: CreatedWorkspace,
+  lease: DesktopWorkspaceAuthorityLease,
   options: WorkspaceActivityOpenOptions = {},
 ): Promise<SyncStatusResult> {
+  const workspace = canonicalWorkspaceFor(lease);
   let status: SyncStatusResult;
   for (;;) {
-    const closing = workspaceActivityClosePromises.get(workspace.workspaceId);
+    const closing = lease.state.activityClosing;
     if (closing) {
       await closing.catch(() => undefined);
+      lease.assertCurrent();
       continue;
     }
-    const existing = workspaceActivityOpenPromises.get(workspace.workspaceId);
+    const existing = lease.state.activityOpening;
     if (existing) {
       status = await existing;
+      lease.assertCurrent();
       break;
     }
     const opening = activity.open(workspace);
-    workspaceActivityOpenPromises.set(workspace.workspaceId, opening);
+    lease.state.activityOpening = opening;
     try {
       status = await opening;
+      lease.assertCurrent();
       break;
     } finally {
-      if (workspaceActivityOpenPromises.get(workspace.workspaceId) === opening) {
-        workspaceActivityOpenPromises.delete(workspace.workspaceId);
+      if (lease.state.activityOpening === opening) {
+        lease.state.activityOpening = null;
       }
     }
   }
@@ -2655,12 +2899,10 @@ async function ensureWorkspaceActivityOpen(
   workspace: CreatedWorkspace,
   options: WorkspaceActivityOpenOptions = {},
 ): Promise<SyncStatusResult> {
-  return withEngineStoreRecovered(
-    engineStoreRebuildLocks,
-    workspace,
-    () => ensureWorkspaceActivityOpenBody(workspace, options),
-    (rootPath) =>
-      completePendingEngineStoreMoveForWorkspace(workspace, rootPath),
+  return workspaceAuthorities.withAuthority(workspace.workspaceId, (lease) =>
+    withEngineStoreRecoveredForAuthority(lease,
+    () => ensureWorkspaceActivityOpenBody(lease, options),
+    ),
   );
 }
 
@@ -2668,34 +2910,40 @@ async function ensureWorkspaceActivityOpenUnderEngineStoreLock(
   workspace: CreatedWorkspace,
   options: WorkspaceActivityOpenOptions = {},
 ): Promise<SyncStatusResult> {
-  return withEngineStoreRecoveredUnderEngineStoreLock(
-    workspace,
-    () => ensureWorkspaceActivityOpenBody(workspace, options),
+  return workspaceAuthorities.withAuthority(workspace.workspaceId, (lease) => {
+    const canonicalWorkspace = canonicalWorkspaceFor(lease);
+    return withEngineStoreRecoveredUnderEngineStoreLock(
+      canonicalWorkspace,
+    () => ensureWorkspaceActivityOpenBody(lease, options),
     async (rootPath) => {
-      await completePendingEngineStoreMoveForWorkspace(workspace, rootPath);
-      // Recovery settled (resumed-and-completed, or an honest no-op) without
-      // throwing — release before the activity-open body below starts
-      // capture. A failed recovery throws out of the line above and never
-      // reaches this call, so the sticky-on-failure rule is untouched.
-      options.afterReopenRecoverySettled?.();
+      await completePendingEngineStoreMoveForWorkspace(
+          canonicalWorkspace, rootPath);
+        lease.assertCurrent();
+        options.afterReopenRecoverySettled?.();
     },
   );
+});
 }
 
 async function closeDispatchRunActivity(
-  workspaceId: string,
+  workspace: Pick<CreatedWorkspace, "workspaceId">,
   options: { notifyRenderer?: boolean } = {},
 ): Promise<void> {
-  const existing = workspaceActivityClosePromises.get(workspaceId);
-  if (existing) return existing;
-  const relayWorkspaceId =
-    findWorkspace(workspaceId)?.remote?.remoteWorkspaceId;
+  return workspaceAuthorities.withAuthority(
+    workspace.workspaceId,
+    async (lease) => {
+      const existing = lease.state.activityClosing;
+  if (existing) return await existing;
+      const current = canonicalWorkspaceFor(lease);
+  const relayWorkspaceId = current.remote?.remoteWorkspaceId;
   const closing = closeWorkspaceActivityAndRelay({
-    closeActivity: () =>
-      activity.close(workspaceId, {
-        preserveStatus: true,
+    closeActivity: async () => {
+          await activity.close(current.workspaceId, {
+            expectedRootPath: current.rootPath,
+            preserveStatus: true,
         notify: options.notifyRenderer,
-      }),
+      });
+        },
     ...(relayWorkspaceId
       ? {
           closeRelay: () => closeRelayTransportWorkspace(relayWorkspaceId),
@@ -2707,14 +2955,17 @@ async function closeDispatchRunActivity(
         error,
       ),
   });
-  workspaceActivityClosePromises.set(workspaceId, closing);
+      lease.state.activityClosing = closing;
   try {
     await closing;
-  } finally {
-    if (workspaceActivityClosePromises.get(workspaceId) === closing) {
-      workspaceActivityClosePromises.delete(workspaceId);
+        lease.assertCurrent();
+      } finally {
+    if (lease.state.activityClosing === closing) {
+          lease.state.activityClosing = null;
     }
   }
+    },
+  );
 }
 
 async function acquireDispatchRunActivity(
@@ -2733,9 +2984,13 @@ async function acquireDispatchRunActivity(
   // The refusal's recovery instruction derives from this fact.
   return createDispatchRunRelease({
     alreadyOpen,
-    isRetained: () =>
-      retainedWorkspaceActivities.has(workspace.workspaceId),
-    close: () => closeDispatchRunActivity(workspace.workspaceId),
+    isRetained: () => {
+      const lease = requireWorkspaceAuthority(workspace.workspaceId);
+      const retained = lease.state.retainedActivity;
+      lease.release();
+      return retained;
+    },
+    close: () => closeDispatchRunActivity(workspace),
   });
 }
 
@@ -2776,18 +3031,35 @@ async function publishAgentPresence(
   );
 }
 
-const pendingCliRunMessageLinks = new Set<string>();
-
 function cliRunMessageLinkKey(link: CliRunMessageLink): string {
-  return `${link.workspaceId}\u0000${link.runId}\u0000${link.messageId}`;
+  return `${link.runId}\u0000${link.messageId}`;
 }
 
 function hasPendingCliRunMessageLink(
   workspaceId: string,
   runId: string,
 ): boolean {
-  const prefix = `${workspaceId}\u0000${runId}\u0000`;
-  return [...pendingCliRunMessageLinks].some((key) => key.startsWith(prefix));
+  if (!findWorkspace(workspaceId)) return false;
+  const lease = requireWorkspaceAuthority(workspaceId);
+  const prefix = `${runId}\u0000`;
+  const pending = [...lease.state.pendingCliRunMessageLinks].some((key) => key.startsWith(prefix),
+  );
+  lease.release();
+  return pending;
+}
+
+function rememberPendingCliRunMessageLink(
+  link: CliRunMessageLink,
+  pending: boolean,
+): void {
+  if (!findWorkspace(link.workspaceId)) return;
+  const lease = requireWorkspaceAuthority(link.workspaceId);
+  if (pending) {
+    lease.state.pendingCliRunMessageLinks.add(cliRunMessageLinkKey(link));
+  } else {
+    lease.state.pendingCliRunMessageLinks.delete(cliRunMessageLinkKey(link));
+  }
+  lease.release();
 }
 
 const chatDispatchService = createChatDispatchService({
@@ -2885,16 +3157,29 @@ const chatDispatchService = createChatDispatchService({
   },
   onRunUpdated: (workspaceId) => notifyRenderer({ workspaceId }),
   setRunAttribution: async (workspaceId, run) => {
-    if (run) {
-      if (!(await activity.claimAgentRun(workspaceId, run))) {
+    const lease = requireWorkspaceAuthority(workspaceId);
+    try {
+      if (run) {
+      if (!(await activity.claimAgentRun(workspaceId, run,
+            lease.binding.canonicalRootPath,
+          ))) {
         throw new Error("Another agent run is already active in this workspace.");
       }
-      dispatchAgentRunSlots.set(workspaceId, run.agentRunId);
+        lease.assertCurrent();
+        lease.state.dispatchAgentRunId = run.agentRunId;
       return;
     }
-    const ownedRunId = dispatchAgentRunSlots.get(workspaceId);
-    if (ownedRunId) await activity.clearAgentRun(workspaceId, ownedRunId);
-    dispatchAgentRunSlots.delete(workspaceId);
+    const ownedRunId = lease.state.dispatchAgentRunId;
+    if (ownedRunId) {
+        await activity.clearAgentRun(workspaceId, ownedRunId,
+          lease.binding.canonicalRootPath,
+        );
+      }
+      lease.assertCurrent();
+      lease.state.dispatchAgentRunId = null;
+    } finally {
+      lease.release();
+    }
   },
   runSlotOccupied: (workspaceId) => activity.hasAgentRun(workspaceId),
   hasPendingRunMessageLink: hasPendingCliRunMessageLink,
@@ -2948,20 +3233,23 @@ async function openWorkspaceActivityWith(
   // handshaking (the window loads during it). Wait for the handshake instead
   // of building a capture over null engine sessions.
   await engineDaemonStartup;
-  retainedWorkspaceActivities.add(workspace.workspaceId);
+  return workspaceAuthorities.withAuthority(workspace.workspaceId,
+    async (lease) => {
+      const canonicalWorkspace = canonicalWorkspaceFor(lease);
+      lease.state.retainedActivity = true;
   const result = await workspaceChatLifecycle.open(
-    workspace,
-    () => ensureOpen(workspace, options),
+        canonicalWorkspace,
+    () => ensureOpen(canonicalWorkspace, options),
     options.afterActivityOpen,
-  );
+      );
+      lease.assertCurrent();
   void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
     console.error("[desktop] chat dispatch workspace-open scan:", error);
   });
-  // Rows a previous session marked pending and never wrote (quit or crash
-  // mid-projection) have no event of their own; one flagged visit per open
-  // covers them.
-  queueChatBookmarkProjection(workspace.workspaceId);
+      queueChatBookmarkProjection(workspace.workspaceId);
   return result;
+    },
+  );
 }
 
 async function openWorkspaceActivity(
@@ -2998,11 +3286,6 @@ async function startAgentRunWithWorkspaceActivity(
   if (!run) throw new Error("The agent run did not start.");
   return run;
 }
-
-const lastEngineStoreRebuildResult = new Map<
-  string,
-  RebuildEngineStoreResult
->();
 
 function createPluginSurfaceHostLease(
   pipeline: PluginPipeline,
@@ -3513,16 +3796,16 @@ async function startDesktopCliServer(): Promise<CliServerHandle> {
       await syncSharedChannelsForChatTarget(workspace.workspaceId, target);
     },
     onRunMessageLinkPending: (link) => {
-      pendingCliRunMessageLinks.add(cliRunMessageLinkKey(link));
+      rememberPendingCliRunMessageLink(link, true);
     },
     onRunMessageLinkSettled: (link) => {
-      pendingCliRunMessageLinks.delete(cliRunMessageLinkKey(link));
+      rememberPendingCliRunMessageLink(link, false);
       void chatDispatchService.scanWorkspace(link.workspaceId).catch((error) => {
         console.error("[desktop] CLI provenance recovery scan:", error);
       });
     },
     onRunMessageLinkAbandoned: (link) => {
-      pendingCliRunMessageLinks.delete(cliRunMessageLinkKey(link));
+      rememberPendingCliRunMessageLink(link, false);
     },
     onError: (error) => {
       console.error("[desktop] CLI server:", error);
@@ -3544,12 +3827,19 @@ async function startDesktopCliServer(): Promise<CliServerHandle> {
 const engineYDocSessionIpc = createEngineYDocSessionIpc({
   sessionFor: (sender) =>
     rendererWorkspaceSessions.current(sender as WebContents),
-  requireWorkspace,
-  captureFor: (workspaceId) => activity.engineCaptureFor(workspaceId),
-  ensureCaptureFor: async (workspaceId) => {
-    await openWorkspaceActivity(requireWorkspace(workspaceId));
+  acquireWorkspace: (workspaceId) => {
+    const lease = requireWorkspaceAuthority(workspaceId);
+    return {
+      workspace: canonicalWorkspaceFor(lease),
+      assertCurrent: () => lease.assertCurrent(),
+      release: () => lease.release(),
+    };
   },
-  isSharedView: (workspaceId) => sharedViewOf(workspaceId) !== null,
+  captureFor: (workspace) => activity.engineCaptureFor(workspace.workspaceId, workspace.rootPath),
+  ensureCaptureFor: async (workspace) => {
+    await openWorkspaceActivity(requireWorkspace(workspace.workspaceId));
+  },
+  isSharedView: (workspace) => sharedViewOf(workspace.workspaceId) !== null,
   resolveDocumentPath: async (workspace, path) => {
     try {
       return (await resolveWorkspaceFile(workspace.rootPath, path, "write"))
@@ -3617,7 +3907,9 @@ function parseUpdateStateForIpc(state: PublicUpdateState): UpdateStateEvent | nu
 
 function currentUpdateState(): UpdateStateEvent {
   const fallback = fallbackUpdateState();
-  return parseUpdateStateForIpc(autoUpdateController?.publicState() ?? fallback) ?? fallback;
+  return (
+    parseUpdateStateForIpc(autoUpdateController?.publicState() ?? fallback) ?? fallback
+  );
 }
 
 function broadcastUpdateState(state: PublicUpdateState): void {
@@ -3935,9 +4227,16 @@ shareViewFiles = createShareViewFiles({
 });
 const workspaceFileMutations = createWorkspaceFileMutationOwner({
   assertTrustedSender,
-  requireWorkspace,
-  engineCaptureFor: (workspaceId) => activity.engineCaptureFor(workspaceId),
+  withWorkspaceAuthority: (workspaceId, work) =>
+    workspaceAuthorities.withAuthority(workspaceId, async (lease) => {
+      const workspace = canonicalWorkspaceFor(lease);
+      return await work({
+        authorityId: lease.binding.attachmentId,
+        workspace,
+        capture: activity.engineCaptureFor(workspaceId, workspace.rootPath),
   yDocSessions: engineYDocSessionIpc.fileMutationPort(),
+      });
+    }),
   shareViewFiles,
   trashItem: (path) => shell.trashItem(path),
   notifyRenderer: (workspaceId) => notifyRenderer({ workspaceId }),
@@ -4298,20 +4597,7 @@ app.on("will-quit", (event) => {
     .catch(() => undefined),
   );
   const agentIntegrationStop = agentIntegration.stopAll().catch(() => undefined);
-  // Linked chat stores are lazy singletons with SQLite handles on the shared
-  // engine.db; close them at quit so WAL locks never outlive the app.
-  const chatStoreStop = chatDispatchStop.then(() =>
-    Promise.all(
-      [...linkedChatStores.values()].map((store) => store.close().catch(() => undefined)),
-    ));
-  const dispatchStoreStop = chatDispatchStop.then(async () => {
-    await Promise.allSettled(
-      [...agentDispatchStoreHandles.values()].map(
-        async (handle) => await handle.close(),
-      ),
-    );
-    agentDispatchStoreHandles.clear();
-  });
+  const workspaceAuthorityStop = chatDispatchStop.then(() => workspaceAuthorities.close()).catch(() => undefined);
   // Close live engine Y.Doc sessions (settle + release reservations) before the
   // engine stores stop — a session must never settle onto a closed store.
   const engineYDocStop = closeAllEngineYDocSessions();
@@ -4322,8 +4608,7 @@ app.on("will-quit", (event) => {
       .then(() => activity.stopAll());
   const rustEngineStop = Promise.all([
     captureStop.catch(() => undefined),
-    chatStoreStop,
-    dispatchStoreStop,
+    workspaceAuthorityStop,
   ])
     .then(async () => await closeAllRelayTransportWorkspaces())
     .catch(() => undefined)
@@ -4336,8 +4621,6 @@ app.on("will-quit", (event) => {
       chatDispatchStop,
       agentIntegrationStop,
       captureStop,
-      chatStoreStop,
-      dispatchStoreStop,
       rustEngineStop,
     ]).then(() => undefined),
     new Promise<void>((resolve) => setTimeout(resolve, WILL_QUIT_BUDGET_MS)),
@@ -4442,7 +4725,7 @@ async function ensureWorkspaceRegistered(rootPath: string): Promise<WorkspaceSum
     kind: "personal",
   });
   const summary = WorkspaceSummary.parse(created);
-  registerWorkspace(created);
+  registerPhysicalWorkspace(created);
   refreshNativeWorkspaceSurfaces();
   return summary;
 }
@@ -4701,7 +4984,7 @@ function registerIpcHandlers(
     // persisted into the registry, or every later registry read would throw
     // and the app would launch to a permanent blank window.
     const summary = WorkspaceSummary.parse(created);
-    registerWorkspace(created);
+    registerPhysicalWorkspace(created);
     refreshNativeWorkspaceSurfaces();
     return summary;
   });
@@ -4719,7 +5002,7 @@ function registerIpcHandlers(
     // workspaceId is untrusted input — an oversized or non-hostname-safe id
     // must fail the attach with a visible error, not brick the registry.
     const summary = WorkspaceSummary.parse(attached);
-    registerWorkspace(attached);
+    registerPhysicalWorkspace(attached);
     refreshNativeWorkspaceSurfaces();
     return summary;
   });
@@ -5551,6 +5834,7 @@ function registerIpcHandlers(
     // Pre-flight against the relay BEFORE creating anything locally.
     const relay = { baseUrl: credentials.relayUrl, token: credentials.token };
     let probe: RelayWorkspaceBootstrapResult;
+    let authorityBinding: DesktopWorkspaceAuthorityBinding | null = null;
     try {
       probe = await probeWorkspaceRelay(relayTransportRoutes, {
         workspaceId: parsed.workspaceId,
@@ -5608,7 +5892,7 @@ function registerIpcHandlers(
           await installWorkspaceDataKey(created.rootPath, unwrapped),
       });
 
-      registerWorkspace({ ...created, joinBootstrapPending: true });
+      authorityBinding = registerPhysicalWorkspace({ ...created, joinBootstrapPending: true });
       refreshNativeWorkspaceSurfaces();
 
       // Now open capture, bind the remote, and enable the pull-first engine.
@@ -5635,13 +5919,19 @@ function registerIpcHandlers(
       // having pulled. Everything removed still lives on the relay; the
       // user retries with the same code and the same (empty again) folder.
       console.error(`[desktop] join rollback for ${rootPath}:`, error);
-      await activity.close(created.workspaceId).catch(() => undefined);
+      if (authorityBinding) {
+        try {
+          await removePhysicalWorkspace(authorityBinding);
+        } catch(cleanupError) {
+          console.error("[desktop] join rollback cleanup:", cleanupError);
+          throw new Error(
+            "Couldn't safely roll back the workspace. Its folder was left in place; restart dohc before retrying.",
+          );
+        }
+      }
       await closeRelayTransportWorkspace(parsed.workspaceId).catch(
         () => undefined,
       );
-      try {
-        removeWorkspace(created.workspaceId);
-      } catch {}
       await resetFailedJoinFolder(rootPath).catch(() => undefined);
       refreshNativeWorkspaceSurfaces();
       // Scope-free: the rollback removed a registry entry no window has
@@ -5885,7 +6175,10 @@ function registerIpcHandlers(
           shareId,
           channelWireId,
         }),
-      serialize: serializeSharedChannelSync,
+      serialize: (workspaceId, run) =>
+        workspaceAuthorities.withAuthority(workspaceId, (lease) =>
+          serializeWorkspaceAuthorityWork(lease, run),
+        ),
       afterPull: projectPendingChatBookmarksAfterPull,
     });
   }
@@ -6473,7 +6766,7 @@ function registerIpcHandlers(
       kind: "personal",
       bootstrap: "join",
     });
-    registerWorkspace(created);
+    const authorityBinding = registerPhysicalWorkspace(created);
     setWorkspaceShareView(created.workspaceId, {
       shareId: parsed.shareId,
       granterEmail: info.granterEmail,
@@ -6519,12 +6812,17 @@ function registerIpcHandlers(
       }
     } catch (error) {
       console.error(`[desktop] open-share rollback for ${rootPath}:`, error);
+      try {
+        await removePhysicalWorkspace(authorityBinding);
+      } catch (cleanupError) {
+        console.error("[desktop] open-share rollback cleanup:", cleanupError);
+        throw new Error(
+          "Couldn't safely roll back the shared view. Its folder was left in place; restart dohc before retrying.",
+        );
+      }
       await closeRelayTransportWorkspace(created.workspaceId).catch(
         () => undefined,
       );
-      try {
-        removeWorkspace(created.workspaceId);
-      } catch {}
       await resetFailedJoinFolder(rootPath).catch(() => undefined);
       refreshNativeWorkspaceSurfaces();
       // Scope-free: the rollback removed a registry entry no window has
@@ -7235,7 +7533,8 @@ function registerIpcHandlers(
     references: readonly ChatFileReferenceInput[] | undefined,
   ) {
     const resolved: Array<{
-      objectId: Awaited<ReturnType<WorkspaceEngineCapture["fileObjectIdForPath"]>> & string;
+      objectId: Awaited<ReturnType<WorkspaceEngineCapture["fileObjectIdForPath"]>
+      > & string;
       pathHint: string;
       headingText?: string;
       headingAnchor?: string;
@@ -7299,9 +7598,9 @@ function registerIpcHandlers(
   function chatBookmarkDestination(title: string, targetId: string): string {
     const stem = title
       .replace(/[<>:"/\\|?*\u0000-\u001f]/gu, " ")
-      .replace(/\s+/gu, " ")
-      .trim()
-      .slice(0, 70) || "Chat";
+        .replace(/\s+/gu, " ")
+        .trim()
+        .slice(0, 70) || "Chat";
     const suffix = targetId.replace(/[^a-z0-9_-]/giu, "").slice(-10) || "saved";
     return `Bookmarks/Chats/${stem}--${suffix}.md`;
   }
@@ -7317,24 +7616,32 @@ function registerIpcHandlers(
   // writes are serialized too, but callers can otherwise compute the same
   // missing destination before either write starts and race ready/failed
   // transitions for one generation.
-  const chatBookmarkRuns = new Map<string, Promise<void>>();
   async function withChatBookmarkRun<T>(
     workspaceId: string,
     bookmarkId: string,
     run: () => Promise<T>,
   ): Promise<T> {
-    const key = `${workspaceId}\u0000${bookmarkId}`;
-    const previous = chatBookmarkRuns.get(key) ?? Promise.resolve();
-    const result = previous.catch(() => undefined).then(run);
+    const lease = requireWorkspaceAuthority(workspaceId);
+    const runs = lease.state.chatBookmarkRuns;
+    const previous = runs.get(bookmarkId) ?? Promise.resolve();
+    const result = previous
+      .catch(() => undefined)
+      .then(async () => {
+        lease.assertCurrent();
+        const value = await run();
+        lease.assertCurrent();
+        return value;
+      });
     const settled = result.then(
       () => undefined,
       () => undefined,
     );
-    chatBookmarkRuns.set(key, settled);
+    runs.set(bookmarkId, settled);
     try {
       return await result;
     } finally {
-      if (chatBookmarkRuns.get(key) === settled) chatBookmarkRuns.delete(key);
+      if (runs.get(bookmarkId) === settled) runs.delete(bookmarkId);
+      lease.release();
     }
   }
 
@@ -7343,32 +7650,106 @@ function registerIpcHandlers(
     capture: WorkspaceEngineCapture,
     bookmark: ChatBookmark,
   ): Promise<ChatBookmark> {
-    return withChatBookmarkRun(workspace.workspaceId, bookmark.bookmarkId, async () => {
-      const store = linkedChatStoreFor(workspace);
-      const current = await store.findBookmark({
-        workspaceId: workspace.workspaceId,
-        ownerUserId: bookmark.ownerUserId,
-        bookmarkId: bookmark.bookmarkId,
-      });
-      if (!current) throw new Error("That bookmark no longer exists.");
-      // A duplicate worker, a newer live generation, or an archive may have
-      // won while this call waited for the bookmark queue.
-      if (
-        current.projectionState !== "pending" ||
-        current.generation !== bookmark.generation
-      ) {
-        return current;
-      }
-      bookmark = current;
-      try {
-        if (bookmark.state === "archived") {
-          const archivedPath = chatBookmarkArchiveDestination(bookmark);
-          // Recovery validates the bookmark-specific frontmatter when legacy
-          // state or a crash left projectionObjectId unclaimed. It can recover
-          // from either side of an already-completed engine rename.
-          const archived = await archiveChatBookmarkProjection({
+    return withChatBookmarkRun(
+      workspace.workspaceId,
+      bookmark.bookmarkId,
+      async () => {
+        const store = linkedChatStoreFor(workspace);
+        const current = await store.findBookmark({
+          workspaceId: workspace.workspaceId,
+          ownerUserId: bookmark.ownerUserId,
+          bookmarkId: bookmark.bookmarkId,
+        });
+        if (!current) throw new Error("That bookmark no longer exists.");
+        // A duplicate worker, a newer live generation, or an archive may have
+        // won while this call waited for the bookmark queue.
+        if (
+          current.projectionState !== "pending" ||
+          current.generation !== bookmark.generation
+        ) {
+          return current;
+        }
+        bookmark = current;
+        try {
+          if (bookmark.state === "archived") {
+            const archivedPath = chatBookmarkArchiveDestination(bookmark);
+            // Recovery validates the bookmark-specific frontmatter when legacy
+            // state or a crash left projectionObjectId unclaimed. It can recover
+            // from either side of an already-completed engine rename.
+            const archived = await archiveChatBookmarkProjection({
+              bookmark,
+              archivedPath,
+              capture,
+            });
+            const ready = await store.markBookmarkReady({
+              workspaceId: workspace.workspaceId,
+              ownerUserId: bookmark.ownerUserId,
+              bookmarkId: bookmark.bookmarkId,
+              generation: bookmark.generation,
+              projectionObjectId: archived.objectId,
+              // The store owns the logical active projection path. The capture
+              // layer has already moved this exact object to archivedPath.
+              projectionPath: bookmark.destinationPath,
+            });
+            return ready.bookmark;
+          }
+          const threads = await store.listThreads({
+            workspaceId: workspace.workspaceId,
+          });
+          const thread = threads.find(
+            (entry) => entry.id === bookmark.threadId,
+          );
+          if (!thread) throw new Error("The source chat no longer exists.");
+          const allMessages = await store.listMessages({
+            workspaceId: workspace.workspaceId,
+            threadId: bookmark.threadId,
+          });
+          let selectedMessages = allMessages;
+          if (bookmark.messageId) {
+            const selected = allMessages.find(
+              (message) => message.id === bookmark.messageId,
+            );
+            if (!selected)
+              throw new Error("The bookmarked message no longer exists.");
+            const parent = selected.parentMessageId
+              ? allMessages.find(
+                  (message) => message.id === selected.parentMessageId,
+                )
+              : undefined;
+            selectedMessages = parent ? [parent, selected] : [selected];
+          }
+          const channel = thread.channelId
+            ? (
+                await store.listChannels({ workspaceId: workspace.workspaceId })
+              ).find((entry) => entry.id === thread.channelId)
+            : undefined;
+          const text = formatChatBookmarkProjection({
+            bookmarkId: bookmark.bookmarkId,
+            threadId: bookmark.threadId,
+            ...(bookmark.messageId ? { messageId: bookmark.messageId } : {}),
+            ...(channel
+              ? { channelId: channel.id, channelName: channel.name }
+              : {}),
+            title: thread.title,
+            mode: bookmark.mode,
+            updatedAtMs: Date.now(),
+            ...(bookmark.mode === "snapshot"
+              ? { snapshotAtMs: bookmark.createdAtMs }
+              : {}),
+            messages: selectedMessages.map((message) => ({
+              id: message.id,
+              authorKind: message.author.kind,
+              authorDisplayName: message.author.displayName,
+              body: message.body,
+              createdAtMs: message.createdAtMs,
+              ...(message.parentMessageId
+                ? { parentMessageId: message.parentMessageId }
+                : {}),
+            })),
+          });
+          const written = await writeChatBookmarkProjection({
             bookmark,
-            archivedPath,
+            text,
             capture,
           });
           const ready = await store.markBookmarkReady({
@@ -7376,77 +7757,25 @@ function registerIpcHandlers(
             ownerUserId: bookmark.ownerUserId,
             bookmarkId: bookmark.bookmarkId,
             generation: bookmark.generation,
-            projectionObjectId: archived.objectId,
-            // The store owns the logical active projection path. The capture
-            // layer has already moved this exact object to archivedPath.
+            projectionObjectId: written.objectId,
             projectionPath: bookmark.destinationPath,
           });
           return ready.bookmark;
+        } catch (error) {
+          const failed = await store.markBookmarkFailed({
+            workspaceId: workspace.workspaceId,
+            ownerUserId: bookmark.ownerUserId,
+            bookmarkId: bookmark.bookmarkId,
+            generation: bookmark.generation,
+            failureReason:
+              error instanceof Error ? error.message : "Projection failed",
+          });
+          throw new Error(
+            failed.bookmark.failureReason ?? "Could not save chat bookmark.",
+          );
         }
-        const threads = await store.listThreads({ workspaceId: workspace.workspaceId });
-        const thread = threads.find((entry) => entry.id === bookmark.threadId);
-        if (!thread) throw new Error("The source chat no longer exists.");
-        const allMessages = await store.listMessages({
-          workspaceId: workspace.workspaceId,
-          threadId: bookmark.threadId,
-        });
-        let selectedMessages = allMessages;
-        if (bookmark.messageId) {
-          const selected = allMessages.find((message) => message.id === bookmark.messageId);
-          if (!selected) throw new Error("The bookmarked message no longer exists.");
-          const parent = selected.parentMessageId
-            ? allMessages.find((message) => message.id === selected.parentMessageId)
-            : undefined;
-          selectedMessages = parent ? [parent, selected] : [selected];
-        }
-        const channel = thread.channelId
-          ? (await store.listChannels({ workspaceId: workspace.workspaceId })).find(
-              (entry) => entry.id === thread.channelId,
-            )
-          : undefined;
-        const text = formatChatBookmarkProjection({
-          bookmarkId: bookmark.bookmarkId,
-          threadId: bookmark.threadId,
-          ...(bookmark.messageId ? { messageId: bookmark.messageId } : {}),
-          ...(channel ? { channelId: channel.id, channelName: channel.name } : {}),
-          title: thread.title,
-          mode: bookmark.mode,
-          updatedAtMs: Date.now(),
-          ...(bookmark.mode === "snapshot" ? { snapshotAtMs: bookmark.createdAtMs } : {}),
-          messages: selectedMessages.map((message) => ({
-            id: message.id,
-            authorKind: message.author.kind,
-            authorDisplayName: message.author.displayName,
-            body: message.body,
-            createdAtMs: message.createdAtMs,
-            ...(message.parentMessageId ? { parentMessageId: message.parentMessageId } : {}),
-          })),
-        });
-        const written = await writeChatBookmarkProjection({
-          bookmark,
-          text,
-          capture,
-        });
-        const ready = await store.markBookmarkReady({
-          workspaceId: workspace.workspaceId,
-          ownerUserId: bookmark.ownerUserId,
-          bookmarkId: bookmark.bookmarkId,
-          generation: bookmark.generation,
-          projectionObjectId: written.objectId,
-          projectionPath: bookmark.destinationPath,
-        });
-        return ready.bookmark;
-      } catch (error) {
-        const failed = await store.markBookmarkFailed({
-          workspaceId: workspace.workspaceId,
-          ownerUserId: bookmark.ownerUserId,
-          bookmarkId: bookmark.bookmarkId,
-          generation: bookmark.generation,
-          failureReason: error instanceof Error ? error.message : "Projection failed",
-        });
-        throw new Error(failed.bookmark.failureReason ?? "Could not save chat bookmark.");
-      }
-    });
+      },
+    );
   }
 
   async function materializePendingChatBookmarks(
@@ -7465,14 +7794,16 @@ function registerIpcHandlers(
       limit: 50,
     });
     for (const bookmark of pending) {
-      await materializeChatBookmark(workspace, capture, bookmark).catch((error) => {
-        console.error("[desktop] chat bookmark projection:", error);
-        // Re-flag so the worker's next tick retries. If markBookmarkFailed
-        // itself failed, the row is still pending and this is the only retry
-        // path; if it succeeded, the row left listPendingBookmarks and the
-        // extra pass finds nothing — no permanent-failure loop.
-        queueChatBookmarkProjection(workspace.workspaceId);
-      });
+      await materializeChatBookmark(workspace, capture, bookmark).catch(
+        (error) => {
+          console.error("[desktop] chat bookmark projection:", error);
+          // Re-flag so the worker's next tick retries. If markBookmarkFailed
+          // itself failed, the row is still pending and this is the only retry
+          // path; if it succeeded, the row left listPendingBookmarks and the
+          // extra pass finds nothing — no permanent-failure loop.
+          queueChatBookmarkProjection(workspace.workspaceId);
+        },
+      );
     }
   }
 
@@ -7519,7 +7850,9 @@ function registerIpcHandlers(
     );
     const moment = await capture.readMoment(input.momentId);
     return ReadEngineMomentResult.parse({
-      moment: moment ? engineMomentDetailForIpc(moment, agentAuthorDisplayName) : null,
+      moment: moment
+        ? engineMomentDetailForIpc(moment, agentAuthorDisplayName)
+        : null,
     });
   });
 
@@ -7564,7 +7897,9 @@ function registerIpcHandlers(
       input.workspaceId,
       "Chats",
     );
-    const rowsUncovered = await syncWorkspaceSharedChannels(workspace.workspaceId);
+    const rowsUncovered = await syncWorkspaceSharedChannels(
+      workspace.workspaceId,
+    );
     const objectId = await capture.fileObjectIdForPath(input.path);
     const store = linkedChatStoreFor(workspace);
     const mentions = await store.listFileMentions({
@@ -7574,18 +7909,28 @@ function registerIpcHandlers(
     const activeFiles = await activeEngineFileIndex(workspace);
     const mentionChannelWireIds = new Map(
       await Promise.all(
-        [...new Set(mentions.flatMap((mention) => mention.channel ? [mention.channel.id] : []))]
-          .map(async (channelId) => [
-            channelId,
-            await store.getChannelWireId({
-              workspaceId: workspace.workspaceId,
+        [
+          ...new Set(
+            mentions.flatMap((mention) =>
+              mention.channel ? [mention.channel.id] : [],
+            ),
+          ),
+        ].map(
+          async (channelId) =>
+            [
               channelId,
-            }),
-          ] as const),
+              await store.getChannelWireId({
+                workspaceId: workspace.workspaceId,
+                channelId,
+              }),
+            ] as const,
+        ),
       ),
     );
     return ListChatFileMentionsResult.parse({
-      ...(rowsUncovered > 0 ? { sharedChannelRowsUncovered: rowsUncovered } : {}),
+      ...(rowsUncovered > 0
+        ? { sharedChannelRowsUncovered: rowsUncovered }
+        : {}),
       mentions: mentions.flatMap((mention) => {
         const currentPath = resolveChatFileMentionPath({
           requestedObjectId: objectId,
@@ -7598,25 +7943,31 @@ function registerIpcHandlers(
           pathByObjectId: activeFiles.pathByObjectId,
         });
         if (!currentPath) return [];
-        return [{
-          attachment: chatAttachmentForIpc({
-            ...mention.attachment,
-            pathHint: currentPath,
-          }),
-          message: chatMessageForIpc(mention.message),
-          thread: chatThreadForIpc(mention.thread),
-          ...(mention.channel
-            ? {
-                channelId: mention.channel.id,
-                ...(mentionChannelWireIds.get(mention.channel.id)
-                  ? { channelWireId: mentionChannelWireIds.get(mention.channel.id)! }
-                  : {}),
-                channelName: mention.channel.name,
-                channelSlug: mention.channel.slug,
-                channelKind: mention.channel.kind,
-              }
-            : {}),
-        }];
+        return [
+          {
+            attachment: chatAttachmentForIpc({
+              ...mention.attachment,
+              pathHint: currentPath,
+            }),
+            message: chatMessageForIpc(mention.message),
+            thread: chatThreadForIpc(mention.thread),
+            ...(mention.channel
+              ? {
+                  channelId: mention.channel.id,
+                  ...(mentionChannelWireIds.get(mention.channel.id)
+                    ? {
+                        channelWireId: mentionChannelWireIds.get(
+                          mention.channel.id,
+                        )!,
+                      }
+                    : {}),
+                  channelName: mention.channel.name,
+                  channelSlug: mention.channel.slug,
+                  channelKind: mention.channel.kind,
+                }
+              : {}),
+          },
+        ];
       }),
     });
   });
@@ -7648,7 +7999,9 @@ function registerIpcHandlers(
     assertWritableWorkspace(workspace);
     await warmCredentialCache();
     const store = linkedChatStoreFor(workspace);
-    const threads = await store.listThreads({ workspaceId: workspace.workspaceId });
+    const threads = await store.listThreads({
+      workspaceId: workspace.workspaceId,
+    });
     const thread = threads.find((entry) => entry.id === input.target.threadId);
     if (!thread) throw new Error("That chat is no longer available.");
     if (input.target.kind === "message") {
@@ -7675,7 +8028,9 @@ function registerIpcHandlers(
     });
     const bookmark = await materializeChatBookmark(workspace, capture, saved);
     notifyRenderer({ workspaceId: workspace.workspaceId });
-    return SaveChatBookmarkResult.parse({ bookmark: chatBookmarkForIpc(bookmark) });
+    return SaveChatBookmarkResult.parse({
+      bookmark: chatBookmarkForIpc(bookmark),
+    });
   });
 
   ipcMain.handle(CHANNELS.archiveChatBookmark, async (event, payload) => {
@@ -7706,7 +8061,11 @@ function registerIpcHandlers(
         });
       },
     );
-    const projected = await materializeChatBookmark(workspace, capture, archived);
+    const projected = await materializeChatBookmark(
+      workspace,
+      capture,
+      archived,
+    );
     notifyRenderer({ workspaceId: workspace.workspaceId });
     return ArchiveChatBookmarkResult.parse({
       bookmark: chatBookmarkForIpc(projected),
@@ -8027,8 +8386,8 @@ function registerIpcHandlers(
         ...chatThreadForIpc(thread),
         path:
           (thread.linkedFile
-            ? pathByObjectId.get(thread.linkedFile.objectId) ??
-              thread.linkedFile.pathHint
+            ? (pathByObjectId.get(thread.linkedFile.objectId) ??
+              thread.linkedFile.pathHint)
             : undefined) ?? null,
       })),
     });
@@ -8905,7 +9264,8 @@ function registerIpcHandlers(
       // branches on the top-level channelWireId. A nested chatChannel body
       // would fall through to the path-share validator and silently fail.
       createGrant: async (email) => {
-        const created = await relayShareJsonWithCredentials<{ shareId?: string }>(
+        const created = await relayShareJsonWithCredentials<{ shareId?: string;
+        }>(
           credentials,
           `/sync/${encodeURIComponent(remote.remoteWorkspaceId)}/shares`,
           {
@@ -9145,12 +9505,12 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.rebuildEngineStore, async (event, payload) => {
     assertTrustedSender(event);
     const input = RebuildEngineStorePayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    assertWritableWorkspace(workspace);
-    return runInKeyedLane(
-      engineStoreRebuildLocks,
-      workspace.workspaceId,
+    const registered = requireWorkspace(input.workspaceId);
+    assertWritableWorkspace(registered);
+    return workspaceAuthorities.withAuthority(input.workspaceId, (lease) =>
+      inWorkspaceEngineStoreLane(lease,
       async () => {
+        const workspace = canonicalWorkspaceFor(lease);
         const sessions = requireEngineSessions();
         return RebuildEngineStoreResult.parse(
           await rebuildEngineStoreRequest(workspace.rootPath, {
@@ -9159,14 +9519,14 @@ function registerIpcHandlers(
                 activity.getStatus(workspace.workspaceId).engineStoreRefused,
               ),
             hasActiveAgentRun: () =>
-              activity.hasAgentRun(workspace.workspaceId),
+              activity.hasAgentRun(workspace.workspaceId, workspace.rootPath),
             previousResult: () =>
-              lastEngineStoreRebuildResult.get(workspace.workspaceId),
+              lease.state.lastEngineStoreRebuildResult ?? undefined,
             rememberResult: (result) =>
-              lastEngineStoreRebuildResult.set(workspace.workspaceId, result),
+              (lease.state.lastEngineStoreRebuildResult = result),
             closeActivity: async () => {
               try {
-                await closeDispatchRunActivity(workspace.workspaceId, {
+                await closeDispatchRunActivity(workspace, {
                   notifyRenderer: false,
                 });
               } catch (error) {
@@ -9197,7 +9557,7 @@ function registerIpcHandlers(
             },
           }),
         );
-      },
+      }),
     );
   });
 
@@ -9619,24 +9979,40 @@ function registerIpcHandlers(
   // its workspace, so the worker idles instead of querying every open
   // workspace unconditionally. The slow cadence is the crash backstop — a
   // failed pass re-flags and retries here.
-  const bookmarkProjectionRuns = new Set<string>();
   const bookmarkProjectionTimer = setInterval(() => {
     for (const workspaceId of activity.listOpenWorkspaceIds()) {
-      if (!pendingChatBookmarkProjectionWorkspaceIds.has(workspaceId)) continue;
-      if (bookmarkProjectionRuns.has(workspaceId)) continue;
-      const workspace = findWorkspace(workspaceId);
-      const capture = activity.engineCaptureFor(workspaceId);
-      if (!workspace || !capture || sharedViewOf(workspaceId)) continue;
-      pendingChatBookmarkProjectionWorkspaceIds.delete(workspaceId);
-      bookmarkProjectionRuns.add(workspaceId);
+      if (!findWorkspace(workspaceId)) continue;
+      const lease = requireWorkspaceAuthority(workspaceId);
+      const state = lease.state;
+      if (!state.bookmarkProjectionPending || state.bookmarkProjectionRunning) {
+        lease.release();
+        continue;
+      }
+      const workspace = canonicalWorkspaceFor(lease);
+      const capture = activity.engineCaptureFor(workspaceId,
+        workspace.rootPath,
+      );
+      if (!capture || sharedViewOf(workspaceId)) {
+        lease.release();
+        continue;
+      }
+      state.bookmarkProjectionPending = false;
+      state.bookmarkProjectionRunning = true;
       void materializePendingChatBookmarks(workspace, capture)
+        .then(() => lease.assertCurrent())
         .catch((error) => {
           console.error("[desktop] live chat bookmark projection:", error);
-          // Whole-pass failure: keep the workspace flagged so the next tick
-          // retries instead of losing the pending rows until the next reply.
-          queueChatBookmarkProjection(workspaceId);
+          try {
+            lease.assertCurrent();
+            state.bookmarkProjectionPending = true;
+          } catch {
+            // The successor owns a separate queue.
+          }
         })
-        .finally(() => bookmarkProjectionRuns.delete(workspaceId));
+        .finally(() => {
+          state.bookmarkProjectionRunning = false;
+          lease.release();
+        });
     }
   }, 30_000);
   bookmarkProjectionTimer.unref();

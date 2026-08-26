@@ -26,6 +26,7 @@ export interface DesktopLinkedChatStore extends AwaitableLinkedChatStore {
 
 export interface DesktopLinkedChatStoreOptions {
   sessions: EngineWorkspaceSessions;
+  runWithAuthority?<Result>(work: () => Promise<Result>): Promise<Result>;
 }
 
 function toStoreChannel(channel: LiveChatChannel): ChatChannel {
@@ -75,11 +76,19 @@ async function mapWithConcurrency<T, U>(
 export function createLiveLinkedChatStore(
   workspace: EngineWorkspace,
   sessions: EngineWorkspaceSessions,
+  options: {
+    runWithAuthority?<Result>(work: () => Promise<Result>): Promise<Result>;
+  } = {},
 ): DesktopLinkedChatStore {
+  const runWithAuthority =
+    options.runWithAuthority ??
+    (async <Result>(work: () => Promise<Result>) => await work());
   const invoke = async <T>(
     operation: (adapter: ChatsLiveAdapter) => Promise<T>,
     options?: EngineWorkspaceRunOptions,
   ): Promise<T> =>
+    await runWithAuthority(
+      async () =>
     await sessions.run(
       workspace,
       async ({ client, workspace: handle }) => {
@@ -89,6 +98,7 @@ export function createLiveLinkedChatStore(
         return await operation(adapter);
       },
       options,
+        ),
     );
   const invokeRead = async <T>(
     operation: (adapter: ChatsLiveAdapter) => Promise<T>,
@@ -99,10 +109,12 @@ export function createLiveLinkedChatStore(
 
   return {
     ensureOpen: async () => {
-      await sessions.run(
+      await runWithAuthority(
+        async () =>
+          await sessions.run(
         workspace,
         async () => undefined,
-        { retryTransportErrors: true },
+        { retryTransportErrors: true }),
       );
     },
     createThread: async (input) =>
@@ -283,7 +295,7 @@ export function createLiveLinkedChatStore(
         async (adapter) => await adapter.getThreadProjection(input),
       ),
     close: async () => {
-      await sessions.closeWorkspace(workspace.workspaceId);
+      await sessions.closeWorkspace(workspace);
     },
   };
 }
@@ -292,5 +304,5 @@ export function createDesktopLinkedChatStore(
   workspace: EngineWorkspace,
   options: DesktopLinkedChatStoreOptions,
 ): DesktopLinkedChatStore {
-  return createLiveLinkedChatStore(workspace, options.sessions);
+  return createLiveLinkedChatStore(workspace, options.sessions, options);
 }

@@ -31,7 +31,11 @@ describe("received share engine access", () => {
       rootPath: location.rootPath,
       shareMount: true,
     });
-    expect(rememberShareMount).toHaveBeenCalledWith(location.engineWorkspaceId);
+    expect(rememberShareMount).toHaveBeenCalledWith({
+      workspaceId: location.engineWorkspaceId,
+      rootPath: location.rootPath,
+      shareMount: true,
+    });
 
     expect(access.storeFor(location)).toBe(store);
     expect(createStores).toHaveBeenCalledWith(
@@ -88,7 +92,11 @@ describe("received share engine access", () => {
       rootPath: "C:\\received",
       shareMount: true,
     });
-    expect(rememberShareMount).toHaveBeenCalledWith("received-1");
+    expect(rememberShareMount).toHaveBeenCalledWith({
+      workspaceId: "received-1",
+      rootPath: "C:\\received",
+      shareMount: true,
+    });
 
     access.relayForRegistered({
       workspaceId: "received-1",

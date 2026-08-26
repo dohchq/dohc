@@ -88,6 +88,14 @@ function providerSession(
   return Object.assign(base, input);
 }
 
+function workspaceAuthority(workspaceId: string) {
+  return {
+    workspace: { workspaceId, rootPath: "C:/workspace" },
+    assertCurrent: vi.fn(),
+    release: vi.fn(),
+  };
+}
+
 interface TestHarnessOptions {
   resolveDocumentPath?: (
     workspace: { workspaceId: string; rootPath: string },
@@ -137,10 +145,7 @@ function harness(
             () => !retired,
             options.rendererWorkspaceId,
           ),
-    requireWorkspace: (workspaceId) => ({
-      workspaceId,
-      rootPath: "C:/workspace",
-    }),
+    acquireWorkspace: workspaceAuthority,
     captureFor: () => capture,
     ensureCaptureFor: vi.fn(async () => undefined),
     isSharedView: () => readOnly,
@@ -386,10 +391,7 @@ describe("engine Y.Doc IPC adapter", () => {
     });
     const ipc = createEngineYDocSessionIpc({
       sessionFor: () => rendererSession(),
-      requireWorkspace: (workspaceId) => ({
-        workspaceId,
-        rootPath: "C:/workspace",
-      }),
+      acquireWorkspace: workspaceAuthority,
       captureFor: () => (captureAvailable ? capture : null),
       ensureCaptureFor,
       isSharedView: () => false,
@@ -400,7 +402,10 @@ describe("engine Y.Doc IPC adapter", () => {
     await expect(ipc.open(sender, openPayload)).resolves.toMatchObject({
       available: true,
     });
-    expect(ensureCaptureFor).toHaveBeenCalledWith("workspace-1");
+    expect(ensureCaptureFor).toHaveBeenCalledWith({
+      workspaceId: "workspace-1",
+      rootPath: "C:/workspace",
+    });
     expect(capture.openYDocSession).toHaveBeenCalledOnce();
   });
 
@@ -457,10 +462,7 @@ describe("engine Y.Doc IPC adapter", () => {
     };
     const ipc = createEngineYDocSessionIpc({
       sessionFor: () => rendererSession(),
-      requireWorkspace: (workspaceId) => ({
-        workspaceId,
-        rootPath: "C:/workspace",
-      }),
+      acquireWorkspace: workspaceAuthority,
       captureFor: () => capture,
       ensureCaptureFor: vi.fn(async () => undefined),
       isSharedView: () => false,
@@ -706,10 +708,7 @@ describe("engine Y.Doc IPC adapter", () => {
     });
     const ipc = createEngineYDocSessionIpc({
       sessionFor: () => rendererSession(() => generation),
-      requireWorkspace: (workspaceId) => ({
-        workspaceId,
-        rootPath: "C:/workspace",
-      }),
+      acquireWorkspace: workspaceAuthority,
       captureFor: () => (captureAvailable ? capture : null),
       ensureCaptureFor,
       isSharedView: () => false,
@@ -916,10 +915,7 @@ describe("engine Y.Doc IPC adapter", () => {
     };
     const ipc = createEngineYDocSessionIpc({
       sessionFor: () => rendererSession(),
-      requireWorkspace: (workspaceId) => ({
-        workspaceId,
-        rootPath: "C:/workspace",
-      }),
+      acquireWorkspace: workspaceAuthority,
       captureFor: () => capture,
       ensureCaptureFor: vi.fn(async () => undefined),
       isSharedView: () => false,
@@ -1004,10 +1000,7 @@ describe("engine Y.Doc IPC adapter", () => {
       };
       const ipc = createEngineYDocSessionIpc({
         sessionFor: () => rendererSession(),
-        requireWorkspace: (workspaceId) => ({
-          workspaceId,
-          rootPath: "C:/workspace",
-        }),
+        acquireWorkspace: workspaceAuthority,
         captureFor: () => capture,
         ensureCaptureFor: vi.fn(async () => undefined),
         isSharedView: () => false,
@@ -1050,10 +1043,7 @@ describe("engine Y.Doc IPC adapter", () => {
     };
     const ipc = createEngineYDocSessionIpc({
       sessionFor: () => rendererSession(),
-      requireWorkspace: (workspaceId) => ({
-        workspaceId,
-        rootPath: "C:/workspace",
-      }),
+      acquireWorkspace: workspaceAuthority,
       captureFor: () => capture,
       ensureCaptureFor: vi.fn(async () => undefined),
       isSharedView: () => false,

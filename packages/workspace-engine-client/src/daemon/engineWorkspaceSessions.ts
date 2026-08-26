@@ -35,6 +35,8 @@ import {
 export interface EngineWorkspace {
   workspaceId: string;
   rootPath: string;
+  /** Process-local identity for one attachment of this physical workspace. */
+  attachmentId?: symbol;
   shareMount?: true;
   // One-shot maintenance/bootstrap opens can suppress capture, then close the
   // session before the ordinary desktop activity opens it with capture.
@@ -51,6 +53,8 @@ export interface EngineDaemonClientSource {
 }
 
 interface SessionEntry {
+  readonly workspaceId: string;
+  readonly rootPath: string;
   binding: EngineWorkspaceBinding | null;
   opening: {
     client: EngineDaemonClient;
@@ -288,11 +292,11 @@ async function defaultSleep(ms: number): Promise<void> {
 }
 
 export class EngineWorkspaceSessions {
-  private readonly entries = new Map<string, SessionEntry>();
+  private readonly entries = new Map<string | symbol, SessionEntry>();
   private readonly preparations = new Map<string, Promise<void>>();
-  private readonly captureAuthors = new Map<string, AgentAuthor | null>();
-  private readonly shareMounts = new Set<string>();
-  private readonly rebuildingWorkspaces = new Set<string>();
+  private readonly captureAuthors = new Map<string | symbol, AgentAuthor | null>();
+  private readonly shareMounts = new Set<string | symbol>();
+  private readonly rebuildingWorkspaces = new Set<string | symbol>();
   private readonly transportRebindAttempts: number;
   private readonly sleep: (delayMs: number) => Promise<void>;
   private readonly now: () => number;
@@ -400,7 +404,7 @@ export class EngineWorkspaceSessions {
     operation: (binding: EngineWorkspaceBinding) => Promise<T>,
     options: EngineWorkspaceRunOptions = {},
   ): Promise<T> {
-    const entry = await this.acquire(workspace.workspaceId);
+    const entry = await this.acquire(workspace);
     try {
       const maxAttempts = options.retryTransportErrors
         ? this.transportRebindAttempts
@@ -715,26 +719,28 @@ export class EngineWorkspaceSessions {
     }
   }
 
-  rememberCaptureAuthor(workspaceId: string, author: AgentAuthor | null): void {
-    this.captureAuthors.set(workspaceId, author);
+  rememberCaptureAuthor(
+    workspace: string | EngineWorkspace, author: AgentAuthor | null): void {
+    this.captureAuthors.set(this.sessionKey(workspace), author);
   }
 
-  rememberShareMount(workspaceId: string): void {
-    this.shareMounts.add(workspaceId);
+  rememberShareMount(workspace: string | EngineWorkspace): void {
+    this.shareMounts.add(this.sessionKey(workspace));
   }
 
-  beginRebuild(workspaceId: string): void {
-    this.rebuildingWorkspaces.add(workspaceId);
+  beginRebuild(workspace: string | EngineWorkspace): void {
+    this.rebuildingWorkspaces.add(this.sessionKey(workspace));
   }
 
-  endRebuild(workspaceId: string): void {
-    this.rebuildingWorkspaces.delete(workspaceId);
+  endRebuild(workspace: string | EngineWorkspace): void {
+    this.rebuildingWorkspaces.delete(this.sessionKey(workspace));
   }
 
-  async closeWorkspace(workspaceId: string): Promise<void> {
-    this.captureAuthors.delete(workspaceId);
-    this.shareMounts.delete(workspaceId);
-    const entry = this.entries.get(workspaceId);
+  async closeWorkspace(workspace: string | EngineWorkspace): Promise<void> {
+    const key = this.sessionKey(workspace);
+    this.captureAuthors.delete(key);
+    this.shareMounts.delete(key);
+    const entry = this.entries.get(key);
     if (!entry) return;
     if (entry.closing) {
       await entry.closing;
@@ -747,46 +753,70 @@ export class EngineWorkspaceSessions {
       await closing;
     } finally {
       if (entry.closing === closing) entry.closing = null;
-      if (this.entries.get(workspaceId) === entry) {
-        this.entries.delete(workspaceId);
+      if (this.entries.get(key) === entry) {
+        this.entries.delete(key);
       }
     }
   }
 
   async closeAll(): Promise<void> {
     this.acceptingRuns = false;
-    const workspaceIds = [...this.entries.keys()];
+    const workspaces = [...this.entries.entries()].map(([key, entry]) =>
+      typeof key === "symbol"
+        ? {
+            workspaceId: entry.workspaceId,
+            rootPath: entry.rootPath,
+            attachmentId: key,
+          }
+        : key,
+    );
     await Promise.allSettled(
-      workspaceIds.map(async (workspaceId) => {
-        await this.closeWorkspace(workspaceId);
+      workspaces.map(async (workspace) => {
+        await this.closeWorkspace(workspace);
       }),
     );
   }
 
-  private entry(workspaceId: string): SessionEntry {
-    let entry = this.entries.get(workspaceId);
+  private sessionKey(workspace: string | EngineWorkspace): string | symbol {
+    return typeof workspace === "string"
+      ? workspace
+      : (workspace.attachmentId ?? workspace.workspaceId);
+  }
+
+  private entry(workspace: EngineWorkspace): SessionEntry {
+    const key = this.sessionKey(workspace);
+    let entry = this.entries.get(key);
     if (!entry) {
       entry = {
+        workspaceId: workspace.workspaceId,
+        rootPath: workspace.rootPath,
         binding: null,
         opening: null,
         closing: null,
         activeRuns: 0,
         idleWaiters: new Set(),
       };
-      this.entries.set(workspaceId, entry);
+      this.entries.set(key, entry);
+    } else if (
+      entry.workspaceId !== workspace.workspaceId ||
+      entry.rootPath !== workspace.rootPath
+    ) {
+      throw new Error(
+        `Rust engine workspace authority changed for ${workspace.workspaceId}.`,
+      );
     }
     return entry;
   }
 
-  private async acquire(workspaceId: string): Promise<SessionEntry> {
+  private async acquire(workspace: EngineWorkspace): Promise<SessionEntry> {
     for (;;) {
       if (!this.acceptingRuns) {
         throw new EngineWorkspaceSessionsClosedError();
       }
-      if (this.rebuildingWorkspaces.has(workspaceId)) {
-        throw new EngineWorkspaceRebuildingError(workspaceId);
+      if (this.rebuildingWorkspaces.has(this.sessionKey(workspace))) {
+        throw new EngineWorkspaceRebuildingError(workspace.workspaceId);
       }
-      const entry = this.entry(workspaceId);
+      const entry = this.entry(workspace);
       if (entry.closing) {
         await entry.closing;
         continue;
@@ -944,9 +974,10 @@ export class EngineWorkspaceSessions {
   ): Promise<EngineWorkspaceBinding> {
     await this.prepareWorkspace(workspace.rootPath);
     const requester = new WorkspaceDaemonRequester(client);
-    const hasCaptureAuthor = this.captureAuthors.has(workspace.workspaceId);
+    const sessionKey = this.sessionKey(workspace);
+    const hasCaptureAuthor = this.captureAuthors.has(sessionKey);
     const shareMount =
-      workspace.shareMount === true || this.shareMounts.has(workspace.workspaceId);
+      workspace.shareMount === true || this.shareMounts.has(sessionKey);
     const captureDisabled = shareMount || workspace.captureMode === "none";
     const raw = await requester.request(
       WORKSPACE_METHOD.open,
@@ -961,7 +992,7 @@ export class EngineWorkspaceSessions {
         ...(!captureDisabled && hasCaptureAuthor
           ? {
               captureAuthor:
-                this.captureAuthors.get(workspace.workspaceId) ?? null,
+                this.captureAuthors.get(sessionKey) ?? null,
             }
           : {}),
       },

@@ -619,6 +619,54 @@ describe("EngineWorkspaceSessions", () => {
     expect(secondOperation).toHaveBeenCalledOnce();
   });
 
+  it("does not let a workspace-id close discover a token-bound attachment", async () => {
+    const workspace = {
+      ...(await tempWorkspace()),
+      attachmentId: Symbol("attachment"),
+    };
+    const client = new MockClient("exact-handle");
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+
+    await expect(
+      sessions.run(workspace, async ({ workspace: handle }) => handle),
+    ).resolves.toBe("exact-handle");
+    await sessions.closeWorkspace(workspace.workspaceId);
+    await expect(
+      sessions.run(workspace, async ({ workspace: handle }) => handle),
+    ).resolves.toBe("exact-handle");
+
+    expect(
+      client.requests.filter((request) => request.method === "workspace.open"),
+    ).toHaveLength(1);
+    expect(
+      client.requests.filter((request) => request.method === "workspace.close"),
+    ).toHaveLength(0);
+  });
+
+  it("rejects a changed root presented with the same attachment token", async () => {
+    const workspace = {
+      ...(await tempWorkspace()),
+      attachmentId: Symbol("attachment"),
+    };
+    const client = new MockClient("exact-handle");
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+    await sessions.run(workspace, async () => undefined);
+
+    await expect(
+      sessions.run(
+        { ...workspace, rootPath: await tempRoot() },
+        async () => undefined,
+      ),
+    ).rejects.toThrow("Rust engine workspace authority changed");
+    expect(
+      client.requests.filter((request) => request.method === "workspace.open"),
+    ).toHaveLength(1);
+  });
+
   it("makes closeAll terminal so teardown cannot be repopulated", async () => {
     const workspace = await tempWorkspace();
     const closeGate = deferred<void>();

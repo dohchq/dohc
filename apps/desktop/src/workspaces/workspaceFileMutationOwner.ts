@@ -78,14 +78,23 @@ export interface WorkspaceFileMutationWorkspace {
 
 export interface WorkspaceFileMutationYDocPort {
   withDocumentUnowned<T>(
-    workspaceId: string,
+    authorityId: string | symbol,
     path: string,
     mutation: () => Promise<T>,
   ): Promise<T>;
   markDeletedUnderPath(
-    workspaceId: string,
+    authorityId: string | symbol,
     pathOrPrefix: string,
   ): void;
+}
+
+export interface WorkspaceFileMutationAuthority<
+  Workspace extends WorkspaceFileMutationWorkspace,
+> {
+  readonly authorityId: string | symbol;
+  readonly workspace: Readonly<Workspace>;
+  readonly capture: MutationCapture | null;
+  readonly yDocSessions: WorkspaceFileMutationYDocPort;
 }
 
 type MutationCapture = Pick<
@@ -110,15 +119,17 @@ export function createWorkspaceFileMutationOwner<
   Workspace extends WorkspaceFileMutationWorkspace,
 >(dependencies: {
   assertTrustedSender(event: IpcEvent): void;
-  requireWorkspace(workspaceId: string): Workspace;
-  engineCaptureFor(workspaceId: string): MutationCapture | null;
-  yDocSessions: WorkspaceFileMutationYDocPort;
+  withWorkspaceAuthority<Result>(workspaceId: string,
+    work: (
+      authority: WorkspaceFileMutationAuthority<Workspace>,
+    ) => Promise<Result>,
+  ): Promise<Result>;
   shareViewFiles: Pick<ShareViewFiles, "change">;
   trashItem(path: string): Promise<void>;
   notifyRenderer(workspaceId: string): void;
   logError(message: string, error: unknown): void;
 }): WorkspaceFileMutationOwner<IpcEvent> {
-  const shareTarget = (workspace: Workspace) => ({
+  const shareTarget = (workspace: Readonly<Workspace>) => ({
     kind: "standalone" as const,
     workspaceId: workspace.workspaceId,
   });
@@ -160,29 +171,39 @@ export function createWorkspaceFileMutationOwner<
     return committedShareViewChangeValue(workspaceId, outcome);
   };
 
-  const requireMutation = <Payload extends { workspaceId: string }>(
+  const runMutation = <Payload extends { workspaceId: string }, Result>(
     event: IpcEvent,
     payload: unknown,
     parse: (value: unknown) => Payload,
-  ): { input: Payload; workspace: Workspace; receivedShare: boolean } => {
+    work: (input: { input: Payload; workspace: Readonly<Workspace>; receivedShare: boolean;
+      authorityId: string | symbol;
+      capture: MutationCapture | null;
+      yDocSessions: WorkspaceFileMutationYDocPort;
+    }) => Promise<Result>,
+  ): Promise<Result> => {
     dependencies.assertTrustedSender(event);
     const input = parse(payload);
-    const workspace = dependencies.requireWorkspace(input.workspaceId);
-    return {
+    return dependencies.withWorkspaceAuthority(input.workspaceId,
+      async (authority) =>
+        await work({
       input,
-      workspace,
-      receivedShare: shareViewIsPresent(workspace.shareView),
-    };
+          workspace: authority.workspace,
+      receivedShare: shareViewIsPresent(authority.workspace.shareView),
+          authorityId: authority.authorityId,
+          capture: authority.capture,
+          yDocSessions: authority.yDocSessions,
+        }),
+    );
   };
 
   return {
     createFile: async (event, payload) => {
-      const { input, workspace, receivedShare } = requireMutation(
+      return await runMutation(
         event,
         payload,
         CreateWorkspaceFilePayload.parse,
-      );
-      if (!receivedShare) assertWritableWorkspace(workspace);
+        async ({ input, workspace, receivedShare }) => {
+          if (!receivedShare) assertWritableWorkspace(workspace);
       return withStaleSensitiveWorkspaceOperation(
         workspace.rootPath,
         async (lease) => {
@@ -211,14 +232,16 @@ export function createWorkspaceFileMutationOwner<
         },
       );
     },
+      );
+    },
 
     createFolder: async (event, payload) => {
-      const { input, workspace, receivedShare } = requireMutation(
+      return await runMutation(
         event,
         payload,
         CreateWorkspaceFolderPayload.parse,
-      );
-      if (receivedShare) throw new Error(SHARE_VIEW_EMPTY_FOLDER_REFUSAL);
+        async ({ input, workspace, receivedShare }) => {
+          if (receivedShare) throw new Error(SHARE_VIEW_EMPTY_FOLDER_REFUSAL);
       assertWritableWorkspace(workspace);
       return withStaleSensitiveWorkspaceOperation(
         workspace.rootPath,
@@ -228,14 +251,16 @@ export function createWorkspaceFileMutationOwner<
           }),
       );
     },
+      );
+    },
 
     movePath: async (event, payload) => {
-      const { input, workspace, receivedShare } = requireMutation(
+      return await runMutation(
         event,
         payload,
         MoveWorkspacePathPayload.parse,
-      );
-      if (!receivedShare) assertWritableWorkspace(workspace);
+        async ({ input, workspace, receivedShare, capture }) => {
+          if (!receivedShare) assertWritableWorkspace(workspace);
       return withExclusiveWorkspaceOperation(
         workspace.rootPath,
         async (markWorkspaceChanged, lease) => {
@@ -264,8 +289,6 @@ export function createWorkspaceFileMutationOwner<
           const toPath = preparedMove?.physicalToPath ?? requestedPaths.toPath;
           const visibleResultPath =
             preparedMove?.visibleResultPath ?? requestedPaths.toPath;
-
-          const capture = dependencies.engineCaptureFor(workspace.workspaceId);
           const fromKind = liveDocumentKindForPath(fromPath);
           const toKind = liveDocumentKindForPath(toPath);
           if (
@@ -323,14 +346,23 @@ export function createWorkspaceFileMutationOwner<
         },
       );
     },
+      );
+    },
 
     deletePath: async (event, payload) => {
-      const { input, workspace, receivedShare } = requireMutation(
+      return await runMutation(
         event,
         payload,
         DeleteWorkspacePathPayload.parse,
-      );
-      if (!receivedShare) assertWritableWorkspace(workspace);
+        async ({
+          input,
+          workspace,
+          receivedShare,
+          authorityId,
+          capture,
+          yDocSessions,
+        }) => {
+          if (!receivedShare) assertWritableWorkspace(workspace);
       return withExclusiveWorkspaceOperation(
         workspace.rootPath,
         async (markWorkspaceChanged, lease) => {
@@ -344,9 +376,7 @@ export function createWorkspaceFileMutationOwner<
           // release it before moving the artifact out from under the engine.
           const finishDebts = localPath === null
             ? undefined
-            : await dependencies
-                .engineCaptureFor(workspace.workspaceId)
-                ?.settleAndCloseLiveSessionsForPath(localPath);
+            : await capture?.settleAndCloseLiveSessionsForPath(localPath);
           try {
             // Local deletion stays recoverable: deletePath tries the OS trash,
             // then moves the entry into .dohc/trash when the OS refuses it.
@@ -378,8 +408,7 @@ export function createWorkspaceFileMutationOwner<
             }
             if (!receivedShare) markWorkspaceChanged();
             if (localPath !== null) {
-              dependencies.yDocSessions.markDeletedUnderPath(
-                workspace.workspaceId,
+                  yDocSessions.markDeletedUnderPath(authorityId,
                 localPath,
               );
             }
@@ -394,14 +423,22 @@ export function createWorkspaceFileMutationOwner<
         },
       );
     },
+      );
+    },
 
     writeText: async (event, payload) => {
-      const { input, workspace, receivedShare } = requireMutation(
+      return await runMutation(
         event,
         payload,
         WriteWorkspaceTextPayload.parse,
-      );
-      if (!receivedShare) assertWritableWorkspace(workspace);
+        async ({
+          input,
+          workspace,
+          receivedShare,
+          authorityId,
+          yDocSessions,
+        }) => {
+          if (!receivedShare) assertWritableWorkspace(workspace);
       if (receivedShare) {
         const result = await withStaleSensitiveWorkspaceOperation(
           workspace.rootPath,
@@ -444,8 +481,7 @@ export function createWorkspaceFileMutationOwner<
             }
             throw error;
           }
-          return dependencies.yDocSessions.withDocumentUnowned(
-            workspace.workspaceId,
+          return yDocSessions.withDocumentUnowned(authorityId,
             path,
             () =>
               writeWorkspaceTextInLease(
@@ -460,14 +496,16 @@ export function createWorkspaceFileMutationOwner<
       );
       return WriteWorkspaceTextResult.parse(result);
     },
+      );
+    },
 
     writeAsset: async (event, payload) => {
-      const { input, workspace } = requireMutation(
+      return await runMutation(
         event,
         payload,
         WriteWorkspaceAssetPayload.parse,
-      );
-      assertWritableWorkspace(workspace);
+        async ({ input, workspace, authorityId, yDocSessions }) => {
+          assertWritableWorkspace(workspace);
       await withStaleSensitiveWorkspaceOperation(
         workspace.rootPath,
         async (lease) => {
@@ -483,8 +521,8 @@ export function createWorkspaceFileMutationOwner<
               "A live document cannot be replaced by an image attachment.",
             );
           }
-          await dependencies.yDocSessions.withDocumentUnowned(
-            workspace.workspaceId,
+          await yDocSessions.withDocumentUnowned(
+                authorityId,
             path.resolvedPath,
             () =>
               writeWorkspaceAssetInLease(
@@ -495,6 +533,8 @@ export function createWorkspaceFileMutationOwner<
               ),
           );
         },
+      );
+    },
       );
     },
   };

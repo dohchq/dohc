@@ -13,6 +13,7 @@ import type { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore"
 interface ReceivedShareEngineLocation {
   engineWorkspaceId: string;
   rootPath: string;
+  attachmentId?: symbol;
 }
 
 interface ReceivedShareRelayLocation extends ReceivedShareEngineLocation {
@@ -22,6 +23,7 @@ interface ReceivedShareRelayLocation extends ReceivedShareEngineLocation {
 interface RegisteredWorkspaceEngineLocation {
   workspaceId: string;
   rootPath: string;
+  attachmentId?: symbol;
   shareView?: unknown;
 }
 
@@ -56,12 +58,14 @@ export function createReceivedShareEngineAccess(dependencies: {
     // caller that reconstructs a plain descriptor from reopening this received
     // share with generic capture. It also happens before a store or relay can
     // issue workspace.open.
-    sessions.rememberShareMount(location.engineWorkspaceId);
-    return {
+    const workspace = {
       workspaceId: location.engineWorkspaceId,
       rootPath: location.rootPath,
       shareMount: true,
-    };
+      ...(location.attachmentId ? { attachmentId: location.attachmentId } : {}),
+    } as const;
+    sessions.rememberShareMount(workspace);
+    return workspace;
   };
   const workspaceForRegistered = (
     location: RegisteredWorkspaceEngineLocation,
@@ -70,10 +74,16 @@ export function createReceivedShareEngineAccess(dependencies: {
       ? workspaceFor({
           engineWorkspaceId: location.workspaceId,
           rootPath: location.rootPath,
+          ...(location.attachmentId
+            ? { attachmentId: location.attachmentId }
+            : {}),
         })
       : {
           workspaceId: location.workspaceId,
           rootPath: location.rootPath,
+          ...(location.attachmentId
+            ? { attachmentId: location.attachmentId }
+            : {}),
         };
   const bind = (workspace: EngineWorkspace, relay: SyncRelayConnection) =>
     dependencies.relayClient().bind({

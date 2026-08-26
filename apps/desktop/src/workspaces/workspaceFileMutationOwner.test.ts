@@ -180,9 +180,13 @@ async function harness(options: {
   );
   const owner = createWorkspaceFileMutationOwner({
     assertTrustedSender,
-    requireWorkspace,
-    engineCaptureFor: () => capture,
+    withWorkspaceAuthority: async (workspaceId, work) =>
+      await work({
+        authorityId: workspaceId,
+        workspace: requireWorkspace(workspaceId),
+        capture,
     yDocSessions,
+      }),
     shareViewFiles: { change },
     trashItem,
     notifyRenderer,

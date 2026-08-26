@@ -67,7 +67,11 @@ describe("renderer reload admission", () => {
     const yDoc = createEngineYDocSessionIpc({
       sessionFor: (requestSender) =>
         sessions.current(requestSender as typeof renderer),
-      requireWorkspace: () => workspace,
+      acquireWorkspace: () => ({
+        workspace,
+        assertCurrent: () => undefined,
+        release: () => undefined,
+      }),
       captureFor: () => ({ openYDocSession }),
       ensureCaptureFor: vi.fn(async () => undefined),
       isSharedView: () => false,

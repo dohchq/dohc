@@ -20,8 +20,12 @@ import {
 // gone from this layer — the engine capture is a workspace's only history.
 // Legacy history left on disk by pre-flip versions is a read-only relic.
 
+export interface ActivityWorkspace extends CreatedWorkspace {
+  attachmentId?: symbol;
+}
+
 interface WatchedWorkspace {
-  workspace: CreatedWorkspace;
+  workspace: ActivityWorkspace;
   handle: WorkspaceWatchHandle;
   inFlight: boolean;
   lastSyncedAtMs: number | null;
@@ -60,13 +64,14 @@ interface WatchedWorkspace {
 export interface WorkspaceActivityOptions {
   // Live facts main owns: whether this workspace has cloud sync enabled
   // (registry remote identity) and whether a cloud session exists right now.
-  cloudStateFor?: (workspaceId: string) => { enabled: boolean; connected: boolean };
+  cloudStateFor?: (workspaceId: string) => { enabled: boolean; connected: boolean;
+  };
   // Builds a sync engine for a workspace when it is enabled AND connected;
   // null keeps the workspace local-only. Called on open and on enableCloud.
   // The options (joinBootstrap) ride through from enableCloud so a freshly
   // JOINED workspace's engine can be built pull-first (0P-C gate fix).
   engineFor?: (
-    workspace: CreatedWorkspace,
+    workspace: ActivityWorkspace,
     capture: WorkspaceEngineCapture | null,
     engineOptions?: { joinBootstrap?: boolean },
   ) => CloudSyncEngine | null;
@@ -76,7 +81,7 @@ export interface WorkspaceActivityOptions {
   // activity-owned callbacks the builder must wire into the capture it
   // creates (they feed the workspace's history-capture notice state).
   captureFor?: (
-    workspace: CreatedWorkspace,
+    workspace: ActivityWorkspace,
     hooks: WorkspaceCaptureHooks,
   ) => Promise<WorkspaceCaptureDecision> | WorkspaceCaptureDecision;
   // Dormant R13b shadow observer. No shipping caller supplies it; a later
@@ -89,7 +94,7 @@ export interface WorkspaceActivityOptions {
   // Receives the watcher's already-settled path-rich batch. The callback is
   // internal to main and runs before the path-free renderer notification.
   onWatcherBatch?: (
-    workspace: CreatedWorkspace,
+    workspace: ActivityWorkspace,
     events: readonly WatcherEvent[],
   ) => void;
 }
@@ -199,7 +204,13 @@ export function createWorkspaceActivity(
     return baseStatus;
   }
 
-  async function open(workspace: CreatedWorkspace): Promise<SyncStatusResult> {
+  async function open(workspace: ActivityWorkspace): Promise<SyncStatusResult> {
+    const current = watched.get(workspace.workspaceId);
+    if (current && current.workspace.rootPath !== workspace.rootPath) {
+      throw new Error(
+        "Workspace activity was replaced by another physical root.",
+      );
+    }
     if (!watched.has(workspace.workspaceId)) {
       const entry: WatchedWorkspace = {
         workspace,
@@ -363,10 +374,18 @@ export function createWorkspaceActivity(
   // folder/registry state without tearing down every other workspace.
   async function close(
     workspaceId: string,
-    closeOptions: { preserveStatus?: boolean; notify?: boolean } = {},
-  ): Promise<void> {
+    closeOptions: { preserveStatus?: boolean; notify?: boolean;
+      expectedRootPath?: string;
+    } = {},
+  ): Promise<boolean> {
     const entry = watched.get(workspaceId);
-    if (!entry) return;
+    if (!entry) return false;
+    if (
+      closeOptions.expectedRootPath !== undefined &&
+      entry.workspace.rootPath !== closeOptions.expectedRootPath
+    ) {
+      return false;
+    }
     if (closeOptions.preserveStatus) {
       preservedStatuses.set(workspaceId, statusFor(workspaceId));
     } else {
@@ -396,6 +415,7 @@ export function createWorkspaceActivity(
       (result): result is PromiseRejectedResult => result.status === "rejected",
     );
     if (failed) throw failed.reason;
+    return true;
   }
 
   // After a login completes, attach engines to already-open cloud-enabled
@@ -469,9 +489,18 @@ export function createWorkspaceActivity(
   async function claimAgentRun(
     workspaceId: string,
     run: ActiveAgentRun,
+    expectedRootPath?: string,
   ): Promise<boolean> {
     const entry = watched.get(workspaceId);
     if (!entry) throw new Error(`Workspace is not open: ${workspaceId}`);
+    if (
+      expectedRootPath !== undefined &&
+      entry.workspace.rootPath !== expectedRootPath
+    ) {
+      throw new Error(
+        "Workspace activity was replaced by another physical root.",
+      );
+    }
     if (entry.agentRun !== null) return false;
     entry.agentRun = run;
     try {
@@ -486,17 +515,30 @@ export function createWorkspaceActivity(
   async function clearAgentRun(
     workspaceId: string,
     agentRunId: string,
+    expectedRootPath?: string,
   ): Promise<void> {
     const entry = watched.get(workspaceId);
     if (!entry) return;
+    if (
+      expectedRootPath !== undefined &&
+      entry.workspace.rootPath !== expectedRootPath
+    ) {
+      return;
+    }
     if (entry.agentRun?.agentRunId !== agentRunId) return;
     await entry.capture?.setActiveAgentRun(null);
     if (entry.agentRun?.agentRunId === agentRunId) entry.agentRun = null;
   }
 
-  function hasAgentRun(workspaceId: string): boolean {
+  function hasAgentRun(workspaceId: string,
+    expectedRootPath?: string,
+  ): boolean {
     const entry = watched.get(workspaceId);
-    return entry !== undefined && entry.agentRun !== null;
+    return (
+      entry !== undefined &&
+      (expectedRootPath === undefined ||
+        entry.workspace.rootPath === expectedRootPath) && entry.agentRun !== null
+    );
   }
 
   // Registers engine-originated disk writes (restore flows, future engine
@@ -515,8 +557,22 @@ export function createWorkspaceActivity(
   // The per-workspace engine capture instance (null when the workspace is
   // opted out or not open). Version-operation IPC handlers gate on this: no
   // capture, no versions surface.
-  function engineCaptureFor(workspaceId: string): WorkspaceEngineCapture | null {
-    return watched.get(workspaceId)?.capture ?? null;
+  function engineCaptureFor(workspaceId: string,
+    expectedRootPath?: string,
+  ): WorkspaceEngineCapture | null {
+    const entry = watched.get(workspaceId);
+    if (
+      !entry ||
+      (expectedRootPath !== undefined &&
+        entry.workspace.rootPath !== expectedRootPath)
+    ) {
+      return null;
+    }
+    return entry.capture;
+  }
+
+  function workspaceRootPath(workspaceId: string): string | null {
+    return watched.get(workspaceId)?.workspace.rootPath ?? null;
   }
 
   // Resolves once every watcher has flushed AND its in-flight records are
@@ -548,6 +604,7 @@ export function createWorkspaceActivity(
     clearAgentRun,
     hasAgentRun,
     engineCaptureFor,
+    workspaceRootPath,
     registerExpectedEngineEvents,
     stopAll,
   };
