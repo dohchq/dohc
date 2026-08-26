@@ -164,7 +164,14 @@ describe("AgentIntegration", () => {
       await integration.endAgentRun("ws", "no-such-run", "complete");
       expect(ended).toEqual([]);
       await integration.endAgentRun("ws", run.id, "failed");
-      expect(ended).toEqual([{ workspaceId: "ws", runId: run.id, status: "failed" }]);
+      expect(ended).toEqual([
+        {
+          attachmentId: Symbol.for("test-workspace-attachment:ws"),
+          workspaceId: "ws",
+          runId: run.id,
+          status: "failed",
+        },
+      ]);
     });
   });
 
@@ -206,6 +213,7 @@ describe("AgentIntegration", () => {
         acquire: () => {
           const heldState = currentState;
           return {
+            attachmentId: Symbol.for("test-old-attachment"),
             workspaceId: "ws",
             rootPath: root,
             state: heldState,

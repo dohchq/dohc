@@ -45,6 +45,7 @@ export class AgentIntegrationState {
 }
 
 export interface AgentIntegrationAuthority {
+  readonly attachmentId: symbol;
   readonly workspaceId: string;
   readonly rootPath: string;
   readonly state: AgentIntegrationState;
@@ -73,6 +74,7 @@ export interface AgentIntegrationOptions {
   // (AgentSessionManager finalizeRun, the panel's Stop, the endAgentRun IPC),
   // so run-completion consumers (the try-in-version review card) hook here.
   onRunEnded?: (input: {
+    attachmentId: symbol;
     workspaceId: string;
     runId: string;
     status: "complete" | "failed";
@@ -228,7 +230,12 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
       if (recorded) {
         authority.assertCurrent();
         try {
-          options.onRunEnded?.({ workspaceId, runId, status });
+          options.onRunEnded?.({
+            attachmentId: authority.attachmentId,
+            workspaceId,
+            runId,
+            status,
+          });
         } catch (error) {
           console.error("[desktop] onRunEnded hook failed", error);
         }

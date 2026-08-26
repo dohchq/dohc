@@ -33,6 +33,7 @@ export function createInMemoryAgentIntegration(
         states.set(workspaceId, state);
       }
       return {
+        attachmentId: Symbol.for(`test-workspace-attachment:${workspaceId}`),
         workspaceId,
         rootPath,
         state,

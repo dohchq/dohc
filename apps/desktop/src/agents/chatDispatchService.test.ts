@@ -103,6 +103,7 @@ class FakeRunnerProcess implements RunnerProcess {
 }
 
 interface FixtureOptions {
+  workspaceAttachmentId?: symbol;
   runner?: Partial<RunnerSettings>;
   identity?: ChatDispatchIdentity;
   serviceNotesWritable?: boolean;
@@ -149,6 +150,7 @@ interface Fixture {
   postedWorkspaces: string[];
   runUpdatedWorkspaces: string[];
   syncRequests: string[];
+  syncWorkspaces: ChatDispatchWorkspace[];
   presence: ChatDispatchPresenceInput[];
   attributions: Array<{
     workspaceId: string;
@@ -192,7 +194,13 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
   const root = await createTestScratch("dohc-chat-dispatch-");
   const stateRoot = join(root, "state");
   const appRoot = join(root, "app");
-  const workspace = { workspaceId: WORKSPACE_ID, rootPath: root };
+  const workspace: ChatDispatchWorkspace = {
+    workspaceId: WORKSPACE_ID,
+    rootPath: root,
+    ...(options.workspaceAttachmentId
+      ? { attachmentId: options.workspaceAttachmentId }
+      : {}),
+  };
   const chatIds = { channel: 0, message: 0, thread: 0 };
   let chatNow = CHAT_START_MS;
   let nextChatTimestamp: number | null = null;
@@ -226,6 +234,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
   const postedWorkspaces: string[] = [];
   const runUpdatedWorkspaces: string[] = [];
   const syncRequests: string[] = [];
+  const syncWorkspaces: ChatDispatchWorkspace[] = [];
   const presence: ChatDispatchPresenceInput[] = [];
   const attributions: Fixture["attributions"] = [];
   const errors: unknown[] = [];
@@ -469,9 +478,10 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     stateDir: () => stateRoot,
     appRoot: () => appRoot,
     isPackaged: () => false,
-    queueSync: async (workspaceId) => {
-      syncRequests.push(workspaceId);
-      return options.onQueueSync?.(workspaceId, chat);
+    queueSync: async (dispatchWorkspace) => {
+      syncWorkspaces.push(dispatchWorkspace);
+      syncRequests.push(dispatchWorkspace.workspaceId);
+      return options.onQueueSync?.(dispatchWorkspace.workspaceId, chat);
     },
     ...(options.scanEligible ? { scanEligible: options.scanEligible } : {}),
     ...(options.temporaryRunActivity || options.prepareRunWorkspaceFailures
@@ -493,17 +503,25 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
       options.authorizeServiceNote
         ? options.authorizeServiceNote(workspace, threadId, verifiedUserId)
         : options.serviceNotesWritable !== false,
-    onMessagePosted: (workspaceId) => postedWorkspaces.push(workspaceId),
-    onRunUpdated: (workspaceId) => runUpdatedWorkspaces.push(workspaceId),
-    setRunAttribution: async (workspaceId, run) => {
-      attributions.push({ workspaceId, run });
-      await options.setRunAttribution?.(workspaceId, run);
+    onMessagePosted: (dispatchWorkspace) =>
+      postedWorkspaces.push(dispatchWorkspace.workspaceId),
+    onRunUpdated: (dispatchWorkspace) =>
+      runUpdatedWorkspaces.push(dispatchWorkspace.workspaceId),
+    setRunAttribution: async (dispatchWorkspace, run) => {
+      attributions.push({ workspaceId: dispatchWorkspace.workspaceId, run });
+      await options.setRunAttribution?.(dispatchWorkspace.workspaceId, run);
     },
     publishPresence: async (input) => {
       presence.push(input);
     },
     ...(options.hasPendingRunMessageLink
-      ? { hasPendingRunMessageLink: options.hasPendingRunMessageLink }
+      ? {
+          hasPendingRunMessageLink: (dispatchWorkspace, runId) =>
+            options.hasPendingRunMessageLink?.(
+              dispatchWorkspace.workspaceId,
+              runId,
+            ) ?? false,
+        }
       : {}),
     requeueFailedTrigger: (input) => {
       requeues.push(input);
@@ -511,7 +529,8 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
       if (error) throw error;
       return requeueRaw(input);
     },
-    listAppQuitRecoveries: listRecoveriesRaw,
+    listAppQuitRecoveries: (dispatchWorkspace) =>
+      listRecoveriesRaw(dispatchWorkspace.workspaceId),
     spawnRunner,
     killProcessGroup: (pid, signal) => {
       killCalls.push({ pid, signal });
@@ -536,6 +555,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     postedWorkspaces,
     runUpdatedWorkspaces,
     syncRequests,
+    syncWorkspaces,
     presence,
     attributions,
     errors,
@@ -1302,6 +1322,23 @@ describe("chatDispatchService", () => {
     expect(fixture.spawnCalls[0]!.process.stdinText).toContain(
       "Remote tray-only task.",
     );
+  });
+
+  it("carries the physical attachment token into asynchronous sync work", async () => {
+    vi.useFakeTimers();
+    const attachmentId = Symbol("attachment");
+    const fixture = await createFixture({
+      workspaceAttachmentId: attachmentId,
+      pumpWorkspace: true,
+      onQueueSync: () => false,
+    });
+
+    fixture.service.start();
+    await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_PUMP_MS);
+    await flushMicrotasks();
+
+    expect(fixture.syncWorkspaces).toEqual([fixture.workspace]);
+    expect(fixture.syncWorkspaces[0]?.attachmentId).toBe(attachmentId);
   });
 
   it("starts workspace pump syncs concurrently", async () => {

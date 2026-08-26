@@ -73,6 +73,30 @@ describe("workspace chat lifecycle", () => {
     releaseMaintenance();
   });
 
+  it("lets attachment teardown drain background maintenance", async () => {
+    const maintenance = Promise.withResolvers<void>();
+    const lifecycle = createWorkspaceChatLifecycle({
+      isReadOnly: () => false,
+      maintain: () => maintenance.promise,
+      onError: vi.fn(),
+    });
+
+    await lifecycle.open(
+      { workspaceId: "personal", rootPath: "/workspace" },
+      async () => undefined,
+    );
+    let drained = false;
+    const settling = lifecycle.settled().then(() => {
+      drained = true;
+    });
+    await Promise.resolve();
+    expect(drained).toBe(false);
+
+    maintenance.resolve();
+    await settling;
+    expect(drained).toBe(true);
+  });
+
   it("starts maintenance on first open, after join hydration", async () => {
     const order: string[] = [];
     const lifecycle = createWorkspaceChatLifecycle({

@@ -365,7 +365,7 @@ function createHarness() {
     stop: vi.fn(async (target) => {
       log.push(target.clearPartition ? "stop-partition" : "stop-surface");
     }),
-    withPluginSdkGrantSuspensions: vi.fn(async (run) => {
+    withPluginSdkGrantSuspensions: vi.fn(async (_workspaceId, run) => {
       const result = await run((identity: { pluginId: string }) => {
         log.push(`suspend:${identity.pluginId}`);
       });
@@ -428,6 +428,7 @@ function createHarness() {
     ),
     ensure: ensurePipeline,
   };
+  let authorityHolds = 0;
 
   registerPluginIpcHandlers({
     registrar: {
@@ -480,6 +481,14 @@ function createHarness() {
           },
         };
       },
+      withAuthority: async (_workspaceId, work) => {
+        authorityHolds += 1;
+        try {
+          return await work();
+        } finally {
+          authorityHolds -= 1;
+        }
+      },
     },
     runtimes,
     surfaces,
@@ -509,6 +518,9 @@ function createHarness() {
     sender,
     state,
     surfaces,
+    get authorityHolds() {
+      return authorityHolds;
+    },
     get panelAdmission() {
       return panelAdmission;
     },
@@ -538,6 +550,20 @@ beforeEach(() => {
 });
 
 describe("plugin IPC handlers", () => {
+  it("holds workspace authority across an awaited plugin operation", async () => {
+    const harness = createHarness();
+    const pending = deferred<typeof harness.runtime>();
+    harness.ensurePipeline.mockReturnValueOnce(pending.promise);
+
+    const result = harness.invoke(CHANNELS.listPlugins);
+    await Promise.resolve();
+
+    expect(harness.authorityHolds).toBe(1);
+    pending.resolve(harness.runtime);
+    await result;
+    expect(harness.authorityHolds).toBe(0);
+  });
+
   it("registers the complete plugin control plane once", () => {
     const harness = createHarness();
 

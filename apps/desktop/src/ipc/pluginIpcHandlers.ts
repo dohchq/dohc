@@ -106,8 +106,14 @@ type PluginIpcSurfaces<TView extends PluginWebAppViewLike> = Pick<
   | "startPanel"
   | "startWebApp"
   | "stop"
-  | "withPluginSdkGrantSuspensions"
->;
+> & {
+  withPluginSdkGrantSuspensions<Result extends { readonly ok: boolean }>(
+    workspaceId: string,
+    run: (
+      suspend: (identity: { workspaceId: string; pluginId: string }) => void,
+    ) => Promise<Result>,
+  ): Promise<Result>;
+};
 
 interface PluginIpcPlatform<
   TSender extends PluginIpcSender,
@@ -157,6 +163,10 @@ interface RegisterPluginIpcHandlersOptions<
       workspace: TWorkspace;
       session: PluginRendererWorkspaceSession;
     };
+    withAuthority<Result>(
+      workspaceId: string,
+      work: () => Result | Promise<Result>,
+    ): Promise<Result>;
   };
   runtimes: {
     current(workspaceId: string): PluginIpcRuntime | undefined;
@@ -221,7 +231,17 @@ export function registerPluginIpcHandlers<
     handle(channel, handler) {
       rawRegistrar.handle(channel, (event, payload) => {
         assertTrustedSender(event);
-        return handler(event, payload);
+        const workspaceId =
+          typeof payload === "object" &&
+          payload !== null &&
+          "workspaceId" in payload &&
+          typeof payload.workspaceId === "string"
+            ? payload.workspaceId
+            : undefined;
+        if (workspaceId === undefined) return handler(event, payload);
+        return workspaces.withAuthority(workspaceId, () =>
+          handler(event, payload),
+        );
       });
     },
   };
@@ -748,10 +768,10 @@ export function registerPluginIpcHandlers<
   pluginAction(CHANNELS.installPlugin, (pipeline, pluginId) =>
     pipeline.install(pluginId));
   pluginAction(CHANNELS.disablePlugin, (pipeline, pluginId, workspaceId) =>
-    surfaces.withPluginSdkGrantSuspensions((suspend) =>
+    surfaces.withPluginSdkGrantSuspensions(workspaceId, (suspend) =>
       pipeline.disable(pluginId, {
         onWillStopRuntime: () => suspend({ workspaceId, pluginId }),
-      })
+      }),
     ));
   pluginAction(CHANNELS.enablePlugin, (pipeline, pluginId) =>
     pipeline.enable(pluginId));
@@ -846,16 +866,18 @@ export function registerPluginIpcHandlers<
         input.workspaceId,
       );
       const result: PluginPipelineUninstallResult =
-        await surfaces.withPluginSdkGrantSuspensions((suspend) =>
-          pipeline.uninstall(
-            input.pluginId,
-            input.directoryName,
-            input.confirmationToken,
-            {
-              onWillStopRuntime: (pluginId) =>
-                suspend({ workspaceId: input.workspaceId, pluginId }),
-            },
-          )
+        await surfaces.withPluginSdkGrantSuspensions(
+          input.workspaceId,
+          (suspend) =>
+            pipeline.uninstall(
+              input.pluginId,
+              input.directoryName,
+              input.confirmationToken,
+              {
+                onWillStopRuntime: (pluginId) =>
+                  suspend({ workspaceId: input.workspaceId, pluginId }),
+              },
+            ),
         );
       const rendererResult = PluginActionResult.parse(
         result.ok

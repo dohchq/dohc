@@ -218,6 +218,7 @@ export function shareViewFilesStore(
 }
 
 export interface ShareViewFilesDependencies {
+  stateFor?(target: ResolvedShareViewFilesTarget): ShareViewFilesState;
   /** Synchronous and registry-derived. It is called again after lifecycle wait. */
   resolveTarget(
     target: ShareViewFilesTarget,
@@ -251,6 +252,13 @@ export interface ShareViewFilesDependencies {
     owner: ShareViewFilesOwnerCapability,
     target: ActiveShareViewFilesTarget,
   ): Promise<{ folderLeft: boolean; error?: unknown }>;
+}
+
+export class ShareViewFilesState {
+  readonly iconCache = new Map<
+    string,
+    { stamp: string; icon: string | undefined }
+  >();
 }
 
 type ActiveShareViewFilesTarget = ResolvedShareViewFilesTarget & {
@@ -613,12 +621,10 @@ function errorMessage(error: unknown): string {
 export function createShareViewFiles(
   dependencies: ShareViewFilesDependencies,
 ): ShareViewFiles {
-  const iconCache = new Map<
-    string,
-    { stamp: string; icon: string | undefined }
-  >();
+  const fallbackState = new ShareViewFilesState();
 
   function rememberIcon(
+    iconCache: ShareViewFilesState["iconCache"],
     key: string,
     value: { stamp: string; icon: string | undefined },
   ): void {
@@ -1088,6 +1094,8 @@ export function createShareViewFiles(
 
     async list(requested) {
       return withCurrentTarget(requested, async (target) => {
+        const iconCache =
+          dependencies.stateFor?.(target).iconCache ?? fallbackState.iconCache;
         return withStore(target, async (store) => {
           const main = await store.ensureMainVersion({
             workspaceId: target.storeWorkspaceId,
@@ -1138,7 +1146,7 @@ export function createShareViewFiles(
                   } catch {
                     // Listing stays available if one optional icon cannot be read.
                   }
-                  rememberIcon(key, { stamp, icon });
+                  rememberIcon(iconCache, key, { stamp, icon });
                 }
               },
             ),

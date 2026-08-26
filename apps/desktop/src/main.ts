@@ -646,6 +646,7 @@ import {
 } from "./workspaces/workspaceAssets";
 import {
   createShareViewFiles,
+  ShareViewFilesState,
   shareViewFilesStore,
   type ShareViewFileChangeOutcome,
   type ShareViewFiles,
@@ -811,22 +812,6 @@ function assertAgentRunnableWorkspace(workspaceId: string): void {
   }
 }
 
-const sitePreviews = createSitePreviewLifecycle({
-  allowOrigin: allowLoopbackFrameOrigin,
-});
-const pluginWorkspaceRuntimes = new PluginWorkspaceRuntimes<CreatedWorkspace>({
-  assertWritable: assertWritableWorkspace,
-  isOpen: (workspaceId): boolean =>
-    rendererWorkspaceSessions.isWorkspaceOpen(workspaceId),
-  create: createPluginWorkspaceRuntimeParts,
-  onPipelineStatus: notifyPluginStatusChanged,
-  onCleanupError: (workspaceId, error) => {
-    console.warn(
-      `[desktop] failed to clean up plugins for workspace "${workspaceId}"`,
-      error,
-    );
-  },
-});
 let autoUpdateController: AutoUpdateController | null = null;
 let applicationMenuCanInstallUpdate: boolean | null = null;
 
@@ -917,6 +902,7 @@ function createPluginWorkspaceRuntimeParts(
     authorityLease.release();
     throw new Error("Plugin runtime creation received a stale workspace root.");
   }
+  const surfaces = authorityLease.state.pluginSurfaces;
   authorityLease.release();
   const runWithAuthority = <Result>(work: () => Result | Promise<Result>) =>
     workspaceAuthorities.withBinding(authorityBinding, () => work());
@@ -1030,12 +1016,12 @@ function createPluginWorkspaceRuntimeParts(
     },
     onDispose: () => childProcessBroker.dispose(),
     onStatusChange: (pluginId, status) => {
-      void runWithAuthority(() =>
+      void Promise.resolve(
         surfaceHostLifecycle?.statusChanged(pluginId, status),
       ).catch(() => undefined);
     },
     onRecoveryDisposition: (pluginId, disposition) => {
-      void runWithAuthority(() =>
+      void Promise.resolve(
         surfaceHostLifecycle?.recoveryDisposition(pluginId, disposition),
       ).catch(() => undefined);
     },
@@ -1044,7 +1030,7 @@ function createPluginWorkspaceRuntimeParts(
   surfaceHostLifecycle = new PluginSurfaceHostLifecycle({
     workspaceId: workspace.workspaceId,
     host: pluginHost,
-    surfaces: pluginSurfaces,
+    surfaces,
     onRuntimeStatus: (pluginId, status) =>
       pipeline?.noteRuntimeStatus(pluginId, status),
     onError: (error, context) => {
@@ -1067,13 +1053,11 @@ function createPluginWorkspaceRuntimeParts(
     pnpmRunnerEntry: join(import.meta.dirname, "pnpm-runner.js"),
     onStatusChange: hooks.onPipelineStatus,
     onRuntimeStopped: (pluginId) =>
-      runWithAuthority(() =>
-        pluginSurfaces.stop({
-          kind: "plugin",
-          workspaceId: workspace.workspaceId,
-          pluginId,
-        }),
-      ),
+      surfaces.stop({
+        kind: "plugin",
+        workspaceId: workspace.workspaceId,
+        pluginId,
+      }),
     isEngineCaptureAvailable: () =>
       withWorkspaceAttachment(
         {
@@ -1736,6 +1720,13 @@ const SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS = 15_000;
 
 interface DesktopWorkspaceAuthorityState {
   activity: WorkspaceActivityState;
+  pluginRuntimes: PluginWorkspaceRuntimes<CreatedWorkspace>;
+  pluginSurfaces: PluginSurfaces<WebContentsView>;
+  sitePreviews: ReturnType<typeof createSitePreviewLifecycle>;
+  tryInVersionSessions: ReturnType<typeof createTryInVersionSessions>;
+  workspaceChatLifecycle: ReturnType<typeof createWorkspaceChatLifecycle>;
+  shareMountCommands: ReturnType<typeof createShareMountCommandsFor>;
+  shareViewFiles: ShareViewFilesState;
   sharedChannelWork: Promise<void>;
   sharedChannelSyncCursor: string | null;
   bookmarkProjectionPending: boolean;
@@ -1759,9 +1750,39 @@ type DesktopWorkspaceAuthorityLease = WorkspaceAuthorityLease<
   DesktopWorkspaceAuthorityState
 >;
 
-function createDesktopWorkspaceAuthorityState(): DesktopWorkspaceAuthorityState {
+function createDesktopWorkspaceAuthorityState(
+  binding: WorkspaceAuthorityBinding<RegistryEntry>,
+): DesktopWorkspaceAuthorityState {
+  const pluginRuntimes = new PluginWorkspaceRuntimes<CreatedWorkspace>({
+    assertWritable: assertWritableWorkspace,
+    isOpen: (workspaceId) =>
+      rendererWorkspaceSessions.isWorkspaceOpen(workspaceId),
+    create: createPluginWorkspaceRuntimeParts,
+    onPipelineStatus: (workspaceId, event) => {
+      withWorkspaceAttachment(
+        { workspaceId, attachmentId: binding.attachmentId },
+        () => notifyPluginStatusChanged(workspaceId, event),
+      );
+    },
+    onCleanupError: (workspaceId, error) => {
+      console.warn(
+        `[desktop] failed to clean up plugins for workspace "${workspaceId}"`,
+        error,
+      );
+    },
+  });
+  const pluginSurfaces = createPluginSurfaces(binding, pluginRuntimes);
   return {
     activity: new WorkspaceActivityState(),
+    pluginRuntimes,
+    pluginSurfaces,
+    sitePreviews: createSitePreviewLifecycle({
+      allowOrigin: allowLoopbackFrameOrigin,
+    }),
+    tryInVersionSessions: createTryInVersionSessionsFor(binding),
+    workspaceChatLifecycle: createWorkspaceChatLifecycleFor(binding),
+    shareMountCommands: createShareMountCommandsFor(binding),
+    shareViewFiles: new ShareViewFilesState(),
     sharedChannelWork: Promise.resolve(),
     sharedChannelSyncCursor: null,
     bookmarkProjectionPending: false,
@@ -1792,13 +1813,15 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
       Promise.resolve().then(() =>
         agentIntegration.disposeState(state.agentIntegration),
       ),
-      pluginWorkspaceRuntimes.stop(binding.workspaceId, () =>
-        pluginSurfaces.stop({
+      state.pluginRuntimes.stop(binding.workspaceId, () =>
+        state.pluginSurfaces.stop({
           kind: "workspace",
           workspaceId: binding.workspaceId,
         }),
       ),
-      sitePreviews.stopWorkspace(binding.workspaceId),
+      state.sitePreviews.stopWorkspace(binding.workspaceId),
+      state.tryInVersionSessions.settled(),
+      state.workspaceChatLifecycle.settled(),
       binding.workspace.remote?.remoteWorkspaceId
         ? closeRelayTransportWorkspace(
             binding.workspace.remote.remoteWorkspaceId,
@@ -1827,7 +1850,12 @@ function withWorkspaceAttachment<Result>(
   work: (lease: DesktopWorkspaceAuthorityLease) => Result,
 ): Result | undefined {
   if (!findWorkspace(workspace.workspaceId)) return undefined;
-  const lease = requireWorkspaceAuthority(workspace.workspaceId);
+  let lease: DesktopWorkspaceAuthorityLease;
+  try {
+    lease = requireWorkspaceAuthority(workspace.workspaceId);
+  } catch {
+    return undefined;
+  }
   try {
     if (
       workspace.attachmentId !== undefined &&
@@ -1855,6 +1883,154 @@ function withWorkspaceAttachmentAsync<Result>(
     return work(lease);
   });
 }
+
+const pluginWorkspaceRuntimes: Pick<
+  PluginWorkspaceRuntimes<CreatedWorkspace>,
+  "current" | "ensure" | "stop"
+> = {
+  current(workspaceId) {
+    return withWorkspaceAttachment({ workspaceId }, (lease) =>
+      lease.state.pluginRuntimes.current(workspaceId),
+    );
+  },
+  ensure(workspace) {
+    return workspaceAuthorities.withAuthority(workspace.workspaceId, (lease) => {
+      if (lease.binding.registeredRootPath !== workspace.rootPath) {
+        throw new Error("Plugin runtime request belongs to a retired workspace.");
+      }
+      return lease.state.pluginRuntimes.ensure(canonicalWorkspaceFor(lease));
+    });
+  },
+  stop(workspaceId, beforeDispose) {
+    return workspaceAuthorities.withAuthority(workspaceId, (lease) =>
+      lease.state.pluginRuntimes.stop(workspaceId, beforeDispose),
+    );
+  },
+};
+
+type WorkspacePluginSurfaces = Pick<
+  PluginSurfaces<WebContentsView>,
+  | "applyWebAppBounds"
+  | "authorizePanelSdk"
+  | "startPanel"
+  | "startWebApp"
+  | "stop"
+> & {
+  applyWebAppZoom(level: number): void;
+  close(): Promise<void>;
+  withPluginSdkGrantSuspensions<Result extends { readonly ok: boolean }>(
+    workspaceId: string,
+    run: (
+      suspend: (identity: { workspaceId: string; pluginId: string }) => void,
+    ) => Promise<Result>,
+  ): Promise<Result>;
+};
+
+const pluginSurfaces: WorkspacePluginSurfaces = {
+  startPanel(request, admission) {
+    return workspaceAuthorities.withAuthority(request.workspaceId, (lease) =>
+      lease.state.pluginSurfaces.startPanel(request, admission),
+    );
+  },
+  startWebApp(request, admission) {
+    return workspaceAuthorities.withAuthority(request.workspaceId, (lease) =>
+      lease.state.pluginSurfaces.startWebApp(request, admission),
+    );
+  },
+  authorizePanelSdk(request) {
+    const lease = requireWorkspaceAuthority(request.workspaceId);
+    try {
+      return lease.state.pluginSurfaces.authorizePanelSdk(request);
+    } finally {
+      lease.release();
+    }
+  },
+  applyWebAppBounds(request) {
+    return (
+      withWorkspaceAttachment({ workspaceId: request.workspaceId }, (lease) =>
+        lease.state.pluginSurfaces.applyWebAppBounds(request),
+      ) ?? false
+    );
+  },
+  applyWebAppZoom(level) {
+    for (const workspaceId of workspaceAuthorities.workspaceIds()) {
+      withWorkspaceAttachment({ workspaceId }, (lease) =>
+        lease.state.pluginSurfaces.applyWebAppZoom(level),
+      );
+    }
+  },
+  stop(target) {
+    if (target.kind !== "sender") {
+      return workspaceAuthorities.withAuthority(target.workspaceId, (lease) =>
+        lease.state.pluginSurfaces.stop(target),
+      );
+    }
+    return Promise.all(
+      workspaceAuthorities.workspaceIds().map((workspaceId) =>
+        workspaceAuthorities.withAuthority(workspaceId, (lease) =>
+          lease.state.pluginSurfaces.stop(target),
+        ),
+      ),
+    ).then(() => undefined);
+  },
+  withPluginSdkGrantSuspensions(workspaceId, run) {
+    return workspaceAuthorities.withAuthority(workspaceId, (lease) =>
+      lease.state.pluginSurfaces.withPluginSdkGrantSuspensions(run),
+    );
+  },
+  close() {
+    return Promise.all(
+      workspaceAuthorities.workspaceIds().map((workspaceId) =>
+        workspaceAuthorities.withAuthority(workspaceId, (lease) =>
+          lease.state.pluginSurfaces.close(),
+        ),
+      ),
+    ).then(() => undefined);
+  },
+};
+
+type SitePreviewLifecycle = ReturnType<typeof createSitePreviewLifecycle>;
+
+const sitePreviews: SitePreviewLifecycle = {
+  start: (input) =>
+    workspaceAuthorities.withAuthority(input.workspaceId, (lease) =>
+      lease.state.sitePreviews.start(input),
+    ),
+  status(workspaceId, siteRoot) {
+    const lease = requireWorkspaceAuthority(workspaceId);
+    try {
+      return lease.state.sitePreviews.status(workspaceId, siteRoot);
+    } finally {
+      lease.release();
+    }
+  },
+  stop(input) {
+    return workspaceAuthorities.withAuthority(input.workspaceId, (lease) =>
+      lease.state.sitePreviews.stop(input),
+    );
+  },
+  cancelSender(senderId) {
+    for (const workspaceId of workspaceAuthorities.workspaceIds()) {
+      withWorkspaceAttachment({ workspaceId }, (lease) =>
+        lease.state.sitePreviews.cancelSender(senderId),
+      );
+    }
+  },
+  stopWorkspace(workspaceId) {
+    return workspaceAuthorities.withAuthority(workspaceId, (lease) =>
+      lease.state.sitePreviews.stopWorkspace(workspaceId),
+    );
+  },
+  stopAll() {
+    return Promise.all(
+      workspaceAuthorities.workspaceIds().map((workspaceId) =>
+        workspaceAuthorities.withAuthority(workspaceId, (lease) =>
+          lease.state.sitePreviews.stopAll(),
+        ),
+      ),
+    ).then(() => undefined);
+  },
+};
 
 type DesktopWorkspaceAuthorityBinding =
   WorkspaceAuthorityBinding<RegistryEntry>;
@@ -2543,6 +2719,7 @@ const agentIntegration = createAgentIntegration({
     const lease = requireWorkspaceAuthority(workspaceId);
     const workspace = canonicalWorkspaceFor(lease);
     return {
+      attachmentId: lease.binding.attachmentId,
       workspaceId,
       rootPath: workspace.rootPath,
       state: lease.state.agentIntegration,
@@ -2590,9 +2767,13 @@ const agentIntegration = createAgentIntegration({
   // turn-completed via AgentSessionManager, a Settings stop, the endAgentRun
   // IPC) — the try-in-version review card listens on that single seam.
   // tryInVersionSessions is initialized just below, before any run can end.
-  onRunEnded: ({ workspaceId, runId, status }) => {
-    tryInVersionSessions.handleRunEnded(workspaceId, runId, status);
-    void chatDispatchService.scanWorkspace(workspaceId).catch((error) => {
+  onRunEnded: ({ attachmentId, workspaceId, runId, status }) => {
+    tryInVersionSessions.handleRunEnded(
+      { workspaceId, attachmentId },
+      runId,
+      status,
+    );
+    void chatDispatchService.scanWorkspace(workspaceId, attachmentId).catch((error) => {
       console.error("[desktop] post-panel-run dispatch scan:", error);
     });
   },
@@ -2602,58 +2783,99 @@ const agentIntegration = createAgentIntegration({
 // and a review state when the run ends. Resolution of the capture mirrors
 // requireEngineCapture (workspace identity from the registry, engine flag
 // gate); unflagged workspaces reject with the same product message.
-const tryInVersionSessions = createTryInVersionSessions({
+function createTryInVersionSessionsFor(
+  binding: WorkspaceAuthorityBinding<RegistryEntry>,
+) {
+  return createTryInVersionSessions({
   operationsFor: async (workspaceId) => {
-    desktopMarks.mark("try-in-version-ops-start");
-    const workspace = requireWorkspace(workspaceId);
-    await openWorkspaceActivity(workspace);
-    const capture = activity.engineCaptureFor(workspace.workspaceId);
-    if (!capture) {
-      throw new Error(
-        engineOffRefusal(
-          activity.getStatus(workspace.workspaceId),
-          "Versions",
-          // openWorkspaceActivity retained this session: only a restart
-          // re-runs the capture decision.
-          "restart",
-        ),
+    return workspaceAuthorities.withBinding(binding, async (lease) => {
+      desktopMarks.mark("try-in-version-ops-start");
+      const workspace = canonicalWorkspaceFor(lease);
+      await openWorkspaceActivity(workspace);
+      lease.assertCurrent();
+      const capture = workspaceActivity.engineCaptureFor(lease.state.activity);
+      if (!capture) {
+        throw new Error(
+          engineOffRefusal(
+            workspaceActivity.getStatus(workspace, lease.state.activity),
+            "Versions",
+            "restart",
+          ),
+        );
+      }
+      desktopMarks.measureSince(
+        "try-in-version-ops",
+        "try-in-version-ops-start",
       );
-    }
-    desktopMarks.measureSince("try-in-version-ops", "try-in-version-ops-start");
-    return capture;
+      return capture;
+    });
   },
   startRun: async (workspaceId, task, driverId) => {
-    assertChatRunnerIdle(workspaceId);
-    desktopMarks.mark("try-in-version-run-start-begin");
-    if (driverId) {
-      // The driver session path: the driver does the work and the run id
-      // comes from the session (startSession starts the run through
-      // AgentIntegration, so 0N-1 attribution applies identically).
-      const sessions = await agentSessionManager();
-      const snapshot = await sessions.startSession({
-        workspaceId,
-        driverId,
-        prompt: task,
-      });
-      const session = snapshot.session;
-      if (!session?.runId || session.status === "failed") {
-        throw new Error(session?.lastError ?? "The agent could not start.");
+    return workspaceAuthorities.withBinding(binding, async (lease) => {
+      assertChatRunnerIdle(workspaceId);
+      desktopMarks.mark("try-in-version-run-start-begin");
+      if (driverId) {
+        const sessions = await agentSessionManager();
+        const snapshot = await sessions.startSession({
+          workspaceId,
+          driverId,
+          prompt: task,
+        });
+        lease.assertCurrent();
+        const session = snapshot.session;
+        if (!session?.runId || session.status === "failed") {
+          throw new Error(session?.lastError ?? "The agent could not start.");
+        }
+        return { id: session.runId };
       }
-      return { id: session.runId };
-    }
-    // No driver: a bare dohc-tracked run — the user's own agent tool does the
-    // work in the folder and dohc attributes what it changes.
-    const run = await startAgentRunWithWorkspaceActivity(
-      requireWorkspace(workspaceId),
-    );
-    desktopMarks.measureSince(
-      "try-in-version-run-start",
-      "try-in-version-run-start-begin",
-    );
-    return run;
+      const run = await startAgentRunWithWorkspaceActivity(
+        canonicalWorkspaceFor(lease),
+      );
+      desktopMarks.measureSince(
+        "try-in-version-run-start",
+        "try-in-version-run-start-begin",
+      );
+      return run;
+    });
   },
-  onStateChanged: (workspaceId) => notifyRenderer({ workspaceId }),
-});
+  onStateChanged: (workspaceId) =>
+    withWorkspaceAttachment(
+      { workspaceId, attachmentId: binding.attachmentId },
+      () => notifyRenderer({ workspaceId }),
+    ),
+  });
+}
+
+const tryInVersionSessions = {
+  start(workspaceId: string, task: string, driverId?: string) {
+    return workspaceAuthorities.withAuthority(workspaceId, (lease) =>
+      lease.state.tryInVersionSessions.start(workspaceId, task, driverId),
+    );
+  },
+  handleRunEnded(
+    workspace: { workspaceId: string; attachmentId: symbol },
+    runId: string,
+    status: "complete" | "failed",
+  ): void {
+    withWorkspaceAttachment(workspace, (lease) =>
+      lease.state.tryInVersionSessions.handleRunEnded(
+        workspace.workspaceId,
+        runId,
+        status,
+      ),
+    );
+  },
+  snapshot(workspaceId: string) {
+    return withWorkspaceAttachment({ workspaceId }, (lease) =>
+      lease.state.tryInVersionSessions.snapshot(workspaceId),
+    ) ?? null;
+  },
+  dismiss(workspaceId: string): boolean {
+    return withWorkspaceAttachment({ workspaceId }, (lease) =>
+      lease.state.tryInVersionSessions.dismiss(workspaceId),
+    ) ?? false;
+  },
+};
 /**
  * The workspace's own `agents.*` settings: which driver it prefers, and which
  * model that driver should start with. Unreadable settings answer with the
@@ -2710,6 +2932,13 @@ function linkedChatStoreFor(
     : workspaceOrLease;
   try {
     lease.assertCurrent();
+    if (
+      !("binding" in workspaceOrLease) &&
+      workspaceOrLease.attachmentId !== undefined &&
+      workspaceOrLease.attachmentId !== lease.binding.attachmentId
+    ) {
+      throw new Error("This chat store request belongs to a retired workspace.");
+    }
   const existing = lease.state.linkedChatStore;
   if (existing) return existing;
   if (!rustEngineWorkspaceSessions) {
@@ -2740,10 +2969,17 @@ function linkedChatStoreFor(
 function agentDispatchStoreHandleFor(workspace: {
   workspaceId: string;
   rootPath: string;
+  attachmentId?: symbol;
 }): LiveAgentDispatchStoreHandle {
   const lease = requireWorkspaceAuthority(workspace.workspaceId);
   try {
     lease.assertCurrent();
+    if (
+      workspace.attachmentId !== undefined &&
+      workspace.attachmentId !== lease.binding.attachmentId
+    ) {
+      throw new Error("This dispatch store request belongs to a retired workspace.");
+    }
     const existing = lease.state.agentDispatchStoreHandle;
   if (existing) return existing;
   if (!rustEngineWorkspaceSessions) {
@@ -2925,10 +3161,16 @@ function workspaceForDispatch(workspaceId: string): ChatDispatchWorkspace | null
   if (!workspace || sharedViewOf(workspaceId)) {
     return null;
   }
-  return {
-    workspaceId: workspace.workspaceId,
-    rootPath: workspace.rootPath,
-  };
+  const lease = requireWorkspaceAuthority(workspaceId);
+  try {
+    return {
+      workspaceId: lease.binding.workspaceId,
+      rootPath: lease.binding.canonicalRootPath,
+      attachmentId: lease.binding.attachmentId,
+    };
+  } finally {
+    lease.release();
+  }
 }
 
 function syncDispatchWorkspaces(): ChatDispatchWorkspace[] {
@@ -3015,8 +3257,11 @@ function completePendingEngineStoreMoveForWorkspace(
   });
 }
 
-async function syncWorkspaceForDispatch(workspaceId: string): Promise<boolean> {
-  return workspaceAuthorities.withAuthority(workspaceId, async (lease) => {
+async function syncWorkspaceForDispatch(
+  dispatchWorkspace: ChatDispatchWorkspace,
+): Promise<boolean> {
+  const workspaceId = dispatchWorkspace.workspaceId;
+  return withWorkspaceAttachmentAsync(dispatchWorkspace, async (lease) => {
     const existing = lease.state.dispatchSync;
     if (existing) return await existing;
     const pending = Promise.resolve().then(async () => {
@@ -3174,11 +3419,11 @@ async function ensureWorkspaceActivityOpenUnderEngineStoreLock(
 }
 
 async function closeDispatchRunActivity(
-  workspace: Pick<CreatedWorkspace, "workspaceId">,
+  workspace: Pick<CreatedWorkspace, "workspaceId"> & { attachmentId?: symbol },
   options: { notifyRenderer?: boolean } = {},
 ): Promise<void> {
-  return workspaceAuthorities.withAuthority(
-    workspace.workspaceId,
+  return withWorkspaceAttachmentAsync(
+    workspace,
     async (lease) => {
       const existing = lease.state.activityClosing;
   if (existing) return await existing;
@@ -3217,28 +3462,22 @@ async function closeDispatchRunActivity(
 }
 
 async function acquireDispatchRunActivity(
-  workspace: CreatedWorkspace,
+  workspace: CreatedWorkspace & { attachmentId?: symbol },
 ): Promise<() => Promise<boolean>> {
-  const alreadyOpen = activity
-    .listOpenWorkspaceIds()
-    .includes(workspace.workspaceId);
-  await workspaceChatLifecycle.open(
-    workspace,
-    () => ensureWorkspaceActivityOpen(workspace),
-  );
-  // The release resolves to whether a fresh attempt would rebuild the
-  // capture, decided from the POST-close retention state (#541) — the
-  // close's own await is a window a renderer/CLI open can retain through.
-  // The refusal's recovery instruction derives from this fact.
-  return createDispatchRunRelease({
-    alreadyOpen,
-    isRetained: () => {
-      const lease = requireWorkspaceAuthority(workspace.workspaceId);
-      const retained = lease.state.retainedActivity;
-      lease.release();
-      return retained;
-    },
-    close: () => closeDispatchRunActivity(workspace),
+  return withWorkspaceAttachmentAsync(workspace, async (lease) => {
+    const current = canonicalWorkspaceFor(lease);
+    const alreadyOpen = workspaceActivity.isOpen(lease.state.activity);
+    await lease.state.workspaceChatLifecycle.open(
+      current,
+      () => ensureWorkspaceActivityOpen(current),
+    );
+    return createDispatchRunRelease({
+      alreadyOpen,
+      isRetained: () =>
+        withWorkspaceAttachment(current, (held) => held.state.retainedActivity) ??
+        false,
+      close: () => closeDispatchRunActivity(current),
+    });
   });
 }
 
@@ -3253,30 +3492,34 @@ function openDispatchWorkspaces(): ChatDispatchWorkspace[] {
 async function publishAgentPresence(
   input: ChatDispatchPresenceInput,
 ): Promise<void> {
-  const transport = await presenceRelayTransportForScope({
-    kind: "workspace",
-    workspaceId: input.workspaceId,
-  });
-  if (!transport) return;
-  const topics = [
-    `chat:thread:${input.threadId}`,
-    CHAT_AGENT_PRESENCE_TOPIC,
-  ];
-  if (input.leave) {
+  await withWorkspaceAttachmentAsync(input, async () => {
+    const transport = await presenceRelayTransportForScope({
+      kind: "workspace",
+      workspaceId: input.workspaceId,
+    });
+    if (!transport) return;
+    const topics = [
+      `chat:thread:${input.threadId}`,
+      CHAT_AGENT_PRESENCE_TOPIC,
+    ];
+    if (input.leave) {
+      await Promise.all(
+        topics.map((topic) =>
+          transport.leave({ topic, clientId: input.clientId }),
+        ),
+      );
+      return;
+    }
     await Promise.all(
-      topics.map((topic) => transport.leave({ topic, clientId: input.clientId })),
+      topics.map((topic) =>
+        transport.publish({
+          topic,
+          clientId: input.clientId,
+          state: input.state ?? null,
+        }),
+      ),
     );
-    return;
-  }
-  await Promise.all(
-    topics.map((topic) =>
-      transport.publish({
-        topic,
-        clientId: input.clientId,
-        state: input.state ?? null,
-      }),
-    ),
-  );
+  });
 }
 
 function cliRunMessageLinkKey(link: CliRunMessageLink): string {
@@ -3284,16 +3527,26 @@ function cliRunMessageLinkKey(link: CliRunMessageLink): string {
 }
 
 function hasPendingCliRunMessageLink(
-  workspaceId: string,
+  workspace: ChatDispatchWorkspace,
   runId: string,
 ): boolean {
+  const workspaceId = workspace.workspaceId;
   if (!findWorkspace(workspaceId)) return false;
   const lease = requireWorkspaceAuthority(workspaceId);
-  const prefix = `${runId}\u0000`;
-  const pending = [...lease.state.pendingCliRunMessageLinks].some((key) => key.startsWith(prefix),
-  );
-  lease.release();
-  return pending;
+  try {
+    if (
+      workspace.attachmentId !== undefined &&
+      workspace.attachmentId !== lease.binding.attachmentId
+    ) {
+      return false;
+    }
+    const prefix = `${runId}\u0000`;
+    return [...lease.state.pendingCliRunMessageLinks].some((key) =>
+      key.startsWith(prefix),
+    );
+  } finally {
+    lease.release();
+  }
 }
 
 function rememberPendingCliRunMessageLink(
@@ -3319,20 +3572,25 @@ const chatDispatchService = createChatDispatchService({
     agentDispatchStoreHandleFor(workspace).store,
   readRunnerSettings: async () =>
     (await readCachedUserSettingsFile(stateDir())).settings.runner,
-  identityFor: async (workspaceId, target) => {
-    await warmCredentialCache();
-    const workspace = findWorkspace(workspaceId);
-    const verifiedUserId = workspace
-      ? target
-        ? (await chatRelayIdentityFor(workspaceId, target, linkedChatStoreFor(workspace)))
-            .authorUserId
-        : resolveWorkspaceRelayAuthorId(workspace, cachedCredentials)
-      : undefined;
-    return {
-      displayName: localUserDisplayName(),
-      ...(verifiedUserId ? { verifiedUserId } : {}),
-    };
-  },
+  identityFor: (workspace, target) =>
+    withWorkspaceAttachmentAsync(workspace, async (lease) => {
+      await warmCredentialCache();
+      lease.assertCurrent();
+      const registered = canonicalWorkspaceFor(lease);
+      const verifiedUserId = target
+        ? (
+            await chatRelayIdentityFor(
+              registered.workspaceId,
+              target,
+              linkedChatStoreFor(lease),
+            )
+          ).authorUserId
+        : resolveWorkspaceRelayAuthorId(registered, cachedCredentials);
+      return {
+        displayName: localUserDisplayName(),
+        ...(verifiedUserId ? { verifiedUserId } : {}),
+      };
+    }),
   stateDir,
   appRoot: () => app.getAppPath(),
   isPackaged: () => app.isPackaged,
@@ -3343,13 +3601,21 @@ const chatDispatchService = createChatDispatchService({
   // workspace-open scan reaches dispatchStoreFor/chatStoreFor, whose daemon
   // workspace.open creates .dohc/engine/engine.db. Open sessions answer from
   // their capture snapshot (the flag applies at the NEXT open).
-  scanEligible: (workspace) => dispatchScanEligible(workspace, activity),
+  scanEligible: (workspace) =>
+    withWorkspaceAttachmentAsync(workspace, () =>
+      dispatchScanEligible(workspace, activity),
+    ),
   prepareRunWorkspace: async (workspace) => {
-    const registered = findWorkspace(workspace.workspaceId);
-    if (!registered) {
-      throw new Error(`Unknown workspace: ${workspace.workspaceId}`);
-    }
-    const release = await acquireDispatchRunActivity(registered);
+    const { registered, release } = await withWorkspaceAttachmentAsync(
+      workspace,
+      async (lease) => {
+        const registered = canonicalWorkspaceFor(lease);
+        return {
+          registered,
+          release: await acquireDispatchRunActivity(registered),
+        };
+      },
+    );
     // The helper owns both orders (#583): cause read before the release,
     // recovery derived from what the release actually did.
     await releaseAndRefuseWithoutCapture({
@@ -3372,41 +3638,54 @@ const chatDispatchService = createChatDispatchService({
       await release();
     };
   },
-  authorizeServiceNote: async (workspace, threadId, verifiedUserId) => {
-    try {
-      const store = linkedChatStoreFor(workspace);
-      await assertSharedChannelWritable({
-        workspaceId: workspace.workspaceId,
-        sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,
-        store,
-        target: { threadId },
+  authorizeServiceNote: (workspace, threadId, verifiedUserId) =>
+    withWorkspaceAttachmentAsync(workspace, async (lease) => {
+      try {
+        const store = linkedChatStoreFor(lease);
+        await assertSharedChannelWritable({
+          workspaceId: workspace.workspaceId,
+          sharedChannels: lease.binding.workspace.sharedChannels,
+          store,
+          target: { threadId },
+        });
+        const identity = await chatRelayIdentityFor(
+          workspace.workspaceId,
+          { threadId },
+          store,
+        );
+        return (
+          identity.authorUserId === verifiedUserId &&
+          (identity.joinedChannel === null || verifiedUserId !== undefined)
+        );
+      } catch (error) {
+        if (!(error instanceof SharedChannelReadOnlyError)) throw error;
+        return false;
+      }
+    }),
+  onMessagePosted: (workspace, threadId) => {
+    withWorkspaceAttachment(workspace, () => {
+      notifyRenderer({ workspaceId: workspace.workspaceId });
+      queueChatBookmarkProjection(workspace.workspaceId);
+      activity.queueCloudSync(workspace.workspaceId);
+      void withWorkspaceAttachmentAsync(workspace, () =>
+        syncSharedChannelsForChatTarget(workspace.workspaceId, { threadId }),
+      ).catch((error) => {
+        console.error("[desktop] shared channel sync:", error);
       });
-      const identity = await chatRelayIdentityFor(workspace.workspaceId, {
-        threadId,
-      }, store);
-      return (
-        identity.authorUserId === verifiedUserId &&
-        (identity.joinedChannel === null || verifiedUserId !== undefined)
-      );
-    } catch (error) {
-      if (!(error instanceof SharedChannelReadOnlyError)) throw error;
-      return false;
-    }
-  },
-  onMessagePosted: (workspaceId, threadId) => {
-    notifyRenderer({ workspaceId });
-    // An agent reply can mark a live bookmark projection pending.
-    queueChatBookmarkProjection(workspaceId);
-    activity.queueCloudSync(workspaceId);
-    void syncSharedChannelsForChatTarget(workspaceId, { threadId });
-    void chatDispatchService.scanWorkspace(workspaceId).catch((error) => {
-      console.error("[desktop] chat dispatch scan:", error);
+      void chatDispatchService
+        .scanWorkspace(workspace.workspaceId, workspace.attachmentId)
+        .catch((error) => {
+          console.error("[desktop] chat dispatch scan:", error);
+        });
     });
   },
-  onRunUpdated: (workspaceId) => notifyRenderer({ workspaceId }),
-  setRunAttribution: async (workspaceId, run) => {
-    const lease = requireWorkspaceAuthority(workspaceId);
-    try {
+  onRunUpdated: (workspace) =>
+    withWorkspaceAttachment(workspace, () =>
+      notifyRenderer({ workspaceId: workspace.workspaceId }),
+    ),
+  setRunAttribution: (workspace, run) =>
+    withWorkspaceAttachmentAsync(workspace, async (lease) => {
+      const workspaceId = workspace.workspaceId;
       if (run) {
       if (!(await activity.claimAgentRun(workspaceId, run,
             lease.binding.canonicalRootPath,
@@ -3415,34 +3694,36 @@ const chatDispatchService = createChatDispatchService({
       }
         lease.assertCurrent();
         lease.state.dispatchAgentRunId = run.agentRunId;
-      return;
-    }
-    const ownedRunId = lease.state.dispatchAgentRunId;
-    if (ownedRunId) {
+        return;
+      }
+      const ownedRunId = lease.state.dispatchAgentRunId;
+      if (ownedRunId) {
         await activity.clearAgentRun(workspaceId, ownedRunId,
           lease.binding.canonicalRootPath,
         );
       }
       lease.assertCurrent();
       lease.state.dispatchAgentRunId = null;
-    } finally {
-      lease.release();
-    }
-  },
-  runSlotOccupied: (workspaceId) => activity.hasAgentRun(workspaceId),
+    }),
+  runSlotOccupied: (workspace) =>
+    withWorkspaceAttachment(workspace, () =>
+      activity.hasAgentRun(workspace.workspaceId),
+    ) ?? false,
   hasPendingRunMessageLink: hasPendingCliRunMessageLink,
   publishPresence: publishAgentPresence,
   requeueFailedTrigger: (input) => {
     const workspace = workspaceForDispatch(input.workspaceId);
-    return workspace
+    return workspace &&
+      (input.attachmentId === undefined ||
+        workspace.attachmentId === input.attachmentId)
       ? agentDispatchStoreHandleFor(workspace).requeueFailedTrigger(input)
       : false;
   },
-  listAppQuitRecoveries: (workspaceId) => {
-    const workspace = workspaceForDispatch(workspaceId);
-    return workspace
+  listAppQuitRecoveries: (workspace) => {
+    const current = workspaceForDispatch(workspace.workspaceId);
+    return current && current.attachmentId === workspace.attachmentId
       ? agentDispatchStoreHandleFor(workspace).listAppQuitRecoveries(
-          workspaceId,
+          workspace.workspaceId,
         )
       : [];
   },
@@ -3457,17 +3738,31 @@ function assertChatRunnerIdle(workspaceId: string): void {
   }
 }
 
-const workspaceChatLifecycle = createWorkspaceChatLifecycle({
-  isReadOnly: (workspaceId) => Boolean(sharedViewOf(workspaceId)),
-  isReadyForMaintenance: (workspaceId) =>
-    findWorkspace(workspaceId)?.joinBootstrapPending !== true,
-  maintain: async (rootPath) => {
-    await ensureAgentsChatBlock(rootPath);
-  },
-  onError: (error) => {
-    console.error("[desktop] AGENTS.md chat description:", error);
-  },
-});
+function createWorkspaceChatLifecycleFor(
+  binding: WorkspaceAuthorityBinding<RegistryEntry>,
+) {
+  return createWorkspaceChatLifecycle({
+    isReadOnly: (workspaceId) =>
+      withWorkspaceAttachment(
+        { workspaceId, attachmentId: binding.attachmentId },
+        () => Boolean(sharedViewOf(workspaceId)),
+      ) ?? true,
+    isReadyForMaintenance: (workspaceId) =>
+      withWorkspaceAttachment(
+        { workspaceId, attachmentId: binding.attachmentId },
+        () => findWorkspace(workspaceId)?.joinBootstrapPending !== true,
+      ) ?? false,
+    maintain: async (rootPath) => {
+      if (rootPath !== binding.canonicalRootPath) {
+        throw new Error("Chat maintenance received a stale workspace root.");
+      }
+      await ensureAgentsChatBlock(rootPath);
+    },
+    onError: (error) => {
+      console.error("[desktop] AGENTS.md chat description:", error);
+    },
+  });
+}
 
 async function openWorkspaceActivityWith(
   workspace: CreatedWorkspace,
@@ -3485,13 +3780,16 @@ async function openWorkspaceActivityWith(
     async (lease) => {
       const canonicalWorkspace = canonicalWorkspaceFor(lease);
       lease.state.retainedActivity = true;
-  const result = await workspaceChatLifecycle.open(
+  const result = await lease.state.workspaceChatLifecycle.open(
         canonicalWorkspace,
     () => ensureOpen(canonicalWorkspace, options),
     options.afterActivityOpen,
       );
       lease.assertCurrent();
-  void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
+  void chatDispatchService.scanWorkspace(
+    workspace.workspaceId,
+    lease.binding.attachmentId,
+  ).catch((error) => {
     console.error("[desktop] chat dispatch workspace-open scan:", error);
   });
       queueChatBookmarkProjection(workspace.workspaceId);
@@ -3669,7 +3967,11 @@ function notifyPluginPanelInvalidated(
   );
 }
 
-const pluginSurfaces = new PluginSurfaces<WebContentsView>({
+function createPluginSurfaces(
+  binding: WorkspaceAuthorityBinding<RegistryEntry>,
+  pluginRuntimes: PluginWorkspaceRuntimes<CreatedWorkspace>,
+): PluginSurfaces<WebContentsView> {
+  return new PluginSurfaces<WebContentsView>({
   ViewClass: WebContentsView,
   bindWebAppZoom: bindGuestZoom,
   allowPanelOrigin: allowLoopbackFrameOrigin,
@@ -3679,14 +3981,28 @@ const pluginSurfaces = new PluginSurfaces<WebContentsView>({
     session.fromPartition(partition).clearStorageData(),
   notifyWebAppFailed: ({ senderId, generation, ...event }) => {
     const sender = webContents.fromId(senderId);
-    if (sender) notifyPluginWebAppFailed(sender, generation, event);
+    if (!sender) return;
+    withWorkspaceAttachment(
+      {
+        workspaceId: binding.workspaceId,
+        attachmentId: binding.attachmentId,
+      },
+      () => notifyPluginWebAppFailed(sender, generation, event),
+    );
   },
   notifyPanelInvalidated: ({ senderId, generation, ...event }) => {
     const sender = webContents.fromId(senderId);
-    if (sender) notifyPluginPanelInvalidated(sender, generation, event);
+    if (!sender) return;
+    withWorkspaceAttachment(
+      {
+        workspaceId: binding.workspaceId,
+        attachmentId: binding.attachmentId,
+      },
+      () => notifyPluginPanelInvalidated(sender, generation, event),
+    );
   },
   onPanelDisposed: ({ workspaceId, pluginId, panelId, surfaceId }) => {
-    pluginWorkspaceRuntimes.current(workspaceId)?.workspaceEvents.disposeOwner({
+    pluginRuntimes.current(workspaceId)?.workspaceEvents.disposeOwner({
       kind: "panel",
       workspaceId,
       pluginId,
@@ -3697,7 +4013,8 @@ const pluginSurfaces = new PluginSurfaces<WebContentsView>({
   onError: (error, context) => {
     console.warn(`[desktop] ${context}`, error);
   },
-});
+  });
+}
 
 async function requirePluginEngineCapture(workspaceId: string) {
   const workspace = requireWorkspace(workspaceId);
@@ -3866,9 +4183,18 @@ async function stopAllPluginWorkspaces(): Promise<void> {
   // longer be cancelled. Idempotent. The caller awaits it inside
   // WILL_QUIT_BUDGET_MS so quit cannot outrun a preview process's own
   // hard-kill path.
-  const sitePreviewStop = sitePreviews.stopAll();
-  const pluginStop = pluginWorkspaceRuntimes.close(() => pluginSurfaces.close());
-  await Promise.allSettled([sitePreviewStop, pluginStop]);
+  await Promise.allSettled(
+    workspaceAuthorities.workspaceIds().map((workspaceId) =>
+      workspaceAuthorities.withAuthority(workspaceId, async (lease) => {
+        await Promise.allSettled([
+          lease.state.sitePreviews.stopAll(),
+          lease.state.pluginRuntimes.close(() =>
+            lease.state.pluginSurfaces.close(),
+          ),
+        ]);
+      }),
+    ),
+  );
 }
 
 // Agent-facing `dohc chat`: the socket authenticates locally, then MAIN
@@ -3994,9 +4320,15 @@ async function openCliWorkspace(
 }
 
 async function startDesktopCliServer(): Promise<CliServerHandle> {
-  await workspaceChatLifecycle.boot(listWorkspaces()).catch((error: unknown) => {
-    console.error("[desktop] AGENTS.md boot maintenance:", error);
-  });
+  await Promise.allSettled(
+    listWorkspaces().map((workspace) =>
+      workspaceAuthorities.withAuthority(workspace.workspaceId, (lease) =>
+        lease.state.workspaceChatLifecycle.boot([
+          canonicalWorkspaceFor(lease),
+        ]),
+      ),
+    ),
+  );
   const server = await startCliServer({
     stateDir: stateDir(),
     listWorkspaces: () =>
@@ -4351,11 +4683,18 @@ function resolveShareViewFilesTarget(
 }
 
 let shareViewFiles: ShareViewFiles;
-const shareMountCommands = createShareMountCommands({
+function createShareMountCommandsFor(
+  binding: WorkspaceAuthorityBinding<RegistryEntry>,
+) {
+  return createShareMountCommands({
   readMounts: (workspaceId) =>
     storedShareMounts(findWorkspace(workspaceId) ?? {}),
-  writeMounts: (workspaceId, mounts) =>
-    setWorkspaceShareMounts(workspaceId, mounts),
+  writeMounts: (workspaceId, mounts) => {
+    if (workspaceId !== binding.workspaceId) {
+      throw new Error("Share mount write targeted a different workspace.");
+    }
+    setWorkspaceShareMounts(workspaceId, mounts);
+  },
   loadCredentials: () => loadAndCacheCurrentCredentials(),
   fetchInfo: (relay, shareId) => fetchShareViewInfo({ relay, shareId }),
   listDirectory: (absolutePath) => readdir(absolutePath).catch(() => []),
@@ -4371,11 +4710,71 @@ const shareMountCommands = createShareMountCommands({
   workspaceSummary: (workspaceId) =>
     workspaceSummaryFor(requireWorkspace(workspaceId)),
   refreshNativeWorkspaceSurfaces,
-  notifyRenderer,
+  notifyRenderer: (scope) =>
+    withWorkspaceAttachment(
+      { ...scope, attachmentId: binding.attachmentId },
+      () => notifyRenderer(scope),
+    ),
   logError: (message, error) => console.error(`[desktop] ${message}`, error),
-});
+  });
+}
+
+const shareMountCommands: ReturnType<typeof createShareMountCommandsFor> = {
+  mount(input) {
+    return workspaceAuthorities.withAuthority(
+      input.workspace.workspaceId,
+      (lease) =>
+        lease.state.shareMountCommands.mount({
+          ...input,
+          workspace: canonicalWorkspaceFor(lease),
+        }),
+    );
+  },
+  refresh(input) {
+    return workspaceAuthorities.withAuthority(
+      input.workspace.workspaceId,
+      (lease) =>
+        lease.state.shareMountCommands.refresh({
+          workspace: canonicalWorkspaceFor(lease),
+        }),
+    );
+  },
+  unmount(input) {
+    return workspaceAuthorities.withAuthority(
+      input.workspace.workspaceId,
+      (lease) =>
+        lease.state.shareMountCommands.unmount({
+          ...input,
+          workspace: canonicalWorkspaceFor(lease),
+        }),
+    );
+  },
+  filesLifecycle: {
+    createMount(owner, target) {
+      return workspaceAuthorities.withAuthority(target.workspaceId, (lease) =>
+        lease.state.shareMountCommands.filesLifecycle.createMount(owner, target),
+      );
+    },
+    removeMount(owner, target) {
+      return workspaceAuthorities.withAuthority(target.workspaceId, (lease) =>
+        lease.state.shareMountCommands.filesLifecycle.removeMount(owner, target),
+      );
+    },
+  },
+};
 
 shareViewFiles = createShareViewFiles({
+  stateFor: (target) => {
+    const lease = requireWorkspaceAuthority(target.workspaceId);
+    try {
+      if (target.schedulingRootPath !== lease.binding.canonicalRootPath) {
+        throw new Error("Share file cache request belongs to a retired workspace.");
+      }
+      return lease.state.shareViewFiles;
+    } finally {
+      lease.release();
+    }
+  },
   resolveTarget: resolveShareViewFilesTarget,
   openStore: (target) =>
     shareViewFilesStore(
@@ -7311,6 +7710,8 @@ function registerIpcHandlers(
         }
         return { workspace, session };
       },
+      withAuthority: (workspaceId, work) =>
+        workspaceAuthorities.withAuthority(workspaceId, work),
     },
     runtimes: pluginWorkspaceRuntimes,
     surfaces: pluginSurfaces,
