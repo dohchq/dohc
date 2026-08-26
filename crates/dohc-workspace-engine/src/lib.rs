@@ -796,6 +796,15 @@ impl EngineService {
         Self::with_supervisor(WorkspaceSupervisor::global())
     }
 
+    /// Harness-only deterministic session namespace for paired actor tests.
+    #[cfg(feature = "harness")]
+    #[doc(hidden)]
+    pub fn with_session_epoch_for_harness(session_epoch: impl Into<String>) -> Self {
+        let mut service = Self::new();
+        service.session_epoch = session_epoch.into();
+        service
+    }
+
     fn with_supervisor(supervisor: &'static WorkspaceSupervisor) -> Self {
         EngineService {
             supervisor,
@@ -8515,6 +8524,35 @@ impl EngineService {
             .await
             .map_err(map_runtime)?;
         Ok(json!({}))
+    }
+
+    /// Observe the actor-local writer cache without adding a product RPC.
+    #[cfg(feature = "harness")]
+    #[doc(hidden)]
+    pub async fn ydoc_cache_stats_for_harness(
+        &self,
+        handle: &WorkspaceHandle,
+    ) -> Result<dohc_engine_collab::CacheStats, RuntimeError> {
+        let actor = lock(&self.handles)
+            .get(handle)
+            .map(|open| open.actor.clone())
+            .ok_or(RuntimeError::ActorUnavailable)?;
+        actor.ydoc_cache_stats_for_test().await
+    }
+
+    /// Evict every actor-local document so the next consumer proves its cold
+    /// fallback on the same durable state.
+    #[cfg(feature = "harness")]
+    #[doc(hidden)]
+    pub async fn ydoc_cache_clear_for_harness(
+        &self,
+        handle: &WorkspaceHandle,
+    ) -> Result<dohc_engine_collab::CacheStats, RuntimeError> {
+        let actor = lock(&self.handles)
+            .get(handle)
+            .map(|open| open.actor.clone())
+            .ok_or(RuntimeError::ActorUnavailable)?;
+        actor.ydoc_cache_clear_for_test().await
     }
 
     fn open(&self, handle: Option<&WorkspaceHandle>) -> Result<OpenWorkspace, WireError> {

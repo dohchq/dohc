@@ -1,3 +1,4 @@
+use dohc_engine_collab::WriterDocCache;
 use dohc_engine_storage::{EngineStore, FaultInjector};
 
 use crate::{ApplyOutcome, ConflictApplyResult, LeaseProbe, ReplicationEnvelope, SyncError};
@@ -100,6 +101,28 @@ pub fn apply_replication_envelope(
     faults: &dyn FaultInjector,
     leases: &dyn LeaseProbe,
 ) -> Result<ApplyOutcome<RoutedApply>, SyncError> {
+    apply_replication_envelope_inner(store, None, envelope, faults, leases)
+}
+
+/// Actor pull route carrying the writer-thread document cache to the narrow
+/// Y.Doc PR3 consumers.
+pub fn apply_replication_envelope_with_cache(
+    store: &mut EngineStore,
+    cache: &mut WriterDocCache,
+    envelope: &ReplicationEnvelope,
+    faults: &dyn FaultInjector,
+    leases: &dyn LeaseProbe,
+) -> Result<ApplyOutcome<RoutedApply>, SyncError> {
+    apply_replication_envelope_inner(store, Some(cache), envelope, faults, leases)
+}
+
+fn apply_replication_envelope_inner(
+    store: &mut EngineStore,
+    mut cache: Option<&mut WriterDocCache>,
+    envelope: &ReplicationEnvelope,
+    faults: &dyn FaultInjector,
+    leases: &dyn LeaseProbe,
+) -> Result<ApplyOutcome<RoutedApply>, SyncError> {
     let Some(route) = OWNED_OP_ROUTES
         .iter()
         .find_map(|(kind, route)| (*kind == envelope.op_kind).then_some(*route))
@@ -114,6 +137,14 @@ pub fn apply_replication_envelope(
             |_tx, _op| Err(SyncError::UnsupportedOperation),
         ));
     };
+    if !matches!(route, OwnedRoute::Ydoc)
+        && let Some(cache) = cache.as_deref_mut()
+    {
+        // Other replicated routes can archive or replace Y.Doc lineages. Clear
+        // before their transactions so a later envelope in this pull cannot
+        // observe an ABA-valid stale entry after a committed crash.
+        cache.clear();
+    }
     match route {
         OwnedRoute::Chat => plain(crate::apply_chat_envelope(store, envelope, faults)),
         OwnedRoute::Secret => map_applied(
@@ -123,13 +154,17 @@ pub fn apply_replication_envelope(
                 ..RoutedApply::default()
             },
         ),
-        OwnedRoute::Ydoc => map_applied(
-            crate::apply_ydoc_envelope(store, envelope, faults, leases),
-            |ydoc| RoutedApply {
+        OwnedRoute::Ydoc => {
+            let applied = if let Some(cache) = cache {
+                crate::apply_ydoc_envelope_cached(store, cache, envelope, faults, leases)
+            } else {
+                crate::apply_ydoc_envelope(store, envelope, faults, leases)
+            };
+            map_applied(applied, |ydoc| RoutedApply {
                 conflicts_opened: ydoc.conflicts_opened,
                 ..RoutedApply::default()
-            },
-        ),
+            })
+        }
         OwnedRoute::Conflict => map_applied(
             crate::apply_conflict_envelope(store, envelope, faults, leases),
             |conflict| {

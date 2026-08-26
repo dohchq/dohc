@@ -984,6 +984,13 @@ pub(crate) fn structurally_equal_v2(left: &Ydoc, right: &Ydoc) -> Result<bool, C
     Ok(document_structure_v2(left)? == document_structure_v2(right)?)
 }
 
+/// Test evidence for comparing independently reconstructed full-state updates
+/// when raw bytes may differ only through canonicalized map-key ordering.
+#[doc(hidden)]
+pub fn structurally_equal_v2_for_test(left: &Ydoc, right: &Ydoc) -> Result<bool, CollabError> {
+    structurally_equal_v2(left, right)
+}
+
 fn document_structure_v2(doc: &Ydoc) -> Result<DocumentStructureV2, CollabError> {
     let pending = if let Some((update, missing)) = doc.pending_update_v1_with_missing() {
         Some(PendingStructureV2 {

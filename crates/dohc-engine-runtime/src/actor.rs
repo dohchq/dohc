@@ -36,7 +36,7 @@ use crate::search::{
 };
 use crate::search::{read_engine_search_policy, resolve_effective_policy};
 use dohc_engine_collab::{
-    AppendOutcome, CloseOutcome, CollabError, ContentKind, DocKey, LeaseRegistry,
+    AppendOutcome, CacheStats, CloseOutcome, CollabError, ContentKind, DocKey, LeaseRegistry,
     LineageClaimStatus, Projection, Regime, SceneAsset, WriterDocCache, Ydoc,
     encode_scene_asset_record, encode_scene_asset_records, import_portable_scene,
 };
@@ -1334,6 +1334,11 @@ enum Command {
         token: CancellationToken,
         reply: oneshot::Sender<Result<YdocResyncState, RuntimeError>>,
     },
+    /// Test evidence seam: observe the actor-local writer cache without
+    /// exposing it through the product protocol.
+    YdocCacheStatsForTest { reply: oneshot::Sender<CacheStats> },
+    /// Test evidence seam: force the next consumer down the cold path.
+    YdocCacheClearForTest { reply: oneshot::Sender<CacheStats> },
     YdocCloseSession {
         key: DocKey,
         materialization: Option<YdocCloseMaterialization>,
@@ -3623,6 +3628,26 @@ impl ActorHandle {
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    #[doc(hidden)]
+    pub async fn ydoc_cache_stats_for_test(&self) -> Result<CacheStats, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::YdocCacheStatsForTest { reply })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)
+    }
+
+    #[doc(hidden)]
+    pub async fn ydoc_cache_clear_for_test(&self) -> Result<CacheStats, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::YdocCacheClearForTest { reply })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)
     }
 
     pub async fn ydoc_close_session(
@@ -6669,6 +6694,7 @@ fn execute_http_request(
 
 fn execute_relay_operation(
     store: &mut EngineStore,
+    doc_cache: &mut WriterDocCache,
     transport: DeferredRelayTransport,
     operation: RelayOperation,
     leases: &LeaseRegistry,
@@ -6686,7 +6712,14 @@ fn execute_relay_operation(
             workspace_id,
             now_ms,
         } => client
-            .pull_chat_workspace(store, &workspace_id, &NoFaults, leases, now_ms)
+            .pull_chat_workspace_with_cache(
+                store,
+                doc_cache,
+                &workspace_id,
+                &NoFaults,
+                leases,
+                now_ms,
+            )
             .map(RelayOperationOutcome::Sync)
             .map_err(RuntimeError::from),
         RelayOperation::CommitCursor {
@@ -7885,6 +7918,7 @@ fn worker_main(
             } => {
                 let outcome = ydoc_settle_on_store(
                     &mut store,
+                    &mut doc_cache,
                     &root_dir,
                     &key,
                     &path,
@@ -7907,11 +7941,19 @@ fn worker_main(
             } => {
                 let outcome = ydoc_resync_on_store(
                     &mut store,
+                    &mut doc_cache,
                     &key,
                     expected_lineage_claim_id.as_deref(),
                     &token,
                 );
                 let _ = reply.send(outcome);
+            }
+            Command::YdocCacheStatsForTest { reply } => {
+                let _ = reply.send(doc_cache.stats());
+            }
+            Command::YdocCacheClearForTest { reply } => {
+                doc_cache.clear();
+                let _ = reply.send(doc_cache.stats());
             }
             Command::YdocCloseSession {
                 key,
@@ -9209,7 +9251,13 @@ fn worker_main(
                 let outcome = if token.is_cancelled() {
                     Err(RuntimeError::Cancelled)
                 } else {
-                    execute_relay_operation(&mut store, transport, operation, &leases)
+                    execute_relay_operation(
+                        &mut store,
+                        &mut doc_cache,
+                        transport,
+                        operation,
+                        &leases,
+                    )
                 };
                 // A pull can claim, replace, or advance lineages behind the
                 // local path (probe-covered; reset hooks stay unconditional).
@@ -9852,9 +9900,7 @@ fn ydoc_open_state_on_store(
         // Only the POST-LEASE read drains: a pre-lease probe mutating the
         // lineage while another session holds the lease would advance state
         // behind the active editor with no event or resync signal.
-        // A full drain may replace the lineage, so eviction must precede it.
-        doc_cache.remove(&key);
-        drain_deferred_ydoc_for_local_rpc(store, &key, &NoFaults)?;
+        drain_deferred_ydoc_for_local_rpc(store, doc_cache, &key, &NoFaults)?;
     }
     // An open sync conflict on this object freezes the OPEN as well as the
     // settle: the claimed lineage may be a peer's unreviewed base, and
@@ -10219,6 +10265,7 @@ fn ydoc_settle_disk_preimage(
 #[allow(clippy::too_many_arguments)]
 fn ydoc_settle_on_store(
     store: &mut EngineStore,
+    doc_cache: &mut WriterDocCache,
     root_dir: &std::path::Path,
     key: &DocKey,
     path: &str,
@@ -10284,6 +10331,7 @@ fn ydoc_settle_on_store(
             if marker.regime == Regime::Replicated {
                 let drained = drain_deferred_ydoc_for_live_session_rpc(
                     store,
+                    doc_cache,
                     key,
                     expected_lineage_claim_id,
                     faults,
@@ -10297,9 +10345,16 @@ fn ydoc_settle_on_store(
             }
         }
     }
-    let doc = match dohc_engine_collab::load_persisted(store, key)? {
-        Some(persisted) => persisted.doc,
-        None => return Err(dohc_engine_collab::CollabError::NoMarker.into()),
+    let cold_doc;
+    let doc = match store.read_with(|conn| doc_cache.doc_for_consumer(conn, key))? {
+        Some(cached) => cached,
+        None => {
+            cold_doc = match dohc_engine_collab::load_persisted(store, key)? {
+                Some(persisted) => persisted.doc,
+                None => return Err(dohc_engine_collab::CollabError::NoMarker.into()),
+            };
+            &cold_doc
+        }
     };
     // A doc holding unintegrated remote updates (missing cross-origin
     // dependency) must not settle: the projection would omit pending remote
@@ -10308,7 +10363,7 @@ fn ydoc_settle_on_store(
     if doc.has_pending_dependencies() {
         return Err(dohc_engine_collab::CollabError::MissingDependencies.into());
     }
-    let projection = project_ydoc_on_store(store, key, &doc, content_kind)?;
+    let projection = project_ydoc_on_store(store, key, doc, content_kind)?;
     // The in-band cap bounds only what the RESPONSE can carry as one wire
     // string — it must never gate the settle itself. Materialization writes
     // the file from `projection.content` down here, so an over-cap doc
@@ -10743,6 +10798,7 @@ fn ydoc_settle_on_store(
 
 fn ydoc_resync_on_store(
     store: &mut EngineStore,
+    doc_cache: &mut WriterDocCache,
     key: &DocKey,
     expected_lineage_claim_id: Option<&str>,
     token: &CancellationToken,
@@ -10766,28 +10822,50 @@ fn ydoc_resync_on_store(
         .is_some_and(|marker| marker.regime == Regime::Replicated)
         && observed_lineage_claim_id == expected_lineage_claim_id
     {
-        drain_deferred_ydoc_for_live_session_rpc(store, key, expected_lineage_claim_id, &NoFaults)?
+        drain_deferred_ydoc_for_live_session_rpc(
+            store,
+            doc_cache,
+            key,
+            expected_lineage_claim_id,
+            &NoFaults,
+        )?
     } else {
         dohc_engine_sync::YdocDrainResult::default()
     };
-    let persisted = dohc_engine_collab::load_persisted(store, key)?;
-    let lineage_claim_id = persisted
+    // Marker metadata is always read durably after the drain; CacheTuple proves
+    // document replay identity, not content-kind/regime/claim metadata.
+    let marker = dohc_engine_collab::read_marker(store, key)?;
+    let lineage_claim_id = marker
         .as_ref()
-        .and_then(|persisted| persisted.marker.lineage_claim_id.clone());
-    let artifact_assets = persisted
-        .as_ref()
-        .filter(|persisted| persisted.marker.content_kind == ContentKind::Scene)
-        .map(|persisted| scene_asset_descriptors_for_open(&persisted.doc))
+        .and_then(|marker| marker.lineage_claim_id.clone());
+    let cached_doc = if marker.is_some() {
+        store.read_with(|conn| doc_cache.doc_for_consumer(conn, key))?
+    } else {
+        None
+    };
+    let cold_doc = if marker.is_some() && cached_doc.is_none() {
+        dohc_engine_collab::load_persisted(store, key)?.map(|persisted| persisted.doc)
+    } else {
+        None
+    };
+    let doc = cached_doc.or(cold_doc.as_ref());
+    let artifact_assets = doc
+        .filter(|_| {
+            marker
+                .as_ref()
+                .is_some_and(|marker| marker.content_kind == ContentKind::Scene)
+        })
+        .map(scene_asset_descriptors_for_open)
         .unwrap_or_default();
-    if let Some(persisted) = persisted.as_ref()
-        && persisted.marker.content_kind == ContentKind::Scene
+    if let Some(doc) = doc
+        && marker
+            .as_ref()
+            .is_some_and(|marker| marker.content_kind == ContentKind::Scene)
     {
-        validate_scene_artifact_assets_on_store(store, key, &persisted.doc, &artifact_assets)?;
+        validate_scene_artifact_assets_on_store(store, key, doc, &artifact_assets)?;
     }
-    let initial_update = persisted.map_or_else(
-        || Ydoc::wire().encode_full_state(),
-        |persisted| persisted.doc.encode_full_state(),
-    );
+    let initial_update =
+        doc.map_or_else(|| Ydoc::wire().encode_full_state(), Ydoc::encode_full_state);
     let recovered_paths = drained
         .lineage_replacements
         .into_iter()
@@ -10853,7 +10931,7 @@ fn ydoc_close_session_on_store(
         // The drain PROJECTS internally now (idempotent-by-sha, dependency-
         // gated): drained remote content reaches the visible head with no
         // session left to settle it.
-        let drained = drain_deferred_ydoc_for_local_rpc(store, key, faults)?;
+        let drained = drain_deferred_ydoc_for_local_rpc(store, doc_cache, key, faults)?;
         if let Some(materialization) = materialization {
             materialize_ydoc_drain(store, key, &drained, materialization, now_ms, faults)?;
         }
@@ -10939,10 +11017,12 @@ fn materialize_ydoc_drain(
 /// decline visible at this boundary, matching the existing #632 diagnostic.
 fn drain_deferred_ydoc_for_local_rpc(
     store: &mut EngineStore,
+    doc_cache: &mut WriterDocCache,
     key: &DocKey,
     faults: &dyn FaultInjector,
 ) -> Result<dohc_engine_sync::YdocDrainResult, RuntimeError> {
-    let drained = dohc_engine_sync::drain_deferred_ydoc_for_key(store, key, faults)?;
+    let drained =
+        dohc_engine_sync::drain_deferred_ydoc_for_key_cached(store, doc_cache, key, faults)?;
     for declined in &drained.sharing_declined {
         eprintln!("engine: {declined}");
     }
@@ -10954,12 +11034,14 @@ fn drain_deferred_ydoc_for_local_rpc(
 /// lease, so resync cannot replace the lineage behind the active editor.
 fn drain_deferred_ydoc_for_live_session_rpc(
     store: &mut EngineStore,
+    doc_cache: &mut WriterDocCache,
     key: &DocKey,
     expected_lineage_claim_id: Option<&str>,
     faults: &dyn FaultInjector,
 ) -> Result<dohc_engine_sync::YdocDrainResult, RuntimeError> {
-    let drained = dohc_engine_sync::drain_deferred_ydoc_for_live_session(
+    let drained = dohc_engine_sync::drain_deferred_ydoc_for_live_session_cached(
         store,
+        doc_cache,
         key,
         expected_lineage_claim_id,
         faults,
@@ -13560,8 +13642,10 @@ mod share_view_identity_tests {
     use dohc_engine_testkit::ScratchDir;
 
     fn record(store: &mut EngineStore, access: ShareAccess) -> ShareViewIdentityRecord {
+        let mut doc_cache = WriterDocCache::new();
         let outcome = execute_relay_operation(
             store,
+            &mut doc_cache,
             DeferredRelayTransport::default(),
             RelayOperation::RecordShareViewIdentity {
                 workspace_id: "ws".to_owned(),

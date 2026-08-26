@@ -24,11 +24,11 @@ use rusqlite::Transaction;
 
 use crate::durable::{
     append_row, blob_seq_in_log, load_for_replay_gate, maybe_compact, query_marker,
-    validate_update_bytes, Regime,
+    validate_update_bytes, CompactOutcome, Regime,
 };
 use crate::error::CollabError;
 use crate::limits::DEFAULT_COMPACTION_THRESHOLD;
-use crate::DocKey;
+use crate::{DocKey, WriterDocCache};
 
 /// Who produced an update — the actor tag journaled into `ydoc_updates`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,9 +96,37 @@ pub fn apply_remote_update(
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<ReplicationApplyOutcome>, CollabError> {
+    apply_remote_update_outer(store, None, key, remote, faults, now_ms)
+}
+
+/// Drain-only outer wrapper that keeps an already-resident writer-cache entry
+/// aligned after the remote append commits. The remote replay gate itself
+/// remains cold; serving it is PR4 scope.
+pub fn apply_remote_update_for_deferred_drain(
+    store: &mut EngineStore,
+    cache: &mut WriterDocCache,
+    key: &DocKey,
+    remote: &RemoteUpdate,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+) -> Result<TxnOutcome<ReplicationApplyOutcome>, CollabError> {
+    apply_remote_update_outer(store, Some(cache), key, remote, faults, now_ms)
+}
+
+fn apply_remote_update_outer(
+    store: &mut EngineStore,
+    mut cache: Option<&mut WriterDocCache>,
+    key: &DocKey,
+    remote: &RemoteUpdate,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+) -> Result<TxnOutcome<ReplicationApplyOutcome>, CollabError> {
     let outcome = store.write_with(faults, |tx| {
         apply_remote_update_in_transaction(tx, key, remote, now_ms)
     })?;
+    if let Some(cache) = cache.as_deref_mut() {
+        cache.finish_deferred_remote_append(store, key, &outcome, &remote.bytes);
+    }
     // Self-bound the log: a genuinely-applied remote update folds the log once it
     // grows past the threshold (a replicated fold keeps a full-state snapshot,
     // never prunes — peers still bootstrap). A dedup/crash does nothing.
@@ -106,7 +134,23 @@ pub fn apply_remote_update(
         outcome,
         TxnOutcome::Committed(ReplicationApplyOutcome::Applied { .. })
     ) {
-        let _ = maybe_compact(store, key, DEFAULT_COMPACTION_THRESHOLD, faults, now_ms)?;
+        match maybe_compact(store, key, DEFAULT_COMPACTION_THRESHOLD, faults, now_ms)? {
+            TxnOutcome::Committed(CompactOutcome::Compacted {
+                up_to_seq,
+                snapshot_sha,
+                ..
+            }) => {
+                if let Some(cache) = cache.as_deref_mut() {
+                    cache.note_compacted(store, key, up_to_seq, &snapshot_sha);
+                }
+            }
+            TxnOutcome::Committed(CompactOutcome::Skipped { .. }) => {}
+            TxnOutcome::Crashed { .. } => {
+                if let Some(cache) = cache {
+                    cache.remove(key);
+                }
+            }
+        }
     }
     Ok(outcome)
 }

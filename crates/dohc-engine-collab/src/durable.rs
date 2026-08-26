@@ -2435,10 +2435,44 @@ pub fn validate_remote_update_with_pending(
 ) -> Result<(), CollabError> {
     validate_update_bytes(bytes)?;
     let base = store.read_with(|conn| load_for_replay_gate(conn, key))?;
+    validate_remote_update_with_pending_base(&base, pending, bytes)
+}
+
+/// Cache-backed form of [`validate_remote_update_with_pending`]. Serves only
+/// the no-predecessor case: the gate consumes exactly the canonical scan of
+/// the base's full-state re-encode, which is the predicate CACHE-VALID proves
+/// equal to the cold rebuild, so a cached base with an empty queue is
+/// verdict-identical by construction. With queued predecessors it falls back
+/// to cold reconstruction: a scratch forked from the cached full state and a
+/// cold incremental rebuild can hold differently-merged blocks, and applying
+/// the queued prefix to each can fragment the re-encoded delete-set endpoints
+/// differently — endpoints the gate reads — so a fork could accept a candidate
+/// the cold path rejects.
+pub fn validate_remote_update_with_pending_cached(
+    store: &EngineStore,
+    cache: &WriterDocCache,
+    key: &DocKey,
+    pending: &[Vec<u8>],
+    bytes: &[u8],
+) -> Result<(), CollabError> {
+    if pending.is_empty() {
+        validate_update_bytes(bytes)?;
+        if let Some(cached) = store.read_with(|conn| cache.doc_for_consumer(conn, key))? {
+            return crate::validate_replay_parity(cached, bytes);
+        }
+    }
+    validate_remote_update_with_pending(store, key, pending, bytes)
+}
+
+fn validate_remote_update_with_pending_base(
+    base: &Ydoc,
+    pending: &[Vec<u8>],
+    bytes: &[u8],
+) -> Result<(), CollabError> {
     for queued in pending {
         base.apply(queued)?;
     }
-    crate::validate_replay_parity(&base, bytes)
+    crate::validate_replay_parity(base, bytes)
 }
 
 /// The content sha the lineage last durably settled (public read for the
