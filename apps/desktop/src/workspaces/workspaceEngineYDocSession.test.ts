@@ -34,6 +34,7 @@ import {
 import { createTestScratch } from "./testTemp";
 
 const WORKSPACE_ID = "engine-ydoc-session-test";
+const ATTACHMENT_ID = Symbol("test-workspace-attachment");
 const PATH = "notes/solo.md";
 const INITIAL_MARKDOWN = "# Solo\n\nStart here.\n";
 
@@ -195,7 +196,7 @@ beforeEach(async () => {
   capture = createWorkspaceEngineCapture({
     workspaceId: WORKSPACE_ID,
     rootPath: root,
-    attachmentId: Symbol("test-workspace-attachment"),
+    attachmentId: ATTACHMENT_ID,
     rustEngineSessions: sessions,
     onError: (context) => captureErrors.push(context),
   });
@@ -695,7 +696,7 @@ it("never reports a save seq the settled file does not back", async () => {
   const honest = createWorkspaceEngineCapture({
     workspaceId: WORKSPACE_ID,
     rootPath: root,
-    attachmentId: Symbol("test-workspace-attachment"),
+    attachmentId: ATTACHMENT_ID,
     rustEngineSessions: sessions,
     openRustYDocProviderSession: async (options) =>
       await openEngineYdocProviderSession({ ...options, settleDebounceMs }),
