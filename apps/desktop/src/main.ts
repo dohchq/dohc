@@ -268,6 +268,10 @@ import { PresenceMutationOwner } from "./collab/presenceMutationOwner";
 import { createDesktopRendererWorkspaceRetirement } from "./mainRendererWorkspaceRetirement";
 import { RendererWorkspaceSessionOwner } from "./window/rendererWorkspaceSessionOwner";
 import { createExactRendererWorkspaceReferenceOwner } from "./window/exactRendererWorkspaceReference";
+import {
+  createRendererWorkspaceOperationRunner,
+  type ExactRendererWorkspaceOperation,
+} from "./window/rendererWorkspaceOperation";
 import { desktopMarks } from "./performance/desktopMarks";
 import { launchMarks, logLaunchMarksOnce } from "./performance/launchMarks";
 import {
@@ -1567,6 +1571,10 @@ type CloudSessionCredentials = NonNullable<
 >;
 let cachedCredentials: CloudSessionCredentials | null = null;
 let credentialCacheGeneration = 0;
+// Share kind is relay/account-scoped, not workspace-scoped. Keep one cache
+// across physical workspaces in the same session, and clear it whenever that
+// credential session ends or changes.
+const peekedReceivedGrantKinds = new Map<string, "dm" | "not-dm">();
 const credentialSessionCache =
   new CredentialSessionCache<CloudSessionCredentials>((snapshot) => {
     cachedCredentials = snapshot.credentials;
@@ -1581,14 +1589,9 @@ function warmCredentialCache(): Promise<void> {
 function setCachedCredentials(credentials: CloudSessionCredentials): void {
   credentialSessionCache.set(credentials);
 }
-// #742 P1 (rounds 3–5): the last successfully classified DM request lanes,
-// per workspace — see createLastKnownDmRequestLanesCache's own comment for
-// the staleness contract. Declared at module scope (not inside the IPC
-// registration closure) so relayShareJsonWithCredentials — a top-level
-// function, its own separate closure — can clear it from the 401 path below.
-const lastKnownDmRequestLanes = createLastKnownDmRequestLanesCache();
 function clearCachedCredentials(): void {
   credentialSessionCache.clear();
+  peekedReceivedGrantKinds.clear();
   // #742 P1 SECURITY (rounds 4–5): every credential-cache clear is a session
   // transition (login adoption, logout, or a current-session 401 — all three
   // call this one function). Clearing here, not at each call site
@@ -1596,7 +1599,14 @@ function clearCachedCredentials(): void {
   // never be served the PREVIOUS account's cached request rows, sender
   // emails included, regardless of which of the three paths ended the
   // session.
-  lastKnownDmRequestLanes.clear();
+  for (const workspaceId of workspaceAuthorities.workspaceIds()) {
+    const lease = workspaceAuthorities.acquire(workspaceId);
+    try {
+      lease.state.lastKnownDmRequestLanes.clear();
+    } finally {
+      lease.release();
+    }
+  }
 }
 async function loadAndCacheCurrentCredentials(): Promise<CloudSessionCredentials | null> {
   const loaded = await credentialSessionCache.adoptCurrent(() =>
@@ -1615,10 +1625,9 @@ async function loadAndCacheCurrentCredentials(): Promise<CloudSessionCredentials
 function normalizeServerUrl(url: string): string {
   return url.replace(/\/+$/, "");
 }
-async function remoteForWorkspace(workspaceId: string) {
+async function remoteForWorkspace(workspace: RegistryEntry) {
   await warmCredentialCache();
   const credentialGeneration = credentialCacheGeneration;
-  const workspace = requireWorkspace(workspaceId);
   const remote = workspace.remote;
   if (!remote) throw new Error("Sync this workspace before sharing.");
   const credentials = cachedCredentials;
@@ -1733,6 +1742,9 @@ interface DesktopWorkspaceAuthorityState {
   shareViewFiles: ShareViewFilesState;
   sharedChannelWork: Promise<void>;
   sharedChannelSyncCursor: string | null;
+  lastKnownDmRequestLanes: ReturnType<
+    typeof createLastKnownDmRequestLanesCache
+  >;
   bookmarkProjectionPending: boolean;
   bookmarkProjectionRunning: boolean;
   agentIntegration: AgentIntegrationState;
@@ -1758,6 +1770,11 @@ type DesktopWorkspaceOperation = WorkspaceAuthorityOperation<
   RegistryEntry,
   DesktopWorkspaceAuthorityState
 >;
+
+interface DesktopWorkspaceOperationAuthority {
+  readonly state: DesktopWorkspaceAuthorityState;
+  assertCurrent(): void;
+}
 
 function createDesktopWorkspaceAuthorityState(
   binding: WorkspaceAuthorityBinding<RegistryEntry>,
@@ -1794,6 +1811,7 @@ function createDesktopWorkspaceAuthorityState(
     shareViewFiles: new ShareViewFilesState(),
     sharedChannelWork: Promise.resolve(),
     sharedChannelSyncCursor: null,
+    lastKnownDmRequestLanes: createLastKnownDmRequestLanesCache(),
     bookmarkProjectionPending: false,
     bookmarkProjectionRunning: false,
     agentIntegration: new AgentIntegrationState(),
@@ -1865,50 +1883,11 @@ function withPhysicalWorkspaceOperation<Result>(
   return workspaceAuthorities.withOperation(workspaceId, work);
 }
 
-type DesktopRendererWorkspaceOperation = DesktopWorkspaceOperation & {
-  readonly session: NonNullable<
-    ReturnType<RendererWorkspaceSessionOwner<WebContents>["current"]>
-  >;
-  assertCurrent(): void;
-};
-
-function withRendererWorkspaceOperation<Result>(
-  sender: WebContents,
-  workspaceId: string,
-  inactiveMessage: string,
-  work: (
-    operation: DesktopRendererWorkspaceOperation,
-  ) => Result | Promise<Result>,
-): Promise<Result> {
-  const session = rendererWorkspaceSessions.current(sender);
-  return withPhysicalWorkspaceOperation(workspaceId, async (physical) => {
-    const assertCurrent = (): void => {
-      physical.assertCurrent();
-      const workspace = physical.workspace;
-      if (
-        !session?.isCurrent() ||
-        session.workspaceId !== workspace.workspaceId ||
-        session.attachmentId !== workspace.attachmentId
-      ) {
-        throw new Error(inactiveMessage);
-      }
-    };
-    assertCurrent();
-    if (!session) throw new Error(inactiveMessage);
-    const operation = Object.freeze({
-      get workspace() {
-        return physical.workspace;
-      },
-      state: physical.state,
-      signal: physical.signal,
-      session,
-      assertCurrent,
-    });
-    const result = await work(operation);
-    assertCurrent();
-    return result;
-  });
-}
+type DesktopRendererWorkspaceOperation = ExactRendererWorkspaceOperation<
+  DesktopWorkspaceOperation["workspace"],
+  DesktopWorkspaceAuthorityState,
+  NonNullable<ReturnType<RendererWorkspaceSessionOwner<WebContents>["current"]>>
+>;
 
 function withCurrentWorkspaceAttachmentOperation<Result>(
   workspace: { workspaceId: string; attachmentId: symbol },
@@ -2231,16 +2210,16 @@ async function cleanupFailedPhysicalWorkspace(
 }
 
 function serializeWorkspaceAuthorityWork<Result>(
-  lease: DesktopWorkspaceAuthorityLease,
+  authority: DesktopWorkspaceOperationAuthority,
   run: () => Promise<Result>,
 ): Promise<Result> {
-  const state = lease.state;
+  const state = authority.state;
   const result = state.sharedChannelWork
     .catch(() => undefined)
     .then(async () => {
-      lease.assertCurrent();
+      authority.assertCurrent();
       const value = await run();
-      lease.assertCurrent();
+      authority.assertCurrent();
       return value;
     });
   state.sharedChannelWork = result.then(
@@ -2358,8 +2337,17 @@ function syncWorkspaceSharedChannels(
 ): Promise<number> {
   return workspaceAuthorities.withAuthority(workspaceId, (lease) =>
     serializeWorkspaceAuthorityWork(lease, () =>
-    runSharedChannelSyncPass(lease, priorityChannelWireId),
+      runSharedChannelSyncPass(lease, priorityChannelWireId),
     ),
+  );
+}
+
+function syncRendererWorkspaceSharedChannels(
+  operation: DesktopRendererWorkspaceOperation,
+  priorityChannelWireId?: string,
+): Promise<number> {
+  return serializeWorkspaceAuthorityWork(operation, () =>
+    runSharedChannelSyncPass(operation, priorityChannelWireId),
   );
 }
 
@@ -2376,24 +2364,52 @@ async function syncSharedChannelsForChatTarget(
   return workspaceAuthorities.withAuthority(workspaceId, async (lease) => {
     lease.assertCurrent();
     if (!target) return await syncWorkspaceSharedChannels(workspaceId);
-  let joinedChannel: JoinedSharedChannel | null;
-  try {
-    joinedChannel = await joinedSharedChannelForTarget({
-      workspaceId,
-      sharedChannels: entry.sharedChannels,
-      store: linkedChatStoreFor(lease),
-      target,
-    });
+    let joinedChannel: JoinedSharedChannel | null;
+    try {
+      joinedChannel = await joinedSharedChannelForTarget({
+        workspaceId,
+        sharedChannels: entry.sharedChannels,
+        store: linkedChatStoreFor(lease),
+        target,
+      });
       lease.assertCurrent();
     } catch {
       // The lookup failed. That says nothing about the target, so an ordinary
       // pass is safer than treating the channel as local.
       return await syncWorkspaceSharedChannels(workspaceId);
-  }
+    }
     if (!joinedChannel || joinedChannel.ended === true) return 0;
-    return await syncWorkspaceSharedChannels(workspaceId, joinedChannel.channelWireId,
+    return await syncWorkspaceSharedChannels(
+      workspaceId,
+      joinedChannel.channelWireId,
     );
   });
+}
+
+async function syncRendererSharedChannelsForChatTarget(
+  operation: DesktopRendererWorkspaceOperation,
+  target?: { channelId: string } | { threadId: string },
+): Promise<number> {
+  operation.assertCurrent();
+  const workspace = operation.workspace;
+  if (!target) return syncRendererWorkspaceSharedChannels(operation);
+  let joinedChannel: JoinedSharedChannel | null;
+  try {
+    joinedChannel = await joinedSharedChannelForTarget({
+      workspaceId: workspace.workspaceId,
+      sharedChannels: workspace.sharedChannels,
+      store: linkedChatStoreFor(workspace),
+      target,
+    });
+    operation.assertCurrent();
+  } catch {
+    return syncRendererWorkspaceSharedChannels(operation);
+  }
+  if (!joinedChannel || joinedChannel.ended === true) return 0;
+  return syncRendererWorkspaceSharedChannels(
+    operation,
+    joinedChannel.channelWireId,
+  );
 }
 
 // A pass with no rows to cover left nothing behind. Clearing the remainder this
@@ -2409,20 +2425,41 @@ function reportSharedChannelPassCoveredEverything(workspaceId: string): void {
 }
 
 async function runSharedChannelSyncPass(
-  lease: DesktopWorkspaceAuthorityLease,
+  authority: DesktopWorkspaceAuthorityLease | DesktopWorkspaceOperation,
   priorityChannelWireId?: string,
 ): Promise<number> {
-  const workspaceId = lease.binding.workspaceId;
+  const binding = "binding" in authority ? authority.binding : null;
+  const operation: DesktopWorkspaceOperation | null =
+    binding === null ? (authority as DesktopWorkspaceOperation) : null;
+  const workspaceId = operation
+    ? operation.workspace.workspaceId
+    : binding!.workspaceId;
+  let requestCredentialGeneration: number | null = null;
+  const assertRequestCurrent = (): void => {
+    authority.assertCurrent();
+    if (
+      operation &&
+      requestCredentialGeneration !== null &&
+      credentialCacheGeneration !== requestCredentialGeneration
+    ) {
+      throw new Error("Your dohc Cloud session changed. Try again.");
+    }
+  };
   // Live rows this pass is responsible for. A pass that dies before finishing —
   // or never starts, because the account is signed out — refreshed none of them,
   // and must say so rather than report a clean sweep. Seeded before the
   // credential work so a rejection there still knows the count.
   let liveRows = 0;
   try {
-    lease.assertCurrent();
-    const current = findWorkspace(workspaceId);
+    authority.assertCurrent();
+    const current = operation ? operation.workspace : findWorkspace(workspaceId);
     const entry = current
-      ? { ...current, rootPath: lease.binding.canonicalRootPath }
+      ? {
+          ...current,
+          rootPath: operation
+            ? current.rootPath
+            : binding!.canonicalRootPath,
+        }
       : null;
     // The registry, unfiltered: the pass needs a row's PLACE even after the row
     // stops being syncable, or a revoked cursor sends the rotation back to the
@@ -2435,7 +2472,8 @@ async function runSharedChannelSyncPass(
     }
     liveRows = channels.length;
     await warmCredentialCache();
-    lease.assertCurrent();
+    requestCredentialGeneration = credentialCacheGeneration;
+    assertRequestCurrent();
     const syncCredentials = cachedCredentials;
     // Signed out, or signed in to a server this workspace does not sync with:
     // the rows are joined and none of them got refreshed.
@@ -2469,24 +2507,32 @@ async function runSharedChannelSyncPass(
       registryOrder,
       passRows: SHARED_CHANNEL_SYNC_PASS_ROWS,
       resumeAfterChannelWireId:
-        lease.state.sharedChannelSyncCursor ?? undefined,
+        authority.state.sharedChannelSyncCursor ?? undefined,
       priorityChannelWireId,
-      pull: async (input) =>
-        await daemonRelay.pullSharedChannel({
+      pull: async (input) => {
+        assertRequestCurrent();
+        const pulled = await daemonRelay.pullSharedChannel({
           shareId: input.shareId,
           channelWireId: input.channelWireId,
-        }),
-      push: async (input) =>
-        await daemonRelay.pushSharedChannel({
+        });
+        assertRequestCurrent();
+        return pulled;
+      },
+      push: async (input) => {
+        assertRequestCurrent();
+        const pushed = await daemonRelay.pushSharedChannel({
           shareId: input.shareId,
           channelWireId: input.channelWireId,
-        }),
+        });
+        assertRequestCurrent();
+        return pushed;
+      },
     });
-    lease.assertCurrent();
+    assertRequestCurrent();
     if (result.resumeAfterChannelWireId === null) {
-      lease.state.sharedChannelSyncCursor = null;
+      authority.state.sharedChannelSyncCursor = null;
     } else {
-      lease.state.sharedChannelSyncCursor = result.resumeAfterChannelWireId;
+      authority.state.sharedChannelSyncCursor = result.resumeAfterChannelWireId;
     }
     // Rows this pass did not leave fresh: the ones the rotation never reached,
     // plus the ones it reached and could not sync.
@@ -2504,21 +2550,30 @@ async function runSharedChannelSyncPass(
       // composer honesty keys off `joined.access`, and a corrected row stops
       // every future pass from re-attempting the same doomed push.
       const readOnly = new Set(result.readOnlyShareIds);
+      assertRequestCurrent();
       setWorkspaceSharedChannels(
         workspaceId,
-        (findWorkspace(workspaceId)?.sharedChannels ?? []).map((channel) => {
+        ((operation ? operation.workspace : findWorkspace(workspaceId))
+          ?.sharedChannels ?? []).map((channel) => {
           if (ended.has(channel.shareId)) return { ...channel, ended: true };
           if (readOnly.has(channel.shareId)) return { ...channel, access: "read-only" as const };
           return channel;
         }),
       );
+      assertRequestCurrent();
     }
     if (result.changed || result.endedShareIds.length > 0 || result.readOnlyShareIds.length > 0) {
+      assertRequestCurrent();
       notifyRenderer({ workspaceId });
     }
-    if (result.changed) await projectPendingChatBookmarksAfterPull(workspaceId);
+    if (result.changed) {
+      assertRequestCurrent();
+      await projectPendingChatBookmarksAfterPull(workspaceId);
+      assertRequestCurrent();
+    }
     return unrefreshed;
   } catch (error) {
+    if (operation) assertRequestCurrent();
     console.error(`[desktop] shared channel sync failed for ${workspaceId}:`, error);
     return liveRows;
   }
@@ -4878,35 +4933,35 @@ function createShareMountCommandsFor(
   binding: WorkspaceAuthorityBinding<RegistryEntry>,
 ) {
   return createShareMountCommands({
-  readMounts: (workspaceId) =>
-    storedShareMounts(findWorkspace(workspaceId) ?? {}),
-  writeMounts: (workspaceId, mounts) => {
-    if (workspaceId !== binding.workspaceId) {
-      throw new Error("Share mount write targeted a different workspace.");
-    }
-    setWorkspaceShareMounts(workspaceId, mounts);
-  },
-  loadCredentials: () => loadAndCacheCurrentCredentials(),
-  fetchInfo: (relay, shareId) => fetchShareViewInfo({ relay, shareId }),
-  listDirectory: (absolutePath) => readdir(absolutePath).catch(() => []),
-  withWorkspaceOperation: (workspaceRoot, run) =>
-    withExclusiveWorkspaceOperation(
-      workspaceRoot,
-      (_markWorkspaceChanged, lease) => run(lease),
-    ),
-  files: () => shareViewFiles,
-  projectionFor: shareViewFilesMountProjection,
-  closeRelayWorkspace: (workspaceId) =>
-    closeRelayTransportWorkspace(workspaceId),
-  workspaceSummary: (workspaceId) =>
-    workspaceSummaryFor(requireWorkspace(workspaceId)),
-  refreshNativeWorkspaceSurfaces,
-  notifyRenderer: (scope) =>
-    withWorkspaceAttachment(
-      { ...scope, attachmentId: binding.attachmentId },
-      () => notifyRenderer(scope),
-    ),
-  logError: (message, error) => console.error(`[desktop] ${message}`, error),
+    readMounts: (workspaceId) =>
+      storedShareMounts(findWorkspace(workspaceId) ?? {}),
+    writeMounts: (workspaceId, mounts) => {
+      if (workspaceId !== binding.workspaceId) {
+        throw new Error("Share mount write targeted a different workspace.");
+      }
+      setWorkspaceShareMounts(workspaceId, mounts);
+    },
+    loadCredentials: () => loadAndCacheCurrentCredentials(),
+    fetchInfo: (relay, shareId) => fetchShareViewInfo({ relay, shareId }),
+    listDirectory: (absolutePath) => readdir(absolutePath).catch(() => []),
+    withWorkspaceOperation: (workspaceRoot, run) =>
+      withExclusiveWorkspaceOperation(
+        workspaceRoot,
+        (_markWorkspaceChanged, lease) => run(lease),
+      ),
+    files: () => shareViewFiles,
+    projectionFor: shareViewFilesMountProjection,
+    closeRelayWorkspace: (workspaceId) =>
+      closeRelayTransportWorkspace(workspaceId),
+    workspaceSummary: (workspaceId) =>
+      workspaceSummaryFor(requireWorkspace(workspaceId)),
+    refreshNativeWorkspaceSurfaces,
+    notifyRenderer: (scope) =>
+      withWorkspaceAttachment(
+        { ...scope, attachmentId: binding.attachmentId },
+        () => notifyRenderer(scope),
+      ),
+    logError: (message, error) => console.error(`[desktop] ${message}`, error),
   });
 }
 
@@ -4915,39 +4970,75 @@ const shareMountCommands: Pick<
   "mount" | "refresh" | "unmount"
 > = {
   mount(input) {
+    const attachmentId = Reflect.get(input.workspace, "attachmentId");
+    if (typeof attachmentId !== "symbol") {
+      throw new Error("Share mount work requires an exact workspace attachment.");
+    }
     return withPhysicalWorkspaceOperation(
       input.workspace.workspaceId,
       async (operation) => {
+        if (operation.workspace.attachmentId !== attachmentId) {
+          throw new Error("Share mount work belongs to a retired workspace.");
+        }
         await engineDaemonStartup;
         operation.assertCurrent();
+        input.assertCurrent();
         return operation.state.shareMountCommands.mount({
           ...input,
           workspace: operation.workspace,
+          assertCurrent: () => {
+            operation.assertCurrent();
+            input.assertCurrent();
+          },
         });
       },
     );
   },
   refresh(input) {
+    const attachmentId = Reflect.get(input.workspace, "attachmentId");
+    if (typeof attachmentId !== "symbol") {
+      throw new Error("Share mount work requires an exact workspace attachment.");
+    }
     return withPhysicalWorkspaceOperation(
       input.workspace.workspaceId,
       async (operation) => {
+        if (operation.workspace.attachmentId !== attachmentId) {
+          throw new Error("Share mount work belongs to a retired workspace.");
+        }
         await engineDaemonStartup;
         operation.assertCurrent();
+        input.assertCurrent();
         return operation.state.shareMountCommands.refresh({
           workspace: operation.workspace,
+          assertCurrent: () => {
+            operation.assertCurrent();
+            input.assertCurrent();
+          },
         });
       },
     );
   },
   unmount(input) {
+    const attachmentId = Reflect.get(input.workspace, "attachmentId");
+    if (typeof attachmentId !== "symbol") {
+      throw new Error("Share mount work requires an exact workspace attachment.");
+    }
     return withPhysicalWorkspaceOperation(
       input.workspace.workspaceId,
       async (operation) => {
+        if (operation.workspace.attachmentId !== attachmentId) {
+          throw new Error("Share mount work belongs to a retired workspace.");
+        }
         await engineDaemonStartup;
         operation.assertCurrent();
+        input.assertCurrent();
         return operation.state.shareMountCommands.unmount({
           ...input,
           workspace: operation.workspace,
+          assertCurrent: () => {
+            operation.assertCurrent();
+            input.assertCurrent();
+          },
         });
       },
     );
@@ -5321,6 +5412,20 @@ const rendererWorkspaceSessions: RendererWorkspaceSessionOwner<WebContents> =
         error,
       );
     },
+  });
+
+const withRendererWorkspaceOperation =
+  createRendererWorkspaceOperationRunner<
+    WebContents,
+    DesktopWorkspaceOperation["workspace"],
+    DesktopWorkspaceAuthorityState,
+    NonNullable<
+      ReturnType<RendererWorkspaceSessionOwner<WebContents>["current"]>
+    >
+  >({
+    currentSession: (sender) => rendererWorkspaceSessions.current(sender),
+    withPhysicalOperation: (workspaceId, work) =>
+      withPhysicalWorkspaceOperation(workspaceId, work),
   });
 
 const exactRendererWorkspaceReferences =
@@ -5987,12 +6092,19 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.exportWorkspaceZip, async (event, payload) => {
     assertTrustedSender(event);
     const input = ExportWorkspaceZipPayload.parse(payload);
-    // Gather + bound BEFORE asking where to save: an over-limit export
-    // refuses without ever showing a dialog.
-    const { entries, baseName } = await withRendererWorkspaceOperation(
+    const inactiveMessage =
+      "Export stopped because this window changed workspaces.";
+    const workspaceReference = await exactRendererWorkspaceReferences.capture(
       event.sender,
       input.workspaceId,
-      "Export stopped because this window changed workspaces.",
+      inactiveMessage,
+    );
+    // Gather + bound BEFORE asking where to save: an over-limit export
+    // refuses without ever showing a dialog.
+    const { entries, baseName } = await exactRendererWorkspaceReferences.withReference(
+      event.sender,
+      workspaceReference,
+      inactiveMessage,
       (operation) =>
         collectOwnedZipEntries(operation.workspace, input.relativePath),
     );
@@ -6010,11 +6122,21 @@ function registerIpcHandlers(
       });
       target = result.canceled ? null : (result.filePath ?? null);
     }
-    if (target !== null) {
-      const { writeFile } = await import("node:fs/promises");
-      await writeFile(target, buildStoreZip(entries));
-    }
-    return ExportWorkspaceZipResult.parse({ path: target });
+    return exactRendererWorkspaceReferences.withReference(
+      event.sender,
+      workspaceReference,
+      inactiveMessage,
+      async (operation) => {
+        if (target === null) {
+          return ExportWorkspaceZipResult.parse({ path: null });
+        }
+        const { writeFile } = await import("node:fs/promises");
+        operation.assertCurrent();
+        await writeFile(target, buildStoreZip(entries));
+        operation.assertCurrent();
+        return ExportWorkspaceZipResult.parse({ path: target });
+      },
+    );
   });
 
   // "Copy as Markdown" / "Export as HTML" / "Export as PDF" (ViewHeader's
@@ -6025,10 +6147,16 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.exportDocumentFile, async (event, payload) => {
     assertTrustedSender(event);
     const input = ExportDocumentFilePayload.parse(payload);
+    const inactiveMessage =
+      "Export stopped because this window changed workspaces.";
     // workspaceId authorizes the CALLER (a real, currently-open workspace) —
     // the save target itself is intentionally outside any workspace, same as
     // exportWorkspaceZip above.
-    requireWorkspace(input.workspaceId);
+    const workspaceReference = await exactRendererWorkspaceReferences.capture(
+      event.sender,
+      input.workspaceId,
+      inactiveMessage,
+    );
 
     const exportKinds: Record<
       typeof input.kind,
@@ -6063,17 +6191,29 @@ function registerIpcHandlers(
       });
       target = result.canceled ? null : (result.filePath ?? null);
     }
-    if (target !== null) {
-      const { writeFile } = await import("node:fs/promises");
-      if (input.kind === "pdf") {
-        await writeFile(target, await renderHtmlToPdf(input.content));
-      } else {
-        // Markdown and HTML both arrive as the exact text to persist —
-        // markdown is the raw document source, HTML the self-contained render.
-        await writeFile(target, input.content, "utf8");
-      }
-    }
-    return ExportDocumentFileResult.parse({ path: target });
+    return exactRendererWorkspaceReferences.withReference(
+      event.sender,
+      workspaceReference,
+      inactiveMessage,
+      async (operation) => {
+        if (target === null) {
+          return ExportDocumentFileResult.parse({ path: null });
+        }
+        const { writeFile } = await import("node:fs/promises");
+        operation.assertCurrent();
+        if (input.kind === "pdf") {
+          const pdf = await renderHtmlToPdf(input.content);
+          operation.assertCurrent();
+          await writeFile(target, pdf);
+        } else {
+          // Markdown and HTML both arrive as the exact text to persist —
+          // markdown is the raw document source, HTML the self-contained render.
+          await writeFile(target, input.content, "utf8");
+        }
+        operation.assertCurrent();
+        return ExportDocumentFileResult.parse({ path: target });
+      },
+    );
   });
 
   // Native explorer context menu over the CLOSED EXPLORER_MENU_COMMANDS set:
@@ -7076,32 +7216,52 @@ function registerIpcHandlers(
         "This came to you through a share — copy it into your own files to share it onward.",
       );
     }
-    const entry = requireWorkspace(input.workspaceId);
-    if (shareViewIsPresent(entry.shareView)) {
-      throw new Error("This is a shared view — only the original workspace can be shared.");
-    }
-    const { remote } = await remoteForWorkspace(input.workspaceId);
-    const created = await relayShareJson<{ shareId: string }>(
-      `/sync/${encodeURIComponent(remote.remoteWorkspaceId)}/shares`,
-      {
-        method: "POST",
-        body: JSON.stringify({
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Sharing stopped because this window changed workspaces.",
+      async (operation) => {
+        const workspace = operation.workspace;
+        if (shareViewIsPresent(workspace.shareView)) {
+          throw new Error(
+            "This is a shared view — only the original workspace can be shared.",
+          );
+        }
+        const { remote, credentials, credentialGeneration } =
+          await remoteForWorkspace(workspace);
+        operation.assertCurrent();
+        const created = await awaitCredentialGeneration({
+          capturedGeneration: credentialGeneration,
+          currentGeneration: () => credentialCacheGeneration,
+          run: () => {
+            operation.assertCurrent();
+            return relayShareJsonWithCredentials<{ shareId: string }>(
+              credentials,
+              `/sync/${encodeURIComponent(remote.remoteWorkspaceId)}/shares`,
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  recipientEmail: input.recipientEmail,
+                  access: input.access,
+                  ...(input.paths ? { paths: input.paths } : {}),
+                  ...(input.versionId ? { versionId: input.versionId } : {}),
+                }),
+              },
+            );
+          },
+        });
+        operation.assertCurrent();
+        const shareCode = buildShareCode({
+          shareId: created.shareId,
+          relayUrl: credentials.relayUrl!,
+        });
+        return CreateRelayShareResult.parse({
+          shareId: created.shareId,
+          shareCode,
           recipientEmail: input.recipientEmail,
-          access: input.access,
-          ...(input.paths ? { paths: input.paths } : {}),
-          ...(input.versionId ? { versionId: input.versionId } : {}),
-        }),
+        });
       },
     );
-    const shareCode = buildShareCode({
-      shareId: created.shareId,
-      relayUrl: cachedCredentials!.relayUrl!,
-    });
-    return CreateRelayShareResult.parse({
-      shareId: created.shareId,
-      shareCode,
-      recipientEmail: input.recipientEmail,
-    });
   });
 
   ipcMain.handle(CHANNELS.listRelayShares, async (event) => {
@@ -7141,49 +7301,73 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.shareChatChannel, async (event, payload) => {
     assertTrustedSender(event);
     const input = ShareChatChannelPayload.parse(payload);
-    const { workspace, capture } = await requireEngineCapture(
+    return withRendererWorkspaceOperation(
+      event.sender,
       input.workspaceId,
-      "Chats",
-    );
-    assertWritableWorkspace(workspace);
-    const store = linkedChatStoreFor(workspace);
-    await requireShareableChatChannel({
-      workspaceId: workspace.workspaceId,
-      channelId: input.channelId,
-      store,
-    });
-    const wireId = await store.getChannelWireId({
-      workspaceId: workspace.workspaceId,
-      channelId: input.channelId,
-    });
-    if (!wireId) throw new Error("This channel can't be shared yet.");
-    // "general" is every workspace's personal default channel — the SAME wire
-    // id everywhere by design, so sharing it would merge strangers' personal
-    // chats. Refuse with a way forward.
-    if (wireId === GENERAL_CHANNEL_WIRE_ID) {
-      throw new Error(
-        "The general channel is personal to each workspace. Create a channel to share it.",
-      );
-    }
-    const entry = findWorkspace(input.workspaceId);
-    if (entry?.sharedChannels?.some((channel) => channel.channelWireId === wireId)) {
-      throw new Error(
-        "This channel was shared with you — ask the person who shared it to add more people.",
-      );
-    }
-    const { remote } = await remoteForWorkspace(input.workspaceId);
-    const created = await relayShareJson<{ shareId: string }>(
-      `/sync/${encodeURIComponent(remote.remoteWorkspaceId)}/shares`,
-      {
-        method: "POST",
-        body: JSON.stringify({
-          recipientEmail: input.recipientEmail,
-          channelWireId: wireId,
-          ...(input.access ? { access: input.access } : {}),
-        }),
+      "Sharing stopped because this window changed workspaces.",
+      async (operation) => {
+        const { workspace } = await requireEngineCapture(
+          operation.workspace,
+          "Chats",
+        );
+        operation.assertCurrent();
+        assertWritableWorkspace(workspace);
+        const store = linkedChatStoreFor(workspace);
+        await requireShareableChatChannel({
+          workspaceId: workspace.workspaceId,
+          channelId: input.channelId,
+          store,
+        });
+        operation.assertCurrent();
+        const wireId = await store.getChannelWireId({
+          workspaceId: workspace.workspaceId,
+          channelId: input.channelId,
+        });
+        operation.assertCurrent();
+        if (!wireId) throw new Error("This channel can't be shared yet.");
+        // "general" is every workspace's personal default channel — the SAME wire
+        // id everywhere by design, so sharing it would merge strangers' personal
+        // chats. Refuse with a way forward.
+        if (wireId === GENERAL_CHANNEL_WIRE_ID) {
+          throw new Error(
+            "The general channel is personal to each workspace. Create a channel to share it.",
+          );
+        }
+        if (
+          workspace.sharedChannels?.some(
+            (channel) => channel.channelWireId === wireId,
+          )
+        ) {
+          throw new Error(
+            "This channel was shared with you — ask the person who shared it to add more people.",
+          );
+        }
+        const { remote, credentials, credentialGeneration } =
+          await remoteForWorkspace(workspace);
+        operation.assertCurrent();
+        const created = await awaitCredentialGeneration({
+          capturedGeneration: credentialGeneration,
+          currentGeneration: () => credentialCacheGeneration,
+          run: () => {
+            operation.assertCurrent();
+            return relayShareJsonWithCredentials<{ shareId: string }>(
+              credentials,
+              `/sync/${encodeURIComponent(remote.remoteWorkspaceId)}/shares`,
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  recipientEmail: input.recipientEmail,
+                  channelWireId: wireId,
+                  ...(input.access ? { access: input.access } : {}),
+                }),
+              },
+            );
+          },
+        });
+        operation.assertCurrent();
+        return ShareChatChannelResult.parse({ shareId: created.shareId });
       },
     );
-    return ShareChatChannelResult.parse({ shareId: created.shareId });
   });
 
   // What THIS machine joined, for the channels the caller named. The grant
@@ -7196,15 +7380,24 @@ function registerIpcHandlers(
   // and an unscoped answer would carry that history to the renderer. The write
   // gate is unaffected — assertSharedChannelWritable reads the whole array
   // here in main and never crosses IPC at all.
-  function joinedChannelAnswers(workspaceId: string, channelWireIds: readonly string[]) {
-    const entry = requireWorkspace(workspaceId);
-    return scopeJoinedChannels(entry.sharedChannels ?? [], channelWireIds);
+  function joinedChannelAnswers(
+    workspace: RegistryEntry,
+    channelWireIds: readonly string[],
+  ) {
+    return scopeJoinedChannels(workspace.sharedChannels ?? [], channelWireIds);
   }
 
   ipcMain.handle(
     CHANNELS.listJoinedSharedChannels,
     createListJoinedSharedChannelsIpcHandler({
       assertTrustedSender,
+      withWorkspaceOperation: (event, workspaceId, work) =>
+        withRendererWorkspaceOperation(
+          event.sender,
+          workspaceId,
+          "Sharing stopped because this window changed workspaces.",
+          work,
+        ),
       answerJoinedChannels: joinedChannelAnswers,
     }),
   );
@@ -7260,158 +7453,257 @@ function registerIpcHandlers(
   }
 
   function reserveAndPullSharedChannelForWorkspace(input: {
+    operation: DesktopRendererWorkspaceOperation;
+    assertCurrent?: () => void;
     relay: SyncRelayConnection;
     shareId: string;
-    workspaceId: string;
-    rootPath: string;
     recipientUserId: string;
     relayUrl: string;
     preWrite?: (info: { channelWireId: string }) => void;
   }): Promise<JoinedSharedChannel> {
+    const workspace = input.operation.workspace;
+    const assertCurrent = input.assertCurrent ?? input.operation.assertCurrent;
     return reserveAndPullSharedChannel({
-      ...input,
-      readSharedChannels: (workspaceId) =>
-        findWorkspace(workspaceId)?.sharedChannels ?? [],
-      writeSharedChannels: setWorkspaceSharedChannels,
-      fetchInfo: fetchSharedChannelInfo,
-      pull: ({ workspaceId, rootPath, relay, shareId, channelWireId }) =>
-        relayClientForWorkspace({ workspaceId, rootPath, relay }).pullSharedChannel({
+      relay: input.relay,
+      shareId: input.shareId,
+      workspaceId: workspace.workspaceId,
+      rootPath: workspace.rootPath,
+      recipientUserId: input.recipientUserId,
+      relayUrl: input.relayUrl,
+      preWrite: input.preWrite,
+      readSharedChannels: () => {
+        assertCurrent();
+        return input.operation.workspace.sharedChannels ?? [];
+      },
+      writeSharedChannels: (workspaceId, channels) => {
+        if (workspaceId !== workspace.workspaceId) {
+          throw new Error("Shared channel write targeted a different workspace.");
+        }
+        assertCurrent();
+        setWorkspaceSharedChannels(workspaceId, channels);
+        assertCurrent();
+      },
+      fetchInfo: async (request) => {
+        assertCurrent();
+        const info = await fetchSharedChannelInfo(request);
+        assertCurrent();
+        return info;
+      },
+      pull: async ({ workspaceId, rootPath, relay, shareId, channelWireId }) => {
+        assertCurrent();
+        const result = await relayClientForWorkspace({
+          workspaceId,
+          rootPath,
+          relay,
+        }).pullSharedChannel({
           shareId,
           channelWireId,
-        }),
-      serialize: (workspaceId, run) =>
-        workspaceAuthorities.withAuthority(workspaceId, (lease) =>
-          serializeWorkspaceAuthorityWork(lease, run),
-        ),
-      afterPull: projectPendingChatBookmarksAfterPull,
+        });
+        assertCurrent();
+        return result;
+      },
+      serialize: (workspaceId, run) => {
+        if (workspaceId !== workspace.workspaceId) {
+          throw new Error("Shared channel work targeted a different workspace.");
+        }
+        return serializeWorkspaceAuthorityWork(
+          { state: input.operation.state, assertCurrent },
+          run,
+        );
+      },
+      afterPull: async (workspaceId) => {
+        if (workspaceId !== workspace.workspaceId) {
+          throw new Error("Shared channel pull targeted a different workspace.");
+        }
+        assertCurrent();
+        await projectPendingChatBookmarksAfterPull(workspaceId);
+        assertCurrent();
+      },
     });
   }
 
   ipcMain.handle(CHANNELS.listChatChannelShares, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListChatChannelSharesPayload.parse(payload);
-    const entry = requireWorkspace(input.workspaceId);
-    // Relay-side listings need a signed-in session; without one the local
-    // joined set still answers (their local copies keep working offline), and
-    // the relay side reports signed-out or unreachable instead of posing as
-    // an empty listing.
-    //
-    // ONE credentials snapshot serves both the fetch and the session key, so
-    // the key always names the session the request actually used — a login
-    // or switch landing mid-flight cannot drift them apart.
-    await warmCredentialCache();
-    const credentials = cachedCredentials;
-    const shareIdsClaimedElsewhere = shareIdsClaimedByOtherWorkspaces(input.workspaceId);
-    const relay = await readRelayChatShareLanes({
-      fetchListing: async () => {
-        if (!credentials) throw new RelaySessionError("Sign in to dohc Cloud first.");
-        const listing = await relayShareJsonWithCredentials<{
-          granted?: Array<Record<string, unknown>>;
-          received?: Array<Record<string, unknown>>;
-        }>(credentials, "/sync/shares");
-        const receivedShareIds = Array.isArray(listing.received)
-          ? listing.received.flatMap((row) => {
-              const selector = row.selector as { kind?: unknown } | undefined;
-              return selector?.kind === "chat-channel" && typeof row.shareId === "string"
-                ? [row.shareId]
-                : [];
-            })
-          : [];
-        // This adds bounded relay reads only for uncached grants. The one-time
-        // cost closes the request-gate window before the first syncDms poll.
-        await resolveDmKinds({
-          shareIds: receivedShareIds,
-          cache: peekedReceivedGrantKinds,
-          peekKind: (shareId) =>
-            peekReceivedGrantKindForShare(
-              {
-                baseUrl: normalizeServerUrl(credentials.relayUrl!),
-                token: credentials.token,
-                fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Sharing stopped because this window changed workspaces.",
+      async (operation) => {
+        const workspace = operation.workspace;
+        // Relay-side listings need a signed-in session; without one the local
+        // joined set still answers (their local copies keep working offline), and
+        // the relay side reports signed-out or unreachable instead of posing as
+        // an empty listing.
+        //
+        // ONE credentials snapshot serves both the fetch and the session key, so
+        // the key always names the session the request actually used — a login
+        // or switch landing mid-flight cannot drift them apart.
+        await warmCredentialCache();
+        operation.assertCurrent();
+        const credentials = cachedCredentials;
+        const shareCredentialGeneration = credentialCacheGeneration;
+        const assertCurrentShareSession = (): void => {
+          operation.assertCurrent();
+          if (credentialCacheGeneration !== shareCredentialGeneration) {
+            throw new Error("Your dohc Cloud session changed. Try again.");
+          }
+        };
+        const shareIdsClaimedElsewhere = shareIdsClaimedByOtherWorkspaces(
+          workspace.workspaceId,
+        );
+        const relay = await readRelayChatShareLanes({
+          fetchListing: async () => {
+            if (!credentials) {
+              throw new RelaySessionError("Sign in to dohc Cloud first.");
+            }
+            assertCurrentShareSession();
+            const listing = await relayShareJsonWithCredentials<{
+              granted?: Array<Record<string, unknown>>;
+              received?: Array<Record<string, unknown>>;
+            }>(credentials, "/sync/shares");
+            assertCurrentShareSession();
+            const receivedShareIds = Array.isArray(listing.received)
+              ? listing.received.flatMap((row) => {
+                  const selector = row.selector as
+                    | { kind?: unknown }
+                    | undefined;
+                  return selector?.kind === "chat-channel" &&
+                    typeof row.shareId === "string"
+                    ? [row.shareId]
+                    : [];
+                })
+              : [];
+            // This adds bounded relay reads only for uncached grants. The one-time
+            // cost closes the request-gate window before the first syncDms poll.
+            await resolveDmKinds({
+              shareIds: receivedShareIds,
+              cache: peekedReceivedGrantKinds,
+              peekKind: async (shareId) => {
+                assertCurrentShareSession();
+                const kind = await peekReceivedGrantKindForShare(
+                  {
+                    baseUrl: normalizeServerUrl(credentials.relayUrl!),
+                    token: credentials.token,
+                    fetch: relayFetchWithTimeout(
+                      SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS,
+                    ),
+                  },
+                  shareId,
+                );
+                assertCurrentShareSession();
+                return kind;
               },
-              shareId,
-            ),
+            });
+            assertCurrentShareSession();
+            for (const shareId of shareIdsToWithholdFromOrdinaryInvites({
+              shareIds: receivedShareIds,
+              cache: peekedReceivedGrantKinds,
+            })) {
+              shareIdsClaimedElsewhere.add(shareId);
+            }
+            return listing;
+          },
+          remoteWorkspaceId: workspace.remote?.remoteWorkspaceId ?? null,
+          shareIdsClaimedElsewhere,
         });
-        for (const shareId of shareIdsToWithholdFromOrdinaryInvites({
-          shareIds: receivedShareIds,
-          cache: peekedReceivedGrantKinds,
-        })) {
-          shareIdsClaimedElsewhere.add(shareId);
-        }
-        return listing;
+        assertCurrentShareSession();
+        // The caller's channels PLUS the invitations this answer is about to hand
+        // it. The sharing surface shows both, and for each invitation it decides
+        // whether this workspace has already joined that channel — a question it
+        // cannot ask in advance, because this call is what tells it the invitation
+        // exists. Read after the relay await, so a sync pass that ended a row
+        // during it is reflected rather than missed.
+        const shownWireIds = [
+          ...input.channelWireIds,
+          ...(relay.state === "answered"
+            ? relay.received.map((row) => row.channelWireId)
+            : []),
+        ];
+        return ListChatChannelSharesResult.parse({
+          joined: joinedChannelAnswers(operation.workspace, shownWireIds),
+          sessionKey:
+            relay.state === "signed-out"
+              ? null
+              : chatShareSessionKey(credentials),
+          relay,
+        });
       },
-      remoteWorkspaceId: entry.remote?.remoteWorkspaceId ?? null,
-      shareIdsClaimedElsewhere,
-    });
-    // The caller's channels PLUS the invitations this answer is about to hand
-    // it. The sharing surface shows both, and for each invitation it decides
-    // whether this workspace has already joined that channel — a question it
-    // cannot ask in advance, because this call is what tells it the invitation
-    // exists. Read after the relay await, so a sync pass that ended a row
-    // during it is reflected rather than missed.
-    const shownWireIds = [
-      ...input.channelWireIds,
-      ...(relay.state === "answered"
-        ? relay.received.map((row) => row.channelWireId)
-        : []),
-    ];
-    return ListChatChannelSharesResult.parse({
-      joined: joinedChannelAnswers(input.workspaceId, shownWireIds),
-      sessionKey:
-        relay.state === "signed-out" ? null : chatShareSessionKey(credentials),
-      relay,
-    });
+    );
   });
 
   ipcMain.handle(CHANNELS.joinSharedChannel, async (event, payload) => {
     assertTrustedSender(event);
     const input = JoinSharedChannelPayload.parse(payload);
-    const { workspace } = await requireEngineCapture(
+    return withRendererWorkspaceOperation(
+      event.sender,
       input.workspaceId,
-      "Chats",
+      "Joining stopped because this window changed workspaces.",
+      async (operation) => {
+        const { workspace } = await requireEngineCapture(
+          operation.workspace,
+          "Chats",
+        );
+        operation.assertCurrent();
+        if (shareViewIsPresent(workspace.shareView)) {
+          throw new Error(
+            "Shared views are read-only — join channels from a workspace you own.",
+          );
+        }
+        await warmCredentialCache();
+        operation.assertCurrent();
+        const joinCredentials = cachedCredentials;
+        const joinCredentialGeneration = credentialCacheGeneration;
+        if (!joinCredentials) throw new Error("Sign in to dohc Cloud first.");
+        if (!joinCredentials.relayUrl) {
+          throw new Error(
+            "Reconnect dohc Cloud with a sync relay URL, then try again.",
+          );
+        }
+        // Capture the credentials BEFORE the awaits below (CodeRabbit Data
+        // Integrity): cachedCredentials can change during fetch/pull (logout,
+        // relay switch) — re-reading it afterwards can crash on null or pin the
+        // joined channel to the WRONG relay. The join is atomic against the
+        // credentials it started with.
+        const joinedRelayUrl = joinCredentials.relayUrl;
+        const joinedRecipientUserId = joinCredentials.userId;
+        const assertCurrentJoinSession = (): void => {
+          operation.assertCurrent();
+          if (credentialCacheGeneration !== joinCredentialGeneration) {
+            throw new Error("Your dohc Cloud session changed. Try again.");
+          }
+        };
+        const relay = {
+          baseUrl: normalizeServerUrl(joinedRelayUrl),
+          token: joinCredentials.token,
+          // Same timeout wrapper runSharedChannelSyncPass uses (:973): an
+          // unresponsive relay must abort the join's fetch/pull instead of leaving
+          // the renderer's "Joining…" button stuck forever.
+          fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
+        };
+        let joined: JoinedSharedChannel;
+        try {
+          joined = await reserveAndPullSharedChannelForWorkspace({
+            operation,
+            assertCurrent: assertCurrentJoinSession,
+            relay,
+            shareId: input.shareId,
+            recipientUserId: joinedRecipientUserId,
+            relayUrl: joinedRelayUrl,
+          });
+          assertCurrentJoinSession();
+        } catch (error) {
+          assertCurrentJoinSession();
+          if (error instanceof ShareUnavailableError) {
+            throw new Error("That shared channel isn't available anymore.");
+          }
+          throw error;
+        }
+        return JoinSharedChannelResult.parse({
+          joined: { ...joined, ended: false },
+        });
+      },
     );
-    const entry = requireWorkspace(input.workspaceId);
-    if (shareViewIsPresent(entry.shareView)) {
-      throw new Error("Shared views are read-only — join channels from a workspace you own.");
-    }
-    await warmCredentialCache();
-    const joinCredentials = cachedCredentials;
-    if (!joinCredentials) throw new Error("Sign in to dohc Cloud first.");
-    if (!joinCredentials.relayUrl) {
-      throw new Error("Reconnect dohc Cloud with a sync relay URL, then try again.");
-    }
-    // Capture the credentials BEFORE the awaits below (CodeRabbit Data
-    // Integrity): cachedCredentials can change during fetch/pull (logout,
-    // relay switch) — re-reading it afterwards can crash on null or pin the
-    // joined channel to the WRONG relay. The join is atomic against the
-    // credentials it started with.
-    const joinedRelayUrl = joinCredentials.relayUrl;
-    const joinedRecipientUserId = joinCredentials.userId;
-    const relay = {
-      baseUrl: normalizeServerUrl(joinedRelayUrl),
-      token: joinCredentials.token,
-      // Same timeout wrapper runSharedChannelSyncPass uses (:973): an
-      // unresponsive relay must abort the join's fetch/pull instead of leaving
-      // the renderer's "Joining…" button stuck forever.
-      fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
-    };
-    let joined: JoinedSharedChannel;
-    try {
-      joined = await reserveAndPullSharedChannelForWorkspace({
-        relay,
-        shareId: input.shareId,
-        workspaceId: workspace.workspaceId,
-        rootPath: workspace.rootPath,
-        recipientUserId: joinedRecipientUserId,
-        relayUrl: joinedRelayUrl,
-      });
-    } catch (error) {
-      if (error instanceof ShareUnavailableError) {
-        throw new Error("That shared channel isn't available anymore.");
-      }
-      throw error;
-    }
-    return JoinSharedChannelResult.parse({ joined: { ...joined, ended: false } });
   });
 
   // Member-initiated leave: purely local — the channel stops syncing and its
@@ -7420,19 +7712,31 @@ function registerIpcHandlers(
   // leaveSharedChannel and leaveDm (#742) — a DM's accepted row IS a
   // JoinedSharedChannel row in the same registry, so ending it is the same
   // operation regardless of which surface asked.
-  function endWorkspaceJoinedChannel(workspaceId: string, shareId: string): void {
-    const entry = requireWorkspace(workspaceId);
+  function endWorkspaceJoinedChannel(
+    operation: DesktopRendererWorkspaceOperation,
+    shareId: string,
+  ): void {
+    const workspace = operation.workspace;
+    operation.assertCurrent();
     setWorkspaceSharedChannels(
-      workspaceId,
-      endJoinedChannel(entry.sharedChannels ?? [], shareId),
+      workspace.workspaceId,
+      endJoinedChannel(workspace.sharedChannels ?? [], shareId),
     );
+    operation.assertCurrent();
   }
 
   ipcMain.handle(CHANNELS.leaveSharedChannel, async (event, payload) => {
     assertTrustedSender(event);
     const input = LeaveSharedChannelPayload.parse(payload);
-    endWorkspaceJoinedChannel(input.workspaceId, input.shareId);
-    return undefined;
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Leaving stopped because this window changed workspaces.",
+      (operation) => {
+        endWorkspaceJoinedChannel(operation, input.shareId);
+        return undefined;
+      },
+    );
   });
 
   // Record that the user has seen a share's skipped ops.
@@ -7446,25 +7750,37 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.dismissShareSkips, async (event, payload) => {
     assertTrustedSender(event);
     const input = DismissShareSkipsPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    if (input.shareId === undefined && !shareViewIsPresent(workspace.shareView)) {
-      throw new Error("This workspace is not a shared view.");
-    }
-    if (
-      input.shareId !== undefined &&
-      shareMountRecordsForId(
-        storedShareMounts(workspace),
-        input.shareId,
-      ).length === 0
-    ) {
-      throw new Error("That share is not mounted in this workspace.");
-    }
-    acknowledgeWorkspaceShareSkips(
-      workspace.workspaceId,
-      input.shareId,
-      input.generation,
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Share warning update stopped because this window changed workspaces.",
+      (operation) => {
+        const workspace = operation.workspace;
+        if (
+          input.shareId === undefined &&
+          !shareViewIsPresent(workspace.shareView)
+        ) {
+          throw new Error("This workspace is not a shared view.");
+        }
+        if (
+          input.shareId !== undefined &&
+          shareMountRecordsForId(
+            storedShareMounts(workspace),
+            input.shareId,
+          ).length === 0
+        ) {
+          throw new Error("That share is not mounted in this workspace.");
+        }
+        operation.assertCurrent();
+        acknowledgeWorkspaceShareSkips(
+          workspace.workspaceId,
+          input.shareId,
+          input.generation,
+        );
+        operation.assertCurrent();
+        notifyRenderer({ workspaceId: workspace.workspaceId });
+      },
     );
-    notifyRenderer({ workspaceId: workspace.workspaceId });
   });
 
   // ---- Share changes (#646 PR3a) ----
@@ -8214,7 +8530,13 @@ function registerIpcHandlers(
   registerShareMountIpcHandlers({
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     assertTrustedSender,
-    requireWorkspace,
+    withWorkspaceOperation: (event, workspaceId, work) =>
+      withRendererWorkspaceOperation(
+        event.sender,
+        workspaceId,
+        "Share update stopped because this window changed workspaces.",
+        work,
+      ),
     assertWritableWorkspace,
     commands: shareMountCommands,
   });
@@ -8438,8 +8760,14 @@ function registerIpcHandlers(
   // requireWorkspace (renderer identity is never trusted) and is gated on the
   // workspace-engine alpha capture being attached — for unflagged workspaces
   // the calls reject.
-  async function requireEngineCapture(workspaceId: string, feature: EngineFeature) {
-    const workspace = requireWorkspace(workspaceId);
+  async function requireEngineCapture(
+    workspaceOrId: string | RegistryEntry,
+    feature: EngineFeature,
+  ) {
+    const workspace =
+      typeof workspaceOrId === "string"
+        ? requireWorkspace(workspaceOrId)
+        : workspaceOrId;
     // Idempotent: guarantees the watcher + capture are live before any
     // engine operation touches the chain.
     await openWorkspaceActivity(workspace);
@@ -9663,57 +9991,83 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.listChatChannels, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListChatChannelsPayload.parse(payload);
-    const { workspace } = await requireEngineCapture(
+    return withRendererWorkspaceOperation(
+      event.sender,
       input.workspaceId,
-      "Chats",
+      "Chats stopped because this window changed workspaces.",
+      async (operation) => {
+        const { workspace } = await requireEngineCapture(
+          operation.workspace,
+          "Chats",
+        );
+        operation.assertCurrent();
+        // MU-C4: refresh joined shared channels BEFORE reading, so opening
+        // Chats shows other members' latest messages. Offline, local rows
+        // still answer.
+        const rowsUncovered =
+          await syncRendererWorkspaceSharedChannels(operation);
+        operation.assertCurrent();
+        const store = linkedChatStoreFor(workspace);
+        // First chat use auto-creates General.
+        await store.ensureGeneralChannel({
+          workspaceId: workspace.workspaceId,
+        });
+        operation.assertCurrent();
+        const channels = await store.listChannels({
+          workspaceId: workspace.workspaceId,
+        });
+        operation.assertCurrent();
+        // Wire identities let the renderer match channels against share grants.
+        const wireIdEntries = await Promise.all(
+          channels.map(async (channel) => [
+            channel.id,
+            await store
+              .getChannelWireId({
+                workspaceId: workspace.workspaceId,
+                channelId: channel.id,
+              })
+              .catch(() => null),
+          ] as const),
+        );
+        operation.assertCurrent();
+        const wireIds = new Map(wireIdEntries);
+        // The "Files" grouping: file-linked Chats with their CURRENT path (the
+        // stable object id resolved through the active version), falling back
+        // to the captured hint when the engine no longer owns the file.
+        const threads = await store.listThreads({
+          workspaceId: workspace.workspaceId,
+        });
+        operation.assertCurrent();
+        const fileThreads = threads.filter((thread) => thread.linkedFile);
+        let pathByObjectId = new Map<string, string>();
+        if (fileThreads.length > 0) {
+          try {
+            ({ pathByObjectId } = await activeEngineFileIndex(workspace));
+          } catch {
+            // Path resolution is display-only; the hint fallback keeps the
+            // listing honest enough.
+          }
+          operation.assertCurrent();
+        }
+        return ListChatChannelsResult.parse({
+          ...(rowsUncovered > 0
+            ? { sharedChannelRowsUncovered: rowsUncovered }
+            : {}),
+          channels: channels.map((channel) => ({
+            ...chatChannelForIpc(channel),
+            wireId: wireIds.get(channel.id) ?? null,
+          })),
+          fileThreads: fileThreads.map((thread) => ({
+            ...chatThreadForIpc(thread),
+            path:
+              (thread.linkedFile
+                ? (pathByObjectId.get(thread.linkedFile.objectId) ??
+                  thread.linkedFile.pathHint)
+                : undefined) ?? null,
+          })),
+        });
+      },
     );
-    // MU-C4: refresh joined shared channels BEFORE reading, so opening Chats
-    // shows other members' latest messages. Never throws; offline it returns
-    // fast and the local rows answer.
-    const rowsUncovered = await syncWorkspaceSharedChannels(workspace.workspaceId);
-    const store = linkedChatStoreFor(workspace);
-    // First chat use auto-creates General.
-    await store.ensureGeneralChannel({ workspaceId: workspace.workspaceId });
-    const channels = await store.listChannels({ workspaceId: workspace.workspaceId });
-    // Wire identities let the renderer match channels against share grants.
-    const wireIdEntries = await Promise.all(
-      channels.map(async (channel) => [
-        channel.id,
-        await store
-          .getChannelWireId({ workspaceId: workspace.workspaceId, channelId: channel.id })
-          .catch(() => null),
-      ] as const),
-    );
-    const wireIds = new Map(wireIdEntries);
-    // The "Files" grouping: file-linked Chats with their CURRENT path (the
-    // stable object id resolved through the active version), falling back to
-    // the captured hint when the engine no longer owns the file.
-    const threads = await store.listThreads({ workspaceId: workspace.workspaceId });
-    const fileThreads = threads.filter((thread) => thread.linkedFile);
-    let pathByObjectId = new Map<string, string>();
-    if (fileThreads.length > 0) {
-      try {
-        ({ pathByObjectId } = await activeEngineFileIndex(workspace));
-      } catch {
-        // Path resolution is display-only; the hint fallback keeps the
-        // listing honest enough.
-      }
-    }
-    return ListChatChannelsResult.parse({
-      ...(rowsUncovered > 0 ? { sharedChannelRowsUncovered: rowsUncovered } : {}),
-      channels: channels.map((channel) => ({
-        ...chatChannelForIpc(channel),
-        wireId: wireIds.get(channel.id) ?? null,
-      })),
-      fileThreads: fileThreads.map((thread) => ({
-        ...chatThreadForIpc(thread),
-        path:
-          (thread.linkedFile
-            ? (pathByObjectId.get(thread.linkedFile.objectId) ??
-              thread.linkedFile.pathHint)
-            : undefined) ?? null,
-      })),
-    });
   });
 
   function chatFollowForIpc(follow: {
@@ -10162,16 +10516,6 @@ function registerIpcHandlers(
   // shows nothing. Authorization lives at the relay. This layer lists
   // requests, accepts them into a workspace, and displays established DMs.
 
-  // The relay connection DMs ride, or null when collaboration is off.
-  function dmRelayConnection(): SyncRelayConnection | null {
-    if (!cachedCredentials?.relayUrl) return null;
-    return {
-      baseUrl: normalizeServerUrl(cachedCredentials.relayUrl),
-      token: cachedCredentials.token,
-      fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
-    };
-  }
-
   function dmRecordForIpc(dm: DmRecordInfo) {
     return {
       channelId: dm.channelId,
@@ -10191,10 +10535,6 @@ function registerIpcHandlers(
   function dmRequestFile(): string {
     return join(stateDir(), "dohc-dm-requests.json");
   }
-
-  // Confirmed received-grant kinds. An empty/unbootstrapped log stays
-  // retryable because a grant can arrive before its channel bootstrap ops.
-  const peekedReceivedGrantKinds = new Map<string, "dm" | "not-dm">();
 
   // Peek a received chat-channel grant's kind without mutating the local store.
   // The share-log GET paginates raw rows before the
@@ -10225,185 +10565,256 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.syncDms, async (event, payload) => {
     assertTrustedSender(event);
     const input = SyncDmsPayload.parse(payload);
-    const { workspace } = await requireEngineCapture(
+    return withRendererWorkspaceOperation(
+      event.sender,
       input.workspaceId,
-      "Chats",
-    );
-    await warmCredentialCache();
-    const relay = dmRelayConnection();
-    const store = linkedChatStoreFor(workspace);
-    const { pending, declined } = await classifyDmRequestsWithFallback({
-      workspaceId: workspace.workspaceId,
-      cache: lastKnownDmRequestLanes,
-      // #742 P1 SECURITY (round 6): see classifyDmRequestsWithFallback's own
-      // comment — this is the guard against an old account's in-flight
-      // classify repopulating a just-cleared cache after a session
-      // transition.
-      credentialGeneration: () => credentialCacheGeneration,
-      classify: async () => {
-        if (!relay) throw new Error("DM sync is unavailable: not signed in.");
-        const listing = await relayShareJson<{
-          received?: Array<{
-            shareId?: unknown;
-            granterEmail?: unknown;
-            selector?: { kind?: unknown; channelWireId?: unknown };
-          }>;
-        }>("/sync/shares");
-        // Re-derived on EVERY call, not a snapshot taken once: classifyDmRequests
-        // calls this twice, before and after its own async peek, specifically to
-        // catch a grant accepted elsewhere mid-poll (PR #737 round 6) — freezing
-        // it here would silently reopen that race.
-        return classifyDmRequests({
-          received: listing.received ?? [],
-          kindCache: peekedReceivedGrantKinds,
-          peekKind: (shareId) => peekReceivedGrantKindForShare(relay, shareId),
-          holdersByShareId: () =>
-            liveSharedChannelHoldersByShareId(listWorkspaces()),
-          holdersByWireId: () =>
-            liveSharedChannelHoldersByWireId(listWorkspaces()),
-          declinedShareIds: readDeclinedDms(dmRequestFile()),
+      "Chats stopped because this window changed workspaces.",
+      async (operation) => {
+        const { workspace } = await requireEngineCapture(
+          operation.workspace,
+          "Chats",
+        );
+        operation.assertCurrent();
+        await warmCredentialCache();
+        operation.assertCurrent();
+        const syncCredentials = cachedCredentials;
+        const syncCredentialGeneration = credentialCacheGeneration;
+        const assertCurrentDmSyncSession = (): void => {
+          operation.assertCurrent();
+          if (credentialCacheGeneration !== syncCredentialGeneration) {
+            throw new Error("Your dohc Cloud session changed. Try again.");
+          }
+        };
+        const relay = syncCredentials?.relayUrl
+          ? {
+              baseUrl: normalizeServerUrl(syncCredentials.relayUrl),
+              token: syncCredentials.token,
+              fetch: relayFetchWithTimeout(
+                SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS,
+              ),
+            }
+          : null;
+        const store = linkedChatStoreFor(workspace);
+        const { pending, declined } =
+          await classifyDmRequestsWithFallback({
+            workspaceId: workspace.workspaceId,
+            cache: operation.state.lastKnownDmRequestLanes,
+            // The cache belongs to this physical attachment. The credential
+            // generation guard also prevents an old account's in-flight
+            // classify from repopulating it after a session transition.
+            credentialGeneration: () => credentialCacheGeneration,
+            classify: async () => {
+              if (!relay || !syncCredentials) {
+                throw new Error("DM sync is unavailable: not signed in.");
+              }
+              assertCurrentDmSyncSession();
+              const listing = await relayShareJsonWithCredentials<{
+                received?: Array<{
+                  shareId?: unknown;
+                  granterEmail?: unknown;
+                  selector?: { kind?: unknown; channelWireId?: unknown };
+                }>;
+              }>(syncCredentials, "/sync/shares");
+              assertCurrentDmSyncSession();
+              // Re-derived on EVERY call, not a snapshot taken once:
+              // classifyDmRequests calls this twice around its async peek.
+              return classifyDmRequests({
+                received: listing.received ?? [],
+                kindCache: peekedReceivedGrantKinds,
+                peekKind: async (shareId) => {
+                  assertCurrentDmSyncSession();
+                  const kind = await peekReceivedGrantKindForShare(
+                    relay,
+                    shareId,
+                  );
+                  assertCurrentDmSyncSession();
+                  return kind;
+                },
+                holdersByShareId: () => {
+                  assertCurrentDmSyncSession();
+                  return liveSharedChannelHoldersByShareId(listWorkspaces());
+                },
+                holdersByWireId: () => {
+                  assertCurrentDmSyncSession();
+                  return liveSharedChannelHoldersByWireId(listWorkspaces());
+                },
+                declinedShareIds: readDeclinedDms(dmRequestFile()),
+              });
+            },
+          });
+        assertCurrentDmSyncSession();
+        if (relay) {
+          try {
+            // Push the member's local ops, pull everyone else's, for the joined
+            // DMs (and other shared channels) this bounded pass reaches.
+            await syncRendererSharedChannelsForChatTarget(
+              operation,
+              input.openChannelId
+                ? { channelId: input.openChannelId }
+                : undefined,
+            );
+            assertCurrentDmSyncSession();
+            // The cloud engine owns its work after this request queues it. Do
+            // not extend the renderer operation into that durable process.
+            activity.queueCloudSync(workspace.workspaceId);
+          } catch (error) {
+            assertCurrentDmSyncSession();
+            // Offline degradation: the local DM list still serves and the next
+            // pass retries.
+            console.error(
+              `[desktop] DM sync failed for ${workspace.rootPath}:`,
+              error,
+            );
+          }
+        }
+        assertCurrentDmSyncSession();
+        const dms = await listDmRecords({
+          workspaceId: workspace.workspaceId,
+          store,
+          sharedChannels: operation.workspace.sharedChannels ?? [],
+        });
+        assertCurrentDmSyncSession();
+        const requestShareIds = new Set(
+          [...pending, ...declined].map((row) => row.shareId),
+        );
+        // Fresh, AFTER classify resolves — not reused from before it, which
+        // could be stale by the time the withhold decision needs it.
+        const holdersByShareId = liveSharedChannelHoldersByShareId(
+          listWorkspaces(),
+        );
+        const holdersByWireId = liveSharedChannelHoldersByWireId(
+          listWorkspaces(),
+        );
+        return SyncDmsResult.parse({
+          available: relay !== null,
+          dms: withholdDmsInRequestLanes({
+            dms,
+            requestShareIds,
+            holdersByShareId,
+            holdersByWireId,
+            workspaceId: workspace.workspaceId,
+          }).map(dmRecordForIpc),
+          pending,
+          declined,
         });
       },
-    });
-    if (relay) {
-      try {
-        // Push the member's local ops, pull everyone else's, for the joined
-        // DMs (and other shared channels) this bounded pass reaches. The DM the
-        // caller has OPEN is named, so the 4 s poll behind an open conversation
-        // refreshes that conversation instead of only looking like it does.
-        await syncSharedChannelsForChatTarget(
-          workspace.workspaceId,
-          input.openChannelId ? { channelId: input.openChannelId } : undefined,
-        );
-        // Owner-side liveness: members' ops land in THIS workspace's own relay
-        // bucket; nudge the (debounced) sync engine so they arrive without
-        // waiting for an unrelated file edit. No-op when the workspace has no
-        // cloud engine.
-        activity.queueCloudSync(workspace.workspaceId);
-      } catch (error) {
-        // Offline degradation: never a crash, never a blocked Chats view — the
-        // local DM list still serves and the next pass retries. Unrelated to
-        // pending/declined above, which classifyDmRequestsWithFallback already
-        // resolved (freshly, or from the last-known cache).
-        console.error(`[desktop] DM sync failed for ${workspace.rootPath}:`, error);
-      }
-    }
-    const dms = await listDmRecords({
-      workspaceId: workspace.workspaceId,
-      store,
-      sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels ?? [],
-    });
-    const requestShareIds = new Set(
-      [...pending, ...declined].map((row) => row.shareId),
     );
-    // Fresh, AFTER classify resolves — not reused from before it, which could
-    // be stale by the time the withhold decision actually needs it.
-    const holdersByShareId = liveSharedChannelHoldersByShareId(listWorkspaces());
-    const holdersByWireId = liveSharedChannelHoldersByWireId(listWorkspaces());
-    return SyncDmsResult.parse({
-      available: relay !== null,
-      dms: withholdDmsInRequestLanes({
-        dms,
-        requestShareIds,
-        holdersByShareId,
-        holdersByWireId,
-        workspaceId: workspace.workspaceId,
-      }).map(dmRecordForIpc),
-      pending,
-      declined,
-    });
   });
 
   ipcMain.handle(CHANNELS.acceptDm, async (event, payload) => {
     assertTrustedSender(event);
     const input = AcceptDmPayload.parse(payload);
-    const { workspace } = await requireEngineCapture(input.workspaceId, "Chats");
-    const entry = requireWorkspace(input.workspaceId);
-    if (shareViewIsPresent(entry.shareView)) {
-      throw new Error(
-        "Shared views are read-only — add this conversation to a workspace you own.",
-      );
-    }
-
-    assertShareNotHeldElsewhere(input.shareId, input.workspaceId);
-
-    const acceptedHere = isShareAcceptedInWorkspace(
-      entry.sharedChannels ?? [],
-      input.shareId,
-    );
-    if (!acceptedHere) {
-      if (peekedReceivedGrantKinds.get(input.shareId) !== "dm") {
-        throw new Error(
-          "dohc could not find that message request. Wait for Chats to refresh, then try again.",
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Accepting stopped because this window changed workspaces.",
+      async (operation) => {
+        const { workspace } = await requireEngineCapture(
+          operation.workspace,
+          "Chats",
         );
-      }
-      await warmCredentialCache();
-      const acceptCredentials = cachedCredentials;
-      if (!acceptCredentials) throw new Error("Sign in to dohc Cloud first.");
-      if (!acceptCredentials.relayUrl) {
-        throw new Error("Reconnect dohc Cloud with a sync relay URL, then try again.");
-      }
-      const acceptedRelayUrl = acceptCredentials.relayUrl;
-      const relay = {
-        baseUrl: normalizeServerUrl(acceptedRelayUrl),
-        token: acceptCredentials.token,
-        fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
-      };
-      // Recheck after the relay awaits. Two open Chats views can accept the
-      // same account-wide request concurrently; only the first may reserve it.
-      assertShareNotHeldElsewhere(input.shareId, input.workspaceId);
-      try {
-        await reserveAndPullSharedChannelForWorkspace({
-          relay,
-          shareId: input.shareId,
-          workspaceId: workspace.workspaceId,
-          rootPath: workspace.rootPath,
-          recipientUserId: acceptCredentials.userId,
-          relayUrl: acceptedRelayUrl,
-          preWrite: (info) =>
-            assertShareNotHeldElsewhere(
-              input.shareId,
-              input.workspaceId,
-              info.channelWireId,
-            ),
-        });
-      } catch (error) {
-        if (error instanceof ShareUnavailableError) {
+        operation.assertCurrent();
+        if (shareViewIsPresent(workspace.shareView)) {
           throw new Error(
-            "That conversation isn't available anymore. Ask the sender to message you again.",
+            "Shared views are read-only — add this conversation to a workspace you own.",
           );
         }
-        // The reservation row is the write gate (reserveAndPullSharedChannel writes it
-        // before the pull, and keeps it if the pull fails). Once it exists, a pull
-        // failure is not an accept failure — fall through to the listDmRecords check
-        // below, which reports success if the pull's data landed anyway, or the
-        // existing "could not open it" message if it hasn't yet.
-        if (
-          !isShareAcceptedInWorkspace(
-            findWorkspace(input.workspaceId)?.sharedChannels ?? [],
-            input.shareId,
-          )
-        ) {
-          throw error;
-        }
-      }
-    }
 
-    // Acceptance succeeded, so this obsolete marker cleanup is best-effort; decline and undecline handlers must persist their requested change.
-    void clearDeclinedDm(dmRequestFile(), input.shareId);
-    const dm = (
-      await listDmRecords({
-        workspaceId: input.workspaceId,
-        store: linkedChatStoreFor(workspace),
-        sharedChannels: findWorkspace(input.workspaceId)?.sharedChannels ?? [],
-      })
-    ).find((record) => record.shareId === input.shareId);
-    if (!dm) {
-      throw new Error(
-        "dohc added the conversation but could not open it. Open it from Direct messages.",
-      );
-    }
-    return AcceptDmResult.parse({ dm: dmRecordForIpc(dm) });
+        assertShareNotHeldElsewhere(input.shareId, workspace.workspaceId);
+        const acceptedHere = isShareAcceptedInWorkspace(
+          workspace.sharedChannels ?? [],
+          input.shareId,
+        );
+        if (!acceptedHere) {
+          if (peekedReceivedGrantKinds.get(input.shareId) !== "dm") {
+            throw new Error(
+              "dohc could not find that message request. Wait for Chats to refresh, then try again.",
+            );
+          }
+          await warmCredentialCache();
+          operation.assertCurrent();
+          const acceptCredentials = cachedCredentials;
+          const acceptCredentialGeneration = credentialCacheGeneration;
+          if (!acceptCredentials) throw new Error("Sign in to dohc Cloud first.");
+          if (!acceptCredentials.relayUrl) {
+            throw new Error(
+              "Reconnect dohc Cloud with a sync relay URL, then try again.",
+            );
+          }
+          const acceptedRelayUrl = acceptCredentials.relayUrl;
+          const assertCurrentAcceptSession = (): void => {
+            operation.assertCurrent();
+            if (credentialCacheGeneration !== acceptCredentialGeneration) {
+              throw new Error("Your dohc Cloud session changed. Try again.");
+            }
+          };
+          const relay = {
+            baseUrl: normalizeServerUrl(acceptedRelayUrl),
+            token: acceptCredentials.token,
+            fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
+          };
+          // Two open Chats views can accept the same account-wide request
+          // concurrently; only the first may reserve it.
+          assertShareNotHeldElsewhere(input.shareId, workspace.workspaceId);
+          try {
+            await reserveAndPullSharedChannelForWorkspace({
+              operation,
+              assertCurrent: assertCurrentAcceptSession,
+              relay,
+              shareId: input.shareId,
+              recipientUserId: acceptCredentials.userId,
+              relayUrl: acceptedRelayUrl,
+              preWrite: (info) => {
+                assertCurrentAcceptSession();
+                assertShareNotHeldElsewhere(
+                  input.shareId,
+                  workspace.workspaceId,
+                  info.channelWireId,
+                );
+              },
+            });
+            assertCurrentAcceptSession();
+          } catch (error) {
+            assertCurrentAcceptSession();
+            if (error instanceof ShareUnavailableError) {
+              throw new Error(
+                "That conversation isn't available anymore. Ask the sender to message you again.",
+              );
+            }
+            // The reservation row is the write gate. Once it exists, a pull
+            // failure is not an accept failure; the local DM check below tells
+            // whether enough data landed to open the conversation.
+            if (
+              !isShareAcceptedInWorkspace(
+                operation.workspace.sharedChannels ?? [],
+                input.shareId,
+              )
+            ) {
+              throw error;
+            }
+          }
+        }
+
+        operation.assertCurrent();
+        // Acceptance succeeded, so obsolete decline-marker cleanup is
+        // best-effort. It is account-scoped and owns no workspace authority.
+        void clearDeclinedDm(dmRequestFile(), input.shareId);
+        const dm = (
+          await listDmRecords({
+            workspaceId: workspace.workspaceId,
+            store: linkedChatStoreFor(workspace),
+            sharedChannels: operation.workspace.sharedChannels ?? [],
+          })
+        ).find((record) => record.shareId === input.shareId);
+        operation.assertCurrent();
+        if (!dm) {
+          throw new Error(
+            "dohc added the conversation but could not open it. Open it from Direct messages.",
+          );
+        }
+        return AcceptDmResult.parse({ dm: dmRecordForIpc(dm) });
+      },
+    );
   });
 
   ipcMain.handle(CHANNELS.declineDm, (event, payload) => {
@@ -10428,20 +10839,33 @@ function registerIpcHandlers(
   // leaveSharedChannel ends. The next syncDms poll's classifyDmRequests finds
   // no live holder for this shareId, so the conversation reappears as a
   // request and can be accepted into any workspace, including this one.
-  ipcMain.handle(CHANNELS.leaveDm, (event, payload) => {
+  ipcMain.handle(CHANNELS.leaveDm, async (event, payload) => {
     assertTrustedSender(event);
     const input = LeaveDmPayload.parse(payload);
-    const leftRow = (
-      requireWorkspace(input.workspaceId).sharedChannels ?? []
-    ).find((channel) => channel.shareId === input.shareId);
-    endWorkspaceJoinedChannel(input.workspaceId, input.shareId);
-    // #742 P1 (round 5): the leave is locally knowable without the relay —
-    // see markLeftInLastKnownLanes's own comment for why this must run here.
-    markLeftInLastKnownLanes(lastKnownDmRequestLanes, input.workspaceId, {
-      shareId: input.shareId,
-      granterEmail: leftRow?.granterEmail ?? null,
-    });
-    return undefined;
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Leaving stopped because this window changed workspaces.",
+      (operation) => {
+        const workspace = operation.workspace;
+        const leftRow = (workspace.sharedChannels ?? []).find(
+          (channel) => channel.shareId === input.shareId,
+        );
+        endWorkspaceJoinedChannel(operation, input.shareId);
+        operation.assertCurrent();
+        // The leave is locally knowable without the relay. Keep this physical
+        // attachment's fallback lanes consistent with the registry write.
+        markLeftInLastKnownLanes(
+          operation.state.lastKnownDmRequestLanes,
+          workspace.workspaceId,
+          {
+            shareId: input.shareId,
+            granterEmail: leftRow?.granterEmail ?? null,
+          },
+        );
+        return undefined;
+      },
+    );
   });
 
   // Start (or continue) a DM: dedupe by recipient set, ensure one live grant
@@ -10449,223 +10873,235 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.startDm, async (event, payload) => {
     assertTrustedSender(event);
     const input = StartDmPayload.parse(payload);
-    // A DM needs the full collaboration surface: a signed-in relay session AND
-    // a synced workspace — the DM's canonical log is this workspace's relay
-    // bucket, so an unsynced workspace could never deliver it.
-    const workspace = requireWorkspace(input.workspaceId);
-    assertWritableWorkspace(workspace);
-    const {
-      remote,
-      credentials,
-      credentialGeneration,
-    } = await remoteForWorkspace(input.workspaceId);
-    function assertCurrentDmSession(): void {
-      if (credentialCacheGeneration !== credentialGeneration) {
-        throw new Error("Your dohc Cloud session changed. Try again.");
-      }
-    }
-    async function awaitCurrentDmSession<Result>(
-      run: () => Promise<Result>,
-    ): Promise<Result> {
-      assertCurrentDmSession();
-      return awaitCredentialGeneration({
-        capturedGeneration: credentialGeneration,
-        currentGeneration: () => credentialCacheGeneration,
-        run,
-      });
-    }
-    const { capture } = await requireEngineCapture(
+    return withRendererWorkspaceOperation(
+      event.sender,
       input.workspaceId,
-      "Chats",
-    );
-    const authorUserId = resolveWorkspaceRelayAuthorId(
-      workspace,
-      credentials,
-    );
-    if (!credentials.relayUrl || !authorUserId) {
-      throw new Error("Sign in to dohc Cloud to start a direct message.");
-    }
-    const recipients = parseDmRecipients(input.recipients);
-    const selfEmail = credentials.email.toLowerCase();
-    if (selfEmail && recipients.includes(selfEmail)) {
-      throw new Error("A direct message needs a recipient other than yourself.");
-    }
-    // Resolve mentions before creating/granting a DM so an invalid or stale
-    // heading cannot leave behind a partially initialized conversation.
-    const attachments = await awaitCurrentDmSession(() =>
-      resolveChatFileReferences(
-        workspace,
-        capture.fileObjectIdForPath,
-        input.fileReferences,
-      ),
-    );
-    const store = linkedChatStoreFor(workspace);
-    // A DM's identity is its LIVE grant recipient set — NOT its (truncatable,
-    // collidable) display name. Enumerate live chat-channel grants keyed by
-    // wire id ONCE: used both to dedup the DM (exact recipient-set match) and
-    // to compute which recipients still need a grant. The anti-enumeration
-    // posture is the relay's: known and unknown emails create indistinguishable
-    // grants.
-    const shares = await awaitCurrentDmSession(() =>
-      relayShareJsonWithCredentials<{
-        granted?: Array<{
-          recipientEmail?: string | null;
-          revokedAtMs?: number | null;
-          selector?: { kind?: string; channelWireId?: string };
-        }>;
-      }>(credentials, "/sync/shares"),
-    );
-    const liveGrantEmailsByWire = new Map<string, Set<string>>();
-    for (const row of shares.granted ?? []) {
-      if (
-        (row.revokedAtMs ?? null) !== null ||
-        row.selector?.kind !== "chat-channel" ||
-        typeof row.selector.channelWireId !== "string" ||
-        typeof row.recipientEmail !== "string"
-      ) {
-        continue;
-      }
-      const wire = row.selector.channelWireId;
-      const set = liveGrantEmailsByWire.get(wire) ?? new Set<string>();
-      set.add(row.recipientEmail.toLowerCase());
-      liveGrantEmailsByWire.set(wire, set);
-    }
-    // Starting a DM with a recipient set you already message opens the existing
-    // one — matched by its live grant recipients, never by the display name.
-    const dmChannelWires = await awaitCurrentDmSession(async () =>
-      Promise.all(
-        (await store.listChannels({ workspaceId: workspace.workspaceId }))
-          .filter((channel) => channel.kind === "dm")
-          .map(async (channel) => ({
+      "Starting a direct message stopped because this window changed workspaces.",
+      async (operation) => {
+        // A DM needs the full collaboration surface: a signed-in relay session
+        // and a synced workspace. The exact operation supplies the canonical
+        // physical root used by both the local engine and relay work.
+        const workspace = operation.workspace;
+        assertWritableWorkspace(workspace);
+        const { remote, credentials, credentialGeneration } =
+          await remoteForWorkspace(workspace);
+        operation.assertCurrent();
+        function assertCurrentDmSession(): void {
+          operation.assertCurrent();
+          if (credentialCacheGeneration !== credentialGeneration) {
+            throw new Error("Your dohc Cloud session changed. Try again.");
+          }
+        }
+        async function awaitCurrentDmSession<Result>(
+          run: () => Promise<Result>,
+        ): Promise<Result> {
+          assertCurrentDmSession();
+          const result = await awaitCredentialGeneration({
+            capturedGeneration: credentialGeneration,
+            currentGeneration: () => credentialCacheGeneration,
+            run,
+          });
+          assertCurrentDmSession();
+          return result;
+        }
+        const { capture } = await requireEngineCapture(workspace, "Chats");
+        assertCurrentDmSession();
+        const authorUserId = resolveWorkspaceRelayAuthorId(
+          workspace,
+          credentials,
+        );
+        if (!credentials.relayUrl || !authorUserId) {
+          throw new Error("Sign in to dohc Cloud to start a direct message.");
+        }
+        const recipients = parseDmRecipients(input.recipients);
+        const selfEmail = credentials.email.toLowerCase();
+        if (selfEmail && recipients.includes(selfEmail)) {
+          throw new Error(
+            "A direct message needs a recipient other than yourself.",
+          );
+        }
+        // Resolve mentions before creating/granting a DM so an invalid or stale
+        // heading cannot leave behind a partially initialized conversation.
+        const attachments = await awaitCurrentDmSession(() =>
+          resolveChatFileReferences(
+            workspace,
+            capture.fileObjectIdForPath,
+            input.fileReferences,
+          ),
+        );
+        const store = linkedChatStoreFor(workspace);
+        // A DM's identity is its LIVE grant recipient set, not its display
+        // name. Enumerate live chat-channel grants once for deduplication and
+        // for deciding which recipients still need a grant.
+        const shares = await awaitCurrentDmSession(() =>
+          relayShareJsonWithCredentials<{
+            granted?: Array<{
+              recipientEmail?: string | null;
+              revokedAtMs?: number | null;
+              selector?: { kind?: string; channelWireId?: string };
+            }>;
+          }>(credentials, "/sync/shares"),
+        );
+        const liveGrantEmailsByWire = new Map<string, Set<string>>();
+        for (const row of shares.granted ?? []) {
+          if (
+            (row.revokedAtMs ?? null) !== null ||
+            row.selector?.kind !== "chat-channel" ||
+            typeof row.selector.channelWireId !== "string" ||
+            typeof row.recipientEmail !== "string"
+          ) {
+            continue;
+          }
+          const wire = row.selector.channelWireId;
+          const set = liveGrantEmailsByWire.get(wire) ?? new Set<string>();
+          set.add(row.recipientEmail.toLowerCase());
+          liveGrantEmailsByWire.set(wire, set);
+        }
+        // Starting a DM with the same live recipient set opens the existing one.
+        const dmChannels = (
+          await awaitCurrentDmSession(() =>
+            store.listChannels({ workspaceId: workspace.workspaceId }),
+          )
+        ).filter((channel) => channel.kind === "dm");
+        const dmChannelWires = await Promise.all(
+          dmChannels.map(async (channel) => ({
             id: channel.id,
             wireId:
-              (await store.getChannelWireId({
-                workspaceId: workspace.workspaceId,
-                channelId: channel.id,
-              })) ?? channel.id,
+              (await awaitCurrentDmSession(() =>
+                store.getChannelWireId({
+                  workspaceId: workspace.workspaceId,
+                  channelId: channel.id,
+                }),
+              )) ?? channel.id,
           })),
-      ),
-    );
-    const matchedId = matchDmChannelByRecipients({
-      recipients,
-      channels: dmChannelWires,
-      liveGrantEmailsByWire,
-    });
-    let channelId = matchedId;
-    if (!channelId) {
-      channelId = (
-        await awaitCurrentDmSession(() =>
-          store.createChannel({
-            workspaceId: workspace.workspaceId,
-            name: dmChannelNameFor(recipients),
-            kind: "dm",
-          }),
-        )
-      ).id;
-    }
-    const wireId =
-      (await awaitCurrentDmSession(() =>
-        store.getChannelWireId({
-          workspaceId: workspace.workspaceId,
-          channelId,
-        }),
-      )) ?? channelId;
-    // Ensure one LIVE grant per recipient (grants are rows; a re-run after a
-    // revocation re-invites). A freshly created channel has no grants yet. The
-    // grants are created ATOMICALLY: if any fails, grantDmRecipients revokes the
-    // ones created in THIS call and rethrows, so no half-granted channel lingers
-    // to be duplicated on retry (matchDmChannelByRecipients needs an EXACT set).
-    // The first message is sent only AFTER this resolves, so a thrown rollback
-    // means nothing was said yet; the orphaned channel (zero live grants, no
-    // thread) is hidden by listDmRecords.
-    const covered = liveGrantEmailsByWire.get(wireId) ?? new Set<string>();
-    let threads: Awaited<ReturnType<typeof store.listChannelThreads>> = [];
-    const message = await grantDmRecipients({
-      recipients,
-      covered,
-      // FLAT chat-channel grant body (matches shareChatChannel): the relay
-      // branches on the top-level channelWireId. A nested chatChannel body
-      // would fall through to the path-share validator and silently fail.
-      createGrant: async (email) => {
-        const created = await relayShareJsonWithCredentials<{ shareId?: string;
-        }>(
-          credentials,
-          `/sync/${encodeURIComponent(remote.remoteWorkspaceId)}/shares`,
-          {
-            method: "POST",
-            body: JSON.stringify({
-              recipientEmail: email,
-              channelWireId: wireId,
-              access: "read-write",
-            }),
-          },
         );
-        return typeof created.shareId === "string" ? created.shareId : null;
-      },
-      revokeGrant: async (shareId) => {
-        await relayShareJsonWithCredentials(
-          credentials,
-          `/sync/shares/${encodeURIComponent(shareId)}/revoke`,
-          {
-            method: "POST",
-          },
-        );
-      },
-      assertCurrent: assertCurrentDmSession,
-      beforeCommit: async () => {
-        threads = await awaitCurrentDmSession(() =>
-          store.listChannelThreads({
-            workspaceId: workspace.workspaceId,
-            channelId,
-          }),
-        );
-      },
-      commit: async () => {
-        const running = runningThread(threads);
-        const author = {
-          kind: "human" as const,
-          displayName: localUserDisplayName(),
-        };
-        return running
-          ? store.sendMessage({
+        assertCurrentDmSession();
+        const matchedId = matchDmChannelByRecipients({
+          recipients,
+          channels: dmChannelWires,
+          liveGrantEmailsByWire,
+        });
+        let channelId = matchedId;
+        if (!channelId) {
+          channelId = (
+            await awaitCurrentDmSession(() =>
+              store.createChannel({
+                workspaceId: workspace.workspaceId,
+                name: dmChannelNameFor(recipients),
+                kind: "dm",
+              }),
+            )
+          ).id;
+        }
+        const wireId =
+          (await awaitCurrentDmSession(() =>
+            store.getChannelWireId({
               workspaceId: workspace.workspaceId,
-              threadId: running.thread.id,
-              author,
-              authorUserId,
-              body: input.body,
-              ...(attachments.length > 0 ? { attachments } : {}),
-            })
-          : (
-              await store.startChannelThread({
+              channelId,
+            }),
+          )) ?? channelId;
+        // Grant the full recipient set before the first message mutation.
+        // grantDmRecipients revokes grants created by this call if setup or
+        // commit fails.
+        const covered = liveGrantEmailsByWire.get(wireId) ?? new Set<string>();
+        let threads: Awaited<ReturnType<typeof store.listChannelThreads>> = [];
+        const message = await grantDmRecipients({
+          recipients,
+          covered,
+          createGrant: async (email) => {
+            assertCurrentDmSession();
+            const created = await relayShareJsonWithCredentials<{
+              shareId?: string;
+            }>(
+              credentials,
+              `/sync/${encodeURIComponent(remote.remoteWorkspaceId)}/shares`,
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  recipientEmail: email,
+                  channelWireId: wireId,
+                  access: "read-write",
+                }),
+              },
+            );
+            // The helper records this id before its next currentness check, so
+            // retirement during POST still rolls the grant back.
+            return typeof created.shareId === "string" ? created.shareId : null;
+          },
+          // Compensating cleanup uses the captured relay session even when
+          // forward authority is stale, so retirement cannot strand a partial
+          // recipient set.
+          revokeGrant: async (shareId) => {
+            await relayShareJsonWithCredentials(
+              credentials,
+              `/sync/shares/${encodeURIComponent(shareId)}/revoke`,
+              { method: "POST" },
+            );
+          },
+          assertCurrent: assertCurrentDmSession,
+          beforeCommit: async () => {
+            threads = await awaitCurrentDmSession(() =>
+              store.listChannelThreads({
                 workspaceId: workspace.workspaceId,
                 channelId,
-                author,
-                authorUserId,
-                body: input.body,
-                ...(attachments.length > 0 ? { attachments } : {}),
-              })
-            ).message;
+              }),
+            );
+          },
+          commit: async () => {
+            const running = runningThread(threads);
+            const author = {
+              kind: "human" as const,
+              displayName: localUserDisplayName(),
+            };
+            return running
+              ? store.sendMessage({
+                  workspaceId: workspace.workspaceId,
+                  threadId: running.thread.id,
+                  author,
+                  authorUserId,
+                  body: input.body,
+                  ...(attachments.length > 0 ? { attachments } : {}),
+                })
+              : (
+                  await store.startChannelThread({
+                    workspaceId: workspace.workspaceId,
+                    channelId,
+                    author,
+                    authorUserId,
+                    body: input.body,
+                    ...(attachments.length > 0 ? { attachments } : {}),
+                  })
+                ).message;
+          },
+        });
+        assertCurrentDmSession();
+        if (!message) throw new Error("Could not start that direct message.");
+        // These durable owners take over only after exact request admission.
+        assertCurrentDmSession();
+        activity.queueCloudSync(workspace.workspaceId);
+        assertCurrentDmSession();
+        void chatDispatchService
+          .scanWorkspace(workspace.workspaceId)
+          .catch((error) => {
+            console.error("[desktop] local chat dispatch scan:", error);
+          });
+        assertCurrentDmSession();
+        const dm = (
+          await awaitCurrentDmSession(() =>
+            listDmRecords({
+              workspaceId: workspace.workspaceId,
+              store,
+              sharedChannels: operation.workspace.sharedChannels ?? [],
+            }),
+          )
+        ).find((candidate) => candidate.channelId === channelId);
+        if (!dm) throw new Error("Could not start that direct message.");
+        return StartDmResult.parse({
+          dm: dmRecordForIpc(dm),
+          message: chatMessageForIpc(message),
+        });
       },
-    });
-    if (!message) throw new Error("Could not start that direct message.");
-    // Replicate promptly: the channel/thread/message ops are journaled but chat
-    // writes never pass through the file watcher.
-    activity.queueCloudSync(workspace.workspaceId);
-    void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
-      console.error("[desktop] local chat dispatch scan:", error);
-    });
-    const dm = (
-      await listDmRecords({
-        workspaceId: workspace.workspaceId,
-        store,
-        sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels ?? [],
-      })
-    ).find((candidate) => candidate.channelId === channelId);
-    if (!dm) throw new Error("Could not start that direct message.");
-    return StartDmResult.parse({
-      dm: dmRecordForIpc(dm),
-      message: chatMessageForIpc(message),
-    });
+    );
   });
 
   // Ephemeral presence (MU-C5): the renderer NEVER receives the relay bearer

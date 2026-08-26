@@ -94,6 +94,51 @@ describe("workspace file operation wiring", () => {
     }
   });
 
+  it("reacquires the exact renderer workspace after export dialogs", () => {
+    for (const channel of ["exportWorkspaceZip", "exportDocumentFile"]) {
+      const handler = handlerSource(channel);
+      const captureAt = handler.indexOf(
+        "exactRendererWorkspaceReferences.capture(",
+      );
+      const dialogAt = handler.indexOf("await dialog.showSaveDialog(");
+      const cancelAt = handler.indexOf("if (target === null)");
+      const reacquireAt = handler.lastIndexOf(
+        "exactRendererWorkspaceReferences.withReference(",
+      );
+      const assertionAt = handler.indexOf(
+        "operation.assertCurrent();",
+        reacquireAt,
+      );
+      const writeAt = handler.indexOf("await writeFile(");
+      const resultAt = handler.lastIndexOf(
+        channel === "exportWorkspaceZip"
+          ? "ExportWorkspaceZipResult.parse("
+          : "ExportDocumentFileResult.parse(",
+      );
+
+      expect(captureAt, channel).toBeGreaterThan(-1);
+      expect(dialogAt, channel).toBeGreaterThan(captureAt);
+      expect(reacquireAt, channel).toBeGreaterThan(dialogAt);
+      expect(cancelAt, channel).toBeGreaterThan(reacquireAt);
+      expect(assertionAt, channel).toBeGreaterThan(cancelAt);
+      expect(writeAt, channel).toBeGreaterThan(reacquireAt);
+      expect(writeAt, channel).toBeGreaterThan(assertionAt);
+      expect(writeAt, channel).toBeGreaterThan(cancelAt);
+      expect(resultAt, channel).toBeGreaterThan(writeAt);
+
+      if (channel === "exportDocumentFile") {
+        const renderAt = handler.indexOf("await renderHtmlToPdf(");
+        const postRenderAssertionAt = handler.indexOf(
+          "operation.assertCurrent();",
+          renderAt,
+        );
+        expect(renderAt).toBeGreaterThan(assertionAt);
+        expect(postRenderAssertionAt).toBeGreaterThan(renderAt);
+        expect(writeAt).toBeGreaterThan(postRenderAssertionAt);
+      }
+    }
+  });
+
   it("holds graph, heading, backlink, and settings I/O under renderer authority", () => {
     const helpers = new Map([
       ["readWorkspaceGraph", "readWorkspaceGraph("],

@@ -24,7 +24,14 @@ export function registerShareMountIpcHandlers<
 >(dependencies: {
   registerHandler(channel: string, handler: ShareMountIpcHandler<Event>): void;
   assertTrustedSender(event: Event): void;
-  requireWorkspace(workspaceId: string): Workspace;
+  withWorkspaceOperation(
+    event: Event,
+    workspaceId: string,
+    work: (operation: {
+      readonly workspace: Workspace;
+      assertCurrent(): void;
+    }) => Promise<unknown>,
+  ): Promise<unknown>;
   assertWritableWorkspace(workspace: Workspace): void;
   commands: Pick<
     ShareMountCommands<WorkspaceSummary>,
@@ -34,13 +41,19 @@ export function registerShareMountIpcHandlers<
   dependencies.registerHandler(CHANNELS.mountShare, async (event, payload) => {
     dependencies.assertTrustedSender(event);
     const input = MountSharePayload.parse(payload);
-    const workspace = dependencies.requireWorkspace(input.workspaceId);
-    dependencies.assertWritableWorkspace(workspace);
-    return MountShareResult.parse(
-      await dependencies.commands.mount({
-        workspace,
-        shareCode: input.shareCode,
-      }),
+    return dependencies.withWorkspaceOperation(
+      event,
+      input.workspaceId,
+      async (operation) => {
+        dependencies.assertWritableWorkspace(operation.workspace);
+        return MountShareResult.parse(
+          await dependencies.commands.mount({
+            workspace: operation.workspace,
+            shareCode: input.shareCode,
+            assertCurrent: operation.assertCurrent,
+          }),
+        );
+      },
     );
   });
 
@@ -49,10 +62,18 @@ export function registerShareMountIpcHandlers<
     async (event, payload) => {
       dependencies.assertTrustedSender(event);
       const input = RefreshShareMountsPayload.parse(payload);
-      const workspace = dependencies.requireWorkspace(input.workspaceId);
-      dependencies.assertWritableWorkspace(workspace);
-      return RefreshShareMountsResult.parse(
-        await dependencies.commands.refresh({ workspace }),
+      return dependencies.withWorkspaceOperation(
+        event,
+        input.workspaceId,
+        async (operation) => {
+          dependencies.assertWritableWorkspace(operation.workspace);
+          return RefreshShareMountsResult.parse(
+            await dependencies.commands.refresh({
+              workspace: operation.workspace,
+              assertCurrent: operation.assertCurrent,
+            }),
+          );
+        },
       );
     },
   );
@@ -60,13 +81,19 @@ export function registerShareMountIpcHandlers<
   dependencies.registerHandler(CHANNELS.unmountShare, async (event, payload) => {
     dependencies.assertTrustedSender(event);
     const input = UnmountSharePayload.parse(payload);
-    const workspace = dependencies.requireWorkspace(input.workspaceId);
-    dependencies.assertWritableWorkspace(workspace);
-    return UnmountShareResult.parse(
-      await dependencies.commands.unmount({
-        workspace,
-        shareId: input.shareId,
-      }),
+    return dependencies.withWorkspaceOperation(
+      event,
+      input.workspaceId,
+      async (operation) => {
+        dependencies.assertWritableWorkspace(operation.workspace);
+        return UnmountShareResult.parse(
+          await dependencies.commands.unmount({
+            workspace: operation.workspace,
+            shareId: input.shareId,
+            assertCurrent: operation.assertCurrent,
+          }),
+        );
+      },
     );
   });
 }

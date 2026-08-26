@@ -29,6 +29,7 @@ import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
 
 interface TestEvent {
   trusted: boolean;
+  activeWorkspaceId?: string;
 }
 
 interface TestContext {
@@ -1309,7 +1310,19 @@ describe("createListJoinedSharedChannelsIpcHandler", () => {
   function handlerOver(rows: ReturnType<typeof registry>) {
     return createListJoinedSharedChannelsIpcHandler<TestEvent>({
       assertTrustedSender: () => undefined,
-      answerJoinedChannels: (_workspaceId, channelWireIds) =>
+      withWorkspaceOperation: async (event, workspaceId, work) => {
+        if (
+          event.activeWorkspaceId !== undefined &&
+          event.activeWorkspaceId !== workspaceId
+        ) {
+          throw new Error("This window changed workspaces.");
+        }
+        return await work({
+          workspace: { workspaceId },
+          assertCurrent: () => undefined,
+        });
+      },
+      answerJoinedChannels: (_workspace, channelWireIds) =>
         scopeJoinedChannels(
           rows.map((row) => ({
             ...row,
@@ -1362,11 +1375,27 @@ describe("createListJoinedSharedChannelsIpcHandler", () => {
     ]);
   });
 
+  it("refuses a payload workspace that is not active in the renderer", async () => {
+    const handler = handlerOver(registry(4));
+
+    await expect(
+      handler(
+        { trusted: true, activeWorkspaceId: "ws-2" },
+        { workspaceId: "ws-1", channelWireIds: ["wire-1"] },
+      ),
+    ).rejects.toThrow("changed workspaces");
+  });
+
   it("refuses an untrusted sender before it reads anything", async () => {
     const handler = createListJoinedSharedChannelsIpcHandler<TestEvent>({
       assertTrustedSender: (event) => {
         if (!event.trusted) throw new Error("untrusted");
       },
+      withWorkspaceOperation: async (_event, workspaceId, work) =>
+        await work({
+          workspace: { workspaceId },
+          assertCurrent: () => undefined,
+        }),
       answerJoinedChannels: () => {
         throw new Error("must not read");
       },

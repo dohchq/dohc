@@ -78,19 +78,40 @@ export function createMarkChatThreadReadIpcHandler<
 // #640: the registry array grows with every channel the workspace has ever
 // joined, and the response must not. Source-text pins cannot show a response
 // size, so this is the layer the size test drives.
-export function createListJoinedSharedChannelsIpcHandler<Event>(input: {
+export function createListJoinedSharedChannelsIpcHandler<
+  Event,
+  Workspace extends { readonly workspaceId: string } = {
+    readonly workspaceId: string;
+  },
+>(input: {
   assertTrustedSender: (event: Event) => void;
-  answerJoinedChannels: (
+  withWorkspaceOperation: <Result>(
+    event: Event,
     workspaceId: string,
+    work: (operation: {
+      readonly workspace: Workspace;
+      assertCurrent(): void;
+    }) => Result | Promise<Result>,
+  ) => Promise<Result>;
+  answerJoinedChannels: (
+    workspace: Workspace,
     channelWireIds: readonly string[],
   ) => JoinedChannelAnswer[];
 }): MainChatIpcHandler<Event, ListJoinedSharedChannelsResult> {
   return async (event, rawPayload) => {
     input.assertTrustedSender(event);
     const payload = ListJoinedSharedChannelsPayload.parse(rawPayload);
-    return ListJoinedSharedChannelsResult.parse({
-      joined: input.answerJoinedChannels(payload.workspaceId, payload.channelWireIds),
-    });
+    return input.withWorkspaceOperation(
+      event,
+      payload.workspaceId,
+      (operation) =>
+        ListJoinedSharedChannelsResult.parse({
+          joined: input.answerJoinedChannels(
+            operation.workspace,
+            payload.channelWireIds,
+          ),
+        }),
+    );
   };
 }
 

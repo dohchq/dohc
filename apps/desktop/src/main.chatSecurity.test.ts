@@ -214,6 +214,56 @@ describe("main-process chat authorization", () => {
     );
   });
 
+  it("admits renderer workspace requests through one exact physical operation", () => {
+    for (const channel of [
+      "createRelayShare",
+      "shareChatChannel",
+      "listChatChannelShares",
+      "joinSharedChannel",
+      "leaveSharedChannel",
+      "dismissShareSkips",
+      "listChatChannels",
+      "syncDms",
+      "acceptDm",
+      "leaveDm",
+      "startDm",
+    ]) {
+      const handler = handlerSource(channel);
+      const admissionAt = handler.indexOf("withRendererWorkspaceOperation(");
+      expect(admissionAt, channel).toBeGreaterThan(-1);
+      expect(
+        Math.max(
+          handler.indexOf("operation.workspace"),
+          handler.indexOf("endWorkspaceJoinedChannel(operation"),
+        ),
+        channel,
+      ).toBeGreaterThan(
+        admissionAt,
+      );
+      expect(handler, channel).not.toContain(
+        "requireWorkspace(input.workspaceId)",
+      );
+      expect(handler, channel).not.toContain(
+        "findWorkspace(input.workspaceId)",
+      );
+      expect(handler, channel).not.toContain(
+        "requireEngineCapture(input.workspaceId",
+      );
+    }
+
+    const joined = handlerSource("listJoinedSharedChannels");
+    expect(joined).toContain("withWorkspaceOperation:");
+    expect(joined).toContain("withRendererWorkspaceOperation(");
+
+    const mountRegistration = mainSource.slice(
+      mainSource.indexOf("registerShareMountIpcHandlers({"),
+      mainSource.indexOf("registerShareMountIpcHandlers({") + 1_200,
+    );
+    expect(mountRegistration).toContain("withWorkspaceOperation:");
+    expect(mountRegistration).toContain("withRendererWorkspaceOperation(");
+    expect(mountRegistration).not.toContain("requireWorkspace,");
+  });
+
   it("revalidates owner agent-message authorship after the authorization await", () => {
     const start = mainSource.indexOf("authorizeServiceNote: (");
     const end = mainSource.indexOf("onMessagePosted:", start);
@@ -228,7 +278,7 @@ describe("main-process chat authorization", () => {
     const handler = handlerSource("shareChatChannel");
     expect(handler).toContain("requireShareableChatChannel({");
     expect(handler.indexOf("requireShareableChatChannel({")).toBeLessThan(
-      handler.indexOf("relayShareJson<{ shareId: string }>("),
+      handler.indexOf("relayShareJsonWithCredentials<{ shareId: string }>("),
     );
   });
 
@@ -237,7 +287,7 @@ describe("main-process chat authorization", () => {
       "afterSuccessfulPull: () =>\n      withWorkspaceAttachmentAsync(workspace, () =>\n        projectPendingChatBookmarksAfterPull(workspace.workspaceId)",
     );
     expect(mainSource).toContain(
-      "if (result.changed) await projectPendingChatBookmarksAfterPull(workspaceId);",
+      "await projectPendingChatBookmarksAfterPull(workspaceId);",
     );
     expect(mainSource).toContain(
       "readOnly: Boolean(sharedViewOf(workspaceId))",
@@ -318,12 +368,17 @@ describe("main-process chat authorization", () => {
     expect(helperEnd).toBeGreaterThan(helperStart);
     const helper = mainSource.slice(helperStart, helperEnd);
     expect(helper).toContain("return reserveAndPullSharedChannel({");
+    expect(helper).toContain("operation: DesktopRendererWorkspaceOperation;");
     expect(helper).toContain(
-      "writeSharedChannels: setWorkspaceSharedChannels",
+      "const assertCurrent = input.assertCurrent ?? input.operation.assertCurrent;",
     );
+    expect(helper).toContain("assertCurrent();");
+    expect(helper).toContain("setWorkspaceSharedChannels(workspaceId, channels);");
     expect(helper).toContain("serialize: (workspaceId, run) =>");
-    expect(helper).toContain("workspaceAuthorities.withAuthority(workspaceId, (lease) =>");
-    expect(helper).toContain("serializeWorkspaceAuthorityWork(lease, run)");
+    expect(helper).toContain(
+      "{ state: input.operation.state, assertCurrent },",
+    );
+    expect(helper).not.toContain("workspaceAuthorities.withAuthority(");
     for (const [label, source] of [
       ["joinSharedChannel", handlerSource("joinSharedChannel")],
       ["acceptDm", handlerSource("acceptDm")],
@@ -370,8 +425,9 @@ describe("main-process chat authorization", () => {
   // two pulls of the same share race the per-share cursor and peer updates.
   // Both join paths run outside a pass, so this queues rather than deadlocking.
   it("runs each join's first pull under the same per-workspace serializer as the sync pass", () => {
+    expect(mainSource).toContain("serializeWorkspaceAuthorityWork(lease, () =>");
     expect(mainSource).toContain(
-      "return workspaceAuthorities.withAuthority(workspaceId, (lease) =>\n    serializeWorkspaceAuthorityWork(lease, () =>\n    runSharedChannelSyncPass(lease, priorityChannelWireId),",
+      "serializeWorkspaceAuthorityWork(operation, () =>",
     );
 
     const serializeAt = dmRequestsSource.indexOf("await input.serialize(");
@@ -424,8 +480,11 @@ describe("main-process chat authorization", () => {
     expect(handler).toContain("if (!acceptedHere)");
     expect(reserveAt).toBeGreaterThan(credentialsAt);
     expect(handler).toContain("workspaceId: workspace.workspaceId");
-    expect(handler).toContain(
-      "preWrite: (info) =>\n            assertShareNotHeldElsewhere(\n              input.shareId,\n              input.workspaceId,\n              info.channelWireId,\n            )",
+    const preWriteAt = handler.indexOf("preWrite: (info) => {");
+    expect(preWriteAt).toBeGreaterThan(reserveAt);
+    expect(handler.slice(preWriteAt)).toContain("operation.assertCurrent();");
+    expect(handler.slice(preWriteAt)).toContain(
+      "assertShareNotHeldElsewhere(\n                  input.shareId,\n                  workspace.workspaceId,",
     );
     expect(handler).not.toContain("activity.queueCloudSync");
   });
@@ -434,7 +493,7 @@ describe("main-process chat authorization", () => {
     const handler = handlerSource("acceptDm");
     const catchAt = handler.indexOf("} catch (error) {");
     const catchEnd = handler.indexOf(
-      "\n    }\n\n    // Acceptance succeeded",
+      "\n        }\n\n        operation.assertCurrent();",
       catchAt,
     );
     expect(catchAt).toBeGreaterThan(-1);
@@ -452,11 +511,9 @@ describe("main-process chat authorization", () => {
     expect(placementCheckAt).toBeGreaterThan(shareUnavailableAt);
     expect(rethrowAt).toBeGreaterThan(placementCheckAt);
     expect(catchBlock).toContain(
-      "findWorkspace(input.workspaceId)?.sharedChannels ?? [],\n            input.shareId,",
+      "operation.workspace.sharedChannels ?? [],\n                input.shareId,",
     );
-    expect(catchBlock).toContain(
-      "input.shareId,\n          )\n        ) {\n          throw error;\n        }",
-    );
+    expect(catchBlock).not.toContain("findWorkspace(");
   });
 
   it("keeps accepted DMs in syncDms when the declined-request store is unreadable", () => {
@@ -489,10 +546,10 @@ describe("main-process chat authorization", () => {
     const classifyAt = handler.indexOf("classify: async () => {");
     const requestShareIdsAt = handler.indexOf("const requestShareIds = new Set(");
     const holdersAt = handler.indexOf(
-      "const holdersByShareId = liveSharedChannelHoldersByShareId(listWorkspaces());",
+      "const holdersByShareId = liveSharedChannelHoldersByShareId(",
     );
     const holdersByWireAt = handler.indexOf(
-      "const holdersByWireId = liveSharedChannelHoldersByWireId(listWorkspaces());",
+      "const holdersByWireId = liveSharedChannelHoldersByWireId(",
     );
     const withholdAt = handler.indexOf("dms: withholdDmsInRequestLanes({");
     expect(classifyAt).toBeGreaterThan(-1);
@@ -516,20 +573,37 @@ describe("main-process chat authorization", () => {
   // createLastKnownDmRequestLanesCache in dmChats.test.ts, per the #737
   // precedent for anything main.ts cannot be imported to exercise directly).
   // This pin only checks main.ts's WIRING: syncDms routes classify through
-  // the shared fallback cache, keyed per workspace, guarded by the
-  // credential generation (round 6: the mid-classify session-transition
-  // race — dmChats.test.ts drives that arithmetic executingly too).
-  it("routes syncDms's classify through classifyDmRequestsWithFallback with the shared cache and generation guard", () => {
+  // the attachment-owned fallback cache, keyed per workspace inside that
+  // state, and guarded by the credential generation.
+  it("routes syncDms's classify through the attachment cache and generation guard", () => {
     const handler = handlerSource("syncDms");
     expect(handler).toContain("await classifyDmRequestsWithFallback({");
     expect(handler).toContain("workspaceId: workspace.workspaceId,");
-    expect(handler).toContain("cache: lastKnownDmRequestLanes,");
+    expect(handler).toContain(
+      "cache: operation.state.lastKnownDmRequestLanes,",
+    );
     expect(handler).toContain(
       "credentialGeneration: () => credentialCacheGeneration,",
     );
     expect(mainSource).toContain(
+      "lastKnownDmRequestLanes: createLastKnownDmRequestLanesCache(),",
+    );
+    expect(mainSource).not.toContain(
       "const lastKnownDmRequestLanes = createLastKnownDmRequestLanesCache();",
     );
+  });
+
+  it("keeps startDm grant rollback outside the post-await currentness check", () => {
+    const handler = handlerSource("startDm");
+    const createGrantAt = handler.indexOf("createGrant: async (email) => {");
+    const revokeGrantAt = handler.indexOf("revokeGrant: async (shareId) => {");
+    expect(createGrantAt).toBeGreaterThan(-1);
+    expect(revokeGrantAt).toBeGreaterThan(createGrantAt);
+    const createGrant = handler.slice(createGrantAt, revokeGrantAt);
+    expect(createGrant).toContain("assertCurrentDmSession();");
+    expect(createGrant).toContain("relayShareJsonWithCredentials<{");
+    expect(createGrant).not.toContain("awaitCurrentDmSession(");
+    expect(handler).toContain("assertCurrent: assertCurrentDmSession,");
   });
 
   // #742 P1 SECURITY (rounds 4–5): a NEW account's first failed poll must
@@ -548,7 +622,10 @@ describe("main-process chat authorization", () => {
     expect(clearFnStart).toBeGreaterThan(-1);
     expect(clearFnEnd).toBeGreaterThan(clearFnStart);
     expect(mainSource.slice(clearFnStart, clearFnEnd)).toContain(
-      "lastKnownDmRequestLanes.clear();",
+      "lease.state.lastKnownDmRequestLanes.clear();",
+    );
+    expect(mainSource.slice(clearFnStart, clearFnEnd)).toContain(
+      "peekedReceivedGrantKinds.clear();",
     );
 
     // Every session-transition site calls the shared function — none
@@ -585,7 +662,9 @@ describe("main-process chat authorization", () => {
     expect(helperStart).toBeGreaterThan(-1);
     expect(helperEnd).toBeGreaterThan(helperStart);
     const helper = mainSource.slice(helperStart, helperEnd);
-    expect(helper).toContain("endJoinedChannel(entry.sharedChannels ?? [], shareId)");
+    expect(helper).toContain(
+      "endJoinedChannel(workspace.sharedChannels ?? [], shareId)",
+    );
     expect(helper).toContain("setWorkspaceSharedChannels(");
 
     const leaveShared = handlerSource("leaveSharedChannel");
@@ -595,7 +674,7 @@ describe("main-process chat authorization", () => {
       ["leaveDm", leaveDm],
     ] as const) {
       expect(handler, label).toContain(
-        "endWorkspaceJoinedChannel(input.workspaceId, input.shareId);",
+        "endWorkspaceJoinedChannel(operation, input.shareId);",
       );
       // Neither handler duplicates the ending logic inline.
       expect(handler, label).not.toContain("endJoinedChannel(");
@@ -614,14 +693,14 @@ describe("main-process chat authorization", () => {
     const handler = handlerSource("leaveDm");
     const leftRowAt = handler.indexOf("const leftRow = (");
     const endAt = handler.indexOf(
-      "endWorkspaceJoinedChannel(input.workspaceId, input.shareId);",
+      "endWorkspaceJoinedChannel(operation, input.shareId);",
     );
     const markAt = handler.indexOf("markLeftInLastKnownLanes(");
     expect(leftRowAt).toBeGreaterThan(-1);
     expect(endAt).toBeGreaterThan(leftRowAt);
     expect(markAt).toBeGreaterThan(endAt);
     expect(handler.slice(markAt)).toContain(
-      "markLeftInLastKnownLanes(lastKnownDmRequestLanes, input.workspaceId, {",
+      "operation.state.lastKnownDmRequestLanes,",
     );
     expect(handler.slice(markAt)).toContain(
       "granterEmail: leftRow?.granterEmail ?? null,",
@@ -652,7 +731,7 @@ describe("main-process chat authorization", () => {
     // And the scope is a required argument of the one projection, so a third
     // caller cannot answer the lane without naming one.
     expect(mainSource).toContain(
-      "function joinedChannelAnswers(workspaceId: string, channelWireIds: readonly string[])",
+      "function joinedChannelAnswers(\n    workspace: RegistryEntry,",
     );
     // The write gate is unaffected: it reads the WHOLE registry array, in
     // main, and never crosses IPC at all.

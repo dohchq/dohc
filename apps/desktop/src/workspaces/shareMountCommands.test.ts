@@ -29,6 +29,7 @@ const SELECTOR = {
   access: "view" as const,
 };
 const LEASE = {} as WorkspaceOperationLease;
+const assertCurrent = () => undefined;
 
 const LIVE_OWNER_COMPLETE = Symbol("live owner complete");
 
@@ -246,6 +247,7 @@ describe("share mount commands", () => {
     const result = await h.commands.mount({
       workspace: WORKSPACE,
       shareCode: SHARE_CODE,
+      assertCurrent,
     });
 
     expect(result).toEqual({
@@ -283,7 +285,7 @@ describe("share mount commands", () => {
     const commands = createShareMountCommands(h.dependencies);
 
     await expect(
-      commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE }),
+      commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent }),
     ).rejects.toThrow("Nothing was added");
 
     expect(h.mounts).toEqual([]);
@@ -326,7 +328,7 @@ describe("share mount commands", () => {
     const commands = createShareMountCommands(h.dependencies);
 
     await expect(
-      commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE }),
+      commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent }),
     ).rejects.toThrow("cleanup did not finish");
 
     const rollbackError = loggedErrors.find(
@@ -355,7 +357,7 @@ describe("share mount commands", () => {
     const commands = createShareMountCommands(h.dependencies);
 
     await expect(
-      commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE }),
+      commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent }),
     ).rejects.toThrow("cleanup did not finish");
 
     const rollbackError = loggedErrors.find(
@@ -386,11 +388,13 @@ describe("share mount commands", () => {
     const first = commands.mount({
       workspace: WORKSPACE,
       shareCode: SHARE_CODE,
+      assertCurrent,
     });
     await vi.waitFor(() => expect(calls).toBe(1));
     const second = commands.mount({
       workspace: WORKSPACE,
       shareCode: SHARE_CODE,
+      assertCurrent,
     });
     await Promise.resolve();
     expect(calls).toBe(1);
@@ -403,7 +407,11 @@ describe("share mount commands", () => {
   it("fails closed before relay access for invalid or cross-relay share codes", async () => {
     const invalid = harness();
     await expect(
-      invalid.commands.mount({ workspace: WORKSPACE, shareCode: "not-a-code" }),
+      invalid.commands.mount({
+        workspace: WORKSPACE,
+        shareCode: "not-a-code",
+        assertCurrent,
+      }),
     ).rejects.toThrow("doesn't look like a share code");
     expect(invalid.events).toEqual([]);
 
@@ -415,7 +423,7 @@ describe("share mount commands", () => {
     });
     const commands = createShareMountCommands(mismatch.dependencies);
     await expect(
-      commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE }),
+      commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent }),
     ).rejects.toThrow("different server");
     expect(mismatch.events).toEqual([]);
   });
@@ -429,7 +437,7 @@ describe("share mount commands", () => {
     const commands = createShareMountCommands(h.dependencies);
 
     await expect(
-      commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE }),
+      commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent }),
     ).rejects.toThrow("shared chat channel");
     expect(h.events).toEqual(["credentials", "preflight"]);
   });
@@ -442,7 +450,7 @@ describe("share mount commands", () => {
     );
 
     await expect(
-      h.commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE }),
+      h.commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent }),
     ).rejects.toThrow("cleanup did not finish");
     expect(h.events.at(-1)).toBe("notify:workspace-one");
   });
@@ -455,7 +463,7 @@ describe("share mount commands", () => {
     });
 
     await expect(
-      h.commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE }),
+      h.commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent }),
     ).rejects.toThrow("Nothing was added");
 
     expect(h.files.unmount).not.toHaveBeenCalled();
@@ -589,7 +597,7 @@ describe("share mount commands", () => {
       { shareId: "damaged", label: "../../escape" },
     ];
 
-    const result = await h.commands.refresh({ workspace: WORKSPACE });
+    const result = await h.commands.refresh({ workspace: WORKSPACE, assertCurrent });
 
     expect(result.results).toEqual([
       {
@@ -629,7 +637,9 @@ describe("share mount commands", () => {
       new RelayUnauthorizedError(),
     );
 
-    await expect(h.commands.refresh({ workspace: WORKSPACE })).rejects.toThrow(
+    await expect(
+      h.commands.refresh({ workspace: WORKSPACE, assertCurrent }),
+    ).rejects.toThrow(
       "session expired",
     );
     expect(h.events.at(-1)).toBe("notify:workspace-one");
@@ -645,6 +655,7 @@ describe("share mount commands", () => {
     const result = await h.commands.unmount({
       workspace: WORKSPACE,
       shareId: SHARE_ID,
+      assertCurrent,
     });
 
     expect(result).toEqual({
@@ -680,6 +691,7 @@ describe("share mount commands", () => {
     const result = await h.commands.unmount({
       workspace: WORKSPACE,
       shareId: SHARE_ID,
+      assertCurrent,
     });
 
     expect(result.folderLeft).toBe(true);
@@ -744,7 +756,11 @@ describe("share mount commands", () => {
       };
 
       await expect(
-        h.commands.unmount({ workspace: WORKSPACE, shareId: SHARE_ID }),
+        h.commands.unmount({
+          workspace: WORKSPACE,
+          shareId: SHARE_ID,
+          assertCurrent,
+        }),
       ).resolves.toEqual({
         workspace: { id: WORKSPACE.workspaceId },
         ...(folderLeft ? { folderLeft: true } : {}),
@@ -762,7 +778,7 @@ describe("share mount commands", () => {
     const commands = createShareMountCommands(h.dependencies);
 
     await expect(
-      commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE }),
+      commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent }),
     ).rejects.toThrow("No share matches that code");
     expect(h.events).toEqual(["credentials"]);
   });

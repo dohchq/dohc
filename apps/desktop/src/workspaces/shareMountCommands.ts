@@ -80,16 +80,19 @@ export interface ShareMountCommands<WorkspaceSummary> {
   mount(input: {
     workspace: ShareMountCommandWorkspace;
     shareCode: string;
+    assertCurrent(): void;
   }): Promise<{
     workspace: WorkspaceSummary;
     mount: ShareMountStatusRow;
   }>;
   refresh(input: {
     workspace: ShareMountCommandWorkspace;
+    assertCurrent(): void;
   }): Promise<{ results: ShareMountStatusRow[] }>;
   unmount(input: {
     workspace: ShareMountCommandWorkspace;
     shareId: string;
+    assertCurrent(): void;
   }): Promise<{ workspace: WorkspaceSummary; folderLeft?: true }>;
   filesLifecycle: ShareMountFilesLifecycle;
 }
@@ -245,8 +248,9 @@ export function createShareMountCommands<WorkspaceSummary>(
   return {
     filesLifecycle,
 
-    mount({ workspace, shareCode }) {
+    mount({ workspace, shareCode, assertCurrent }) {
       return withCommandAdmission(workspace.workspaceId, async () => {
+        assertCurrent();
         const parsed = parseShareCode(shareCode);
         if (!parsed) {
           throw new Error(
@@ -254,6 +258,7 @@ export function createShareMountCommands<WorkspaceSummary>(
           );
         }
         const credentials = await dependencies.loadCredentials();
+        assertCurrent();
         if (!credentials) throw new Error("Sign in to dohc Cloud first.");
         const relayUrl = credentials.relayUrl;
         if (!relayUrl || !relayUrlsMatch(relayUrl, parsed.relayUrl)) {
@@ -270,7 +275,9 @@ export function createShareMountCommands<WorkspaceSummary>(
         const relay = { baseUrl: relayUrl, token: credentials.token };
         let info: Pick<ShareViewInfo, "granterEmail" | "selector">;
         try {
+          assertCurrent();
           info = await dependencies.fetchInfo(relay, parsed.shareId);
+          assertCurrent();
         } catch (error) {
           if (error instanceof ShareUnavailableError) {
             throw new Error(
@@ -295,6 +302,7 @@ export function createShareMountCommands<WorkspaceSummary>(
             const onDisk = await dependencies.listDirectory(
               join(workspace.rootPath, SHARED_WITH_ME_FOLDER),
             );
+            assertCurrent();
             const mount = {
               shareId: parsed.shareId,
               label: allocateShareMountLabel({
@@ -329,8 +337,10 @@ export function createShareMountCommands<WorkspaceSummary>(
             try {
               const outcome = await files.mount(lease, prepared);
               mounted = true;
+              assertCurrent();
               dependencies.refreshNativeWorkspaceSurfaces();
               dependencies.notifyRenderer({ workspaceId: workspace.workspaceId });
+              assertCurrent();
               return {
                 workspace: dependencies.workspaceSummary(workspace.workspaceId),
                 mount: {
@@ -365,6 +375,7 @@ export function createShareMountCommands<WorkspaceSummary>(
                   );
                 }
               }
+              assertCurrent();
               dependencies.logError(
                 `mount-share rollback for ${mount.label}:`,
                 mountError,
@@ -406,8 +417,9 @@ export function createShareMountCommands<WorkspaceSummary>(
       });
     },
 
-    refresh({ workspace }) {
+    refresh({ workspace, assertCurrent }) {
       return withCommandAdmission(workspace.workspaceId, async () => {
+        assertCurrent();
         const mounts = dependencies.readMounts(workspace.workspaceId);
         const results: ShareMountStatusRow[] = [];
         const pushResult = (
@@ -446,6 +458,7 @@ export function createShareMountCommands<WorkspaceSummary>(
                     "refresh",
                   ),
               );
+              assertCurrent();
               if (
                 reconciled.kind !== "refresh" ||
                 "ok" in reconciled.outcome
@@ -460,6 +473,7 @@ export function createShareMountCommands<WorkspaceSummary>(
                 reconciled.outcome.changedPaths,
               );
             } catch (error) {
+              assertCurrent();
               const verdict = classifyShareMountRefreshError(error);
               if (verdict.kind === "abort") {
                 throw new Error(verdict.message);
@@ -473,16 +487,18 @@ export function createShareMountCommands<WorkspaceSummary>(
           }
           return { results };
         } finally {
+          assertCurrent();
           dependencies.notifyRenderer({ workspaceId: workspace.workspaceId });
         }
       });
     },
 
-    unmount({ workspace, shareId }) {
+    unmount({ workspace, shareId, assertCurrent }) {
       return withCommandAdmission(workspace.workspaceId, () =>
         dependencies.withWorkspaceOperation(
           workspace.rootPath,
           async (lease) => {
+            assertCurrent();
             const registeredMounts = dependencies.readMounts(
               workspace.workspaceId,
             );
@@ -504,6 +520,7 @@ export function createShareMountCommands<WorkspaceSummary>(
                     error,
                   );
                 });
+              assertCurrent();
               // The empty array is a durable ownership tombstone. Removing
               // the registry field could promote leftover projection bytes.
               dependencies.writeMounts(
@@ -521,6 +538,7 @@ export function createShareMountCommands<WorkspaceSummary>(
               workspaceId: workspace.workspaceId,
               shareId: removal.mount.shareId,
             });
+            assertCurrent();
             presentUnmount(workspace.workspaceId, shareId);
             return {
               workspace: dependencies.workspaceSummary(workspace.workspaceId),
