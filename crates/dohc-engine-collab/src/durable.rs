@@ -21,7 +21,7 @@ use dohc_engine_storage::{
 };
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
-use crate::doc_cache::{GateBaseProbe, ServedGateBase, WriterDocCache};
+use crate::doc_cache::{GateBaseProbe, GateBaseSource, ServedGateBase, WriterDocCache};
 use crate::error::CollabError;
 use crate::limits::{DEFAULT_COMPACTION_THRESHOLD, MAX_YDOC_UPDATE_BYTES};
 use crate::ydoc::{ContentKind, Projection, SuccessorBase, Ydoc};
@@ -458,7 +458,7 @@ pub fn record_local_update_with_origin(
     let mut probe = GateBaseProbe::default();
     let outcome = store.write_with(faults, |tx| -> Result<AppendOutcome, CollabError> {
         let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
-        append_local_update_cached(
+        let outcome = append_local_update_cached(
             tx,
             key,
             &marker,
@@ -468,11 +468,13 @@ pub fn record_local_update_with_origin(
             now_ms,
             cache,
             &mut probe,
-        )
+        )?;
+        probe.capture_commit(tx, key);
+        Ok(outcome)
     })?;
-    cache.finish_local_append(store, key, &outcome, update, &sha, probe);
-    self_bound_log(store, cache, key, &outcome, faults, now_ms)?;
-    Ok(outcome)
+    finalize_local_append(
+        store, cache, key, outcome, update, &sha, probe, faults, now_ms,
+    )
 }
 
 /// Create a marker when needed and append a locally-produced update in one
@@ -818,12 +820,21 @@ where
                 )
                 .map_err(map_sql)?;
             }
+            probe.capture_commit(tx, key);
             Ok(outcome)
         }
     })?;
-    cache.finish_local_append(store, key, &outcome, update, &update_sha, probe);
-    self_bound_log(store, cache, key, &outcome, faults, now_ms)?;
-    Ok(outcome)
+    finalize_local_append(
+        store,
+        cache,
+        key,
+        outcome,
+        update,
+        &update_sha,
+        probe,
+        faults,
+        now_ms,
+    )
 }
 
 fn append_local_update(
@@ -886,8 +897,7 @@ fn append_local_update_cached(
         Some(base) => {
             crate::validate_replay_parity(base, update)?;
             probe.served = Some(ServedGateBase {
-                hit: true,
-                rebuilt: None,
+                source: GateBaseSource::Hit,
                 observed: marker.clone(),
             });
         }
@@ -895,8 +905,7 @@ fn append_local_update_cached(
             let base = load_for_replay_gate(conn, key)?;
             crate::validate_replay_parity(&base, update)?;
             probe.served = Some(ServedGateBase {
-                hit: false,
-                rebuilt: Some(base),
+                source: GateBaseSource::Rebuilt(base),
                 observed: marker.clone(),
             });
         }
@@ -909,6 +918,25 @@ fn append_local_update_cached(
         emit_outbound: marker.regime == Regime::Replicated
             && marker.lineage_claim_status == LineageClaimStatus::Exact,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_local_append(
+    store: &mut EngineStore,
+    cache: &mut WriterDocCache,
+    key: &DocKey,
+    outcome: TxnOutcome<AppendOutcome>,
+    update: &[u8],
+    update_sha: &str,
+    probe: GateBaseProbe,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+) -> Result<TxnOutcome<AppendOutcome>, CollabError> {
+    // This order is part of CACHE-VALID: advance or install against the append
+    // commit first, then let a resulting fold re-base that entry.
+    cache.finish_local_append(key, &outcome, update, update_sha, probe);
+    self_bound_log(store, cache, key, &outcome, faults, now_ms)?;
+    Ok(outcome)
 }
 
 /// After a genuinely-new append, fold the log if it has grown past the default

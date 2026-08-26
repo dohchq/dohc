@@ -448,6 +448,60 @@ fn a_guarded_error_after_the_gate_leaves_the_entry_valid() {
     );
 }
 
+#[test]
+fn the_commit_token_observes_updates_appended_by_the_post_append_hook() {
+    let (mut ts, key) = setup("cache-commit-token-extra", Regime::LocalOnly);
+    let u1 = independent_insert("a");
+    committed(
+        record_local_update(&mut ts.store, &mut ts.cache, &key, &u1, &NoFaults, 1_001).expect("u1"),
+    );
+    let u2 = independent_insert("b");
+    let extra = independent_insert("c");
+    let before = ts.cache.stats();
+
+    committed(
+        record_local_update_creating_marker_guarded(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            None,
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            &u2,
+            None,
+            false,
+            false,
+            None,
+            &NoFaults,
+            1_002,
+            |tx, _outcome| {
+                let appended = record_update_in_tx(tx, &key, &extra, 1_003)?;
+                assert!(!appended.deduped, "the hook must append another row");
+                Ok(())
+            },
+        )
+        .expect("append with extra update"),
+    );
+
+    assert_eq!(
+        read_marker(&ts.store, &key)
+            .expect("marker")
+            .expect("row")
+            .head_update_seq,
+        3,
+        "both updates committed"
+    );
+    assert_eq!(
+        ts.cache.stats().advances,
+        before.advances,
+        "the cache must not advance by only the first update"
+    );
+    assert!(
+        !ts.cache.contains_for_test(&key),
+        "the final in-transaction tuple must reject the partial advancement"
+    );
+}
+
 #[cfg(feature = "fault-injection")]
 #[test]
 fn a_pre_persist_crash_keeps_the_entry_valid() {
@@ -628,7 +682,12 @@ fn the_byte_budget_bounds_residency_without_affecting_appends() {
     );
     assert!(
         !cache.contains_for_test(&key),
-        "over-budget entries evict immediately"
+        "over-budget entries are not installed"
+    );
+    assert_eq!(
+        cache.stats().installs,
+        0,
+        "the rejected install is not counted"
     );
     let u2 = independent_insert("b");
     committed(

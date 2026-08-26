@@ -6998,13 +6998,15 @@ fn worker_main(
                 token,
                 reply,
             } => {
-                let outcome = versioned_text_write_on_store(
-                    &mut store,
-                    &input,
-                    root_dir.as_deref(),
-                    faults.as_ref(),
-                    &token,
-                );
+                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
+                    versioned_text_write_on_store(
+                        &mut store,
+                        &input,
+                        root_dir.as_deref(),
+                        faults.as_ref(),
+                        &token,
+                    )
+                });
                 let _ = reply.send(outcome);
             }
             Command::VersionedBinaryWrite {
@@ -7015,14 +7017,16 @@ fn worker_main(
                 token,
                 reply,
             } => {
-                let outcome = versioned_binary_write_on_store(
-                    &mut store,
-                    &input,
-                    &root_dir,
-                    self_writes.as_ref(),
-                    faults.as_ref(),
-                    &token,
-                );
+                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
+                    versioned_binary_write_on_store(
+                        &mut store,
+                        &input,
+                        &root_dir,
+                        self_writes.as_ref(),
+                        faults.as_ref(),
+                        &token,
+                    )
+                });
                 let _ = reply.send(outcome);
             }
             Command::VersionedTextRename {
@@ -7033,14 +7037,16 @@ fn worker_main(
                 token,
                 reply,
             } => {
-                let outcome = versioned_text_rename_on_store(
-                    &mut store,
-                    &input,
-                    &root_dir,
-                    self_writes.as_ref(),
-                    faults.as_ref(),
-                    &token,
-                );
+                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
+                    versioned_text_rename_on_store(
+                        &mut store,
+                        &input,
+                        &root_dir,
+                        self_writes.as_ref(),
+                        faults.as_ref(),
+                        &token,
+                    )
+                });
                 let _ = reply.send(outcome);
             }
             Command::VersionedTextDelete {
@@ -7051,14 +7057,16 @@ fn worker_main(
                 token,
                 reply,
             } => {
-                let outcome = versioned_text_delete_on_store(
-                    &mut store,
-                    &input,
-                    &root_dir,
-                    self_writes.as_ref(),
-                    faults.as_ref(),
-                    &token,
-                );
+                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
+                    versioned_text_delete_on_store(
+                        &mut store,
+                        &input,
+                        &root_dir,
+                        self_writes.as_ref(),
+                        faults.as_ref(),
+                        &token,
+                    )
+                });
                 let _ = reply.send(outcome);
             }
             Command::VersionedTextRollback {
@@ -7069,14 +7077,16 @@ fn worker_main(
                 token,
                 reply,
             } => {
-                let outcome = versioned_text_rollback_on_store(
-                    &mut store,
-                    &input,
-                    &root_dir,
-                    self_writes.as_ref(),
-                    faults.as_ref(),
-                    &token,
-                );
+                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
+                    versioned_text_rollback_on_store(
+                        &mut store,
+                        &input,
+                        &root_dir,
+                        self_writes.as_ref(),
+                        faults.as_ref(),
+                        &token,
+                    )
+                });
                 let _ = reply.send(outcome);
             }
             Command::VersionedTextCompare { input, reply } => {
@@ -7093,14 +7103,16 @@ fn worker_main(
                 token,
                 reply,
             } => {
-                let outcome = versioned_text_merge_on_store(
-                    &mut store,
-                    &input,
-                    &root_dir,
-                    self_writes.as_ref(),
-                    faults.as_ref(),
-                    &token,
-                );
+                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
+                    versioned_text_merge_on_store(
+                        &mut store,
+                        &input,
+                        &root_dir,
+                        self_writes.as_ref(),
+                        faults.as_ref(),
+                        &token,
+                    )
+                });
                 let _ = reply.send(outcome);
             }
             Command::CompareVersionFilesPage {
@@ -7130,14 +7142,16 @@ fn worker_main(
                 token,
                 reply,
             } => {
-                let outcome = capture_ingest_on_store(
-                    &mut store,
-                    &input,
-                    root_dir.as_deref(),
-                    &leases,
-                    faults.as_ref(),
-                    &token,
-                );
+                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
+                    capture_ingest_on_store(
+                        &mut store,
+                        &input,
+                        root_dir.as_deref(),
+                        &leases,
+                        faults.as_ref(),
+                        &token,
+                    )
+                });
                 let _ = reply.send(outcome);
             }
             Command::CaptureIngestBinary {
@@ -7147,13 +7161,15 @@ fn worker_main(
                 token,
                 reply,
             } => {
-                let outcome = capture_ingest_binary_on_store(
-                    &mut store,
-                    &input,
-                    &leases,
-                    faults.as_ref(),
-                    &token,
-                );
+                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
+                    capture_ingest_binary_on_store(
+                        &mut store,
+                        &input,
+                        &leases,
+                        faults.as_ref(),
+                        &token,
+                    )
+                });
                 let _ = reply.send(outcome);
             }
             Command::CaptureSecret {
@@ -7693,15 +7709,17 @@ fn worker_main(
                 token,
                 reply,
             } => {
-                let outcome = capture_retire_on_store(
-                    &mut store,
-                    &input,
-                    root_dir.as_deref(),
-                    self_writes.as_deref(),
-                    &leases,
-                    faults.as_ref(),
-                    &token,
-                );
+                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
+                    capture_retire_on_store(
+                        &mut store,
+                        &input,
+                        root_dir.as_deref(),
+                        self_writes.as_deref(),
+                        &leases,
+                        faults.as_ref(),
+                        &token,
+                    )
+                });
                 let _ = reply.send(outcome);
             }
             Command::VersionedTextRead {
@@ -9213,6 +9231,17 @@ fn worker_main(
     drop(store);
 }
 
+/// Local file mutations can rewrite or retire a Y.Doc lineage inside their
+/// transaction. Clear before entry so a committed crash cannot preserve an
+/// entry across a probe-invisible reset. A rollback only loses cache warmth.
+fn with_local_file_mutation_cache_reset<T>(
+    doc_cache: &mut WriterDocCache,
+    mutation: impl FnOnce() -> T,
+) -> T {
+    doc_cache.clear();
+    mutation()
+}
+
 fn reconcile_scene_asset_materialization_conflicts(
     store: &EngineStore,
     root_dir: &std::path::Path,
@@ -9776,6 +9805,9 @@ fn ydoc_open_state_on_store(
             .is_some_and(|marker| marker.regime == dohc_engine_collab::Regime::LocalOnly)
         && dohc_engine_collab::read_last_settled_sha(store, &key)?.is_some()
     {
+        // Invalidate before the reset. A committed crash returns before the
+        // actor can run any post-transaction hook.
+        doc_cache.remove(&key);
         let cleared = store.write_with(&NoFaults, |tx| {
             tx.execute(
                 "DELETE FROM ydoc_updates                  WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
@@ -9797,10 +9829,6 @@ fn ydoc_open_state_on_store(
         if matches!(cleared, TxnOutcome::Crashed { .. }) {
             return Err(RuntimeError::OperationCrashed);
         }
-        // This clear is a head-rewind that keeps the claim fields — the one
-        // reset shape the cache's tuple probe cannot see. Unconditional
-        // removal is the reset hook the CACHE-VALID proof requires.
-        doc_cache.remove(&key);
     }
     // Re-converge BEFORE loading state: an envelope acked-but-deferred while
     // a previous session held the lease is only guaranteed to drain on that
@@ -9824,6 +9852,8 @@ fn ydoc_open_state_on_store(
         // Only the POST-LEASE read drains: a pre-lease probe mutating the
         // lineage while another session holds the lease would advance state
         // behind the active editor with no event or resync signal.
+        // A full drain may replace the lineage, so eviction must precede it.
+        doc_cache.remove(&key);
         drain_deferred_ydoc_for_local_rpc(store, &key, &NoFaults)?;
     }
     // An open sync conflict on this object freezes the OPEN as well as the
@@ -13079,6 +13109,68 @@ fn snapshot(store: &EngineStore) -> Result<StoreSnapshot, StorageError> {
         request_ledger: store.request_ledger_len()?,
         migration_ledger: store.migration_ledger_len()?,
     })
+}
+
+#[cfg(test)]
+mod doc_cache_reset_tests {
+    use super::*;
+    use dohc_engine_testkit::ScratchDir;
+
+    #[test]
+    fn local_file_retire_removes_a_poisoned_warm_entry_immediately() {
+        let scratch = ScratchDir::new().expect("scratch directory");
+        let mut store = EngineStore::open(&scratch.engine_db_path().expect("engine database"), 1)
+            .expect("open engine store");
+        ensure_mutation_version_on_store(&mut store, "workspace", "main", 1, &NoFaults)
+            .expect("ensure main version");
+        let key = DocKey::new("workspace", "main", "document").expect("document key");
+        let update = Ydoc::wire().plaintext_insert(0, "cached");
+        let mut cache = WriterDocCache::new();
+        let appended = dohc_engine_collab::record_local_update_creating_marker_guarded(
+            &mut store,
+            &mut cache,
+            &key,
+            Some("document.md"),
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            &update,
+            None,
+            true,
+            false,
+            None,
+            &NoFaults,
+            2,
+            |_tx, _outcome| Ok(()),
+        )
+        .expect("append update");
+        assert!(matches!(appended, TxnOutcome::Committed(_)));
+        assert!(cache.contains_for_test(&key), "the entry must be warm");
+        cache.poison_doc_for_test(&key, Ydoc::wire());
+
+        let retired = with_local_file_mutation_cache_reset(&mut cache, || {
+            store.write_with(&NoFaults, |tx| -> Result<(), RuntimeError> {
+                dohc_engine_sync::retire_ydoc_lineage_in_tx(
+                    tx,
+                    &key.workspace_id,
+                    &key.version_id,
+                    &key.object_id,
+                )
+                .map_err(RuntimeError::from)
+            })
+        })
+        .expect("retire lineage");
+        assert!(matches!(retired, TxnOutcome::Committed(())));
+        assert!(
+            !cache.contains_for_test(&key),
+            "retire must remove the entry before any healing append"
+        );
+        assert!(
+            dohc_engine_collab::read_marker(&store, &key)
+                .expect("read retired marker")
+                .is_none(),
+            "the lineage must be retired"
+        );
+    }
 }
 
 #[cfg(test)]

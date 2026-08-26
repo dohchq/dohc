@@ -33,32 +33,27 @@ use dohc_engine_storage::{EngineStore, TxnOutcome};
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::durable::{
-    binary_blob_for_gate, latest_snapshot, map_sql, query_marker, AppendOutcome,
-    LineageClaimStatus, Marker, Regime,
+    binary_blob_for_gate, latest_snapshot, map_sql, query_marker, AppendOutcome, Marker,
 };
 use crate::error::CollabError;
-use crate::ydoc::{ContentKind, Ydoc};
+use crate::ydoc::Ydoc;
 use crate::DocKey;
 
 /// Hard cap on resident entries.
 const MAX_ENTRIES: usize = 16;
-/// Byte budget across all entries (approximate, from encoded sizes).
+/// Encoded-wire-byte budget across all entries. It does not bound in-memory size.
 const MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 
 /// The durable coordinates that name one exact replay path. Two lineage states
-/// with equal tuples replay the same byte sequence — except a head-rewind that
-/// re-appends the same head bytes over different history with identical claim
-/// fields (the local-only prune ABA), which is why every such reset must call
-/// [`WriterDocCache::remove`].
+/// with equal tuples replay the same byte sequence, except a lineage reset that
+/// later rebuilds the same coordinates over different history. Every such reset
+/// must call [`WriterDocCache::remove`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CacheTuple {
+struct CacheTuple {
     head_update_seq: i64,
     head_snapshot_seq: i64,
-    lineage_claim_status: LineageClaimStatus,
     lineage_claim_id: Option<String>,
     lineage_epoch_tag: Option<String>,
-    content_kind: ContentKind,
-    regime: Regime,
     /// Sha of the log row at `head_update_seq`; `None` when the head is folded
     /// into the snapshot (`head_update_seq == head_snapshot_seq`).
     head_row_sha: Option<String>,
@@ -69,21 +64,23 @@ impl CacheTuple {
         CacheTuple {
             head_update_seq: marker.head_update_seq,
             head_snapshot_seq: marker.head_snapshot_seq,
-            lineage_claim_status: marker.lineage_claim_status,
             lineage_claim_id: marker.lineage_claim_id.clone(),
             lineage_epoch_tag: marker.lineage_epoch_tag.clone(),
-            content_kind: marker.content_kind,
-            regime: marker.regime,
             head_row_sha,
         }
     }
 
-    /// Read the current tuple from the caller's connection, or `None` when the
-    /// marker is absent or torn (head row missing).
-    fn read_current(conn: &Connection, key: &DocKey) -> Result<Option<Self>, CollabError> {
-        let Some(marker) = query_marker(conn, key)? else {
-            return Ok(None);
-        };
+    fn after_append(marker: &Marker, seq: i64, update_sha: &str) -> Self {
+        let mut tuple = Self::from_marker(marker, Some(update_sha.to_owned()));
+        tuple.head_update_seq = seq;
+        tuple
+    }
+
+    fn read_for_marker(
+        conn: &Connection,
+        key: &DocKey,
+        marker: &Marker,
+    ) -> Result<Option<Self>, CollabError> {
         let head_row_sha = if marker.head_update_seq > marker.head_snapshot_seq {
             match head_row_sha(conn, key, marker.head_update_seq)? {
                 Some(sha) => Some(sha),
@@ -92,7 +89,16 @@ impl CacheTuple {
         } else {
             None
         };
-        Ok(Some(CacheTuple::from_marker(&marker, head_row_sha)))
+        Ok(Some(CacheTuple::from_marker(marker, head_row_sha)))
+    }
+
+    /// Read the current tuple from the caller's connection, or `None` when the
+    /// marker is absent or torn (head row missing).
+    fn read_current(conn: &Connection, key: &DocKey) -> Result<Option<Self>, CollabError> {
+        let Some(marker) = query_marker(conn, key)? else {
+            return Ok(None);
+        };
+        Self::read_for_marker(conn, key, &marker)
     }
 }
 
@@ -130,17 +136,35 @@ pub struct CacheStats {
 #[derive(Default)]
 pub(crate) struct GateBaseProbe {
     pub(crate) served: Option<ServedGateBase>,
+    commit: Option<CacheCommitToken>,
+}
+
+impl GateBaseProbe {
+    /// Capture the transaction's final replay coordinates without making cache
+    /// maintenance capable of failing the append.
+    pub(crate) fn capture_commit(&mut self, conn: &Connection, key: &DocKey) {
+        self.commit = Some(CacheCommitToken(
+            CacheTuple::read_current(conn, key).ok().flatten(),
+        ));
+    }
 }
 
 pub(crate) struct ServedGateBase {
-    /// True when the cache served the base; false when the base was rebuilt.
-    pub(crate) hit: bool,
-    /// The rebuilt PRE-APPEND base doc (miss only), read inside the append
-    /// transaction, handed out for a post-commit install.
-    pub(crate) rebuilt: Option<Ydoc>,
+    pub(crate) source: GateBaseSource,
     /// The marker as observed inside the append transaction, at gate time.
     pub(crate) observed: Marker,
 }
+
+pub(crate) enum GateBaseSource {
+    Hit,
+    /// The rebuilt PRE-APPEND base doc, read inside the append transaction and
+    /// handed out for a post-commit install.
+    Rebuilt(Ydoc),
+}
+
+/// The final replay coordinates observed after all in-transaction append work.
+/// Only a normally committed outcome may consume this token.
+struct CacheCommitToken(Option<CacheTuple>);
 
 /// The single-writer-thread cache. `!Send` on purpose (it caches `Ydoc`s); it
 /// lives and dies with the workspace store's worker thread.
@@ -200,29 +224,11 @@ impl WriterDocCache {
             self.misses.set(self.misses.get() + 1);
             return Ok(None);
         };
-        let t = &entry.tuple;
-        let marker_fields_match = t.head_update_seq == marker.head_update_seq
-            && t.head_snapshot_seq == marker.head_snapshot_seq
-            && t.lineage_claim_status == marker.lineage_claim_status
-            && t.lineage_claim_id == marker.lineage_claim_id
-            && t.lineage_epoch_tag == marker.lineage_epoch_tag
-            && t.content_kind == marker.content_kind
-            && t.regime == marker.regime;
-        if !marker_fields_match {
-            self.misses.set(self.misses.get() + 1);
-            return Ok(None);
-        }
         // O(1) head-row probe: the row at the head seq must hold exactly the
         // sha the entry advanced with. A folded head (head == snapshot seq)
         // has no row and the tuple must agree.
-        let expected_row = if marker.head_update_seq > marker.head_snapshot_seq {
-            head_row_sha(conn, key, marker.head_update_seq)?
-        } else {
-            None
-        };
-        if expected_row != t.head_row_sha
-            || (marker.head_update_seq > marker.head_snapshot_seq && expected_row.is_none())
-        {
+        let current = CacheTuple::read_for_marker(conn, key, marker)?;
+        if current.as_ref() != Some(&entry.tuple) {
             self.misses.set(self.misses.get() + 1);
             return Ok(None);
         }
@@ -234,14 +240,16 @@ impl WriterDocCache {
         // (`replay_parity::scan_v1`), not the raw re-encode bytes: yrs
         // `Any::Map` is HashMap-backed, so two byte-replay-identical docs can
         // legitimately re-encode an embed's map keys in different orders — and
-        // the gate itself fingerprints such payloads order-independently.
+        // the gate itself fingerprints such payloads order-independently. This
+        // is verdict-sufficient for gate-only serving but ignores origin and
+        // block-order differences; PR3 must strengthen the oracle before
+        // projections or resync use cached docs.
         #[cfg(any(test, debug_assertions))]
         {
-            use crate::replay_parity::scan_v1;
+            use crate::replay_parity::structurally_equal_v1;
             let fresh = crate::durable::load_for_replay_gate(conn, key)?;
-            assert_eq!(
-                scan_v1(&fresh.encode_full_state())?,
-                scan_v1(&entry.doc.encode_full_state())?,
+            assert!(
+                structurally_equal_v1(&fresh.encode_full_state(), &entry.doc.encode_full_state(),)?,
                 "CACHE-VALID violated: cached Y.Doc full-state structure \
                  diverges from load_for_replay_gate for {key:?}"
             );
@@ -249,9 +257,8 @@ impl WriterDocCache {
             let cached_pending = entry.doc.pending_update_v1();
             match (&fresh_pending, &cached_pending) {
                 (None, None) => {}
-                (Some(fresh_bytes), Some(cached_bytes)) => assert_eq!(
-                    scan_v1(fresh_bytes)?,
-                    scan_v1(cached_bytes)?,
+                (Some(fresh_bytes), Some(cached_bytes)) => assert!(
+                    structurally_equal_v1(fresh_bytes, cached_bytes)?,
                     "CACHE-VALID violated: cached Y.Doc pending structure \
                      diverges from load_for_replay_gate for {key:?}"
                 ),
@@ -271,15 +278,13 @@ impl WriterDocCache {
     }
 
     /// Advance or install the entry for one COMMITTED, genuinely-new local
-    /// append. Verifies against a fresh durable read that the commit changed
-    /// the replay path by exactly this append (head advanced by one, head row
-    /// holds `update_sha`, every other tuple field unchanged from the in-tx
-    /// observation); anything else — an in-transaction base origination, a
-    /// hook that appended more — removes the entry instead. Cache maintenance
-    /// never fails the append: every internal failure degrades to `remove`.
+    /// append. The end-of-transaction token proves that the commit changed the
+    /// replay path by exactly this append: the head advanced by one, its row
+    /// holds `update_sha`, and every other tuple field is unchanged. An
+    /// in-transaction base origination or an extra append removes the entry.
+    /// Cache maintenance never fails the append.
     pub(crate) fn finish_local_append(
         &mut self,
-        store: &EngineStore,
         key: &DocKey,
         outcome: &TxnOutcome<AppendOutcome>,
         update: &[u8],
@@ -291,37 +296,28 @@ impl WriterDocCache {
                 // A dedupe changed nothing: the entry (if any) is still valid.
             }
             TxnOutcome::Committed(app) => {
-                let Some(served) = probe.served else {
+                let GateBaseProbe { served, commit } = probe;
+                let Some(served) = served else {
                     // A non-deduped append that never reached the gate is
                     // unexpected; fail safe.
                     self.remove(key);
                     return;
                 };
-                let fresh = store.read_with(|conn| CacheTuple::read_current(conn, key));
-                let Ok(Some(fresh)) = fresh else {
+                let Some(CacheCommitToken(Some(fresh))) = commit else {
                     self.remove(key);
                     return;
                 };
                 let observed = &served.observed;
-                let exactly_this_append = fresh.head_update_seq == app.seq
-                    && app.seq == observed.head_update_seq + 1
-                    && fresh.head_row_sha.as_deref() == Some(update_sha)
-                    && fresh.head_snapshot_seq == observed.head_snapshot_seq
-                    && fresh.lineage_claim_status == observed.lineage_claim_status
-                    && fresh.lineage_claim_id == observed.lineage_claim_id
-                    && fresh.lineage_epoch_tag == observed.lineage_epoch_tag
-                    && fresh.content_kind == observed.content_kind
-                    && fresh.regime == observed.regime;
+                let expected = CacheTuple::after_append(observed, app.seq, update_sha);
+                let exactly_this_append =
+                    app.seq == observed.head_update_seq + 1 && fresh == expected;
                 if !exactly_this_append {
                     self.remove(key);
                     return;
                 }
-                if served.hit {
-                    self.advance_committed(key, update, fresh);
-                } else if let Some(doc) = served.rebuilt {
-                    self.install_committed(key, doc, update, fresh);
-                } else {
-                    self.remove(key);
+                match served.source {
+                    GateBaseSource::Hit => self.advance_committed(key, update, fresh),
+                    GateBaseSource::Rebuilt(doc) => self.install_committed(key, doc, update, fresh),
                 }
             }
             // Durable-but-unacked: the head advanced without a verified
@@ -361,6 +357,10 @@ impl WriterDocCache {
         }
         let approx_bytes =
             doc.encode_full_state().len() + doc.pending_update_v1().map_or(0, |bytes| bytes.len());
+        if approx_bytes > self.max_total_bytes() {
+            self.remove(key);
+            return;
+        }
         let entry = CacheEntry {
             doc,
             tuple,
@@ -424,9 +424,8 @@ impl WriterDocCache {
     }
 
     /// Drop the entry for `key`. The mandatory hook for every lineage reset
-    /// the tuple cannot see (a local-only prune re-appended to the same head
-    /// coordinates replays DIFFERENT bytes under an identical tuple). Always
-    /// safe: the next append misses and reconstructs.
+    /// the tuple cannot see. Always safe: the next append misses and
+    /// reconstructs.
     pub fn remove(&mut self, key: &DocKey) {
         if self.entries.remove(key).is_some() {
             self.removes += 1;
