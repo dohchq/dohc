@@ -330,6 +330,7 @@ function makeBridge(
     emitWorkspaceActivity: (event: WorkspaceActivityEvent = {}) => {
       for (const callback of [...activityCallbacks]) callback(event);
     },
+    workspaceActivitySubscriberCount: () => activityCallbacks.size,
     emitSearchResults: (batch: SearchResultsEvent) => searchCallback?.(batch),
     emitPluginPanelOpened: (event: PluginPanelOpenedEvent) =>
       pluginPanelOpenedCallback?.(event),
@@ -3794,6 +3795,82 @@ const SKIPPED_RECORD = {
   generation: 3,
 };
 
+describe("workspace switch admission", () => {
+  it("restores B's layout and engine surfaces after one admitted open", async () => {
+    let selectedWorkspace = WORKSPACE;
+    let admittedWorkspaceId = WORKSPACE.workspaceId;
+    const rejectedReads: string[] = [];
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.getWorkspaceUiState = vi.fn(async () => {
+      if (admittedWorkspaceId !== selectedWorkspace.workspaceId) {
+        rejectedReads.push(`ui-state:${selectedWorkspace.workspaceId}`);
+        throw new Error("UI state read stopped because this window changed workspaces.");
+      }
+      return selectedWorkspace.workspaceId === OTHER_WORKSPACE.workspaceId
+        ? storedStateWithTabs(["b.md"], "b.md")
+        : null;
+    });
+    bridge.getWorkspaceSettings = vi.fn(async (): Promise<WorkspaceSettingsResult> => {
+      if (admittedWorkspaceId !== selectedWorkspace.workspaceId) {
+        rejectedReads.push(`settings:${selectedWorkspace.workspaceId}`);
+        throw new Error(
+          "Workspace settings read stopped because this window changed workspaces.",
+        );
+      }
+      return {
+        settings: {
+          ...DEFAULT_WORKSPACE_SETTINGS,
+          experimental: {
+            ...DEFAULT_WORKSPACE_SETTINGS.experimental,
+            workspaceEngineAlpha:
+              selectedWorkspace.workspaceId === OTHER_WORKSPACE.workspaceId,
+          },
+        },
+        source: "stored",
+      };
+    });
+    bridge.openWorkspace = vi.fn(async () => {
+      admittedWorkspaceId = selectedWorkspace.workspaceId;
+      return SYNC_STATUS;
+    });
+    const shell = (workspace: Workspace) => (
+      <DesktopWorkspaceShell
+        key={workspace.workspaceId}
+        workspace={workspace}
+        workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+        onSwitchWorkspace={() => {}}
+      />
+    );
+    vi.stubGlobal("dohcDesktop", bridge);
+    const view = render(shell(WORKSPACE));
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+    bridge.getWorkspaceUiState.mockClear();
+    bridge.getWorkspaceSettings.mockClear();
+    bridge.openWorkspace.mockClear();
+
+    selectedWorkspace = OTHER_WORKSPACE;
+    view.rerender(shell(OTHER_WORKSPACE));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+    await screen.findByTestId("tab-b.md");
+    await screen.findByTestId("titlebar-chats-sidebar");
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalled());
+    await act(async () => {});
+
+    expect(rejectedReads).toEqual([
+      `ui-state:${OTHER_WORKSPACE.workspaceId}`,
+      `settings:${OTHER_WORKSPACE.workspaceId}`,
+    ]);
+    expect(bridge.getWorkspaceUiState).toHaveBeenCalledTimes(2);
+    expect(bridge.getWorkspaceSettings).toHaveBeenCalledTimes(2);
+    expect(bridge.openWorkspace).toHaveBeenCalledOnce();
+  });
+});
+
 describe("ui-state merge-on-load", () => {
   it("drops saved state answered after the shell changes workspaces", async () => {
     const first = deferred<WorkspaceUiState | null>();
@@ -5887,10 +5964,21 @@ describe("ui-state merge-on-load", () => {
     renderShell(bridge);
 
     await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1));
-    act(() => {
-      bridge.emitWorkspaceActivity();
-    });
-    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2));
+    // Notifications subscribes immediately; the listing refresh listener is
+    // the second live subscription and waits for workspace readiness.
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
+    vi.useFakeTimers();
+    try {
+      act(() => {
+        bridge.emitWorkspaceActivity();
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
+      });
+      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
 
     // The newer request fails. Nothing has been displayed yet.
     await act(async () => {
@@ -12425,45 +12513,33 @@ describe("history page", () => {
     expect(placeholder.textContent).not.toContain("Settings");
   });
 
-  // #636, the other untimed write: the workspace-open effect. It runs twice —
-  // the settings read changes refreshHistory's identity — and its status was
-  // written with no token, so it moved no watermark and any older read still
-  // in flight could land on top of the newer open's answer.
-  it("keeps an older status read from landing over the second open's status", async () => {
-    const syncingStatus = { ...SYNC_STATUS, state: "syncing" as const };
-    const conflictStatus = { ...SYNC_STATUS, state: "conflict" as const };
-    const heldRead = deferred<typeof SYNC_STATUS | typeof conflictStatus>();
-    let holdNextRead = true;
+  it("does not reopen the workspace when the engine setting enables history", async () => {
+    const settings = deferred<WorkspaceSettingsResult>();
     const bridge = makeEngineBridge(Promise.resolve(null));
-    // The first open answers before the settings read lands; the second one
-    // carries the workspace as it stands now.
-    let opens = 0;
-    bridge.openWorkspace = vi.fn(async () => {
-      opens += 1;
-      return opens === 1 ? SYNC_STATUS : syncingStatus;
-    });
-    bridge.getSyncStatus = vi.fn(() => {
-      if (holdNextRead) {
-        holdNextRead = false;
-        return heldRead.promise;
-      }
-      return Promise.resolve(syncingStatus);
-    });
+    bridge.getWorkspaceSettings = vi.fn(() => settings.promise);
     renderShell(bridge);
 
-    // Both opens have answered, and so has the refresh that followed the
-    // second one. Only the first refresh's status read is outstanding.
-    await waitFor(() => expect(bridge.openWorkspace).toHaveBeenCalledTimes(2));
     await waitFor(() =>
-      expect(screen.getByTestId("sync-status").dataset.state).toBe("syncing"),
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
+    expect(bridge.openWorkspace).toHaveBeenCalledOnce();
 
-    // It answers last, describing a workspace both newer answers have left.
     await act(async () => {
-      heldRead.resolve(conflictStatus);
-      await heldRead.promise;
+      settings.resolve({
+        settings: {
+          ...DEFAULT_WORKSPACE_SETTINGS,
+          experimental: {
+            ...DEFAULT_WORKSPACE_SETTINGS.experimental,
+            workspaceEngineAlpha: true,
+          },
+        },
+        source: "stored",
+      });
+      await settings.promise;
     });
-    expect(screen.getByTestId("sync-status").dataset.state).toBe("syncing");
+
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalled());
+    expect(bridge.openWorkspace).toHaveBeenCalledOnce();
   });
 });
 
