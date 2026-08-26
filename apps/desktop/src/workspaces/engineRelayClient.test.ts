@@ -1738,12 +1738,15 @@ describe("EngineRelayClient", () => {
       attachmentId: Symbol("relay-successor"),
     };
     const first = live.bind({ ...firstWorkspace, relay });
-    const second = live.bind({ ...secondWorkspace, relay });
-
     await first.push();
+    await live.closeWorkspace(firstWorkspace);
+
+    const second = live.bind({ ...secondWorkspace, relay });
     await second.push();
     expect(opens).toBe(2);
 
+    // A delayed predecessor cleanup must not release the successor's route or
+    // close its attachment-keyed session.
     await live.closeWorkspace(firstWorkspace);
     expect(routes.modeFor(firstWorkspace.workspaceId)).toBe("daemon");
     await second.push();
@@ -1796,15 +1799,16 @@ describe("EngineRelayClient", () => {
       return undefined;
     });
     const { rootPath, live, relay, routes, sessions } = await harness(daemon);
-    const workspaceId = "workspace-attached-close-all";
+    const firstWorkspaceId = "workspace-attached-close-all-first";
+    const secondWorkspaceId = "workspace-attached-close-all-second";
     const first = live.bind({
-      workspaceId,
+      workspaceId: firstWorkspaceId,
       rootPath,
       attachmentId: Symbol("relay-close-all-first"),
       relay,
     });
     const second = live.bind({
-      workspaceId,
+      workspaceId: secondWorkspaceId,
       rootPath,
       attachmentId: Symbol("relay-close-all-second"),
       relay,
@@ -1820,7 +1824,8 @@ describe("EngineRelayClient", () => {
         .map((request) => request.workspace)
         .sort(),
     ).toEqual(["ws-close-all-1", "ws-close-all-2"]);
-    expect(routes.modeFor(workspaceId)).toBeNull();
+    expect(routes.modeFor(firstWorkspaceId)).toBeNull();
+    expect(routes.modeFor(secondWorkspaceId)).toBeNull();
     await sessions.closeAll();
   });
 
