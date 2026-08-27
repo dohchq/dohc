@@ -594,6 +594,11 @@ async function startShareWeb(
   } = {},
 ): Promise<RunningShareWeb> {
   const relayUrl = options.relayUrl ?? (await startRelay());
+  // The adapter refuses to start without viewer assets, and a fresh checkout
+  // has no built viewer/dist — every spawn injects a fixture through the test
+  // seam so the suite never depends on a Vite build artifact.
+  const viewerAssetsDir =
+    options.viewerAssetsDir ?? (await createViewerAssets(true));
   const env = { ...process.env };
   delete env.DOHC_SHARE_WEB_DEV;
   delete env.DOHC_SHARE_WEB_TEST_RESPONSE_ERROR_DURING_PIPE;
@@ -612,9 +617,7 @@ async function startShareWeb(
   if (options.trustedProxies !== undefined) {
     env.DOHC_SHARE_WEB_TRUSTED_PROXIES = options.trustedProxies;
   }
-  if (options.viewerAssetsDir !== undefined) {
-    env.DOHC_SHARE_WEB_TEST_VIEWER_ASSETS_DIR = options.viewerAssetsDir;
-  }
+  env.DOHC_SHARE_WEB_TEST_VIEWER_ASSETS_DIR = viewerAssetsDir;
   const mainUrl = new URL("./main.ts", import.meta.url);
   const childArguments =
     process.platform === "win32"
