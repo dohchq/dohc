@@ -16,12 +16,13 @@ const desktopWorkers = configuredWorkers > 0 ? configuredWorkers : 1;
 
 // Dedicated desktop E2E config: Electron instances cannot safely run in
 // parallel on one display. Keep CI serial by default; set PLAYWRIGHT_WORKERS
-// locally to benchmark isolated-display parallelism. This is the only
-// Playwright config in the repo (the web app and its root config were retired);
-// run it via `pnpm test:desktop:e2e`.
+// locally to benchmark isolated-display parallelism. The renderer profiling
+// harness has its own config and is excluded here; run this default suite via
+// `pnpm test:desktop:e2e`.
 export default defineConfig({
   testDir: "./e2e",
   testMatch: "**/*.spec.ts",
+  testIgnore: "**/profiling/**",
   workers: desktopWorkers,
   timeout: 60_000,
   expect: {
