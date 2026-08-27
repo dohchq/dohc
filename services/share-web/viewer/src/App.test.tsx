@@ -2,6 +2,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as AppModule from "./App";
 import {
   App,
   fileTree,
@@ -12,7 +13,20 @@ import {
 import { filesFromLog, type RelayOp, type SharedFile, type ViewMeta } from "./model";
 
 const SESSION = "abcdefghijkl";
+const SECOND_SESSION = "mnopqrstuvwx";
+const FIRST_HANDOFF_CODE = "A".repeat(43);
+const SECOND_HANDOFF_CODE = "B".repeat(43);
 const SETTLE_TURN_LIMIT = 200;
+
+interface DohcNavigation {
+  urlForCode: (code: string) => string;
+  openCode: (code: string) => void;
+}
+
+function dohcNavigation(): DohcNavigation {
+  return (AppModule as unknown as { dohcNavigation: DohcNavigation })
+    .dohcNavigation;
+}
 
 const DEFAULT_META: ViewMeta = {
   access: "view",
@@ -177,6 +191,391 @@ describe("App", () => {
     return [...container.querySelectorAll("button.file")]
       .map((button) => button.textContent);
   }
+
+  function buttonNamed(name: string): HTMLButtonElement | undefined {
+    return [...container.querySelectorAll("button")]
+      .find((button) => button.textContent === name) as
+        | HTMLButtonElement
+        | undefined;
+  }
+
+  function clickButton(name: string): void {
+    const button = buttonNamed(name);
+    expect(button).toBeDefined();
+    act(() => {
+      button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+  }
+
+  function handoffCalls(fetchMock: ReturnType<typeof vi.fn>): Array<unknown[]> {
+    return fetchMock.mock.calls.filter(
+      ([input]) => requestPath(input as RequestInfo | URL) === "/api/handoff",
+    );
+  }
+
+  function viewerFetch(
+    handoff: (init: RequestInit | undefined) => Response | Promise<Response>,
+  ) {
+    return vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/log?since=0&limit=500") return logPage([]);
+      if (path === "/api/handoff") return handoff(init);
+      throw new Error(`Unexpected request: ${path}`);
+    });
+  }
+
+  it("requires explicit consent before the first handoff request", async () => {
+    const fetchMock = viewerFetch(() => jsonResponse({
+      ok: true,
+      code: FIRST_HANDOFF_CODE,
+      expiresAtMs: Date.now() + 60_000,
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+
+    expect(buttonNamed("Open in dohc")).toBeDefined();
+    expect(handoffCalls(fetchMock)).toHaveLength(0);
+
+    clickButton("Open in dohc");
+
+    expect(handoffCalls(fetchMock)).toHaveLength(0);
+    expect(container.textContent).toContain(
+      "This opens the share in the dohc app on this computer.",
+    );
+    expect(container.textContent).toContain(
+      "When it opens, the person who shared it will see the email on your dohc account.",
+    );
+    expect(buttonNamed("Agree and open")).toBeDefined();
+    expect(buttonNamed("Cancel")).toBeDefined();
+
+    clickButton("Cancel");
+
+    expect(buttonNamed("Agree and open")).toBeUndefined();
+    expect(handoffCalls(fetchMock)).toHaveLength(0);
+
+    clickButton("Open in dohc");
+    const navigate = vi.spyOn(dohcNavigation(), "openCode")
+      .mockImplementation(() => undefined);
+    clickButton("Agree and open");
+    await settle(() => handoffCalls(fetchMock).length === 1);
+
+    expect(handoffCalls(fetchMock)).toHaveLength(1);
+    await settle(() => navigate.mock.calls.length === 1);
+  });
+
+  it("posts only the current viewer contract and navigates with only the handoff code", async () => {
+    const secrets = [
+      SESSION,
+      "cookie-sentinel",
+      "https://relay.example/sync",
+      "bearer-url-secret",
+      "fragment-secret",
+      "share-sensitive-id",
+      "grant-sensitive-id",
+    ];
+    const fetchMock = viewerFetch(() => jsonResponse({
+      ok: true,
+      code: FIRST_HANDOFF_CODE,
+      expiresAtMs: Date.now() + 60_000,
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const navigate = vi.spyOn(dohcNavigation(), "openCode")
+      .mockImplementation(() => undefined);
+
+    await renderApp();
+    clickButton("Open in dohc");
+    clickButton("Agree and open");
+    await settle(() => navigate.mock.calls.length === 1);
+
+    const calls = handoffCalls(fetchMock);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.[0]).toBe("/api/handoff");
+    const init = calls[0]?.[1] as RequestInit | undefined;
+    expect(init?.method).toBe("POST");
+    expect(init?.credentials).toBe("same-origin");
+    expect(init).not.toHaveProperty("body");
+    expect(init?.headers).toEqual({ "x-dohc-link-session": SESSION });
+    expect(Object.keys(init?.headers ?? {})).toEqual(["x-dohc-link-session"]);
+
+    expect(navigate).toHaveBeenCalledWith(FIRST_HANDOFF_CODE);
+    const launchedCode = String(navigate.mock.calls[0]?.[0]);
+    const launchUrl = dohcNavigation().urlForCode(launchedCode);
+    expect(launchUrl).toBe(`dohc://open/${FIRST_HANDOFF_CODE}`);
+    for (const secret of secrets) expect(launchUrl).not.toContain(secret);
+    expect(launchUrl).not.toContain("?");
+    expect(launchUrl).not.toContain("#");
+    expect(() => dohcNavigation().urlForCode("bad/code"))
+      .toThrow("invalid handoff code");
+  });
+
+  it.each([
+    ["a response without ok true", { code: FIRST_HANDOFF_CODE, expiresAtMs: Date.now() + 60_000 }],
+    ["a malformed code", { ok: true, code: "short", expiresAtMs: Date.now() + 60_000 }],
+    ["an expired code", { ok: true, code: FIRST_HANDOFF_CODE, expiresAtMs: Date.now() }],
+    ["a non-integer expiry", { ok: true, code: FIRST_HANDOFF_CODE, expiresAtMs: Date.now() + 60_000.5 }],
+    ["an unexpected response field", { ok: true, code: FIRST_HANDOFF_CODE, expiresAtMs: Date.now() + 60_000, extra: true }],
+  ])("rejects %s", async (_label, body) => {
+    const fetchMock = viewerFetch(() => jsonResponse(body));
+    vi.stubGlobal("fetch", fetchMock);
+    const navigate = vi.spyOn(dohcNavigation(), "openCode")
+      .mockImplementation(() => undefined);
+
+    await renderApp();
+    clickButton("Open in dohc");
+    clickButton("Agree and open");
+    await settle(() => buttonNamed("Try again") !== undefined);
+
+    expect(container.textContent).toContain(
+      "dohc couldn't prepare the app handoff. Check your connection, then choose Try again.",
+    );
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("shows terminal reload copy for a 404 handoff refusal", async () => {
+    const fetchMock = viewerFetch(() => new Response(null, { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+    clickButton("Open in dohc");
+    clickButton("Agree and open");
+    await settle(() => container.textContent?.includes("Reload the page") === true);
+
+    expect(container.textContent).toContain(
+      "This link can't open in dohc right now. Reload the page to check the share.",
+    );
+    expect(buttonNamed("Try again")).toBeUndefined();
+    expect(buttonNamed("Open in dohc")).toBeUndefined();
+  });
+
+  it("shows wait copy for 429 and mints a fresh code on the next open", async () => {
+    let handoffRequests = 0;
+    const fetchMock = viewerFetch(() => {
+      handoffRequests += 1;
+      return handoffRequests === 1
+        ? new Response(null, { status: 429 })
+        : jsonResponse({
+            ok: true,
+            code: SECOND_HANDOFF_CODE,
+            expiresAtMs: Date.now() + 60_000,
+          });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const navigate = vi.spyOn(dohcNavigation(), "openCode")
+      .mockImplementation(() => undefined);
+
+    await renderApp();
+    clickButton("Open in dohc");
+    clickButton("Agree and open");
+    await settle(() => buttonNamed("Open in dohc") !== undefined);
+
+    expect(container.textContent).toContain(
+      "Too many attempts. Wait a minute, then choose Open in dohc again.",
+    );
+    expect(buttonNamed("Try again")).toBeUndefined();
+
+    clickButton("Open in dohc");
+    await settle(() => navigate.mock.calls.length === 1);
+
+    expect(handoffCalls(fetchMock)).toHaveLength(2);
+    expect(navigate).toHaveBeenCalledWith(SECOND_HANDOFF_CODE);
+  });
+
+  it.each([
+    ["503", () => new Response(null, { status: 503 })],
+    ["network failure", () => Promise.reject(new Error("network failure"))],
+  ])("retries a %s with a fresh handoff request", async (_label, fail) => {
+    let handoffRequests = 0;
+    const fetchMock = viewerFetch(() => {
+      handoffRequests += 1;
+      return handoffRequests === 1
+        ? fail()
+        : jsonResponse({
+            ok: true,
+            code: SECOND_HANDOFF_CODE,
+            expiresAtMs: Date.now() + 60_000,
+          });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const navigate = vi.spyOn(dohcNavigation(), "openCode")
+      .mockImplementation(() => undefined);
+
+    await renderApp();
+    clickButton("Open in dohc");
+    clickButton("Agree and open");
+    await settle(() => buttonNamed("Try again") !== undefined);
+
+    expect(container.textContent).toContain(
+      "dohc couldn't prepare the app handoff. Check your connection, then choose Try again.",
+    );
+    clickButton("Try again");
+    await settle(() => navigate.mock.calls.length === 1);
+
+    expect(handoffCalls(fetchMock)).toHaveLength(2);
+    expect(navigate).toHaveBeenCalledWith(SECOND_HANDOFF_CODE);
+  });
+
+  it("keeps post-navigation recovery visible and retries with a fresh code", async () => {
+    const codes = [FIRST_HANDOFF_CODE, SECOND_HANDOFF_CODE];
+    let handoffRequests = 0;
+    const fetchMock = viewerFetch(() => jsonResponse({
+      ok: true,
+      code: codes[handoffRequests++],
+      expiresAtMs: Date.now() + 60_000,
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const navigate = vi.spyOn(dohcNavigation(), "openCode")
+      .mockImplementation(() => undefined);
+
+    await renderApp();
+    clickButton("Open in dohc");
+    clickButton("Agree and open");
+    await settle(() => navigate.mock.calls.length === 1);
+
+    expect(container.textContent).toContain(
+      "If dohc didn't open, install it, then choose Try again.",
+    );
+    clickButton("Try again");
+    await settle(() => navigate.mock.calls.length === 2);
+
+    expect(handoffCalls(fetchMock)).toHaveLength(2);
+    expect(navigate.mock.calls).toEqual([
+      [FIRST_HANDOFF_CODE],
+      [SECOND_HANDOFF_CODE],
+    ]);
+  });
+
+  it("does not navigate or repaint after an in-flight handoff is unmounted", async () => {
+    let resolveHandoff: ((response: Response) => void) | undefined;
+    let handoffSignal: AbortSignal | undefined;
+    const heldHandoff = new Promise<Response>((resolve) => {
+      resolveHandoff = resolve;
+    });
+    const fetchMock = viewerFetch((init) => {
+      handoffSignal = init?.signal ?? undefined;
+      return heldHandoff;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const navigate = vi.spyOn(dohcNavigation(), "openCode")
+      .mockImplementation(() => undefined);
+
+    await renderApp();
+    clickButton("Open in dohc");
+    clickButton("Agree and open");
+    await settle(() => handoffCalls(fetchMock).length === 1);
+
+    expect(container.textContent).toContain("Opening in dohc…");
+    expect(container.textContent).toContain(
+      "Your browser may ask for permission to open dohc.",
+    );
+    act(() => root?.unmount());
+    root = null;
+    resolveHandoff?.(jsonResponse({
+      ok: true,
+      code: FIRST_HANDOFF_CODE,
+      expiresAtMs: Date.now() + 60_000,
+    }));
+    await settle(() => handoffSignal?.aborted === true);
+
+    expect(navigate).not.toHaveBeenCalled();
+    expect(container.textContent).toBe("");
+  });
+
+  it("does not navigate or repaint a replacement ready session", async () => {
+    let resolveFirstHandoff: ((response: Response) => void) | undefined;
+    let firstHandoffSignal: AbortSignal | undefined;
+    const heldHandoff = new Promise<Response>((resolve) => {
+      resolveFirstHandoff = resolve;
+    });
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/log?since=0&limit=500") return logPage([]);
+      if (path === "/api/handoff") {
+        firstHandoffSignal = init?.signal ?? undefined;
+        return heldHandoff;
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const navigate = vi.spyOn(dohcNavigation(), "openCode")
+      .mockImplementation(() => undefined);
+
+    await renderApp();
+    clickButton("Open in dohc");
+    clickButton("Agree and open");
+    await settle(() => handoffCalls(fetchMock).length === 1);
+
+    history.replaceState(null, "", `/s/${SECOND_SESSION}`);
+    await act(async () => {
+      root?.render(<App key={SECOND_SESSION} />);
+    });
+    await settle(() => container.querySelector(".viewer") !== null);
+    resolveFirstHandoff?.(jsonResponse({
+      ok: true,
+      code: FIRST_HANDOFF_CODE,
+      expiresAtMs: Date.now() + 60_000,
+    }));
+    await settle(() => firstHandoffSignal?.aborted === true);
+
+    expect(navigate).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Shared by a dohc user");
+    expect(container.textContent).not.toContain("If dohc didn't open");
+  });
+
+  it("invalidates an in-flight handoff when the ready viewer is refused", async () => {
+    vi.useFakeTimers();
+    let metaRequests = 0;
+    let logRequests = 0;
+    let resolveHandoff: ((response: Response) => void) | undefined;
+    let handoffSignal: AbortSignal | undefined;
+    const heldHandoff = new Promise<Response>((resolve) => {
+      resolveHandoff = resolve;
+    });
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") {
+        metaRequests += 1;
+        return metaRequests === 1
+          ? jsonResponse(DEFAULT_META)
+          : new Response(null, { status: 404 });
+      }
+      if (path === "/api/view/log?since=0&limit=500") {
+        logRequests += 1;
+        return logPage([]);
+      }
+      if (path === "/api/handoff") {
+        handoffSignal = init?.signal ?? undefined;
+        return heldHandoff;
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const navigate = vi.spyOn(dohcNavigation(), "openCode")
+      .mockImplementation(() => undefined);
+
+    await renderApp();
+    clickButton("Open in dohc");
+    clickButton("Agree and open");
+    await settle(() => handoffCalls(fetchMock).length === 1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+    });
+    expect(container.textContent).toContain("This link isn't available.");
+
+    resolveHandoff?.(jsonResponse({
+      ok: true,
+      code: FIRST_HANDOFF_CODE,
+      expiresAtMs: Date.now() + 60_000,
+    }));
+    await settle(() => handoffSignal?.aborted === true);
+
+    expect(navigate).not.toHaveBeenCalled();
+    expect(container.textContent).toBe("This link isn't available.");
+    expect(logRequests).toBe(2);
+  });
 
   it("renders a successful empty share instead of refusing it", async () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {

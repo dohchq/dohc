@@ -23,6 +23,16 @@ h1 { margin: 4px 0 0; font-family: Georgia, serif; font-size: 24px; font-weight:
 .eyebrow, .section-label { margin: 0; color: #6d6e67; font-family: ui-monospace, monospace; font-size: 11px; }
 .section-label { margin-bottom: 12px; text-transform: uppercase; letter-spacing: .08em; }
 .badge { border: 1px solid #bdb8ad; border-radius: 999px; padding: 5px 10px; color: #4b534b; font-size: 12px; }
+.header-actions { display: flex; align-items: flex-start; gap: 12px; margin-left: auto; }
+.handoff-panel { display: flex; max-width: 430px; flex-direction: column; align-items: flex-start; gap: 8px; color: #565851; font-size: 12px; line-height: 1.45; }
+.handoff-panel p { margin: 0; }
+.handoff-title { color: #272923; font-weight: 600; }
+.handoff-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+.handoff-button { border-radius: 8px; padding: 7px 11px; cursor: pointer; font-size: 12px; font-weight: 600; }
+.handoff-button.primary { border: 1px solid #526a57; background: #526a57; color: #faf7f0; }
+.handoff-button.primary:hover { opacity: .9; }
+.handoff-button.secondary { border: 1px solid #bdb8ad; background: transparent; color: #4b534b; }
+.handoff-button.secondary:hover { background: #ece7dc; color: #272923; }
 .freshness { padding: 10px 32px; border-bottom: 1px solid #d6d0c3; background: #ece7dc; color: #62645e; font-family: ui-monospace, monospace; font-size: 11px; }
 .layout { display: grid; grid-template-columns: minmax(220px, 280px) minmax(0, 1fr); min-height: calc(100vh - 116px); }
 nav { padding: 24px 16px; border-right: 1px solid #d6d0c3; background: #efeae0; }
@@ -44,7 +54,8 @@ nav { padding: 24px 16px; border-right: 1px solid #d6d0c3; background: #efeae0; 
 .download-card { max-width: 520px; margin: 80px auto; border: 1px solid #d6d0c3; border-radius: 12px; padding: 24px; background: #f5f1e8; }
 
 @media (max-width: 720px) {
-  header { padding: 20px; }
+  header { align-items: flex-start; flex-direction: column; padding: 20px; }
+  .header-actions { width: 100%; justify-content: space-between; margin-left: 0; }
   .freshness { padding-inline: 20px; }
   .layout { grid-template-columns: 1fr; }
   nav { border-right: 0; border-bottom: 1px solid #d6d0c3; }
