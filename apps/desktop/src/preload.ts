@@ -320,6 +320,14 @@ const bridge: DohcDesktopBridge = {
   createRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.createRelayShare, payload),
   listRelayShares: () => ipcRenderer.invoke(CHANNELS.listRelayShares),
   revokeRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.revokeRelayShare, payload),
+  createRelayShareLink: (payload) =>
+    ipcRenderer.invoke(CHANNELS.createRelayShareLink, payload),
+  listRelayShareLinks: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listRelayShareLinks, payload),
+  rotateRelayShareLink: (payload) =>
+    ipcRenderer.invoke(CHANNELS.rotateRelayShareLink, payload),
+  revokeRelayShareLink: (payload) =>
+    ipcRenderer.invoke(CHANNELS.revokeRelayShareLink, payload),
   shareChatChannel: (payload) => ipcRenderer.invoke(CHANNELS.shareChatChannel, payload),
   listChatChannelShares: (payload) =>
     ipcRenderer.invoke(CHANNELS.listChatChannelShares, payload),

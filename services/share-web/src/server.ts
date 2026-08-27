@@ -19,6 +19,7 @@ const MAX_BLOB_PROXIES_PER_GRANT = 24;
 const LINK_REFRESH_WINDOW_MS = 5 * 60 * 1_000;
 export const LINK_SESSION_RENEWAL_GRACE_MS = 7 * 24 * 60 * 60 * 1_000;
 const RASTER_SIGNATURE_BYTES = 12;
+const HANDOFF_CODE = /^[A-Za-z0-9_-]{43}$/u;
 const SESSION_DISCRIMINATOR = /^[A-Za-z0-9_-]{12}$/u;
 const SHA256_HEX = /^[a-f0-9]{64}$/u;
 
@@ -341,6 +342,25 @@ function parsedRelaySession(
     return null;
   }
   return { grantId, capabilityToken, expiresAtMs };
+}
+
+function parsedRelayHandoff(
+  value: unknown,
+  nowMs: number,
+): { code: string; expiresAtMs: number } | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const handoff = value as Record<string, unknown>;
+  if (
+    handoff.ok !== true ||
+    typeof handoff.code !== "string" ||
+    !HANDOFF_CODE.test(handoff.code) ||
+    typeof handoff.expiresAtMs !== "number" ||
+    !Number.isSafeInteger(handoff.expiresAtMs) ||
+    handoff.expiresAtMs <= nowMs
+  ) {
+    return null;
+  }
+  return { code: handoff.code, expiresAtMs: handoff.expiresAtMs };
 }
 
 function contentTypeForAsset(path: string): string {
@@ -682,6 +702,55 @@ export function createShareWebHandler({
         );
       } catch {
         return refused();
+      }
+    }
+
+    if (pathname === "/api/handoff" && request.method === "POST") {
+      if (!request.headers.has(LINK_SESSION_HEADER)) return refused();
+      const authenticated = await readSession(request);
+      if (!authenticated) return refused();
+      const refreshed = await refreshSession(authenticated);
+      if (!refreshed.ok) return refused(refreshed.status);
+      const refreshedCookieHeaders: Record<string, string> = refreshed.setCookie
+        ? { "set-cookie": refreshed.setCookie }
+        : {};
+      const capabilityToken = authenticated.session.capabilityToken;
+      try {
+        const relayResponse = await fetchRelay(
+          relayRequest(relayUrl, "/sync/link-handoff", {
+            method: "POST",
+            headers: {
+              authorization: `LinkCapability ${capabilityToken}`,
+              ...(relayExchangeKey
+                ? { "x-dohc-relay-exchange-key": relayExchangeKey }
+                : {}),
+            },
+          }),
+        );
+        if (relayResponse.status === 429) {
+          return refused(429, refreshedCookieHeaders);
+        }
+        if (relayResponse.status !== 200) {
+          if (relayResponse.status === 401) {
+            sessions.deleteIfCapability(
+              authenticated.discriminator,
+              authenticated.token,
+              capabilityToken,
+            );
+          }
+          return refused(
+            relayResponse.status === 401 || relayResponse.status === 404 ? 404 : 503,
+            refreshedCookieHeaders,
+          );
+        }
+        const handoff = parsedRelayHandoff(await relayResponse.json(), nowMs());
+        if (!handoff) return refused(503, refreshedCookieHeaders);
+        return jsonResponse(
+          { ok: true, code: handoff.code, expiresAtMs: handoff.expiresAtMs },
+          { headers: refreshedCookieHeaders },
+        );
+      } catch {
+        return refused(503, refreshedCookieHeaders);
       }
     }
 

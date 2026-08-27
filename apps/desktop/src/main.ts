@@ -62,6 +62,19 @@ import {
   CreateRelayShareResult,
   ListRelaySharesResult,
   RevokeRelaySharePayload,
+  CreateRelayShareLinkPayload,
+  CreateRelayShareLinkResult,
+  ListRelayShareLinksPayload,
+  ListRelayShareLinksResult,
+  RelayShareLinkCreateResponse,
+  RelayShareLinkDependentConflict,
+  RelayShareLinkEndResponse,
+  RelayShareLinkListResponse,
+  RelayShareLinkRotateResponse,
+  RotateRelayShareLinkPayload,
+  RotateRelayShareLinkResult,
+  RevokeRelayShareLinkPayload,
+  RevokeRelayShareLinkResult,
   ShareChatChannelPayload,
   ShareChatChannelResult,
   ListChatChannelSharesPayload,
@@ -1683,11 +1696,27 @@ function relayShareErrorCopy(
   }
 }
 
+type RelayShareRetainedDependentSetResult<T> =
+  | { kind: "success"; body: T }
+  | { kind: "dependents-changed"; body: unknown; status: number };
+
 async function relayShareJsonWithCredentials<T>(
   credentials: CloudSessionCredentials,
   path: string,
   init?: RequestInit,
-): Promise<T> {
+): Promise<T>;
+async function relayShareJsonWithCredentials<T>(
+  credentials: CloudSessionCredentials,
+  path: string,
+  init: RequestInit | undefined,
+  options: { retainDependentSetConflict: true },
+): Promise<RelayShareRetainedDependentSetResult<T>>;
+async function relayShareJsonWithCredentials<T>(
+  credentials: CloudSessionCredentials,
+  path: string,
+  init?: RequestInit,
+  options?: { retainDependentSetConflict: true },
+): Promise<T | RelayShareRetainedDependentSetResult<T>> {
   if (!credentials.relayUrl) {
     throw new Error("Reconnect dohc Cloud with a sync relay URL, then try again.");
   }
@@ -1716,11 +1745,26 @@ async function relayShareJsonWithCredentials<T>(
       { sessionWasCurrent },
     );
   }
-  const data = (await response.json().catch(() => null)) as { ok?: boolean; error?: string; code?: string;
+  const data = (await response.json().catch(() => null)) as {
+    ok?: boolean;
+    error?: string;
+    code?: string;
+    [key: string]: unknown;
   }
     | null;
   if (!response.ok || data?.ok === false) {
+    if (
+      options?.retainDependentSetConflict &&
+      response.status === 409 &&
+      data?.ok === false &&
+      data.code === "dependents_changed"
+    ) {
+      return { kind: "dependents-changed", body: data, status: response.status };
+    }
     throw new Error(relayShareErrorCopy(response.status, data));
+  }
+  if (options?.retainDependentSetConflict) {
+    return { kind: "success", body: data as T };
   }
   return data as T;
 }
@@ -7521,6 +7565,190 @@ function registerIpcHandlers(
       method: "POST",
     });
     return undefined;
+  });
+
+  ipcMain.handle(CHANNELS.createRelayShareLink, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = CreateRelayShareLinkPayload.parse(payload);
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Sharing stopped because this window changed workspaces.",
+      async (operation) => {
+        operation.assertCurrent();
+        const { credentials, credentialGeneration } =
+          await remoteForWorkspace(operation.workspace);
+        operation.assertCurrent();
+        const relayResult = await awaitCredentialGeneration({
+          capturedGeneration: credentialGeneration,
+          currentGeneration: () => credentialCacheGeneration,
+          run: () => {
+            operation.assertCurrent();
+            return relayShareJsonWithCredentials<unknown>(
+              credentials,
+              `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/shares/links`,
+              {
+                method: "POST",
+                body: JSON.stringify(
+                  "paths" in input
+                    ? { paths: input.paths }
+                    : { versionId: input.versionId },
+                ),
+              },
+            );
+          },
+        });
+        operation.assertCurrent();
+        const parsed = RelayShareLinkCreateResponse.safeParse(relayResult);
+        if (!parsed.success) {
+          throw new Error(relayShareErrorCopy(500, null));
+        }
+        return CreateRelayShareLinkResult.parse(parsed.data);
+      },
+    );
+  });
+
+  ipcMain.handle(CHANNELS.listRelayShareLinks, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListRelayShareLinksPayload.parse(payload);
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Sharing stopped because this window changed workspaces.",
+      async (operation) => {
+        operation.assertCurrent();
+        const { credentials, credentialGeneration } =
+          await remoteForWorkspace(operation.workspace);
+        operation.assertCurrent();
+        const relayResult = await awaitCredentialGeneration({
+          capturedGeneration: credentialGeneration,
+          currentGeneration: () => credentialCacheGeneration,
+          run: () => {
+            operation.assertCurrent();
+            return relayShareJsonWithCredentials<unknown>(
+              credentials,
+              `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/shares/links`,
+            );
+          },
+        });
+        operation.assertCurrent();
+        const parsed = RelayShareLinkListResponse.safeParse(relayResult);
+        if (!parsed.success) {
+          throw new Error(relayShareErrorCopy(500, null));
+        }
+        return ListRelayShareLinksResult.parse(parsed.data);
+      },
+    );
+  });
+
+  ipcMain.handle(CHANNELS.rotateRelayShareLink, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = RotateRelayShareLinkPayload.parse(payload);
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Sharing stopped because this window changed workspaces.",
+      async (operation) => {
+        operation.assertCurrent();
+        const { credentials, credentialGeneration } =
+          await remoteForWorkspace(operation.workspace);
+        operation.assertCurrent();
+        const relayResult = await awaitCredentialGeneration({
+          capturedGeneration: credentialGeneration,
+          currentGeneration: () => credentialCacheGeneration,
+          run: () => {
+            operation.assertCurrent();
+            return relayShareJsonWithCredentials<unknown>(
+              credentials,
+              `/sync/shares/${encodeURIComponent(input.shareId)}/links/${encodeURIComponent(input.grantId)}/rotate`,
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  workspaceId: operation.workspace.workspaceId,
+                  expectedDependentGrantIds: input.expectedDependentGrantIds,
+                }),
+              },
+              { retainDependentSetConflict: true },
+            );
+          },
+        });
+        operation.assertCurrent();
+        if (relayResult.kind === "dependents-changed") {
+          const conflict = RelayShareLinkDependentConflict.safeParse(
+            relayResult.body,
+          );
+          if (!conflict.success) {
+            throw new Error(relayShareErrorCopy(relayResult.status, null));
+          }
+          return RotateRelayShareLinkResult.parse({
+            outcome: "dependents-changed",
+            dependents: conflict.data.dependents,
+          });
+        }
+        const rotated = RelayShareLinkRotateResponse.safeParse(relayResult.body);
+        if (!rotated.success) {
+          throw new Error(relayShareErrorCopy(500, null));
+        }
+        return RotateRelayShareLinkResult.parse({
+          outcome: "rotated",
+          url: rotated.data.url,
+        });
+      },
+    );
+  });
+
+  ipcMain.handle(CHANNELS.revokeRelayShareLink, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = RevokeRelayShareLinkPayload.parse(payload);
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Sharing stopped because this window changed workspaces.",
+      async (operation) => {
+        operation.assertCurrent();
+        const { credentials, credentialGeneration } =
+          await remoteForWorkspace(operation.workspace);
+        operation.assertCurrent();
+        const relayResult = await awaitCredentialGeneration({
+          capturedGeneration: credentialGeneration,
+          currentGeneration: () => credentialCacheGeneration,
+          run: () => {
+            operation.assertCurrent();
+            return relayShareJsonWithCredentials<unknown>(
+              credentials,
+              `/sync/shares/${encodeURIComponent(input.shareId)}/revoke`,
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  grantId: input.grantId,
+                  workspaceId: operation.workspace.workspaceId,
+                  expectedDependentGrantIds: input.expectedDependentGrantIds,
+                }),
+              },
+              { retainDependentSetConflict: true },
+            );
+          },
+        });
+        operation.assertCurrent();
+        if (relayResult.kind === "dependents-changed") {
+          const conflict = RelayShareLinkDependentConflict.safeParse(
+            relayResult.body,
+          );
+          if (!conflict.success) {
+            throw new Error(relayShareErrorCopy(relayResult.status, null));
+          }
+          return RevokeRelayShareLinkResult.parse({
+            outcome: "dependents-changed",
+            dependents: conflict.data.dependents,
+          });
+        }
+        const ended = RelayShareLinkEndResponse.safeParse(relayResult.body);
+        if (!ended.success) {
+          throw new Error(relayShareErrorCopy(500, null));
+        }
+        return RevokeRelayShareLinkResult.parse({ outcome: "ended" });
+      },
+    );
   });
 
   // --- Shared channels (MU-C4) --------------------------------------------

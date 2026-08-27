@@ -3509,6 +3509,164 @@ export const RevokeRelaySharePayload = z.object({
 });
 export type RevokeRelaySharePayload = z.infer<typeof RevokeRelaySharePayload>;
 
+// Phase 2 owner links are workspace-scoped View capabilities. The renderer
+// supplies exactly one selector and never supplies an access level.
+export const CreateRelayShareLinkPayload = z.union([
+  z
+    .object({
+      workspaceId: WORKSPACE_ID,
+      paths: z.array(PATH_STRING).min(1).max(100),
+      versionId: z.never().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      workspaceId: WORKSPACE_ID,
+      paths: z.never().optional(),
+      versionId: z.string().min(1).max(128),
+    })
+    .strict(),
+]);
+export type CreateRelayShareLinkPayload = z.infer<
+  typeof CreateRelayShareLinkPayload
+>;
+
+const RELAY_SHARE_LINK_URL = z.url().max(4096);
+
+export const CreateRelayShareLinkResult = z.object({
+  shareId: SHARE_ID,
+  grantId: SHARE_ID,
+  url: RELAY_SHARE_LINK_URL,
+});
+export type CreateRelayShareLinkResult = z.infer<
+  typeof CreateRelayShareLinkResult
+>;
+
+export const ListRelayShareLinksPayload = z
+  .object({ workspaceId: WORKSPACE_ID })
+  .strict();
+export type ListRelayShareLinksPayload = z.infer<
+  typeof ListRelayShareLinksPayload
+>;
+
+export const RelayShareLinkDependent = z.object({
+  grantId: SHARE_ID,
+  recipientUserId: z.string().min(1).max(256).nullable(),
+  recipientEmail: EMAIL_STRING.nullable(),
+  access: SHARE_ACCESS,
+  generation: z.number().int().min(1),
+  createdAtMs: z.number().int().nonnegative(),
+});
+export type RelayShareLinkDependent = z.infer<
+  typeof RelayShareLinkDependent
+>;
+
+const RelayShareLinkRowBase = z.object({
+  shareId: SHARE_ID,
+  grantId: SHARE_ID,
+  generation: z.number().int().min(1),
+  status: z.enum(["active", "revoked"]),
+  createdAtMs: z.number().int().nonnegative(),
+  revokedAtMs: z.number().int().nonnegative().nullable(),
+  lastUsedAtMs: z.number().int().nonnegative().nullable(),
+  urlIssuedAtMs: z.number().int().nonnegative().nullable(),
+  dependents: z.array(RelayShareLinkDependent).max(1000),
+});
+
+export const RelayShareLinkRow = z.union([
+  RelayShareLinkRowBase.extend({
+    selector: RelayShareSelector,
+    access: SHARE_ACCESS,
+    damaged: z.never().optional(),
+  }),
+  RelayShareLinkRowBase.extend({
+    selector: z.null(),
+    access: z.string().max(64),
+    damaged: z.literal(true),
+  }),
+]);
+export type RelayShareLinkRow = z.infer<typeof RelayShareLinkRow>;
+
+export const ListRelayShareLinksResult = z.object({
+  links: z.array(RelayShareLinkRow).max(1000),
+});
+export type ListRelayShareLinksResult = z.infer<
+  typeof ListRelayShareLinksResult
+>;
+
+const RelayShareLinkMutationPayload = z
+  .object({
+    workspaceId: WORKSPACE_ID,
+    shareId: SHARE_ID,
+    grantId: SHARE_ID,
+    expectedDependentGrantIds: z.array(SHARE_ID).max(1000),
+  })
+  .strict();
+
+export const RotateRelayShareLinkPayload = RelayShareLinkMutationPayload;
+export type RotateRelayShareLinkPayload = z.infer<
+  typeof RotateRelayShareLinkPayload
+>;
+
+export const RevokeRelayShareLinkPayload = RelayShareLinkMutationPayload;
+export type RevokeRelayShareLinkPayload = z.infer<
+  typeof RevokeRelayShareLinkPayload
+>;
+
+export const RelayShareLinkDependentConflict = z.object({
+  ok: z.literal(false),
+  code: z.literal("dependents_changed"),
+  dependents: z.array(RelayShareLinkDependent).max(1000),
+});
+export type RelayShareLinkDependentConflict = z.infer<
+  typeof RelayShareLinkDependentConflict
+>;
+
+export const RelayShareLinkCreateResponse = CreateRelayShareLinkResult.extend({
+  ok: z.literal(true),
+});
+
+export const RelayShareLinkListResponse = ListRelayShareLinksResult.extend({
+  ok: z.literal(true),
+});
+
+export const RelayShareLinkRotateResponse = z.object({
+  ok: z.literal(true),
+  url: RELAY_SHARE_LINK_URL,
+});
+
+export const RelayShareLinkEndResponse = z.object({
+  ok: z.literal(true),
+});
+
+const RelayShareLinkDependentsChangedOutcome = z
+  .object({
+    outcome: z.literal("dependents-changed"),
+    dependents: z.array(RelayShareLinkDependent).max(1000),
+  })
+  .strict();
+
+export const RotateRelayShareLinkResult = z.discriminatedUnion("outcome", [
+  z
+    .object({
+      outcome: z.literal("rotated"),
+      url: RELAY_SHARE_LINK_URL,
+    })
+    .strict(),
+  RelayShareLinkDependentsChangedOutcome,
+]);
+export type RotateRelayShareLinkResult = z.infer<
+  typeof RotateRelayShareLinkResult
+>;
+
+export const RevokeRelayShareLinkResult = z.discriminatedUnion("outcome", [
+  z.object({ outcome: z.literal("ended") }).strict(),
+  RelayShareLinkDependentsChangedOutcome,
+]);
+export type RevokeRelayShareLinkResult = z.infer<
+  typeof RevokeRelayShareLinkResult
+>;
+
 // ---- Share changes (#646 PR3a) ----
 // An edit-level recipient edits its own share view and SENDS the result. The
 // granter reads the changes and accepts or declines them; nothing lands in
@@ -4955,6 +5113,18 @@ export interface DohcDesktopBridge {
   createRelayShare(payload: CreateRelaySharePayload): Promise<CreateRelayShareResult>;
   listRelayShares(): Promise<ListRelaySharesResult>;
   revokeRelayShare(payload: RevokeRelaySharePayload): Promise<void>;
+  createRelayShareLink(
+    payload: CreateRelayShareLinkPayload,
+  ): Promise<CreateRelayShareLinkResult>;
+  listRelayShareLinks(
+    payload: ListRelayShareLinksPayload,
+  ): Promise<ListRelayShareLinksResult>;
+  rotateRelayShareLink(
+    payload: RotateRelayShareLinkPayload,
+  ): Promise<RotateRelayShareLinkResult>;
+  revokeRelayShareLink(
+    payload: RevokeRelayShareLinkPayload,
+  ): Promise<RevokeRelayShareLinkResult>;
   shareChatChannel(payload: ShareChatChannelPayload): Promise<ShareChatChannelResult>;
   listChatChannelShares(
     payload: ListChatChannelSharesPayload,
