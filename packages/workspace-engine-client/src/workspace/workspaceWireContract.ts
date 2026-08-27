@@ -3,6 +3,16 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as SchemaGetter from "effect/SchemaGetter";
 import * as Struct from "effect/Struct";
+import type {
+  CollectionGetParams as CollectionGetContractParams,
+  CollectionGetRecordParams as CollectionGetRecordContractParams,
+  CollectionGetRecordResult as CollectionGetRecordContractResult,
+  CollectionGetResult as CollectionGetContractResult,
+  CollectionListParams as CollectionListContractParams,
+  CollectionListResult as CollectionListContractResult,
+  CollectionQueryParams as CollectionQueryContractParams,
+  CollectionQueryResult as CollectionQueryContractResult,
+} from "@dohc/workspace-contracts/collection";
 import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
 
 export const WORKSPACE_METHOD = {
@@ -11,6 +21,10 @@ export const WORKSPACE_METHOD = {
   conflictsList: "conflicts.list",
   conflictsOpen: "conflicts.open",
   conflictsResolve: "conflicts.resolve",
+  collectionsList: "collections.list",
+  collectionsGet: "collections.get",
+  collectionsQuery: "collections.query",
+  collectionsGetRecord: "collections.getRecord",
   searchQuery: "search.query",
   searchQueryPage: "search.queryPage",
   searchQueryChatMessagesGranular: "search.queryChatMessagesGranular",
@@ -41,6 +55,14 @@ export type WorkspaceOpenParams = WorkspaceJsonObject & {
   recoverRunningDispatches?: boolean;
 };
 export type WorkspaceEmptyParams = WorkspaceJsonObject;
+export type CollectionListParams =
+  WorkspaceJsonObject & CollectionListContractParams;
+export type CollectionGetParams =
+  WorkspaceJsonObject & CollectionGetContractParams;
+export type CollectionQueryParams =
+  WorkspaceJsonObject & CollectionQueryContractParams;
+export type CollectionGetRecordParams =
+  WorkspaceJsonObject & CollectionGetRecordContractParams;
 export type ConflictListParams = WorkspaceJsonObject & {
   status?: "open" | "resolved";
   afterConflictId?: string;
@@ -175,6 +197,11 @@ export type ConflictResolveResult =
     })
   | ReplicatedConflictResult;
 
+export type CollectionListResult = CollectionListContractResult;
+export type CollectionGetResult = CollectionGetContractResult;
+export type CollectionQueryResult = CollectionQueryContractResult;
+export type CollectionGetRecordResult = CollectionGetRecordContractResult;
+
 export type SearchResult = WorkspaceJsonObject & {
   surface: "file" | "chat";
   path: string;
@@ -232,6 +259,10 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.conflictsList]: ConflictListParams;
   [WORKSPACE_METHOD.conflictsOpen]: ConflictOpenParams;
   [WORKSPACE_METHOD.conflictsResolve]: ConflictResolveParams;
+  [WORKSPACE_METHOD.collectionsList]: CollectionListParams;
+  [WORKSPACE_METHOD.collectionsGet]: CollectionGetParams;
+  [WORKSPACE_METHOD.collectionsQuery]: CollectionQueryParams;
+  [WORKSPACE_METHOD.collectionsGetRecord]: CollectionGetRecordParams;
   [WORKSPACE_METHOD.searchQuery]: SearchQueryParams;
   [WORKSPACE_METHOD.searchQueryPage]: SearchQueryPageParams;
   [WORKSPACE_METHOD.searchQueryChatMessagesGranular]: SearchQueryChatMessagesGranularParams;
@@ -247,6 +278,10 @@ export type WorkspaceMethodResultMap = {
   [WORKSPACE_METHOD.conflictsList]: ConflictListPage;
   [WORKSPACE_METHOD.conflictsOpen]: ConflictOpenResult;
   [WORKSPACE_METHOD.conflictsResolve]: ConflictResolveResult;
+  [WORKSPACE_METHOD.collectionsList]: CollectionListResult;
+  [WORKSPACE_METHOD.collectionsGet]: CollectionGetResult;
+  [WORKSPACE_METHOD.collectionsQuery]: CollectionQueryResult;
+  [WORKSPACE_METHOD.collectionsGetRecord]: CollectionGetRecordResult;
   [WORKSPACE_METHOD.searchQuery]: SearchResult[];
   [WORKSPACE_METHOD.searchQueryPage]: SearchQueryPageResult;
   [WORKSPACE_METHOD.searchQueryChatMessagesGranular]: GranularChatMessageSearchResponse;
@@ -364,6 +399,183 @@ type _ReplicatedConflictResultSchemaMatchesPublicType = Assert<
     : false
 >;
 
+const CollectionSchemaReasonSchema = mutableStruct({
+  code: Schema.Literals([
+    "invalid-yaml",
+    "root-not-mapping",
+    "unknown-property",
+    "expected-text",
+    "expected-mapping",
+    "expected-sequence",
+    "expected-boolean",
+    "missing-property",
+    "unknown-field-type",
+    "unknown-view-kind",
+    "invalid-sort-direction",
+    "empty-value",
+    "duplicate-value",
+    "reserved-field-name",
+    "invalid-relation-target",
+    "unknown-field-reference",
+  ]),
+  path: Schema.String,
+});
+
+const CollectionFieldDefinitionSchema = Schema.Union([
+  mutableStruct({
+    name: Schema.String,
+    type: Schema.Literals([
+      "text",
+      "number",
+      "checkbox",
+      "date",
+      "person",
+      "url",
+    ]),
+  }),
+  mutableStruct({
+    name: Schema.String,
+    type: Schema.Literals(["select", "multi-select"]),
+    options: Schema.mutable(Schema.Array(Schema.String)),
+  }),
+  mutableStruct({
+    name: Schema.String,
+    type: Schema.Literal("relation"),
+    collection: Schema.String,
+    many: Schema.Boolean,
+  }),
+]);
+
+const CollectionSchemaSchema = mutableStruct({
+  name: NullableString,
+  description: NullableString,
+  fields: Schema.mutable(Schema.Array(CollectionFieldDefinitionSchema)),
+  views: Schema.mutable(
+    Schema.Array(
+      mutableStruct({
+        name: Schema.String,
+        kind: Schema.Literals(["table", "board", "calendar"]),
+        groupBy: NullableString,
+        sort: Schema.mutable(
+          Schema.Array(
+            mutableStruct({
+              field: Schema.String,
+              direction: Schema.Literals(["asc", "desc"]),
+            }),
+          ),
+        ),
+        visibleFields: Schema.NullOr(
+          Schema.mutable(Schema.Array(Schema.String)),
+        ),
+        dateField: NullableString,
+      }),
+    ),
+  ),
+});
+
+const CollectionSummarySchema = mutableStruct({
+  path: Schema.String,
+  status: Schema.Literals(["valid", "degraded"]),
+  reasons: Schema.mutable(Schema.Array(CollectionSchemaReasonSchema)),
+});
+
+const CollectionDetailsSchema = mutableStruct({
+  path: Schema.String,
+  status: Schema.Literals(["valid", "degraded"]),
+  reasons: Schema.mutable(Schema.Array(CollectionSchemaReasonSchema)),
+  schema: CollectionSchemaSchema,
+  recordCount: Schema.Int,
+});
+
+const CollectionFieldValueReasonSchema = mutableStruct({
+  code: Schema.Literals([
+    "expected-text",
+    "expected-number",
+    "number-not-finite",
+    "expected-boolean",
+    "expected-sequence",
+    "invalid-date",
+    "unknown-option",
+    "duplicate-value",
+    "empty-person-id",
+    "invalid-record-id",
+    "invalid-url",
+  ]),
+  path: Schema.String,
+});
+
+const CollectionIndexedValueValidationSchema = Schema.Union([
+  mutableStruct({ status: Schema.Literal("valid") }),
+  mutableStruct({
+    status: Schema.Literal("flagged"),
+    reason: CollectionFieldValueReasonSchema,
+  }),
+  mutableStruct({ status: Schema.Literal("untyped") }),
+]);
+
+const CollectionRecordSchema = mutableStruct({
+  id: Schema.String,
+  path: Schema.String,
+  values: Schema.mutable(
+    Schema.Array(
+      mutableStruct({
+        field: Schema.String,
+        value: Schema.MutableJson,
+        validation: CollectionIndexedValueValidationSchema,
+        resolvedRelations: Schema.mutable(
+          Schema.Array(
+            mutableStruct({
+              recordId: Schema.String,
+              label: Schema.String,
+            }),
+          ),
+        ),
+      }),
+    ),
+  ),
+});
+
+const CollectionListResultSchema = mutableStruct({
+  collections: Schema.mutable(Schema.Array(CollectionSummarySchema)),
+});
+
+const CollectionQueryResultSchema = mutableStruct({
+  collection: CollectionSummarySchema,
+  records: Schema.mutable(Schema.Array(CollectionRecordSchema)),
+  groups: Schema.NullOr(
+    Schema.mutable(
+      Schema.Array(
+        mutableStruct({
+          value: Schema.MutableJson,
+          records: Schema.mutable(Schema.Array(CollectionRecordSchema)),
+        }),
+      ),
+    ),
+  ),
+});
+
+const CollectionGetRecordResultSchema = mutableStruct({
+  collection: CollectionSummarySchema,
+  record: CollectionRecordSchema,
+  history: Schema.mutable(
+    Schema.Array(
+      mutableStruct({
+        field: Schema.String,
+        previous: mutableStruct({
+          present: Schema.Boolean,
+          value: Schema.MutableJson,
+        }),
+        next: mutableStruct({
+          present: Schema.Boolean,
+          value: Schema.MutableJson,
+        }),
+        authorOriginId: NullableString,
+        recordedAtMs: Schema.Int,
+      }),
+    ),
+  ),
+});
+
 const SearchResultSchema = mutableStruct({
   surface: Schema.Literals(["file", "chat"]),
   path: Schema.String,
@@ -421,6 +633,10 @@ const WorkspaceResultSchemas = {
     }),
     ReplicatedConflictResultSchema,
   ]),
+  [WORKSPACE_METHOD.collectionsList]: CollectionListResultSchema,
+  [WORKSPACE_METHOD.collectionsGet]: CollectionDetailsSchema,
+  [WORKSPACE_METHOD.collectionsQuery]: CollectionQueryResultSchema,
+  [WORKSPACE_METHOD.collectionsGetRecord]: CollectionGetRecordResultSchema,
   [WORKSPACE_METHOD.searchQuery]: Schema.mutable(Schema.Array(SearchResultSchema)),
   [WORKSPACE_METHOD.searchQueryPage]: SearchQueryPageResultSchema,
   [WORKSPACE_METHOD.searchQueryChatMessagesGranular]:

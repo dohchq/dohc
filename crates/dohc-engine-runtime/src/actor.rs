@@ -49,26 +49,29 @@ use dohc_engine_domain::{
     ChatChannelKind, ChatChannelSummary, ChatDecision, ChatFeedPage, ChatFeedReadState,
     ChatFileMention, ChatFollow, ChatMention, ChatMessage, ChatMessagePage,
     ChatProjectionFileAccess, ChatReaction, ChatThread, ChatThreadProjection, ChatThreadReadState,
-    CollectionAdoptionCandidate, CollectionRelationCleanupCandidate, CompareTextFileVersions,
-    CreateFileThread, CreateNamedVersion, DeleteResult, DeleteTextFile, DispatchClaim,
-    DispatchRecovery, DomainError, InbandBinary, InbandSecret, InbandText, LinkedChatStore,
-    ListMomentsQuery, MentionCursor, MergeTextFileFromVersion, MergeTextFileResult, MomentPage,
-    MomentRecord, PendingBookmarkRow, RECORD_ID_FRONTMATTER_KEY, RenameResult, RenameTextFile,
-    ResolveDecision, ResolveTextConflict, ResolveTextConflictResult, RollbackTextFileMutation,
-    RunRecordLink, SaveBookmark, SecretComparePage, SecretDelete, SecretFileStat, SecretFileStore,
-    SecretMomentPage, SecretMomentRecord, SecretOp, SecretRestoreResult, SecretWrite,
-    SecretWriteResult, SendMessage, SetFollow, SetReaction, SnapshotContent, SnapshotMetadata,
-    SnapshotView, StartChannelThread, TextConflict, TextSnapshot, ThreadDispatchPause,
-    UnreadFileThread, VersionFileChangePage, VersionRecord, VersionedTextComparison,
-    VersionedTextStore, WriteBinary, WriteResult, WriteText, apply_secret_file_from_version_with,
-    binary_delete_job_id, binary_rename_delete_job_id, binary_rename_write_job_id,
-    binary_rollback_job_identity, capture_ingest_binary_with_admission_in_tx,
-    capture_ingest_with_admission_in_tx, capture_manifest_seed, capture_retire_in_tx,
-    capture_secret_retire_with, compare_secret_files_page_keyless,
-    decode_binary_rollback_job_identity, delete_secret_file_keyless_with, derive_capture_object_id,
-    enqueue_binary_delete, enqueue_binary_rename, enqueue_write, fork_version_keyless_with,
-    get_secret_moment_keyless, has_secret_state, insert_text_conflict_if_absent,
-    list_secret_files_keyless, list_secret_files_keyless_page, list_secret_moments_page_keyless,
+    CollectionAdoptionCandidate, CollectionDetails, CollectionQuery, CollectionQueryResult,
+    CollectionRecordDetails, CollectionRelationCleanupCandidate, CollectionSummary,
+    CompareTextFileVersions, CreateFileThread, CreateNamedVersion, DeleteResult, DeleteTextFile,
+    DispatchClaim, DispatchRecovery, DomainError, InbandBinary, InbandSecret, InbandText,
+    LinkedChatStore, ListMomentsQuery, MentionCursor, MergeTextFileFromVersion,
+    MergeTextFileResult, MomentPage, MomentRecord, PendingBookmarkRow, RECORD_ID_FRONTMATTER_KEY,
+    RenameResult, RenameTextFile, ResolveDecision, ResolveTextConflict, ResolveTextConflictResult,
+    RollbackTextFileMutation, RunRecordLink, SaveBookmark, SecretComparePage, SecretDelete,
+    SecretFileStat, SecretFileStore, SecretMomentPage, SecretMomentRecord, SecretOp,
+    SecretRestoreResult, SecretWrite, SecretWriteResult, SendMessage, SetFollow, SetReaction,
+    SnapshotContent, SnapshotMetadata, SnapshotView, StartChannelThread, TextConflict,
+    TextSnapshot, ThreadDispatchPause, UnreadFileThread, VersionFileChangePage, VersionRecord,
+    VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult, WriteText,
+    apply_secret_file_from_version_with, binary_delete_job_id, binary_rename_delete_job_id,
+    binary_rename_write_job_id, binary_rollback_job_identity,
+    capture_ingest_binary_with_admission_in_tx, capture_ingest_with_admission_in_tx,
+    capture_manifest_seed, capture_retire_in_tx, capture_secret_retire_with,
+    compare_secret_files_page_keyless, decode_binary_rollback_job_identity,
+    delete_secret_file_keyless_with, derive_capture_object_id, enqueue_binary_delete,
+    enqueue_binary_rename, enqueue_write, fork_version_keyless_with, get_collection,
+    get_collection_record, get_secret_moment_keyless, has_secret_state,
+    insert_text_conflict_if_absent, list_collections, list_secret_files_keyless,
+    list_secret_files_keyless_page, list_secret_moments_page_keyless, query_collection_records,
     reconcile_collections_in_tx, restore_secret_file_verbatim_with_metadata_and_after,
     rollback_compensating_moment_id, secret_file_len_keyless, select_snapshot_by_path_in_tx,
     set_collection_adoption_state_in_tx, synchronize_collection_frontmatter_index_in_tx,
@@ -1029,6 +1032,28 @@ enum Command {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<Vec<String>, RuntimeError>>,
+    },
+    CollectionsList {
+        workspace_id: String,
+        reply: oneshot::Sender<Result<Vec<CollectionSummary>, RuntimeError>>,
+    },
+    CollectionsGet {
+        workspace_id: String,
+        collection_path: String,
+        reply: oneshot::Sender<Result<Option<CollectionDetails>, RuntimeError>>,
+    },
+    CollectionsQueryRecords {
+        workspace_id: String,
+        collection_path: String,
+        query: CollectionQuery,
+        reply: oneshot::Sender<Result<Option<CollectionQueryResult>, RuntimeError>>,
+    },
+    CollectionsGetRecord {
+        workspace_id: String,
+        collection_path: String,
+        record_id: String,
+        history_limit: usize,
+        reply: oneshot::Sender<Result<Option<CollectionRecordDetails>, RuntimeError>>,
     },
     CaptureSecret {
         // Boxed: the plaintext + key payload should not size every command
@@ -2713,6 +2738,78 @@ impl ActorHandle {
                 now_ms,
                 faults,
                 token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn collections_list(
+        &self,
+        workspace_id: String,
+    ) -> Result<Vec<CollectionSummary>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::CollectionsList {
+                workspace_id,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn collections_get(
+        &self,
+        workspace_id: String,
+        collection_path: String,
+    ) -> Result<Option<CollectionDetails>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::CollectionsGet {
+                workspace_id,
+                collection_path,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn collections_query_records(
+        &self,
+        workspace_id: String,
+        collection_path: String,
+        query: CollectionQuery,
+    ) -> Result<Option<CollectionQueryResult>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::CollectionsQueryRecords {
+                workspace_id,
+                collection_path,
+                query,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn collections_get_record(
+        &self,
+        workspace_id: String,
+        collection_path: String,
+        record_id: String,
+        history_limit: usize,
+    ) -> Result<Option<CollectionRecordDetails>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::CollectionsGetRecord {
+                workspace_id,
+                collection_path,
+                record_id,
+                history_limit,
                 reply,
             })
             .await
@@ -7245,6 +7342,58 @@ fn worker_main(
                     faults.as_ref(),
                     &token,
                 );
+                let _ = reply.send(outcome);
+            }
+            Command::CollectionsList {
+                workspace_id,
+                reply,
+            } => {
+                let outcome = store
+                    .read_with(|conn| list_collections(conn, &workspace_id))
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::CollectionsGet {
+                workspace_id,
+                collection_path,
+                reply,
+            } => {
+                let outcome = store
+                    .read_with(|conn| get_collection(conn, &workspace_id, &collection_path))
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::CollectionsQueryRecords {
+                workspace_id,
+                collection_path,
+                query,
+                reply,
+            } => {
+                let outcome = store
+                    .read_with(|conn| {
+                        query_collection_records(conn, &workspace_id, &collection_path, &query)
+                    })
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::CollectionsGetRecord {
+                workspace_id,
+                collection_path,
+                record_id,
+                history_limit,
+                reply,
+            } => {
+                let outcome = store
+                    .read_with(|conn| {
+                        get_collection_record(
+                            conn,
+                            &workspace_id,
+                            &collection_path,
+                            &record_id,
+                            history_limit,
+                        )
+                    })
+                    .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
             Command::CaptureSecret {

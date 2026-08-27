@@ -4,6 +4,7 @@
 //! hold this port to the same schema recovery, Field value, and Record id
 //! outcomes.
 
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 use dohc_engine_storage::StorageError;
@@ -311,6 +312,135 @@ pub enum FieldValueValidation {
     Valid,
     Flagged { reason: FieldValueReason },
 }
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionSummary {
+    pub path: String,
+    pub status: CollectionSchemaStatus,
+    pub reasons: Vec<CollectionSchemaReason>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionDetails {
+    pub path: String,
+    pub status: CollectionSchemaStatus,
+    pub reasons: Vec<CollectionSchemaReason>,
+    pub schema: CollectionSchema,
+    pub record_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CollectionFilterOperator {
+    Equals,
+    Contains,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CollectionFilter {
+    pub field: String,
+    pub operator: CollectionFilterOperator,
+    pub value: Value,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CollectionSortDirection {
+    Asc,
+    Desc,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CollectionSort {
+    pub field: String,
+    pub direction: CollectionSortDirection,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionQuery {
+    pub filter: Option<CollectionFilter>,
+    pub sort: Vec<CollectionSort>,
+    pub group_by: Option<String>,
+    pub resolve_relations: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum CollectionIndexedValueValidation {
+    Valid,
+    Flagged { reason: FieldValueReason },
+    Untyped,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionResolvedRelation {
+    pub record_id: String,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionIndexedValue {
+    pub field: String,
+    pub value: Value,
+    pub validation: CollectionIndexedValueValidation,
+    pub resolved_relations: Vec<CollectionResolvedRelation>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionRecord {
+    pub id: String,
+    pub path: String,
+    pub values: Vec<CollectionIndexedValue>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionRecordGroup {
+    pub value: Value,
+    pub records: Vec<CollectionRecord>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionQueryResult {
+    pub collection: CollectionSummary,
+    pub records: Vec<CollectionRecord>,
+    pub groups: Option<Vec<CollectionRecordGroup>>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct CollectionHistoryValue {
+    pub present: bool,
+    pub value: Option<Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionFieldHistoryEntry {
+    pub field: String,
+    pub previous: CollectionHistoryValue,
+    pub next: CollectionHistoryValue,
+    pub author_origin_id: Option<String>,
+    pub recorded_at_ms: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionRecordDetails {
+    pub collection: CollectionSummary,
+    pub record: CollectionRecord,
+    pub history: Vec<CollectionFieldHistoryEntry>,
+}
+
+pub const MAX_COLLECTION_HISTORY_LIMIT: usize = 500;
 
 fn pointer_segment(value: &str) -> String {
     value.replace('~', "~0").replace('/', "~1")
@@ -1800,6 +1930,597 @@ pub fn set_collection_adoption_state_in_tx(
         });
     }
     Ok(())
+}
+
+fn active_version_id(conn: &Connection, workspace_id: &str) -> Result<String, crate::DomainError> {
+    conn.query_row(
+        "SELECT COALESCE(\
+           (SELECT version_id FROM active_versions WHERE workspace_id=?1),\
+           (SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1))",
+        [workspace_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .map_err(crate::DomainError::sql_corrupt)?
+    .ok_or(crate::DomainError::WorkspaceNotFound)
+}
+
+fn stored_schema_status(value: &str) -> Result<CollectionSchemaStatus, crate::DomainError> {
+    match value {
+        "valid" => Ok(CollectionSchemaStatus::Valid),
+        "degraded" => Ok(CollectionSchemaStatus::Degraded),
+        _ => Err(crate::DomainError::StateCorrupt {
+            reason: "invalid collection schema status",
+        }),
+    }
+}
+
+fn stored_schema_reasons(value: &str) -> Result<Vec<CollectionSchemaReason>, crate::DomainError> {
+    serde_json::from_str(value)
+        .map_err(|error| crate::DomainError::Storage(StorageError::corrupt_public(error)))
+}
+
+fn collection_summary_for_version(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    collection_path: &str,
+) -> Result<Option<CollectionSummary>, crate::DomainError> {
+    let stored = conn
+        .query_row(
+            "SELECT schema_status,degradation_reasons_json FROM collections \
+             WHERE workspace_id=?1 AND version_id=?2 AND collection_path=?3",
+            params![workspace_id, version_id, collection_path],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(crate::DomainError::sql_corrupt)?;
+    stored
+        .map(|(status, reasons)| {
+            Ok(CollectionSummary {
+                path: collection_path.to_owned(),
+                status: stored_schema_status(&status)?,
+                reasons: stored_schema_reasons(&reasons)?,
+            })
+        })
+        .transpose()
+}
+
+/// Every collection in the active workspace version, ordered by path.
+pub fn list_collections(
+    conn: &Connection,
+    workspace_id: &str,
+) -> Result<Vec<CollectionSummary>, crate::DomainError> {
+    let version_id = active_version_id(conn, workspace_id)?;
+    let mut statement = conn
+        .prepare(
+            "SELECT collection_path,schema_status,degradation_reasons_json FROM collections \
+             WHERE workspace_id=?1 AND version_id=?2 ORDER BY collection_path",
+        )
+        .map_err(crate::DomainError::sql_corrupt)?;
+    let rows = statement
+        .query_map(params![workspace_id, version_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(crate::DomainError::sql_corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(crate::DomainError::sql_corrupt)?;
+    rows.into_iter()
+        .map(|(path, status, reasons)| {
+            Ok(CollectionSummary {
+                path,
+                status: stored_schema_status(&status)?,
+                reasons: stored_schema_reasons(&reasons)?,
+            })
+        })
+        .collect()
+}
+
+/// The parsed schema and record count for one active-version collection.
+pub fn get_collection(
+    conn: &Connection,
+    workspace_id: &str,
+    collection_path: &str,
+) -> Result<Option<CollectionDetails>, crate::DomainError> {
+    let version_id = active_version_id(conn, workspace_id)?;
+    let Some(summary) =
+        collection_summary_for_version(conn, workspace_id, &version_id, collection_path)?
+    else {
+        return Ok(None);
+    };
+    let schema = load_collection_schema(conn, workspace_id, &version_id, collection_path)?;
+    let record_count = conn
+        .query_row(
+            "SELECT COUNT(*) FROM collection_records \
+             WHERE workspace_id=?1 AND version_id=?2 AND collection_path=?3 \
+               AND record_id IS NOT NULL",
+            params![workspace_id, version_id, collection_path],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(crate::DomainError::sql_corrupt)?;
+    let record_count =
+        usize::try_from(record_count).map_err(|_| crate::DomainError::StateCorrupt {
+            reason: "negative collection record count",
+        })?;
+    Ok(Some(CollectionDetails {
+        path: summary.path,
+        status: summary.status,
+        reasons: summary.reasons,
+        schema,
+        record_count,
+    }))
+}
+
+fn indexed_validation(
+    status: &str,
+    reason: Option<&str>,
+) -> Result<CollectionIndexedValueValidation, crate::DomainError> {
+    match status {
+        "valid" if reason.is_none() => Ok(CollectionIndexedValueValidation::Valid),
+        "untyped" if reason.is_none() => Ok(CollectionIndexedValueValidation::Untyped),
+        "flagged" => {
+            let reason = reason.ok_or(crate::DomainError::StateCorrupt {
+                reason: "flagged collection value has no reason",
+            })?;
+            Ok(CollectionIndexedValueValidation::Flagged {
+                reason: serde_json::from_str(reason).map_err(|error| {
+                    crate::DomainError::Storage(StorageError::corrupt_public(error))
+                })?,
+            })
+        }
+        _ => Err(crate::DomainError::StateCorrupt {
+            reason: "invalid indexed collection validation",
+        }),
+    }
+}
+
+fn load_collection_records(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    collection_path: &str,
+) -> Result<Vec<CollectionRecord>, crate::DomainError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT r.record_id,r.file_path,f.field_name,f.value_json,\
+                    f.validation_status,f.validation_reason_json \
+             FROM collection_records r \
+             LEFT JOIN collection_record_fields f \
+               ON f.workspace_id=r.workspace_id AND f.version_id=r.version_id \
+              AND f.record_id=r.record_id \
+             WHERE r.workspace_id=?1 AND r.version_id=?2 AND r.collection_path=?3 \
+               AND r.record_id IS NOT NULL \
+             ORDER BY r.file_path,r.record_id,f.field_name",
+        )
+        .map_err(crate::DomainError::sql_corrupt)?;
+    let rows = statement
+        .query_map(params![workspace_id, version_id, collection_path], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })
+        .map_err(crate::DomainError::sql_corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(crate::DomainError::sql_corrupt)?;
+    let mut records = Vec::<CollectionRecord>::new();
+    let mut record_indexes = HashMap::<String, usize>::new();
+    for (record_id, file_path, field, value, validation, reason) in rows {
+        let index = match record_indexes.get(&record_id).copied() {
+            Some(index) => index,
+            None => {
+                let index = records.len();
+                records.push(CollectionRecord {
+                    id: record_id.clone(),
+                    path: file_path,
+                    values: Vec::new(),
+                });
+                record_indexes.insert(record_id, index);
+                index
+            }
+        };
+        let (Some(field), Some(value), Some(validation)) = (field, value, validation) else {
+            continue;
+        };
+        records[index].values.push(CollectionIndexedValue {
+            field,
+            value: serde_json::from_str(&value).map_err(|error| {
+                crate::DomainError::Storage(StorageError::corrupt_public(error))
+            })?,
+            validation: indexed_validation(&validation, reason.as_deref())?,
+            resolved_relations: Vec::new(),
+        });
+    }
+    Ok(records)
+}
+
+fn filename_label(path: &str) -> String {
+    path_basename(path)
+        .strip_suffix(".md")
+        .unwrap_or_else(|| path_basename(path))
+        .to_owned()
+}
+
+fn relation_target_label(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    target_collection_path: &str,
+    target_record_id: &str,
+) -> Result<String, crate::DomainError> {
+    let Some(file_path) = conn
+        .query_row(
+            "SELECT file_path FROM collection_records \
+             WHERE workspace_id=?1 AND version_id=?2 AND collection_path=?3 \
+               AND record_id=?4",
+            params![
+                workspace_id,
+                version_id,
+                target_collection_path,
+                target_record_id
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(crate::DomainError::sql_corrupt)?
+    else {
+        return Ok(target_record_id.to_owned());
+    };
+    let mut statement = conn
+        .prepare(
+            "SELECT field_name,value_json FROM collection_record_fields \
+             WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3",
+        )
+        .map_err(crate::DomainError::sql_corrupt)?;
+    let rows = statement
+        .query_map(params![workspace_id, version_id, target_record_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(crate::DomainError::sql_corrupt)?
+        .collect::<Result<HashMap<_, _>, _>>()
+        .map_err(crate::DomainError::sql_corrupt)?;
+    let mut label_fields: Vec<&str> = Vec::new();
+    for preferred in ["title", "name"] {
+        if let Some(field) = rows
+            .keys()
+            .find(|field| field.eq_ignore_ascii_case(preferred))
+        {
+            label_fields.push(field);
+        }
+    }
+    for field in label_fields {
+        if let Some(label) = rows
+            .get(field)
+            .and_then(|value| serde_json::from_str::<Value>(value).ok())
+            .and_then(|value| value.as_str().map(str::trim).map(str::to_owned))
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(label);
+        }
+    }
+    Ok(filename_label(&file_path))
+}
+
+fn resolve_record_relations(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    collection_path: &str,
+    records: &mut [CollectionRecord],
+) -> Result<(), crate::DomainError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT e.source_record_id,e.field_name,e.target_record_id,\
+                    e.target_collection_path \
+             FROM collection_relation_edges e \
+             JOIN collection_records r ON r.workspace_id=e.workspace_id \
+               AND r.version_id=e.version_id AND r.record_id=e.source_record_id \
+             WHERE e.workspace_id=?1 AND e.version_id=?2 AND r.collection_path=?3 \
+             ORDER BY e.source_record_id,e.field_name,e.target_record_id",
+        )
+        .map_err(crate::DomainError::sql_corrupt)?;
+    let edges = statement
+        .query_map(params![workspace_id, version_id, collection_path], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(crate::DomainError::sql_corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(crate::DomainError::sql_corrupt)?;
+    drop(statement);
+    let mut labels = HashMap::<(String, String), String>::new();
+    let mut resolved = HashMap::<(String, String, String), String>::new();
+    for (source, field, target, target_collection) in edges {
+        let cache_key = (target_collection.clone(), target.clone());
+        let label = match labels.get(&cache_key) {
+            Some(label) => label.clone(),
+            None => {
+                let label = relation_target_label(
+                    conn,
+                    workspace_id,
+                    version_id,
+                    &target_collection,
+                    &target,
+                )?;
+                labels.insert(cache_key, label.clone());
+                label
+            }
+        };
+        resolved.insert((source, field, target), label);
+    }
+    for record in records {
+        for value in &mut record.values {
+            let targets: Vec<&str> = match &value.value {
+                Value::String(target) => vec![target],
+                Value::Array(targets) => targets.iter().filter_map(Value::as_str).collect(),
+                _ => Vec::new(),
+            };
+            value.resolved_relations = targets
+                .into_iter()
+                .filter_map(|target| {
+                    resolved
+                        .get(&(record.id.clone(), value.field.clone(), target.to_owned()))
+                        .map(|label| CollectionResolvedRelation {
+                            record_id: target.to_owned(),
+                            label: label.clone(),
+                        })
+                })
+                .collect();
+        }
+    }
+    Ok(())
+}
+
+fn value_for_field<'a>(record: &'a CollectionRecord, field: &str) -> Option<&'a Value> {
+    record
+        .values
+        .iter()
+        .find(|value| value.field == field)
+        .map(|value| &value.value)
+}
+
+fn value_contains(value: &Value, needle: &Value) -> bool {
+    match (value, needle) {
+        (Value::String(value), Value::String(needle)) => value.contains(needle),
+        (Value::Array(values), needle) => values
+            .iter()
+            .any(|value| value == needle || value_contains(value, needle)),
+        _ => false,
+    }
+}
+
+fn matches_collection_filter(record: &CollectionRecord, filter: &CollectionFilter) -> bool {
+    let Some(value) = value_for_field(record, &filter.field) else {
+        return false;
+    };
+    match filter.operator {
+        CollectionFilterOperator::Equals => value == &filter.value,
+        CollectionFilterOperator::Contains => value_contains(value, &filter.value),
+    }
+}
+
+fn json_kind(value: &Value) -> u8 {
+    match value {
+        Value::Null => 0,
+        Value::Bool(_) => 1,
+        Value::Number(_) => 2,
+        Value::String(_) => 3,
+        Value::Array(_) => 4,
+        Value::Object(_) => 5,
+    }
+}
+
+fn compare_json(left: &Value, right: &Value) -> Ordering {
+    let kind = json_kind(left).cmp(&json_kind(right));
+    if kind != Ordering::Equal {
+        return kind;
+    }
+    match (left, right) {
+        (Value::Null, Value::Null) => Ordering::Equal,
+        (Value::Bool(left), Value::Bool(right)) => left.cmp(right),
+        (Value::Number(left), Value::Number(right)) => left
+            .as_f64()
+            .partial_cmp(&right.as_f64())
+            .unwrap_or(Ordering::Equal),
+        (Value::String(left), Value::String(right)) => left.cmp(right),
+        _ => left.to_string().cmp(&right.to_string()),
+    }
+}
+
+fn compare_optional_json(left: Option<&Value>, right: Option<&Value>) -> Ordering {
+    match (left, right) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Less,
+        (Some(_), None) => Ordering::Greater,
+        (Some(left), Some(right)) => compare_json(left, right),
+    }
+}
+
+fn group_collection_records(
+    records: &[CollectionRecord],
+    field: &str,
+) -> Result<Vec<CollectionRecordGroup>, crate::DomainError> {
+    let mut groups = Vec::<CollectionRecordGroup>::new();
+    let mut indexes = HashMap::<String, usize>::new();
+    for record in records {
+        let value = value_for_field(record, field)
+            .cloned()
+            .unwrap_or(Value::Null);
+        let key = serde_json::to_string(&value)
+            .map_err(|error| crate::DomainError::Storage(StorageError::corrupt_public(error)))?;
+        let index = match indexes.get(&key).copied() {
+            Some(index) => index,
+            None => {
+                let index = groups.len();
+                groups.push(CollectionRecordGroup {
+                    value,
+                    records: Vec::new(),
+                });
+                indexes.insert(key, index);
+                index
+            }
+        };
+        groups[index].records.push(record.clone());
+    }
+    Ok(groups)
+}
+
+/// Filter, sort, group, and optionally resolve relation labels from the active
+/// version's persisted collection index. Raw indexed values are never reparsed
+/// from record files, including when the schema is degraded.
+pub fn query_collection_records(
+    conn: &Connection,
+    workspace_id: &str,
+    collection_path: &str,
+    query: &CollectionQuery,
+) -> Result<Option<CollectionQueryResult>, crate::DomainError> {
+    let version_id = active_version_id(conn, workspace_id)?;
+    let Some(collection) =
+        collection_summary_for_version(conn, workspace_id, &version_id, collection_path)?
+    else {
+        return Ok(None);
+    };
+    let mut records = load_collection_records(conn, workspace_id, &version_id, collection_path)?;
+    if query.resolve_relations {
+        resolve_record_relations(
+            conn,
+            workspace_id,
+            &version_id,
+            collection_path,
+            &mut records,
+        )?;
+    }
+    if let Some(filter) = &query.filter {
+        records.retain(|record| matches_collection_filter(record, filter));
+    }
+    records.sort_by(|left, right| {
+        for sort in &query.sort {
+            let ordering = compare_optional_json(
+                value_for_field(left, &sort.field),
+                value_for_field(right, &sort.field),
+            );
+            let ordering = match sort.direction {
+                CollectionSortDirection::Asc => ordering,
+                CollectionSortDirection::Desc => ordering.reverse(),
+            };
+            if ordering != Ordering::Equal {
+                return ordering;
+            }
+        }
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let groups = query
+        .group_by
+        .as_deref()
+        .map(|field| group_collection_records(&records, field))
+        .transpose()?;
+    Ok(Some(CollectionQueryResult {
+        collection,
+        records,
+        groups,
+    }))
+}
+
+fn history_value_from_json(
+    value: Option<String>,
+) -> Result<CollectionHistoryValue, crate::DomainError> {
+    match value {
+        Some(value) => Ok(CollectionHistoryValue {
+            present: true,
+            value: Some(serde_json::from_str(&value).map_err(|error| {
+                crate::DomainError::Storage(StorageError::corrupt_public(error))
+            })?),
+        }),
+        None => Ok(CollectionHistoryValue {
+            present: false,
+            value: None,
+        }),
+    }
+}
+
+/// One active-version record with its current indexed fields and a bounded,
+/// newest-first history page.
+pub fn get_collection_record(
+    conn: &Connection,
+    workspace_id: &str,
+    collection_path: &str,
+    record_id: &str,
+    history_limit: usize,
+) -> Result<Option<CollectionRecordDetails>, crate::DomainError> {
+    if history_limit == 0 || history_limit > MAX_COLLECTION_HISTORY_LIMIT {
+        return Err(crate::DomainError::InvalidInput {
+            reason: "collection history limit is out of range",
+        });
+    }
+    let version_id = active_version_id(conn, workspace_id)?;
+    let Some(collection) =
+        collection_summary_for_version(conn, workspace_id, &version_id, collection_path)?
+    else {
+        return Ok(None);
+    };
+    let record = load_collection_records(conn, workspace_id, &version_id, collection_path)?
+        .into_iter()
+        .find(|record| record.id == record_id);
+    let Some(record) = record else {
+        return Ok(None);
+    };
+    let mut statement = conn
+        .prepare(
+            "SELECT field_name,previous_value_json,next_value_json,author_origin_id,\
+                    recorded_at_ms \
+             FROM collection_field_history \
+             WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3 \
+             ORDER BY recorded_at_ms DESC,history_id DESC LIMIT ?4",
+        )
+        .map_err(crate::DomainError::sql_corrupt)?;
+    let rows = statement
+        .query_map(
+            params![workspace_id, version_id, record_id, history_limit as i64],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )
+        .map_err(crate::DomainError::sql_corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(crate::DomainError::sql_corrupt)?;
+    let history = rows
+        .into_iter()
+        .map(
+            |(field, previous, next, author_origin_id, recorded_at_ms)| {
+                Ok(CollectionFieldHistoryEntry {
+                    field,
+                    previous: history_value_from_json(previous)?,
+                    next: history_value_from_json(next)?,
+                    author_origin_id,
+                    recorded_at_ms,
+                })
+            },
+        )
+        .collect::<Result<Vec<_>, crate::DomainError>>()?;
+    Ok(Some(CollectionRecordDetails {
+        collection,
+        record,
+        history,
+    }))
 }
 
 fn is_calendar_date(value: &str) -> bool {

@@ -184,6 +184,29 @@ const WORKSPACE_REQUEST_CASES: WorkspaceRequestCase[] = [
   { method: WORKSPACE_METHOD.conflictsList, params: {} },
   { method: WORKSPACE_METHOD.conflictsOpen, params: { conflict: {} } },
   { method: WORKSPACE_METHOD.conflictsResolve, params: { local: {} } },
+  { method: WORKSPACE_METHOD.collectionsList, params: {} },
+  {
+    method: WORKSPACE_METHOD.collectionsGet,
+    params: { collectionPath: "projects" },
+  },
+  {
+    method: WORKSPACE_METHOD.collectionsQuery,
+    params: {
+      collectionPath: "projects",
+      filter: { field: "status", operator: "equals", value: "active" },
+      sort: [{ field: "due", direction: "asc" }],
+      groupBy: "status",
+      resolveRelations: true,
+    },
+  },
+  {
+    method: WORKSPACE_METHOD.collectionsGetRecord,
+    params: {
+      collectionPath: "projects",
+      recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      historyLimit: 25,
+    },
+  },
   {
     method: WORKSPACE_METHOD.searchQuery,
     params: { versionId: "main", query: "hello" },
@@ -237,6 +260,32 @@ const conflict: ConflictRecord = {
   incoming: conflictState,
 };
 
+const collectionSummary = {
+  path: "projects",
+  status: "degraded",
+  reasons: [{ code: "unknown-field-reference", path: "/views/0/groupBy" }],
+};
+const collectionRecord = {
+  id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+  path: "projects/roadmap.md",
+  values: [
+    {
+      field: "status",
+      value: "active",
+      validation: { status: "valid" },
+      resolvedRelations: [],
+    },
+    {
+      field: "legacy",
+      value: { nested: [1, true, null] },
+      validation: { status: "untyped" },
+      resolvedRelations: [
+        { recordId: "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb", label: "Linked" },
+      ],
+    },
+  ],
+};
+
 const WORKSPACE_DECODER_CASES: Array<{
   method: WorkspaceMethod;
   valid: Parameters<typeof decodeWorkspaceResult>[1];
@@ -251,6 +300,56 @@ const WORKSPACE_DECODER_CASES: Array<{
   {
     method: WORKSPACE_METHOD.conflictsResolve,
     valid: { conflict, write: null, delete: null },
+  },
+  {
+    method: WORKSPACE_METHOD.collectionsList,
+    valid: { collections: [collectionSummary] },
+  },
+  {
+    method: WORKSPACE_METHOD.collectionsGet,
+    valid: {
+      ...collectionSummary,
+      schema: {
+        name: "Projects",
+        description: null,
+        fields: [{ name: "status", type: "text" }],
+        views: [
+          {
+            name: "All",
+            kind: "table",
+            groupBy: null,
+            sort: [{ field: "status", direction: "asc" }],
+            visibleFields: null,
+            dateField: null,
+          },
+        ],
+      },
+      recordCount: 1,
+    },
+  },
+  {
+    method: WORKSPACE_METHOD.collectionsQuery,
+    valid: {
+      collection: collectionSummary,
+      records: [collectionRecord],
+      groups: [{ value: "active", records: [collectionRecord] }],
+    },
+  },
+  {
+    method: WORKSPACE_METHOD.collectionsGetRecord,
+    valid: {
+      collection: collectionSummary,
+      record: collectionRecord,
+      history: [
+        {
+          field: "status",
+          previous: { present: false, value: null },
+          next: { present: true, value: "active" },
+          authorOriginId: null,
+          recordedAtMs: 1,
+        },
+      ],
+    },
   },
   { method: WORKSPACE_METHOD.searchQuery, valid: [] },
   {
@@ -1252,7 +1351,7 @@ describe("VersionedLiveAdapter", () => {
     }
   });
 
-  it("encodes workspace.open and all eight bound workspace-family methods", async () => {
+  it("encodes workspace.open and representative bound workspace-family methods", async () => {
     const openRequests: Request[] = [];
     const captureAuthor = {
       kind: "agent" as const,
@@ -1293,6 +1392,87 @@ describe("VersionedLiveAdapter", () => {
         params: entry.params,
       });
     }
+  });
+
+  it("encodes the collection reads with their exact methods and params", async () => {
+    const requests: Request[] = [];
+    const adapter = new VersionedLiveAdapter(
+      captureClient(requests),
+      WORKSPACE,
+      { workspaceId: WORKSPACE },
+    );
+    const query = {
+      collectionPath: "projects",
+      filter: {
+        field: "metadata",
+        operator: "contains" as const,
+        value: { nested: ["active", 1, true, null] },
+      },
+      sort: [
+        { field: "due", direction: "asc" as const },
+        { field: "title", direction: "desc" as const },
+      ],
+      groupBy: "status",
+      resolveRelations: true,
+    };
+
+    await expect(adapter.listCollections()).rejects.toBe(SENTINEL);
+    await expect(
+      adapter.getCollection({ collectionPath: "projects" }),
+    ).rejects.toBe(SENTINEL);
+    await expect(adapter.queryCollectionRecords(query)).rejects.toBe(SENTINEL);
+    await expect(
+      adapter.getCollectionRecord({
+        collectionPath: "projects",
+        recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+        historyLimit: 25,
+      }),
+    ).rejects.toBe(SENTINEL);
+
+    expect(
+      requests.map(
+        ({ method, workspace, params, idempotencyKey, deadlineMs }) => ({
+          method,
+          workspace,
+          params,
+          idempotencyKey,
+          deadlineMs,
+        }),
+      ),
+    ).toEqual([
+      {
+        method: "collections.list",
+        workspace: WORKSPACE,
+        params: {},
+        idempotencyKey: undefined,
+        deadlineMs: undefined,
+      },
+      {
+        method: "collections.get",
+        workspace: WORKSPACE,
+        params: { collectionPath: "projects" },
+        idempotencyKey: undefined,
+        deadlineMs: undefined,
+      },
+      {
+        method: "collections.query",
+        workspace: WORKSPACE,
+        params: query,
+        idempotencyKey: undefined,
+        deadlineMs: undefined,
+      },
+      {
+        method: "collections.getRecord",
+        workspace: WORKSPACE,
+        params: {
+          collectionPath: "projects",
+          recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+          historyLimit: 25,
+        },
+        idempotencyKey: undefined,
+        deadlineMs: undefined,
+      },
+    ]);
   });
 
   it.each(WORKSPACE_DECODER_CASES)(

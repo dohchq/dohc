@@ -111,3 +111,115 @@ export interface FieldValueReason {
 export type FieldValueValidation =
   | { status: "valid" }
   | { status: "flagged"; reason: FieldValueReason };
+
+export type CollectionJsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | CollectionJsonValue[]
+  | { [key: string]: CollectionJsonValue };
+
+export type CollectionStatus = CollectionSchemaParseResult["status"];
+
+export interface CollectionSummary {
+  path: string;
+  status: CollectionStatus;
+  reasons: CollectionSchemaReason[];
+}
+
+export interface CollectionDetails extends CollectionSummary {
+  schema: CollectionSchema;
+  recordCount: number;
+}
+
+export type CollectionIndexedValueValidation =
+  | FieldValueValidation
+  | { status: "untyped" };
+
+export interface CollectionResolvedRelation {
+  recordId: string;
+  label: string;
+}
+
+export interface CollectionIndexedValue {
+  field: string;
+  value: CollectionJsonValue;
+  validation: CollectionIndexedValueValidation;
+  resolvedRelations: CollectionResolvedRelation[];
+}
+
+export interface CollectionRecord {
+  id: string;
+  path: string;
+  values: CollectionIndexedValue[];
+}
+
+export interface CollectionRecordGroup {
+  value: CollectionJsonValue;
+  records: CollectionRecord[];
+}
+
+export type CollectionFilterOperator = "equals" | "contains";
+
+export interface CollectionQueryFilter {
+  field: string;
+  operator: CollectionFilterOperator;
+  value: CollectionJsonValue;
+}
+
+export interface CollectionQuerySort {
+  field: string;
+  direction: ViewSortDirection;
+}
+
+export type CollectionListParams = Record<string, never>;
+
+export interface CollectionListResult {
+  collections: CollectionSummary[];
+}
+
+export interface CollectionGetParams {
+  collectionPath: string;
+}
+
+export type CollectionGetResult = CollectionDetails;
+
+export interface CollectionQueryParams {
+  collectionPath: string;
+  filter?: CollectionQueryFilter;
+  sort?: CollectionQuerySort[];
+  groupBy?: string;
+  resolveRelations?: boolean;
+}
+
+export interface CollectionQueryResult {
+  collection: CollectionSummary;
+  records: CollectionRecord[];
+  groups: CollectionRecordGroup[] | null;
+}
+
+export interface CollectionGetRecordParams {
+  collectionPath: string;
+  recordId: string;
+  historyLimit: number;
+}
+
+export interface CollectionHistoryValue {
+  present: boolean;
+  value: CollectionJsonValue;
+}
+
+export interface CollectionFieldHistoryEntry {
+  field: string;
+  previous: CollectionHistoryValue;
+  next: CollectionHistoryValue;
+  authorOriginId: string | null;
+  recordedAtMs: number;
+}
+
+export interface CollectionGetRecordResult {
+  collection: CollectionSummary;
+  record: CollectionRecord;
+  history: CollectionFieldHistoryEntry[];
+}

@@ -21,11 +21,12 @@ use dohc_engine_domain::{
     ChatAgentReadState, ChatAttachment, ChatBookmark, ChatChannel, ChatChannelKind,
     ChatChannelSummary, ChatDecision, ChatDecisionState, ChatFeedReadState, ChatFileMention,
     ChatFollow, ChatMention, ChatMessage, ChatProjectionFileAccess, ChatReaction,
-    ChatReactionState, ChatThread, ChatThreadReadState, CompareTextFileVersions, ComparisonStatus,
-    ConflictChoice, ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution,
-    ConflictStatus, CreateFileThread, CreateNamedVersion, DeleteTextFile, DispatchClaim,
-    DispatchRecord, DomainError, FeedCursorValue, FollowState, FollowTargetKind,
-    LocalAttachmentInput, MentionCursor, MergeTextFileFromVersion, MergeTextFileResult,
+    ChatReactionState, ChatThread, ChatThreadReadState, CollectionFilter, CollectionQuery,
+    CollectionSort, CompareTextFileVersions, ComparisonStatus, ConflictChoice, ConflictContentKind,
+    ConflictFileState, ConflictMetadata, ConflictResolution, ConflictStatus, CreateFileThread,
+    CreateNamedVersion, DeleteTextFile, DispatchClaim, DispatchRecord, DomainError,
+    FeedCursorValue, FollowState, FollowTargetKind, LocalAttachmentInput,
+    MAX_COLLECTION_HISTORY_LIMIT, MentionCursor, MergeTextFileFromVersion, MergeTextFileResult,
     MergeUnchangedReason, MomentOp, RenameTextFile, ResolveConflictKind, ResolveDecision,
     ResolveTextConflict, RollbackTextFileMutation, SaveBookmark, SecretDelete, SecretDiskIntent,
     SecretMomentRecord, SecretWrite, SendMessage, SetFollow, SetReaction, StartChannelThread,
@@ -135,6 +136,23 @@ impl EngineEvents {
 const MAX_INBAND_CONTENT_BYTES: usize = dohc_engine_domain::INBAND_CONTENT_CAP_BYTES;
 const MAX_DESKTOP_CAPTURE_TEXT_BYTES: usize = 128 * 1024;
 const MAX_METADATA_FIELD_BYTES: usize = dohc_engine_domain::MAX_METADATA_FIELD_BYTES;
+const COLLECTION_RESPONSE_HARD_CAP_BYTES: usize =
+    dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize - 64 * 1024;
+
+fn collection_response_json(response: impl Serialize) -> Result<Value, WireError> {
+    let response =
+        serde_json::to_value(response).map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?;
+    let encoded_len = serde_json::to_vec(&response)
+        .map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?
+        .len();
+    if encoded_len > COLLECTION_RESPONSE_HARD_CAP_BYTES {
+        return Err(wire(
+            ErrorCode::LimitExceeded,
+            "collection-response-exceeds-wire-limit",
+        ));
+    }
+    Ok(response)
+}
 
 /// Aggregate hydrated blob bytes allowed to wait for or flow through framed
 /// egress. A single stored blob may be this large, so exact-byte reservations
@@ -1031,6 +1049,22 @@ impl EngineService {
             }
             "search.ensureIndex" => {
                 self.search_ensure_index(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "collections.list" => {
+                self.collections_list(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "collections.get" => {
+                self.collections_get(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "collections.query" => {
+                self.collections_query(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "collections.getRecord" => {
+                self.collections_get_record(&ctx, request.workspace, request.params)
                     .await?
             }
             "watcher.status" => self.watcher_status(request.workspace)?,
@@ -3457,31 +3491,46 @@ impl EngineService {
             }
 
             let version = match intent {
-                VersionFenceIntent::Fork { input } => {
-                    open.actor
-                        .create_named_version(input, Arc::new(NoFaults), token)
-                        .await
-                }
+                VersionFenceIntent::Fork { input } => open
+                    .actor
+                    .create_named_version(input, Arc::new(NoFaults), token)
+                    .await
+                    .map_err(map_runtime)?,
                 VersionFenceIntent::Switch {
                     target_version_id,
-                    now_ms,
+                    now_ms: switch_now_ms,
                 } => {
-                    open.actor
+                    let version = open
+                        .actor
                         .set_active_version(
                             dohc_engine_runtime::ActiveVersionSwitch {
                                 workspace_id: open.workspace_id.clone(),
                                 version_id: target_version_id,
                                 root_dir: open.root.clone(),
                                 self_writes: Arc::new(self_writes.scoped(&open.root)),
-                                now_ms,
+                                now_ms: switch_now_ms,
                             },
+                            Arc::new(NoFaults),
+                            token.clone(),
+                        )
+                        .await
+                        .map_err(map_runtime)?;
+                    open.actor
+                        .reconcile_collections(
+                            open.workspace_id.clone(),
+                            version.version_id.clone(),
+                            open.root.clone(),
+                            capture_leases.clone(),
+                            Arc::new(self_writes.scoped(&open.root)),
+                            now_ms()?,
                             Arc::new(NoFaults),
                             token,
                         )
                         .await
+                        .map_err(map_runtime)?;
+                    version
                 }
-            }
-            .map_err(map_runtime)?;
+            };
             Ok(VersionFenceOutcome::Committed(version))
         });
         tokio::select! {
@@ -3608,6 +3657,102 @@ impl EngineService {
     /// up (`running`), whether anything since the last fully clean tick went
     /// wrong (`degraded`), and whether the restart streak has escalated past
     /// recovery-on-its-own-timescale (`terminal`).
+    async fn collections_list(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let _: CollectionsListParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let collections = Self::read_under_ctx(
+            &cancellation,
+            "collections.list",
+            open.actor.collections_list(open.workspace_id),
+        )
+        .await?;
+        collection_response_json(json!({ "collections": collections }))
+    }
+
+    async fn collections_get(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: CollectionsGetParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let collection = Self::read_under_ctx(
+            &cancellation,
+            "collections.get",
+            open.actor
+                .collections_get(open.workspace_id, params.collection_path),
+        )
+        .await?
+        .ok_or_else(|| wire(ErrorCode::InvalidParams, "collection-not-found"))?;
+        collection_response_json(collection)
+    }
+
+    async fn collections_query(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: CollectionsQueryParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let result = Self::read_under_ctx(
+            &cancellation,
+            "collections.query",
+            open.actor.collections_query_records(
+                open.workspace_id,
+                params.collection_path,
+                CollectionQuery {
+                    filter: params.filter,
+                    sort: params.sort,
+                    group_by: params.group_by,
+                    resolve_relations: params.resolve_relations,
+                },
+            ),
+        )
+        .await?
+        .ok_or_else(|| wire(ErrorCode::InvalidParams, "collection-not-found"))?;
+        collection_response_json(result)
+    }
+
+    async fn collections_get_record(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: CollectionsGetRecordParams = parse(params)?;
+        if params.history_limit == 0 || params.history_limit > MAX_COLLECTION_HISTORY_LIMIT {
+            return Err(wire(
+                ErrorCode::InvalidParams,
+                "collection-history-limit-out-of-range",
+            ));
+        }
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let result = Self::read_under_ctx(
+            &cancellation,
+            "collections.getRecord",
+            open.actor.collections_get_record(
+                open.workspace_id,
+                params.collection_path,
+                params.record_id,
+                params.history_limit,
+            ),
+        )
+        .await?
+        .ok_or_else(|| wire(ErrorCode::InvalidParams, "collection-record-not-found"))?;
+        collection_response_json(result)
+    }
+
     fn watcher_status(&self, handle: Option<WorkspaceHandle>) -> Result<Value, WireError> {
         let open = self.open(handle.as_ref())?;
         let guard = lock(&open.capture);
@@ -9626,6 +9771,38 @@ struct SearchChatMessagesGranularParams {
 struct SearchEnsureIndexParams {
     workspace_id: String,
     version_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CollectionsListParams {}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CollectionsGetParams {
+    collection_path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CollectionsQueryParams {
+    collection_path: String,
+    #[serde(default)]
+    filter: Option<CollectionFilter>,
+    #[serde(default)]
+    sort: Vec<CollectionSort>,
+    #[serde(default)]
+    group_by: Option<String>,
+    #[serde(default)]
+    resolve_relations: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CollectionsGetRecordParams {
+    collection_path: String,
+    record_id: String,
+    history_limit: usize,
 }
 
 #[derive(Deserialize)]

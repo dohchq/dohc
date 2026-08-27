@@ -11,6 +11,13 @@ import {
   WORKSPACE_METHOD,
   decodeWorkspaceResult,
   type CaptureFlushResult,
+  type CollectionGetParams,
+  type CollectionGetRecordParams,
+  type CollectionGetRecordResult,
+  type CollectionGetResult,
+  type CollectionListResult,
+  type CollectionQueryParams,
+  type CollectionQueryResult,
   type ConflictFileState,
   type ConflictListParams,
   type ConflictOpenParams,
@@ -906,6 +913,26 @@ export class VersionedLiveAdapter {
 
   async querySearch(input: SearchQueryParams): Promise<SearchResult[]> {
     return this.workspaceRequest(WORKSPACE_METHOD.searchQuery, input);
+  }
+
+  async listCollections(): Promise<CollectionListResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.collectionsList, {});
+  }
+
+  async getCollection(input: CollectionGetParams): Promise<CollectionGetResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.collectionsGet, input);
+  }
+
+  async queryCollectionRecords(
+    input: CollectionQueryParams,
+  ): Promise<CollectionQueryResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.collectionsQuery, input);
+  }
+
+  async getCollectionRecord(
+    input: CollectionGetRecordParams,
+  ): Promise<CollectionGetRecordResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.collectionsGetRecord, input);
   }
 
   async writeSecretFile(input: {
