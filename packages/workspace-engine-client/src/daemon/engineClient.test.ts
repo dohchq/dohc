@@ -840,9 +840,13 @@ describe("EngineClient", () => {
       });
       for (const chunk of chunks) peer.sendRaw(chunk);
 
-      expect(onBlob).toHaveBeenCalledWith(
-        expect.objectContaining({ streamId: 62, bytes }),
-      );
+      // Compare the 2 MiB payload with Buffer.equals: vitest's generic deep
+      // equality walks it element by element, which alone takes seconds and
+      // made this test flaky against its own timeout.
+      expect(onBlob).toHaveBeenCalledTimes(1);
+      const delivered = onBlob.mock.calls[0]![0] as { streamId: number; bytes: Buffer };
+      expect(delivered.streamId).toBe(62);
+      expect(Buffer.from(delivered.bytes).equals(bytes)).toBe(true);
       expect(
         allocate.mock.calls.filter(([size]) => size === bytes.byteLength),
       ).toHaveLength(1);
