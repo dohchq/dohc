@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 import { Duplex, PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import type { Envelope } from "../ydoc/generated/Envelope";
@@ -808,6 +809,53 @@ describe("EngineClient", () => {
     transport.close();
   });
 
+  it("preallocates announced blob bytes once without concatenating chunks", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const onBlob = vi.fn();
+    transport.onBlob(onBlob);
+    void transport.sendRequest(request(21, "blob.preallocated")).catch(() => {});
+
+    const bytes = Buffer.alloc(2 * 1024 * 1024 + 3, 7);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const chunks: Buffer[] = [];
+    for (let offset = 0; offset < bytes.byteLength; offset += 60_000) {
+      const end = Math.min(bytes.byteLength, offset + 60_000);
+      chunks.push(
+        blobChunkFrame(62, bytes.subarray(offset, end), end === bytes.byteLength),
+      );
+    }
+    const allocate = vi.spyOn(Buffer, "allocUnsafe");
+    const concatenate = vi.spyOn(Buffer, "concat");
+
+    try {
+      peer.send({
+        type: "blobStart",
+        requestId: 1,
+        streamId: 62,
+        totalBytes: bytes.byteLength,
+        sha256,
+      });
+      for (const chunk of chunks) peer.sendRaw(chunk);
+
+      expect(onBlob).toHaveBeenCalledWith(
+        expect.objectContaining({ streamId: 62, bytes }),
+      );
+      expect(
+        allocate.mock.calls.filter(([size]) => size === bytes.byteLength),
+      ).toHaveLength(1);
+      expect(
+        concatenate.mock.calls.some(([, size]) => size === bytes.byteLength),
+      ).toBe(false);
+    } finally {
+      allocate.mockRestore();
+      concatenate.mockRestore();
+      transport.close();
+    }
+  });
+
   it("aborts decoding the rest of a coalesced buffer when onFrame returns false", () => {
     const decoder = new FrameDecoder();
     const frame = encodeFrame(FrameType.Control, 0, Buffer.from("{}"));
@@ -857,6 +905,43 @@ describe("EngineClient", () => {
       code: "protocol-error",
       cause: { code: "blob-digest-mismatch" },
     });
+  });
+
+  it("retains and concatenates chunks when blob size is unknown", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const onBlob = vi.fn();
+    transport.onBlob(onBlob);
+    void transport.sendRequest(request(22, "blob.unknown.length")).catch(
+      () => {},
+    );
+    peer.send({
+      type: "blobStart",
+      requestId: 1,
+      streamId: 64,
+      totalBytes: null,
+      sha256:
+        "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
+    });
+    const concatenate = vi.spyOn(Buffer, "concat");
+
+    try {
+      peer.sendRaw(blobChunkFrame(64, Buffer.from("hello "), false));
+      peer.sendRaw(blobChunkFrame(64, Buffer.from("world"), true));
+
+      expect(onBlob).toHaveBeenCalledWith(
+        expect.objectContaining({
+          streamId: 64,
+          bytes: Buffer.from("hello world"),
+        }),
+      );
+      expect(concatenate.mock.calls.some(([, size]) => size === 11)).toBe(true);
+    } finally {
+      concatenate.mockRestore();
+      transport.close();
+    }
   });
 
   it("clamps a peer's huge blob chunk limit to the client cap", async () => {
@@ -919,12 +1004,39 @@ describe("EngineClient", () => {
         type: "blobStart",
         requestId: 1,
         streamId,
-        totalBytes: 5,
+        totalBytes: null,
         sha256: null,
       });
     }
     peer.sendRaw(blobChunkFrame(34, Buffer.from("123"), false));
     peer.sendRaw(blobChunkFrame(35, Buffer.from("456"), false));
+
+    await expect(pending).rejects.toMatchObject({
+      code: "protocol-error",
+      cause: { code: "blob-backpressure-exceeded" },
+    });
+  });
+
+  it("reserves announced destinations against the global blob byte budget", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer, { maxBlobBytes: 5 });
+    peer.acknowledge();
+    await transport.ready();
+    const pending = transport.sendRequest(request(25, "await.blob.reservation"));
+    peer.send({
+      type: "blobStart",
+      requestId: 1,
+      streamId: 37,
+      totalBytes: 3,
+      sha256: null,
+    });
+    peer.send({
+      type: "blobStart",
+      requestId: 1,
+      streamId: 38,
+      totalBytes: 3,
+      sha256: null,
+    });
 
     await expect(pending).rejects.toMatchObject({
       code: "protocol-error",
@@ -992,6 +1104,48 @@ describe("EngineClient", () => {
       code: "protocol-error",
       cause: { code: "unknown-blob-stream" },
     });
+  });
+
+  it("frees a cancelled request's mid-stream blob allocation", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer, { maxBlobBytes: 6 });
+    peer.acknowledge();
+    await transport.ready();
+    const cancelled = transport.sendRequest(request(23, "blob.cancelled"));
+    peer.send({
+      type: "blobStart",
+      requestId: 1,
+      streamId: 82,
+      totalBytes: 6,
+      sha256: null,
+    });
+    peer.sendRaw(blobChunkFrame(82, Buffer.from("abc"), false));
+    await transport.cancelRequest(23);
+    peer.send({
+      type: "error",
+      id: 1,
+      error: { code: "CANCELLED", message: "cancelled", retry: "no" },
+    });
+    await expect(cancelled).rejects.toMatchObject({
+      wireError: { code: "CANCELLED" },
+    });
+
+    const onBlob = vi.fn();
+    transport.onBlob(onBlob);
+    void transport.sendRequest(request(24, "blob.after.cancel")).catch(() => {});
+    peer.send({
+      type: "blobStart",
+      requestId: 2,
+      streamId: 83,
+      totalBytes: 6,
+      sha256: null,
+    });
+    peer.sendRaw(blobChunkFrame(83, Buffer.from("abcdef"), true));
+
+    expect(onBlob).toHaveBeenCalledWith(
+      expect.objectContaining({ streamId: 83, bytes: Buffer.from("abcdef") }),
+    );
+    transport.close();
   });
 
   it("fails the handshake on malformed helloAck capabilities", async () => {

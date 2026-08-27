@@ -3,7 +3,7 @@
 // consumers remain on the TypeScript engine until the atomic cutover.
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, type Hash } from "node:crypto";
 import { Duplex } from "node:stream";
 import { TextDecoder } from "node:util";
 import type { BlobStart } from "../ydoc/generated/BlobStart";
@@ -24,11 +24,12 @@ const DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_BLOB_CHUNK_BYTES = 256 * 1024;
 const DEFAULT_MAX_BLOB_BYTES = 64 * 1024 * 1024;
 const MAX_CONCURRENT_BLOB_STREAMS = 64;
-// Global cap on retained chunk Buffers across all streams, so tiny-chunk floods
-// spread over many streams cannot amplify object overhead past the byte budget.
+// Global cap on chunks received by active streams. Unknown-length streams retain
+// those Buffers; known-length streams do not, but keep the same tiny-chunk flood
+// refusal until FIN.
 const MAX_BUFFERED_BLOB_CHUNKS = 8192;
-// Bounds retained per-chunk object overhead so a tiny-chunk flood cannot amplify
-// memory past the byte budget. A max-size blob at the default chunk size is ~256
+// Bounds per-stream tiny-chunk work and, for the unknown-length fallback,
+// retained Buffer overhead. A max-size blob at the default chunk size is ~256
 // chunks, so this leaves ample headroom for legitimate chunking.
 const MAX_BLOB_CHUNKS_PER_STREAM = 4096;
 // Blob streaming gates on this negotiated hello/helloAck capability, never on
@@ -576,8 +577,14 @@ interface PendingBlob {
   // Captured when the stream is announced so response/chunk ordering cannot
   // change the blob's request identity after resolveResponse clears pending.
   readonly callerRequestId: number;
-  readonly chunks: Buffer[];
+  // A known-length stream writes straight into its final destination. Only the
+  // bounded unknown-length fallback retains chunks for FIN concatenation.
+  readonly destination: Buffer | null;
+  readonly chunks: Buffer[] | null;
+  readonly hash: Hash | null;
   receivedBytes: number;
+  receivedChunks: number;
+  retainedBytes: number;
 }
 
 type HelloAckEnvelope = Extract<Envelope, { type: "helloAck" }>;
@@ -1133,11 +1140,31 @@ export class EngineClient implements EngineTransport {
         `Blob stream ${start.streamId} references unknown request ${start.requestId}.`,
       );
     }
+    const announcedBytes = start.totalBytes ?? null;
+    if (
+      announcedBytes !== null &&
+      this.bufferedBlobBytes + announcedBytes > this.maxBlobBytes
+    ) {
+      throw new BlobStreamError(
+        "blob-backpressure-exceeded",
+        `Buffered blob bytes exceed the ${this.maxBlobBytes} byte global budget.`,
+      );
+    }
+    const destination =
+      announcedBytes === null ? null : Buffer.allocUnsafe(announcedBytes);
+    if (announcedBytes !== null) this.bufferedBlobBytes += announcedBytes;
     this.blobStreams.set(start.streamId, {
       start,
       callerRequestId: pendingEntry.callerId,
-      chunks: [],
+      destination,
+      chunks: destination === null ? [] : null,
+      hash:
+        start.sha256 === undefined || start.sha256 === null
+          ? null
+          : createHash("sha256"),
       receivedBytes: 0,
+      receivedChunks: 0,
+      retainedBytes: announcedBytes ?? 0,
     });
   }
 
@@ -1183,13 +1210,16 @@ export class EngineClient implements EngineTransport {
         `Blob stream ${frame.streamId} exceeded its ${Math.min(announcedBytes, this.maxBlobBytes)} byte bound.`,
       );
     }
-    if (this.bufferedBlobBytes + frame.payload.length > this.maxBlobBytes) {
+    if (
+      stream.destination === null &&
+      this.bufferedBlobBytes + frame.payload.length > this.maxBlobBytes
+    ) {
       throw new BlobStreamError(
         "blob-backpressure-exceeded",
         `Buffered blob bytes exceed the ${this.maxBlobBytes} byte global budget.`,
       );
     }
-    if (stream.chunks.length >= MAX_BLOB_CHUNKS_PER_STREAM) {
+    if (stream.receivedChunks >= MAX_BLOB_CHUNKS_PER_STREAM) {
       throw new BlobStreamError(
         "blob-backpressure-exceeded",
         `Blob stream ${frame.streamId} exceeded ${MAX_BLOB_CHUNKS_PER_STREAM} buffered chunks.`,
@@ -1201,9 +1231,16 @@ export class EngineClient implements EngineTransport {
         `Buffered blob chunks exceed the ${MAX_BUFFERED_BLOB_CHUNKS} global cap.`,
       );
     }
-    stream.chunks.push(frame.payload);
+    if (stream.destination === null) {
+      stream.chunks!.push(frame.payload);
+      stream.retainedBytes += frame.payload.length;
+      this.bufferedBlobBytes += frame.payload.length;
+    } else {
+      frame.payload.copy(stream.destination, stream.receivedBytes);
+    }
+    stream.hash?.update(frame.payload);
     stream.receivedBytes = receivedBytes;
-    this.bufferedBlobBytes += frame.payload.length;
+    stream.receivedChunks += 1;
     this.bufferedBlobChunks += 1;
     if (!frame.fin) return;
     if (
@@ -1217,11 +1254,11 @@ export class EngineClient implements EngineTransport {
       );
     }
 
-    const bytes = Buffer.concat(stream.chunks, receivedBytes);
+    const bytes =
+      stream.destination ?? Buffer.concat(stream.chunks ?? [], receivedBytes);
     if (
-      stream.start.sha256 !== undefined &&
-      stream.start.sha256 !== null &&
-      createHash("sha256").update(bytes).digest("hex") !== stream.start.sha256
+      stream.hash !== null &&
+      stream.hash.digest("hex") !== stream.start.sha256
     ) {
       throw new BlobStreamError(
         "blob-digest-mismatch",
@@ -1229,9 +1266,7 @@ export class EngineClient implements EngineTransport {
       );
     }
 
-    this.blobStreams.delete(frame.streamId);
-    this.bufferedBlobBytes -= receivedBytes;
-    this.bufferedBlobChunks -= stream.chunks.length;
+    this.releaseBlobStream(frame.streamId, stream);
     const blob: CompletedBlob = {
       requestId: stream.callerRequestId,
       streamId: stream.start.streamId,
@@ -1287,11 +1322,15 @@ export class EngineClient implements EngineTransport {
     // drop them so a late FIN cannot dispatch a blob the caller saw fail.
     for (const [streamId, stream] of this.blobStreams) {
       if (stream.start.requestId !== id) continue;
-      this.bufferedBlobBytes -= stream.receivedBytes;
-      this.bufferedBlobChunks -= stream.chunks.length;
-      this.blobStreams.delete(streamId);
+      this.releaseBlobStream(streamId, stream);
     }
     pending.reject(new EngineRequestError(pending.callerId, wireError));
+  }
+
+  private releaseBlobStream(streamId: number, stream: PendingBlob): void {
+    this.blobStreams.delete(streamId);
+    this.bufferedBlobBytes -= stream.retainedBytes;
+    this.bufferedBlobChunks -= stream.receivedChunks;
   }
 
   private writeEnvelope(envelope: Envelope): Promise<void> {

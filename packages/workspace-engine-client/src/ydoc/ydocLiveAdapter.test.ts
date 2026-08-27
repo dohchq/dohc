@@ -265,6 +265,29 @@ async function drain(): Promise<void> {
 }
 
 describe("YdocLiveAdapter", () => {
+  it("hands the completed state blob to Yjs without another byte copy", async () => {
+    const engine = seedPlaintextEngine("already captured");
+    let deliveredBytes: Uint8Array | undefined;
+    const unsubscribe = engine.onBlob((blob) => {
+      deliveredBytes = blob.bytes;
+    });
+    const adapter = new YdocLiveAdapter(engine);
+
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      seedAbsentLineage: false,
+    });
+
+    expect(deliveredBytes).toBeDefined();
+    expect(session.initialUpdate).toBe(deliveredBytes);
+    await session.close({ settle: false });
+    adapter.dispose();
+    unsubscribe();
+  });
+
   it("keeps scene roots as Y.Maps across initial and remote updates", async () => {
     const engine = new YdocLoopbackEngine();
     const adapter = new YdocLiveAdapter(engine);
