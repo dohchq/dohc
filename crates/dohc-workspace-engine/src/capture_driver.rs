@@ -2685,6 +2685,13 @@ struct ApplyRunContext<'a> {
     events: EngineEvents,
 }
 
+struct CaptureThreadOutcome {
+    plan: ReconcilePlan,
+    result: CaptureApplyResult,
+    policy_held: bool,
+    collections: Result<Vec<String>, RuntimeError>,
+}
+
 /// TS parity (`reconcile-${createId()}` + "Reconciled offline edits"): one
 /// actor-neutral correlation id ties a reconcile pass's per-file moments
 /// together as a group without inventing an author.
@@ -2761,6 +2768,34 @@ async fn apply_run_with_handle(
     let plan = match run {
         ReconcileRun::Completed(plan) => plan,
         ReconcileRun::Converged => {
+            let adopted_paths = match actor.active_version_id(workspace_id.to_owned()).await {
+                Ok(version_id) => match actor
+                    .reconcile_collections(
+                        workspace_id.to_owned(),
+                        version_id,
+                        root.to_path_buf(),
+                        leases.clone(),
+                        Arc::new(self_writes.clone()),
+                        now_ms,
+                        Arc::new(NoFaults),
+                        CancellationToken::new(),
+                    )
+                    .await
+                {
+                    Ok(paths) => paths,
+                    Err(_) => {
+                        status.mark_degraded();
+                        return false;
+                    }
+                },
+                Err(RuntimeError::Domain(dohc_engine_domain::DomainError::WorkspaceNotFound)) => {
+                    Vec::new()
+                }
+                Err(_) => {
+                    status.mark_degraded();
+                    return false;
+                }
+            };
             return match repair_and_materialize_ydoc_recoveries(
                 root,
                 actor,
@@ -2770,7 +2805,8 @@ async fn apply_run_with_handle(
             )
             .await
             {
-                Ok(recovered_paths) => {
+                Ok(mut recovered_paths) => {
+                    recovered_paths.extend(adopted_paths);
                     if !recovered_paths.is_empty() {
                         events.emit(
                             CAPTURE_MOMENT_RECORDED_EVENT,
@@ -2840,9 +2876,20 @@ async fn apply_run_with_handle(
                 apply_provenance,
             );
             let result = apply_reconcile_plan(&apply_plan, &mut sink, &NoFaults);
-            let _ = done_tx.send((apply_plan, result, sink.policy_held()));
+            let collections =
+                if result.failed_applies.is_empty() && !result.degraded && result.completed() {
+                    sink.reconcile_collections()
+                } else {
+                    Ok(Vec::new())
+                };
+            let _ = done_tx.send(CaptureThreadOutcome {
+                plan: apply_plan,
+                result,
+                policy_held: sink.policy_held(),
+                collections,
+            });
         });
-    let applied: Option<(ReconcilePlan, CaptureApplyResult, bool)> = match apply_thread {
+    let applied: Option<CaptureThreadOutcome> = match apply_thread {
         Ok(joiner) => {
             let outcome = done_rx.await.ok();
             let _ = tokio::task::spawn_blocking(move || joiner.join()).await;
@@ -2850,11 +2897,25 @@ async fn apply_run_with_handle(
         }
         Err(_) => None,
     };
-    let Some((plan, mut result, sink_policy_held)) = applied else {
+    let Some(CaptureThreadOutcome {
+        plan,
+        mut result,
+        policy_held: sink_policy_held,
+        collections: collection_result,
+    }) = applied
+    else {
         // Spawn failure or apply-thread panic: the plan must still resolve.
         status.mark_degraded();
         ack_all_failed(files, plan, status).await;
         return false;
+    };
+    let collection_paths = match collection_result {
+        Ok(paths) => paths,
+        Err(_) => {
+            result.degraded = true;
+            status.mark_degraded();
+            Vec::new()
+        }
     };
     // OVER-CAP + NARROWED: a path in the scanner's retained-over-cap set
     // never appears in the diff (CAL-3 keeps it last-known-good, never
@@ -2982,10 +3043,15 @@ async fn apply_run_with_handle(
     // retained loop above (which reports its retires via not_owned_paths).
     // Gating on applied_paths alone left the renderer permanently stale for
     // exactly those moments.
-    if !result.applied_paths.is_empty() || !result.not_owned_paths.is_empty() {
+    if !result.applied_paths.is_empty()
+        || !result.not_owned_paths.is_empty()
+        || !collection_paths.is_empty()
+    {
+        let mut recorded_paths = result.applied_paths.clone();
+        recorded_paths.extend(collection_paths);
         events.emit(
             CAPTURE_MOMENT_RECORDED_EVENT,
-            moment_recorded_payload(workspace_id, &result.applied_paths, &result.not_owned_paths),
+            moment_recorded_payload(workspace_id, &recorded_paths, &result.not_owned_paths),
         );
     }
     if result.completed() && files.acknowledge_capture(plan, result).await.is_err() {

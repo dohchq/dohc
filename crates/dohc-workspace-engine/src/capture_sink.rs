@@ -342,6 +342,21 @@ impl StoreCaptureSink {
         self.policy_held.get()
     }
 
+    /// Refresh collection detection and record bindings after a clean capture
+    /// pass. Adoption uses the runtime's ordinary Y.Doc update + settle path,
+    /// including durable replication journaling and self-write suppression.
+    pub(crate) fn reconcile_collections(&self) -> Result<Vec<String>, RuntimeError> {
+        self.actor.reconcile_collections_blocking(
+            self.workspace_id.clone(),
+            self.version_id.clone(),
+            self.shadow_root.clone(),
+            self.leases.clone(),
+            Arc::new(self.self_writes.clone()),
+            self.now_ms,
+            Arc::new(NoFaults),
+        )
+    }
+
     fn policy_tracks(&self, path: &str) -> Result<bool, CaptureError> {
         match &self.files_policy {
             PolicyState::Known(None) => Ok(true),
@@ -1121,11 +1136,14 @@ fn open_no_follow(absolute: &Path) -> NoFollowOpen {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dohc_engine_domain::{SecretDiskIntent, SecretFileStore, SecretWrite, VersionedTextStore};
+    use dohc_engine_domain::{
+        SecretDiskIntent, SecretFileStore, SecretWrite, VersionedTextStore, is_record_id,
+    };
     use dohc_engine_files::{CaptureOp, ReconcilePlan, ScanGeneration, apply_reconcile_plan};
     use dohc_engine_runtime::WorkspaceSupervisor;
     use dohc_engine_storage::{EngineStore, NoFaults as FilesNoFaults};
     use dohc_engine_testkit::ScratchDir;
+    use rusqlite::OptionalExtension;
 
     const WORKSPACE_ID: &str = "ws-capture-sink";
     const VERSION_ID: &str = "main";
@@ -1236,6 +1254,346 @@ mod tests {
                 )
             })
             .expect("moment count")
+    }
+
+    fn collection_record(db: &Path, path: &str) -> Option<(Option<String>, String)> {
+        let store = EngineStore::open(db, 100).expect("reopen store");
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT record_id, adoption_state FROM collection_records \
+                     WHERE workspace_id = ?1 AND version_id = ?2 AND file_path = ?3",
+                    [WORKSPACE_ID, VERSION_ID, path],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+            })
+            .expect("collection record")
+    }
+
+    fn adopted_record_id(db: &Path, path: &str) -> String {
+        let (record_id, state) = collection_record(db, path).expect("record binding");
+        assert_eq!(state, "adopted");
+        let record_id = record_id.expect("adopted record id");
+        assert!(is_record_id(&record_id), "WP1 record id format");
+        record_id
+    }
+
+    fn collection_status(db: &Path, path: &str) -> Option<(String, String)> {
+        let store = EngineStore::open(db, 100).expect("reopen store");
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT schema_status, degradation_reasons_json FROM collections \
+                     WHERE workspace_id = ?1 AND version_id = ?2 AND collection_path = ?3",
+                    [WORKSPACE_ID, VERSION_ID, path],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+            })
+            .expect("collection status")
+    }
+
+    fn latest_ydoc_actor_origin(db: &Path, path: &str) -> Option<String> {
+        let store = EngineStore::open(db, 100).expect("reopen store");
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT u.actor_origin_id FROM ydoc_updates u \
+                     JOIN collection_records r ON r.workspace_id = u.workspace_id \
+                       AND r.version_id = u.version_id AND r.object_id = u.object_id \
+                     WHERE r.workspace_id = ?1 AND r.version_id = ?2 AND r.file_path = ?3 \
+                     ORDER BY u.seq DESC LIMIT 1",
+                    [WORKSPACE_ID, VERSION_ID, path],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map(Option::flatten)
+            })
+            .expect("Y.Doc actor origin")
+    }
+
+    fn ydoc_update_count(db: &Path, path: &str) -> i64 {
+        let store = EngineStore::open(db, 100).expect("reopen store");
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_updates u \
+                     JOIN collection_records r ON r.workspace_id = u.workspace_id \
+                       AND r.version_id = u.version_id AND r.object_id = u.object_id \
+                     WHERE r.workspace_id = ?1 AND r.version_id = ?2 AND r.file_path = ?3",
+                    [WORKSPACE_ID, VERSION_ID, path],
+                    |row| row.get(0),
+                )
+            })
+            .expect("Y.Doc update count")
+    }
+
+    fn engine_ydoc_update_count(db: &Path, path: &str) -> i64 {
+        let store = EngineStore::open(db, 100).expect("reopen store");
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_updates u \
+                     JOIN collection_records r ON r.workspace_id = u.workspace_id \
+                       AND r.version_id = u.version_id AND r.object_id = u.object_id \
+                     WHERE r.workspace_id = ?1 AND r.version_id = ?2 AND r.file_path = ?3 \
+                       AND u.actor_origin_id = 'engine'",
+                    [WORKSPACE_ID, VERSION_ID, path],
+                    |row| row.get(0),
+                )
+            })
+            .expect("engine Y.Doc update count")
+    }
+
+    #[test]
+    fn collection_adoption_writes_one_engine_id_and_self_write_does_not_loop() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        write_file(scratch.path(), "tasks/collection.yaml", b"name: Tasks\n");
+        write_file(scratch.path(), "tasks/alpha.md", b"Alpha task\n");
+        ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
+        ingest(&mut sink, "tasks/alpha.md").expect("capture record");
+        assert_eq!(moment_count(&db, "tasks/alpha.md"), 1);
+        assert_eq!(ydoc_update_count(&db, "tasks/alpha.md"), 0);
+
+        assert_eq!(
+            sink.reconcile_collections().expect("adopt record"),
+            ["tasks/alpha.md"]
+        );
+        let record_id = adopted_record_id(&db, "tasks/alpha.md");
+        let written = std::fs::read_to_string(scratch.path().join("tasks/alpha.md"))
+            .expect("read adopted artifact");
+        assert!(written.contains(&record_id));
+        assert_eq!(
+            snapshot(&db, "tasks/alpha.md")
+                .expect("adopted snapshot")
+                .text,
+            written
+        );
+        assert_eq!(
+            moment_count(&db, "tasks/alpha.md"),
+            2,
+            "settlement journals the engine-authored projected file moment"
+        );
+        assert_eq!(ydoc_update_count(&db, "tasks/alpha.md"), 2);
+        assert_eq!(engine_ydoc_update_count(&db, "tasks/alpha.md"), 1);
+        assert_eq!(
+            latest_ydoc_actor_origin(&db, "tasks/alpha.md").as_deref(),
+            Some("engine")
+        );
+
+        let written_sha = sha256_hex(written.as_bytes());
+        assert!(
+            sink.self_writes
+                .has_pending(WORKSPACE_ID, "tasks/alpha.md", &written_sha),
+            "the settle must arm watcher suppression before replacing the file"
+        );
+        ingest(&mut sink, "tasks/alpha.md").expect("consume self-write observation");
+        assert!(
+            !sink
+                .self_writes
+                .has_pending(WORKSPACE_ID, "tasks/alpha.md", &written_sha),
+            "watcher suppression is single-shot"
+        );
+        assert_eq!(moment_count(&db, "tasks/alpha.md"), 2);
+        assert_eq!(ydoc_update_count(&db, "tasks/alpha.md"), 2);
+        assert_eq!(engine_ydoc_update_count(&db, "tasks/alpha.md"), 1);
+        assert!(
+            sink.reconcile_collections()
+                .expect("idempotent reconciliation")
+                .is_empty()
+        );
+        assert_eq!(moment_count(&db, "tasks/alpha.md"), 2);
+        assert_eq!(ydoc_update_count(&db, "tasks/alpha.md"), 2);
+        assert_eq!(engine_ydoc_update_count(&db, "tasks/alpha.md"), 1);
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+    }
+
+    #[test]
+    fn copied_collection_record_gets_a_fresh_id_without_rebinding_the_original() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        write_file(scratch.path(), "tasks/collection.yaml", b"name: Tasks\n");
+        write_file(scratch.path(), "tasks/original.md", b"Original\n");
+        ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
+        ingest(&mut sink, "tasks/original.md").expect("capture original");
+        sink.reconcile_collections().expect("adopt original");
+        let original_id = adopted_record_id(&db, "tasks/original.md");
+
+        std::fs::copy(
+            scratch.path().join("tasks/original.md"),
+            scratch.path().join("tasks/copy.md"),
+        )
+        .expect("copy record");
+        ingest(&mut sink, "tasks/copy.md").expect("capture copy");
+        assert_eq!(
+            sink.reconcile_collections().expect("adopt copy"),
+            ["tasks/copy.md"]
+        );
+        let copy_id = adopted_record_id(&db, "tasks/copy.md");
+        assert_ne!(copy_id, original_id);
+        assert_eq!(adopted_record_id(&db, "tasks/original.md"), original_id);
+        let copy_text = std::fs::read_to_string(scratch.path().join("tasks/copy.md"))
+            .expect("read copied record");
+        assert!(copy_text.contains(&copy_id));
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+    }
+
+    #[test]
+    fn broken_collection_schema_degrades_without_blocking_record_adoption() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        write_file(
+            scratch.path(),
+            "tasks/collection.yaml",
+            b"fields:\n  title: [\n",
+        );
+        write_file(scratch.path(), "tasks/alpha.md", b"Alpha\n");
+        ingest(&mut sink, "tasks/collection.yaml").expect("capture broken schema");
+        ingest(&mut sink, "tasks/alpha.md").expect("capture record");
+
+        assert_eq!(
+            sink.reconcile_collections()
+                .expect("fail-soft collection reconciliation"),
+            ["tasks/alpha.md"]
+        );
+        let (status, reasons) = collection_status(&db, "tasks").expect("collection detected");
+        assert_eq!(status, "degraded");
+        assert_ne!(reasons, "[]");
+        adopted_record_id(&db, "tasks/alpha.md");
+        assert_eq!(moment_count(&db, "tasks/alpha.md"), 2);
+        assert_eq!(ydoc_update_count(&db, "tasks/alpha.md"), 2);
+
+        std::fs::remove_file(scratch.path().join("tasks/collection.yaml")).expect("remove schema");
+        sink.retire("tasks/collection.yaml").expect("retire schema");
+        assert!(
+            sink.reconcile_collections()
+                .expect("remove disappeared collection")
+                .is_empty()
+        );
+        assert_eq!(collection_status(&db, "tasks"), None);
+        assert_eq!(collection_record(&db, "tasks/alpha.md"), None);
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+    }
+
+    #[test]
+    fn collection_record_binding_follows_frontmatter_id_across_rename() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        write_file(scratch.path(), "tasks/collection.yaml", b"name: Tasks\n");
+        write_file(scratch.path(), "tasks/before.md", b"Before\n");
+        ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
+        ingest(&mut sink, "tasks/before.md").expect("capture record");
+        sink.reconcile_collections().expect("adopt record");
+        let record_id = adopted_record_id(&db, "tasks/before.md");
+
+        std::fs::rename(
+            scratch.path().join("tasks/before.md"),
+            scratch.path().join("tasks/after.md"),
+        )
+        .expect("rename record");
+        sink.retire("tasks/before.md").expect("retire old path");
+        ingest(&mut sink, "tasks/after.md").expect("capture new path");
+        assert!(
+            sink.reconcile_collections()
+                .expect("reconcile rename")
+                .is_empty(),
+            "a rename with a valid id needs no write-back"
+        );
+        assert_eq!(adopted_record_id(&db, "tasks/after.md"), record_id);
+        assert!(collection_record(&db, "tasks/before.md").is_none());
+
+        std::fs::rename(
+            scratch.path().join("tasks/after.md"),
+            scratch.path().join("outside.md"),
+        )
+        .expect("move record out");
+        sink.retire("tasks/after.md")
+            .expect("retire collection path");
+        ingest(&mut sink, "outside.md").expect("capture outside file");
+        sink.reconcile_collections().expect("reconcile move out");
+        assert!(collection_record(&db, "tasks/after.md").is_none());
+        assert!(collection_record(&db, "outside.md").is_none());
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+    }
+
+    #[test]
+    fn collection_adoption_waits_for_an_open_file_conflict_to_resolve() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        write_file(scratch.path(), "tasks/collection.yaml", b"name: Tasks\n");
+        write_file(scratch.path(), "tasks/blocked.md", b"Blocked\n");
+        ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
+        ingest(&mut sink, "tasks/blocked.md").expect("capture record");
+        let object_id = snapshot(&db, "tasks/blocked.md")
+            .expect("record snapshot")
+            .object_id;
+        let connection = rusqlite::Connection::open(&db).expect("open conflict connection");
+        connection
+            .execute(
+                "INSERT INTO conflicts (\
+                    workspace_id, conflict_id, path, target_version_id, source_version_id, \
+                    created_at_ms, updated_at_ms, status, chosen_from, metadata_origin, \
+                    base_exists, base_path, current_exists, current_path, current_object_id, \
+                    incoming_exists, incoming_path, incoming_object_id\
+                 ) VALUES (?1, 'collection-adoption-conflict', ?2, ?3, ?3, \
+                    10, 10, 'open', 'current', 'sync', \
+                    0, ?2, 1, ?2, ?4, 1, ?2, ?4)",
+                rusqlite::params![WORKSPACE_ID, "tasks/blocked.md", VERSION_ID, object_id],
+            )
+            .expect("insert open conflict");
+        drop(connection);
+
+        assert!(
+            sink.reconcile_collections()
+                .expect("defer conflicted record")
+                .is_empty()
+        );
+        assert_eq!(
+            collection_record(&db, "tasks/blocked.md"),
+            Some((None, "deferred-conflict".to_owned()))
+        );
+        assert_eq!(moment_count(&db, "tasks/blocked.md"), 1);
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("tasks/blocked.md"))
+                .expect("read deferred record"),
+            "Blocked\n"
+        );
+
+        let connection = rusqlite::Connection::open(&db).expect("open resolution connection");
+        connection
+            .execute(
+                "UPDATE conflicts SET status = 'resolved', updated_at_ms = 20 \
+                 WHERE workspace_id = ?1 AND conflict_id = 'collection-adoption-conflict'",
+                [WORKSPACE_ID],
+            )
+            .expect("resolve conflict");
+        drop(connection);
+        assert_eq!(
+            sink.reconcile_collections()
+                .expect("adopt after conflict resolution"),
+            ["tasks/blocked.md"]
+        );
+        adopted_record_id(&db, "tasks/blocked.md");
+        assert_eq!(moment_count(&db, "tasks/blocked.md"), 2);
+        assert_eq!(ydoc_update_count(&db, "tasks/blocked.md"), 2);
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
     }
 
     /// (metadata_summary, metadata_correlation_id) of the LATEST secret

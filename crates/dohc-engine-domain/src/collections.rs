@@ -4,8 +4,10 @@
 //! hold this port to the same schema recovery, Field value, and Record id
 //! outcomes.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
+use dohc_engine_storage::StorageError;
+use rusqlite::{Connection, params};
 use saphyr::{LoadableYamlNode, MappingOwned, YamlOwned};
 use serde::{Deserialize, Serialize};
 
@@ -216,6 +218,44 @@ pub struct CollectionSchemaParseResult {
     pub status: CollectionSchemaStatus,
     pub schema: CollectionSchema,
     pub reasons: Vec<CollectionSchemaReason>,
+}
+
+/// One record whose Markdown artifact needs an engine-authored id write-back.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CollectionAdoptionCandidate {
+    pub record_id: String,
+    pub collection_path: String,
+    pub file_path: String,
+    pub object_id: String,
+}
+
+/// The local collection projection after one active-version reconciliation.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CollectionReconcileResult {
+    pub adoptions: Vec<CollectionAdoptionCandidate>,
+}
+
+#[derive(Clone)]
+struct CollectionSnapshot {
+    path: String,
+    object_id: String,
+    text: String,
+}
+
+#[derive(Clone)]
+struct ExistingRecordBinding {
+    record_id: Option<String>,
+    file_path: String,
+    adoption_state: String,
+}
+
+#[derive(Clone)]
+struct DesiredRecordBinding {
+    record_id: Option<String>,
+    collection_path: String,
+    file_path: String,
+    object_id: String,
+    adoption_state: &'static str,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -852,6 +892,354 @@ fn degraded_document(code: CollectionSchemaReasonCode) -> CollectionSchemaParseR
             path: String::new(),
         }],
     }
+}
+
+fn parent_path(path: &str) -> &str {
+    path.rsplit_once('/').map_or("", |(parent, _)| parent)
+}
+
+fn path_basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+fn markdown_record_id(markdown: &str) -> Option<String> {
+    let mut lines = markdown.split_inclusive('\n');
+    let first = lines.next()?;
+    if first.trim_end_matches(['\r', '\n']) != "---" {
+        return None;
+    }
+    let yaml_start = first.len();
+    let mut yaml_end = yaml_start;
+    let mut found_end = false;
+    for line in lines {
+        if line.trim_end_matches(['\r', '\n']) == "---" {
+            found_end = true;
+            break;
+        }
+        yaml_end += line.len();
+    }
+    if !found_end {
+        return None;
+    }
+    let documents = YamlOwned::load_from_str(&markdown[yaml_start..yaml_end]).ok()?;
+    if documents.len() != 1 {
+        return None;
+    }
+    let mapping = documents.first()?.as_mapping()?;
+    mapping_get(mapping, RECORD_ID_FRONTMATTER_KEY)
+        .and_then(YamlOwned::as_str)
+        .map(str::to_owned)
+}
+
+fn load_collection_snapshots(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+) -> Result<Vec<CollectionSnapshot>, crate::DomainError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT s.path, s.object_id, b.text \
+             FROM snapshots s JOIN blobs b ON b.sha256 = s.blob_sha256 \
+             WHERE s.workspace_id = ?1 AND s.version_id = ?2 \
+               AND s.content_kind = 'text' ORDER BY s.path",
+        )
+        .map_err(crate::DomainError::sql_corrupt)?;
+    statement
+        .query_map(params![workspace_id, version_id], |row| {
+            Ok(CollectionSnapshot {
+                path: row.get(0)?,
+                object_id: row.get(1)?,
+                text: row.get(2)?,
+            })
+        })
+        .map_err(crate::DomainError::sql_corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(crate::DomainError::sql_corrupt)
+}
+
+fn load_record_bindings(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+) -> Result<Vec<ExistingRecordBinding>, crate::DomainError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT record_id, file_path, adoption_state \
+             FROM collection_records WHERE workspace_id = ?1 AND version_id = ?2 \
+             ORDER BY file_path",
+        )
+        .map_err(crate::DomainError::sql_corrupt)?;
+    statement
+        .query_map(params![workspace_id, version_id], |row| {
+            Ok(ExistingRecordBinding {
+                record_id: row.get(0)?,
+                file_path: row.get(1)?,
+                adoption_state: row.get(2)?,
+            })
+        })
+        .map_err(crate::DomainError::sql_corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(crate::DomainError::sql_corrupt)
+}
+
+fn has_open_file_conflict(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+    path: &str,
+) -> Result<bool, crate::DomainError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM conflicts \
+         WHERE workspace_id = ?1 AND target_version_id = ?2 AND status = 'open' \
+           AND (current_object_id = ?3 OR incoming_object_id = ?3 OR path = ?4))",
+        params![workspace_id, version_id, object_id, path],
+        |row| row.get(0),
+    )
+    .map_err(crate::DomainError::sql_corrupt)
+}
+
+fn mint_unused_record_id(used: &mut HashSet<String>) -> Result<String, crate::DomainError> {
+    loop {
+        let record_id = mint_record_id().map_err(|error| {
+            crate::DomainError::Storage(StorageError::persist_public(std::io::Error::other(error)))
+        })?;
+        if used.insert(record_id.clone()) {
+            return Ok(record_id);
+        }
+    }
+}
+
+/// Refresh collection detection and record bindings from active-version text
+/// heads. The caller runs this on the engine's single writer inside one
+/// transaction after capture has applied the settled filesystem scan.
+pub fn reconcile_collections_in_tx(
+    tx: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+) -> Result<CollectionReconcileResult, crate::DomainError> {
+    let snapshots = load_collection_snapshots(tx, workspace_id, version_id)?;
+    let existing = load_record_bindings(tx, workspace_id, version_id)?;
+
+    let schema_snapshots: Vec<&CollectionSnapshot> = snapshots
+        .iter()
+        .filter(|snapshot| path_basename(&snapshot.path) == COLLECTION_SCHEMA_FILENAME)
+        .collect();
+    let collection_paths: HashSet<String> = schema_snapshots
+        .iter()
+        .map(|snapshot| parent_path(&snapshot.path).to_owned())
+        .collect();
+    let records: Vec<&CollectionSnapshot> = snapshots
+        .iter()
+        .filter(|snapshot| {
+            snapshot.path.ends_with(".md") && collection_paths.contains(parent_path(&snapshot.path))
+        })
+        .collect();
+    let current_paths: HashSet<&str> = records.iter().map(|record| record.path.as_str()).collect();
+    let current_ids: HashMap<&str, String> = records
+        .iter()
+        .filter_map(|record| {
+            markdown_record_id(&record.text)
+                .filter(|record_id| is_record_id(record_id))
+                .map(|record_id| (record.path.as_str(), record_id))
+        })
+        .collect();
+
+    let existing_by_path: HashMap<&str, &ExistingRecordBinding> = existing
+        .iter()
+        .map(|binding| (binding.file_path.as_str(), binding))
+        .collect();
+    let mut current_owners: HashMap<String, &ExistingRecordBinding> = HashMap::new();
+    let mut absent_owners = HashSet::new();
+    let mut used_ids = HashSet::new();
+    for binding in &existing {
+        let Some(record_id) = binding.record_id.as_ref() else {
+            continue;
+        };
+        used_ids.insert(record_id.clone());
+        if current_ids.get(binding.file_path.as_str()) == Some(record_id) {
+            current_owners.insert(record_id.clone(), binding);
+        } else if !current_paths.contains(binding.file_path.as_str())
+            && binding.adoption_state == "adopted"
+        {
+            absent_owners.insert(record_id.clone());
+        }
+    }
+
+    let mut desired = Vec::with_capacity(records.len());
+    let mut claimed_ids: HashMap<String, String> = HashMap::new();
+    let mut adoptions = Vec::new();
+    for record in records {
+        let collection_path = parent_path(&record.path).to_owned();
+        let parsed_id = current_ids.get(record.path.as_str()).cloned();
+        let existing_at_path = existing_by_path.get(record.path.as_str()).copied();
+        let conflicted = has_open_file_conflict(
+            tx,
+            workspace_id,
+            version_id,
+            &record.object_id,
+            &record.path,
+        )?;
+
+        if conflicted {
+            let record_id = existing_at_path
+                .and_then(|binding| binding.record_id.clone())
+                .or_else(|| {
+                    parsed_id
+                        .as_ref()
+                        .filter(|record_id| absent_owners.contains(*record_id))
+                        .cloned()
+                });
+            if let Some(record_id) = record_id.as_ref() {
+                claimed_ids.insert(record_id.clone(), record.path.clone());
+            }
+            desired.push(DesiredRecordBinding {
+                record_id,
+                collection_path,
+                file_path: record.path.clone(),
+                object_id: record.object_id.clone(),
+                adoption_state: "deferred-conflict",
+            });
+            continue;
+        }
+
+        if let Some(record_id) = parsed_id {
+            let occupied_by_current = current_owners
+                .get(&record_id)
+                .is_some_and(|owner| owner.file_path != record.path);
+            let occupied_in_pass = claimed_ids
+                .get(&record_id)
+                .is_some_and(|owner_path| owner_path != &record.path);
+            if occupied_by_current || occupied_in_pass {
+                let fresh_id = mint_unused_record_id(&mut used_ids)?;
+                claimed_ids.insert(fresh_id.clone(), record.path.clone());
+                desired.push(DesiredRecordBinding {
+                    record_id: Some(fresh_id.clone()),
+                    collection_path: collection_path.clone(),
+                    file_path: record.path.clone(),
+                    object_id: record.object_id.clone(),
+                    adoption_state: "pending",
+                });
+                adoptions.push(CollectionAdoptionCandidate {
+                    record_id: fresh_id,
+                    collection_path,
+                    file_path: record.path.clone(),
+                    object_id: record.object_id.clone(),
+                });
+            } else {
+                used_ids.insert(record_id.clone());
+                claimed_ids.insert(record_id.clone(), record.path.clone());
+                desired.push(DesiredRecordBinding {
+                    record_id: Some(record_id),
+                    collection_path,
+                    file_path: record.path.clone(),
+                    object_id: record.object_id.clone(),
+                    adoption_state: "adopted",
+                });
+            }
+            continue;
+        }
+
+        let pending_id = existing_at_path.and_then(|binding| {
+            (binding.adoption_state == "pending" || binding.adoption_state == "deferred-conflict")
+                .then(|| binding.record_id.clone())
+                .flatten()
+        });
+        let record_id = match pending_id {
+            Some(record_id) if !claimed_ids.contains_key(&record_id) => record_id,
+            _ => mint_unused_record_id(&mut used_ids)?,
+        };
+        claimed_ids.insert(record_id.clone(), record.path.clone());
+        desired.push(DesiredRecordBinding {
+            record_id: Some(record_id.clone()),
+            collection_path: collection_path.clone(),
+            file_path: record.path.clone(),
+            object_id: record.object_id.clone(),
+            adoption_state: "pending",
+        });
+        adoptions.push(CollectionAdoptionCandidate {
+            record_id,
+            collection_path,
+            file_path: record.path.clone(),
+            object_id: record.object_id.clone(),
+        });
+    }
+
+    tx.execute(
+        "DELETE FROM collection_records WHERE workspace_id = ?1 AND version_id = ?2",
+        params![workspace_id, version_id],
+    )
+    .map_err(crate::DomainError::sql_persist)?;
+    tx.execute(
+        "DELETE FROM collections WHERE workspace_id = ?1 AND version_id = ?2",
+        params![workspace_id, version_id],
+    )
+    .map_err(crate::DomainError::sql_persist)?;
+    for snapshot in schema_snapshots {
+        let parsed = parse_collection_schema(&snapshot.text);
+        let status = match parsed.status {
+            CollectionSchemaStatus::Valid => "valid",
+            CollectionSchemaStatus::Degraded => "degraded",
+        };
+        let reasons = serde_json::to_string(&parsed.reasons)
+            .map_err(|error| crate::DomainError::Storage(StorageError::persist_public(error)))?;
+        tx.execute(
+            "INSERT INTO collections \
+             (workspace_id, version_id, collection_path, schema_path, schema_status, \
+              degradation_reasons_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                workspace_id,
+                version_id,
+                parent_path(&snapshot.path),
+                snapshot.path,
+                status,
+                reasons
+            ],
+        )
+        .map_err(crate::DomainError::sql_persist)?;
+    }
+    for binding in desired {
+        tx.execute(
+            "INSERT INTO collection_records \
+             (workspace_id, version_id, record_id, collection_path, file_path, object_id, \
+              adoption_state) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                workspace_id,
+                version_id,
+                binding.record_id,
+                binding.collection_path,
+                binding.file_path,
+                binding.object_id,
+                binding.adoption_state
+            ],
+        )
+        .map_err(crate::DomainError::sql_persist)?;
+    }
+    Ok(CollectionReconcileResult { adoptions })
+}
+
+pub fn set_collection_adoption_state_in_tx(
+    tx: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    file_path: &str,
+    record_id: &str,
+    state: &str,
+) -> Result<(), crate::DomainError> {
+    let changed = tx
+        .execute(
+            "UPDATE collection_records SET adoption_state = ?5 \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND file_path = ?3 \
+               AND record_id = ?4",
+            params![workspace_id, version_id, file_path, record_id, state],
+        )
+        .map_err(crate::DomainError::sql_persist)?;
+    if changed != 1 {
+        return Err(crate::DomainError::StateCorrupt {
+            reason: "collection adoption binding disappeared",
+        });
+    }
+    Ok(())
 }
 
 fn is_calendar_date(value: &str) -> bool {

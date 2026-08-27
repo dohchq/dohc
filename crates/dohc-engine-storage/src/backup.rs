@@ -63,6 +63,8 @@ const COMPARED_TABLES: &[&str] = &[
     "moments",
     "scene_asset_delete_authorities",
     "scene_asset_delete_authority_items",
+    "collections",
+    "collection_records",
     "materialization_jobs",
     "ydoc_docs",
     "ydoc_updates",

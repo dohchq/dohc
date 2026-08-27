@@ -49,30 +49,30 @@ use dohc_engine_domain::{
     ChatChannelKind, ChatChannelSummary, ChatDecision, ChatFeedPage, ChatFeedReadState,
     ChatFileMention, ChatFollow, ChatMention, ChatMessage, ChatMessagePage,
     ChatProjectionFileAccess, ChatReaction, ChatThread, ChatThreadProjection, ChatThreadReadState,
-    CompareTextFileVersions, CreateFileThread, CreateNamedVersion, DeleteResult, DeleteTextFile,
-    DispatchClaim, DispatchRecovery, DomainError, InbandBinary, InbandSecret, InbandText,
-    LinkedChatStore, ListMomentsQuery, MentionCursor, MergeTextFileFromVersion,
-    MergeTextFileResult, MomentPage, MomentRecord, PendingBookmarkRow, RenameResult,
-    RenameTextFile, ResolveDecision, ResolveTextConflict, ResolveTextConflictResult,
-    RollbackTextFileMutation, RunRecordLink, SaveBookmark, SecretComparePage, SecretDelete,
-    SecretFileStat, SecretFileStore, SecretMomentPage, SecretMomentRecord, SecretOp,
-    SecretRestoreResult, SecretWrite, SecretWriteResult, SendMessage, SetFollow, SetReaction,
-    SnapshotContent, SnapshotMetadata, SnapshotView, StartChannelThread, TextConflict,
-    TextSnapshot, ThreadDispatchPause, UnreadFileThread, VersionFileChangePage, VersionRecord,
-    VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult, WriteText,
-    apply_secret_file_from_version_with, binary_delete_job_id, binary_rename_delete_job_id,
-    binary_rename_write_job_id, binary_rollback_job_identity,
+    CollectionAdoptionCandidate, CompareTextFileVersions, CreateFileThread, CreateNamedVersion,
+    DeleteResult, DeleteTextFile, DispatchClaim, DispatchRecovery, DomainError, InbandBinary,
+    InbandSecret, InbandText, LinkedChatStore, ListMomentsQuery, MentionCursor,
+    MergeTextFileFromVersion, MergeTextFileResult, MomentPage, MomentRecord, PendingBookmarkRow,
+    RECORD_ID_FRONTMATTER_KEY, RenameResult, RenameTextFile, ResolveDecision, ResolveTextConflict,
+    ResolveTextConflictResult, RollbackTextFileMutation, RunRecordLink, SaveBookmark,
+    SecretComparePage, SecretDelete, SecretFileStat, SecretFileStore, SecretMomentPage,
+    SecretMomentRecord, SecretOp, SecretRestoreResult, SecretWrite, SecretWriteResult, SendMessage,
+    SetFollow, SetReaction, SnapshotContent, SnapshotMetadata, SnapshotView, StartChannelThread,
+    TextConflict, TextSnapshot, ThreadDispatchPause, UnreadFileThread, VersionFileChangePage,
+    VersionRecord, VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult,
+    WriteText, apply_secret_file_from_version_with, binary_delete_job_id,
+    binary_rename_delete_job_id, binary_rename_write_job_id, binary_rollback_job_identity,
     capture_ingest_binary_with_admission_in_tx, capture_ingest_with_admission_in_tx,
     capture_manifest_seed, capture_retire_in_tx, capture_secret_retire_with,
     compare_secret_files_page_keyless, decode_binary_rollback_job_identity,
     delete_secret_file_keyless_with, derive_capture_object_id, enqueue_binary_delete,
     enqueue_binary_rename, enqueue_write, fork_version_keyless_with, get_secret_moment_keyless,
     has_secret_state, insert_text_conflict_if_absent, list_secret_files_keyless,
-    list_secret_files_keyless_page, list_secret_moments_page_keyless,
+    list_secret_files_keyless_page, list_secret_moments_page_keyless, reconcile_collections_in_tx,
     restore_secret_file_verbatim_with_metadata_and_after, rollback_compensating_moment_id,
-    secret_file_len_keyless, select_snapshot_by_path_in_tx, validate_addressable_plaintext_path,
-    validate_plaintext_storable_path, write_binary_in_tx, write_projected_text_in_tx,
-    write_text_in_tx,
+    secret_file_len_keyless, select_snapshot_by_path_in_tx, set_collection_adoption_state_in_tx,
+    validate_addressable_plaintext_path, validate_plaintext_storable_path, write_binary_in_tx,
+    write_projected_text_in_tx, write_text_in_tx,
 };
 use dohc_engine_files::{
     DurabilityPolicy, JobOutcome, MaterializeError, ProjectionTargetKind, ProjectionTargetState,
@@ -1017,6 +1017,17 @@ enum Command {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<CaptureIngestBinaryResult, RuntimeError>>,
+    },
+    ReconcileCollections {
+        workspace_id: String,
+        version_id: String,
+        root_dir: PathBuf,
+        leases: LeaseRegistry,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<Vec<String>, RuntimeError>>,
     },
     CaptureSecret {
         // Boxed: the plaintext + key payload should not size every command
@@ -2195,6 +2206,37 @@ impl ActorHandle {
             .map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn reconcile_collections_blocking(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        root_dir: PathBuf,
+        leases: LeaseRegistry,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+    ) -> Result<Vec<String>, RuntimeError> {
+        debug_assert_sync_context();
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::ReconcileCollections {
+                workspace_id,
+                version_id,
+                root_dir,
+                leases,
+                self_writes,
+                now_ms,
+                faults,
+                token: CancellationToken::new(),
+                reply,
+            })
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx
+            .blocking_recv()
+            .map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
     /// Capture a secret file on the actor's writer, blocking the caller. The
     /// workspace data key travels with the request (the actor holds no key
     /// state; custody stays at the composition layer).
@@ -2638,6 +2680,36 @@ impl ActorHandle {
             .send(Command::CaptureIngestBinary {
                 input,
                 leases,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn reconcile_collections(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        root_dir: PathBuf,
+        leases: LeaseRegistry,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<Vec<String>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ReconcileCollections {
+                workspace_id,
+                version_id,
+                root_dir,
+                leases,
+                self_writes,
+                now_ms,
                 faults,
                 token,
                 reply,
@@ -7145,6 +7217,30 @@ fn worker_main(
                     &mut store,
                     &input,
                     &leases,
+                    faults.as_ref(),
+                    &token,
+                );
+                let _ = reply.send(outcome);
+            }
+            Command::ReconcileCollections {
+                workspace_id,
+                version_id,
+                root_dir,
+                leases,
+                self_writes,
+                now_ms,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = reconcile_collections_on_store(
+                    &mut store,
+                    &workspace_id,
+                    &version_id,
+                    &root_dir,
+                    &leases,
+                    self_writes.as_ref(),
+                    now_ms,
                     faults.as_ref(),
                     &token,
                 );
@@ -12560,6 +12656,241 @@ fn merge_moment_outbound_identity(result: &MergeTextFileResult) -> Option<(&str,
         }
         MergeTextFileResult::Unchanged { .. } | MergeTextFileResult::Conflict { .. } => None,
     }
+}
+
+fn persist_collection_adoption_state(
+    store: &mut EngineStore,
+    candidate: &CollectionAdoptionCandidate,
+    workspace_id: &str,
+    version_id: &str,
+    state: &str,
+    faults: &dyn FaultInjector,
+) -> Result<(), RuntimeError> {
+    match store.write_with(faults, |tx| {
+        set_collection_adoption_state_in_tx(
+            tx,
+            workspace_id,
+            version_id,
+            &candidate.file_path,
+            &candidate.record_id,
+            state,
+        )
+        .map_err(RuntimeError::from)
+    })? {
+        TxnOutcome::Committed(()) => Ok(()),
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
+}
+
+fn adoption_conflict(error: &RuntimeError) -> bool {
+    matches!(
+        error,
+        RuntimeError::Domain(DomainError::InvalidInput {
+            reason: "ydoc-conflict-open"
+        })
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn adopt_collection_record_on_store(
+    store: &mut EngineStore,
+    candidate: &CollectionAdoptionCandidate,
+    workspace_id: &str,
+    version_id: &str,
+    root_dir: &std::path::Path,
+    leases: &LeaseRegistry,
+    self_writes: &dyn SelfWriteRecorder,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<Option<String>, RuntimeError> {
+    let probe = ydoc_open_state_on_store(
+        store,
+        workspace_id,
+        now_ms,
+        false,
+        None,
+        version_id,
+        &candidate.file_path,
+        Some(ContentKind::Richdoc),
+        false,
+        token,
+    )?;
+    if probe.key.object_id != candidate.object_id {
+        return Err(DomainError::StateCorrupt {
+            reason: "collection record changed identity during adoption",
+        }
+        .into());
+    }
+    let _lease = match leases.acquire(&probe.key) {
+        Ok(lease) => lease,
+        Err(CollabError::LeaseHeld) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let state = ydoc_open_state_on_store(
+        store,
+        workspace_id,
+        now_ms,
+        true,
+        Some(&probe.key),
+        version_id,
+        &candidate.file_path,
+        Some(ContentKind::Richdoc),
+        false,
+        token,
+    )?;
+    if state.key != probe.key || state.content_kind != ContentKind::Richdoc {
+        return Err(DomainError::InvalidInput {
+            reason: "collection record does not have a rich-document lineage",
+        }
+        .into());
+    }
+
+    let doc = Ydoc::wire();
+    doc.apply(&state.initial_update)?;
+    let append = if state.lineage_existing {
+        let update = doc.frontmatter_set(RECORD_ID_FRONTMATTER_KEY, &candidate.record_id);
+        ydoc_record_update_on_store(
+            store,
+            &state.key,
+            &candidate.file_path,
+            ContentKind::Richdoc,
+            state.regime,
+            &update,
+            Some("engine".to_owned()),
+            state.lineage_claim_id,
+            false,
+            None,
+            None,
+            now_ms,
+            faults,
+            token,
+        )?
+    } else {
+        let seed = state
+            .seed_content
+            .as_deref()
+            .ok_or(DomainError::StateCorrupt {
+                reason: "collection record adoption has no Markdown artifact seed",
+            })?;
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, seed)?;
+        let seed_update = doc.encode_full_state();
+        let seed_append = ydoc_record_update_on_store(
+            store,
+            &state.key,
+            &candidate.file_path,
+            ContentKind::Richdoc,
+            state.regime,
+            &seed_update,
+            None,
+            state.lineage_claim_id,
+            true,
+            state.head_blob_sha256.clone(),
+            None,
+            now_ms,
+            faults,
+            token,
+        )?;
+        let id_update = doc.frontmatter_set(RECORD_ID_FRONTMATTER_KEY, &candidate.record_id);
+        ydoc_record_update_on_store(
+            store,
+            &state.key,
+            &candidate.file_path,
+            ContentKind::Richdoc,
+            state.regime,
+            &id_update,
+            Some("engine".to_owned()),
+            seed_append.lineage_claim_id,
+            false,
+            None,
+            None,
+            now_ms,
+            faults,
+            token,
+        )?
+    };
+    let settlement = ydoc_settle_on_store(
+        store,
+        root_dir,
+        &state.key,
+        &candidate.file_path,
+        ContentKind::Richdoc,
+        append.lineage_claim_id.as_deref(),
+        state.head_blob_sha256,
+        &format!("collection-adoption:{}", candidate.record_id),
+        self_writes,
+        now_ms,
+        faults,
+        token,
+    )?;
+    Ok(Some(settlement.path))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reconcile_collections_on_store(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    version_id: &str,
+    root_dir: &std::path::Path,
+    leases: &LeaseRegistry,
+    self_writes: &dyn SelfWriteRecorder,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<Vec<String>, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    let reconciliation = match store.write_with(faults, |tx| {
+        reconcile_collections_in_tx(tx, workspace_id, version_id).map_err(RuntimeError::from)
+    })? {
+        TxnOutcome::Committed(reconciliation) => reconciliation,
+        TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+    };
+
+    let mut adopted_paths = Vec::new();
+    for candidate in reconciliation.adoptions {
+        if token.is_cancelled() {
+            return Err(RuntimeError::Cancelled);
+        }
+        match adopt_collection_record_on_store(
+            store,
+            &candidate,
+            workspace_id,
+            version_id,
+            root_dir,
+            leases,
+            self_writes,
+            now_ms,
+            faults,
+            token,
+        ) {
+            Ok(Some(path)) => {
+                persist_collection_adoption_state(
+                    store,
+                    &candidate,
+                    workspace_id,
+                    version_id,
+                    "adopted",
+                    faults,
+                )?;
+                adopted_paths.push(path);
+            }
+            Ok(None) => {}
+            Err(error) if adoption_conflict(&error) => {
+                persist_collection_adoption_state(
+                    store,
+                    &candidate,
+                    workspace_id,
+                    version_id,
+                    "deferred-conflict",
+                    faults,
+                )?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(adopted_paths)
 }
 
 fn capture_ingest_on_store(

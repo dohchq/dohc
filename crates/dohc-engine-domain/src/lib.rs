@@ -64,12 +64,13 @@ pub use chats::{
     validate_follow_target,
 };
 pub use collections::{
-    COLLECTION_SCHEMA_FILENAME, CollectionFieldType, CollectionFieldValue, CollectionSchema,
-    CollectionSchemaParseResult, CollectionSchemaReason, CollectionSchemaReasonCode,
-    CollectionSchemaStatus, FieldDefinition, FieldValueReason, FieldValueReasonCode,
-    FieldValueValidation, RECORD_ID_FRONTMATTER_KEY, RECORD_ID_PREFIX,
-    RECORD_ID_RANDOM_BASE32_LENGTH, ViewDefinition, ViewKind, ViewSort, ViewSortDirection,
-    is_record_id, mint_record_id, parse_collection_schema, validate_field_value,
+    COLLECTION_SCHEMA_FILENAME, CollectionAdoptionCandidate, CollectionFieldType,
+    CollectionFieldValue, CollectionReconcileResult, CollectionSchema, CollectionSchemaParseResult,
+    CollectionSchemaReason, CollectionSchemaReasonCode, CollectionSchemaStatus, FieldDefinition,
+    FieldValueReason, FieldValueReasonCode, FieldValueValidation, RECORD_ID_FRONTMATTER_KEY,
+    RECORD_ID_PREFIX, RECORD_ID_RANDOM_BASE32_LENGTH, ViewDefinition, ViewKind, ViewSort,
+    ViewSortDirection, is_record_id, mint_record_id, parse_collection_schema,
+    reconcile_collections_in_tx, set_collection_adoption_state_in_tx, validate_field_value,
 };
 pub use conflicts::{
     BINARY_COMBINED_TEXT_REFUSAL, BinaryResolveWrite, CONFLICT_METADATA_BUDGET_BYTES,

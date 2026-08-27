@@ -2870,6 +2870,46 @@ ALTER TABLE ydoc_docs ADD COLUMN seed_source_sha256 TEXT;
 
 pub(crate) const YDOC_SEED_SOURCE_MIGRATION_ID: &str = "v1-ydoc-seed-source";
 
+/// Ordinal 39. Local collection detection and record bindings. Collection
+/// state is derived from active-version file heads, but persists so record ids
+/// survive renames and copied-file collisions have an existing owner.
+const V1_COLLECTION_ADOPTION_DDL: &str = "\
+CREATE TABLE collections (
+    workspace_id             TEXT NOT NULL,
+    version_id               TEXT NOT NULL,
+    collection_path          TEXT NOT NULL,
+    schema_path              TEXT NOT NULL,
+    schema_status            TEXT NOT NULL
+      CHECK (schema_status IN ('valid', 'degraded')),
+    degradation_reasons_json TEXT NOT NULL CHECK (json_valid(degradation_reasons_json)),
+    PRIMARY KEY (workspace_id, version_id, collection_path),
+    UNIQUE (workspace_id, version_id, schema_path),
+    FOREIGN KEY (workspace_id, version_id)
+      REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE collection_records (
+    workspace_id    TEXT NOT NULL,
+    version_id      TEXT NOT NULL,
+    record_id       TEXT,
+    collection_path TEXT NOT NULL,
+    file_path       TEXT NOT NULL,
+    object_id       TEXT NOT NULL,
+    adoption_state  TEXT NOT NULL
+      CHECK (adoption_state IN ('pending', 'deferred-conflict', 'adopted')),
+    PRIMARY KEY (workspace_id, version_id, file_path),
+    UNIQUE (workspace_id, version_id, record_id),
+    FOREIGN KEY (workspace_id, version_id, collection_path)
+      REFERENCES collections(workspace_id, version_id, collection_path) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id, object_id)
+      REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX collection_records_by_collection
+    ON collection_records(workspace_id, version_id, collection_path, file_path);
+";
+
+pub(crate) const COLLECTION_ADOPTION_MIGRATION_ID: &str = "v1-collection-adoption";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -3148,6 +3188,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: YDOC_SEED_SOURCE_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_YDOC_SEED_SOURCE_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 39,
+        id: COLLECTION_ADOPTION_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_COLLECTION_ADOPTION_DDL,
         sets_user_version: None,
     },
 ];
