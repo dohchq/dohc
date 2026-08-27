@@ -804,6 +804,7 @@ const DatabaseTableView = z.object({
   name: z.string(),
   columns: z.array(DatabaseColumnView),
   rows: z.array(z.record(z.string(), z.unknown())),
+  nextOffset: z.number().int().nonnegative().nullable(),
 });
 
 export const DatabaseSnapshotResult = z.object({
@@ -818,6 +819,25 @@ export const ReadWorkspaceDatabasePayload = z.object({
 });
 export type ReadWorkspaceDatabasePayload = z.infer<typeof ReadWorkspaceDatabasePayload>;
 
+export const ReadWorkspaceDatabasePagePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  relativePath: PATH_STRING,
+  table: SQL_IDENT,
+  offset: z.number().int().nonnegative(),
+});
+export type ReadWorkspaceDatabasePagePayload = z.infer<
+  typeof ReadWorkspaceDatabasePagePayload
+>;
+
+export const DatabasePageResult = z.object({
+  path: z.string(),
+  table: z.string(),
+  offset: z.number().int().nonnegative(),
+  rows: z.array(z.record(z.string(), z.unknown())),
+  nextOffset: z.number().int().nonnegative().nullable(),
+});
+export type DatabasePageResult = z.infer<typeof DatabasePageResult>;
+
 export const ApplyDatabaseEditPayload = z.object({
   workspaceId: WORKSPACE_ID,
   relativePath: PATH_STRING,
@@ -830,6 +850,18 @@ export const ApplyDatabaseEditPayload = z.object({
   }),
 });
 export type ApplyDatabaseEditPayload = z.infer<typeof ApplyDatabaseEditPayload>;
+
+export const DatabaseEditResult = z.object({
+  path: z.string(),
+  table: z.string(),
+  page: z.object({
+    offset: z.number().int().nonnegative(),
+    rows: z.array(z.record(z.string(), z.unknown())),
+    nextOffset: z.number().int().nonnegative().nullable(),
+  }),
+  version: z.number().int().nonnegative(),
+});
+export type DatabaseEditResult = z.infer<typeof DatabaseEditResult>;
 
 export const ImportToDatabasePayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -4847,9 +4879,12 @@ export interface DohcDesktopBridge {
   readWorkspaceDatabase(
     payload: ReadWorkspaceDatabasePayload,
   ): Promise<DatabaseSnapshotResult>;
+  readWorkspaceDatabasePage(
+    payload: ReadWorkspaceDatabasePagePayload,
+  ): Promise<DatabasePageResult>;
   applyDatabaseEdit(
     payload: ApplyDatabaseEditPayload,
-  ): Promise<DatabaseSnapshotResult>;
+  ): Promise<DatabaseEditResult>;
   importToDatabase(
     payload: ImportToDatabasePayload,
   ): Promise<ImportToDatabaseResult>;

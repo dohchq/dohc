@@ -1,7 +1,10 @@
 import { DohcMark } from "@dohc/brand";
 import { ArrowDown, ArrowUp, Database, Search, Share2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { DatabaseSnapshotResult } from "../ipc/bridgeContract";
+import type {
+  DatabaseEditResult,
+  DatabaseSnapshotResult,
+} from "../ipc/bridgeContract";
 import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
 
@@ -72,9 +75,27 @@ function compareCells(a: unknown, b: unknown, numeric: boolean): number {
   });
 }
 
+function mergeEditPage(
+  snapshot: Snapshot,
+  result: DatabaseEditResult,
+): Snapshot {
+  if (result.path !== snapshot.path || result.page.offset !== 0) return snapshot;
+  let changed = false;
+  const tables = snapshot.tables.map((table) => {
+    if (table.name !== result.table) return table;
+    changed = true;
+    return {
+      ...table,
+      rows: result.page.rows,
+      nextOffset: result.page.nextOffset,
+    };
+  });
+  return changed ? { ...snapshot, tables } : snapshot;
+}
+
 // Visible SQLite studio: browse tables, see schema, and edit a cell. An edit
 // writes through to the on-disk file (canonical) and is recorded in the
-// inspectable operation log; the studio re-renders from the fresh snapshot.
+// inspectable operation log; the studio merges the returned first page.
 export function DatabaseStudioView(props: {
   workspaceId: string;
   path: string;
@@ -223,6 +244,7 @@ export function DatabaseStudioView(props: {
     const current = editing;
     const targetWorkspaceId = workspaceId;
     const targetPath = path;
+    const targetLoadId = currentSnapshotRef.current.loadId;
     setEditing(null);
     try {
       const result = await bridge().applyDatabaseEdit({
@@ -240,15 +262,20 @@ export function DatabaseStudioView(props: {
       const currentSnapshot = currentSnapshotRef.current;
       if (
         currentSnapshot.workspaceId === targetWorkspaceId &&
-        currentSnapshot.path === targetPath
+        currentSnapshot.path === targetPath &&
+        currentSnapshot.loadId === targetLoadId &&
+        result.path === targetPath
       ) {
-        setSnapshot(result);
+        setSnapshot((currentSnapshot) =>
+          currentSnapshot ? mergeEditPage(currentSnapshot, result) : currentSnapshot,
+        );
       }
     } catch {
       const currentSnapshot = currentSnapshotRef.current;
       if (
         currentSnapshot.workspaceId === targetWorkspaceId &&
-        currentSnapshot.path === targetPath
+        currentSnapshot.path === targetPath &&
+        currentSnapshot.loadId === targetLoadId
       ) {
         setError(true);
       }

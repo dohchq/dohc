@@ -15,8 +15,6 @@ import {
   type WorkspaceTextReadResult,
 } from "./workspaceAssets";
 import {
-  applyDatabaseEdit,
-  readDatabaseSnapshot,
   type DatabaseEdit,
   type DatabaseSnapshotView,
 } from "./workspaceDatabase";
@@ -51,6 +49,17 @@ export interface WorkspaceSdkHostContext {
   // Host-derived owner authority. Required so a caller cannot regain raw-disk
   // reads by omitting the adapter.
   reads: WorkspaceSdkReadPort;
+  // Host-derived database writer. Production routes this through the shared
+  // database worker; the SDK caller supplies neither a filesystem path nor an
+  // execution lane.
+  editDatabase(input: {
+    path: string;
+    edit: DatabaseEdit;
+    author: ChangeAuthor;
+    nowMs: number;
+    operationId?: string;
+    signal?: AbortSignal;
+  }): Promise<unknown>;
 }
 
 export type SdkSearchStarter = typeof startRipgrepSearch;
@@ -334,16 +343,16 @@ export async function invokeWorkspaceSdkHost(
       const input = record(params);
       const path = sdkWorkspacePath(input.path, "write");
       const [edit] = databaseEdits(input);
-      await readDatabaseSnapshot(context.workspaceRoot, path);
+      await context.reads.readDatabase(path);
       assertRequestSurfaceActive(context);
-      return applyDatabaseEdit(
-        context.workspaceRoot,
+      return context.editDatabase({
         path,
         edit,
-        context.author,
-        context.now?.() ?? Date.now(),
-        { signal: context.signal, ...(context.createId ? { createId: context.createId } : {}) },
-      );
+        author: context.author,
+        nowMs: context.now?.() ?? Date.now(),
+        ...(context.createId ? { operationId: context.createId() } : {}),
+        ...(context.signal ? { signal: context.signal } : {}),
+      });
     }
     case "ui.open": {
       const input = record(params);

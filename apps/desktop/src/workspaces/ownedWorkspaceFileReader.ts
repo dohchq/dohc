@@ -18,10 +18,33 @@ import type {
   WorkspaceTextReadResult,
 } from "./workspaceAssets";
 import {
+  readDatabasePageFromBytes,
   readDatabaseSnapshotFromBytes,
+  readPreparedDatabasePage,
   readPreparedDatabaseSnapshot,
+  type DatabasePageView,
   type DatabaseSnapshotView,
 } from "./workspaceDatabase";
+
+export interface OwnedWorkspaceDatabaseReader {
+  readPrepared(
+    path: string,
+    source: PreparedWorkspaceFileRead,
+  ): Promise<DatabaseSnapshotView>;
+  readBytes(path: string, bytes: Uint8Array): Promise<DatabaseSnapshotView>;
+  readPagePrepared(
+    path: string,
+    source: PreparedWorkspaceFileRead,
+    table: string,
+    offset: number,
+  ): Promise<DatabasePageView>;
+  readPageBytes(
+    path: string,
+    bytes: Uint8Array,
+    table: string,
+    offset: number,
+  ): Promise<DatabasePageView>;
+}
 
 export interface OwnedWorkspaceFileReader {
   resolveShare(path: string): Promise<{
@@ -35,12 +58,18 @@ export interface OwnedWorkspaceFileReader {
     { path: string } & Extract<ShareViewFileReadOutcome, { kind: "asset" }>
   >;
   readDatabase(path: string): Promise<DatabaseSnapshotView>;
+  readDatabasePage(
+    path: string,
+    table: string,
+    offset: number,
+  ): Promise<DatabasePageView>;
 }
 
 /** Reads local files from disk and received-share files from their owner store. */
 export function createOwnedWorkspaceFileReader(input: {
   workspace: ShareViewFilesWorkspaceRecord;
   files: Pick<ShareViewFiles, "read">;
+  databaseReader?: OwnedWorkspaceDatabaseReader;
 }): OwnedWorkspaceFileReader {
   type PreparedRead =
     | { kind: "local"; source: PreparedWorkspaceFileRead }
@@ -133,6 +162,30 @@ export function createOwnedWorkspaceFileReader(input: {
     return { path: prepared.path, ...read };
   }
 
+  const databaseReader: OwnedWorkspaceDatabaseReader =
+    input.databaseReader ?? {
+      readPrepared: readPreparedDatabaseSnapshot,
+      readBytes: readDatabaseSnapshotFromBytes,
+      readPagePrepared: readPreparedDatabasePage,
+      readPageBytes: readDatabasePageFromBytes,
+    };
+
+  async function preparedDatabase(path: string): Promise<
+    | { kind: "local"; source: PreparedWorkspaceFileRead }
+    | { kind: "share"; path: string; bytes: Uint8Array }
+  > {
+    const prepared = await prepareRead(path);
+    if (prepared.kind === "local") return prepared;
+    const read = await input.files.read(prepared.target, {
+      kind: "asset",
+      path: prepared.path,
+    });
+    if (read.kind !== "asset") {
+      throw new Error("Shared database read returned an invalid result.");
+    }
+    return { kind: "share", path: prepared.path, bytes: read.bytes };
+  }
+
   return {
     resolveShare,
 
@@ -154,18 +207,29 @@ export function createOwnedWorkspaceFileReader(input: {
     readAsset,
 
     async readDatabase(path) {
-      const prepared = await prepareRead(path);
+      const prepared = await preparedDatabase(path);
       if (prepared.kind === "local") {
-        return readPreparedDatabaseSnapshot(path, prepared.source);
+        return databaseReader.readPrepared(path, prepared.source);
       }
-      const read = await input.files.read(prepared.target, {
-        kind: "asset",
-        path: prepared.path,
-      });
-      if (read.kind !== "asset") {
-        throw new Error("Shared database read returned an invalid result.");
+      return databaseReader.readBytes(path, prepared.bytes);
+    },
+
+    async readDatabasePage(path, table, offset) {
+      const prepared = await preparedDatabase(path);
+      if (prepared.kind === "local") {
+        return databaseReader.readPagePrepared(
+          path,
+          prepared.source,
+          table,
+          offset,
+        );
       }
-      return readDatabaseSnapshotFromBytes(path, read.bytes);
+      return databaseReader.readPageBytes(
+        path,
+        prepared.bytes,
+        table,
+        offset,
+      );
     },
   };
 }

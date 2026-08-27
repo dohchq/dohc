@@ -659,6 +659,7 @@ export const CHANNELS = {
   saveChatBookmark: "desktop:save-chat-bookmark",
   archiveChatBookmark: "desktop:archive-chat-bookmark",
   readWorkspaceDatabase: "desktop:read-workspace-database",
+  readWorkspaceDatabasePage: "desktop:read-workspace-database-page",
   applyDatabaseEdit: "desktop:apply-database-edit",
   importToDatabase: "desktop:import-to-database",
   listSites: "desktop:list-sites",

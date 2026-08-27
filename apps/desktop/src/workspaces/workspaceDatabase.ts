@@ -1,25 +1,17 @@
 import {
-  createDatabaseOperation,
   databaseOpLogPath,
   mediaTypeForPath,
-  serializeDatabaseOperation,
   validateUserMaterializePath,
   type ChangeAuthor,
-  type DatabaseRowOp,
 } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
 import {
-  appendFile,
   link,
   mkdir,
-  mkdtemp,
-  readFile,
   realpath,
   rm,
   writeFile,
 } from "node:fs/promises";
-import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
 import { isInside } from "../security/pathContainment";
 import {
@@ -28,299 +20,158 @@ import {
 } from "./workspaceAssets";
 import { existingAncestor } from "./workspaceFiles";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
+import type {
+  DatabaseEdit,
+  DatabaseEditResult,
+  DatabasePageView,
+  DatabaseSnapshotView,
+} from "./workspaceDatabaseTypes";
+import {
+  createWorkspaceDatabaseWorkerOwner,
+  type WorkspaceDatabaseWorkerOwner,
+} from "./workspaceDatabaseWorker";
 
-// node:sqlite is a Node built-in (no native addon, no electron-rebuild). It is
-// loaded via createRequire so the bundler leaves it as a runtime require and it
-// stays off the launch path until a database is actually opened. A minimal
-// local type avoids depending on @types/node's experimental sqlite typings.
-interface SqliteStatement {
-  all(...params: unknown[]): Array<Record<string, unknown>>;
-  run(...params: unknown[]): { changes: number };
-  get(...params: unknown[]): Record<string, unknown> | undefined;
-}
-interface SqliteDb {
-  prepare(sql: string): SqliteStatement;
-  exec(sql: string): void;
-  close(): void;
-}
-interface SqliteModule {
-  DatabaseSync: new (path: string, options?: { readOnly?: boolean }) => SqliteDb;
-}
+export type {
+  DatabaseColumnView,
+  DatabaseEdit,
+  DatabaseEditResult,
+  DatabasePageView,
+  DatabaseSnapshotView,
+  DatabaseTableView,
+} from "./workspaceDatabaseTypes";
+export {
+  createWorkspaceDatabaseWorkerOwner,
+  type WorkspaceDatabaseWorkerOwner,
+} from "./workspaceDatabaseWorker";
 
-const requireFromHere = createRequire(import.meta.url);
-function nodeSqlite(): SqliteModule {
-  return requireFromHere("node:sqlite") as SqliteModule;
-}
+export const workspaceDatabaseWorker = createWorkspaceDatabaseWorkerOwner();
 
-interface DatabaseColumnView {
-  name: string;
-  type: string;
-  primaryKey?: boolean;
-  nullable?: boolean;
-}
-interface DatabaseTableView {
-  name: string;
-  columns: DatabaseColumnView[];
-  rows: Array<Record<string, unknown>>;
-}
-export interface DatabaseSnapshotView {
-  path: string;
-  tables: DatabaseTableView[];
+interface DatabaseWorkerCallOptions {
+  signal?: AbortSignal;
+  worker?: WorkspaceDatabaseWorkerOwner;
 }
 
-// Bounds: the studio shows a workable window, never streams an entire large
-// database into the renderer or main-process memory (native-fast, not
-// Notion-slow — and a hostile db with one giant blob must not freeze the app).
-const MAX_ROWS = 1000;
-const MAX_TABLES = 200;
-const MAX_CELL_CHARS = 4096;
-
-function quoteIdent(name: string): string {
-  return `"${name.replace(/"/g, '""')}"`;
-}
-
-// Bound every cell before it leaves the database layer: blobs become a small
-// placeholder, oversized text is truncated for display (edits write the full
-// typed value, so truncation never round-trips into the file).
-function sanitizeCell(value: unknown): unknown {
-  if (value instanceof Uint8Array) return `<blob ${value.byteLength} bytes>`;
-  if (typeof value === "string" && value.length > MAX_CELL_CHARS) {
-    return `${value.slice(0, MAX_CELL_CHARS)}…`;
-  }
-  return value;
-}
-
-function sanitizeRows(rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
-  return rows.map((row) =>
-    Object.fromEntries(Object.entries(row).map(([k, v]) => [k, sanitizeCell(v)])),
-  );
-}
-
-// node:sqlite only binds null / number / bigint / string / Uint8Array. Coerce
-// the JS values the studio sends (booleans, undefined) into bindable ones.
-function bindable(value: unknown): unknown {
-  if (value === undefined || value === null) return null;
-  if (typeof value === "boolean") return value ? 1 : 0;
-  if (typeof value === "number" || typeof value === "bigint" || typeof value === "string") {
-    return value;
-  }
-  return JSON.stringify(value);
-}
-
-// Reads a visible workspace database into an inspectable snapshot: every table,
-// its column schema, and a bounded window of rows. Opened read-only.
 export async function readDatabaseSnapshot(
   rootPath: string,
   relativePath: string,
+  options: DatabaseWorkerCallOptions = {},
 ): Promise<DatabaseSnapshotView> {
   const { realTarget, normalized } = await resolveWorkspaceFile(
     rootPath,
     relativePath,
     "read",
   );
-  return readDatabaseSnapshotAtPath(realTarget, normalized);
+  return (options.worker ?? workspaceDatabaseWorker).readPath({
+    absolutePath: realTarget,
+    path: normalized,
+    signal: options.signal,
+  });
 }
 
-function readDatabaseSnapshotAtPath(
-  absolutePath: string,
-  resultPath: string,
-): DatabaseSnapshotView {
-  const { DatabaseSync } = nodeSqlite();
-  const db = new DatabaseSync(absolutePath, { readOnly: true });
-  try {
-    const tableNames = db
-      .prepare(
-        `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name LIMIT ${MAX_TABLES}`,
-      )
-      .all()
-      .map((r) => String(r.name));
-    const tables: DatabaseTableView[] = tableNames.map((name) => {
-      const info = db.prepare(`PRAGMA table_info(${quoteIdent(name)})`).all();
-      const columns: DatabaseColumnView[] = info.map((c) => ({
-        name: String(c.name),
-        type: String(c.type ?? "").toLowerCase() || "text",
-        primaryKey: Number(c.pk) > 0,
-        nullable: Number(c.notnull) === 0,
-      }));
-      // Each row carries its SQLite rowid as __dohc_rowid — the stable, unique
-      // identity an edit keys on (a guessed "id" column may not be unique).
-      // WITHOUT ROWID tables fall back to a plain select; the studio then only
-      // allows edits when a single-column declared primary key exists.
-      let rows: Array<Record<string, unknown>>;
-      try {
-        rows = db
-          .prepare(`SELECT rowid AS __dohc_rowid, * FROM ${quoteIdent(name)} LIMIT ${MAX_ROWS}`)
-          .all();
-      } catch {
-        rows = db.prepare(`SELECT * FROM ${quoteIdent(name)} LIMIT ${MAX_ROWS}`).all();
-      }
-      return { name, columns, rows: sanitizeRows(rows) };
-    });
-    return { path: resultPath, tables };
-  } finally {
-    db.close();
-  }
+async function readPreparedPath<T>(
+  source: PreparedWorkspaceFileRead,
+  run: (absolutePath: string) => Promise<T>,
+): Promise<T> {
+  return source.withVerifiedPath(run);
 }
 
-/**
- * Open a local database through the file identity that owner routing judged.
- * The verified handle stays open while SQLite reads the path, so a replacement
- * detected immediately before or after the snapshot refuses the result.
- * node:sqlite has no file-descriptor input, so an external actor could still
- * replace and restore the exact pathname during this synchronous call.
- */
 export function readPreparedDatabaseSnapshot(
   requestedPath: string,
   source: PreparedWorkspaceFileRead,
+  options: DatabaseWorkerCallOptions = {},
 ): Promise<DatabaseSnapshotView> {
-  return source.withVerifiedPathSync((absolutePath) =>
-    readDatabaseSnapshotAtPath(absolutePath, requestedPath),
+  return readPreparedPath(source, (absolutePath) =>
+    (options.worker ?? workspaceDatabaseWorker).readPath({
+      absolutePath,
+      path: requestedPath,
+      signal: options.signal,
+    }),
   );
 }
 
-// Received-share databases are owned by the share's canonical store, not by
-// their visible projection. SQLite needs a filesystem path, so give it a
-// private, short-lived copy containing only the owner's main database bytes.
-// Projection WAL/journal sidecars never enter this directory.
-export async function readDatabaseSnapshotFromBytes(
+export function readPreparedDatabasePage(
+  requestedPath: string,
+  source: PreparedWorkspaceFileRead,
+  table: string,
+  offset: number,
+  options: DatabaseWorkerCallOptions = {},
+): Promise<DatabasePageView> {
+  return readPreparedPath(source, (absolutePath) =>
+    (options.worker ?? workspaceDatabaseWorker).readPagePath({
+      absolutePath,
+      path: requestedPath,
+      table,
+      offset,
+      signal: options.signal,
+    }),
+  );
+}
+
+export function readDatabaseSnapshotFromBytes(
   relativePath: string,
   bytes: Uint8Array,
+  options: DatabaseWorkerCallOptions = {},
 ): Promise<DatabaseSnapshotView> {
-  const temporaryRoot = await mkdtemp(join(tmpdir(), "dohc-database-snapshot-"));
-  try {
-    const temporaryPath = "snapshot.sqlite";
-    await writeFile(join(temporaryRoot, temporaryPath), bytes, {
-      flag: "wx",
-      mode: 0o600,
-    });
-    const snapshot = await readDatabaseSnapshot(temporaryRoot, temporaryPath);
-    return { ...snapshot, path: relativePath };
-  } finally {
-    await rm(temporaryRoot, { recursive: true, force: true });
-  }
+  return (options.worker ?? workspaceDatabaseWorker).readBytes({
+    bytes,
+    path: relativePath,
+    signal: options.signal,
+  });
 }
 
-export interface DatabaseEdit {
-  table: string;
-  op: DatabaseRowOp;
-  pkColumn: string;
-  rowId: string | number;
-  payload?: Record<string, unknown>;
+export function readDatabasePageFromBytes(
+  relativePath: string,
+  bytes: Uint8Array,
+  table: string,
+  offset: number,
+  options: DatabaseWorkerCallOptions = {},
+): Promise<DatabasePageView> {
+  return (options.worker ?? workspaceDatabaseWorker).readPageBytes({
+    bytes,
+    path: relativePath,
+    table,
+    offset,
+    signal: options.signal,
+  });
 }
 
-function runEdit(db: SqliteDb, edit: DatabaseEdit): void {
-  const table = quoteIdent(edit.table);
-  const pk = quoteIdent(edit.pkColumn);
-  if (edit.op === "delete") {
-    db.prepare(`DELETE FROM ${table} WHERE ${pk} = ?`).run(bindable(edit.rowId));
-    return;
-  }
-  const payload = edit.payload ?? {};
-  if (edit.op === "update") {
-    const cols = Object.keys(payload);
-    if (cols.length === 0) return;
-    const setClause = cols.map((c) => `${quoteIdent(c)} = ?`).join(", ");
-    db.prepare(`UPDATE ${table} SET ${setClause} WHERE ${pk} = ?`).run(
-      ...cols.map((c) => bindable(payload[c])),
-      bindable(edit.rowId),
-    );
-    return;
-  }
-  // insert / upsert — ensure the primary key value is present.
-  const cols = edit.pkColumn in payload ? Object.keys(payload) : [edit.pkColumn, ...Object.keys(payload)];
-  const values = cols.map((c) => bindable(c === edit.pkColumn && !(c in payload) ? edit.rowId : payload[c]));
-  const verb = edit.op === "upsert" ? "INSERT OR REPLACE" : "INSERT";
-  db.prepare(
-    `${verb} INTO ${table} (${cols.map(quoteIdent).join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`,
-  ).run(...values);
-}
-
-async function nextOpVersion(logAbsPath: string): Promise<number> {
-  try {
-    const text = await readFile(logAbsPath, "utf8");
-    return text.split("\n").filter((line) => line.trim().length > 0).length + 1;
-  } catch {
-    return 1;
-  }
-}
-
-// Edits to one database run strictly in sequence: the op-log version derives
-// from the log's line count, so two interleaved edits would otherwise both
-// read the same count and record duplicate versions.
-const editQueues = new Map<string, Promise<unknown>>();
-
-function enqueueEdit<T>(key: string, run: () => Promise<T>): Promise<T> {
-  const next = (editQueues.get(key) ?? Promise.resolve()).then(run, run);
-  editQueues.set(key, next.catch(() => undefined));
-  return next;
-}
-
-// Applies a single structured row edit to a visible database IN PLACE (the
-// file is the canonical artifact) and appends the edit to the inspectable
-// JSONL operation log under .dohc. Local history records the file change via
-// the watcher today; the op log is the structured record cloud sync will
-// carry in Phase 9 (raw database bytes never CRDT-sync). Returns the fresh
-// snapshot.
-export function applyDatabaseEdit(
+export async function applyDatabaseEdit(
   rootPath: string,
   relativePath: string,
   edit: DatabaseEdit,
   author: ChangeAuthor,
   nowMs: number,
-  // Injectable id seam (oracle/tests) for the persisted operationId. Omitted ⇒
-  // a real randomUUID, identical to today's behavior.
-  options: { signal?: AbortSignal; createId?: () => string } = {},
-): Promise<DatabaseSnapshotView> {
-  return enqueueEdit(`${rootPath}\u0000${relativePath}`, () => {
-    if (options.signal?.aborted) throw new Error("Database edit was cancelled.");
-    return applyDatabaseEditNow(
-      rootPath,
-      relativePath,
-      edit,
+  options: DatabaseWorkerCallOptions & {
+    createId?: () => string;
+    pageOffset?: number;
+  } = {},
+): Promise<DatabaseEditResult> {
+  if (options.signal?.aborted) throw new Error("Database edit was cancelled.");
+  const { realTarget, normalized } = await resolveWorkspaceFile(
+    rootPath,
+    relativePath,
+  );
+  if (options.signal?.aborted) throw new Error("Database edit was cancelled.");
+  const logPath = join(rootPath, databaseOpLogPath(normalized));
+  return (options.worker ?? workspaceDatabaseWorker).editPath({
+    absolutePath: realTarget,
+    path: normalized,
+    logPath,
+    statePath: join(dirname(logPath), "state.sqlite"),
+    edit,
+    operation: {
+      operationId: options.createId?.() ?? randomUUID(),
+      databasePath: normalized,
+      table: edit.table,
+      op: edit.op,
+      rowId: String(edit.rowId),
+      payload: edit.payload ?? {},
+      appliedAt: nowMs,
       author,
-      nowMs,
-      options.signal,
-      options.createId,
-    );
+    },
+    pageOffset: options.pageOffset,
+    signal: options.signal,
   });
-}
-
-async function applyDatabaseEditNow(
-  rootPath: string,
-  relativePath: string,
-  edit: DatabaseEdit,
-  author: ChangeAuthor,
-  nowMs: number,
-  signal?: AbortSignal,
-  createId: () => string = randomUUID,
-): Promise<DatabaseSnapshotView> {
-  const { realTarget, normalized } = await resolveWorkspaceFile(rootPath, relativePath);
-  if (signal?.aborted) throw new Error("Database edit was cancelled.");
-  const { DatabaseSync } = nodeSqlite();
-  const db = new DatabaseSync(realTarget);
-  try {
-    runEdit(db, edit);
-  } finally {
-    db.close();
-  }
-
-  const logRel = databaseOpLogPath(normalized);
-  const logAbs = join(rootPath, logRel);
-  await mkdir(dirname(logAbs), { recursive: true });
-  const operation = createDatabaseOperation({
-    operationId: createId(),
-    databasePath: normalized,
-    table: edit.table,
-    op: edit.op,
-    rowId: String(edit.rowId),
-    payload: edit.payload ?? {},
-    version: await nextOpVersion(logAbs),
-    appliedAt: nowMs,
-    author,
-  });
-  await appendFile(logAbs, serializeDatabaseOperation(operation));
-
-  return readDatabaseSnapshot(rootPath, relativePath);
 }
 
 // Atomically writes bytes to a NEW workspace-relative path, enforcing
