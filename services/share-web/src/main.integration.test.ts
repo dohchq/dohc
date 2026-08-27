@@ -23,6 +23,10 @@ const BLOB_SHA = "a".repeat(64);
 const TEST_SHUTDOWN_GRACE_PERIOD_MS = 250;
 const WITHIN_SHUTDOWN_GRACE_MS = 100;
 const FORCED_SHUTDOWN_TIMEOUT_MS = 2_000;
+const STOP_SHARE_WEB_DEADLINE_MS = 13_000;
+const SIGKILL_EXIT_TIMEOUT_MS = 1_000;
+const CLEANUP_HOOK_TIMEOUT_MS =
+  STOP_SHARE_WEB_DEADLINE_MS + SIGKILL_EXIT_TIMEOUT_MS + 2_000;
 const MISSING_VIEWER_ASSETS_MESSAGE =
   "share-web viewer assets are missing. Run: pnpm --filter @dohc/share-web build";
 const VIEWER_HTML = "<!doctype html><title>share-web viewer fixture</title>";
@@ -83,13 +87,16 @@ type RawSocketResult =
   | { kind: "socket-error"; error: string };
 
 afterEach(async () => {
-  await Promise.all([...children].map(stopShareWeb));
-  await Promise.all([...relayServers].map(stopRelay));
-  await Promise.all(
-    [...viewerAssetRoots].map((root) => rm(root, { recursive: true, force: true })),
-  );
-  viewerAssetRoots.clear();
-});
+  try {
+    await Promise.all([...children].map(stopShareWeb));
+  } finally {
+    await Promise.all([...relayServers].map(stopRelay));
+    await Promise.all(
+      [...viewerAssetRoots].map((root) => rm(root, { recursive: true, force: true })),
+    );
+    viewerAssetRoots.clear();
+  }
+}, CLEANUP_HOOK_TIMEOUT_MS);
 
 describe("share-web Node request adapter", () => {
   it.each([
@@ -953,9 +960,33 @@ async function listenOnEphemeralPort(server: Server): Promise<void> {
 async function stopShareWeb(child: ChildProcessWithoutNullStreams): Promise<void> {
   children.delete(child);
   if (child.exitCode !== null || child.signalCode !== null) return;
-  const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  const exited = waitForExit(child);
   child.kill();
-  await exited;
+  const gracefulExit = await settleWithin(exited, STOP_SHARE_WEB_DEADLINE_MS);
+  if (gracefulExit.kind === "settled") return;
+
+  const pid = child.pid ?? "unknown";
+  let signalSent: boolean;
+  try {
+    signalSent = child.kill("SIGKILL");
+  } catch (error) {
+    throw new Error(
+      `share-web child pid=${String(pid)} exceeded the ` +
+        `${String(STOP_SHARE_WEB_DEADLINE_MS)} ms stop deadline; ` +
+        "failed to send SIGKILL",
+      { cause: error },
+    );
+  }
+  const forcedExit = await settleWithin(exited, SIGKILL_EXIT_TIMEOUT_MS);
+  const forcedExitDiagnostic =
+    forcedExit.kind === "timeout"
+      ? `timed out after ${String(SIGKILL_EXIT_TIMEOUT_MS)} ms`
+      : `code=${String(forcedExit.value.code)}, signal=${String(forcedExit.value.signal)}`;
+  throw new Error(
+    `share-web child pid=${String(pid)} exceeded the ` +
+      `${String(STOP_SHARE_WEB_DEADLINE_MS)} ms stop deadline; ` +
+      `SIGKILL sent=${String(signalSent)}; forced exit ${forcedExitDiagnostic}`,
+  );
 }
 
 function waitForExit(

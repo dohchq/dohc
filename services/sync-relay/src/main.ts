@@ -1,7 +1,7 @@
 import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
 import { createSessionActorResolver, UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
 import { writeSync } from "node:fs";
-import { createServer } from "node:http";
+import { createServer, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Pool } from "pg";
@@ -21,6 +21,8 @@ const secret = process.env.BETTER_AUTH_SECRET ?? "";
 const nodeEnv = process.env.NODE_ENV;
 const isDevOrTest = nodeEnv === "development" || nodeEnv === "test";
 const testAuthSeam = process.env.SYNC_RELAY_TEST_AUTH === "1" && isDevOrTest;
+const controlledStreamTestSeam =
+  testAuthSeam && process.env.SYNC_RELAY_TEST_CONTROLLED_STREAM === "1";
 const linkKey = process.env.DOHC_RELAY_LINK_KEY;
 const relayExchangeKey = process.env.DOHC_RELAY_EXCHANGE_KEY;
 const relayExchangeKeyHash =
@@ -160,6 +162,7 @@ if (testAuthSeam) {
 // transport is never persisted, so it lives only here and is lost on restart
 // (by design — presence is not durable).
 const presence = new PresenceHub();
+let finishControlledTestStream: (() => void) | undefined;
 
 const relayHandler = createSyncRelayHandler({
   storage,
@@ -172,6 +175,54 @@ const relayHandler = createSyncRelayHandler({
 });
 const fetchHandler = async (request: Request): Promise<Response> => {
   const url = new URL(request.url);
+  if (controlledStreamTestSeam && url.pathname === "/__test/controlled-stream") {
+    if (request.method === "POST") {
+      const finish = finishControlledTestStream;
+      if (!finish) return new Response(null, { status: 409 });
+      finish();
+      return new Response(null, { status: 204 });
+    }
+    if (request.method === "GET") {
+      if (finishControlledTestStream) return new Response(null, { status: 409 });
+      const chunkBytes = 1024 * 1024;
+      let active = true;
+      let removeAbortListener = (): void => undefined;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const abort = (): void => {
+            if (!active) return;
+            active = false;
+            finishControlledTestStream = undefined;
+            controller.error(new Error("controlled stream client disconnected"));
+          };
+          removeAbortListener = () => request.signal.removeEventListener("abort", abort);
+          request.signal.addEventListener("abort", abort, { once: true });
+          controller.enqueue(new Uint8Array(chunkBytes).fill(0x61));
+          finishControlledTestStream = () => {
+            if (!active) return;
+            active = false;
+            finishControlledTestStream = undefined;
+            removeAbortListener();
+            controller.enqueue(new Uint8Array(chunkBytes).fill(0x62));
+            controller.close();
+          };
+        },
+        cancel() {
+          active = false;
+          finishControlledTestStream = undefined;
+          removeAbortListener();
+        },
+      });
+      return new Response(body, {
+        status: 200,
+        headers: {
+          "content-type": "application/octet-stream",
+          "x-dohc-test-stream": "controlled",
+        },
+      });
+    }
+    return new Response(null, { status: 405 });
+  }
   if (url.pathname === "/health") {
     // The presence hub footprint is exposed ONLY under the dev/test seam so
     // integration tests can assert parked waiters are released on disconnect;
@@ -300,7 +351,11 @@ const server = createServer((request, response) => {
       .then(async (webResponse) => {
         response.statusCode = webResponse.status;
         for (const [key, value] of webResponse.headers) response.setHeader(key, value);
-        response.end(Buffer.from(await webResponse.arrayBuffer()));
+        if (!webResponse.body) {
+          response.end();
+          return;
+        }
+        await pipeResponseBody(webResponse.body, response);
       })
       .catch(() => {
         // Never echo internal error details (or anything derived from the
@@ -311,6 +366,56 @@ const server = createServer((request, response) => {
       });
   });
 });
+
+async function pipeResponseBody(
+  body: ReadableStream<Uint8Array>,
+  outgoing: ServerResponse,
+): Promise<void> {
+  const reader = body.getReader();
+  const cancelOnClose = (): void => {
+    if (!outgoing.writableFinished) void reader.cancel().catch(() => undefined);
+  };
+  outgoing.once("close", cancelOnClose);
+  try {
+    while (!outgoing.destroyed) {
+      const read = await reader.read();
+      if (read.done) {
+        outgoing.end();
+        return;
+      }
+      if (!outgoing.write(read.value)) {
+        const drained = await waitForDrain(outgoing);
+        if (!drained) return;
+      }
+    }
+  } catch {
+    if (!outgoing.destroyed) outgoing.destroy();
+  } finally {
+    outgoing.off("close", cancelOnClose);
+    if (!outgoing.writableFinished) await reader.cancel().catch(() => undefined);
+  }
+}
+
+function waitForDrain(outgoing: ServerResponse): Promise<boolean> {
+  if (outgoing.destroyed) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const cleanup = (): void => {
+      outgoing.off("close", closed);
+      outgoing.off("drain", drained);
+    };
+    const closed = (): void => {
+      cleanup();
+      resolve(false);
+    };
+    const drained = (): void => {
+      cleanup();
+      resolve(true);
+    };
+    outgoing.once("close", closed);
+    outgoing.once("drain", drained);
+  });
+}
+
 const host = testAuthSeam ? "127.0.0.1" : (process.env.SYNC_RELAY_BIND ?? "0.0.0.0");
 server.listen(requestedPort, host, () => {
   const address = server.address();

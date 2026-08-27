@@ -397,7 +397,121 @@ async function capabilityRefusalBody(response: Response): Promise<string> {
   return body;
 }
 
+async function readRemainingBytes(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  firstChunk: Uint8Array,
+): Promise<Uint8Array> {
+  const chunks = [firstChunk];
+  let byteLength = firstChunk.byteLength;
+  for (;;) {
+    const read = await reader.read();
+    if (read.done) break;
+    chunks.push(read.value);
+    byteLength += read.value.byteLength;
+  }
+  const bytes = new Uint8Array(byteLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
 describe("relay capability reads", () => {
+  it.each([
+    [
+      "keyed revocation",
+      async (h: SyncRelayHandler, shareId: string, grantId: string) =>
+        await h(
+          request(
+            OWNER,
+            `/sync/shares/${shareId}/revoke`,
+            jsonBody({ grantId }),
+          ),
+        ),
+    ],
+    [
+      "whole-share revocation",
+      async (h: SyncRelayHandler, shareId: string) =>
+        await h(request(OWNER, `/sync/shares/${shareId}/revoke`, { method: "POST" })),
+    ],
+    [
+      "rotation",
+      async (h: SyncRelayHandler, shareId: string, grantId: string) =>
+        await h(
+          request(
+            OWNER,
+            `/sync/shares/${shareId}/links/${grantId}/rotate`,
+            { method: "POST" },
+          ),
+        ),
+    ],
+    [
+      "retuning",
+      async (h: SyncRelayHandler, shareId: string, grantId: string) =>
+        await h(
+          request(
+            OWNER,
+            `/sync/shares/${shareId}/links/${grantId}/retune`,
+            jsonBody({ access: "comment" }),
+          ),
+        ),
+    ],
+  ] as const)(
+    "terminates an open link blob stream after %s without affecting another grant",
+    async (_transitionName, transition) => {
+      const storage = await newStorage();
+      const h = handler(storage);
+      const content = `${"a".repeat(64 * 1024)}${"b".repeat(64 * 1024)}${"c".repeat(64 * 1024)}`;
+      expect(
+        (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
+      ).toBe(200);
+      const blobSha = await putBlob(h, content);
+      await appendMoments(h, [moment(0, "docs/large.bin", content, 1_100)]);
+      const target = await createLink(h, { paths: ["docs"], access: "view" });
+      const untouched = await createLink(h, { paths: ["docs"], access: "view" });
+
+      const targetResponse = await h(
+        linkRequest(target.capability, `/sync/link/blobs/${blobSha}`),
+      );
+      const untouchedResponse = await h(
+        linkRequest(untouched.capability, `/sync/link/blobs/${blobSha}`),
+      );
+      expect(targetResponse.status).toBe(200);
+      expect(untouchedResponse.status).toBe(200);
+      const targetReader = targetResponse.body!.getReader();
+      const untouchedReader = untouchedResponse.body!.getReader();
+      const targetFirst = await targetReader.read();
+      const untouchedFirst = await untouchedReader.read();
+      expect(targetFirst.done).toBe(false);
+      expect(untouchedFirst.done).toBe(false);
+      if (targetFirst.done || untouchedFirst.done) return;
+      expect(targetFirst.value.byteLength).toBe(64 * 1024);
+      expect(untouchedFirst.value.byteLength).toBe(64 * 1024);
+
+      const changed = await transition(h, target.shareId, target.grantId);
+      expect(changed.status).toBe(200);
+
+      const targetOutcome = await targetReader.read().then(
+        () => ({ kind: "delivered" as const }),
+        (error: unknown) => ({
+          kind: "terminated" as const,
+          message: error instanceof Error ? error.message : String(error),
+        }),
+      );
+      expect(targetOutcome).toEqual({
+        kind: "terminated",
+        message: "link grant changed during blob stream",
+      });
+      const untouchedBytes = await readRemainingBytes(
+        untouchedReader,
+        untouchedFirst.value,
+      );
+      expect(new TextDecoder().decode(untouchedBytes)).toBe(content);
+    },
+  );
+
   it.each([
     ["metadata", "/sync/link/share"],
     ["log", "/sync/link/log"],
@@ -642,6 +756,34 @@ describe("relay capability reads", () => {
     expect(projectedPayload).not.toHaveProperty("payloadAfterPath");
     expect(projectedPayload).not.toHaveProperty("payloadAfterBlobSha256");
     expect(projectedPayload).not.toHaveProperty("payloadAfterContentKind");
+  });
+
+  it("uses an outward move as accountless freshness", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h);
+    const updated = "# updated\n";
+    await putBlob(h, updated);
+    await appendMoments(h, [
+      moment(3, "docs/shared.md", updated, 1_300, {
+        objectId: "object-shared",
+        beforePath: "docs/shared.md",
+        beforeContent: "# shared\n",
+      }),
+      moment(4, "private/moved.md", updated, 1_400, {
+        objectId: "object-shared",
+        operation: "rename",
+        beforePath: "docs/shared.md",
+        beforeContent: updated,
+      }),
+    ]);
+
+    const metadata = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/share")),
+    );
+
+    expect(metadata.lastSettledAtMs).toBe(1_400);
+    expect(metadata.lastSettledKnown).toBe(true);
   });
 
   it("keeps an inward move hidden until the next in-boundary write", async () => {

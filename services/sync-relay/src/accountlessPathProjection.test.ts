@@ -54,6 +54,24 @@ describe("accountless path projection", () => {
     ).toBeNull();
   });
 
+  it("fails closed when a version snapshot names a path outside every root", () => {
+    const projection = createAccountlessPathProjection({
+      paths: ["clients/acme/private/docs"],
+      versionId: "snapshot-1",
+      access: "view",
+    });
+
+    expect(projection.projectPayload({
+      versionId: "snapshot-1",
+      forkSnapshots: [
+        {
+          path: "teams/private/readme.md",
+          blobSha256: "a".repeat(64),
+        },
+      ],
+    })).toBeNull();
+  });
+
   it("disambiguates duplicate visible names without colliding with natural names", () => {
     const projection = createAccountlessPathProjection({
       paths: [

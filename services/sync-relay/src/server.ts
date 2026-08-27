@@ -179,6 +179,7 @@ type SyncRelayRoute =
 // (crates/dohc-engine-sync-http/tests/relay_http.rs) reads this line and fails
 // if the two drift.
 export const MAX_BLOB_BYTES = 20 * 1024 * 1024;
+const LINK_BLOB_STREAM_CHUNK_BYTES = 64 * 1024;
 export const MAX_KEY_ENVELOPE_BYTES = 16 * 1024;
 // One PAGE of the continuous replication lane, for the two log routes. It is
 // not the submit bound: a submit is one user act carrying one intent, and it
@@ -315,6 +316,92 @@ export function createSyncRelayHandler({
     if (relayExchangeKeyHash === undefined) return true;
     const presented = request.headers.get("x-dohc-relay-exchange-key");
     return verifyRelayExchangeKey(presented, relayExchangeKeyHash);
+  };
+
+  type ActiveLinkBlobStream = {
+    shareId: string;
+    terminate: () => void;
+  };
+  // The relay runs as one process and main.ts creates one handler, so this
+  // intentionally per-process registry reaches every open link-blob response.
+  const activeLinkBlobStreams = new Map<string, Set<ActiveLinkBlobStream>>();
+  const registerLinkBlobStream = (
+    grantId: string,
+    stream: ActiveLinkBlobStream,
+  ): (() => void) => {
+    let streams = activeLinkBlobStreams.get(grantId);
+    if (!streams) {
+      streams = new Set();
+      activeLinkBlobStreams.set(grantId, streams);
+    }
+    streams.add(stream);
+    return () => {
+      const registered = activeLinkBlobStreams.get(grantId);
+      if (!registered) return;
+      registered.delete(stream);
+      if (registered.size === 0) activeLinkBlobStreams.delete(grantId);
+    };
+  };
+  const terminateLinkBlobStreamsForGrant = (grantId: string): void => {
+    const streams = activeLinkBlobStreams.get(grantId);
+    if (!streams) return;
+    activeLinkBlobStreams.delete(grantId);
+    for (const stream of streams) stream.terminate();
+  };
+  const terminateLinkBlobStreamsForShare = (shareId: string): void => {
+    const grantIds = [...activeLinkBlobStreams]
+      .filter(([, streams]) => [...streams].some((stream) => stream.shareId === shareId))
+      .map(([grantId]) => grantId);
+    for (const grantId of grantIds) terminateLinkBlobStreamsForGrant(grantId);
+  };
+  const respondWithLinkBlob = (
+    bytes: Uint8Array,
+    shareId: string,
+    grantId: string,
+  ): Response => {
+    let offset = 0;
+    let active = true;
+    let unregister = (): void => undefined;
+    const body = new ReadableStream<Uint8Array>(
+      {
+        start(controller) {
+          const stream: ActiveLinkBlobStream = {
+            shareId,
+            terminate: () => {
+              if (!active) return;
+              active = false;
+              unregister();
+              controller.error(new Error("link grant changed during blob stream"));
+            },
+          };
+          unregister = registerLinkBlobStream(grantId, stream);
+        },
+        pull(controller) {
+          if (!active) return;
+          if (offset >= bytes.byteLength) {
+            active = false;
+            unregister();
+            controller.close();
+            return;
+          }
+          const end = Math.min(offset + LINK_BLOB_STREAM_CHUNK_BYTES, bytes.byteLength);
+          controller.enqueue(bytes.subarray(offset, end));
+          offset = end;
+        },
+        cancel() {
+          if (!active) return;
+          active = false;
+          unregister();
+        },
+      },
+      // Pull only when the transport asks for another chunk. This keeps one
+      // bounded view, rather than the full blob, queued ahead of backpressure.
+      { highWaterMark: 0 },
+    );
+    return new Response(body, {
+      status: 200,
+      headers: { "content-type": "application/octet-stream" },
+    });
   };
 
   // Handle a publish (POST) or long-poll (GET) against an already-authorized
@@ -645,7 +732,7 @@ export function createSyncRelayHandler({
     parentGrantId: grant.parentGrantId,
   });
 
-  const projectRefusedOutwardMove = (
+  const matchRefusedOutwardMove = (
     selector: AnyShareSelector,
     projection: ReturnType<typeof createAccountlessPathProjection>,
     row: Pick<SyncRelayLogRow, "opKind" | "payloadJson">,
@@ -735,7 +822,7 @@ export function createSyncRelayHandler({
           ? accountlessProjection.projectPayload(decision.payload)
           : decision.payload
         : accountlessProjection
-          ? projectRefusedOutwardMove(
+          ? matchRefusedOutwardMove(
               selector,
               accountlessProjection,
               row,
@@ -765,6 +852,9 @@ export function createSyncRelayHandler({
     | { lastSettledAtMs: null; lastSettledKnown: false } => {
     let beforeRelaySeq: number | null = null;
     const chatResolver = chatResolverFor(workspaceId);
+    const accountlessProjection = isChatChannelSelector(selector)
+      ? null
+      : createAccountlessPathProjection(selector);
     for (
       let pagesRead = 0;
       pagesRead < LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET;
@@ -786,6 +876,17 @@ export function createSyncRelayHandler({
           continue;
         }
         if (filterOpForShare(selector, row.opKind, row.payloadJson, chatResolver).allowed) {
+          return { lastSettledAtMs: row.recordedAtMs, lastSettledKnown: true };
+        }
+        if (
+          accountlessProjection !== null &&
+          matchRefusedOutwardMove(
+            selector,
+            accountlessProjection,
+            row,
+            chatResolver,
+          ) !== null
+        ) {
           return { lastSettledAtMs: row.recordedAtMs, lastSettledKnown: true };
         }
       }
@@ -1270,10 +1371,11 @@ export function createSyncRelayHandler({
         );
         if (!blob) throw notFound();
         requireFreshLinkRead(capabilityToken, capability);
-        return new Response(arrayBufferForBytes(blob), {
-          status: 200,
-          headers: { "content-type": "application/octet-stream" },
-        });
+        return respondWithLinkBlob(
+          blob,
+          capability.shareId,
+          capability.grantId,
+        );
       }
       const actor = await resolveActor(request, "workspaceId" in route ? route.workspaceId : "");
 
@@ -1374,6 +1476,7 @@ export function createSyncRelayHandler({
           rotatedAtMs: nowMs(),
         });
         if (!result.ok) throw notFound();
+        terminateLinkBlobStreamsForGrant(result.grant.grantId);
         return jsonResponse({ ok: true, ...linkGrantBody(result.grant), secret });
       }
       if (route.route === "share-link-rotate") throw methodNotAllowed();
@@ -1408,6 +1511,7 @@ export function createSyncRelayHandler({
             : {}),
         });
         if (!result.ok) throw notFound();
+        terminateLinkBlobStreamsForGrant(result.grant.grantId);
         return jsonResponse({
           ok: true,
           ...linkGrantBody(result.grant),
@@ -1442,9 +1546,12 @@ export function createSyncRelayHandler({
             revokedAtMs: nowMs(),
           });
           if (!result.ok) throw notFound();
+          terminateLinkBlobStreamsForGrant(result.grant.grantId);
           return jsonResponse({ ok: true, ...linkGrantBody(result.grant) });
         }
-        storage.revokeShare(route.shareId, nowMs());
+        if (storage.revokeShare(route.shareId, nowMs())) {
+          terminateLinkBlobStreamsForShare(route.shareId);
+        }
         return jsonResponse({ ok: true, shareId: route.shareId });
       }
       if (route.route === "share-revoke") throw methodNotAllowed();

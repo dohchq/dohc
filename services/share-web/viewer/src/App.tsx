@@ -94,12 +94,30 @@ async function apiWithThrottleRetry(
   path: string,
   signal?: AbortSignal,
 ): Promise<Response> {
+  return withBoundedRetry(
+    () => api(session, path, signal),
+    (response) => response.status === 429,
+    false,
+    signal,
+  );
+}
+
+async function withBoundedRetry(
+  request: () => Promise<Response>,
+  shouldRetryResponse: (response: Response) => boolean,
+  retryThrownFailures: boolean,
+  signal?: AbortSignal,
+): Promise<Response> {
   let retryDelayMs = RETRY_INITIAL_MS;
   let retryWaitedMs = 0;
   while (true) {
     if (signal?.aborted) throw new Error("cancelled");
-    const response = await api(session, path, signal);
-    if (response.status !== 429) return response;
+    try {
+      const response = await request();
+      if (!shouldRetryResponse(response)) return response;
+    } catch (error: unknown) {
+      if (!retryThrownFailures || signal?.aborted) throw error;
+    }
     if (retryWaitedMs + retryDelayMs > RETRY_BUDGET_MS) {
       throw new Error("refused");
     }
@@ -199,8 +217,8 @@ export async function loadLog(
   throw new Error("refused");
 }
 
-async function loadMeta(session: string): Promise<ViewMeta> {
-  const response = await api(session, "/api/view/meta");
+async function loadMeta(session: string, signal?: AbortSignal): Promise<ViewMeta> {
+  const response = await api(session, "/api/view/meta", signal);
   if (!response.ok) throw new ViewResponseError(response.status);
   const meta = (await response.json()) as ViewMeta;
   if (meta.access !== "view" || meta.effectiveSelector.access !== "view") {
@@ -213,15 +231,23 @@ function scrubFragment(): void {
   history.replaceState(history.state, "", `${location.pathname}${location.search}`);
 }
 
-async function establishSession(): Promise<string> {
+async function establishSession(signal?: AbortSignal): Promise<string> {
   const secret = location.hash.slice(1);
   if (/^[A-Za-z0-9_-]{43}$/u.test(secret)) {
-    const exchange = fetch("/api/exchange", {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ secret }),
-    });
+    const exchange = withBoundedRetry(
+      () => fetch("/api/exchange", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ secret }),
+        ...(signal ? { signal } : {}),
+      }),
+      (response) =>
+        response.status === 429 ||
+        (response.status >= 500 && response.status < 600),
+      true,
+      signal,
+    );
     scrubFragment();
     const response = await exchange;
     if (!response.ok) throw new Error("refused");
@@ -431,12 +457,40 @@ function RasterImage(props: { source: string; alt: string }) {
 }
 
 function DownloadCard(props: { file: SharedFile; session: string }) {
+  const fileName = props.file.path.split("/").at(-1);
+  const visibleDownloadPath = `/api/view/blob/${props.file.blobSha256}?session=${props.session}`;
+  const download = async () => {
+    const response = await apiWithThrottleRetry(
+      props.session,
+      `/api/view/blob/${props.file.blobSha256}`,
+    );
+    if (!response.ok) throw new Error("refused");
+    const objectUrl = URL.createObjectURL(await response.blob());
+    try {
+      const anchor = document.createElement("a");
+      anchor.href = objectUrl;
+      anchor.download = fileName ?? "";
+      anchor.hidden = true;
+      document.body.append(anchor);
+      try {
+        anchor.click();
+      } finally {
+        anchor.remove();
+      }
+    } finally {
+      URL.revokeObjectURL(objectUrl);
+    }
+  };
   return (
     <div className="download-card">
       <p>{isSvg(props.file.path) ? "SVG files open as downloads." : "This file opens as a download."}</p>
       <a
-        href={`/api/view/blob/${props.file.blobSha256}?session=${props.session}`}
-        download={props.file.path.split("/").at(-1)}
+        href={visibleDownloadPath}
+        download={fileName}
+        onClick={(event) => {
+          event.preventDefault();
+          void download().catch(() => undefined);
+        }}
       >
         Download file
       </a>
@@ -457,9 +511,9 @@ export function App() {
     const controller = new AbortController();
     void (async () => {
       try {
-        const session = await establishSession();
+        const session = await establishSession(controller.signal);
         const [meta, log] = await Promise.all([
-          loadMeta(session),
+          loadMeta(session, controller.signal),
           loadLog(session, 0, new Map(), MAX_LOG_PAGES, controller.signal),
         ]);
         const files = filesFromAccumulator(log.fileAccumulator);
@@ -514,7 +568,7 @@ export function App() {
       refreshInFlight = true;
       const fileAccumulator = new Map(previous.fileAccumulator);
       void Promise.all([
-        loadMeta(readySession),
+        loadMeta(readySession, controller.signal),
         loadLog(
           readySession,
           previous.nextCursor,

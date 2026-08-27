@@ -96,6 +96,7 @@ describe("App", () => {
     if (root) act(() => root?.unmount());
     container.remove();
     vi.useRealTimers();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 
@@ -210,6 +211,54 @@ describe("App", () => {
     expect(container.textContent).not.toContain("This link isn't available.");
   });
 
+  it("cancels an in-flight initial meta request on unmount", async () => {
+    let metaSignal: AbortSignal | undefined;
+    let logSignal: AbortSignal | undefined;
+    let metaAborts = 0;
+    let releaseMeta: ((response: Response) => void) | undefined;
+    let rejectMeta: ((reason: unknown) => void) | undefined;
+    const metaHeld = new Promise<Response>((resolve, reject) => {
+      releaseMeta = resolve;
+      rejectMeta = reject;
+    });
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") {
+        metaSignal = init?.signal ?? undefined;
+        metaSignal?.addEventListener("abort", () => {
+          metaAborts += 1;
+          rejectMeta?.(new DOMException("The request was aborted.", "AbortError"));
+        }, { once: true });
+        return metaHeld;
+      }
+      if (path === "/api/view/log?since=0&limit=500") {
+        logSignal = init?.signal ?? undefined;
+        return logPage([]);
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(<App />);
+      await Promise.resolve();
+    });
+
+    act(() => root?.unmount());
+    root = null;
+    releaseMeta?.(jsonResponse(DEFAULT_META));
+    await act(async () => {
+      for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
+    });
+
+    expect(metaSignal).toBeInstanceOf(AbortSignal);
+    expect(metaSignal).toBe(logSignal);
+    expect(metaSignal?.aborted).toBe(true);
+    expect(metaAborts).toBe(1);
+    expect(container.textContent).not.toContain("This link isn't available.");
+  });
+
   it("presents the established session capability on viewer requests", async () => {
     const file: SharedFile = {
       path: "readme.md",
@@ -231,7 +280,8 @@ describe("App", () => {
 
     await renderApp();
 
-    expect(requestInits.get("/api/view/meta")).toEqual({
+    const metaRequestInit = requestInits.get("/api/view/meta");
+    expect(metaRequestInit).toMatchObject({
       credentials: "same-origin",
       headers: { "x-dohc-link-session": SESSION },
     });
@@ -240,7 +290,9 @@ describe("App", () => {
       credentials: "same-origin",
       headers: { "x-dohc-link-session": SESSION },
     });
+    expect(metaRequestInit?.signal).toBeInstanceOf(AbortSignal);
     expect(logRequestInit?.signal).toBeInstanceOf(AbortSignal);
+    expect(metaRequestInit?.signal).toBe(logRequestInit?.signal);
     const blobRequestInit = requestInits.get(`/api/view/blob/${file.blobSha256}`);
     expect(blobRequestInit).toMatchObject({
       credentials: "same-origin",
@@ -648,6 +700,75 @@ describe("App", () => {
     expect(container.textContent).not.toContain("This link isn't available.");
   });
 
+  it("retries a rejected exchange and establishes the session", async () => {
+    vi.useFakeTimers();
+    const secret = "r".repeat(43);
+    history.replaceState(null, "", `/s/#${secret}`);
+    const exchangeBodies: string[] = [];
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/exchange") {
+        exchangeBodies.push(String(init?.body));
+        if (exchangeBodies.length === 1) throw new Error("network error");
+        return jsonResponse({ session: SESSION });
+      }
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/log?since=0&limit=500") return logPage([]);
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+
+    expect(`${location.pathname}${location.hash}`).toBe("/s/");
+    expect(exchangeBodies).toEqual([JSON.stringify({ secret })]);
+    expect(container.textContent).toContain("Opening shared files");
+    expect(container.textContent).not.toContain("This link isn't available.");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(999);
+    });
+    expect(exchangeBodies).toHaveLength(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+
+    expect(exchangeBodies).toEqual([
+      JSON.stringify({ secret }),
+      JSON.stringify({ secret }),
+    ]);
+    expect(location.pathname).toBe(`/s/${SESSION}`);
+    expect(location.hash).toBe("");
+    expect(container.querySelector("main.content")?.textContent).toBe(
+      "No files in this share yet.",
+    );
+    expect(container.textContent).not.toContain("This link isn't available.");
+  });
+
+  it("refuses a 404 exchange without retrying", async () => {
+    vi.useFakeTimers();
+    const secret = "t".repeat(43);
+    history.replaceState(null, "", `/s/#${secret}`);
+    let exchangeAttempts = 0;
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/exchange") {
+        exchangeAttempts += 1;
+        return new Response(null, { status: 404 });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+
+    expect(exchangeAttempts).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(location.hash).toBe("");
+    expect(container.textContent).toContain("This link isn't available.");
+  });
+
   it("offers binary Markdown files as downloads", async () => {
     const file: SharedFile = {
       path: "payload.md",
@@ -671,6 +792,94 @@ describe("App", () => {
     expect(fetchMock.mock.calls.map(([input]) => requestPath(input))).not.toContain(
       `/api/view/blob/${file.blobSha256}`,
     );
+  });
+
+  it("retries a rate-limited download and delivers only the successful bytes", async () => {
+    vi.useFakeTimers();
+    const file: SharedFile = {
+      path: "payload.bin",
+      blobSha256: "d".repeat(64),
+      contentKind: "binary",
+    };
+    const visibleDownloadPath = `/api/view/blob/${file.blobSha256}?session=${SESSION}`;
+    const downloadPath = `/api/view/blob/${file.blobSha256}`;
+    const downloadRequests: string[] = [];
+    const deliveredBlobs: Blob[] = [];
+    const objectUrl = "blob:dohc-download";
+    const createObjectUrl = vi.spyOn(URL, "createObjectURL")
+      .mockImplementation((blob) => {
+        if (!(blob instanceof Blob)) throw new Error("Expected download bytes");
+        deliveredBlobs.push(blob);
+        return objectUrl;
+      });
+    const revokeObjectUrl = vi.spyOn(URL, "revokeObjectURL")
+      .mockImplementation(() => undefined);
+    const clickedDownloads: Array<{
+      href: string;
+      download: string;
+      connected: boolean;
+    }> = [];
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      clickedDownloads.push({
+        href: this.href,
+        download: this.download,
+        connected: this.isConnected,
+      });
+    });
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
+      if (path === downloadPath) {
+        downloadRequests.push(path);
+        return downloadRequests.length === 1
+          ? new Response("rate-limit refusal", { status: 429 })
+          : new Response("shared file bytes");
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+
+    const visibleDownload = container.querySelector("a[download]");
+    expect(visibleDownload?.getAttribute("href")).toBe(visibleDownloadPath);
+    expect(visibleDownload?.getAttribute("download")).toBe("payload.bin");
+    expect(visibleDownload?.textContent).toBe("Download file");
+
+    let followedRawAnchor = true;
+    await act(async () => {
+      followedRawAnchor = visibleDownload?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
+      ) ?? true;
+      await Promise.resolve();
+    });
+
+    expect(followedRawAnchor).toBe(false);
+    expect(downloadRequests).toEqual([downloadPath]);
+    expect(deliveredBlobs).toEqual([]);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(999);
+    });
+    expect(downloadRequests).toHaveLength(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+
+    expect(downloadRequests).toEqual([downloadPath, downloadPath]);
+    expect(await deliveredBlobs[0]?.text()).toBe("shared file bytes");
+    expect(clickedDownloads).toEqual([{
+      href: objectUrl,
+      download: "payload.bin",
+      connected: true,
+    }]);
+    expect(createObjectUrl).toHaveBeenCalledTimes(1);
+    expect(revokeObjectUrl).toHaveBeenCalledWith(objectUrl);
+    expect(document.body.querySelector(`a[href="${objectUrl}"]`)).toBeNull();
   });
 
   async function renderRasterImage(): Promise<{
@@ -1453,6 +1662,64 @@ describe("App", () => {
     ]);
     expect(heartbeatSignal).toBeInstanceOf(AbortSignal);
     expect(heartbeatSignal?.aborted).toBe(true);
+    expect(container.textContent).not.toContain("This link isn't available.");
+  });
+
+  it("cancels an in-flight heartbeat meta request on teardown", async () => {
+    vi.useFakeTimers();
+    const file: SharedFile = {
+      path: "note.txt",
+      blobSha256: "b".repeat(64),
+      contentKind: "text",
+    };
+    let metaRequests = 0;
+    let heartbeatMetaSignal: AbortSignal | undefined;
+    let heartbeatLogSignal: AbortSignal | undefined;
+    let metaAborts = 0;
+    let rejectHeartbeatMeta: ((reason: unknown) => void) | undefined;
+    const heartbeatMetaHeld = new Promise<Response>((_resolve, reject) => {
+      rejectHeartbeatMeta = reject;
+    });
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") {
+        metaRequests += 1;
+        if (metaRequests === 1) return jsonResponse(DEFAULT_META);
+        heartbeatMetaSignal = init?.signal ?? undefined;
+        heartbeatMetaSignal?.addEventListener("abort", () => {
+          metaAborts += 1;
+          rejectHeartbeatMeta?.(
+            new DOMException("The request was aborted.", "AbortError"),
+          );
+        }, { once: true });
+        return heartbeatMetaHeld;
+      }
+      if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
+      if (path === "/api/view/log?since=1&limit=500") {
+        heartbeatLogSignal = init?.signal ?? undefined;
+        return logOpsPage([], 1);
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+    });
+
+    expect(metaRequests).toBe(2);
+    expect(heartbeatMetaSignal).toBeInstanceOf(AbortSignal);
+    expect(heartbeatMetaSignal).toBe(heartbeatLogSignal);
+
+    act(() => root?.unmount());
+    root = null;
+    await act(async () => {
+      for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
+    });
+
+    expect(heartbeatMetaSignal?.aborted).toBe(true);
+    expect(metaAborts).toBe(1);
     expect(container.textContent).not.toContain("This link isn't available.");
   });
 
