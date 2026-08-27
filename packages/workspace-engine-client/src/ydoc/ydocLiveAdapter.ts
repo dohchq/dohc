@@ -1435,7 +1435,7 @@ export class YdocLiveAdapter {
     }
     return {
       result: delivery.result,
-      bytes: new Uint8Array(delivery.blob.bytes),
+      bytes: delivery.blob.bytes,
     };
   }
 
