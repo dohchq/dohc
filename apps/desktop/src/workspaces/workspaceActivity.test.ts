@@ -131,6 +131,28 @@ describe("workspaceActivity capture hooks", () => {
     await activity.stopAll();
   });
 
+  it("publishes settled watcher paths with the workspace activity", async () => {
+    const notify = vi.fn();
+    const activity = createWorkspaceActivity(notify, {
+      captureFor: () => ({ capture: null, shareView: false }),
+    });
+    await activity.open(workspace());
+    notify.mockClear();
+
+    await writeFile(join(root, "changed.md"), "changed");
+
+    await vi.waitFor(
+      () => {
+        expect(notify).toHaveBeenCalledWith({
+          workspaceId: "activity-test",
+          paths: ["changed.md"],
+        });
+      },
+      { timeout: 3_000 },
+    );
+    await activity.stopAll();
+  });
+
   it("wires the live agent-run slot into captureFor's hooks", async () => {
     let liveSlot: (() => unknown) | null = null;
     const activity = createWorkspaceActivity(() => {}, {

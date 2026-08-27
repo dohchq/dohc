@@ -674,10 +674,7 @@ import { createOwnedProjectionRepairer } from "./workspaces/ownedProjectionRepai
 import { createOwnedWorkspaceFileReader } from "./workspaces/ownedWorkspaceFileReader";
 import { importOwnedWorkspaceDatabase } from "./workspaces/ownedWorkspaceDatabaseImport";
 import { applyDatabaseEdit } from "./workspaces/workspaceDatabase";
-import {
-  readWorkspaceGraph,
-  readWorkspaceBacklinks,
-} from "./workspaces/workspaceGraph";
+import { WorkspaceGraphIndex } from "./workspaces/workspaceGraph";
 import {
   extractWorkspaceHeadings,
   findWorkspaceHeading,
@@ -1313,7 +1310,9 @@ function cloudLogin(): CloudLogin {
 const workspaceFileListings = new WorkspaceFileListingCache();
 
 function notifyRenderer(scope?: WorkspaceActivityScope): void {
-  workspaceFileListings.invalidate(workspaceActivityPayload(scope));
+  const activityEvent = workspaceActivityPayload(scope);
+  workspaceFileListings.invalidate(activityEvent);
+  invalidateWorkspaceGraphIndexes(activityEvent);
   broadcastWorkspaceActivity({
     windows: BrowserWindow.getAllWindows(),
     activeWorkspaceIdOf: (webContentsId) => {
@@ -1740,6 +1739,7 @@ const SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS = 15_000;
 
 interface DesktopWorkspaceAuthorityState {
   activity: WorkspaceActivityState;
+  workspaceGraph: WorkspaceGraphIndex;
   pluginRuntimes: PluginWorkspaceRuntimes<CreatedWorkspace>;
   pluginSurfaces: PluginSurfaces<WebContentsView>;
   sitePreviews: ReturnType<typeof createSitePreviewLifecycle>;
@@ -1807,6 +1807,7 @@ function createDesktopWorkspaceAuthorityState(
   const pluginSurfaces = createPluginSurfaces(binding, pluginRuntimes);
   return {
     activity: new WorkspaceActivityState(),
+    workspaceGraph: new WorkspaceGraphIndex(),
     pluginRuntimes,
     pluginSurfaces,
     sitePreviews: createSitePreviewLifecycle({
@@ -1971,6 +1972,23 @@ function withWorkspaceAttachment<Result>(
     return work(lease);
   } finally {
     lease.release();
+  }
+}
+
+function invalidateWorkspaceGraphIndexes(event: {
+  workspaceId?: string;
+  paths?: readonly string[];
+}): void {
+  const invalidate = (workspaceId: string) =>
+    withWorkspaceAttachment({ workspaceId }, (lease) =>
+      lease.state.workspaceGraph.invalidate(event.paths),
+    );
+  if (event.workspaceId) {
+    invalidate(event.workspaceId);
+    return;
+  }
+  for (const workspaceId of workspaceAuthorities.workspaceIds()) {
+    invalidate(workspaceId);
   }
 }
 
@@ -5387,24 +5405,32 @@ async function listOwnedWorkspaceFilesFor(
     // that the window loads during it; the share store needs sessions. A
     // plain workspace's disk listing below stays ungated on purpose.
     await engineDaemonStartup;
-    return shareViewFiles.list({
-      kind: "standalone",
-      workspaceId: workspace.workspaceId,
-    });
+    return shareViewFiles.list(
+      {
+        kind: "standalone",
+        workspaceId: workspace.workspaceId,
+      },
+      { includeContentIdentity: true },
+    );
   }
   const mounts = storedShareMounts(workspace);
-  const disk = await listFiles(workspace.rootPath);
+  const disk = await listFiles(workspace.rootPath, {
+    includeContentIdentity: true,
+  });
   if (!shareMountRegistryIsPresent(workspace)) return disk;
   await engineDaemonStartup;
   return overlayCanonicalShareMountFiles({
     disk,
     mounts,
     listCanonical: (mount) =>
-      shareViewFiles.list({
-        kind: "mount",
-        workspaceId: workspace.workspaceId,
-        shareId: mount.shareId,
-      }),
+      shareViewFiles.list(
+        {
+          kind: "mount",
+          workspaceId: workspace.workspaceId,
+          shareId: mount.shareId,
+        },
+        { includeContentIdentity: true },
+      ),
     onFailure: (mount, error) => {
       const identity = isRecordValue(mount)
         ? `"${String(mount.label)}" (${String(mount.shareId)})`
@@ -5521,10 +5547,25 @@ const ownedSiteCatalog = createOwnedSiteCatalog({
 function ownedWorkspaceGraphSource(
   workspace: RegistryEntry & { readonly attachmentId: symbol },
 ) {
-  if (!workspaceHasReceivedShareState(workspace)) return undefined;
+  const hasShareState = workspaceHasReceivedShareState(workspace);
   return {
-    list: () => listOwnedWorkspaceFilesFor(workspace),
-    readText: (path: string) => readOwnedWorkspaceTextFor(workspace, path),
+    // Ordinary workspaces share the Explorer's complete listing. Received
+    // shares still list per request so authority changes are intersected before
+    // resolution; their parsed bodies remain reusable by content identity.
+    list: () =>
+      hasShareState
+        ? listOwnedWorkspaceFilesFor(workspace)
+        : workspaceFileListings.list({
+            workspaceId: workspace.workspaceId,
+            attachmentId: workspace.attachmentId,
+            allowCached: true,
+            load: () => listOwnedWorkspaceFilesFor(workspace),
+          }),
+    ...(hasShareState
+      ? {
+          readText: (path: string) => readOwnedWorkspaceTextFor(workspace, path),
+        }
+      : {}),
   };
 }
 
@@ -6149,17 +6190,15 @@ function registerIpcHandlers(
       event.sender,
       input.workspaceId,
       "File listing stopped because this window changed workspaces.",
-      (operation) => {
+      async (operation) => {
         const workspace = operation.workspace;
-        return workspaceFileListings.list({
+        const listing = await workspaceFileListings.list({
           workspaceId: workspace.workspaceId,
           attachmentId: workspace.attachmentId,
           allowCached: input.allowCached === true,
-          load: async () =>
-            ListWorkspaceFilesResult.parse(
-              await listOwnedWorkspaceFilesFor(workspace),
-            ),
+          load: async () => await listOwnedWorkspaceFilesFor(workspace),
         });
+        return ListWorkspaceFilesResult.parse(listing);
       },
     );
   });
@@ -6749,7 +6788,7 @@ function registerIpcHandlers(
       "Workspace graph read stopped because this window changed workspaces.",
       async (operation) => {
         const workspace = operation.workspace;
-        const graph = await readWorkspaceGraph(
+        const graph = await operation.state.workspaceGraph.readGraph(
           workspace.rootPath,
           ownedWorkspaceGraphSource(workspace),
         );
@@ -6908,7 +6947,7 @@ function registerIpcHandlers(
       "Backlink read stopped because this window changed workspaces.",
       async (operation) =>
         GetBacklinksResult.parse({
-          sources: await readWorkspaceBacklinks(
+          sources: await operation.state.workspaceGraph.readBacklinks(
             operation.workspace.rootPath,
             input.path,
             ownedWorkspaceGraphSource(operation.workspace),

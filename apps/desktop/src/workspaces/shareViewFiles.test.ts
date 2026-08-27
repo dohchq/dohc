@@ -1782,6 +1782,13 @@ describe("ShareViewFiles", () => {
       ],
       folders: ["docs", "docs/nested", "notes"],
     });
+    const indexed = await files.list(
+      { kind: "standalone", workspaceId: "workspace-a" },
+      { includeContentIdentity: true },
+    );
+    expect(Reflect.get(indexed.files[0]!, "contentIdentity")).toMatch(
+      /^object-\d+:[a-f0-9]{64}:moment-\d+$/,
+    );
     expect(store.readTextFile).toHaveBeenCalledTimes(3);
     await files.list({ kind: "standalone", workspaceId: "workspace-a" });
     expect(store.readTextFile).toHaveBeenCalledTimes(3);

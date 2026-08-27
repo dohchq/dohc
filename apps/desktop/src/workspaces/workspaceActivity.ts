@@ -161,7 +161,7 @@ export function createWorkspaceActivity(
   // Scoped when the push concerns one workspace (main delivers it only to
   // windows with that workspace active); scope-free for the two pushes below
   // that change every synced workspace at once.
-  notify: (scope?: { workspaceId: string }) => void,
+  notify: (scope?: { workspaceId: string; paths?: readonly string[] }) => void,
   options: WorkspaceActivityOptions = {},
 ) {
   function statusFor(
@@ -302,12 +302,15 @@ export function createWorkspaceActivity(
         // nothing (opt-out).
         engineCapture: () => entry.capture,
         onSettledBatch: (events) => options.onWatcherBatch?.(workspace, events),
-        onRecorded: () => {
+        onRecorded: (events) => {
           entry.inFlight = false;
           entry.lastSyncedAtMs = Date.now();
           // Every settled local batch queues a (debounced) cloud push.
           entry.engine?.queueSync();
-          notify({ workspaceId: workspace.workspaceId });
+          notify({
+            workspaceId: workspace.workspaceId,
+            paths: events.map((event) => event.path),
+          });
           if (options.onRustEngineShadowActivity) {
             try {
               void Promise.resolve(
