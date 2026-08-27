@@ -29,6 +29,7 @@
 #![forbid(unsafe_code)]
 
 pub mod chats;
+pub mod collections;
 pub mod conflicts;
 pub mod error;
 pub mod merge;
@@ -61,6 +62,14 @@ pub use chats::{
     replay_pending_chat_coordinates_for_change, replay_ready_pending_chat_coordinates,
     resolve_feed_coordinate, resolve_follow_target, resolve_thread_message, thread_has_message,
     validate_follow_target,
+};
+pub use collections::{
+    COLLECTION_SCHEMA_FILENAME, CollectionFieldType, CollectionFieldValue, CollectionSchema,
+    CollectionSchemaParseResult, CollectionSchemaReason, CollectionSchemaReasonCode,
+    CollectionSchemaStatus, FieldDefinition, FieldValueReason, FieldValueReasonCode,
+    FieldValueValidation, RECORD_ID_FRONTMATTER_KEY, RECORD_ID_PREFIX,
+    RECORD_ID_RANDOM_BASE32_LENGTH, ViewDefinition, ViewKind, ViewSort, ViewSortDirection,
+    is_record_id, mint_record_id, parse_collection_schema, validate_field_value,
 };
 pub use conflicts::{
     BINARY_COMBINED_TEXT_REFUSAL, BinaryResolveWrite, CONFLICT_METADATA_BUDGET_BYTES,

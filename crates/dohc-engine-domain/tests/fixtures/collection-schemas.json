@@ -1,0 +1,280 @@
+{
+  "vectors": [
+    {
+      "name": "valid-all-v1-types-and-views",
+      "yaml": "name: Projects\ndescription: Work in flight\nfields:\n  title:\n    type: text\n  estimate:\n    type: number\n  done:\n    type: checkbox\n  due:\n    type: date\n  status:\n    type: select\n    options: [Planned, Active, Done]\n  labels:\n    type: multi-select\n    options: [Backend, Frontend]\n  owner:\n    type: person\n  parent:\n    type: relation\n    collection: planning/projects\n    many: false\n  dependencies:\n    type: relation\n    collection: planning/projects\n    many: true\n  website:\n    type: url\nviews:\n  - name: All projects\n    kind: table\n    sort:\n      - field: due\n        direction: asc\n    visibleFields: [title, status, owner, due]\n  - name: Status board\n    kind: board\n    groupBy: status\n    visibleFields: [title, owner]\n  - name: Delivery calendar\n    kind: calendar\n    dateField: due\n",
+      "expected": {
+        "status": "valid",
+        "schema": {
+          "name": "Projects",
+          "description": "Work in flight",
+          "fields": [
+            {
+              "name": "title",
+              "type": "text"
+            },
+            {
+              "name": "estimate",
+              "type": "number"
+            },
+            {
+              "name": "done",
+              "type": "checkbox"
+            },
+            {
+              "name": "due",
+              "type": "date"
+            },
+            {
+              "name": "status",
+              "type": "select",
+              "options": [
+                "Planned",
+                "Active",
+                "Done"
+              ]
+            },
+            {
+              "name": "labels",
+              "type": "multi-select",
+              "options": [
+                "Backend",
+                "Frontend"
+              ]
+            },
+            {
+              "name": "owner",
+              "type": "person"
+            },
+            {
+              "name": "parent",
+              "type": "relation",
+              "collection": "planning/projects",
+              "many": false
+            },
+            {
+              "name": "dependencies",
+              "type": "relation",
+              "collection": "planning/projects",
+              "many": true
+            },
+            {
+              "name": "website",
+              "type": "url"
+            }
+          ],
+          "views": [
+            {
+              "name": "All projects",
+              "kind": "table",
+              "groupBy": null,
+              "sort": [
+                {
+                  "field": "due",
+                  "direction": "asc"
+                }
+              ],
+              "visibleFields": [
+                "title",
+                "status",
+                "owner",
+                "due"
+              ],
+              "dateField": null
+            },
+            {
+              "name": "Status board",
+              "kind": "board",
+              "groupBy": "status",
+              "sort": [],
+              "visibleFields": [
+                "title",
+                "owner"
+              ],
+              "dateField": null
+            },
+            {
+              "name": "Delivery calendar",
+              "kind": "calendar",
+              "groupBy": null,
+              "sort": [],
+              "visibleFields": null,
+              "dateField": "due"
+            }
+          ]
+        },
+        "reasons": []
+      }
+    },
+    {
+      "name": "valid-empty-schema",
+      "yaml": "",
+      "expected": {
+        "status": "valid",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [],
+          "views": []
+        },
+        "reasons": []
+      }
+    },
+    {
+      "name": "degraded-bad-yaml",
+      "yaml": "fields:\n  title: [\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [],
+          "views": []
+        },
+        "reasons": [
+          {
+            "code": "invalid-yaml",
+            "path": ""
+          }
+        ]
+      }
+    },
+    {
+      "name": "degraded-unknown-field-type-salvages-siblings",
+      "yaml": "fields:\n  title:\n    type: text\n  score:\n    type: formula\nviews:\n  - name: Table\n    kind: table\n    visibleFields: [title, score]\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [
+            {
+              "name": "title",
+              "type": "text"
+            }
+          ],
+          "views": [
+            {
+              "name": "Table",
+              "kind": "table",
+              "groupBy": null,
+              "sort": [],
+              "visibleFields": [
+                "title"
+              ],
+              "dateField": null
+            }
+          ]
+        },
+        "reasons": [
+          {
+            "code": "unknown-field-type",
+            "path": "/fields/score/type"
+          },
+          {
+            "code": "unknown-field-reference",
+            "path": "/views/0/visibleFields/1"
+          }
+        ]
+      }
+    },
+    {
+      "name": "degraded-bad-relation-target-salvages-siblings",
+      "yaml": "fields:\n  title:\n    type: text\n  project:\n    type: relation\n    collection: ../projects\n    many: false\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [
+            {
+              "name": "title",
+              "type": "text"
+            }
+          ],
+          "views": []
+        },
+        "reasons": [
+          {
+            "code": "invalid-relation-target",
+            "path": "/fields/project/collection"
+          }
+        ]
+      }
+    },
+    {
+      "name": "degraded-shapes-return-structured-reasons",
+      "yaml": "name: 42\nextra: ignored\nfields:\n  id:\n    type: text\n  status:\n    type: select\n    options: [Active, Active, 3]\n  relation:\n    type: relation\n    collection: teams/people\n    many: yes\nviews:\n  - name: Broken references\n    kind: board\n    groupBy: missing\n    sort:\n      - field: status\n        direction: sideways\n    visibleFields: [status, missing, status]\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [
+            {
+              "name": "status",
+              "type": "select",
+              "options": [
+                "Active"
+              ]
+            }
+          ],
+          "views": [
+            {
+              "name": "Broken references",
+              "kind": "board",
+              "groupBy": null,
+              "sort": [],
+              "visibleFields": [
+                "status"
+              ],
+              "dateField": null
+            }
+          ]
+        },
+        "reasons": [
+          {
+            "code": "unknown-property",
+            "path": "/extra"
+          },
+          {
+            "code": "reserved-field-name",
+            "path": "/fields/id"
+          },
+          {
+            "code": "duplicate-value",
+            "path": "/fields/status/options/1"
+          },
+          {
+            "code": "expected-text",
+            "path": "/fields/status/options/2"
+          },
+          {
+            "code": "expected-boolean",
+            "path": "/fields/relation/many"
+          },
+          {
+            "code": "expected-text",
+            "path": "/name"
+          },
+          {
+            "code": "unknown-field-reference",
+            "path": "/views/0/groupBy"
+          },
+          {
+            "code": "invalid-sort-direction",
+            "path": "/views/0/sort/0/direction"
+          },
+          {
+            "code": "unknown-field-reference",
+            "path": "/views/0/visibleFields/1"
+          },
+          {
+            "code": "duplicate-value",
+            "path": "/views/0/visibleFields/2"
+          }
+        ]
+      }
+    }
+  ]
+}

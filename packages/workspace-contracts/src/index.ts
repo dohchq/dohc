@@ -1,5 +1,7 @@
 export * from "./backend";
 export * from "./chatMentions";
+export * from "./collection";
+export * from "./collectionValues";
 export * from "./domain";
 export * from "./errors";
 export * from "./events";
