@@ -1,10 +1,8 @@
-import { expect, test, type Download, type Page, type Response } from "@playwright/test";
+import { type Page, type Response } from "@playwright/test";
 import {
+  expect,
   seedShare,
-  startProbe,
-  startStack,
-  type RunningProbe,
-  type RunningStack,
+  test,
 } from "./harness";
 
 const MIME_ATTACK_SENTINEL = "__dohcIso4MimeAttackSentinel_3de752bf";
@@ -18,39 +16,6 @@ const SIGNATURE_ONLY_PNG = Buffer.concat([
   Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
   Buffer.from("not-a-decodable-png", "utf8"),
 ]);
-
-let probe: RunningProbe | undefined;
-let stack: RunningStack | undefined;
-
-test.describe.configure({ mode: "serial" });
-
-test.beforeAll(async () => {
-  stack = await startStack();
-  try {
-    probe = await startProbe();
-  } catch (error) {
-    await stack.stop();
-    stack = undefined;
-    throw error;
-  }
-});
-
-test.afterAll(async () => {
-  const cleanupErrors: unknown[] = [];
-  try {
-    await probe?.stop();
-  } catch (error) {
-    cleanupErrors.push(error);
-  }
-  try {
-    await stack?.stop();
-  } catch (error) {
-    cleanupErrors.push(error);
-  }
-  if (cleanupErrors.length > 0) {
-    throw new AggregateError(cleanupErrors, "MIME browser test cleanup failed");
-  }
-});
 
 function activeHtml(probeUrl: string): Uint8Array {
   const scriptProbe = `${probeUrl}/iso4mime-script?sentinel=3de752bf`;
@@ -93,9 +58,11 @@ async function expectImageDecodeFailure(image: import("@playwright/test").Locato
   expect(decoded).toBe(false);
 }
 
-test("separates viewer extensions from service byte-sniffed MIME types", async ({ browser }) => {
-  if (!stack || !probe) throw new Error("MIME browser test services did not start");
-
+test("separates viewer extensions from service byte-sniffed MIME types", async ({
+  browser,
+  probe,
+  stack,
+}) => {
   const htmlBytes = activeHtml(probe.url);
   const seeded = await seedShare({
     relayUrl: stack.relayUrl,
@@ -114,7 +81,6 @@ test("separates viewer extensions from service byte-sniffed MIME types", async (
   }
 
   const context = await browser.newContext({ acceptDownloads: true });
-  const downloads: Download[] = [];
   try {
     const page = await context.newPage();
     await page.addInitScript(
@@ -155,7 +121,6 @@ test("separates viewer extensions from service byte-sniffed MIME types", async (
     const downloadPromise = page.waitForEvent("download");
     await downloadCard.getByRole("link", { name: "Download file" }).click();
     const [pngResponse, pngDownload] = await Promise.all([pngResponsePromise, downloadPromise]);
-    downloads.push(pngDownload);
 
     expect(pngResponse.status()).toBe(200);
     expect(pngResponse.headers()["content-type"]).toBe("image/png");
@@ -184,21 +149,6 @@ test("separates viewer extensions from service byte-sniffed MIME types", async (
     await expectSentinelUnchanged(page);
     expect(probe.requests).toEqual([]);
   } finally {
-    const cleanupErrors: unknown[] = [];
-    for (const download of downloads) {
-      try {
-        await download.delete();
-      } catch (error) {
-        cleanupErrors.push(error);
-      }
-    }
-    try {
-      await context.close();
-    } catch (error) {
-      cleanupErrors.push(error);
-    }
-    if (cleanupErrors.length > 0) {
-      throw new AggregateError(cleanupErrors, "MIME browser resource cleanup failed");
-    }
+    await context.close();
   }
 });

@@ -1,10 +1,8 @@
-import { expect, test, type Page, type Request } from "@playwright/test";
+import { type Page, type Request } from "@playwright/test";
 import {
+  expect,
   seedShare,
-  startProbe,
-  startStack,
-  type RunningProbe,
-  type RunningStack,
+  test,
 } from "./harness";
 
 const MARKER = "iso7remotefetch-31c8e4a7";
@@ -23,39 +21,6 @@ const PROBE_PATHS = {
   rawStyleImport: `/iso7remotefetch-raw-style-import?marker=${MARKER}-raw-style-import`,
   rawStylesheet: `/iso7remotefetch-raw-stylesheet?marker=${MARKER}-raw-stylesheet`,
 } as const;
-
-let probe: RunningProbe | undefined;
-let stack: RunningStack | undefined;
-
-test.describe.configure({ mode: "serial" });
-
-test.beforeAll(async () => {
-  stack = await startStack();
-  try {
-    probe = await startProbe();
-  } catch (error) {
-    await stack.stop();
-    stack = undefined;
-    throw error;
-  }
-});
-
-test.afterAll(async () => {
-  const cleanupErrors: unknown[] = [];
-  try {
-    await probe?.stop();
-  } catch (error) {
-    cleanupErrors.push(error);
-  }
-  try {
-    await stack?.stop();
-  } catch (error) {
-    cleanupErrors.push(error);
-  }
-  if (cleanupErrors.length > 0) {
-    throw new AggregateError(cleanupErrors, "remote-fetch browser test cleanup failed");
-  }
-});
 
 function remoteFixture(probeUrl: string): string {
   const dataSvg = [
@@ -91,9 +56,7 @@ async function expectSentinelsUnchanged(page: Page): Promise<void> {
   expect(values).toEqual([SENTINEL_BASELINE, SENTINEL_BASELINE]);
 }
 
-test("blocks remote media and cross-origin connection egress", async ({ browser }) => {
-  if (!stack || !probe) throw new Error("remote-fetch browser test services did not start");
-
+test("blocks remote media and cross-origin connection egress", async ({ browser, probe, stack }) => {
   const seeded = await seedShare({
     relayUrl: stack.relayUrl,
     paths: ["docs"],
@@ -102,7 +65,7 @@ test("blocks remote media and cross-origin connection egress", async ({ browser 
   const authoredProbeUrls = new Set(
     Object.entries(PROBE_PATHS)
       .filter(([name]) => name !== "directFetch")
-      .map(([, path]) => `${probe!.url}${path}`),
+      .map(([, path]) => `${probe.url}${path}`),
   );
   const browserAuthoredRequests: Request[] = [];
 

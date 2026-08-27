@@ -1,21 +1,11 @@
 import { randomBytes } from "node:crypto";
-import { expect, test, type Browser } from "@playwright/test";
+import { type Browser } from "@playwright/test";
 import {
+  expect,
   seedShare,
-  startStack,
-  type RunningStack,
   type SeededShare,
+  test,
 } from "./harness";
-
-let stack: RunningStack | undefined;
-
-test.beforeAll(async () => {
-  stack = await startStack();
-});
-
-test.afterAll(async () => {
-  await stack?.stop();
-});
 
 async function refusalCopy(browser: Browser, stackUrl: string, secret: string): Promise<string> {
   const context = await browser.newContext();
@@ -48,8 +38,8 @@ async function revokeLink(relayUrl: string, seeded: SeededShare): Promise<void> 
 test("opens a real accountless share without exposing its bearer secret", async ({
   browser,
   page,
+  stack,
 }) => {
-  if (!stack) throw new Error("browser-isolation stack did not start");
   const markdown = "# Browser isolation smoke\n\nRendered by the real viewer.\n";
   const seeded = await seedShare({
     relayUrl: stack.relayUrl,

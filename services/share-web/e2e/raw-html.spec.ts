@@ -1,10 +1,8 @@
-import { expect, test, type Download } from "@playwright/test";
+import { type Page } from "@playwright/test";
 import {
+  expect,
   seedShare,
-  startProbe,
-  startStack,
-  type RunningProbe,
-  type RunningStack,
+  test,
 } from "./harness";
 
 const HTML_DOM_MARKER = "RAW_HTML_BYTES_MUST_NOT_ENTER_VIEWER_DOM";
@@ -17,39 +15,6 @@ const ATTACK_SENTINELS = [
   "__dohcAttackSvg",
   "__dohcAttackJavascriptUrl",
 ] as const;
-
-let probe: RunningProbe | undefined;
-let stack: RunningStack | undefined;
-
-test.describe.configure({ mode: "serial" });
-
-test.beforeAll(async () => {
-  stack = await startStack();
-  try {
-    probe = await startProbe();
-  } catch (error) {
-    await stack.stop();
-    stack = undefined;
-    throw error;
-  }
-});
-
-test.afterAll(async () => {
-  const cleanupErrors: unknown[] = [];
-  try {
-    await probe?.stop();
-  } catch (error) {
-    cleanupErrors.push(error);
-  }
-  try {
-    await stack?.stop();
-  } catch (error) {
-    cleanupErrors.push(error);
-  }
-  if (cleanupErrors.length > 0) {
-    throw new AggregateError(cleanupErrors, "raw HTML browser test cleanup failed");
-  }
-});
 
 function hostileMarkup(probeUrl: string, marker: string): string {
   return `
@@ -71,7 +36,7 @@ fetch(${JSON.stringify(`${probeUrl}/raw-script`)});
 `.trim();
 }
 
-async function expectNoAttackSentinel(page: import("@playwright/test").Page): Promise<void> {
+async function expectNoAttackSentinel(page: Page): Promise<void> {
   const sentinelExists = await page.evaluate(
     (names) => names.map((name) => name in window),
     ATTACK_SENTINELS,
@@ -79,9 +44,11 @@ async function expectNoAttackSentinel(page: import("@playwright/test").Page): Pr
   expect(sentinelExists).toEqual(ATTACK_SENTINELS.map(() => false));
 }
 
-test("keeps shared raw HTML inert in Markdown and downloadable HTML", async ({ browser }) => {
-  if (!stack || !probe) throw new Error("raw HTML browser test services did not start");
-
+test("keeps shared raw HTML inert in Markdown and downloadable HTML", async ({
+  browser,
+  probe,
+  stack,
+}) => {
   const markdownText = "Raw HTML conformance ordinary Markdown text.";
   const rawMarkdown = [
     "# Raw HTML browser conformance",
@@ -114,7 +81,6 @@ test("keeps shared raw HTML inert in Markdown and downloadable HTML", async ({ b
   if (!htmlFile) throw new Error("raw HTML fixture was not seeded");
 
   const context = await browser.newContext({ acceptDownloads: true });
-  let download: Download | undefined;
   try {
     const page = await context.newPage();
     await page.goto(`${stack.shareWebUrl}/s/#${seeded.secret}`);
@@ -152,7 +118,7 @@ test("keeps shared raw HTML inert in Markdown and downloadable HTML", async ({ b
       page.waitForEvent("download"),
       downloadCard.getByRole("link", { name: "Download file" }).click(),
     ]);
-    download = startedDownload;
+    const download = startedDownload;
 
     expect(downloadResponse.status()).toBe(200);
     expect(downloadResponse.headers()["content-type"]).toBe("application/octet-stream");
@@ -168,7 +134,6 @@ test("keeps shared raw HTML inert in Markdown and downloadable HTML", async ({ b
     await expectNoAttackSentinel(page);
     expect(probe.requests).toEqual([]);
   } finally {
-    await download?.delete();
     await context.close();
   }
 });

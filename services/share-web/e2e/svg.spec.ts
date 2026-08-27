@@ -1,47 +1,12 @@
-import { expect, test, type Download, type Page } from "@playwright/test";
+import { type Page } from "@playwright/test";
 import {
+  expect,
   seedShare,
-  startProbe,
-  startStack,
-  type RunningProbe,
-  type RunningStack,
+  test,
 } from "./harness";
 
 const SVG_ATTACK_SENTINEL = "__dohcIso3SvgAttackSentinel_8f91cbe2";
 const SENTINEL_BASELINE = "iso3svg-unmodified-8f91cbe2";
-
-let probe: RunningProbe | undefined;
-let stack: RunningStack | undefined;
-
-test.describe.configure({ mode: "serial" });
-
-test.beforeAll(async () => {
-  stack = await startStack();
-  try {
-    probe = await startProbe();
-  } catch (error) {
-    await stack.stop();
-    stack = undefined;
-    throw error;
-  }
-});
-
-test.afterAll(async () => {
-  const cleanupErrors: unknown[] = [];
-  try {
-    await probe?.stop();
-  } catch (error) {
-    cleanupErrors.push(error);
-  }
-  try {
-    await stack?.stop();
-  } catch (error) {
-    cleanupErrors.push(error);
-  }
-  if (cleanupErrors.length > 0) {
-    throw new AggregateError(cleanupErrors, "SVG browser test cleanup failed");
-  }
-});
 
 function hostileSvg(probeUrl: string): string {
   const onloadProbe = `${probeUrl}/iso3svg-onload?sentinel=8f91cbe2`;
@@ -66,9 +31,11 @@ async function expectSentinelUnchanged(page: Page): Promise<void> {
   expect(value).toBe(SENTINEL_BASELINE);
 }
 
-test("keeps a shared SVG inert and downloads it as an attachment", async ({ browser }) => {
-  if (!stack || !probe) throw new Error("SVG browser test services did not start");
-
+test("keeps a shared SVG inert and downloads it as an attachment", async ({
+  browser,
+  probe,
+  stack,
+}) => {
   const svg = hostileSvg(probe.url);
   const svgBytes = new TextEncoder().encode(svg);
   const seeded = await seedShare({
@@ -82,7 +49,6 @@ test("keeps a shared SVG inert and downloads it as an attachment", async ({ brow
   if (!svgFile) throw new Error("SVG fixture was not seeded");
 
   const context = await browser.newContext({ acceptDownloads: true });
-  let download: Download | undefined;
   try {
     const page = await context.newPage();
     await page.addInitScript(
@@ -114,7 +80,7 @@ test("keeps a shared SVG inert and downloads it as an attachment", async ({ brow
       page.waitForEvent("download"),
       downloadLink.click(),
     ]);
-    download = startedDownload;
+    const download = startedDownload;
 
     expect(downloadResponse.status()).toBe(200);
     expect(downloadResponse.headers()["content-type"]).toBe("application/octet-stream");
@@ -131,7 +97,6 @@ test("keeps a shared SVG inert and downloads it as an attachment", async ({ brow
     await expectSentinelUnchanged(page);
     expect(probe.requests).toEqual([]);
   } finally {
-    await download?.delete();
     await context.close();
   }
 });

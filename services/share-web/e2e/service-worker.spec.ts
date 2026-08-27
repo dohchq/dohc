@@ -1,10 +1,8 @@
-import { expect, test, type Page, type Request, type Response } from "@playwright/test";
+import { type Page, type Request, type Response } from "@playwright/test";
 import {
+  expect,
   seedShare,
-  startProbe,
-  startStack,
-  type RunningProbe,
-  type RunningStack,
+  test,
 } from "./harness";
 
 const EXECUTION_MARKER = "ISO5WORKER_EXECUTED_76b91e4a";
@@ -18,39 +16,6 @@ interface RegistrationSnapshot {
   waitingScriptUrl: string | null;
   activeScriptUrl: string | null;
 }
-
-let probe: RunningProbe | undefined;
-let stack: RunningStack | undefined;
-
-test.describe.configure({ mode: "serial" });
-
-test.beforeAll(async () => {
-  stack = await startStack();
-  try {
-    probe = await startProbe();
-  } catch (error) {
-    await stack.stop();
-    stack = undefined;
-    throw error;
-  }
-});
-
-test.afterAll(async () => {
-  const cleanupErrors: unknown[] = [];
-  try {
-    await probe?.stop();
-  } catch (error) {
-    cleanupErrors.push(error);
-  }
-  try {
-    await stack?.stop();
-  } catch (error) {
-    cleanupErrors.push(error);
-  }
-  if (cleanupErrors.length > 0) {
-    throw new AggregateError(cleanupErrors, "service-worker browser test cleanup failed");
-  }
-});
 
 function hostileWorker(probeUrl: string): Uint8Array {
   const installProbeUrl = `${probeUrl}/iso5worker-install?marker=76b91e4a`;
@@ -100,9 +65,11 @@ function matchesWorker(
     registration.waitingScriptUrl === workerScriptUrl;
 }
 
-test("keeps a shared JavaScript file from becoming a service worker", async ({ browser }) => {
-  if (!stack || !probe) throw new Error("service-worker browser test services did not start");
-
+test("keeps a shared JavaScript file from becoming a service worker", async ({
+  browser,
+  probe,
+  stack,
+}) => {
   const workerBytes = hostileWorker(probe.url);
   const seeded = await seedShare({
     relayUrl: stack.relayUrl,
@@ -116,7 +83,6 @@ test("keeps a shared JavaScript file from becoming a service worker", async ({ b
   if (!workerFile) throw new Error("service-worker fixture was not seeded");
 
   const context = await browser.newContext();
-  let page: Page | undefined;
   let workerScriptUrl: string | undefined;
   let workerScopeUrl: string | undefined;
   try {
@@ -134,7 +100,7 @@ test("keeps a shared JavaScript file from becoming a service worker", async ({ b
         sentinel: EXECUTION_SENTINEL,
       },
     );
-    page = await context.newPage();
+    const page = await context.newPage();
     const observedWorkerRequests: Request[] = [];
     const observedWorkerResponses: Response[] = [];
     context.on("request", (request) => {
@@ -227,24 +193,6 @@ test("keeps a shared JavaScript file from becoming a service worker", async ({ b
     expect(workerResponse.headers()["content-disposition"]).toBe("attachment");
     expect(workerResponse.headers()["x-content-type-options"]).toBe("nosniff");
   } finally {
-    const cleanupErrors: unknown[] = [];
-    if (page && !page.isClosed()) {
-      try {
-        await page.evaluate(async () => {
-          const registrations = await navigator.serviceWorker.getRegistrations();
-          await Promise.all(registrations.map((registration) => registration.unregister()));
-        });
-      } catch (error) {
-        cleanupErrors.push(error);
-      }
-    }
-    try {
-      await context.close();
-    } catch (error) {
-      cleanupErrors.push(error);
-    }
-    if (cleanupErrors.length > 0) {
-      throw new AggregateError(cleanupErrors, "service-worker browser resource cleanup failed");
-    }
+    await context.close();
   }
 });

@@ -1,8 +1,8 @@
-import { expect, test, type Page, type Request } from "@playwright/test";
+import { type Page, type Request } from "@playwright/test";
 import {
+  expect,
   seedShare,
-  startStack,
-  type RunningStack,
+  test,
 } from "./harness";
 
 const OBSERVER_CONTROL = "__dohcIso10StorageObserverControl_b7e15162";
@@ -53,18 +53,6 @@ interface StorageSnapshot {
   }>;
   sessionStorageEntries: Array<[string, string]>;
 }
-
-let stack: RunningStack | undefined;
-
-test.describe.configure({ mode: "serial" });
-
-test.beforeAll(async () => {
-  stack = await startStack();
-});
-
-test.afterAll(async () => {
-  await stack?.stop();
-});
 
 function attackProgram(vector: typeof ATTACK_VECTORS[number]): string {
   return [
@@ -172,23 +160,6 @@ function observerSnapshot(page: Page): Promise<ObserverSnapshot> {
   }, OBSERVER_CONTROL);
 }
 
-async function closeObserver(page: Page): Promise<void> {
-  await page.evaluate((controlName) => {
-    const control = Reflect.get(window, controlName) as {
-      channel: BroadcastChannel;
-      onBroadcast: (event: MessageEvent<unknown>) => void;
-      onServiceWorkerMessage: (event: MessageEvent<unknown>) => void;
-      onStorage: (event: StorageEvent) => void;
-    } | undefined;
-    if (!control) return;
-    control.channel.removeEventListener("message", control.onBroadcast);
-    control.channel.close();
-    navigator.serviceWorker.removeEventListener("message", control.onServiceWorkerMessage);
-    window.removeEventListener("storage", control.onStorage);
-    Reflect.deleteProperty(window, controlName);
-  }, OBSERVER_CONTROL);
-}
-
 function apiRequestsUseSession(requests: readonly Request[], session: string): boolean {
   const viewRequests = requests.filter((request) =>
     new URL(request.url()).pathname.startsWith("/api/view/")
@@ -198,9 +169,10 @@ function apiRequestsUseSession(requests: readonly Request[], session: string): b
   );
 }
 
-test("keeps shared content from creating viewer-origin browser storage", async ({ browser }) => {
-  if (!stack) throw new Error("viewer storage browser test services did not start");
-
+test("keeps shared content from creating viewer-origin browser storage", async ({
+  browser,
+  stack,
+}) => {
   const hostileShare = await seedShare({
     relayUrl: stack.relayUrl,
     paths: ["docs"],
@@ -218,11 +190,8 @@ test("keeps shared content from creating viewer-origin browser storage", async (
   const context = await browser.newContext();
   const observerRequests: Request[] = [];
   const hostileRequests: Request[] = [];
-  let hostilePage: Page | undefined;
-  let observerInstalled = false;
-  let observerPage: Page | undefined;
   try {
-    observerPage = await context.newPage();
+    const observerPage = await context.newPage();
     observerPage.on("request", (request) => observerRequests.push(request));
     await observerPage.goto(`${stack.shareWebUrl}/s/#${observerShare.secret}`);
     await expect(observerPage.locator("article.markdown")).toContainText(
@@ -232,7 +201,6 @@ test("keeps shared content from creating viewer-origin browser storage", async (
     const observerUrl = observerPage.url();
 
     await installObserver(observerPage);
-    observerInstalled = true;
     expect(await storageSnapshot(observerPage)).toEqual({
       cacheNames: [],
       databaseNames: [],
@@ -246,7 +214,7 @@ test("keeps shared content from creating viewer-origin browser storage", async (
       storageEvents: [],
     });
 
-    hostilePage = await context.newPage();
+    const hostilePage = await context.newPage();
     hostilePage.on("request", (request) => hostileRequests.push(request));
     await hostilePage.goto(`${stack.shareWebUrl}/s/#${hostileShare.secret}`);
     const hostileArticle = hostilePage.locator("article.markdown");
@@ -306,29 +274,6 @@ test("keeps shared content from creating viewer-origin browser storage", async (
     );
     expect(hostilePage.url()).toBe(hostileUrl);
   } finally {
-    const cleanupErrors: unknown[] = [];
-    if (observerInstalled && observerPage && !observerPage.isClosed()) {
-      try {
-        await closeObserver(observerPage);
-      } catch (error) {
-        cleanupErrors.push(error);
-      }
-    }
-    for (const page of [hostilePage, observerPage]) {
-      if (!page || page.isClosed()) continue;
-      try {
-        await page.close();
-      } catch (error) {
-        cleanupErrors.push(error);
-      }
-    }
-    try {
-      await context.close();
-    } catch (error) {
-      cleanupErrors.push(error);
-    }
-    if (cleanupErrors.length > 0) {
-      throw new AggregateError(cleanupErrors, "viewer storage browser resource cleanup failed");
-    }
+    await context.close();
   }
 });

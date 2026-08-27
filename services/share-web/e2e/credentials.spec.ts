@@ -1,16 +1,12 @@
 import { createHash } from "node:crypto";
 import {
-  expect,
-  test,
   type Request,
   type Response,
 } from "@playwright/test";
 import {
+  expect,
   seedShare,
-  startProbe,
-  startStack,
-  type RunningProbe,
-  type RunningStack,
+  test,
 } from "./harness";
 
 const RAW_SCRIPT_SENTINEL = "__dohcIso9CredentialRawScript_6a09e667";
@@ -25,39 +21,6 @@ const SAFE_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64",
 );
-
-let probe: RunningProbe | undefined;
-let stack: RunningStack | undefined;
-
-test.describe.configure({ mode: "serial" });
-
-test.beforeAll(async () => {
-  stack = await startStack();
-  try {
-    probe = await startProbe();
-  } catch (error) {
-    await stack.stop();
-    stack = undefined;
-    throw error;
-  }
-});
-
-test.afterAll(async () => {
-  const cleanupErrors: unknown[] = [];
-  try {
-    await probe?.stop();
-  } catch (error) {
-    cleanupErrors.push(error);
-  }
-  try {
-    await stack?.stop();
-  } catch (error) {
-    cleanupErrors.push(error);
-  }
-  if (cleanupErrors.length > 0) {
-    throw new AggregateError(cleanupErrors, "viewer credential browser test cleanup failed");
-  }
-});
 
 function credentialFixture(probeUrl: string, safeBlobSha256: string): string {
   const scriptProbe = `${probeUrl}${EXFILTRATION_PATHS[0]}`;
@@ -85,9 +48,9 @@ function isExfiltrationRequest(request: Request): boolean {
 
 test("keeps the viewer bearer and authored credential probes outside page reach", async ({
   browser,
+  probe,
+  stack,
 }) => {
-  if (!stack || !probe) throw new Error("viewer credential browser test services did not start");
-
   const safeBlobSha256 = createHash("sha256").update(SAFE_PNG).digest("hex");
   const seeded = await seedShare({
     relayUrl: stack.relayUrl,
@@ -226,7 +189,7 @@ test("keeps the viewer bearer and authored credential probes outside page reach"
       .filter((cookie) => cookie.name.startsWith("dohc_share_"))
       .map((cookie) => ({
         domain: cookie.domain,
-        hostOnlyEquivalent: cookie.domain === new URL(stack!.shareWebUrl).hostname &&
+        hostOnlyEquivalent: cookie.domain === new URL(stack.shareWebUrl).hostname &&
           !cookie.domain.startsWith("."),
         httpOnly: cookie.httpOnly,
         name: cookie.name,
@@ -259,7 +222,7 @@ test("keeps the viewer bearer and authored credential probes outside page reach"
     expect(exfiltrationRequests).toHaveLength(0);
     expect(
       probe.requests.filter((request) =>
-        EXFILTRATION_PATHS.some((path) => new URL(request.path, probe!.url).pathname === path)
+        EXFILTRATION_PATHS.some((path) => new URL(request.path, probe.url).pathname === path)
       ),
     ).toEqual([]);
 

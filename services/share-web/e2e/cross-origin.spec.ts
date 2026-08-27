@@ -1,18 +1,10 @@
 import { randomBytes } from "node:crypto";
-import { expect, test, type CDPSession, type Page } from "@playwright/test";
+import { type CDPSession, type Page } from "@playwright/test";
 import {
+  expect,
   seedShare,
-  startProbe,
-  startStack,
-  type RunningProbe,
-  type RunningStack,
+  test,
 } from "./harness";
-
-interface BlockedFetch {
-  errorMessage: string;
-  errorName: string;
-  rejected: true;
-}
 
 interface ObservedNetworkResponse {
   body: Buffer;
@@ -31,45 +23,12 @@ interface PausedResponse {
   responseStatusCode?: number;
 }
 
-let probe: RunningProbe | undefined;
-let stack: RunningStack | undefined;
-
-test.describe.configure({ mode: "serial" });
-
-test.beforeAll(async () => {
-  stack = await startStack();
-  try {
-    probe = await startProbe();
-  } catch (error) {
-    await stack.stop();
-    stack = undefined;
-    throw error;
-  }
-});
-
-test.afterAll(async () => {
-  const cleanupErrors: unknown[] = [];
-  try {
-    await probe?.stop();
-  } catch (error) {
-    cleanupErrors.push(error);
-  }
-  try {
-    await stack?.stop();
-  } catch (error) {
-    cleanupErrors.push(error);
-  }
-  if (cleanupErrors.length > 0) {
-    throw new AggregateError(cleanupErrors, "cross-origin browser test cleanup failed");
-  }
-});
-
 async function fetchFromProbe(
   cdp: CDPSession,
   page: Page,
   probeUrl: string,
   blobUrl: string,
-): Promise<{ networkResponse: ObservedNetworkResponse; scriptResult: BlockedFetch }> {
+): Promise<ObservedNetworkResponse> {
   const probeResponse = await page.goto(probeUrl);
   if (!probeResponse) throw new Error(`probe navigation returned no response for ${probeUrl}`);
   expect(new URL(page.url()).origin).toBe(new URL(probeUrl).origin);
@@ -135,10 +94,7 @@ async function fetchFromProbe(
     errorName: "TypeError",
     rejected: true,
   });
-  if (!scriptResult.rejected) {
-    throw new Error(`probe script unexpectedly read HTTP ${String(scriptResult.status)}`);
-  }
-  return { networkResponse, scriptResult };
+  return networkResponse;
 }
 
 function lowerCaseHeaders(headers: Record<string, string>): Record<string, string> {
@@ -154,9 +110,9 @@ function expectNoCorsPermission(response: ObservedNetworkResponse): void {
 
 test("separates cross-site Strict-cookie withholding from same-site CORS protection", async ({
   browser,
+  probe,
+  stack,
 }) => {
-  if (!stack || !probe) throw new Error("cross-origin browser test services did not start");
-
   const targetBytes = Buffer.from(
     `iso8crossorigin-${randomBytes(24).toString("hex")}`,
     "utf8",
@@ -196,17 +152,17 @@ test("separates cross-site Strict-cookie withholding from same-site CORS protect
     });
 
     const crossSite = await fetchFromProbe(cdp, page, probe.url, blobUrl);
-    expect(crossSite.networkResponse.status).toBe(404);
-    expectNoCorsPermission(crossSite.networkResponse);
-    expect(crossSite.networkResponse.requestHeaders["x-dohc-link-session"])
+    expect(crossSite.status).toBe(404);
+    expectNoCorsPermission(crossSite);
+    expect(crossSite.requestHeaders["x-dohc-link-session"])
       .toBeUndefined();
 
     const sameSite = await fetchFromProbe(cdp, page, probe.sameHostnameUrl, blobUrl);
-    expect(sameSite.networkResponse.status).toBe(200);
-    expectNoCorsPermission(sameSite.networkResponse);
-    expect(sameSite.networkResponse.requestHeaders["x-dohc-link-session"])
+    expect(sameSite.status).toBe(200);
+    expectNoCorsPermission(sameSite);
+    expect(sameSite.requestHeaders["x-dohc-link-session"])
       .toBeUndefined();
-    expect(sameSite.networkResponse.body).toEqual(targetBytes);
+    expect(sameSite.body).toEqual(targetBytes);
   } finally {
     await cdp?.send("Fetch.disable").catch(() => {});
     await cdp?.detach().catch(() => {});

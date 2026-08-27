@@ -1,10 +1,8 @@
-import { expect, test, type Page } from "@playwright/test";
+import { type Page } from "@playwright/test";
 import {
+  expect,
   seedShare,
-  startProbe,
-  startStack,
-  type RunningProbe,
-  type RunningStack,
+  test,
 } from "./harness";
 
 const JAVASCRIPT_SENTINEL = "__dohcIso6NavigationJavascriptAttack_4f72a18c";
@@ -12,39 +10,6 @@ const DATA_SENTINEL = "__dohcIso6NavigationDataAttack_4f72a18c";
 const SENTINEL_BASELINE = "iso6navigation-unmodified-4f72a18c";
 const NEXT_FILE_MARKER = "ISO6NAVIGATION_NEXT_FILE_CONTENT_4f72a18c";
 const EXTERNAL_PROBE_PATH = "/iso6navigation-external?sentinel=4f72a18c";
-
-let probe: RunningProbe | undefined;
-let stack: RunningStack | undefined;
-
-test.describe.configure({ mode: "serial" });
-
-test.beforeAll(async () => {
-  stack = await startStack();
-  try {
-    probe = await startProbe();
-  } catch (error) {
-    await stack.stop();
-    stack = undefined;
-    throw error;
-  }
-});
-
-test.afterAll(async () => {
-  const cleanupErrors: unknown[] = [];
-  try {
-    await probe?.stop();
-  } catch (error) {
-    cleanupErrors.push(error);
-  }
-  try {
-    await stack?.stop();
-  } catch (error) {
-    cleanupErrors.push(error);
-  }
-  if (cleanupErrors.length > 0) {
-    throw new AggregateError(cleanupErrors, "navigation browser test cleanup failed");
-  }
-});
 
 function navigationFixture(probeUrl: string): string {
   return [
@@ -66,18 +31,17 @@ function navigationFixture(probeUrl: string): string {
 
 async function expectAttackSentinelsUnchanged(page: Page): Promise<void> {
   const sentinels = await page.evaluate(
-    ({ baseline, names }) => names.map((name) => Reflect.get(window, name) ?? baseline),
-    {
-      baseline: SENTINEL_BASELINE,
-      names: [JAVASCRIPT_SENTINEL, DATA_SENTINEL],
-    },
+    (names) => names.map((name) => Reflect.get(window, name)),
+    [JAVASCRIPT_SENTINEL, DATA_SENTINEL],
   );
   expect(sentinels).toEqual([SENTINEL_BASELINE, SENTINEL_BASELINE]);
 }
 
-test("keeps authored navigation inert until the user follows an allowed link", async ({ browser }) => {
-  if (!stack || !probe) throw new Error("navigation browser test services did not start");
-
+test("keeps authored navigation inert until the user follows an allowed link", async ({
+  browser,
+  probe,
+  stack,
+}) => {
   const seeded = await seedShare({
     relayUrl: stack.relayUrl,
     paths: ["docs"],
@@ -155,7 +119,7 @@ test("keeps authored navigation inert until the user follows an allowed link", a
     await externalLink.click();
     await expect(page).toHaveURL(externalUrl);
     await expect.poll(
-      () => probe?.requests.filter((request) => request.path === EXTERNAL_PROBE_PATH).length ?? 0,
+      () => probe.requests.filter((request) => request.path === EXTERNAL_PROBE_PATH).length,
     ).toBe(1);
     expect(probe.requests.filter((request) => request.path === EXTERNAL_PROBE_PATH)).toEqual([
       expect.objectContaining({

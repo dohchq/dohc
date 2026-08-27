@@ -5,6 +5,7 @@ import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { expect, test as base } from "@playwright/test";
 
 const LOOPBACK_HOST = "127.0.0.1";
 const RELAY_STARTUP_TIMEOUT_MS = 45_000;
@@ -20,13 +21,7 @@ interface ServiceProcess {
   stdout: () => string;
 }
 
-export interface StackEnvironment {
-  relay: NodeJS.ProcessEnv;
-  shareWeb: NodeJS.ProcessEnv;
-}
-
 export interface RunningStack {
-  env: StackEnvironment;
   relayUrl: string;
   shareWebUrl: string;
   stop: () => Promise<void>;
@@ -249,7 +244,7 @@ async function allocatePort(): Promise<number> {
   return port;
 }
 
-export async function startStack(): Promise<RunningStack> {
+async function startStack(): Promise<RunningStack> {
   const roots = packageRoots();
   const viewerIndex = join(roots.shareWeb, "viewer", "dist", "index.html");
   try {
@@ -344,7 +339,6 @@ export async function startStack(): Promise<RunningStack> {
     }
 
     return {
-      env: { relay: relayEnv, shareWeb: shareWebEnv },
       relayUrl,
       shareWebUrl: `http://${LOOPBACK_HOST}:${String(shareWebPort)}`,
       stop,
@@ -556,7 +550,7 @@ async function stopServer(server: Server): Promise<void> {
   });
 }
 
-export async function startProbe(): Promise<RunningProbe> {
+async function startProbe(): Promise<RunningProbe> {
   const requests: ProbeRequest[] = [];
   const crossSite = await listenProbe("cross-site", requests);
   try {
@@ -577,3 +571,29 @@ export async function startProbe(): Promise<RunningProbe> {
     throw error;
   }
 }
+
+interface ShareWebFixtures {
+  probe: RunningProbe;
+  stack: RunningStack;
+}
+
+export const test = base.extend<ShareWebFixtures>({
+  stack: async ({}, use) => {
+    const stack = await startStack();
+    try {
+      await use(stack);
+    } finally {
+      await stack.stop();
+    }
+  },
+  probe: async ({ stack: _stack }, use) => {
+    const probe = await startProbe();
+    try {
+      await use(probe);
+    } finally {
+      await probe.stop();
+    }
+  },
+});
+
+export { expect };
