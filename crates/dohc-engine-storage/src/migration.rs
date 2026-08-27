@@ -2910,6 +2910,67 @@ CREATE INDEX collection_records_by_collection
 
 pub(crate) const COLLECTION_ADOPTION_MIGRATION_ID: &str = "v1-collection-adoption";
 
+/// Ordinal 40. The local collection projection derived from applied record
+/// frontmatter: current values with validation, per-field history, and
+/// relation edges used for referential cleanup.
+const V1_COLLECTION_INDEX_DDL: &str = "\
+ALTER TABLE collection_records ADD COLUMN index_initialized INTEGER NOT NULL DEFAULT 0
+  CHECK (index_initialized IN (0, 1));
+
+CREATE TABLE collection_record_fields (
+    workspace_id          TEXT NOT NULL,
+    version_id            TEXT NOT NULL,
+    record_id             TEXT NOT NULL,
+    field_name            TEXT NOT NULL,
+    value_json            TEXT NOT NULL CHECK (json_valid(value_json)),
+    validation_status     TEXT NOT NULL
+      CHECK (validation_status IN ('valid', 'flagged', 'untyped')),
+    validation_reason_json TEXT CHECK (
+      validation_reason_json IS NULL OR json_valid(validation_reason_json)
+    ),
+    PRIMARY KEY (workspace_id, version_id, record_id, field_name)
+) STRICT;
+
+CREATE TABLE collection_field_history (
+    history_id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id           TEXT NOT NULL,
+    version_id             TEXT NOT NULL,
+    record_id              TEXT NOT NULL,
+    field_name             TEXT NOT NULL,
+    previous_value_json    TEXT CHECK (
+      previous_value_json IS NULL OR json_valid(previous_value_json)
+    ),
+    next_value_json        TEXT CHECK (
+      next_value_json IS NULL OR json_valid(next_value_json)
+    ),
+    author_origin_id       TEXT,
+    recorded_at_ms         INTEGER NOT NULL
+) STRICT;
+CREATE INDEX collection_field_history_by_record
+    ON collection_field_history(
+      workspace_id, version_id, record_id, field_name, history_id
+    );
+
+CREATE TABLE collection_relation_edges (
+    workspace_id          TEXT NOT NULL,
+    version_id            TEXT NOT NULL,
+    source_record_id      TEXT NOT NULL,
+    field_name            TEXT NOT NULL,
+    target_record_id      TEXT NOT NULL,
+    target_collection_path TEXT NOT NULL,
+    many                  INTEGER NOT NULL CHECK (many IN (0, 1)),
+    PRIMARY KEY (
+      workspace_id, version_id, source_record_id, field_name, target_record_id
+    )
+) STRICT;
+CREATE INDEX collection_relation_edges_by_target
+    ON collection_relation_edges(
+      workspace_id, version_id, target_record_id, source_record_id, field_name
+    );
+";
+
+pub(crate) const COLLECTION_INDEX_MIGRATION_ID: &str = "v1-collection-index";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -3195,6 +3256,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: COLLECTION_ADOPTION_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_COLLECTION_ADOPTION_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 40,
+        id: COLLECTION_INDEX_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_COLLECTION_INDEX_DDL,
         sets_user_version: None,
     },
 ];

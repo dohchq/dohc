@@ -872,12 +872,76 @@ fn append_local_update(
     }
     put_binary_blob(conn, update)?;
     let seq = append_row(conn, key, sha, actor_origin_id, now_ms)?;
+    index_applied_frontmatter(
+        conn,
+        key,
+        marker.content_kind,
+        &base,
+        update,
+        actor_origin_id,
+        now_ms,
+    )?;
     Ok(AppendOutcome {
         seq,
         deduped: false,
         emit_outbound: marker.regime == Regime::Replicated
             && marker.lineage_claim_status == LineageClaimStatus::Exact,
     })
+}
+
+pub(crate) fn index_applied_frontmatter(
+    conn: &Connection,
+    key: &DocKey,
+    content_kind: ContentKind,
+    before_doc: &Ydoc,
+    update: &[u8],
+    author_origin_id: Option<&str>,
+    recorded_at_ms: i64,
+) -> Result<(), CollabError> {
+    if content_kind != ContentKind::Richdoc {
+        return Ok(());
+    }
+    let before = before_doc.frontmatter_json();
+    before_doc.apply(update)?;
+    let after = before_doc.frontmatter_json();
+    let authored_doc = lineage_base_doc(conn, key)?;
+    let authored_before = authored_doc.frontmatter_json();
+    authored_doc.apply(update)?;
+    let authored_after = authored_doc.frontmatter_json();
+    dohc_engine_domain::index_collection_frontmatter_apply_in_tx(
+        conn,
+        &key.workspace_id,
+        &key.version_id,
+        &key.object_id,
+        &before,
+        &after,
+        &authored_before,
+        &authored_after,
+        author_origin_id,
+        recorded_at_ms,
+    )
+    .map_err(|error| CollabError::Corrupt {
+        reason: format!("collection frontmatter index apply failed: {error}"),
+    })
+}
+
+fn lineage_base_doc(conn: &Connection, key: &DocKey) -> Result<Ydoc, CollabError> {
+    let bytes = conn
+        .query_row(
+            "SELECT b.bytes FROM ydoc_snapshots s \
+             JOIN binary_blobs b ON b.sha256=s.snapshot_blob_sha256 \
+             WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 \
+               AND s.up_to_seq=0",
+            rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .map_err(map_sql)?;
+    let doc = Ydoc::wire();
+    if let Some(bytes) = bytes {
+        doc.apply(&bytes)?;
+    }
+    Ok(doc)
 }
 
 /// After a genuinely-new append, fold the log if it has grown past the default

@@ -29,7 +29,7 @@
 //!    the whole update before applying (a truncated update is rejected on decode,
 //!    state-unchanged), and the caller only persists bytes an apply accepted.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -797,6 +797,55 @@ impl Ydoc {
         self.with_delta(|txn| {
             map.insert(txn, key, Any::from(nested.clone()));
         })
+    }
+
+    /// Set one top-level frontmatter value with its JSON scalar or sequence
+    /// shape preserved and return the encoded delta.
+    pub fn frontmatter_set_value(&self, key: &str, value: &Value) -> Vec<u8> {
+        let map = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
+        let value = json_to_any(value);
+        self.with_delta(|txn| {
+            map.insert(txn, key, value);
+        })
+    }
+
+    /// Remove one target from a relation field. A single relation removes the
+    /// key; a many relation keeps the sequence and removes matching entries.
+    /// Returns `None` when the applied frontmatter has no such link.
+    pub fn frontmatter_drop_relation_target(
+        &self,
+        key: &str,
+        target_record_id: &str,
+        many: bool,
+    ) -> Option<Vec<u8>> {
+        let current = self.frontmatter_json();
+        let value = current.as_object()?.get(key)?;
+        let map = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
+        if many {
+            let values = value.as_array()?;
+            if !values
+                .iter()
+                .any(|value| value.as_str() == Some(target_record_id))
+            {
+                return None;
+            }
+            let retained = Value::Array(
+                values
+                    .iter()
+                    .filter(|value| value.as_str() != Some(target_record_id))
+                    .cloned()
+                    .collect(),
+            );
+            Some(self.with_delta(|txn| {
+                map.insert(txn, key, json_to_any(&retained));
+            }))
+        } else if value.as_str() == Some(target_record_id) {
+            Some(self.with_delta(|txn| {
+                map.remove(txn, key);
+            }))
+        } else {
+            None
+        }
     }
 
     fn with_delta(&self, edit: impl FnOnce(&mut yrs::TransactionMut)) -> Vec<u8> {
@@ -1669,6 +1718,22 @@ pub(crate) fn any_to_json(any: &Any) -> Value {
             }
             Value::Object(sorted.into_iter().collect())
         }
+    }
+}
+
+fn json_to_any(value: &Value) -> Any {
+    match value {
+        Value::Null => Any::Null,
+        Value::Bool(value) => Any::Bool(*value),
+        Value::Number(value) => Any::Number(value.as_f64().unwrap_or(f64::NAN)),
+        Value::String(value) => Any::from(value.as_str()),
+        Value::Array(values) => Any::from(values.iter().map(json_to_any).collect::<Vec<_>>()),
+        Value::Object(values) => Any::from(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), json_to_any(value)))
+                .collect::<HashMap<String, Any>>(),
+        ),
     }
 }
 

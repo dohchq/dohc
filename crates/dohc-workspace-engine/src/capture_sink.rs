@@ -1294,6 +1294,68 @@ mod tests {
             .expect("collection status")
     }
 
+    fn indexed_collection_field(
+        db: &Path,
+        path: &str,
+        field: &str,
+    ) -> Option<(String, String, Option<String>)> {
+        let store = EngineStore::open(db, 100).expect("reopen store");
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT f.value_json,f.validation_status,f.validation_reason_json \
+                     FROM collection_record_fields f \
+                     JOIN collection_records r ON r.workspace_id=f.workspace_id \
+                       AND r.version_id=f.version_id AND r.record_id=f.record_id \
+                     WHERE r.workspace_id=?1 AND r.version_id=?2 AND r.file_path=?3 \
+                       AND f.field_name=?4",
+                    rusqlite::params![WORKSPACE_ID, VERSION_ID, path, field],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+            })
+            .expect("indexed collection field")
+    }
+
+    fn relation_edge_count(db: &Path, source_path: &str, field: &str, target: &str) -> i64 {
+        let store = EngineStore::open(db, 100).expect("reopen store");
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM collection_relation_edges e \
+                     JOIN collection_records r ON r.workspace_id=e.workspace_id \
+                       AND r.version_id=e.version_id AND r.record_id=e.source_record_id \
+                     WHERE r.workspace_id=?1 AND r.version_id=?2 AND r.file_path=?3 \
+                       AND e.field_name=?4 AND e.target_record_id=?5",
+                    rusqlite::params![WORKSPACE_ID, VERSION_ID, source_path, field, target],
+                    |row| row.get(0),
+                )
+            })
+            .expect("relation edge count")
+    }
+
+    fn latest_field_history(
+        db: &Path,
+        source_path: &str,
+        field: &str,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        let store = EngineStore::open(db, 100).expect("reopen store");
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT h.previous_value_json,h.next_value_json,h.author_origin_id \
+                     FROM collection_field_history h \
+                     JOIN collection_records r ON r.workspace_id=h.workspace_id \
+                       AND r.version_id=h.version_id AND r.record_id=h.record_id \
+                     WHERE r.workspace_id=?1 AND r.version_id=?2 AND r.file_path=?3 \
+                       AND h.field_name=?4 ORDER BY h.history_id DESC LIMIT 1",
+                    rusqlite::params![WORKSPACE_ID, VERSION_ID, source_path, field],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+            })
+            .expect("latest collection field history")
+    }
+
     fn latest_ydoc_actor_origin(db: &Path, path: &str) -> Option<String> {
         let store = EngineStore::open(db, 100).expect("reopen store");
         store
@@ -1408,6 +1470,142 @@ mod tests {
         assert_eq!(moment_count(&db, "tasks/alpha.md"), 2);
         assert_eq!(ydoc_update_count(&db, "tasks/alpha.md"), 2);
         assert_eq!(engine_ydoc_update_count(&db, "tasks/alpha.md"), 1);
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+    }
+
+    #[test]
+    fn invalid_collection_value_roundtrips_and_schema_edit_only_revalidates() {
+        const RECORD_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        let record = format!("---\nid: {RECORD_ID}\nestimate: nope\n---\n\nTask body\n");
+        write_file(
+            scratch.path(),
+            "tasks/collection.yaml",
+            b"name: Tasks\nfields:\n  estimate:\n    type: number\n",
+        );
+        write_file(scratch.path(), "tasks/alpha.md", record.as_bytes());
+        ingest(&mut sink, "tasks/collection.yaml").expect("capture number schema");
+        ingest(&mut sink, "tasks/alpha.md").expect("capture invalid record");
+
+        assert!(
+            sink.reconcile_collections()
+                .expect("index invalid value")
+                .is_empty()
+        );
+        let indexed =
+            indexed_collection_field(&db, "tasks/alpha.md", "estimate").expect("estimate indexed");
+        assert_eq!(indexed.0, "\"nope\"");
+        assert_eq!(indexed.1, "flagged");
+        assert!(
+            indexed
+                .2
+                .expect("validation reason")
+                .contains("expected-number")
+        );
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("tasks/alpha.md"))
+                .expect("read invalid artifact"),
+            record,
+            "validation must not rewrite the record"
+        );
+
+        write_file(
+            scratch.path(),
+            "tasks/collection.yaml",
+            b"name: Tasks\nfields:\n  estimate:\n    type: text\n",
+        );
+        ingest(&mut sink, "tasks/collection.yaml").expect("capture text schema");
+        assert!(
+            sink.reconcile_collections()
+                .expect("revalidate existing index")
+                .is_empty()
+        );
+        assert_eq!(
+            indexed_collection_field(&db, "tasks/alpha.md", "estimate"),
+            Some(("\"nope\"".to_owned(), "valid".to_owned(), None))
+        );
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("tasks/alpha.md"))
+                .expect("read revalidated artifact"),
+            record,
+            "schema revalidation must not touch the value or file"
+        );
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+    }
+
+    #[test]
+    fn deleting_relation_target_writes_back_and_histories_the_engine_drop() {
+        const SOURCE_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const TARGET_ID: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        write_file(
+            scratch.path(),
+            "tasks/collection.yaml",
+            b"name: Tasks\nfields:\n  related:\n    type: relation\n    collection: tasks\n    many: false\n",
+        );
+        write_file(
+            scratch.path(),
+            "tasks/source.md",
+            format!("---\nid: {SOURCE_ID}\nrelated: {TARGET_ID}\n---\n\nSource\n").as_bytes(),
+        );
+        write_file(
+            scratch.path(),
+            "tasks/target.md",
+            format!("---\nid: {TARGET_ID}\n---\n\nTarget\n").as_bytes(),
+        );
+        ingest(&mut sink, "tasks/collection.yaml").expect("capture relation schema");
+        ingest(&mut sink, "tasks/source.md").expect("capture referrer");
+        ingest(&mut sink, "tasks/target.md").expect("capture target");
+        assert!(
+            sink.reconcile_collections()
+                .expect("index relation")
+                .is_empty()
+        );
+        assert_eq!(
+            relation_edge_count(&db, "tasks/source.md", "related", TARGET_ID),
+            1
+        );
+
+        std::fs::remove_file(scratch.path().join("tasks/target.md")).expect("delete target");
+        sink.retire("tasks/target.md").expect("retire target");
+        assert_eq!(
+            sink.reconcile_collections().expect("drop inbound relation"),
+            ["tasks/source.md"]
+        );
+        assert_eq!(
+            relation_edge_count(&db, "tasks/source.md", "related", TARGET_ID),
+            0
+        );
+        assert_eq!(
+            indexed_collection_field(&db, "tasks/source.md", "related"),
+            None
+        );
+        assert!(
+            !std::fs::read_to_string(scratch.path().join("tasks/source.md"))
+                .expect("read cleaned referrer")
+                .contains("related:"),
+            "the relation is removed through the projected frontmatter write"
+        );
+        assert_eq!(
+            latest_field_history(&db, "tasks/source.md", "related"),
+            (
+                Some(format!("\"{TARGET_ID}\"")),
+                None,
+                Some("engine".to_owned())
+            )
+        );
+        assert_eq!(
+            latest_ydoc_actor_origin(&db, "tasks/source.md").as_deref(),
+            Some("engine")
+        );
 
         drop(sink);
         supervisor.close(&db).expect("close actor");

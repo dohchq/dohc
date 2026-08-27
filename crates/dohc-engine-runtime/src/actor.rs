@@ -49,28 +49,29 @@ use dohc_engine_domain::{
     ChatChannelKind, ChatChannelSummary, ChatDecision, ChatFeedPage, ChatFeedReadState,
     ChatFileMention, ChatFollow, ChatMention, ChatMessage, ChatMessagePage,
     ChatProjectionFileAccess, ChatReaction, ChatThread, ChatThreadProjection, ChatThreadReadState,
-    CollectionAdoptionCandidate, CompareTextFileVersions, CreateFileThread, CreateNamedVersion,
-    DeleteResult, DeleteTextFile, DispatchClaim, DispatchRecovery, DomainError, InbandBinary,
-    InbandSecret, InbandText, LinkedChatStore, ListMomentsQuery, MentionCursor,
-    MergeTextFileFromVersion, MergeTextFileResult, MomentPage, MomentRecord, PendingBookmarkRow,
-    RECORD_ID_FRONTMATTER_KEY, RenameResult, RenameTextFile, ResolveDecision, ResolveTextConflict,
-    ResolveTextConflictResult, RollbackTextFileMutation, RunRecordLink, SaveBookmark,
-    SecretComparePage, SecretDelete, SecretFileStat, SecretFileStore, SecretMomentPage,
-    SecretMomentRecord, SecretOp, SecretRestoreResult, SecretWrite, SecretWriteResult, SendMessage,
-    SetFollow, SetReaction, SnapshotContent, SnapshotMetadata, SnapshotView, StartChannelThread,
-    TextConflict, TextSnapshot, ThreadDispatchPause, UnreadFileThread, VersionFileChangePage,
-    VersionRecord, VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult,
-    WriteText, apply_secret_file_from_version_with, binary_delete_job_id,
-    binary_rename_delete_job_id, binary_rename_write_job_id, binary_rollback_job_identity,
-    capture_ingest_binary_with_admission_in_tx, capture_ingest_with_admission_in_tx,
-    capture_manifest_seed, capture_retire_in_tx, capture_secret_retire_with,
-    compare_secret_files_page_keyless, decode_binary_rollback_job_identity,
-    delete_secret_file_keyless_with, derive_capture_object_id, enqueue_binary_delete,
-    enqueue_binary_rename, enqueue_write, fork_version_keyless_with, get_secret_moment_keyless,
-    has_secret_state, insert_text_conflict_if_absent, list_secret_files_keyless,
-    list_secret_files_keyless_page, list_secret_moments_page_keyless, reconcile_collections_in_tx,
-    restore_secret_file_verbatim_with_metadata_and_after, rollback_compensating_moment_id,
-    secret_file_len_keyless, select_snapshot_by_path_in_tx, set_collection_adoption_state_in_tx,
+    CollectionAdoptionCandidate, CollectionRelationCleanupCandidate, CompareTextFileVersions,
+    CreateFileThread, CreateNamedVersion, DeleteResult, DeleteTextFile, DispatchClaim,
+    DispatchRecovery, DomainError, InbandBinary, InbandSecret, InbandText, LinkedChatStore,
+    ListMomentsQuery, MentionCursor, MergeTextFileFromVersion, MergeTextFileResult, MomentPage,
+    MomentRecord, PendingBookmarkRow, RECORD_ID_FRONTMATTER_KEY, RenameResult, RenameTextFile,
+    ResolveDecision, ResolveTextConflict, ResolveTextConflictResult, RollbackTextFileMutation,
+    RunRecordLink, SaveBookmark, SecretComparePage, SecretDelete, SecretFileStat, SecretFileStore,
+    SecretMomentPage, SecretMomentRecord, SecretOp, SecretRestoreResult, SecretWrite,
+    SecretWriteResult, SendMessage, SetFollow, SetReaction, SnapshotContent, SnapshotMetadata,
+    SnapshotView, StartChannelThread, TextConflict, TextSnapshot, ThreadDispatchPause,
+    UnreadFileThread, VersionFileChangePage, VersionRecord, VersionedTextComparison,
+    VersionedTextStore, WriteBinary, WriteResult, WriteText, apply_secret_file_from_version_with,
+    binary_delete_job_id, binary_rename_delete_job_id, binary_rename_write_job_id,
+    binary_rollback_job_identity, capture_ingest_binary_with_admission_in_tx,
+    capture_ingest_with_admission_in_tx, capture_manifest_seed, capture_retire_in_tx,
+    capture_secret_retire_with, compare_secret_files_page_keyless,
+    decode_binary_rollback_job_identity, delete_secret_file_keyless_with, derive_capture_object_id,
+    enqueue_binary_delete, enqueue_binary_rename, enqueue_write, fork_version_keyless_with,
+    get_secret_moment_keyless, has_secret_state, insert_text_conflict_if_absent,
+    list_secret_files_keyless, list_secret_files_keyless_page, list_secret_moments_page_keyless,
+    reconcile_collections_in_tx, restore_secret_file_verbatim_with_metadata_and_after,
+    rollback_compensating_moment_id, secret_file_len_keyless, select_snapshot_by_path_in_tx,
+    set_collection_adoption_state_in_tx, synchronize_collection_frontmatter_index_in_tx,
     validate_addressable_plaintext_path, validate_plaintext_storable_path, write_binary_in_tx,
     write_projected_text_in_tx, write_text_in_tx,
 };
@@ -12827,6 +12828,146 @@ fn adopt_collection_record_on_store(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn cleanup_collection_relation_on_store(
+    store: &mut EngineStore,
+    candidate: &CollectionRelationCleanupCandidate,
+    workspace_id: &str,
+    version_id: &str,
+    root_dir: &std::path::Path,
+    leases: &LeaseRegistry,
+    self_writes: &dyn SelfWriteRecorder,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<Option<String>, RuntimeError> {
+    let probe = ydoc_open_state_on_store(
+        store,
+        workspace_id,
+        now_ms,
+        false,
+        None,
+        version_id,
+        &candidate.source_file_path,
+        Some(ContentKind::Richdoc),
+        false,
+        token,
+    )?;
+    if probe.key.object_id != candidate.source_object_id {
+        return Err(DomainError::StateCorrupt {
+            reason: "collection relation referrer changed identity during cleanup",
+        }
+        .into());
+    }
+    let _lease = match leases.acquire(&probe.key) {
+        Ok(lease) => lease,
+        Err(CollabError::LeaseHeld) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let state = ydoc_open_state_on_store(
+        store,
+        workspace_id,
+        now_ms,
+        true,
+        Some(&probe.key),
+        version_id,
+        &candidate.source_file_path,
+        Some(ContentKind::Richdoc),
+        false,
+        token,
+    )?;
+    if state.key != probe.key || state.content_kind != ContentKind::Richdoc {
+        return Err(DomainError::InvalidInput {
+            reason: "collection relation referrer does not have a rich-document lineage",
+        }
+        .into());
+    }
+
+    let doc = Ydoc::wire();
+    doc.apply(&state.initial_update)?;
+    let mut lineage_claim_id = state.lineage_claim_id.clone();
+    if !state.lineage_existing {
+        let seed = state
+            .seed_content
+            .as_deref()
+            .ok_or(DomainError::StateCorrupt {
+                reason: "collection relation cleanup has no Markdown artifact seed",
+            })?;
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, seed)?;
+        let seed_update = doc.encode_full_state();
+        lineage_claim_id = ydoc_record_update_on_store(
+            store,
+            &state.key,
+            &candidate.source_file_path,
+            ContentKind::Richdoc,
+            state.regime,
+            &seed_update,
+            None,
+            lineage_claim_id,
+            true,
+            state.head_blob_sha256.clone(),
+            None,
+            now_ms,
+            faults,
+            token,
+        )?
+        .lineage_claim_id;
+    }
+    let Some(update) = doc.frontmatter_drop_relation_target(
+        &candidate.field_name,
+        &candidate.target_record_id,
+        candidate.many,
+    ) else {
+        match store.write_with(faults, |tx| {
+            synchronize_collection_frontmatter_index_in_tx(
+                tx,
+                workspace_id,
+                version_id,
+                &candidate.source_object_id,
+                &doc.frontmatter_json(),
+            )
+            .map_err(RuntimeError::from)
+        })? {
+            TxnOutcome::Committed(()) => return Ok(None),
+            TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+        }
+    };
+    let append = ydoc_record_update_on_store(
+        store,
+        &state.key,
+        &candidate.source_file_path,
+        ContentKind::Richdoc,
+        state.regime,
+        &update,
+        Some("engine".to_owned()),
+        lineage_claim_id,
+        false,
+        None,
+        None,
+        now_ms,
+        faults,
+        token,
+    )?;
+    let settlement = ydoc_settle_on_store(
+        store,
+        root_dir,
+        &state.key,
+        &candidate.source_file_path,
+        ContentKind::Richdoc,
+        append.lineage_claim_id.as_deref(),
+        state.head_blob_sha256,
+        &format!(
+            "collection-relation-cleanup:{}:{}:{}",
+            candidate.source_record_id, candidate.field_name, candidate.target_record_id
+        ),
+        self_writes,
+        now_ms,
+        faults,
+        token,
+    )?;
+    Ok(Some(settlement.path))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn reconcile_collections_on_store(
     store: &mut EngineStore,
     workspace_id: &str,
@@ -12848,7 +12989,7 @@ fn reconcile_collections_on_store(
         TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
     };
 
-    let mut adopted_paths = Vec::new();
+    let mut changed_paths = Vec::new();
     for candidate in reconciliation.adoptions {
         if token.is_cancelled() {
             return Err(RuntimeError::Cancelled);
@@ -12874,7 +13015,9 @@ fn reconcile_collections_on_store(
                     "adopted",
                     faults,
                 )?;
-                adopted_paths.push(path);
+                if !changed_paths.contains(&path) {
+                    changed_paths.push(path);
+                }
             }
             Ok(None) => {}
             Err(error) if adoption_conflict(&error) => {
@@ -12890,7 +13033,35 @@ fn reconcile_collections_on_store(
             Err(error) => return Err(error),
         }
     }
-    Ok(adopted_paths)
+    for candidate in reconciliation.relation_cleanups {
+        if token.is_cancelled() {
+            return Err(RuntimeError::Cancelled);
+        }
+        match cleanup_collection_relation_on_store(
+            store,
+            &candidate,
+            workspace_id,
+            version_id,
+            root_dir,
+            leases,
+            self_writes,
+            now_ms,
+            faults,
+            token,
+        ) {
+            Ok(Some(path)) => {
+                if !changed_paths.contains(&path) {
+                    changed_paths.push(path);
+                }
+            }
+            Ok(None)
+            | Err(RuntimeError::Domain(DomainError::InvalidInput {
+                reason: "ydoc-conflict-open",
+            })) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(changed_paths)
 }
 
 fn capture_ingest_on_store(

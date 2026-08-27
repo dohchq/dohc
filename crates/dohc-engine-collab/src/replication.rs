@@ -23,8 +23,8 @@ use dohc_engine_storage::{put_binary_blob, EngineStore, FaultInjector, TxnOutcom
 use rusqlite::Transaction;
 
 use crate::durable::{
-    append_row, blob_seq_in_log, load_for_replay_gate, maybe_compact, query_marker,
-    validate_update_bytes, Regime,
+    append_row, blob_seq_in_log, index_applied_frontmatter, load_for_replay_gate, maybe_compact,
+    query_marker, validate_update_bytes, Regime,
 };
 use crate::error::CollabError;
 use crate::limits::DEFAULT_COMPACTION_THRESHOLD;
@@ -149,6 +149,15 @@ pub fn apply_remote_update_in_transaction(
     }
     put_binary_blob(tx, &remote.bytes)?;
     let seq = append_row(tx, key, &sha, origin.actor_id(), now_ms)?;
+    index_applied_frontmatter(
+        tx,
+        key,
+        marker.content_kind,
+        &base,
+        &remote.bytes,
+        origin.actor_id(),
+        now_ms,
+    )?;
     Ok(ReplicationApplyOutcome::Applied {
         seq,
         emit_outbound: false,

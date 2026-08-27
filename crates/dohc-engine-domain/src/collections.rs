@@ -7,9 +7,10 @@
 use std::collections::{HashMap, HashSet};
 
 use dohc_engine_storage::StorageError;
-use rusqlite::{Connection, params};
-use saphyr::{LoadableYamlNode, MappingOwned, YamlOwned};
+use rusqlite::{Connection, OptionalExtension, params};
+use saphyr::{LoadableYamlNode, MappingOwned, ScalarOwned, YamlOwned};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::chats::{base32_lowercase_no_padding, is_js_trim_ws};
 
@@ -233,6 +234,18 @@ pub struct CollectionAdoptionCandidate {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CollectionReconcileResult {
     pub adoptions: Vec<CollectionAdoptionCandidate>,
+    pub relation_cleanups: Vec<CollectionRelationCleanupCandidate>,
+}
+
+/// One dangling relation that needs an engine-authored frontmatter update.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CollectionRelationCleanupCandidate {
+    pub source_record_id: String,
+    pub source_file_path: String,
+    pub source_object_id: String,
+    pub field_name: String,
+    pub target_record_id: String,
+    pub many: bool,
 }
 
 #[derive(Clone)]
@@ -247,6 +260,7 @@ struct ExistingRecordBinding {
     record_id: Option<String>,
     file_path: String,
     adoption_state: String,
+    index_initialized: bool,
 }
 
 #[derive(Clone)]
@@ -256,6 +270,7 @@ struct DesiredRecordBinding {
     file_path: String,
     object_id: String,
     adoption_state: &'static str,
+    index_initialized: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -931,6 +946,480 @@ fn markdown_record_id(markdown: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn yaml_to_json(value: &YamlOwned) -> Value {
+    match value {
+        YamlOwned::Value(ScalarOwned::Null) => Value::Null,
+        YamlOwned::Value(ScalarOwned::Boolean(value)) => Value::Bool(*value),
+        YamlOwned::Value(ScalarOwned::Integer(value)) => Value::from(*value),
+        YamlOwned::Value(ScalarOwned::FloatingPoint(value)) => {
+            serde_json::Number::from_f64(value.into_inner()).map_or(Value::Null, Value::Number)
+        }
+        YamlOwned::Value(ScalarOwned::String(value)) | YamlOwned::Representation(value, _, _) => {
+            Value::String(value.clone())
+        }
+        YamlOwned::Sequence(values) => Value::Array(values.iter().map(yaml_to_json).collect()),
+        YamlOwned::Mapping(mapping) => {
+            let mut object = serde_json::Map::new();
+            for (key, value) in mapping {
+                if let Some(key) = yaml_key_text(key) {
+                    object.insert(key, yaml_to_json(value));
+                }
+            }
+            Value::Object(object)
+        }
+        YamlOwned::Tagged(_, value) => yaml_to_json(value),
+        YamlOwned::Alias(_) | YamlOwned::BadValue => Value::Null,
+    }
+}
+
+fn markdown_frontmatter_json(markdown: &str) -> Option<Value> {
+    let mut lines = markdown.split_inclusive('\n');
+    let first = lines.next()?;
+    if first.trim_end_matches(['\r', '\n']) != "---" {
+        return Some(Value::Object(serde_json::Map::new()));
+    }
+    let yaml_start = first.len();
+    let mut yaml_end = yaml_start;
+    let mut found_end = false;
+    for line in lines {
+        if line.trim_end_matches(['\r', '\n']) == "---" {
+            found_end = true;
+            break;
+        }
+        yaml_end += line.len();
+    }
+    if !found_end {
+        return None;
+    }
+    let documents = YamlOwned::load_from_str(&markdown[yaml_start..yaml_end]).ok()?;
+    if documents.len() != 1 || documents.first()?.as_mapping().is_none() {
+        return None;
+    }
+    Some(yaml_to_json(documents.first()?))
+}
+
+fn json_field_value(value: &Value) -> CollectionFieldValue {
+    match value {
+        Value::Null => CollectionFieldValue::Null,
+        Value::Bool(value) => CollectionFieldValue::Boolean(*value),
+        Value::Number(value) => CollectionFieldValue::Number(value.as_f64().unwrap_or(f64::NAN)),
+        Value::String(value) => CollectionFieldValue::Text(value.clone()),
+        Value::Array(values) => {
+            CollectionFieldValue::Sequence(values.iter().map(json_field_value).collect())
+        }
+        Value::Object(_) => CollectionFieldValue::Mapping,
+    }
+}
+
+fn json_text(value: &Value) -> Result<String, crate::DomainError> {
+    serde_json::to_string(value)
+        .map_err(|error| crate::DomainError::Storage(StorageError::persist_public(error)))
+}
+
+fn load_collection_schema(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    collection_path: &str,
+) -> Result<CollectionSchema, crate::DomainError> {
+    let text: String = conn
+        .query_row(
+            "SELECT b.text FROM collections c \
+             JOIN snapshots s ON s.workspace_id=c.workspace_id \
+               AND s.version_id=c.version_id AND s.path=c.schema_path \
+             JOIN blobs b ON b.sha256=s.blob_sha256 \
+             WHERE c.workspace_id=?1 AND c.version_id=?2 AND c.collection_path=?3",
+            params![workspace_id, version_id, collection_path],
+            |row| row.get(0),
+        )
+        .map_err(crate::DomainError::sql_corrupt)?;
+    Ok(parse_collection_schema(&text).schema)
+}
+
+fn validation_columns(
+    field: Option<&FieldDefinition>,
+    value: &Value,
+) -> Result<(&'static str, Option<String>), crate::DomainError> {
+    let Some(field) = field else {
+        return Ok(("untyped", None));
+    };
+    match validate_field_value(field, &json_field_value(value)) {
+        FieldValueValidation::Valid => Ok(("valid", None)),
+        FieldValueValidation::Flagged { reason } => Ok((
+            "flagged",
+            Some(serde_json::to_string(&reason).map_err(|error| {
+                crate::DomainError::Storage(StorageError::persist_public(error))
+            })?),
+        )),
+    }
+}
+
+fn insert_relation_edges(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    source_record_id: &str,
+    field: &FieldDefinition,
+    value: &Value,
+) -> Result<(), crate::DomainError> {
+    let FieldDefinition::Relation {
+        name,
+        collection,
+        many,
+    } = field
+    else {
+        return Ok(());
+    };
+    let targets: Vec<&str> = if *many {
+        value
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|target| is_record_id(target))
+            .collect()
+    } else {
+        value
+            .as_str()
+            .filter(|target| is_record_id(target))
+            .into_iter()
+            .collect()
+    };
+    for target in targets {
+        conn.execute(
+            "INSERT OR IGNORE INTO collection_relation_edges \
+             (workspace_id,version_id,source_record_id,field_name,target_record_id, \
+              target_collection_path,many) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                workspace_id,
+                version_id,
+                source_record_id,
+                name,
+                target,
+                collection,
+                many
+            ],
+        )
+        .map_err(crate::DomainError::sql_persist)?;
+    }
+    Ok(())
+}
+
+fn replace_index_for_record(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    record_id: &str,
+    schema: &CollectionSchema,
+    frontmatter: &Value,
+) -> Result<(), crate::DomainError> {
+    conn.execute(
+        "DELETE FROM collection_record_fields \
+         WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3",
+        params![workspace_id, version_id, record_id],
+    )
+    .map_err(crate::DomainError::sql_persist)?;
+    conn.execute(
+        "DELETE FROM collection_relation_edges \
+         WHERE workspace_id=?1 AND version_id=?2 AND source_record_id=?3",
+        params![workspace_id, version_id, record_id],
+    )
+    .map_err(crate::DomainError::sql_persist)?;
+    let fields: HashMap<&str, &FieldDefinition> = schema
+        .fields
+        .iter()
+        .map(|field| (field.name(), field))
+        .collect();
+    if let Some(values) = frontmatter.as_object() {
+        for (field_name, value) in values {
+            if field_name == RECORD_ID_FRONTMATTER_KEY {
+                continue;
+            }
+            let field = fields.get(field_name.as_str()).copied();
+            let (validation_status, validation_reason_json) = validation_columns(field, value)?;
+            conn.execute(
+                "INSERT INTO collection_record_fields \
+                 (workspace_id,version_id,record_id,field_name,value_json, \
+                  validation_status,validation_reason_json) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![
+                    workspace_id,
+                    version_id,
+                    record_id,
+                    field_name,
+                    json_text(value)?,
+                    validation_status,
+                    validation_reason_json,
+                ],
+            )
+            .map_err(crate::DomainError::sql_persist)?;
+            if let Some(field) = field {
+                insert_relation_edges(conn, workspace_id, version_id, record_id, field, value)?;
+            }
+        }
+    }
+    conn.execute(
+        "UPDATE collection_records SET index_initialized=1 \
+         WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3",
+        params![workspace_id, version_id, record_id],
+    )
+    .map_err(crate::DomainError::sql_persist)?;
+    Ok(())
+}
+
+fn bound_record(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+) -> Result<Option<(String, String)>, crate::DomainError> {
+    conn.query_row(
+        "SELECT record_id,collection_path FROM collection_records \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
+           AND record_id IS NOT NULL",
+        params![workspace_id, version_id, object_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(crate::DomainError::sql_corrupt)
+}
+
+/// Replace one bound record's local projection with its applied Y.Map state.
+pub fn synchronize_collection_frontmatter_index_in_tx(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+    frontmatter: &Value,
+) -> Result<(), crate::DomainError> {
+    let Some((record_id, collection_path)) =
+        bound_record(conn, workspace_id, version_id, object_id)?
+    else {
+        return Ok(());
+    };
+    let schema = load_collection_schema(conn, workspace_id, version_id, &collection_path)?;
+    replace_index_for_record(
+        conn,
+        workspace_id,
+        version_id,
+        &record_id,
+        &schema,
+        frontmatter,
+    )
+}
+
+fn history_value(value: Option<&Value>) -> Result<Option<String>, crate::DomainError> {
+    value.map(json_text).transpose()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_field_history(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    record_id: &str,
+    field_name: &str,
+    previous: Option<&Value>,
+    next: Option<&Value>,
+    author_origin_id: Option<&str>,
+    recorded_at_ms: i64,
+) -> Result<(), crate::DomainError> {
+    conn.execute(
+        "INSERT INTO collection_field_history \
+         (workspace_id,version_id,record_id,field_name,previous_value_json, \
+          next_value_json,author_origin_id,recorded_at_ms) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+        params![
+            workspace_id,
+            version_id,
+            record_id,
+            field_name,
+            history_value(previous)?,
+            history_value(next)?,
+            author_origin_id,
+            recorded_at_ms,
+        ],
+    )
+    .map_err(crate::DomainError::sql_persist)?;
+    Ok(())
+}
+
+/// Diff the applied frontmatter state, append attributed field history, and
+/// replace the current index in the same transaction as the Y.Doc append.
+/// `authored_before` and `authored_after` are the update applied to the
+/// lineage's seq-0 base. They preserve an independent concurrent map write
+/// that Yjs resolves away in the final map.
+#[allow(clippy::too_many_arguments)]
+pub fn index_collection_frontmatter_apply_in_tx(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+    before: &Value,
+    after: &Value,
+    authored_before: &Value,
+    authored_after: &Value,
+    author_origin_id: Option<&str>,
+    recorded_at_ms: i64,
+) -> Result<(), crate::DomainError> {
+    let Some((record_id, collection_path)) =
+        bound_record(conn, workspace_id, version_id, object_id)?
+    else {
+        return Ok(());
+    };
+    let before = before.as_object();
+    let after_object = after.as_object();
+    let authored_before = authored_before.as_object();
+    let authored_after = authored_after.as_object();
+    let mut keys = HashSet::new();
+    if let Some(values) = before {
+        keys.extend(values.keys().map(String::as_str));
+    }
+    if let Some(values) = after_object {
+        keys.extend(values.keys().map(String::as_str));
+    }
+    for field_name in keys {
+        if field_name == RECORD_ID_FRONTMATTER_KEY {
+            continue;
+        }
+        let previous = before.and_then(|values| values.get(field_name));
+        let next = after_object.and_then(|values| values.get(field_name));
+        if previous != next {
+            insert_field_history(
+                conn,
+                workspace_id,
+                version_id,
+                &record_id,
+                field_name,
+                previous,
+                next,
+                author_origin_id,
+                recorded_at_ms,
+            )?;
+        }
+    }
+    let mut authored_keys = HashSet::new();
+    if let Some(values) = authored_before {
+        authored_keys.extend(values.keys().map(String::as_str));
+    }
+    if let Some(values) = authored_after {
+        authored_keys.extend(values.keys().map(String::as_str));
+    }
+    for field_name in authored_keys {
+        if field_name == RECORD_ID_FRONTMATTER_KEY {
+            continue;
+        }
+        let previous = before.and_then(|values| values.get(field_name));
+        let applied = after_object.and_then(|values| values.get(field_name));
+        let authored_previous = authored_before.and_then(|values| values.get(field_name));
+        let authored_next = authored_after.and_then(|values| values.get(field_name));
+        if previous == applied && authored_previous != authored_next {
+            insert_field_history(
+                conn,
+                workspace_id,
+                version_id,
+                &record_id,
+                field_name,
+                authored_previous,
+                authored_next,
+                author_origin_id,
+                recorded_at_ms,
+            )?;
+        }
+    }
+    let schema = load_collection_schema(conn, workspace_id, version_id, &collection_path)?;
+    replace_index_for_record(conn, workspace_id, version_id, &record_id, &schema, after)
+}
+
+fn revalidate_collection_index_in_tx(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+) -> Result<(), crate::DomainError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT r.record_id,r.collection_path,f.field_name,f.value_json \
+             FROM collection_records r \
+             LEFT JOIN collection_record_fields f \
+               ON f.workspace_id=r.workspace_id AND f.version_id=r.version_id \
+              AND f.record_id=r.record_id \
+             WHERE r.workspace_id=?1 AND r.version_id=?2 AND r.record_id IS NOT NULL \
+             ORDER BY r.record_id,f.field_name",
+        )
+        .map_err(crate::DomainError::sql_corrupt)?;
+    let rows = statement
+        .query_map(params![workspace_id, version_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .map_err(crate::DomainError::sql_corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(crate::DomainError::sql_corrupt)?;
+    drop(statement);
+    let mut records: HashMap<(String, String), serde_json::Map<String, Value>> = HashMap::new();
+    for (record_id, collection_path, field_name, value_json) in rows {
+        let values = records.entry((record_id, collection_path)).or_default();
+        if let (Some(field_name), Some(value_json)) = (field_name, value_json) {
+            let value = serde_json::from_str(&value_json).map_err(|error| {
+                crate::DomainError::Storage(StorageError::corrupt_public(error))
+            })?;
+            values.insert(field_name, value);
+        }
+    }
+    for ((record_id, collection_path), values) in records {
+        let schema = load_collection_schema(conn, workspace_id, version_id, &collection_path)?;
+        replace_index_for_record(
+            conn,
+            workspace_id,
+            version_id,
+            &record_id,
+            &schema,
+            &Value::Object(values),
+        )?;
+    }
+    Ok(())
+}
+
+fn dangling_relation_cleanups(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+) -> Result<Vec<CollectionRelationCleanupCandidate>, crate::DomainError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT e.source_record_id,r.file_path,r.object_id,e.field_name, \
+                    e.target_record_id,e.many \
+             FROM collection_relation_edges e \
+             JOIN collection_records r ON r.workspace_id=e.workspace_id \
+               AND r.version_id=e.version_id AND r.record_id=e.source_record_id \
+             WHERE e.workspace_id=?1 AND e.version_id=?2 \
+               AND NOT EXISTS (SELECT 1 FROM collection_records target \
+                 WHERE target.workspace_id=e.workspace_id \
+                   AND target.version_id=e.version_id \
+                   AND target.record_id=e.target_record_id) \
+             ORDER BY r.file_path,e.field_name,e.target_record_id",
+        )
+        .map_err(crate::DomainError::sql_corrupt)?;
+    statement
+        .query_map(params![workspace_id, version_id], |row| {
+            Ok(CollectionRelationCleanupCandidate {
+                source_record_id: row.get(0)?,
+                source_file_path: row.get(1)?,
+                source_object_id: row.get(2)?,
+                field_name: row.get(3)?,
+                target_record_id: row.get(4)?,
+                many: row.get(5)?,
+            })
+        })
+        .map_err(crate::DomainError::sql_corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(crate::DomainError::sql_corrupt)
+}
+
 fn load_collection_snapshots(
     conn: &Connection,
     workspace_id: &str,
@@ -964,7 +1453,7 @@ fn load_record_bindings(
 ) -> Result<Vec<ExistingRecordBinding>, crate::DomainError> {
     let mut statement = conn
         .prepare(
-            "SELECT record_id, file_path, adoption_state \
+            "SELECT record_id, file_path, adoption_state, index_initialized \
              FROM collection_records WHERE workspace_id = ?1 AND version_id = ?2 \
              ORDER BY file_path",
         )
@@ -975,6 +1464,7 @@ fn load_record_bindings(
                 record_id: row.get(0)?,
                 file_path: row.get(1)?,
                 adoption_state: row.get(2)?,
+                index_initialized: row.get(3)?,
             })
         })
         .map_err(crate::DomainError::sql_corrupt)?
@@ -1049,6 +1539,15 @@ pub fn reconcile_collections_in_tx(
         .iter()
         .map(|binding| (binding.file_path.as_str(), binding))
         .collect();
+    let existing_by_record_id: HashMap<&str, &ExistingRecordBinding> = existing
+        .iter()
+        .filter_map(|binding| {
+            binding
+                .record_id
+                .as_deref()
+                .map(|record_id| (record_id, binding))
+        })
+        .collect();
     let mut current_owners: HashMap<String, &ExistingRecordBinding> = HashMap::new();
     let mut absent_owners = HashSet::new();
     let mut used_ids = HashSet::new();
@@ -1099,6 +1598,8 @@ pub fn reconcile_collections_in_tx(
                 file_path: record.path.clone(),
                 object_id: record.object_id.clone(),
                 adoption_state: "deferred-conflict",
+                index_initialized: existing_at_path
+                    .is_some_and(|binding| binding.index_initialized),
             });
             continue;
         }
@@ -1119,6 +1620,7 @@ pub fn reconcile_collections_in_tx(
                     file_path: record.path.clone(),
                     object_id: record.object_id.clone(),
                     adoption_state: "pending",
+                    index_initialized: false,
                 });
                 adoptions.push(CollectionAdoptionCandidate {
                     record_id: fresh_id,
@@ -1129,12 +1631,16 @@ pub fn reconcile_collections_in_tx(
             } else {
                 used_ids.insert(record_id.clone());
                 claimed_ids.insert(record_id.clone(), record.path.clone());
+                let index_initialized = existing_at_path
+                    .or_else(|| existing_by_record_id.get(record_id.as_str()).copied())
+                    .is_some_and(|binding| binding.index_initialized);
                 desired.push(DesiredRecordBinding {
                     record_id: Some(record_id),
                     collection_path,
                     file_path: record.path.clone(),
                     object_id: record.object_id.clone(),
                     adoption_state: "adopted",
+                    index_initialized,
                 });
             }
             continue;
@@ -1156,6 +1662,7 @@ pub fn reconcile_collections_in_tx(
             file_path: record.path.clone(),
             object_id: record.object_id.clone(),
             adoption_state: "pending",
+            index_initialized: existing_at_path.is_some_and(|binding| binding.index_initialized),
         });
         adoptions.push(CollectionAdoptionCandidate {
             record_id,
@@ -1175,7 +1682,7 @@ pub fn reconcile_collections_in_tx(
         params![workspace_id, version_id],
     )
     .map_err(crate::DomainError::sql_persist)?;
-    for snapshot in schema_snapshots {
+    for snapshot in &schema_snapshots {
         let parsed = parse_collection_schema(&snapshot.text);
         let status = match parsed.status {
             CollectionSchemaStatus::Valid => "valid",
@@ -1198,11 +1705,11 @@ pub fn reconcile_collections_in_tx(
         )
         .map_err(crate::DomainError::sql_persist)?;
     }
-    for binding in desired {
+    for binding in &desired {
         tx.execute(
             "INSERT INTO collection_records \
              (workspace_id, version_id, record_id, collection_path, file_path, object_id, \
-              adoption_state) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+              adoption_state, index_initialized) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 workspace_id,
                 version_id,
@@ -1210,12 +1717,65 @@ pub fn reconcile_collections_in_tx(
                 binding.collection_path,
                 binding.file_path,
                 binding.object_id,
-                binding.adoption_state
+                binding.adoption_state,
+                binding.index_initialized,
             ],
         )
         .map_err(crate::DomainError::sql_persist)?;
     }
-    Ok(CollectionReconcileResult { adoptions })
+    for binding in &desired {
+        let Some(record_id) = binding.record_id.as_deref() else {
+            continue;
+        };
+        if binding.index_initialized {
+            continue;
+        }
+        let Some(snapshot) = snapshots
+            .iter()
+            .find(|snapshot| snapshot.path == binding.file_path)
+        else {
+            continue;
+        };
+        let Some(frontmatter) = markdown_frontmatter_json(&snapshot.text) else {
+            continue;
+        };
+        let schema =
+            load_collection_schema(tx, workspace_id, version_id, &binding.collection_path)?;
+        replace_index_for_record(
+            tx,
+            workspace_id,
+            version_id,
+            record_id,
+            &schema,
+            &frontmatter,
+        )?;
+    }
+    tx.execute(
+        "DELETE FROM collection_record_fields \
+         WHERE workspace_id=?1 AND version_id=?2 \
+           AND NOT EXISTS (SELECT 1 FROM collection_records r \
+             WHERE r.workspace_id=collection_record_fields.workspace_id \
+               AND r.version_id=collection_record_fields.version_id \
+               AND r.record_id=collection_record_fields.record_id)",
+        params![workspace_id, version_id],
+    )
+    .map_err(crate::DomainError::sql_persist)?;
+    tx.execute(
+        "DELETE FROM collection_relation_edges \
+         WHERE workspace_id=?1 AND version_id=?2 \
+           AND NOT EXISTS (SELECT 1 FROM collection_records r \
+             WHERE r.workspace_id=collection_relation_edges.workspace_id \
+               AND r.version_id=collection_relation_edges.version_id \
+               AND r.record_id=collection_relation_edges.source_record_id)",
+        params![workspace_id, version_id],
+    )
+    .map_err(crate::DomainError::sql_persist)?;
+    revalidate_collection_index_in_tx(tx, workspace_id, version_id)?;
+    let relation_cleanups = dangling_relation_cleanups(tx, workspace_id, version_id)?;
+    Ok(CollectionReconcileResult {
+        adoptions,
+        relation_cleanups,
+    })
 }
 
 pub fn set_collection_adoption_state_in_tx(

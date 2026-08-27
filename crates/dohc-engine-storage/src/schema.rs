@@ -62,6 +62,9 @@ const REQUIRED_TABLES: &[&str] = &[
     "scene_asset_delete_authority_items",
     "collections",
     "collection_records",
+    "collection_record_fields",
+    "collection_field_history",
+    "collection_relation_edges",
     // R06 conflict-object tables (migration ordinal 7).
     "conflicts",
     // R13 shadow fence token (migration ordinal 8).

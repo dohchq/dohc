@@ -1640,6 +1640,16 @@ pub fn project_and_write_in_tx(
     search_policy: Option<&SearchPolicySnapshot>,
 ) -> Result<(), SyncError> {
     let current = validate_ydoc_identity(tx, key, path)?;
+    if content_kind == dohc_engine_collab::ContentKind::Richdoc {
+        dohc_engine_domain::synchronize_collection_frontmatter_index_in_tx(
+            tx,
+            &key.workspace_id,
+            &key.version_id,
+            &key.object_id,
+            &doc.frontmatter_json(),
+        )
+        .map_err(map_domain_hard_error)?;
+    }
     let projection = project_ydoc_with_store(tx, key, doc, content_kind)?;
     // While a sync conflict is open on this object, the visible head belongs
     // to the user's review: writing through it would clobber the exact state
