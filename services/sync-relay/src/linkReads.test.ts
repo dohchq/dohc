@@ -116,6 +116,44 @@ async function json(response: Response): Promise<Record<string, unknown>> {
   return (await response.json()) as Record<string, unknown>;
 }
 
+function viewerPaths(
+  ops: readonly Record<string, unknown>[],
+  initialPaths: readonly string[] = [],
+): string[] {
+  const paths = new Set(initialPaths);
+  for (const op of ops) {
+    if (op.opKind !== "moment.append") continue;
+    const payload = op.payload;
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) continue;
+    const record = payload as Record<string, unknown>;
+    const beforePath =
+      typeof record.payloadBeforePath === "string"
+        ? record.payloadBeforePath
+        : null;
+    const currentPath = typeof record.path === "string" ? record.path : null;
+    if (record.operation === "delete") {
+      if (beforePath) paths.delete(beforePath);
+      if (currentPath) paths.delete(currentPath);
+      continue;
+    }
+    const afterPath =
+      typeof record.payloadAfterPath === "string"
+        ? record.payloadAfterPath
+        : null;
+    const afterSha = record.payloadAfterBlobSha256;
+    if (
+      afterPath === null ||
+      typeof afterSha !== "string" ||
+      !/^[a-f0-9]{64}$/u.test(afterSha)
+    ) {
+      continue;
+    }
+    if (beforePath && beforePath !== afterPath) paths.delete(beforePath);
+    paths.add(afterPath);
+  }
+  return [...paths].sort();
+}
+
 function sha256(content: string): string {
   return createHash("sha256").update(content).digest("hex");
 }
@@ -520,6 +558,183 @@ describe("relay capability reads", () => {
       versionId: null,
       access: "view",
     });
+  });
+
+  it("projects a refused outward move as an accountless deletion", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h);
+    const initialLog = await json(
+      await h(
+        linkRequest(
+          seeded.capability,
+          "/sync/link/log?since=0&limit=100",
+        ),
+      ),
+    );
+    const initialOps = initialLog.ops as Array<Record<string, unknown>>;
+    const initialPaths = viewerPaths(initialOps);
+    expect(initialPaths).toEqual(["docs/shared.md"]);
+
+    const outwardMove = moment(3, "private/moved.md", "# shared\n", 1_300, {
+      objectId: "object-shared",
+      operation: "rename",
+      beforePath: "docs/shared.md",
+      beforeContent: "# shared\n",
+    });
+    await appendMoments(h, [outwardMove]);
+
+    const accountlessDelta = await json(
+      await h(
+        linkRequest(
+          seeded.capability,
+          `/sync/link/log?since=${String(initialLog.nextCursor)}&limit=100`,
+        ),
+      ),
+    );
+    const accountlessOps = accountlessDelta.ops as Array<Record<string, unknown>>;
+    const authenticatedDelta = await json(
+      await h(
+        request(
+          RECIPIENT,
+          `/sync/shares/share-0/log?since=${String(initialLog.nextCursor)}&limit=100`,
+        ),
+      ),
+    );
+    const authenticatedOps = authenticatedDelta.ops as Array<
+      Record<string, unknown>
+    >;
+
+    expect({
+      rawFilterAllowed: filterOpForShare(
+        { paths: ["docs"], versionId: null, access: "view" },
+        outwardMove.opKind,
+        JSON.stringify(outwardMove.payload),
+      ).allowed,
+      accountlessOps,
+      accountlessViewerPaths: viewerPaths(accountlessOps, initialPaths),
+      authenticatedOps,
+      authenticatedViewerPaths: viewerPaths(authenticatedOps, initialPaths),
+    }).toEqual({
+      rawFilterAllowed: false,
+      accountlessOps: [
+        {
+          relaySeq: 4,
+          originSeq: 3,
+          opKind: "moment.append",
+          payload: {
+            operation: "delete",
+            versionId: "main",
+            metadata: { origin: "sync" },
+            path: "docs/shared.md",
+            payloadBeforePath: "docs/shared.md",
+          },
+          recordedAtMs: 1_300,
+        },
+      ],
+      accountlessViewerPaths: [],
+      authenticatedOps: [],
+      authenticatedViewerPaths: ["docs/shared.md"],
+    });
+    const projectedPayload = accountlessOps[0]?.payload as
+      | Record<string, unknown>
+      | undefined;
+    expect(projectedPayload).not.toHaveProperty("payloadAfterPath");
+    expect(projectedPayload).not.toHaveProperty("payloadAfterBlobSha256");
+    expect(projectedPayload).not.toHaveProperty("payloadAfterContentKind");
+  });
+
+  it("keeps an inward move hidden until the next in-boundary write", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h);
+    const initialLog = await json(
+      await h(
+        linkRequest(
+          seeded.capability,
+          "/sync/link/log?since=0&limit=100",
+        ),
+      ),
+    );
+    const initialOps = initialLog.ops as Array<Record<string, unknown>>;
+    const initialPaths = viewerPaths(initialOps);
+    const updated = "arrived and updated\n";
+    await putBlob(h, updated);
+    const inwardMove = moment(3, "docs/arrived.md", "hidden\n", 1_300, {
+      objectId: "object-2",
+      operation: "rename",
+      beforePath: "private/hidden.md",
+      beforeContent: "hidden\n",
+    });
+    await appendMoments(h, [
+      inwardMove,
+      moment(4, "docs/arrived.md", updated, 1_400, {
+        objectId: "object-2",
+        beforePath: "docs/arrived.md",
+        beforeContent: "hidden\n",
+      }),
+    ]);
+
+    expect(
+      filterOpForShare(
+        { paths: ["docs"], versionId: null, access: "view" },
+        inwardMove.opKind,
+        JSON.stringify(inwardMove.payload),
+      ).allowed,
+    ).toBe(false);
+    const accountlessInward = await json(
+      await h(
+        linkRequest(
+          seeded.capability,
+          `/sync/link/log?since=${String(initialLog.nextCursor)}&limit=1`,
+        ),
+      ),
+    );
+    const accountlessInwardOps = accountlessInward.ops as Array<
+      Record<string, unknown>
+    >;
+    expect(accountlessInwardOps).toEqual([]);
+    expect(viewerPaths(accountlessInwardOps, initialPaths)).toEqual(initialPaths);
+
+    const accountlessWrite = await json(
+      await h(
+        linkRequest(
+          seeded.capability,
+          `/sync/link/log?since=${String(accountlessInward.nextCursor)}&limit=1`,
+        ),
+      ),
+    );
+    const accountlessWriteOps = accountlessWrite.ops as Array<
+      Record<string, unknown>
+    >;
+    expect(viewerPaths(accountlessWriteOps, initialPaths)).toEqual([
+      "docs/arrived.md",
+      "docs/shared.md",
+    ]);
+
+    const authenticatedInward = await json(
+      await h(
+        request(
+          RECIPIENT,
+          `/sync/shares/share-0/log?since=${String(initialLog.nextCursor)}&limit=1`,
+        ),
+      ),
+    );
+    expect(authenticatedInward.ops).toEqual([]);
+    const authenticatedWrite = await json(
+      await h(
+        request(
+          RECIPIENT,
+          `/sync/shares/share-0/log?since=${String(authenticatedInward.nextCursor)}&limit=1`,
+        ),
+      ),
+    );
+    expect(
+      viewerPaths(
+        authenticatedWrite.ops as Array<Record<string, unknown>>,
+        initialPaths,
+      ),
+    ).toEqual(["docs/arrived.md", "docs/shared.md"]);
   });
 
   it("keeps a nested folder's visible name as its accountless root", async () => {

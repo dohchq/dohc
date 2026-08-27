@@ -42,7 +42,7 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
   const hosts = exactList(
     hostValue,
     "DOHC_SHARE_WEB_PUBLIC_HOSTS must contain exact comma-separated Host values.",
-  );
+  ).map((host) => host.toLowerCase());
   const trustedProxyValue = env.DOHC_SHARE_WEB_TRUSTED_PROXIES;
   const trustedProxies = new Set(
     trustedProxyValue === undefined

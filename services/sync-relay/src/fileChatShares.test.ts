@@ -10,6 +10,7 @@ import { openSyncRelayStorage, type SyncRelayStorage } from "./storage";
 
 interface InspectionStatement {
   get(...params: unknown[]): Record<string, unknown> | undefined;
+  run(...params: unknown[]): unknown;
 }
 
 interface InspectionDatabase {
@@ -571,19 +572,12 @@ describe("chat over a file share (#646 PR2)", () => {
     await seedWorkspace(h);
     const shareId = await createShare(h, "comment");
 
-    const requireModule = createRequire(import.meta.url);
-    const { DatabaseSync } = requireModule("node:sqlite") as {
-      DatabaseSync: new (path: string) => {
-        prepare(sql: string): { run(...params: unknown[]): unknown };
-        close(): void;
-      };
-    };
     let revoked = false;
     const original = storage.appendLogBatch.bind(storage);
     storage.appendLogBatch = (input) => {
       if (!revoked) {
         revoked = true;
-        const raw = new DatabaseSync(dbPath);
+        const raw = new InspectionDatabaseSync(dbPath);
         try {
           raw
             .prepare(
@@ -650,19 +644,12 @@ describe("chat over a file share (#646 PR2)", () => {
     await seedWorkspace(h);
     const shareId = await createShare(h, "comment");
 
-    const requireModule = createRequire(import.meta.url);
-    const { DatabaseSync } = requireModule("node:sqlite") as {
-      DatabaseSync: new (path: string) => {
-        prepare(sql: string): { run(...params: unknown[]): unknown };
-        close(): void;
-      };
-    };
     let tampered = false;
     const original = storage.appendLogBatch.bind(storage);
     storage.appendLogBatch = (input) => {
       if (!tampered) {
         tampered = true;
-        const raw = new DatabaseSync(dbPath);
+        const raw = new InspectionDatabaseSync(dbPath);
         raw
           .prepare(
             `UPDATE sync_relay_share_grants

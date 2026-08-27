@@ -24,7 +24,7 @@ const SESSION_HEADER = "x-dohc-link-session";
 const SESSION_PATH = /^\/s\/([A-Za-z0-9_-]{12})\/?$/u;
 const VIEW_HEARTBEAT_INTERVAL_MS = 4 * 60_000;
 const TERMINAL_HEARTBEAT_STATUSES = new Set([401, 403, 404]);
-export const MAX_LOG_PAGES = 10_000;
+export const MAX_LOG_PAGES = 200;
 export const MARKDOWN_PREVIEW_BYTE_CAP = 2 * 1024 * 1024;
 
 type ViewerState =
@@ -138,19 +138,22 @@ async function readMarkdownPreview(response: Response): Promise<MarkdownPreview>
   }
 }
 
-async function loadLog(
+export async function loadLog(
   session: string,
   initialCursor: number,
   fileAccumulator: FileAccumulator,
   maxPages?: number,
+  signal?: AbortSignal,
 ): Promise<LoadedLog> {
   let cursor = initialCursor;
   let pageNumber = 0;
+  let foldEpochLogFloor: number | undefined;
   while (maxPages === undefined || pageNumber < maxPages) {
     pageNumber += 1;
     const response = await apiWithThrottleRetry(
       session,
       `/api/view/log?since=${cursor}&limit=500`,
+      signal,
     );
     if (!response.ok) throw new ViewResponseError(response.status);
     const page = (await response.json()) as {
@@ -168,7 +171,6 @@ async function loadLog(
     ) {
       throw new Error("refused");
     }
-    foldLogOps(fileAccumulator, page.ops as RelayOp[]);
     if (
       !Number.isSafeInteger(page.nextCursor) ||
       page.nextCursor < cursor ||
@@ -176,11 +178,20 @@ async function loadLog(
     ) {
       throw new Error("refused");
     }
+    if (foldEpochLogFloor === undefined) {
+      foldEpochLogFloor = page.epochLogFloor;
+    } else if (page.epochLogFloor !== foldEpochLogFloor) {
+      fileAccumulator = new Map();
+      cursor = page.epochLogFloor;
+      foldEpochLogFloor = page.epochLogFloor;
+      continue;
+    }
+    foldLogOps(fileAccumulator, page.ops as RelayOp[]);
     if (page.hasMore !== true) {
       return {
         fileAccumulator,
         nextCursor: page.nextCursor,
-        epochLogFloor: page.epochLogFloor,
+        epochLogFloor: foldEpochLogFloor,
       };
     }
     cursor = page.nextCursor;
@@ -304,7 +315,7 @@ function Folder(props: {
   const [open, setOpen] = useState(true);
   return (
     <li>
-      <button className="folder" type="button" onClick={() => setOpen((value) => !value)}>
+      <button aria-expanded={open} className="folder" type="button" onClick={() => setOpen((value) => !value)}>
         <span aria-hidden="true">{open ? "▾" : "▸"}</span>
         {props.node.name}
       </button>
@@ -443,12 +454,13 @@ export function App() {
   const readyStateRef = useRef<ReadyState | null>(null);
   useEffect(() => {
     let current = true;
+    const controller = new AbortController();
     void (async () => {
       try {
         const session = await establishSession();
         const [meta, log] = await Promise.all([
           loadMeta(session),
-          loadLog(session, 0, new Map(), MAX_LOG_PAGES),
+          loadLog(session, 0, new Map(), MAX_LOG_PAGES, controller.signal),
         ]);
         const files = filesFromAccumulator(log.fileAccumulator);
         if (current) {
@@ -467,7 +479,10 @@ export function App() {
         if (current) setState({ status: "refused" });
       }
     })();
-    return () => { current = false; };
+    return () => {
+      current = false;
+      controller.abort();
+    };
   }, []);
 
   const readySession = state.status === "ready" ? state.session : null;
@@ -486,6 +501,7 @@ export function App() {
     if (readySession === null) return;
     let current = true;
     let refreshInFlight = false;
+    const controller = new AbortController();
     const interval = window.setInterval(() => {
       const previous = readyStateRef.current;
       if (
@@ -504,6 +520,7 @@ export function App() {
           previous.nextCursor,
           fileAccumulator,
           MAX_LOG_PAGES,
+          controller.signal,
         ),
       ])
         .then(async ([meta, log]) => {
@@ -515,6 +532,7 @@ export function App() {
                 log.epochLogFloor,
                 new Map(),
                 MAX_LOG_PAGES,
+                controller.signal,
               );
           if (!current) return;
           const nextState: ReadyState = {
@@ -547,6 +565,7 @@ export function App() {
     }, VIEW_HEARTBEAT_INTERVAL_MS);
     return () => {
       current = false;
+      controller.abort();
       window.clearInterval(interval);
     };
   }, [readySession]);

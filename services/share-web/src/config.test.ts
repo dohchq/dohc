@@ -7,7 +7,7 @@ describe("share-web configuration", () => {
       NODE_ENV: "development",
       DOHC_SHARE_WEB_DEV: "1",
       DOHC_SHARE_WEB_RELAY_URL: "http://127.0.0.1:1788",
-      DOHC_SHARE_WEB_PUBLIC_HOSTS: "localhost:1790,share.example.test",
+      DOHC_SHARE_WEB_PUBLIC_HOSTS: "localhost:1790,Share.Example.Test",
       DOHC_SHARE_WEB_TRUSTED_PROXIES: "127.0.0.1,10.0.0.2",
       DOHC_SHARE_WEB_PORT: "0",
     });

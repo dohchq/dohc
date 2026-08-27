@@ -1,12 +1,12 @@
 import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
 import { createSessionActorResolver, UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
-import { createHash, timingSafeEqual } from "node:crypto";
 import { writeSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Pool } from "pg";
 import { RELAY_ERRORS } from "./errorCodes";
+import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import { PresenceHub } from "./presence";
 import { MAX_BLOB_BYTES, createSyncRelayHandler } from "./server";
 import { DEFAULT_WORKSPACE_QUOTA_BYTES, openSyncRelayStorage } from "./storage";
@@ -24,7 +24,7 @@ const testAuthSeam = process.env.SYNC_RELAY_TEST_AUTH === "1" && isDevOrTest;
 const linkKey = process.env.DOHC_RELAY_LINK_KEY;
 const relayExchangeKey = process.env.DOHC_RELAY_EXCHANGE_KEY;
 const relayExchangeKeyHash =
-  relayExchangeKey === undefined ? undefined : exchangeKeyHash(relayExchangeKey);
+  relayExchangeKey === undefined ? undefined : hashRelayExchangeKey(relayExchangeKey);
 
 function fatal(message: string): never {
   writeSync(2, `${message}\n`);
@@ -217,16 +217,11 @@ function isLinkRefreshPath(pathname: string): boolean {
   }
 }
 
-function exchangeKeyHash(value: string): Buffer {
-  return createHash("sha256").update(value).digest();
-}
-
 function presentsValidRelayExchangeKey(headers: Headers): boolean {
   const presented = headers.get("x-dohc-relay-exchange-key");
   return (
     relayExchangeKeyHash !== undefined &&
-    presented !== null &&
-    timingSafeEqual(exchangeKeyHash(presented), relayExchangeKeyHash)
+    verifyRelayExchangeKey(presented, relayExchangeKeyHash)
   );
 }
 

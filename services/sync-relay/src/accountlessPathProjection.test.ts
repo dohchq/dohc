@@ -42,6 +42,18 @@ describe("accountless path projection", () => {
     expect(projection.projectPath("teams/private/readme.md")).toBeNull();
   });
 
+  it("fails closed when a payload names a path outside every root", () => {
+    const projection = createAccountlessPathProjection({
+      paths: ["clients/acme/private/docs"],
+      versionId: null,
+      access: "view",
+    });
+
+    expect(
+      projection.projectPayload({ path: "teams/private/readme.md" }),
+    ).toBeNull();
+  });
+
   it("disambiguates duplicate visible names without colliding with natural names", () => {
     const projection = createAccountlessPathProjection({
       paths: [

@@ -16,6 +16,7 @@ const DEFAULT_MAX_SESSIONS = 10_000;
 const MAX_BLOB_PROXIES_PER_SESSION = 8;
 const MAX_BLOB_PROXIES_PER_GRANT = 24;
 const LINK_REFRESH_WINDOW_MS = 5 * 60 * 1_000;
+export const LINK_SESSION_RENEWAL_GRACE_MS = 7 * 24 * 60 * 60 * 1_000;
 const RASTER_SIGNATURE_BYTES = 12;
 const SESSION_DISCRIMINATOR = /^[A-Za-z0-9_-]{12}$/u;
 const SHA256_HEX = /^[a-f0-9]{64}$/u;
@@ -73,7 +74,10 @@ class ShareWebSessionStore {
   get(discriminator: string, token: string, nowMs: number): ShareWebSession | null {
     const key = sessionKey(discriminator, token);
     const session = this.sessions.get(key);
-    if (!session || session.expiresAtMs <= nowMs) {
+    if (
+      !session ||
+      session.expiresAtMs + LINK_SESSION_RENEWAL_GRACE_MS < nowMs
+    ) {
       if (session) this.sessions.delete(key);
       return null;
     }
@@ -107,7 +111,9 @@ class ShareWebSessionStore {
 
   private prune(nowMs: number): void {
     for (const [key, session] of this.sessions) {
-      if (session.expiresAtMs <= nowMs) this.sessions.delete(key);
+      if (session.expiresAtMs + LINK_SESSION_RENEWAL_GRACE_MS < nowMs) {
+        this.sessions.delete(key);
+      }
     }
   }
 }
@@ -221,7 +227,7 @@ function jsonResponse(
   });
 }
 
-function refused(status: 404 | 429 = 404, headers: HeadersInit = {}): Response {
+function refused(status: 404 | 429 | 503 = 404, headers: HeadersInit = {}): Response {
   return response(REFUSAL_BODY, {
     status,
     headers: { "content-type": "application/json", ...Object.fromEntries(new Headers(headers)) },
@@ -265,7 +271,12 @@ function sessionCookie(
   expiresAtMs: number,
   nowMs: number,
 ): string {
-  const maxAge = Math.max(1, Math.ceil((expiresAtMs - nowMs) / 1_000));
+  const maxAge = Math.max(
+    1,
+    Math.ceil(
+      (expiresAtMs + LINK_SESSION_RENEWAL_GRACE_MS - nowMs) / 1_000,
+    ),
+  );
   return (
     `${cookieName(discriminator)}=${token}; Path=/; Max-Age=${maxAge}; ` +
     "Secure; HttpOnly; SameSite=Strict"
@@ -327,9 +338,10 @@ function rasterContentType(bytes: Uint8Array): string | null {
   if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
     return "image/jpeg";
   }
+  const gifSignature = String.fromCharCode(...bytes.subarray(0, 6));
   if (
     bytes.length >= 6 &&
-    String.fromCharCode(...bytes.subarray(0, 6)) in { GIF87a: true, GIF89a: true }
+    (gifSignature === "GIF87a" || gifSignature === "GIF89a")
   ) {
     return "image/gif";
   }
@@ -488,7 +500,10 @@ export function createShareWebHandler({
       token: string;
       session: ShareWebSession;
     },
-  ): Promise<{ ok: true; setCookie: string | null } | { ok: false }> {
+  ): Promise<
+    | { ok: true; setCookie: string | null }
+    | { ok: false; status: 404 | 503 }
+  > {
     const checkedAtMs = nowMs();
     if (
       authenticated.session.expiresAtMs - checkedAtMs >
@@ -552,9 +567,12 @@ export function createShareWebHandler({
         authenticated.token,
         capabilityBeforeRefresh,
       );
-      return { ok: false };
+      return { ok: false, status: 404 };
     }
     if (attempt.status === "unavailable") {
+      if (authenticated.session.expiresAtMs <= nowMs()) {
+        return { ok: false, status: 503 };
+      }
       return { ok: true, setCookie: null };
     }
     return {
@@ -569,7 +587,7 @@ export function createShareWebHandler({
   }
 
   return async (request: Request): Promise<Response> => {
-    if (!publicHosts.has(request.headers.get("host") ?? "")) return refused();
+    if (!publicHosts.has((request.headers.get("host") ?? "").toLowerCase())) return refused();
     const { pathname, search } = new URL(request.url);
 
     if (request.method === "GET" && (pathname === "/s" || pathname.startsWith("/s/"))) {
@@ -645,7 +663,7 @@ export function createShareWebHandler({
       if (!relayPath) return refused();
 
       const refreshed = await refreshSession(authenticated);
-      if (!refreshed.ok) return refused();
+      if (!refreshed.ok) return refused(refreshed.status);
       const refreshedCookieHeaders: Record<string, string> = refreshed.setCookie
         ? { "set-cookie": refreshed.setCookie }
         : {};
@@ -699,7 +717,7 @@ export function createShareWebHandler({
         });
       } catch {
         releaseBlobProxy?.();
-        return refused(404, refreshedCookieHeaders);
+        return refused(503, refreshedCookieHeaders);
       }
     }
 

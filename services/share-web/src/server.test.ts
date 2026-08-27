@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { loadShareWebConfig } from "./config";
 import {
   createShareWebHandler,
+  LINK_SESSION_RENEWAL_GRACE_MS,
   SHARE_WEB_CSP,
   shareWebRefusalBody,
 } from "./server";
@@ -42,6 +44,52 @@ afterEach(() => {
 });
 
 describe("share-web sessions", () => {
+  it.each([
+    {
+      description: "a mixed-case configured host with a lowercase Host header",
+      configuredHost: "Share.Example.Test",
+      incomingHost: HOST,
+    },
+    {
+      description: "a lowercase configured host with a mixed-case Host header",
+      configuredHost: HOST,
+      incomingHost: "Share.Example.Test",
+    },
+  ])("serves $description", async ({ configuredHost, incomingHost }) => {
+    const { publicHosts } = loadShareWebConfig({
+      NODE_ENV: "test",
+      DOHC_SHARE_WEB_RELAY_URL: "http://relay.test",
+      DOHC_SHARE_WEB_PUBLIC_HOSTS: configuredHost,
+    });
+    const fetchRelay = vi.fn(async () =>
+      Response.json({
+        ok: true,
+        grantId: "grant-host-case",
+        capabilityToken: CAP_ALPHA_1,
+        capabilityExpiresAtMs: 901_000,
+      }),
+    );
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      publicHosts,
+      fetchRelay,
+      nowMs: () => 1_000,
+      newSessionToken: () => Buffer.alloc(32, 21).toString("base64url"),
+    });
+    const headers = new Headers(exchange(SECRET_ALPHA).headers);
+    headers.set("host", incomingHost);
+
+    const response = await handler(
+      new Request(`https://${HOST}/api/exchange`, {
+        ...exchange(SECRET_ALPHA),
+        headers,
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(fetchRelay).toHaveBeenCalledOnce();
+  });
+
   it("identifies exchange requests to the relay with the configured key", async () => {
     const relayExchangeKey = "share-web-to-relay-test-exchange-key";
     const clientAddress = "198.51.100.23";
@@ -318,7 +366,76 @@ describe("share-web sessions", () => {
       `LinkCapability ${CAP_ALPHA_2}`,
     ]);
     expect(cookiePair(renewed)).toBe(sessionHeaders.cookie);
-    expect(renewed.headers.get("set-cookie")).toContain("Max-Age=900");
+    expect(renewed.headers.get("set-cookie")).toContain("Max-Age=605700");
+  });
+
+  it("renews an expired session after a suspended tab wakes", async () => {
+    expect(LINK_SESSION_RENEWAL_GRACE_MS).toBe(7 * 24 * 60 * 60 * 1_000);
+    const relayExchangeKey = "share-web-to-relay-refresh-exchange-key";
+    let now = 1_000;
+    let exchangeCalls = 0;
+    let sessionTokenId = 27;
+    const relayOrder: string[] = [];
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      relayExchangeKey,
+      publicHosts: new Set([HOST]),
+      nowMs: () => now,
+      newSessionToken: () => Buffer.alloc(32, sessionTokenId++).toString("base64url"),
+      fetchRelay: async (relayRequest) => {
+        const pathname = new URL(relayRequest.url).pathname;
+        if (pathname === "/sync/link-exchange") {
+          exchangeCalls += 1;
+          return Response.json({
+            ok: true,
+            grantId: "grant-suspended-tab",
+            capabilityToken: CAP_ALPHA_1,
+            capabilityExpiresAtMs: exchangeCalls === 1 ? 901_000 : now + 900_000,
+          });
+        }
+        if (pathname === "/sync/link-refresh") {
+          relayOrder.push("refresh");
+          expect(relayRequest.headers.get("authorization")).toBe(
+            `LinkCapability ${CAP_ALPHA_1}`,
+          );
+          return Response.json({
+            ok: true,
+            grantId: "grant-suspended-tab",
+            capabilityToken: CAP_ALPHA_2,
+            capabilityExpiresAtMs: now + 900_000,
+          });
+        }
+        relayOrder.push("read");
+        expect(relayRequest.headers.get("authorization")).toBe(
+          `LinkCapability ${CAP_ALPHA_2}`,
+        );
+        return Response.json({ ok: true, access: "view" });
+      },
+    });
+
+    const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
+    const body = (await exchanged.json()) as { session: string };
+    const sessionHeaders = {
+      cookie: cookiePair(exchanged),
+      "x-dohc-link-session": body.session,
+    };
+    now += 20 * 60 * 1_000;
+    expect(
+      (await handler(request("/api/exchange", exchange(SECRET_BETA)))).status,
+    ).toBe(200);
+
+    const renewed = await handler(
+      request("/api/view/meta", { headers: sessionHeaders }),
+    );
+    const stillUsable = await handler(
+      request("/api/view/meta", { headers: sessionHeaders }),
+    );
+
+    expect([renewed.status, stillUsable.status]).toEqual([200, 200]);
+    expect(relayOrder).toEqual(["refresh", "read", "read"]);
+    expect(exchanged.headers.get("set-cookie")).toContain("Max-Age=605700");
+    expect(cookiePair(renewed)).toBe(sessionHeaders.cookie);
+    expect(renewed.headers.get("set-cookie")).toContain("Max-Age=605700");
   });
 
   it("shares one capability refresh across concurrent near-expiry views", async () => {
@@ -444,6 +561,73 @@ describe("share-web sessions", () => {
         `LinkCapability ${CAP_ALPHA_2}`,
       ],
     });
+  });
+
+  it("keeps an expired in-grace session after a transient refresh failure", async () => {
+    let now = 1_000;
+    let refreshCalls = 0;
+    const readCapabilities: string[] = [];
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      relayExchangeKey: "share-web-to-relay-refresh-exchange-key",
+      publicHosts: new Set([HOST]),
+      nowMs: () => now,
+      newSessionToken: () => Buffer.alloc(32, 33).toString("base64url"),
+      fetchRelay: async (relayRequest) => {
+        const pathname = new URL(relayRequest.url).pathname;
+        if (pathname === "/sync/link-exchange") {
+          return Response.json({
+            ok: true,
+            grantId: "grant-expired-refresh-failure",
+            capabilityToken: CAP_ALPHA_1,
+            capabilityExpiresAtMs: 901_000,
+          });
+        }
+        if (pathname === "/sync/link-refresh") {
+          refreshCalls += 1;
+          if (refreshCalls === 1) {
+            throw new Error("temporary relay outage");
+          }
+          return Response.json({
+            ok: true,
+            grantId: "grant-expired-refresh-failure",
+            capabilityToken: CAP_ALPHA_2,
+            capabilityExpiresAtMs: now + 900_000,
+          });
+        }
+        const authorization = relayRequest.headers.get("authorization") ?? "";
+        readCapabilities.push(authorization);
+        return authorization === `LinkCapability ${CAP_ALPHA_2}`
+          ? Response.json({ ok: true, access: "view" })
+          : new Response("expired capability", { status: 401 });
+      },
+    });
+    const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
+    const body = (await exchanged.json()) as { session: string };
+    const sessionHeaders = {
+      cookie: cookiePair(exchanged),
+      "x-dohc-link-session": body.session,
+    };
+    now += 20 * 60 * 1_000;
+
+    const duringFailure = await handler(
+      request("/api/view/meta", { headers: sessionHeaders }),
+    );
+    const afterRetry = await handler(
+      request("/api/view/meta", { headers: sessionHeaders }),
+    );
+
+    expect({
+      statuses: [duringFailure.status, afterRetry.status],
+      refreshCalls,
+      readCapabilities,
+    }).toEqual({
+      statuses: [503, 200],
+      refreshCalls: 2,
+      readCapabilities: [`LinkCapability ${CAP_ALPHA_2}`],
+    });
+    expect(afterRetry.headers.get("set-cookie")).toContain("Max-Age=605700");
   });
 
   it("keeps a near-expiry session when relay refresh answers 500", async () => {
@@ -590,6 +774,57 @@ describe("share-web sessions", () => {
     );
     expect(retried.status).toBe(200);
     expect(await retried.json()).toMatchObject({ granterEmail: "owner@example.test" });
+    expect(readCalls).toBe(2);
+  });
+
+  it("returns a generic 503 for a relay transport failure while a received 404 stays 404", async () => {
+    let readCalls = 0;
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      publicHosts: new Set([HOST]),
+      nowMs: () => 1_000,
+      newSessionToken: () => Buffer.alloc(32, 23).toString("base64url"),
+      fetchRelay: async (relayRequest) => {
+        if (new URL(relayRequest.url).pathname === "/sync/link-exchange") {
+          return Response.json({
+            ok: true,
+            grantId: "grant-transport-failure",
+            capabilityToken: CAP_ALPHA_1,
+            capabilityExpiresAtMs: 901_000,
+          });
+        }
+        readCalls += 1;
+        if (readCalls === 1) throw new Error("temporary relay outage");
+        return new Response("relay-specific missing resource", { status: 404 });
+      },
+    });
+    const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
+    const body = (await exchanged.json()) as { session: string };
+    const sessionHeaders = {
+      cookie: cookiePair(exchanged),
+      "x-dohc-link-session": body.session,
+    };
+
+    const unavailable = await handler(
+      request("/api/view/meta", { headers: sessionHeaders }),
+    );
+    expect({ status: unavailable.status, body: await unavailable.text() }).toEqual({
+      status: 503,
+      body: shareWebRefusalBody,
+    });
+    expectSecurityHeaders(unavailable);
+
+    const receivedNotFound = await handler(
+      request("/api/view/meta", { headers: sessionHeaders }),
+    );
+    expect({
+      status: receivedNotFound.status,
+      body: await receivedNotFound.text(),
+    }).toEqual({
+      status: 404,
+      body: shareWebRefusalBody,
+    });
+    expectSecurityHeaders(receivedNotFound);
     expect(readCalls).toBe(2);
   });
 

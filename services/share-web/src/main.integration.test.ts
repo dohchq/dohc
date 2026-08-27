@@ -20,8 +20,9 @@ const MAX_EXCHANGE_BODY_BYTES = 8 * 1024;
 const EXCHANGE_SECRET = Buffer.alloc(32, 11).toString("base64url");
 const CAPABILITY_TOKEN = Buffer.alloc(32, 12).toString("base64url");
 const BLOB_SHA = "a".repeat(64);
-const SHUTDOWN_GRACE_PERIOD_MS = 10_000;
-const SHUTDOWN_MARGIN_MS = 2_000;
+const TEST_SHUTDOWN_GRACE_PERIOD_MS = 250;
+const WITHIN_SHUTDOWN_GRACE_MS = 100;
+const FORCED_SHUTDOWN_TIMEOUT_MS = 2_000;
 const MISSING_VIEWER_ASSETS_MESSAGE =
   "share-web viewer assets are missing. Run: pnpm --filter @dohc/share-web build";
 const VIEWER_HTML = "<!doctype html><title>share-web viewer fixture</title>";
@@ -139,7 +140,10 @@ describe("share-web Node request adapter", () => {
 
   it("force-closes a stalled blob response after the shutdown grace period", async () => {
     const relay = await startControlledBlobRelay();
-    const server = await startShareWeb({ relayUrl: relay.url });
+    const server = await startShareWeb({
+      relayUrl: relay.url,
+      shutdownGracePeriodMs: TEST_SHUTDOWN_GRACE_PERIOD_MS,
+    });
     const session = await exchangeSession(server.port);
     const blobRequest = requestBlob(server.port, session);
 
@@ -153,10 +157,11 @@ describe("share-web Node request adapter", () => {
       const exited = waitForExit(server.child);
       sendTerminationSignal(server.child);
 
-      expect(await settleWithin(exited, SHUTDOWN_GRACE_PERIOD_MS - 1_000)).toEqual({
-        kind: "timeout",
-      });
-      const forcedExit = await settleWithin(exited, SHUTDOWN_MARGIN_MS + 1_000);
+      expect(
+        await settleWithin(exited, WITHIN_SHUTDOWN_GRACE_MS),
+        `share-web exited before its shutdown grace period\n${server.stderr()}`,
+      ).toEqual({ kind: "timeout" });
+      const forcedExit = await settleWithin(exited, FORCED_SHUTDOWN_TIMEOUT_MS);
       expect(
         forcedExit,
         `share-web remained alive after its shutdown grace period\n${server.stderr()}`,
@@ -169,7 +174,7 @@ describe("share-web Node request adapter", () => {
       blobRequest.destroy();
       relay.finishAllBlobs();
     }
-  }, 15_000);
+  }, 5_000);
 
   it("shuts down promptly when no responses are active", async () => {
     const server = await startShareWeb();
@@ -530,6 +535,7 @@ async function startShareWeb(
   options: {
     devMode?: boolean;
     relayUrl?: string;
+    shutdownGracePeriodMs?: number;
     trustedProxies?: string;
     viewerAssetsDir?: string;
   } = {},
@@ -537,9 +543,15 @@ async function startShareWeb(
   const relayUrl = options.relayUrl ?? (await startRelay());
   const env = { ...process.env };
   delete env.DOHC_SHARE_WEB_DEV;
+  delete env.DOHC_SHARE_WEB_TEST_SHUTDOWN_GRACE_PERIOD_MS;
   delete env.DOHC_SHARE_WEB_TEST_VIEWER_ASSETS_DIR;
   delete env.DOHC_SHARE_WEB_TRUSTED_PROXIES;
   if (options.devMode !== false) env.DOHC_SHARE_WEB_DEV = "1";
+  if (options.shutdownGracePeriodMs !== undefined) {
+    env.DOHC_SHARE_WEB_TEST_SHUTDOWN_GRACE_PERIOD_MS = String(
+      options.shutdownGracePeriodMs,
+    );
+  }
   if (options.trustedProxies !== undefined) {
     env.DOHC_SHARE_WEB_TRUSTED_PROXIES = options.trustedProxies;
   }

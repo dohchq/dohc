@@ -9,7 +9,8 @@ import {
   shareWebRefusalBody,
 } from "./server";
 
-const SHUTDOWN_GRACE_PERIOD_MS = 10_000;
+const DEFAULT_SHUTDOWN_GRACE_PERIOD_MS = 10_000;
+const SHUTDOWN_GRACE_PERIOD_MS = shutdownGracePeriodMs();
 
 const config = loadConfig();
 const viewerAssetsDir = viewerAssetsDirectory();
@@ -144,6 +145,16 @@ function viewerAssetsDirectory(): string {
     if (testDirectory) return testDirectory;
   }
   return fileURLToPath(new URL("../viewer/dist", import.meta.url));
+}
+
+function shutdownGracePeriodMs(): number {
+  if (process.env.NODE_ENV !== "test") return DEFAULT_SHUTDOWN_GRACE_PERIOD_MS;
+  const configured = process.env.DOHC_SHARE_WEB_TEST_SHUTDOWN_GRACE_PERIOD_MS;
+  if (configured === undefined) return DEFAULT_SHUTDOWN_GRACE_PERIOD_MS;
+  const parsed = Number(configured);
+  return Number.isSafeInteger(parsed) && parsed >= 0
+    ? parsed
+    : DEFAULT_SHUTDOWN_GRACE_PERIOD_MS;
 }
 
 function refuse(outgoing: ServerResponse): void {

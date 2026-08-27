@@ -2,7 +2,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { App, MARKDOWN_PREVIEW_BYTE_CAP, MAX_LOG_PAGES } from "./App";
+import { App, loadLog, MARKDOWN_PREVIEW_BYTE_CAP, MAX_LOG_PAGES } from "./App";
 import { filesFromLog, type RelayOp, type SharedFile, type ViewMeta } from "./model";
 
 const SESSION = "abcdefghijkl";
@@ -138,6 +138,78 @@ describe("App", () => {
     expect(container.textContent).not.toContain("This link isn't available.");
   });
 
+  it("exposes each folder's disclosure state", async () => {
+    const file: SharedFile = {
+      path: "docs/readme.md",
+      blobSha256: "f".repeat(64),
+      contentKind: "text",
+    };
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
+      if (path === `/api/view/blob/${file.blobSha256}`) {
+        return new Response("# Shared file");
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+
+    const folderButton = container.querySelector("button.folder");
+    expect(folderButton?.getAttribute("aria-expanded")).toBe("true");
+
+    act(() => {
+      folderButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(folderButton?.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("cancels an in-flight initial log scan on unmount", async () => {
+    const logPaths: string[] = [];
+    let logSignal: AbortSignal | undefined;
+    let releaseFirstPage: (() => void) | undefined;
+    const firstPageHeld = new Promise<void>((resolve) => {
+      releaseFirstPage = resolve;
+    });
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path.startsWith("/api/view/log?")) {
+        logPaths.push(path);
+        logSignal = init?.signal ?? undefined;
+        if (logPaths.length === 1) {
+          await firstPageHeld;
+          return logOpsPage([], 1, true);
+        }
+        return logOpsPage([], 2);
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(<App />);
+      await Promise.resolve();
+    });
+    expect(logPaths).toEqual(["/api/view/log?since=0&limit=500"]);
+
+    act(() => root?.unmount());
+    root = null;
+    releaseFirstPage?.();
+    await act(async () => {
+      for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
+    });
+
+    expect(logPaths).toEqual(["/api/view/log?since=0&limit=500"]);
+    expect(logSignal).toBeInstanceOf(AbortSignal);
+    expect(logSignal?.aborted).toBe(true);
+    expect(container.textContent).not.toContain("This link isn't available.");
+  });
+
   it("presents the established session capability on viewer requests", async () => {
     const file: SharedFile = {
       path: "readme.md",
@@ -159,15 +231,16 @@ describe("App", () => {
 
     await renderApp();
 
-    for (const path of [
-      "/api/view/meta",
-      "/api/view/log?since=0&limit=500",
-    ]) {
-      expect(requestInits.get(path), path).toEqual({
-        credentials: "same-origin",
-        headers: { "x-dohc-link-session": SESSION },
-      });
-    }
+    expect(requestInits.get("/api/view/meta")).toEqual({
+      credentials: "same-origin",
+      headers: { "x-dohc-link-session": SESSION },
+    });
+    const logRequestInit = requestInits.get("/api/view/log?since=0&limit=500");
+    expect(logRequestInit).toMatchObject({
+      credentials: "same-origin",
+      headers: { "x-dohc-link-session": SESSION },
+    });
+    expect(logRequestInit?.signal).toBeInstanceOf(AbortSignal);
     const blobRequestInit = requestInits.get(`/api/view/blob/${file.blobSha256}`);
     expect(blobRequestInit).toMatchObject({
       credentials: "same-origin",
@@ -1111,6 +1184,132 @@ describe("App", () => {
     ]);
   });
 
+  it("restarts one load when the epoch floor changes between pages", async () => {
+    const priorEpochFile: SharedFile = {
+      path: "prior-epoch.txt",
+      blobSha256: "1".repeat(64),
+      contentKind: "text",
+    };
+    const firstPageFile: SharedFile = {
+      path: "first-page-old-epoch.txt",
+      blobSha256: "2".repeat(64),
+      contentKind: "text",
+    };
+    const rotatedEpochFile: SharedFile = {
+      path: "rotated-epoch.txt",
+      blobSha256: "3".repeat(64),
+      contentKind: "text",
+    };
+    const snapshotOp = (relaySeq: number, file: SharedFile): RelayOp => ({
+      relaySeq,
+      opKind: "version.create",
+      payload: { forkSnapshots: [file] },
+      recordedAtMs: relaySeq,
+    });
+    const logPaths: string[] = [];
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      logPaths.push(path);
+      if (path === "/api/view/log?since=5&limit=500") {
+        return logOpsPage([snapshotOp(6, firstPageFile)], 6, true, 5);
+      }
+      if (path === "/api/view/log?since=6&limit=500") {
+        return logOpsPage([snapshotOp(11, rotatedEpochFile)], 11, false, 10);
+      }
+      if (path === "/api/view/log?since=10&limit=500") {
+        return logOpsPage([snapshotOp(11, rotatedEpochFile)], 11, false, 10);
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const loaded = await loadLog(
+      SESSION,
+      5,
+      new Map([[priorEpochFile.path, priorEpochFile]]),
+      3,
+    );
+
+    expect({
+      files: [...loaded.fileAccumulator.keys()].sort(),
+      nextCursor: loaded.nextCursor,
+      epochLogFloor: loaded.epochLogFloor,
+      logPaths,
+    }).toEqual({
+      files: [rotatedEpochFile.path],
+      nextCursor: 11,
+      epochLogFloor: 10,
+      logPaths: [
+        "/api/view/log?since=5&limit=500",
+        "/api/view/log?since=6&limit=500",
+        "/api/view/log?since=10&limit=500",
+      ],
+    });
+  });
+
+  it("keeps one fold when the epoch floor stays stable between pages", async () => {
+    const priorFile: SharedFile = {
+      path: "prior.txt",
+      blobSha256: "1".repeat(64),
+      contentKind: "text",
+    };
+    const firstPageFile: SharedFile = {
+      path: "first-page.txt",
+      blobSha256: "2".repeat(64),
+      contentKind: "text",
+    };
+    const secondPageFile: SharedFile = {
+      path: "second-page.txt",
+      blobSha256: "3".repeat(64),
+      contentKind: "text",
+    };
+    const logPaths: string[] = [];
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      logPaths.push(path);
+      if (path === "/api/view/log?since=5&limit=500") {
+        return logOpsPage([{
+          relaySeq: 6,
+          opKind: "version.create",
+          payload: { forkSnapshots: [firstPageFile] },
+          recordedAtMs: 6,
+        }], 6, true, 5);
+      }
+      if (path === "/api/view/log?since=6&limit=500") {
+        return logOpsPage([{
+          relaySeq: 7,
+          opKind: "version.create",
+          payload: { forkSnapshots: [secondPageFile] },
+          recordedAtMs: 7,
+        }], 7, false, 5);
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const loaded = await loadLog(
+      SESSION,
+      5,
+      new Map([[priorFile.path, priorFile]]),
+      2,
+    );
+
+    expect({
+      files: [...loaded.fileAccumulator.keys()].sort(),
+      nextCursor: loaded.nextCursor,
+      epochLogFloor: loaded.epochLogFloor,
+      logPaths,
+    }).toEqual({
+      files: [firstPageFile.path, priorFile.path, secondPageFile.path],
+      nextCursor: 7,
+      epochLogFloor: 5,
+      logPaths: [
+        "/api/view/log?since=5&limit=500",
+        "/api/view/log?since=6&limit=500",
+      ],
+    });
+  });
+
   it("refreshes files and meta every four minutes and stops on unmount", async () => {
     vi.useFakeTimers();
     const startedAt = new Date("2026-08-26T06:00:00.000Z").getTime();
@@ -1200,6 +1399,61 @@ describe("App", () => {
 
     expect(metaPaths).toHaveLength(3);
     expect(logPaths).toHaveLength(3);
+  });
+
+  it("cancels an in-flight heartbeat log scan on teardown", async () => {
+    vi.useFakeTimers();
+    const file: SharedFile = {
+      path: "note.txt",
+      blobSha256: "a".repeat(64),
+      contentKind: "text",
+    };
+    const logPaths: string[] = [];
+    let heartbeatSignal: AbortSignal | undefined;
+    let releaseHeartbeatPage: (() => void) | undefined;
+    const heartbeatPageHeld = new Promise<void>((resolve) => {
+      releaseHeartbeatPage = resolve;
+    });
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path.startsWith("/api/view/log?")) logPaths.push(path);
+      if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
+      if (path === "/api/view/log?since=1&limit=500") {
+        heartbeatSignal = init?.signal ?? undefined;
+        await heartbeatPageHeld;
+        return logOpsPage([], 2, true);
+      }
+      if (path === "/api/view/log?since=2&limit=500") {
+        return logOpsPage([], 2);
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+    });
+    expect(logPaths).toEqual([
+      "/api/view/log?since=0&limit=500",
+      "/api/view/log?since=1&limit=500",
+    ]);
+
+    act(() => root?.unmount());
+    root = null;
+    releaseHeartbeatPage?.();
+    await act(async () => {
+      for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
+    });
+
+    expect(logPaths).toEqual([
+      "/api/view/log?since=0&limit=500",
+      "/api/view/log?since=1&limit=500",
+    ]);
+    expect(heartbeatSignal).toBeInstanceOf(AbortSignal);
+    expect(heartbeatSignal?.aborted).toBe(true);
+    expect(container.textContent).not.toContain("This link isn't available.");
   });
 
   it("falls back to the first file when a heartbeat renames the selected file", async () => {
@@ -1371,7 +1625,7 @@ describe("App", () => {
     },
   );
 
-  it("keeps loaded files when a meta heartbeat returns 500", async () => {
+  it("keeps the last settled view when a meta heartbeat returns 503 and recovers on the next beat", async () => {
     vi.useFakeTimers();
     const file: SharedFile = {
       path: "note.txt",
@@ -1379,16 +1633,22 @@ describe("App", () => {
       contentKind: "text",
     };
     let metaRequests = 0;
+    let logRequests = 0;
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") {
         metaRequests += 1;
-        return metaRequests === 1
-          ? jsonResponse(DEFAULT_META)
-          : new Response(null, { status: 500 });
+        if (metaRequests === 2) return new Response(null, { status: 503 });
+        return jsonResponse(metaRequests === 3
+          ? { ...DEFAULT_META, lastSettledAtMs: Date.now() }
+          : DEFAULT_META);
       }
-      if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
+      if (path === "/api/view/log?since=0&limit=500") {
+        logRequests += 1;
+        return logPage([file]);
+      }
       if (path === "/api/view/log?since=1&limit=500") {
+        logRequests += 1;
         return logOpsPage([], 1);
       }
       throw new Error(`Unexpected request: ${path}`);
@@ -1404,6 +1664,17 @@ describe("App", () => {
     expect(metaRequests).toBe(2);
     expect(container.textContent).not.toContain("This link isn't available.");
     expect(renderedFilePaths()).toEqual([file.path]);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+    });
+
+    expect(metaRequests).toBe(3);
+    expect(logRequests).toBe(3);
+    expect(renderedFilePaths()).toEqual([file.path]);
+    expect(container.querySelector(".freshness")?.textContent).toBe(
+      "Last settled now",
+    );
   });
 
   it("caps heartbeat log pagination", async () => {
@@ -1440,11 +1711,11 @@ describe("App", () => {
 
     expect(heartbeatLogPaths).toHaveLength(MAX_LOG_PAGES);
     expect(heartbeatLogPaths.at(-1)).toBe(
-      "/api/view/log?since=10000&limit=500",
+      "/api/view/log?since=200&limit=500",
     );
     expect(container.textContent).not.toContain("This link isn't available.");
     expect(renderedFilePaths()).toEqual([file.path]);
-  }, 30_000);
+  });
 
   describe("log rate limits", () => {
     it("retries the same log page with exponential backoff", async () => {

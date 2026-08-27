@@ -19,7 +19,10 @@ const storages: SyncRelayStorage[] = [];
 afterEach(async () => {
   await Promise.all(
     servers.splice(0).map(
-      (server) => new Promise<void>((resolve) => server.close(() => resolve())),
+      (server) => {
+        server.closeIdleConnections();
+        return new Promise<void>((resolve) => server.close(() => resolve()));
+      },
     ),
   );
   for (const storage of storages.splice(0)) storage.close();
@@ -39,11 +42,17 @@ async function listen(handler: (request: Request) => Promise<Response>): Promise
           headers: incoming.headers as Record<string, string>,
           body: chunks.length === 0 ? undefined : Buffer.concat(chunks),
         }),
-      ).then(async (webResponse) => {
-        outgoing.statusCode = webResponse.status;
-        for (const [key, value] of webResponse.headers) outgoing.setHeader(key, value);
-        outgoing.end(Buffer.from(await webResponse.arrayBuffer()));
-      });
+      ).then(
+        async (webResponse) => {
+          outgoing.statusCode = webResponse.status;
+          for (const [key, value] of webResponse.headers) outgoing.setHeader(key, value);
+          outgoing.end(Buffer.from(await webResponse.arrayBuffer()));
+        },
+        (error: unknown) => {
+          outgoing.statusCode = 500;
+          outgoing.end(error instanceof Error ? error.message : String(error));
+        },
+      );
     });
   });
   servers.push(server);

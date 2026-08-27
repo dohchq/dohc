@@ -137,6 +137,72 @@ Plain paragraph text.
   });
 });
 
+describe("MarkdownContent link navigation", () => {
+  let container: HTMLDivElement;
+  let root: Root | null;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  });
+
+  afterEach(() => {
+    if (root) act(() => root?.unmount());
+    root = null;
+    container.remove();
+  });
+
+  it("handles a ctrl-click on a resolved shared file but passes through an unresolved link", async () => {
+    const navigatedPaths: string[] = [];
+    await act(() => {
+      root?.render(createElement(MarkdownContent, {
+        markdown: [
+          "[Shared file](/docs/next.md)",
+          "[Unresolved](#section)",
+        ].join("\n\n"),
+        resolveLink: (href: string) => href === "/docs/next.md" ? "docs/next.md" : null,
+        onNavigate: (path: string) => navigatedPaths.push(path),
+      }));
+    });
+
+    const sharedFileLink = [...container.querySelectorAll("a")]
+      .find((anchor) => anchor.textContent === "Shared file");
+    const unresolvedLink = [...container.querySelectorAll("a")]
+      .find((anchor) => anchor.textContent === "Unresolved");
+    if (!sharedFileLink || !unresolvedLink) throw new Error("links did not render");
+
+    let followedSharedFileLink = true;
+    act(() => {
+      followedSharedFileLink = sharedFileLink.dispatchEvent(
+        new MouseEvent("click", {
+          bubbles: true,
+          cancelable: true,
+          ctrlKey: true,
+        }),
+      );
+    });
+
+    expect(followedSharedFileLink).toBe(false);
+    expect(navigatedPaths).toEqual(["docs/next.md"]);
+
+    let followedUnresolvedLink = false;
+    act(() => {
+      followedUnresolvedLink = unresolvedLink.dispatchEvent(
+        new MouseEvent("click", {
+          bubbles: true,
+          cancelable: true,
+          ctrlKey: true,
+        }),
+      );
+    });
+
+    expect(followedUnresolvedLink).toBe(true);
+    expect(navigatedPaths).toEqual(["docs/next.md"]);
+  });
+});
+
 describe("MarkdownContent image retries", () => {
   const imageSource = `/api/view/blob/${"a".repeat(64)}`;
   let container: HTMLDivElement;

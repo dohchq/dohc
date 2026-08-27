@@ -1,4 +1,5 @@
 import {
+  createHash,
   createHmac,
   randomBytes,
   timingSafeEqual,
@@ -13,6 +14,7 @@ import type {
 
 export const LINK_BEARER_BYTES = 32;
 export const LINK_SESSION_TTL_MS = 15 * 60 * 1_000;
+export const LINK_SESSION_RENEWAL_GRACE_MS = 7 * 24 * 60 * 60 * 1_000;
 export const LINK_SESSIONS_PER_GRANT_LIMIT = 10_000;
 export const LINK_EXCHANGE_BUCKET_CAPACITY = 12;
 export const LINK_EXCHANGE_REFILL_PER_SECOND = 0.2;
@@ -43,6 +45,18 @@ export function constantTimeHashEqual(
   const sameLength = computed.length === stored.length;
   const comparable = sameLength ? stored : Buffer.alloc(computed.length);
   return compare(computed, comparable) && sameLength;
+}
+
+export function hashRelayExchangeKey(value: string): string {
+  return createHash("sha256").update(value).digest("base64url");
+}
+
+export function verifyRelayExchangeKey(
+  presented: string | null,
+  expectedHash: string,
+): boolean {
+  const presentedHash = hashRelayExchangeKey(presented ?? "");
+  return presented !== null && constantTimeHashEqual(presentedHash, expectedHash);
 }
 
 type Bucket = {

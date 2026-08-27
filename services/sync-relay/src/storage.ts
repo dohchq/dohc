@@ -9,7 +9,10 @@ import {
   type ConflictResolveEnvelopeContext,
 } from "./conflictResolve";
 import { RELAY_ERRORS } from "./errorCodes";
-import { LINK_SESSIONS_PER_GRANT_LIMIT } from "./linkSecurity";
+import {
+  LINK_SESSIONS_PER_GRANT_LIMIT,
+  LINK_SESSION_RENEWAL_GRACE_MS,
+} from "./linkSecurity";
 
 export const SHARED_BLOB_CANDIDATE_LIMIT = 64;
 
@@ -2115,18 +2118,19 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         }
         if (op.opKind === "version.create") {
           const versionId = versionIdFromVersionCreatePayload(op.payloadJson);
-          if (!versionId) continue;
-          const shas = referencedBlobShas(op.opKind, op.payloadJson, {
-            workspaceId: input.workspaceId,
-            recordedAtMs: op.recordedAtMs,
-          });
-          for (const sha256 of new Set(shas)) {
-            versionSnapshotBlobStmt.run(
-              input.workspaceId,
-              Number(result.lastInsertRowid),
-              versionId,
-              sha256,
-            );
+          if (versionId) {
+            const shas = referencedBlobShas(op.opKind, op.payloadJson, {
+              workspaceId: input.workspaceId,
+              recordedAtMs: op.recordedAtMs,
+            });
+            for (const sha256 of new Set(shas)) {
+              versionSnapshotBlobStmt.run(
+                input.workspaceId,
+                Number(result.lastInsertRowid),
+                versionId,
+                sha256,
+              );
+            }
           }
         }
       }
@@ -2597,8 +2601,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         return false;
       }
       this.db
-        .prepare("DELETE FROM sync_relay_link_sessions WHERE expires_at_ms <= ?")
-        .run(Math.trunc(session.mintedAtMs));
+        .prepare("DELETE FROM sync_relay_link_sessions WHERE expires_at_ms < ?")
+        .run(Math.trunc(session.mintedAtMs - LINK_SESSION_RENEWAL_GRACE_MS));
       const liveSessionCount = Number(
         this.db
           .prepare(
@@ -2653,7 +2657,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       currentSession.capabilityHash === session.capabilityHash ||
       currentSession.grantId !== session.grantId ||
       currentSession.generation !== session.generation ||
-      currentSession.expiresAtMs <= session.mintedAtMs ||
+      currentSession.expiresAtMs + LINK_SESSION_RENEWAL_GRACE_MS <
+        session.mintedAtMs ||
       session.expiresAtMs <= session.mintedAtMs ||
       session.generation < 1
     ) {
@@ -2668,14 +2673,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
              AND capability_hash = ?
              AND grant_id = ?
              AND generation = ?
-             AND expires_at_ms > ?`,
+             AND expires_at_ms >= ?`,
         )
         .run(
           currentSession.sessionId,
           currentSession.capabilityHash,
           currentSession.grantId,
           currentSession.generation,
-          Math.trunc(session.mintedAtMs),
+          Math.trunc(session.mintedAtMs - LINK_SESSION_RENEWAL_GRACE_MS),
         );
       if (Number(retired.changes ?? 0) !== 1) return false;
       this.db

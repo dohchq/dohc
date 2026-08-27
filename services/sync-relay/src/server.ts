@@ -12,13 +12,16 @@ import { stableJsonStringify } from "./canonicalJson";
 import {
   constantTimeHashEqual,
   hashLinkBearer,
+  hashRelayExchangeKey,
   LinkExchangeRateLimiter,
   LinkReadRateLimiter,
   LINK_LOG_READ_BUCKET_CAPACITY,
   LINK_LOG_READ_REFILL_PER_SECOND,
+  LINK_SESSION_RENEWAL_GRACE_MS,
   LINK_SESSION_TTL_MS,
   mintLinkBearer,
   validateLinkCapability,
+  verifyRelayExchangeKey,
 } from "./linkSecurity";
 import {
   PresenceCapacityError,
@@ -304,18 +307,14 @@ export function createSyncRelayHandler({
   newLinkBearer = () => mintLinkBearer(),
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler {
   const relayExchangeKeyHash =
-    relayExchangeKey === undefined ? undefined : sha256Base64Url(relayExchangeKey);
+    relayExchangeKey === undefined ? undefined : hashRelayExchangeKey(relayExchangeKey);
 
   const hasValidRelayExchangeKey = (request: Request): boolean => {
     // An unconfigured key permits the request — that only occurs in
     // development and test; production and self-host require the key.
     if (relayExchangeKeyHash === undefined) return true;
     const presented = request.headers.get("x-dohc-relay-exchange-key");
-    const presentedHash = sha256Base64Url(presented ?? "");
-    return (
-      presented !== null &&
-      constantTimeHashEqual(presentedHash, relayExchangeKeyHash)
-    );
+    return verifyRelayExchangeKey(presented, relayExchangeKeyHash);
   };
 
   // Handle a publish (POST) or long-poll (GET) against an already-authorized
@@ -646,6 +645,64 @@ export function createSyncRelayHandler({
     parentGrantId: grant.parentGrantId,
   });
 
+  const projectRefusedOutwardMove = (
+    selector: AnyShareSelector,
+    projection: ReturnType<typeof createAccountlessPathProjection>,
+    row: Pick<SyncRelayLogRow, "opKind" | "payloadJson">,
+    chatResolver: ChatShareThreadResolver,
+  ): unknown | null => {
+    if (isChatChannelSelector(selector) || row.opKind !== "moment.append") {
+      return null;
+    }
+    let payload: unknown;
+    try {
+      payload = JSON.parse(row.payloadJson);
+    } catch {
+      return null;
+    }
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return null;
+    }
+    const record = payload as Record<string, unknown>;
+    if (record.operation !== "rename") return null;
+    const beforePath = record.payloadBeforePath;
+    const afterPath = record.payloadAfterPath;
+    if (typeof beforePath !== "string" || typeof afterPath !== "string") {
+      return null;
+    }
+    if (record.path !== afterPath) return null;
+    if (
+      record.beforePath !== undefined &&
+      record.beforePath !== null &&
+      record.beforePath !== beforePath
+    ) {
+      return null;
+    }
+    if (
+      projection.projectPath(beforePath) === null ||
+      projection.projectPath(afterPath) !== null
+    ) {
+      return null;
+    }
+
+    // Re-run the visible half as a delete so the existing filter validates
+    // its version and before-path, then emits the standard minimal payload.
+    // An inward move remains absent until its next in-boundary write.
+    const deletion = filterOpForShare(
+      selector,
+      row.opKind,
+      JSON.stringify({
+        operation: "delete",
+        versionId: record.versionId,
+        path: beforePath,
+        payloadBeforePath: beforePath,
+        ...(record.beforePath === beforePath ? { beforePath } : {}),
+      }),
+      chatResolver,
+    );
+    return deletion.allowed ? projection.projectPayload(deletion.payload) : null;
+  };
+
   const filteredLogPage = (
     workspaceId: string,
     selector: AnyShareSelector,
@@ -673,10 +730,18 @@ export function createSyncRelayHandler({
         continue;
       }
       const decision = filterOpForShare(selector, row.opKind, row.payloadJson, chatResolver);
-      if (!decision.allowed) continue;
-      const payload = accountlessProjection
-        ? accountlessProjection.projectPayload(decision.payload)
-        : decision.payload;
+      const payload = decision.allowed
+        ? accountlessProjection
+          ? accountlessProjection.projectPayload(decision.payload)
+          : decision.payload
+        : accountlessProjection
+          ? projectRefusedOutwardMove(
+              selector,
+              accountlessProjection,
+              row,
+              chatResolver,
+            )
+          : null;
       if (payload === null) continue;
       ops.push({
         relaySeq: row.relaySeq,
@@ -952,7 +1017,7 @@ export function createSyncRelayHandler({
     if (
       !session ||
       !constantTimeHashEqual(capabilityHash, session.capabilityHash) ||
-      session.expiresAtMs <= refreshedAtMs
+      session.expiresAtMs + LINK_SESSION_RENEWAL_GRACE_MS < refreshedAtMs
     ) {
       throw invalidLinkCapability();
     }
@@ -3033,10 +3098,6 @@ function parseIfMatchSha256(header: string | null): string | null {
 
 function sha256Hex(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
-}
-
-function sha256Base64Url(value: string): string {
-  return createHash("sha256").update(value).digest("base64url");
 }
 
 function arrayBufferForBytes(bytes: Uint8Array): ArrayBuffer {
