@@ -737,7 +737,10 @@ export function createShareWebHandler({
             );
             return refused();
           }
-          return refused(404, refreshedCookieHeaders);
+          return refused(
+            relayResponse.status >= 500 ? 503 : 404,
+            refreshedCookieHeaders,
+          );
         }
         if (isBlob && releaseBlobProxy) {
           return await streamingBlobResponse(

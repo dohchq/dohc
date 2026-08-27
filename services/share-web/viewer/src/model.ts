@@ -106,9 +106,13 @@ export function foldLogOps(
     } else {
       if (!before) continue;
       const current = files.get(before.path);
-      if (!current || current.blobSha256 !== before.blobSha256) continue;
-      if (before.path !== afterPath && files.has(afterPath)) continue;
-      if (before.path !== afterPath) files.delete(before.path);
+      if (current) {
+        if (current.blobSha256 !== before.blobSha256) continue;
+        if (before.path !== afterPath && files.has(afterPath)) continue;
+        if (before.path !== afterPath) files.delete(before.path);
+      } else if (files.has(afterPath)) {
+        continue;
+      }
     }
     files.set(afterPath, {
       path: afterPath,

@@ -520,6 +520,27 @@ function collectString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+export function parseShareOpPayloadWithReferencedPaths(
+  payloadJson: string,
+): { payload: unknown; referencedPaths: string[] } | null {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(payloadJson);
+  } catch {
+    return null;
+  }
+  const record = asRecord(payload);
+  const referencedPaths = record
+    ? [
+        collectString(record.path),
+        collectString(record.payloadBeforePath),
+        collectString(record.payloadAfterPath),
+        collectString(record.beforePath),
+      ].filter((path): path is string => path !== null)
+    : [];
+  return { payload, referencedPaths };
+}
+
 // Rebuilds the SERVED payload from an explicit per-kind allowlist (the same
 // posture as the moment.append/version.create branches): a stored payload
 // that grows an internal-only field (audit metadata, device ids, ...) must
@@ -800,12 +821,9 @@ export function filterOpForShare(
   payloadJson: string,
   chat?: ChatShareThreadResolver,
 ): ShareOpDecision {
-  let payload: unknown;
-  try {
-    payload = JSON.parse(payloadJson);
-  } catch {
-    return { allowed: false };
-  }
+  const parsed = parseShareOpPayloadWithReferencedPaths(payloadJson);
+  if (!parsed) return { allowed: false };
+  const { payload, referencedPaths } = parsed;
 
   if (isChatChannelSelector(selector)) {
     return filterChatOpForChannelShare(selector, opKind, payload, chat);
@@ -829,18 +847,12 @@ export function filterOpForShare(
     if (!record) return { allowed: false };
     const claimedVersionId = collectString(record.versionId);
     if (claimedVersionId !== targetVersionId(selector)) return { allowed: false };
-    const paths = [
-      collectString(record.path),
-      collectString(record.payloadBeforePath),
-      collectString(record.payloadAfterPath),
-      collectString(record.beforePath),
-    ].filter((path): path is string => path !== null);
-    if (paths.length === 0) return { allowed: false };
+    if (referencedPaths.length === 0) return { allowed: false };
     // ALL referenced paths must be visible. A rename across the share boundary
     // is excluded rather than leaking the outside path. Existing replicas keep
     // their prior view, but accountless current-state blob reads do not
     // hydrate it after the move.
-    if (!paths.every((path) => pathVisibleThroughShare(selector, path))) {
+    if (!referencedPaths.every((path) => pathVisibleThroughShare(selector, path))) {
       return { allowed: false };
     }
     // Build a MINIMAL served payload from the allowlist of fields the

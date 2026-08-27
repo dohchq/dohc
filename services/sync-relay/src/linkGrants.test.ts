@@ -1491,17 +1491,17 @@ describe("relay link grants", () => {
     const h = handler(storage, { relayExchangeKey });
     await seedFileShare(h);
     const created = await createLink(h);
-    const exchanged = await json(
-      await h(
-        request(null, "/sync/link-exchange", {
-          ...jsonBody({ secret: created.secret }),
-          headers: {
-            "content-type": "application/json",
-            "x-dohc-relay-exchange-key": relayExchangeKey,
-          },
-        }),
-      ),
+    const exchangeResponse = await h(
+      request(null, "/sync/link-exchange", {
+        ...jsonBody({ secret: created.secret }),
+        headers: {
+          "content-type": "application/json",
+          "x-dohc-relay-exchange-key": relayExchangeKey,
+        },
+      }),
     );
+    expect(exchangeResponse.status).toBe(200);
+    const exchanged = await json(exchangeResponse);
 
     const missingKey = await h(
       request(null, "/sync/link-refresh", {

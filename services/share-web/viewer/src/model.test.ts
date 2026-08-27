@@ -12,6 +12,8 @@ const ORIGINAL_SHA = "0".repeat(64);
 const FAST_FORWARD_SHA = "1".repeat(64);
 const DIVERGENT_SHA = "2".repeat(64);
 const LATER_FAST_FORWARD_SHA = "3".repeat(64);
+const PROJECTED_PREIMAGE_SHA = "4".repeat(64);
+const ARRIVED_SHA = "5".repeat(64);
 
 function snapshotOp(file: SharedFile): RelayOp {
   return {
@@ -131,6 +133,58 @@ describe("filesFromLog", () => {
     expect(filesFromAccumulator(files)).toEqual([{
       path: PATH,
       blobSha256: FAST_FORWARD_SHA,
+      contentKind: "text",
+    }]);
+  });
+
+  it("applies the next write after a projected inward move left its target absent", () => {
+    const arrivedPath = "docs/arrived.md";
+    const files = new Map<string, SharedFile>();
+    const writeAfterHiddenMove: RelayOp = {
+      relaySeq: 2,
+      opKind: "moment.append",
+      payload: {
+        operation: "write",
+        payloadBeforePath: arrivedPath,
+        payloadBeforeBlobSha256: PROJECTED_PREIMAGE_SHA,
+        payloadAfterPath: arrivedPath,
+        payloadAfterBlobSha256: ARRIVED_SHA,
+        payloadAfterContentKind: "text",
+      },
+      recordedAtMs: 2,
+    };
+
+    foldLogOps(files, [writeAfterHiddenMove]);
+
+    expect(filesFromAccumulator(files)).toEqual([{
+      path: arrivedPath,
+      blobSha256: ARRIVED_SHA,
+      contentKind: "text",
+    }]);
+  });
+
+  it("treats a rename from an unseen path as an arrival", () => {
+    const arrivedPath = "docs/arrived.md";
+    const files = new Map<string, SharedFile>();
+    const renameIn: RelayOp = {
+      relaySeq: 1,
+      opKind: "moment.append",
+      payload: {
+        operation: "rename",
+        payloadBeforePath: "private/hidden.md",
+        payloadBeforeBlobSha256: PROJECTED_PREIMAGE_SHA,
+        payloadAfterPath: arrivedPath,
+        payloadAfterBlobSha256: ARRIVED_SHA,
+        payloadAfterContentKind: "text",
+      },
+      recordedAtMs: 1,
+    };
+
+    foldLogOps(files, [renameIn]);
+
+    expect(filesFromAccumulator(files)).toEqual([{
+      path: arrivedPath,
+      blobSha256: ARRIVED_SHA,
       contentKind: "text",
     }]);
   });

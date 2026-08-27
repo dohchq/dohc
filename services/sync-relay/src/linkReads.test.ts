@@ -21,6 +21,7 @@ import { filterOpForShare, type ShareSelector } from "./shareFilter";
 import {
   createSyncRelayHandler,
   LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET,
+  MAX_BLOB_BYTES,
   MAX_RAW_ROWS_PER_LINK_PAGE,
   type SyncRelayHandler,
 } from "./server";
@@ -130,44 +131,6 @@ function jsonBody(body: unknown): RequestInit {
 
 async function json(response: Response): Promise<Record<string, unknown>> {
   return (await response.json()) as Record<string, unknown>;
-}
-
-function viewerPaths(
-  ops: readonly Record<string, unknown>[],
-  initialPaths: readonly string[] = [],
-): string[] {
-  const paths = new Set(initialPaths);
-  for (const op of ops) {
-    if (op.opKind !== "moment.append") continue;
-    const payload = op.payload;
-    if (!payload || typeof payload !== "object" || Array.isArray(payload)) continue;
-    const record = payload as Record<string, unknown>;
-    const beforePath =
-      typeof record.payloadBeforePath === "string"
-        ? record.payloadBeforePath
-        : null;
-    const currentPath = typeof record.path === "string" ? record.path : null;
-    if (record.operation === "delete") {
-      if (beforePath) paths.delete(beforePath);
-      if (currentPath) paths.delete(currentPath);
-      continue;
-    }
-    const afterPath =
-      typeof record.payloadAfterPath === "string"
-        ? record.payloadAfterPath
-        : null;
-    const afterSha = record.payloadAfterBlobSha256;
-    if (
-      !afterPath ||
-      typeof afterSha !== "string" ||
-      !/^[a-f0-9]{64}$/u.test(afterSha)
-    ) {
-      continue;
-    }
-    if (beforePath && beforePath !== afterPath) paths.delete(beforePath);
-    paths.add(afterPath);
-  }
-  return [...paths].sort();
 }
 
 function sha256(content: string): string {
@@ -462,6 +425,71 @@ describe("relay capability reads", () => {
     expect(LINK_GRANT_LOG_READ_BUCKET_CAPACITY).toBe(
       LINK_LOG_READ_BUCKET_CAPACITY * 4,
     );
+  });
+
+  it("bounds retained link blob bytes per grant and releases every stream charge", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const largeContent = "l".repeat(MAX_BLOB_BYTES);
+    const smallContent = "s".repeat(4 * 1024 * 1024);
+    expect(
+      (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
+    ).toBe(200);
+    const largeSha = await putBlob(h, largeContent);
+    const smallSha = await putBlob(h, smallContent);
+    await appendMoments(h, [
+      moment(0, "docs/large.bin", largeContent, 1_100),
+      moment(1, "docs/small.bin", smallContent, 1_200),
+    ]);
+    const link = await createLink(h, { paths: ["docs"], access: "view" });
+    const opened: Response[] = [];
+
+    try {
+      const held = await Promise.all(
+        Array.from({ length: 3 }, () =>
+          h(linkRequest(link.capability, `/sync/link/blobs/${largeSha}`)),
+        ),
+      );
+      opened.push(...held);
+      const overBudget = await h(
+        linkRequest(link.capability, `/sync/link/blobs/${largeSha}`),
+      );
+      opened.push(overBudget);
+      const small = await h(
+        linkRequest(link.capability, `/sync/link/blobs/${smallSha}`),
+      );
+      opened.push(small);
+
+      await overBudget.body?.cancel();
+      await small.body?.cancel();
+      await held[0]!.body?.cancel();
+      const restored = await h(
+        linkRequest(link.capability, `/sync/link/blobs/${largeSha}`),
+      );
+      opened.push(restored);
+
+      expect({
+        held: held.map((response) => response.status),
+        overBudget: overBudget.status,
+        small: small.status,
+        restored: restored.status,
+      }).toEqual({
+        held: [200, 200, 200],
+        overBudget: 429,
+        small: 200,
+        restored: 200,
+      });
+    } finally {
+      await Promise.all(
+        opened.map(async (response) => {
+          try {
+            await response.body?.cancel();
+          } catch {
+            // A terminated or already-consumed response has released its charge.
+          }
+        }),
+      );
+    }
   });
 
   it.each([
@@ -794,9 +822,12 @@ describe("relay capability reads", () => {
         ),
       ),
     );
-    const initialOps = initialLog.ops as Array<Record<string, unknown>>;
-    const initialPaths = viewerPaths(initialOps);
-    expect(initialPaths).toEqual(["docs/shared.md"]);
+    const initialOps = initialLog.ops as RelayOp[];
+    const initialFiles: FileAccumulator = new Map();
+    foldLogOps(initialFiles, initialOps);
+    expect(filesFromAccumulator(initialFiles).map(({ path }) => path)).toEqual([
+      "docs/shared.md",
+    ]);
 
     const outwardMove = moment(3, "private/moved.md", "# shared\n", 1_300, {
       objectId: "object-shared",
@@ -814,7 +845,7 @@ describe("relay capability reads", () => {
         ),
       ),
     );
-    const accountlessOps = accountlessDelta.ops as Array<Record<string, unknown>>;
+    const accountlessOps = accountlessDelta.ops as RelayOp[];
     const authenticatedDelta = await json(
       await h(
         request(
@@ -823,9 +854,11 @@ describe("relay capability reads", () => {
         ),
       ),
     );
-    const authenticatedOps = authenticatedDelta.ops as Array<
-      Record<string, unknown>
-    >;
+    const authenticatedOps = authenticatedDelta.ops as RelayOp[];
+    const accountlessFiles = new Map(initialFiles);
+    foldLogOps(accountlessFiles, accountlessOps);
+    const authenticatedFiles = new Map(initialFiles);
+    foldLogOps(authenticatedFiles, authenticatedOps);
 
     expect({
       rawFilterAllowed: filterOpForShare(
@@ -834,9 +867,13 @@ describe("relay capability reads", () => {
         JSON.stringify(outwardMove.payload),
       ).allowed,
       accountlessOps,
-      accountlessViewerPaths: viewerPaths(accountlessOps, initialPaths),
+      accountlessFoldedPaths: filesFromAccumulator(accountlessFiles).map(
+        ({ path }) => path,
+      ),
       authenticatedOps,
-      authenticatedViewerPaths: viewerPaths(authenticatedOps, initialPaths),
+      authenticatedFoldedPaths: filesFromAccumulator(authenticatedFiles).map(
+        ({ path }) => path,
+      ),
     }).toEqual({
       rawFilterAllowed: false,
       accountlessOps: [
@@ -855,9 +892,9 @@ describe("relay capability reads", () => {
           recordedAtMs: 1_300,
         },
       ],
-      accountlessViewerPaths: [],
+      accountlessFoldedPaths: [],
       authenticatedOps: [],
-      authenticatedViewerPaths: ["docs/shared.md"],
+      authenticatedFoldedPaths: ["docs/shared.md"],
     });
     const projectedPayload = accountlessOps[0]?.payload as
       | Record<string, unknown>
@@ -895,6 +932,43 @@ describe("relay capability reads", () => {
     expect(metadata.lastSettledKnown).toBe(true);
   });
 
+  it("reports known-empty freshness for a never-written path share", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    expect(
+      (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
+    ).toBe(200);
+    expect(
+      (
+        await h(
+          request(
+            OWNER,
+            `/sync/${WORKSPACE}/log`,
+            jsonBody({
+              originId: "origin-a",
+              ops: [
+                {
+                  originSeq: 0,
+                  opKind: "workspace.init",
+                  payload: {},
+                  recordedAtMs: 2_000,
+                },
+              ],
+            }),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    const link = await createLink(h, { paths: ["docs"], access: "view" });
+
+    const metadata = await json(
+      await h(linkRequest(link.capability, "/sync/link/share")),
+    );
+
+    expect(metadata.lastSettledAtMs).toBeNull();
+    expect(metadata.lastSettledKnown).toBe(true);
+  });
+
   it("keeps an inward move hidden until the next in-boundary write", async () => {
     const storage = await newStorage();
     const h = handler(storage);
@@ -907,8 +981,9 @@ describe("relay capability reads", () => {
         ),
       ),
     );
-    const initialOps = initialLog.ops as Array<Record<string, unknown>>;
-    const initialPaths = viewerPaths(initialOps);
+    const initialOps = initialLog.ops as RelayOp[];
+    const initialFiles: FileAccumulator = new Map();
+    foldLogOps(initialFiles, initialOps);
     const updated = "arrived and updated\n";
     await putBlob(h, updated);
     const inwardMove = moment(3, "docs/arrived.md", "hidden\n", 1_300, {
@@ -941,13 +1016,13 @@ describe("relay capability reads", () => {
         ),
       ),
     );
-    const accountlessWriteOps = accountlessInward.ops as Array<
-      Record<string, unknown>
-    >;
+    const accountlessWriteOps = accountlessInward.ops as RelayOp[];
     expect(accountlessInward).toMatchObject({ nextCursor: 5, hasMore: false });
     expect(accountlessWriteOps).toHaveLength(1);
     expect(accountlessWriteOps[0]).toMatchObject({ originSeq: 4 });
-    expect(viewerPaths(accountlessWriteOps, initialPaths)).toEqual([
+    const accountlessFiles = new Map(initialFiles);
+    foldLogOps(accountlessFiles, accountlessWriteOps);
+    expect(filesFromAccumulator(accountlessFiles).map(({ path }) => path)).toEqual([
       "docs/arrived.md",
       "docs/shared.md",
     ]);
@@ -969,12 +1044,13 @@ describe("relay capability reads", () => {
         ),
       ),
     );
-    expect(
-      viewerPaths(
-        authenticatedWrite.ops as Array<Record<string, unknown>>,
-        initialPaths,
-      ),
-    ).toEqual(["docs/arrived.md", "docs/shared.md"]);
+    const authenticatedWriteOps = authenticatedWrite.ops as RelayOp[];
+    const authenticatedFiles = new Map(initialFiles);
+    foldLogOps(authenticatedFiles, authenticatedWriteOps);
+    expect(filesFromAccumulator(authenticatedFiles).map(({ path }) => path)).toEqual([
+      "docs/arrived.md",
+      "docs/shared.md",
+    ]);
   });
 
   it("keeps a nested folder's visible name as its accountless root", async () => {

@@ -540,17 +540,120 @@ describe("App", () => {
     expect(location.pathname).toBe(`/s/${SESSION}`);
   });
 
-  it("keeps the viewer chrome when the selected file blob is unavailable", async () => {
+  it("refreshes a stale selected-file hash without replacing the viewer", async () => {
+    const staleFile: SharedFile = {
+      path: "readme.md",
+      blobSha256: "9".repeat(64),
+      contentKind: "text",
+    };
+    const currentFile: SharedFile = {
+      ...staleFile,
+      blobSha256: "8".repeat(64),
+    };
+    const changedFileOp: RelayOp = {
+      relaySeq: 2,
+      opKind: "moment.append",
+      payload: {
+        operation: "write",
+        payloadBeforePath: staleFile.path,
+        payloadBeforeBlobSha256: staleFile.blobSha256,
+        payloadAfterPath: currentFile.path,
+        payloadAfterBlobSha256: currentFile.blobSha256,
+        payloadAfterContentKind: currentFile.contentKind,
+      },
+      recordedAtMs: 2,
+    };
+    let metaRequests = 0;
+    const logPaths: string[] = [];
+    let releaseRefresh: (() => void) | undefined;
+    const refreshHeld = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") {
+        metaRequests += 1;
+        if (metaRequests > 1) await refreshHeld;
+        return jsonResponse(DEFAULT_META);
+      }
+      if (path.startsWith("/api/view/log?")) logPaths.push(path);
+      if (path === "/api/view/log?since=0&limit=500") {
+        return logPage([staleFile]);
+      }
+      if (path === "/api/view/log?since=1&limit=500") {
+        await refreshHeld;
+        return logOpsPage([changedFileOp], 2);
+      }
+      if (path === `/api/view/blob/${staleFile.blobSha256}`) {
+        return new Response(null, { status: 404 });
+      }
+      if (path === `/api/view/blob/${currentFile.blobSha256}`) {
+        return new Response("# Current file\n\nRecovered with the new hash.");
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+    await settle(() => {
+      const text = container.querySelector("main.content .file-status")?.textContent ??
+        container.querySelector("main.content .state")?.textContent;
+      return text === "This link isn't available." ||
+        text === "This file changed. Refreshing.";
+    });
+
+    const content = container.querySelector("main.content");
+    expect(content?.textContent).toBe("This file changed. Refreshing.");
+    expect(content?.querySelector(".file-status")?.textContent).toBe(
+      "This file changed. Refreshing.",
+    );
+    expect(container.querySelector("header")?.textContent).toContain(
+      "Shared by a dohc user",
+    );
+    expect(container.querySelector("h1")?.textContent).toBe(staleFile.path);
+    expect(container.querySelector(".badge")?.textContent).toBe("View");
+    expect(container.querySelector('nav[aria-label="Shared files"]')?.textContent)
+      .toContain(staleFile.path);
+    expect(metaRequests).toBe(2);
+    expect(logPaths).toEqual([
+      "/api/view/log?since=0&limit=500",
+      "/api/view/log?since=1&limit=500",
+    ]);
+
+    releaseRefresh?.();
+    await settle(() =>
+      container.querySelector("article.markdown")?.textContent
+        ?.includes("Recovered with the new hash.") === true
+    );
+
+    expect(container.querySelector("article.markdown")?.textContent).toContain(
+      "Recovered with the new hash.",
+    );
+    expect(container.querySelector("main.content .file-status")).toBeNull();
+  });
+
+  it("reports a selected file unavailable when its immediate refresh keeps the stale hash", async () => {
     const file: SharedFile = {
       path: "readme.md",
       blobSha256: "9".repeat(64),
       contentKind: "text",
     };
+    let metaRequests = 0;
+    const logPaths: string[] = [];
+    let blobRequests = 0;
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
-      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/meta") {
+        metaRequests += 1;
+        return jsonResponse(DEFAULT_META);
+      }
+      if (path.startsWith("/api/view/log?")) logPaths.push(path);
       if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
+      if (path === "/api/view/log?since=1&limit=500") {
+        return logOpsPage([], 1);
+      }
       if (path === `/api/view/blob/${file.blobSha256}`) {
+        blobRequests += 1;
         return new Response(null, { status: 404 });
       }
       throw new Error(`Unexpected request: ${path}`);
@@ -558,19 +661,27 @@ describe("App", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await renderApp();
+    await settle(() =>
+      container.querySelector("main.content .file-status")?.textContent ===
+        "This file isn't available right now."
+    );
 
-    const content = container.querySelector("main.content");
-    expect(content?.textContent).toBe("This link isn't available.");
-    expect(content?.querySelector(".state")?.textContent).toBe(
-      "This link isn't available.",
+    expect(container.querySelector("main.content .file-status")?.textContent).toBe(
+      "This file isn't available right now.",
     );
     expect(container.querySelector("header")?.textContent).toContain(
       "Shared by a dohc user",
     );
-    expect(container.querySelector("h1")?.textContent).toBe(file.path);
-    expect(container.querySelector(".badge")?.textContent).toBe("View");
     expect(container.querySelector('nav[aria-label="Shared files"]')?.textContent)
       .toContain(file.path);
+    expect({ metaRequests, logPaths, blobRequests }).toEqual({
+      metaRequests: 2,
+      logPaths: [
+        "/api/view/log?since=0&limit=500",
+        "/api/view/log?since=1&limit=500",
+      ],
+      blobRequests: 1,
+    });
   });
 
   it("retries a throttled file blob and renders it when capacity becomes available", async () => {
@@ -633,7 +744,7 @@ describe("App", () => {
 
     expect(blobRequests).toBe(12);
     expect(container.querySelector("main.content")?.textContent).toBe(
-      "This link isn't available.",
+      "This file isn't available right now.",
     );
   });
 
@@ -1025,6 +1136,156 @@ describe("App", () => {
     expect(createObjectUrl).toHaveBeenCalledTimes(1);
     expect(revokeObjectUrl).toHaveBeenCalledWith(objectUrl);
     expect(document.body.querySelector(`a[href="${objectUrl}"]`)).toBeNull();
+  });
+
+  it("reports an exhausted download retry budget and clears the message on the next attempt", async () => {
+    vi.useFakeTimers();
+    const file: SharedFile = {
+      path: "payload.bin",
+      blobSha256: "5".repeat(64),
+      contentKind: "binary",
+    };
+    const downloadPath = `/api/view/blob/${file.blobSha256}`;
+    let downloadRequests = 0;
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
+      if (path === downloadPath) {
+        downloadRequests += 1;
+        return new Response(null, { status: 429 });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+    const visibleDownload = container.querySelector("a[download]");
+    await act(async () => {
+      visibleDownload?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
+      );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(120_000);
+    });
+
+    expect(downloadRequests).toBe(12);
+    expect(container.querySelector(".download-error")?.textContent).toBe(
+      "The download didn't finish. Try again.",
+    );
+
+    await act(async () => {
+      visibleDownload?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(downloadRequests).toBe(13);
+    expect(container.querySelector(".download-error")).toBeNull();
+  });
+
+  it("reports a non-rate-limited download failure until the next attempt", async () => {
+    const file: SharedFile = {
+      path: "payload.bin",
+      blobSha256: "6".repeat(64),
+      contentKind: "binary",
+    };
+    const downloadPath = `/api/view/blob/${file.blobSha256}`;
+    let downloadRequests = 0;
+    let secondSignal: AbortSignal | undefined;
+    const secondRequestHeld = new Promise<Response>(() => undefined);
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
+      if (path === downloadPath) {
+        downloadRequests += 1;
+        if (downloadRequests === 1) {
+          return new Response(null, { status: 503 });
+        }
+        secondSignal = init?.signal ?? undefined;
+        return secondRequestHeld;
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+    const visibleDownload = container.querySelector("a[download]");
+    await act(async () => {
+      visibleDownload?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
+      );
+      await Promise.resolve();
+    });
+    await settle(() =>
+      container.querySelector(".download-error")?.textContent ===
+        "The download didn't finish. Try again."
+    );
+
+    expect(downloadRequests).toBe(1);
+    await act(async () => {
+      visibleDownload?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(downloadRequests).toBe(2);
+    expect(secondSignal).toBeInstanceOf(AbortSignal);
+    expect(container.querySelector(".download-error")).toBeNull();
+  });
+
+  it("does not report a deliberately cancelled download", async () => {
+    const file: SharedFile = {
+      path: "payload.bin",
+      blobSha256: "7".repeat(64),
+      contentKind: "binary",
+    };
+    const downloadPath = `/api/view/blob/${file.blobSha256}`;
+    const downloadSignals: AbortSignal[] = [];
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
+      if (path === downloadPath) {
+        const signal = init?.signal;
+        if (!signal) throw new Error("Expected a download abort signal");
+        downloadSignals.push(signal);
+        return new Promise<Response>((_resolve, reject) => {
+          signal.addEventListener("abort", () => {
+            reject(new DOMException("The request was aborted.", "AbortError"));
+          }, { once: true });
+        });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+    const visibleDownload = container.querySelector("a[download]");
+    await act(async () => {
+      visibleDownload?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
+      );
+      await Promise.resolve();
+    });
+    await settle(() => downloadSignals.length === 1);
+
+    await act(async () => {
+      visibleDownload?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
+      );
+      await Promise.resolve();
+    });
+    await settle(() =>
+      downloadSignals.length === 2 && downloadSignals[0]?.aborted === true
+    );
+
+    expect(container.querySelector(".download-error")).toBeNull();
   });
 
   it("cancels a throttled download retry when the viewer unmounts", async () => {
@@ -1547,6 +1808,7 @@ describe("App", () => {
     const divergentWriteSha = "4".repeat(64);
     const survivingWriteSha = "5".repeat(64);
     const createdSha = "6".repeat(64);
+    const divergentRenameSha = "7".repeat(64);
     const initialOps: RelayOp[] = [{
       relaySeq: 1,
       opKind: "version.create",
@@ -1624,8 +1886,8 @@ describe("App", () => {
         opKind: "moment.append",
         payload: {
           operation: "rename",
-          payloadBeforePath: fileB.path,
-          payloadBeforeBlobSha256: fileB.blobSha256,
+          payloadBeforePath: "renamed-b.txt",
+          payloadBeforeBlobSha256: divergentRenameSha,
           payloadAfterPath: "losing-b.txt",
           payloadAfterBlobSha256: fileB.blobSha256,
           payloadAfterContentKind: fileB.contentKind,

@@ -39,6 +39,7 @@ import {
   filterOpForShareAppend,
   filterProposedChangeForShare,
   isChatChannelSelector,
+  parseShareOpPayloadWithReferencedPaths,
   parseStoredAnyShareSelectorJson,
   presenceTopicAllowedForShare,
   targetVersionId,
@@ -186,6 +187,7 @@ type SyncRelayRoute =
 // if the two drift.
 export const MAX_BLOB_BYTES = 20 * 1024 * 1024;
 const LINK_BLOB_STREAM_CHUNK_BYTES = 64 * 1024;
+export const LINK_BLOB_INFLIGHT_BYTES_PER_GRANT = 64 * 1024 * 1024;
 export const MAX_KEY_ENVELOPE_BYTES = 16 * 1024;
 // One PAGE of the continuous replication lane, for the two log routes. It is
 // not the submit bound: a submit is one user act carrying one intent, and it
@@ -210,11 +212,12 @@ const SHA256_HEX = /^[a-f0-9]{64}$/u;
 const MAX_WORKSPACE_ID_CHARS = 256;
 const MAX_ORIGIN_ID_CHARS = 256;
 const MAX_OP_KIND_CHARS = 128;
-const FILE_FRESHNESS_OP_KINDS = new Set([
+const ACCOUNTLESS_FILE_REPLAY_OP_KINDS = new Set([
   "workspace.init",
   "moment.append",
   "version.create",
 ]);
+const FILE_FRESHNESS_OP_KINDS = new Set(["moment.append", "version.create"]);
 const MAX_EMAIL_CHARS = 320;
 const MAX_SHARE_ID_CHARS = 128;
 // #646 PR3a. A submit's idempotency key is the client's own string, not a
@@ -259,12 +262,9 @@ interface SettledMomentIdentity {
 
 function settledMomentIdentity(row: SyncRelayLogRow): SettledMomentIdentity | null {
   if (row.opKind !== "moment.append") return null;
-  let payload: unknown;
-  try {
-    payload = JSON.parse(row.payloadJson);
-  } catch {
-    return null;
-  }
+  const parsed = parseShareOpPayloadWithReferencedPaths(row.payloadJson);
+  if (!parsed) return null;
+  const { payload, referencedPaths } = parsed;
   if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
     return null;
   }
@@ -277,12 +277,6 @@ function settledMomentIdentity(row: SyncRelayLogRow): SettledMomentIdentity | nu
     typeof record.versionId === "string" && record.versionId.length > 0
       ? record.versionId
       : null;
-  const referencedPaths = [
-    record.path,
-    record.payloadBeforePath,
-    record.payloadAfterPath,
-    record.beforePath,
-  ].filter((path): path is string => typeof path === "string" && path.length > 0);
   const deleted = record.operation === "delete";
   const settledPath = deleted
     ? null
@@ -341,6 +335,25 @@ export function createSyncRelayHandler({
   // The relay runs as one process and main.ts creates one handler, so this
   // intentionally per-process registry reaches every open link-blob response.
   const activeLinkBlobStreams = new Map<string, Set<ActiveLinkBlobStream>>();
+  const activeLinkBlobBytes = new Map<string, number>();
+  const admitLinkBlobBytes = (
+    grantId: string,
+    byteLength: number,
+  ): (() => void) | null => {
+    const retainedBytes = activeLinkBlobBytes.get(grantId) ?? 0;
+    if (byteLength > LINK_BLOB_INFLIGHT_BYTES_PER_GRANT - retainedBytes) {
+      return null;
+    }
+    activeLinkBlobBytes.set(grantId, retainedBytes + byteLength);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const remaining = (activeLinkBlobBytes.get(grantId) ?? byteLength) - byteLength;
+      if (remaining > 0) activeLinkBlobBytes.set(grantId, remaining);
+      else activeLinkBlobBytes.delete(grantId);
+    };
+  };
   const registerLinkBlobStream = (
     grantId: string,
     stream: ActiveLinkBlobStream,
@@ -374,10 +387,17 @@ export function createSyncRelayHandler({
     bytes: Uint8Array,
     shareId: string,
     grantId: string,
+    releaseBytes: () => void,
   ): Response => {
     let offset = 0;
     let active = true;
     let unregister = (): void => undefined;
+    const release = (): void => {
+      if (!active) return;
+      active = false;
+      unregister();
+      releaseBytes();
+    };
     const body = new ReadableStream<Uint8Array>(
       {
         start(controller) {
@@ -385,8 +405,7 @@ export function createSyncRelayHandler({
             shareId,
             terminate: () => {
               if (!active) return;
-              active = false;
-              unregister();
+              release();
               controller.error(new Error("link grant changed during blob stream"));
             },
           };
@@ -395,8 +414,7 @@ export function createSyncRelayHandler({
         pull(controller) {
           if (!active) return;
           if (offset >= bytes.byteLength) {
-            active = false;
-            unregister();
+            release();
             controller.close();
             return;
           }
@@ -406,8 +424,7 @@ export function createSyncRelayHandler({
         },
         cancel() {
           if (!active) return;
-          active = false;
-          unregister();
+          release();
         },
       },
       // Pull only when the transport asks for another chunk. This keeps one
@@ -849,7 +866,7 @@ export function createSyncRelayHandler({
         nextCursor = row.relaySeq;
         if (
           audience === "accountless" &&
-          !FILE_FRESHNESS_OP_KINDS.has(row.opKind)
+          !ACCOUNTLESS_FILE_REPLAY_OP_KINDS.has(row.opKind)
         ) {
           continue;
         }
@@ -1449,10 +1466,16 @@ export function createSyncRelayHandler({
         );
         if (!blob) throw notFound();
         requireFreshLinkRead(capabilityToken, capability);
+        const releaseBytes = admitLinkBlobBytes(
+          capability.grantId,
+          blob.byteLength,
+        );
+        if (!releaseBytes) throw linkReadRateLimited();
         return respondWithLinkBlob(
           blob,
           capability.shareId,
           capability.grantId,
+          releaseBytes,
         );
       }
       const actor = await resolveActor(request, "workspaceId" in route ? route.workspaceId : "");

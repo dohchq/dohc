@@ -901,7 +901,7 @@ describe("share-web sessions", () => {
     expect(readCalls).toBe(2);
   });
 
-  it("returns a generic 503 for a relay transport failure while a received 404 stays 404", async () => {
+  it("returns a generic 503 for relay transport and received 5xx failures while a received 404 stays 404", async () => {
     let readCalls = 0;
     const handler = createShareWebHandler({
       relayUrl: "http://relay.test",
@@ -919,7 +919,10 @@ describe("share-web sessions", () => {
         }
         readCalls += 1;
         if (readCalls === 1) throw new Error("temporary relay outage");
-        return new Response("relay-specific missing resource", { status: 404 });
+        if (readCalls === 2) {
+          return new Response("relay-specific missing resource", { status: 404 });
+        }
+        return new Response("relay-specific upstream failure", { status: 502 });
       },
     });
     const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
@@ -949,7 +952,19 @@ describe("share-web sessions", () => {
       body: shareWebRefusalBody,
     });
     expectSecurityHeaders(receivedNotFound);
-    expect(readCalls).toBe(2);
+
+    const receivedUpstreamFailure = await handler(
+      request("/api/view/meta", { headers: sessionHeaders }),
+    );
+    expect({
+      status: receivedUpstreamFailure.status,
+      body: await receivedUpstreamFailure.text(),
+    }).toEqual({
+      status: 503,
+      body: shareWebRefusalBody,
+    });
+    expectSecurityHeaders(receivedUpstreamFailure);
+    expect(readCalls).toBe(3);
   });
 
   it("preserves the session after a relay 404 resource miss", async () => {
@@ -1145,7 +1160,7 @@ describe("share-web sessions", () => {
     );
     expect(limitedRequest.bodyUsed).toBe(false);
     expect(otherIp.status).toBe(200);
-    expect(relayCalls).toBe(13);
+    expect(relayCalls).toBe(EXCHANGE_BUCKET_CAPACITY + 1);
   });
 
   it("limits in-flight blob streams independently for each viewer session", async () => {

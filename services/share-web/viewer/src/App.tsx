@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useImageRetryHandlers } from "./imageRetry";
 import { MarkdownContent } from "./MarkdownContent";
 import {
@@ -387,10 +387,13 @@ function FileView(props: {
   file: SharedFile;
   files: SharedFile[];
   onSelect: (path: string) => void;
+  onStaleBlob: (path: string, blobSha256: string) => Promise<boolean>;
 }) {
   const [markdown, setMarkdown] = useState<string | null>(null);
   const [markdownTooLarge, setMarkdownTooLarge] = useState(false);
-  const [failed, setFailed] = useState(false);
+  const [fileStatus, setFileStatus] = useState<
+    "ready" | "refreshing" | "unavailable"
+  >("ready");
   const rendersMarkdown = props.file.contentKind === "text" && isMarkdown(props.file.path);
   const fileMap = useMemo(
     () => new Map(props.files.map((file) => [file.path, file])),
@@ -400,7 +403,7 @@ function FileView(props: {
     let current = true;
     setMarkdown(null);
     setMarkdownTooLarge(false);
-    setFailed(false);
+    setFileStatus("ready");
     if (!rendersMarkdown) return () => { current = false; };
     const abortController = new AbortController();
     void apiWithThrottleRetry(
@@ -409,7 +412,7 @@ function FileView(props: {
       abortController.signal,
     )
       .then(async (response) => {
-        if (!response.ok) throw new Error("refused");
+        if (!response.ok) throw new ViewResponseError(response.status);
         const preview = await readMarkdownPreview(response);
         if (!current) return;
         if (preview.status === "too-large") {
@@ -418,8 +421,20 @@ function FileView(props: {
           setMarkdown(preview.markdown);
         }
       })
-      .catch(() => {
-        if (current && !abortController.signal.aborted) setFailed(true);
+      .catch(async (error: unknown) => {
+        if (!current || abortController.signal.aborted) return;
+        if (!(error instanceof ViewResponseError) || error.status !== 404) {
+          setFileStatus("unavailable");
+          return;
+        }
+        setFileStatus("refreshing");
+        const changed = await props.onStaleBlob(
+          props.file.path,
+          props.file.blobSha256,
+        );
+        if (current && !abortController.signal.aborted && !changed) {
+          setFileStatus("unavailable");
+        }
       });
     return () => {
       current = false;
@@ -428,11 +443,20 @@ function FileView(props: {
   }, [
     props.file.blobSha256,
     props.file.path,
+    props.onStaleBlob,
     props.session,
     rendersMarkdown,
   ]);
 
-  if (failed) return <Unavailable />;
+  if (fileStatus !== "ready") {
+    return (
+      <p className="file-status muted">
+        {fileStatus === "refreshing"
+          ? "This file changed. Refreshing."
+          : "This file isn't available right now."}
+      </p>
+    );
+  }
   if (rendersMarkdown) {
     if (markdownTooLarge) {
       return <DownloadCard file={props.file} session={props.session} />;
@@ -480,14 +504,19 @@ function DownloadCard(props: { file: SharedFile; session: string }) {
   const fileName = props.file.path.split("/").at(-1);
   const visibleDownloadPath = `/api/view/blob/${props.file.blobSha256}?session=${props.session}`;
   const downloadControllerRef = useRef<AbortController | null>(null);
-  useEffect(() => () => {
-    downloadControllerRef.current?.abort();
-    downloadControllerRef.current = null;
+  const [downloadFailed, setDownloadFailed] = useState(false);
+  useEffect(() => {
+    setDownloadFailed(false);
+    return () => {
+      downloadControllerRef.current?.abort();
+      downloadControllerRef.current = null;
+    };
   }, [props.file.blobSha256, props.session]);
   const download = async () => {
     downloadControllerRef.current?.abort();
     const controller = new AbortController();
     downloadControllerRef.current = controller;
+    setDownloadFailed(false);
     try {
       const response = await apiWithThrottleRetry(
         props.session,
@@ -512,6 +541,8 @@ function DownloadCard(props: { file: SharedFile; session: string }) {
       } finally {
         URL.revokeObjectURL(objectUrl);
       }
+    } catch {
+      if (!controller.signal.aborted) setDownloadFailed(true);
     } finally {
       if (downloadControllerRef.current === controller) {
         downloadControllerRef.current = null;
@@ -526,11 +557,16 @@ function DownloadCard(props: { file: SharedFile; session: string }) {
         download={fileName}
         onClick={(event) => {
           event.preventDefault();
-          void download().catch(() => undefined);
+          void download();
         }}
       >
         Download file
       </a>
+      {downloadFailed ? (
+        <p className="download-error muted">
+          The download didn't finish. Try again.
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -543,6 +579,18 @@ export function App() {
   const [state, setState] = useState<ViewerState>({ status: "loading" });
   const [selectedPath, setSelectedPath] = useState("");
   const readyStateRef = useRef<ReadyState | null>(null);
+  const refreshReadyStateRef = useRef<
+    (() => Promise<ReadyState | null>) | null
+  >(null);
+  const refreshStaleBlob = useCallback(
+    async (path: string, blobSha256: string): Promise<boolean> => {
+      const refreshed = await refreshReadyStateRef.current?.();
+      if (!refreshed) return false;
+      const currentFile = refreshed.files.find((file) => file.path === path);
+      return currentFile === undefined || currentFile.blobSha256 !== blobSha256;
+    },
+    [],
+  );
   useEffect(() => {
     let current = true;
     const controller = new AbortController();
@@ -591,31 +639,31 @@ export function App() {
   useEffect(() => {
     if (readySession === null) return;
     let current = true;
-    let refreshInFlight = false;
+    let refreshInFlight: Promise<ReadyState | null> | null = null;
     const controller = new AbortController();
-    const interval = window.setInterval(() => {
+    const refresh = (): Promise<ReadyState | null> => {
+      if (refreshInFlight) return refreshInFlight;
       const previous = readyStateRef.current;
       if (
-        refreshInFlight ||
         previous === null ||
         previous.session !== readySession
       ) {
-        return;
+        return Promise.resolve(null);
       }
-      refreshInFlight = true;
       const fileAccumulator = new Map(previous.fileAccumulator);
-      void Promise.all([
-        loadMeta(readySession, controller.signal),
-        loadLog(
-          readySession,
-          previous.nextCursor,
-          fileAccumulator,
-          MAX_LOG_PAGES,
-          controller.signal,
-        ),
-      ])
-        .then(async ([meta, log]) => {
-          if (!current) return;
+      const refreshPromise = (async (): Promise<ReadyState | null> => {
+        try {
+          const [meta, log] = await Promise.all([
+            loadMeta(readySession, controller.signal),
+            loadLog(
+              readySession,
+              previous.nextCursor,
+              fileAccumulator,
+              MAX_LOG_PAGES,
+              controller.signal,
+            ),
+          ]);
+          if (!current) return null;
           const currentLog = log.epochLogFloor === previous.epochLogFloor
             ? log
             : await loadLog(
@@ -625,7 +673,7 @@ export function App() {
                 MAX_LOG_PAGES,
                 controller.signal,
               );
-          if (!current) return;
+          if (!current) return null;
           const nextState: ReadyState = {
             ...previous,
             meta,
@@ -640,8 +688,8 @@ export function App() {
               ? nextState
               : value
           );
-        })
-        .catch((error: unknown) => {
+          return nextState;
+        } catch (error: unknown) {
           if (
             current &&
             error instanceof ViewResponseError &&
@@ -649,13 +697,24 @@ export function App() {
           ) {
             setState({ status: "refused" });
           }
-        })
-        .finally(() => {
-          refreshInFlight = false;
-        });
+          return null;
+        }
+      })();
+      refreshInFlight = refreshPromise;
+      void refreshPromise.finally(() => {
+        if (refreshInFlight === refreshPromise) refreshInFlight = null;
+      });
+      return refreshPromise;
+    };
+    refreshReadyStateRef.current = refresh;
+    const interval = window.setInterval(() => {
+      void refresh();
     }, VIEW_HEARTBEAT_INTERVAL_MS);
     return () => {
       current = false;
+      if (refreshReadyStateRef.current === refresh) {
+        refreshReadyStateRef.current = null;
+      }
       controller.abort();
       window.clearInterval(interval);
     };
@@ -710,6 +769,7 @@ export function App() {
               file={selected}
               files={state.files}
               onSelect={setSelectedPath}
+              onStaleBlob={refreshStaleBlob}
             />
           ) : (
             <p>No files in this share yet.</p>
