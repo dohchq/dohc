@@ -1558,7 +1558,12 @@ export function createSyncRelayHandler({
       if (!minted) return refused();
       return jsonResponse({ ok: true, code, expiresAtMs });
     } catch (error) {
-      if (error instanceof HttpError) return refused();
+      if (
+        error instanceof HttpError &&
+        error.code !== RELAY_ERRORS.link_read_rate_limited.code
+      ) {
+        return refused();
+      }
       throw error;
     }
   };

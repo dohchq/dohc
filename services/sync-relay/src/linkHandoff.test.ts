@@ -372,7 +372,10 @@ describe("single-use authenticated link handoff", () => {
     const database = inspect(state.dbPath, true);
 
     expect((await state.h(handoffRequest(state.capability))).status).toBe(200);
-    await expectGeneric(await state.h(handoffRequest(state.capability)));
+    expect(await serialized(await state.h(handoffRequest(state.capability)))).toEqual({
+      status: 429,
+      body: '{"ok":false,"error":"too many link reads","code":"link_read_rate_limited"}',
+    });
     expect(codeCount(database)).toBe(1);
 
     const noConfiguredKey = handler(state.storage, {
