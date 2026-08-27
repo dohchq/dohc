@@ -19,13 +19,22 @@ export interface RendererWorkspaceSession<
 export interface RendererWorkspaceRetirement<
   Sender extends RendererWorkspaceSender,
 > {
-  retireSender(session: RendererWorkspaceSession<Sender>): Promise<void>;
+  retireSender(
+    session: RendererWorkspaceSession<Sender>,
+  ): RendererWorkspaceSenderRetirement;
   retireWorkspace(
     workspace: Pick<
       RendererWorkspaceSession<Sender>,
       "workspaceId" | "attachmentId"
     >,
   ): Promise<void>;
+}
+
+export interface RendererWorkspaceSenderRetirement {
+  /** Cleanup that can collide with the next session's sender-owned resources. */
+  readonly requiredForAdmission: Promise<void>;
+  /** Cleanup tracked for attachment re-entry but not unrelated admission. */
+  readonly detachedFromAdmission: Promise<void>;
 }
 
 export class RendererWorkspaceOpenSupersededError extends Error {
@@ -41,10 +50,15 @@ interface SenderState<Sender extends RendererWorkspaceSender> {
   readonly sender: Sender;
   requestSequence: number;
   active: RendererWorkspaceSession<Sender> | undefined;
-  retiring: Promise<void> | undefined;
+  retiring: SenderRetirement | undefined;
   rendererDocumentId: string | undefined;
   readonly retiredRendererDocumentIds: Set<string>;
   destroyed: boolean;
+}
+
+interface SenderRetirement {
+  readonly admission: Promise<void>;
+  readonly completion: Promise<void>;
 }
 
 export interface RendererWorkspaceSessionOwnerOptions<
@@ -74,6 +88,7 @@ export class RendererWorkspaceSessionOwner<
     { readonly workspaceId: string; readonly members: Set<SenderState<Sender>> }
   >();
   readonly #workspaceRetirements = new Map<symbol, Promise<void>>();
+  readonly #detachedSenderRetirements = new Map<symbol, Set<Promise<void>>>();
   #nextGeneration = 0;
 
   constructor(options: RendererWorkspaceSessionOwnerOptions<Sender>) {
@@ -115,7 +130,7 @@ export class RendererWorkspaceSessionOwner<
     const senderRetirement = active
       ? this.#beginSenderRetirement(state, active)
       : state.retiring;
-    if (senderRetirement) await senderRetirement;
+    if (senderRetirement) await senderRetirement.admission;
     this.#assertOpenRequestCurrent(state, requestSequence);
 
     const workspaceRetirement = this.#workspaceRetirements.get(
@@ -201,8 +216,8 @@ export class RendererWorkspaceSessionOwner<
     }
     ++state.requestSequence;
     return state.active
-      ? this.#beginSenderRetirement(state, state.active)
-      : (state.retiring ?? Promise.resolve());
+      ? this.#beginSenderRetirement(state, state.active).completion
+      : (state.retiring?.completion ?? Promise.resolve());
   }
 
   #stateFor(sender: Sender): SenderState<Sender> {
@@ -233,10 +248,13 @@ export class RendererWorkspaceSessionOwner<
         ? this.#beginSenderRetirement(displaced, displaced.active)
         : displaced.retiring;
       if (retiring) {
-        const admission = retiring.then(() => undefined);
-        state.retiring = admission;
-        void admission.finally(() => {
-          if (state.retiring === admission) state.retiring = undefined;
+        const inherited = {
+          admission: retiring.admission,
+          completion: retiring.completion,
+        };
+        state.retiring = inherited;
+        void inherited.admission.finally(() => {
+          if (state.retiring === inherited) state.retiring = undefined;
         });
       }
     }
@@ -246,8 +264,8 @@ export class RendererWorkspaceSessionOwner<
       ++state.requestSequence;
       const retiring = state.active
         ? this.#beginSenderRetirement(state, state.active)
-        : (state.retiring ?? Promise.resolve());
-      void retiring.finally(() => {
+        : state.retiring;
+      void (retiring?.completion ?? Promise.resolve()).finally(() => {
         if (this.#stateBySenderId.get(sender.id) === state) {
           this.#stateBySenderId.delete(sender.id);
         }
@@ -296,39 +314,83 @@ export class RendererWorkspaceSessionOwner<
   #beginSenderRetirement(
     state: SenderState<Sender>,
     session: RendererWorkspaceSession<Sender>,
-  ): Promise<void> {
+  ): SenderRetirement {
     if (state.retiring) return state.retiring;
 
-    const { promise, resolve } = Promise.withResolvers<void>();
-    state.retiring = promise;
     state.active = undefined;
 
-    let senderDrain: Promise<void>;
+    let senderRetirement: RendererWorkspaceSenderRetirement;
     try {
-      senderDrain = this.#retirement.retireSender(session);
+      senderRetirement = this.#retirement.retireSender(session);
     } catch (error) {
       this.#onCleanupError({ kind: "sender", senderId: session.senderId }, error);
-      senderDrain = Promise.resolve();
+      senderRetirement = {
+        requiredForAdmission: Promise.resolve(),
+        detachedFromAdmission: Promise.resolve(),
+      };
     }
 
+    const requiredForAdmission = senderRetirement.requiredForAdmission.catch(
+      (error: unknown) => {
+        this.#onCleanupError(
+          { kind: "sender", senderId: session.senderId },
+          error,
+        );
+      },
+    );
+    const detached = senderRetirement.detachedFromAdmission.catch(
+      (error: unknown) => {
+        this.#onCleanupError(
+          { kind: "sender", senderId: session.senderId },
+          error,
+        );
+      },
+    );
+    this.#trackDetachedSenderRetirement(session.attachmentId, detached);
+
+    const admission = Promise.withResolvers<void>();
+    const completion = Promise.withResolvers<void>();
+    const retirement = {
+      admission: admission.promise,
+      completion: completion.promise,
+    };
+    state.retiring = retirement;
+
     void (async () => {
+      let completionDrain = detached;
       try {
-        await senderDrain.catch((error: unknown) => {
-          this.#onCleanupError(
-            { kind: "sender", senderId: session.senderId },
-            error,
-          );
-        });
+        await requiredForAdmission;
         this.#removeWorkspaceMember(session, state);
         if (!this.#workspaceMembers.has(session.attachmentId)) {
-          await this.#retireWorkspace(session);
+          completionDrain = this.#retireWorkspace(session);
         }
       } finally {
-        if (state.retiring === promise) state.retiring = undefined;
-        resolve();
+        if (state.retiring === retirement) state.retiring = undefined;
+        admission.resolve();
       }
+      await completionDrain;
+      completion.resolve();
     })();
-    return promise;
+    return retirement;
+  }
+
+  #trackDetachedSenderRetirement(
+    attachmentId: symbol,
+    drain: Promise<void>,
+  ): void {
+    const drains =
+      this.#detachedSenderRetirements.get(attachmentId) ?? new Set();
+    drains.add(drain);
+    this.#detachedSenderRetirements.set(attachmentId, drains);
+    void drain.finally(() => {
+      drains.delete(drain);
+      if (
+        drains.size === 0 &&
+        this.#detachedSenderRetirements.get(attachmentId) === drains
+      ) {
+        this.#detachedSenderRetirements.delete(attachmentId);
+      }
+    });
   }
 
   #removeWorkspaceMember(
@@ -353,6 +415,9 @@ export class RendererWorkspaceSessionOwner<
 
     const { promise, resolve } = Promise.withResolvers<void>();
     this.#workspaceRetirements.set(workspace.attachmentId, promise);
+    const detachedSenderDrains = [
+      ...(this.#detachedSenderRetirements.get(workspace.attachmentId) ?? []),
+    ];
     let workspaceDrain: Promise<void>;
     try {
       workspaceDrain = this.#retirement.retireWorkspace({
@@ -366,7 +431,7 @@ export class RendererWorkspaceSessionOwner<
       );
       workspaceDrain = Promise.resolve();
     }
-    void workspaceDrain
+    void Promise.all([workspaceDrain, ...detachedSenderDrains])
       .catch((error: unknown) => {
         this.#onCleanupError(
           { kind: "workspace", workspaceId: workspace.workspaceId },
