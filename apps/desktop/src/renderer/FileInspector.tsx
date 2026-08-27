@@ -367,6 +367,10 @@ const TEXT_EXT = new Set([
 // The markdown autosave debounce. Named because the rearm on unblock has to
 // use the SAME window the keystroke armed — two literals would drift.
 const AUTOSAVE_DEBOUNCE_MS = 800;
+// Source is a read-only projection of the live Y.Doc. Coalesce update bursts
+// without starving a source view that stays visible during sustained edits.
+const SOURCE_VIEW_UPDATE_DELAY_MS = 150;
+const SOURCE_VIEW_UPDATE_MAX_WAIT_MS = 500;
 
 const WYSIWYG_MARKDOWN_THRESHOLD_BYTES = 64 * 1024;
 const RAW_FRONTMATTER_RE =
@@ -1568,6 +1572,7 @@ function MarkdownView(props: {
   refreshAfterConflict: () => void;
   workspaceId: string;
   path: string;
+  documentKey: string;
   fileOpenStartMark: string;
   truncated?: boolean;
   truncatedNotice?: React.ReactNode;
@@ -2236,7 +2241,19 @@ function MarkdownView(props: {
   // an editable raw surface would have to round-trip through full-body
   // markdown patching (the invariant this must never become).
   const [showSource, setShowSource] = useState(false);
-  const [sourceMarkdown, setSourceMarkdown] = useState<string | null>(null);
+  const [sourceProjection, setSourceProjection] = useState<{
+    documentKey: string;
+    doc: Y.Doc;
+    markdown: string;
+  } | null>(null);
+  // Derive currentness during render, before passive-effect cleanup can run.
+  // The key is FileInspector's existing workspace/path/version generation;
+  // doc identity also covers a same-version engine retry.
+  const sourceMarkdown =
+    sourceProjection?.documentKey === props.documentKey &&
+    sourceProjection.doc === engine.doc
+      ? sourceProjection.markdown
+      : null;
   const readDocumentRef = useRef<HTMLDivElement | null>(null);
   const localDocPaneRef = useRef<HTMLDivElement | null>(null);
   // The engine branch's scroller. It holds the top-matter (title, properties)
@@ -2534,39 +2551,58 @@ function MarkdownView(props: {
   }, [jump, showSource]);
   useEffect(() => {
     if (!showSource || !engine.doc) {
-      setSourceMarkdown(null);
+      setSourceProjection(null);
       return;
     }
     const doc = engine.doc;
+    const documentKey = props.documentKey;
     let cancelled = false;
     let serialize: ((doc: Y.Doc) => string) | null = null;
-    let frame: number | null = null;
+    let updateTimer: ReturnType<typeof setTimeout> | null = null;
+    let updateDeadline: number | null = null;
     const recompute = () => {
       if (cancelled || !serialize) return;
-      setSourceMarkdown(serialize(doc));
+      const markdown = serialize(doc);
+      if (cancelled) return;
+      setSourceProjection({ documentKey, doc, markdown });
+    };
+    const runScheduledRecompute = () => {
+      updateTimer = null;
+      updateDeadline = null;
+      recompute();
     };
     void loadImportExport().then((mod) => {
       serialize = mod.yDocToMarkdown;
+      if (updateTimer !== null) {
+        clearTimeout(updateTimer);
+        updateTimer = null;
+        updateDeadline = null;
+      }
       recompute();
     });
     // Live: agent edits / co-editors keep flowing into the mirror doc while
-    // the source view is up — re-project on updates. A co-editor's keystroke
-    // burst forwards one delta per keystroke, so coalesce to one full-document
-    // serialize per frame instead of one per delta.
+    // the source view is up. A co-editor's keystroke burst forwards one delta
+    // per keystroke, so wait for a short trailing edge while the maximum wait
+    // keeps a sustained burst repainting twice per second.
     const scheduleRecompute = () => {
-      if (frame !== null) return;
-      frame = requestAnimationFrame(() => {
-        frame = null;
-        recompute();
-      });
+      const now = Date.now();
+      updateDeadline ??= now + SOURCE_VIEW_UPDATE_MAX_WAIT_MS;
+      if (updateTimer !== null) clearTimeout(updateTimer);
+      updateTimer = setTimeout(
+        runScheduledRecompute,
+        Math.max(
+          0,
+          Math.min(SOURCE_VIEW_UPDATE_DELAY_MS, updateDeadline - now),
+        ),
+      );
     };
     doc.on("update", scheduleRecompute);
     return () => {
       cancelled = true;
-      if (frame !== null) cancelAnimationFrame(frame);
+      if (updateTimer !== null) clearTimeout(updateTimer);
       doc.off("update", scheduleRecompute);
     };
-  }, [showSource, engine.doc]);
+  }, [showSource, engine.doc, props.documentKey]);
 
   // One toggle for both branches (the shell's palette command and Ctrl/Cmd+/
   // route through it): engine mode flips the read-only source projection; the
@@ -5130,6 +5166,7 @@ export const FileInspector = memo(function FileInspector(
             refreshAfterConflict={refreshAfterConflict}
             workspaceId={props.workspaceId}
             path={props.path}
+            documentKey={key}
             fileOpenStartMark={props.fileOpenStartMark ?? "file-open-start"}
             truncated={truncated}
             truncatedNotice={truncatedNotice}
