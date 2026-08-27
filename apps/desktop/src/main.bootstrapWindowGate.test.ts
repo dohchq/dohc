@@ -226,8 +226,8 @@ describe("bootstrap window gate", () => {
       listAt,
       mainSource.indexOf("\nfunction ", listAt),
     );
-    const standaloneAt = body.indexOf("shareViewFiles.list({");
-    const diskAt = body.indexOf("await listFiles(workspace.rootPath);");
+    const standaloneAt = body.indexOf("shareViewFiles.list(");
+    const diskAt = body.indexOf("await listFiles(workspace.rootPath,");
     const overlayAt = body.indexOf("overlayCanonicalShareMountFiles({");
     const firstGateAt = body.indexOf("await engineDaemonStartup;");
     const secondGateAt = body.indexOf("await engineDaemonStartup;", firstGateAt + 1);

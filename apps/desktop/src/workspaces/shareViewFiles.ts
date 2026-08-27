@@ -14,10 +14,7 @@ import {
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
-import type {
-  ListWorkspaceFilesResult,
-  WorkspaceFileEntry,
-} from "../ipc/bridgeContract";
+import type { ListWorkspaceFilesResult } from "../ipc/bridgeContract";
 import {
   assertActiveWorkspaceOperationLease,
   mediaTypeForExtension,
@@ -30,6 +27,7 @@ import {
 import {
   extractFrontmatterIcon,
   type ImportCopyOutcome,
+  type WorkspaceFileListingEntry,
 } from "./workspaceFiles";
 import {
   createShareViewLifecycle,
@@ -184,7 +182,10 @@ export interface ShareViewFiles {
     target: ShareViewFilesTarget,
     request: ShareViewFileReadRequest,
   ): Promise<ShareViewFileReadOutcome>;
-  list(target: ShareViewFilesTarget): Promise<ListWorkspaceFilesResult>;
+  list(
+    target: ShareViewFilesTarget,
+    options?: { includeContentIdentity?: boolean },
+  ): Promise<ListWorkspaceFilesResult>;
   projectionStatus(
     target: ShareViewFilesTarget,
   ): Promise<ShareViewProjectionStatus>;
@@ -1076,7 +1077,7 @@ export function createShareViewFiles(
       });
     },
 
-    async list(requested) {
+    async list(requested, options) {
       return withCurrentTarget(requested, async (target) => {
         const iconCache =
           dependencies.stateFor?.(target).iconCache ?? fallbackState.iconCache;
@@ -1135,12 +1136,19 @@ export function createShareViewFiles(
               },
             ),
           );
-          const files: WorkspaceFileEntry[] = [];
+          const files: WorkspaceFileListingEntry[] = [];
           for (const entry of visible) {
-            const file: WorkspaceFileEntry = {
+            const file: WorkspaceFileListingEntry = {
               path: entry.path,
               kind: classifyPath(entry.path).kind,
             };
+            if (options?.includeContentIdentity === true) {
+              file.contentIdentity = [
+                entry.objectId,
+                entry.sha256,
+                entry.latestMomentId,
+              ].join(":");
+            }
             if (/\.(md|markdown)$/i.test(entry.path)) {
               const cached = iconCache.get(
                 `${target.storeWorkspaceId}\0${entry.path}`,

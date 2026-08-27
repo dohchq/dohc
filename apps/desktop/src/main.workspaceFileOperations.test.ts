@@ -173,8 +173,8 @@ describe("workspace file operation wiring", () => {
 
   it("holds graph, heading, backlink, and settings I/O under renderer authority", () => {
     const helpers = new Map([
-      ["readWorkspaceGraph", "readWorkspaceGraph("],
-      ["getBacklinks", "readWorkspaceBacklinks("],
+      ["readWorkspaceGraph", "operation.state.workspaceGraph.readGraph("],
+      ["getBacklinks", "operation.state.workspaceGraph.readBacklinks("],
       ["listWorkspaceHeadings", "readOwnedWorkspaceTextFor("],
       ["getWorkspaceSettings", "readWorkspaceSettingsFile("],
       ["setWorkspaceSettings", "saveWorkspaceSettingsFile("],

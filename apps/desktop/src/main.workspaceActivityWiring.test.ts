@@ -22,6 +22,9 @@ describe("workspace-activity main-process wiring", () => {
     expect(notify.indexOf("workspaceFileListings.invalidate(")).toBeLessThan(
       notify.indexOf("broadcastWorkspaceActivity({"),
     );
+    expect(notify.indexOf("invalidateWorkspaceGraphIndexes(")).toBeLessThan(
+      notify.indexOf("broadcastWorkspaceActivity({"),
+    );
     expect(notify).toContain("workspaceActivityPayload(scope)");
     // The broadcaster itself owns the channel; this pin covers the wiring
     // that only main can get wrong: which windows and whose active workspace.
@@ -43,6 +46,18 @@ describe("workspace-activity main-process wiring", () => {
     expect(handler).toContain("allowCached: input.allowCached === true,");
     expect(handler).toContain("await listOwnedWorkspaceFilesFor(workspace)");
     expect(handler).not.toContain("requireWorkspace(input.workspaceId)");
+  });
+
+  it("keeps the cold graph index on the workspace attachment and reuses owned listings", () => {
+    expect(mainSource).toContain("workspaceGraph: new WorkspaceGraphIndex(),");
+    const source = sourceBlock(
+      "function ownedWorkspaceGraphSource(",
+      "\n}\n\nasync function collectShareTargetZipEntries",
+    );
+    expect(source).toContain("workspaceFileListings.list({");
+    expect(source).toContain("allowCached: true,");
+    expect(source).toContain("workspaceHasReceivedShareState(workspace)");
+    expect(source).toContain("readOwnedWorkspaceTextFor(workspace, path)");
   });
 
   it("forwards the daemon's capture payload scope into the renderer notification", () => {

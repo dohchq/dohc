@@ -62,6 +62,12 @@ export async function existingAncestor(path: string): Promise<string> {
 }
 import type { WorkspaceFileEntry } from "../ipc/bridgeContract";
 
+// Main-only listing metadata. Zod strips `contentIdentity` at the IPC boundary,
+// while main-process indexes can use it to avoid rereading unchanged Markdown.
+export interface WorkspaceFileListingEntry extends WorkspaceFileEntry {
+  contentIdentity?: string;
+}
+
 // `shared-with-me` is intentionally visible: accepted shares materialize there
 // for read/preview by local sites. Publishing or re-sharing those files remains
 // gated by the explicit publish/share flow, not by local file preview.
@@ -142,7 +148,10 @@ function rememberIcon(absolutePath: string, entry: IconCacheEntry): void {
 // Cache-checked wrapper around readMarkdownIcon. Never throws — a stat
 // failure (e.g. a TOCTOU delete mid-walk) is treated as "no icon", matching
 // readMarkdownIcon's own failure-tolerant contract.
-async function getCachedMarkdownIcon(absolutePath: string): Promise<string | undefined> {
+async function getMarkdownListingMetadata(
+  absolutePath: string,
+  includeIcon: boolean,
+): Promise<IconCacheEntry | undefined> {
   let mtimeMs: number;
   let size: number;
   try {
@@ -159,11 +168,15 @@ async function getCachedMarkdownIcon(absolutePath: string): Promise<string | und
   const cached = iconCache.get(absolutePath);
   if (cached && cached.mtimeMs === mtimeMs && cached.size === size) {
     rememberIcon(absolutePath, cached); // refresh LRU recency
-    return cached.icon;
+    return cached;
   }
-  const icon = await readMarkdownIcon(absolutePath);
-  rememberIcon(absolutePath, { mtimeMs, size, icon });
-  return icon;
+  const entry = {
+    mtimeMs,
+    size,
+    icon: includeIcon ? await readMarkdownIcon(absolutePath) : undefined,
+  };
+  if (includeIcon) rememberIcon(absolutePath, entry);
+  return entry;
 }
 
 // Both queues are process-wide: overlapping forced listings still stay at a
@@ -210,10 +223,13 @@ const runMarkdownIconRead = createBoundedTaskQueue(
 
 export async function listFiles(
   rootPath: string,
-  options: { platform?: NodeJS.Platform } = {},
+  options: {
+    platform?: NodeJS.Platform;
+    includeContentIdentity?: boolean;
+  } = {},
 ): Promise<{ files: WorkspaceFileEntry[]; folders: string[] }> {
   const platform = options.platform ?? process.platform;
-  const entries: WorkspaceFileEntry[] = [];
+  const entries: WorkspaceFileListingEntry[] = [];
   // Directories ride along so EMPTY folders stay visible in the explorer
   // tree (the walk already visits every dir — this is purely additive).
   const folders: string[] = [];
@@ -233,13 +249,24 @@ export async function listFiles(
         pending.push(walk(join(dir, dirent.name), rel));
       } else if (dirent.isFile()) {
         const kind = classifyPath(rel).kind;
-        const entry: WorkspaceFileEntry = { path: rel, kind };
-        if (kind === "file" && /\.(md|markdown)$/i.test(rel)) {
+        const entry: WorkspaceFileListingEntry = { path: rel, kind };
+        if (
+          kind === "file" &&
+          (/\.(md|markdown)$/i.test(rel) ||
+            (options.includeContentIdentity === true && /\.mdx$/i.test(rel)))
+        ) {
           pending.push(
             runMarkdownIconRead(() =>
-              getCachedMarkdownIcon(join(dir, dirent.name)),
-            ).then((icon) => {
-              if (icon) entry.icon = icon;
+              getMarkdownListingMetadata(
+                join(dir, dirent.name),
+                /\.(md|markdown)$/i.test(rel),
+              ),
+            ).then((metadata) => {
+              if (!metadata) return;
+              if (options.includeContentIdentity === true) {
+                entry.contentIdentity = `disk:${metadata.mtimeMs}:${metadata.size}`;
+              }
+              if (metadata.icon) entry.icon = metadata.icon;
             }),
           );
         }

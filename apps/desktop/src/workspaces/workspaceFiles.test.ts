@@ -299,6 +299,19 @@ describe("listFiles", () => {
     ]);
   });
 
+  it("includes private Markdown content identity only when requested", async () => {
+    await writeFile(join(root, "plan.md"), "# Plan\n");
+
+    const ordinary = await listFiles(root);
+    expect(ordinary.files[0]).not.toHaveProperty("contentIdentity");
+
+    const indexed = await listFiles(root, { includeContentIdentity: true });
+    expect(indexed.files[0]).toHaveProperty(
+      "contentIdentity",
+      expect.stringMatching(/^disk:\d+:7$/),
+    );
+  });
+
   it("returns EMPTY folders so the tree can render them", async () => {
     await mkdir(join(root, "empty", "nested"), { recursive: true });
     const result = await listFiles(root);
