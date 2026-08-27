@@ -63,11 +63,20 @@ async function newStorage(): Promise<SyncRelayStorage> {
   return storage;
 }
 
-function forceBlobFallback(storage: SyncRelayStorage): SyncRelayStorage {
+function forceBlobFallback(
+  storage: SyncRelayStorage,
+  onFetchLogPage: () => void = () => {},
+): SyncRelayStorage {
   return new Proxy(storage, {
     get(target, property, receiver) {
       if (property === "latestLogRowForObjectInVersion") return () => null;
       if (property === "objectIdAtPathInVersion") return () => undefined;
+      if (property === "fetchLogPage") {
+        return (input: Parameters<SyncRelayStorage["fetchLogPage"]>[0]) => {
+          onFetchLogPage();
+          return target.fetchLogPage(input);
+        };
+      }
       const value = Reflect.get(target, property, receiver) as unknown;
       return typeof value === "function" ? value.bind(target) : value;
     },
@@ -1550,7 +1559,7 @@ describe("relay capability reads", () => {
           ),
         ),
       ),
-    ).toContain("404:");
+    ).toBe(`404:${LINK_REFUSAL_BODY}`);
   });
 
   it("keeps a live main-version blob servable after the shared object is edited on a fork", async () => {
@@ -2061,6 +2070,55 @@ describe("relay capability reads", () => {
         ),
       ),
     ).toBe(`404:${LINK_REFUSAL_BODY}`);
+  });
+
+  it("shares one fallback page budget across all blob candidates", async () => {
+    const pageSize = 2;
+    const storage = await newStorage();
+    let fallbackPages = 0;
+    const h = handler(
+      forceBlobFallback(storage, () => {
+        fallbackPages += 1;
+      }),
+      { linkCapabilityReadFallbackPageSize: pageSize },
+    );
+    const seeded = await seed(h);
+    const prefixNoise = Array.from({ length: 8 }, (_, index) =>
+      moment(
+        index + 3,
+        `private/blob-prefix-noise-${index}.md`,
+        "hidden\n",
+        1_300 + index,
+      ),
+    );
+    const suffixNoise = Array.from({ length: 19 }, (_, index) =>
+      moment(
+        index + 13,
+        `private/blob-suffix-noise-${index}.md`,
+        "hidden\n",
+        2_300 + index,
+      ),
+    );
+    await appendMoments(h, [
+      ...prefixNoise,
+      moment(11, "docs/decoy.md", "# shared\n", 2_100, {
+        objectId: "object-decoy-a",
+      }),
+      moment(12, "docs/decoy.md", "hidden\n", 2_200, {
+        objectId: "object-decoy-b",
+        beforePath: "docs/decoy.md",
+        beforeContent: "# shared\n",
+      }),
+      ...suffixNoise,
+    ]);
+    fallbackPages = 0;
+
+    const response = await h(
+      linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`),
+    );
+
+    expect.soft(fallbackPages).toBe(LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET);
+    expect(await denialBytes(response)).toBe(`404:${LINK_REFUSAL_BODY}`);
   });
 
   it("keeps freshness and fallback blobs unchanged when the log fits the page budget", async () => {

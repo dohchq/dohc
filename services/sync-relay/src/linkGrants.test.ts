@@ -1618,12 +1618,14 @@ describe("relay link grants", () => {
     const relayExchangeKey = "share-web-relay-refresh-exchange-key";
     let grantId = "";
     let armed = false;
+    let replaceLinkSessionInterceptions = 0;
     const raced = new Proxy(target, {
       get(storage, property, receiver) {
         if (property === "replaceLinkSession") {
           return (
             input: Parameters<SyncRelayStorage["replaceLinkSession"]>[0],
           ): boolean => {
+            replaceLinkSessionInterceptions += 1;
             if (armed) {
               armed = false;
               storage.revokeShareGrant({
@@ -1666,6 +1668,7 @@ describe("relay link grants", () => {
       }),
     );
 
+    expect(replaceLinkSessionInterceptions).toBe(1);
     expect(refused.status).toBe(401);
     expect(await refused.text()).toBe(
       '{"ok":false,"error":"not found","code":"not_found"}',

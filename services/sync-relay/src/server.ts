@@ -260,6 +260,10 @@ interface SettledMomentIdentity {
   deleted: boolean;
 }
 
+interface LinkCapabilityReadFallbackAllowance {
+  pagesRemaining: number;
+}
+
 function settledMomentIdentity(row: SyncRelayLogRow): SettledMomentIdentity | null {
   if (row.opKind !== "moment.append") return null;
   const parsed = parseShareOpPayloadWithReferencedPaths(row.payloadJson);
@@ -777,12 +781,9 @@ export function createSyncRelayHandler({
     if (isChatChannelSelector(selector) || row.opKind !== "moment.append") {
       return null;
     }
-    let payload: unknown;
-    try {
-      payload = JSON.parse(row.payloadJson);
-    } catch {
-      return null;
-    }
+    const parsed = parseShareOpPayloadWithReferencedPaths(row.payloadJson);
+    if (!parsed) return null;
+    const { payload } = parsed;
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
       return null;
     }
@@ -980,17 +981,15 @@ export function createSyncRelayHandler({
     versionId: string,
     candidate: SyncRelayLogRow,
     candidateIdentity: SettledMomentIdentity,
+    allowance: LinkCapabilityReadFallbackAllowance,
   ): SyncRelayLogRow | null => {
     let latest = candidateIdentity.versionId === versionId ? candidate : null;
     let trackedObjectId = candidateIdentity.objectId;
     let trackedPath =
       candidateIdentity.settledPath ?? candidateIdentity.referencedPaths[0] ?? null;
     let cursor = candidate.relaySeq;
-    for (
-      let pagesRead = 0;
-      pagesRead < LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET;
-      pagesRead += 1
-    ) {
+    while (allowance.pagesRemaining > 0) {
+      allowance.pagesRemaining -= 1;
       const page = storage.fetchLogPage({
         workspaceId,
         sinceRelaySeq: cursor,
@@ -1018,6 +1017,7 @@ export function createSyncRelayHandler({
     workspaceId: string,
     versionId: string,
     candidate: SyncRelayLogRow,
+    allowance: LinkCapabilityReadFallbackAllowance,
   ): SyncRelayLogRow | null => {
     const candidateIdentity = settledMomentIdentity(candidate);
     if (!candidateIdentity) return null;
@@ -1041,7 +1041,13 @@ export function createSyncRelayHandler({
             objectId: currentObjectId,
             versionId,
           })
-        : latestPathRelatedMoment(workspaceId, versionId, candidate, candidateIdentity);
+        : latestPathRelatedMoment(
+            workspaceId,
+            versionId,
+            candidate,
+            candidateIdentity,
+            allowance,
+          );
     }
     if (!current) return null;
 
@@ -1097,10 +1103,18 @@ export function createSyncRelayHandler({
       .sort((left, right) => right.relaySeq - left.relaySeq)
       .slice(0, SHARED_BLOB_CANDIDATE_LIMIT);
     const chatResolver = chatResolverFor(workspaceId);
+    const fallbackAllowance: LinkCapabilityReadFallbackAllowance = {
+      pagesRemaining: LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET,
+    };
     const reachable = candidates.some((row) => {
       const establishingRow =
         semantics.kind === "current-state" && selector.versionId === null
-          ? currentSettledBlobMoment(workspaceId, versionId, row)
+          ? currentSettledBlobMoment(
+              workspaceId,
+              versionId,
+              row,
+              fallbackAllowance,
+            )
           : row;
       if (
         !establishingRow ||
