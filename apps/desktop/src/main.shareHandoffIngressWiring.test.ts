@@ -66,9 +66,20 @@ describe("share handoff main-process wiring", () => {
 
     expect(captureAt).toBeGreaterThanOrEqual(0);
     expect(windowGateAt).toBeGreaterThan(captureAt);
-    expect(handler).toContain("if (!accepted && workspacePaths.length === 0) return;");
+    expect(handler).toContain("classifyShareHandoffArguments(argv)");
     expect(handler).toContain("pendingOpenPaths.push(...workspacePaths)");
     expect(handler).toContain("openWorkspacePaths(workspacePaths, window)");
+  });
+
+  it("focuses a plain relaunch but refuses a rejected protocol-only relaunch", () => {
+    const handler = handlerSource("second-instance");
+
+    expect(handler).not.toContain(
+      "if (!accepted && workspacePaths.length === 0) return;",
+    );
+    expect(handler).toContain(
+      'if (handoffIntent === "rejected" && workspacePaths.length === 0) return;',
+    );
   });
 
   it("calls Electron's runtime registration API", () => {

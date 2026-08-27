@@ -3,12 +3,14 @@ import { resolve } from "node:path";
 const SHARE_HANDOFF_SCHEME = "dohc";
 const SHARE_HANDOFF_URL_PATTERN =
   /^dohc:\/\/open\/([A-Za-z0-9_-]{43})$/;
+const SHARE_HANDOFF_PROTOCOL_PATTERN = /^dohc:/iu;
 
 declare const shareHandoffCodeBrand: unique symbol;
 export type ShareHandoffCode = string & {
   readonly [shareHandoffCodeBrand]: true;
 };
 export type ShareHandoffOfferResult = "stored" | "duplicate" | "replaced";
+export type ShareHandoffArgumentIntent = "plain" | "accepted" | "rejected";
 
 export interface ShareHandoffIntentSnapshot {
   code: ShareHandoffCode | null;
@@ -47,6 +49,19 @@ export function parseShareHandoffUrl(rawArgument: string): ShareHandoffCode | nu
   const match = SHARE_HANDOFF_URL_PATTERN.exec(rawArgument);
   if (match?.[0] !== rawArgument) return null;
   return (match?.[1] as ShareHandoffCode | undefined) ?? null;
+}
+
+export function classifyShareHandoffArguments(
+  rawArguments: readonly string[],
+): ShareHandoffArgumentIntent {
+  let sawRejectedProtocolArgument = false;
+  for (const rawArgument of rawArguments) {
+    if (parseShareHandoffUrl(rawArgument) !== null) return "accepted";
+    if (SHARE_HANDOFF_PROTOCOL_PATTERN.test(rawArgument)) {
+      sawRejectedProtocolArgument = true;
+    }
+  }
+  return sawRejectedProtocolArgument ? "rejected" : "plain";
 }
 
 export function createShareHandoffIntentSlot(): ShareHandoffIntentSlot {

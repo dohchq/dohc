@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  classifyShareHandoffArguments,
   createShareHandoffIntentSlot,
   focusShareHandoffWindow,
   parseShareHandoffUrl,
@@ -49,6 +50,26 @@ describe("share handoff URL parser", () => {
 
   it.each(INVALID_URLS)("rejects %s", (_label, rawArgument) => {
     expect(parseShareHandoffUrl(rawArgument)).toBeNull();
+  });
+});
+
+describe("share handoff argument classifier", () => {
+  it.each([
+    ["plain launch", ["dohc.exe"], "plain"],
+    ["exact accepted handoff", ["dohc.exe", VALID_URL], "accepted"],
+    [
+      "rejected lower-case lookalike",
+      ["dohc.exe", `${VALID_URL}?source=browser`],
+      "rejected",
+    ],
+    ["rejected case variant", ["dohc.exe", `DOHC://open/${CODE_A}`], "rejected"],
+    [
+      "workspace path plus rejected lookalike",
+      ["dohc.exe", "C:\\workspaces\\trip", `${VALID_URL}#handoff`],
+      "rejected",
+    ],
+  ] as const)("classifies %s", (_label, argv, expected) => {
+    expect(classifyShareHandoffArguments(argv)).toBe(expected);
   });
 });
 

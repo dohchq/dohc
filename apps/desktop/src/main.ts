@@ -753,6 +753,7 @@ import { ensureAgentsChatBlock } from "./cli/agentsChatBlock";
 import { createWorkspaceChatLifecycle } from "./workspaces/workspaceChatLifecycle";
 import { makeProcessDiagnosticsNonFatal } from "./process/stdioResilience";
 import {
+  classifyShareHandoffArguments,
   createShareHandoffIntentSlot,
   focusShareHandoffWindow,
   receiveShareHandoffArguments,
@@ -12542,6 +12543,7 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on("second-instance", (_event, argv) => {
+    const handoffIntent = classifyShareHandoffArguments(argv);
     const accepted = receiveShareHandoffArguments(argv, shareHandoffIntentSlot);
     if (accepted) shareHandoffRedemption.pendingCodeChanged();
     const workspacePaths = collectOpenWorkspaceArgs(argv);
@@ -12549,7 +12551,7 @@ if (!app.requestSingleInstanceLock()) {
       pendingOpenPaths.push(...workspacePaths);
       return;
     }
-    if (!accepted && workspacePaths.length === 0) return;
+    if (handoffIntent === "rejected" && workspacePaths.length === 0) return;
     void showOrCreateMainWindow().then((window) =>
       openWorkspacePaths(workspacePaths, window),
     );
