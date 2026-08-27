@@ -136,6 +136,29 @@ describe("resolveWorkspaceFile containment", () => {
       }),
     ).rejects.toThrow(/file changed/i);
   });
+
+  it("holds file identity across an asynchronous native-path operation", async () => {
+    const root = await makeWorkspace();
+    const prepared = await prepareWorkspaceFileRead(root, "notes/a.md");
+    const started = Promise.withResolvers<void>();
+    const finish = Promise.withResolvers<void>();
+
+    const operation = prepared.withVerifiedPath(async (absolutePath) => {
+      expect(absolutePath).toBe(join(root, "notes", "a.md"));
+      started.resolve();
+      await finish.promise;
+      return "finished";
+    });
+
+    await started.promise;
+    const replacement = join(root, "notes", "replacement-async.md");
+    await writeFile(replacement, "replacement");
+    await rm(join(root, "notes", "a.md"));
+    await symlink(replacement, join(root, "notes", "a.md"));
+    finish.resolve();
+
+    await expect(operation).rejects.toThrow(/file changed/i);
+  });
 });
 
 describe("size caps", () => {

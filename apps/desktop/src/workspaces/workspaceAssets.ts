@@ -232,6 +232,9 @@ export interface PreparedWorkspaceFileRead {
   readonly path: string;
   readAsset(): Promise<WorkspaceAssetSource>;
   readText(): Promise<WorkspaceTextReadResult>;
+  withVerifiedPath<T>(
+    run: (absolutePath: string) => Promise<T>,
+  ): Promise<T>;
   withVerifiedPathSync<T>(
     run: (
       absolutePath: string,
@@ -357,6 +360,19 @@ class PreparedWorkspaceFileReadCapability implements PreparedWorkspaceFileRead {
           );
         }
         return result;
+      } finally {
+        await this.#assertCanonicalPath();
+      }
+    });
+  }
+
+  withVerifiedPath<T>(
+    run: (absolutePath: string) => Promise<T>,
+  ): Promise<T> {
+    return this.#withVerifiedHandle(async () => {
+      await this.#assertCanonicalPath();
+      try {
+        return await run(this.#realTarget);
       } finally {
         await this.#assertCanonicalPath();
       }

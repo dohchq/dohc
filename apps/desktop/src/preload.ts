@@ -168,6 +168,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.archiveChatBookmark, payload),
   readWorkspaceDatabase: (payload) =>
     ipcRenderer.invoke(CHANNELS.readWorkspaceDatabase, payload),
+  readWorkspaceDatabasePage: (payload) =>
+    ipcRenderer.invoke(CHANNELS.readWorkspaceDatabasePage, payload),
   applyDatabaseEdit: (payload) =>
     ipcRenderer.invoke(CHANNELS.applyDatabaseEdit, payload),
   importToDatabase: (payload) =>

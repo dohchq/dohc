@@ -29,6 +29,9 @@ import { listFiles } from "./workspaceFiles";
 import { createTestScratch } from "./testTemp";
 
 const USER_AUTHOR: ChangeAuthor = { kind: "user", userId: "local" };
+const unusedDatabaseEdit = async (): Promise<never> => {
+  throw new Error("Database edit was not expected in this read-only test.");
+};
 const WORKSPACE_ID = "workspace-sdk-owner-test";
 const HEALTHY_SHARE_ID = "healthy-share";
 const DAMAGED_SHARE_ID = "damaged-share";
@@ -181,6 +184,7 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
       writable: false,
       author: USER_AUTHOR,
       reads: port,
+      editDatabase: unusedDatabaseEdit,
     };
 
     const prepared = await port.prepareSearch();
@@ -262,6 +266,7 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
           writable: false,
           author: USER_AUTHOR,
           reads: port,
+          editDatabase: unusedDatabaseEdit,
         },
         "workspace.search",
         {
@@ -343,6 +348,7 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
       writable: false,
       author: USER_AUTHOR,
       reads: port,
+      editDatabase: unusedDatabaseEdit,
     };
 
     try {
@@ -412,6 +418,7 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
             writable: false,
             author: USER_AUTHOR,
             reads: port,
+            editDatabase: unusedDatabaseEdit,
           },
           "databases.read",
           { path: "source.sqlite" },
@@ -453,6 +460,7 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
           writable: false,
           author: USER_AUTHOR,
           reads: port,
+          editDatabase: unusedDatabaseEdit,
         },
         "databases.read",
         { path: "large.sqlite" },

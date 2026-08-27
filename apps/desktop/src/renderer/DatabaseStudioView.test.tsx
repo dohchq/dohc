@@ -10,7 +10,10 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { DatabaseSnapshotResult } from "../ipc/bridgeContract";
+import type {
+  DatabaseEditResult,
+  DatabaseSnapshotResult,
+} from "../ipc/bridgeContract";
 import { rendererMarks } from "../performance/rendererMarks";
 import { DatabaseStudioView } from "./DatabaseStudioView";
 
@@ -29,6 +32,7 @@ const baseSnapshot: DatabaseSnapshotResult = {
         { id: "txn_002", amount: 10, category: "Transport" },
         { id: "txn_003", amount: null, category: "" },
       ],
+      nextOffset: null,
     },
     {
       name: "notes",
@@ -37,6 +41,7 @@ const baseSnapshot: DatabaseSnapshotResult = {
         { name: "value", type: "TEXT" },
       ],
       rows: [{ key: "memo", value: "Quarter close" }],
+      nextOffset: null,
     },
   ],
 };
@@ -57,22 +62,21 @@ function deferred<T>() {
 
 const bridgeMock = {
   readWorkspaceDatabase: vi.fn(async () => cloneSnapshot()),
-  applyDatabaseEdit: vi.fn(async () =>
-    cloneSnapshot({
-      ...baseSnapshot,
-      tables: [
-        {
-          ...baseSnapshot.tables[0]!,
-          rows: [
-            { id: "txn_001", amount: 42, category: "Groceries" },
-            { id: "txn_002", amount: 10, category: "Transport" },
-            { id: "txn_003", amount: null, category: "" },
-          ],
-        },
-        baseSnapshot.tables[1]!,
+  readWorkspaceDatabasePage: vi.fn(),
+  applyDatabaseEdit: vi.fn(async (): Promise<DatabaseEditResult> => ({
+    path: baseSnapshot.path,
+    table: "wallet",
+    page: {
+      offset: 0,
+      rows: [
+        { id: "txn_001", amount: 42, category: "Groceries" },
+        { id: "txn_002", amount: 10, category: "Transport" },
+        { id: "txn_003", amount: null, category: "" },
       ],
-    }),
-  ),
+      nextOffset: null,
+    },
+    version: 1,
+  })),
 };
 
 function renderStudio() {
@@ -158,7 +162,7 @@ describe("DatabaseStudioView", () => {
     expect(descending[1]).toContain("txn_002");
   });
 
-  it("commits edits through the declared primary key and rerenders the snapshot", async () => {
+  it("commits edits through the declared primary key and merges the returned page", async () => {
     const user = userEvent.setup();
     renderStudio();
 
@@ -182,6 +186,60 @@ describe("DatabaseStudioView", () => {
       });
     });
     expect(await screen.findByText("Groceries")).toBeTruthy();
+    await user.click(within(screen.getByTestId("db-table-list")).getByText("notes"));
+    expect(await screen.findByText("Quarter close")).toBeTruthy();
+  });
+
+  it("ignores an edit page after a refresh starts a newer load", async () => {
+    const user = userEvent.setup();
+    const oldEdit = deferred<DatabaseEditResult>();
+    bridgeMock.applyDatabaseEdit.mockImplementationOnce(() => oldEdit.promise);
+    const { rerender } = render(
+      <DatabaseStudioView
+        workspaceId="ws-1"
+        path="imports/wallet.sqlite"
+        refreshKey={0}
+      />,
+    );
+
+    await screen.findByText("Food");
+    await user.click(screen.getByTestId("db-cell-category-txn_001"));
+    fireEvent.change(screen.getByTestId("db-cell-input"), {
+      target: { value: "Old edit" },
+    });
+    await user.keyboard("{Enter}");
+
+    const refreshed = cloneSnapshot();
+    refreshed.tables[0]!.rows[0]!.category = "Fresh refresh";
+    bridgeMock.readWorkspaceDatabase.mockResolvedValueOnce(refreshed);
+    rerender(
+      <DatabaseStudioView
+        workspaceId="ws-1"
+        path="imports/wallet.sqlite"
+        refreshKey={1}
+      />,
+    );
+    expect(await screen.findByText("Fresh refresh")).toBeTruthy();
+
+    await act(async () => {
+      oldEdit.resolve({
+        path: "imports/wallet.sqlite",
+        table: "wallet",
+        page: {
+          offset: 0,
+          rows: [
+            { id: "txn_001", amount: 42, category: "Old edit" },
+            { id: "txn_002", amount: 10, category: "Transport" },
+            { id: "txn_003", amount: null, category: "" },
+          ],
+          nextOffset: null,
+        },
+        version: 1,
+      });
+    });
+
+    expect(screen.getByText("Fresh refresh")).toBeTruthy();
+    expect(screen.queryByText("Old edit")).toBeNull();
   });
 
   it("clears and ignores stale snapshots after switching workspaces", async () => {
@@ -196,6 +254,7 @@ describe("DatabaseStudioView", () => {
             { name: "category", type: "TEXT" },
           ],
           rows: [{ id: "new_001", category: "New workspace" }],
+          nextOffset: null,
         },
       ],
     });
@@ -232,6 +291,7 @@ describe("DatabaseStudioView", () => {
             { __dohc_rowid: 101, id: "dup", category: "First" },
             { __dohc_rowid: 102, id: "dup", category: "Second" },
           ],
+          nextOffset: null,
         },
       ],
     });

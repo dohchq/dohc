@@ -80,8 +80,15 @@ describe("applyDatabaseEdit", () => {
       AUTHOR,
       1_700_000_000_000,
     );
-    expect(after.tables.find((t) => t.name === "transactions")?.rows.find((r) => String(r.id) === "txn_001")?.category)
-      .toBe("Groceries");
+    expect(
+      after.page.rows.find((row) => String(row.id) === "txn_001")
+        ?.category,
+    ).toBe("Groceries");
+    expect(after).toMatchObject({
+      path: "finance/wallet.sqlite",
+      table: "transactions",
+      version: 1,
+    });
 
     // The structured edit is recorded as inspectable JSONL under .dohc — raw
     // bytes are never the sync unit; this op log is.

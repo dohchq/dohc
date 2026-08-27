@@ -36,6 +36,14 @@ export const preloadBundledRuntimeDeps = [
   "zod",
 ];
 
+export const mainBuildEntries = {
+  main: "src/main.ts",
+  "plugin-host": "src/plugins/pluginHostProcess.ts",
+  "pnpm-runner": "src/plugins/pluginPnpmRunnerProcess.ts",
+  "workspace-database-worker":
+    "src/workspaces/workspaceDatabaseThread.ts",
+};
+
 function effectFree(surface: "preload" | "renderer"): Plugin {
   return {
     name: `effect-free-${surface}`,
@@ -70,11 +78,7 @@ export default defineConfig(({ mode }) => {
         minify,
         outDir: "dist/main",
         lib: {
-          entry: {
-            main: "src/main.ts",
-            "plugin-host": "src/plugins/pluginHostProcess.ts",
-            "pnpm-runner": "src/plugins/pluginPnpmRunnerProcess.ts",
-          },
+          entry: mainBuildEntries,
         },
       },
     },

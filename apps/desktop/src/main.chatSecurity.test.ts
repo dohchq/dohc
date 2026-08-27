@@ -9,6 +9,10 @@ const dmRequestsSource = readFileSync(
   new URL("./workspaces/dmRequests.ts", import.meta.url),
   "utf8",
 );
+const databaseIpcSource = readFileSync(
+  new URL("./ipc/workspaceDatabaseIpc.ts", import.meta.url),
+  "utf8",
+).replaceAll("\r\n", "\n");
 
 function handlerSource(channel: string): string {
   const marker = `CHANNELS.${channel},`;
@@ -17,6 +21,23 @@ function handlerSource(channel: string): string {
   if (markerAt < 0 || start < 0) throw new Error(`Missing IPC handler for ${channel}`);
   const next = mainSource.indexOf("ipcMain.handle(", markerAt + marker.length);
   return mainSource.slice(start, next < 0 ? undefined : next);
+}
+
+function databaseHandlerSource(channel: string): string {
+  const marker = `CHANNELS.${channel},`;
+  const markerAt = databaseIpcSource.indexOf(marker);
+  const start = databaseIpcSource.lastIndexOf(
+    "dependencies.registerHandler(",
+    markerAt,
+  );
+  if (markerAt < 0 || start < 0) {
+    throw new Error(`Missing database IPC handler for ${channel}`);
+  }
+  const next = databaseIpcSource.indexOf(
+    "dependencies.registerHandler(",
+    markerAt + marker.length,
+  );
+  return databaseIpcSource.slice(start, next < 0 ? undefined : next);
 }
 
 describe("main-process chat authorization", () => {
@@ -1089,7 +1110,6 @@ describe("main-process chat authorization", () => {
     // moment states. The next pull would overwrite it.
     const rawDiskWriters = [
       ["pickImageFiles", "operation.workspace"],
-      ["applyDatabaseEdit", "operation.workspace"],
       ["importToDatabase", "operation.workspace"],
     ] as const;
     for (const [channel, workspace] of rawDiskWriters) {
@@ -1101,6 +1121,9 @@ describe("main-process chat authorization", () => {
         `${channel}: MUTATION: a blanket-refused handler that reads the level is one the gate no longer covers`,
       ).not.toContain("if (shareView === null) assertWritableWorkspace(workspace);");
     }
+    expect(databaseHandlerSource("applyDatabaseEdit")).toContain(
+      "dependencies.assertWritableWorkspace(operation.workspace);",
+    );
 
     // The plugin runtime installs and runs plugin code against the workspace
     // root, so its owner takes the same gate before it builds a record.
@@ -1132,7 +1155,6 @@ describe("main-process chat authorization", () => {
 
   it("holds database and UI-state paths under exact renderer and physical authority", () => {
     const helpers = [
-      ["applyDatabaseEdit", "await applyDatabaseEdit("],
       ["getWorkspaceUiState", "await readUiStateFile(operation.workspace.rootPath)"],
       ["setWorkspaceUiState", "writeUiStateFile(operation.workspace.rootPath"],
     ] as const;
@@ -1146,8 +1168,19 @@ describe("main-process chat authorization", () => {
       expect(handler, channel).not.toContain("requireWorkspace(input.workspaceId)");
     }
 
-    expect(handlerSource("applyDatabaseEdit")).toContain(
-      "operation.workspace.rootPath,",
+    const databaseRegistrationAt = mainSource.indexOf(
+      "registerWorkspaceDatabaseIpcHandlers<",
+    );
+    const databaseRegistration = mainSource.slice(
+      databaseRegistrationAt,
+      databaseRegistrationAt + 2_500,
+    );
+    expect(databaseRegistrationAt).toBeGreaterThan(-1);
+    expect(databaseRegistration).toContain("withRendererWorkspaceOperation(");
+    expect(databaseRegistration).toContain("editWorkspaceDatabaseInWorker({");
+    expect(databaseRegistration).toContain("rootPath: operation.workspace.rootPath,");
+    expect(databaseHandlerSource("applyDatabaseEdit")).toContain(
+      "ApplyDatabaseEditPayload.parse(payload)",
     );
     const uiStateHandler = handlerSource("getWorkspaceUiState");
     expect(uiStateHandler).toContain("WorkspaceIdPayload.parse(payload)");

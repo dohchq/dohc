@@ -17,6 +17,8 @@ import {
   ChatDispatchStateForThreadPayload,
   ChatDispatchStateForThreadResult,
   ChatReactionRecord,
+  DatabaseEditResult,
+  DatabasePageResult,
   DatabaseSnapshotResult,
   DesktopMarksResult,
   CreateWorkspaceFilePayload,
@@ -29,6 +31,7 @@ import {
   OpenEngineYDocSessionResult,
   OpenWorkspaceRequestPayload,
   ReloadRendererRequestPayload,
+  ReadWorkspaceDatabasePagePayload,
   ReadEngineYDocArtifactAssetResult,
   ExportDocumentFilePayload,
   ExportDocumentFileResult,
@@ -714,10 +717,70 @@ describe("record IPC contracts", () => {
             name: "tasks",
             columns: [],
             rows: [{ "task title": "Ship Zod 4", priority: 1, done: false }],
+            nextOffset: 1000,
           },
         ],
       }).tables[0]?.rows[0],
     ).toEqual({ "task title": "Ship Zod 4", priority: 1, done: false });
+
+    expect(
+      ReadWorkspaceDatabasePagePayload.parse({
+        workspaceId: "workspace-1",
+        relativePath: "workspace.db",
+        table: "tasks",
+        offset: 1000,
+      }),
+    ).toEqual({
+      workspaceId: "workspace-1",
+      relativePath: "workspace.db",
+      table: "tasks",
+      offset: 1000,
+    });
+    expect(
+      DatabasePageResult.parse({
+        path: "workspace.db",
+        table: "tasks",
+        offset: 1000,
+        rows: [{ "task title": "Keep paging" }],
+        nextOffset: null,
+      }),
+    ).toEqual({
+      path: "workspace.db",
+      table: "tasks",
+      offset: 1000,
+      rows: [{ "task title": "Keep paging" }],
+      nextOffset: null,
+    });
+    expect(
+      DatabaseEditResult.parse({
+        path: "workspace.db",
+        table: "tasks",
+        page: {
+          offset: 0,
+          rows: [{ "task title": "Ship the worker" }],
+          nextOffset: null,
+        },
+        version: 2,
+      }),
+    ).toEqual({
+      path: "workspace.db",
+      table: "tasks",
+      page: {
+        offset: 0,
+        rows: [{ "task title": "Ship the worker" }],
+        nextOffset: null,
+      },
+      version: 2,
+    });
+
+    expect(
+      ReadWorkspaceDatabasePagePayload.safeParse({
+        workspaceId: "workspace-1",
+        relativePath: "workspace.db",
+        table: "tasks",
+        offset: -1,
+      }).success,
+    ).toBe(false);
 
     expect(
       DesktopMarksResult.safeParse({

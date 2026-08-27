@@ -1,6 +1,9 @@
 import type { ListWorkspaceFilesResult } from "../ipc/bridgeContract";
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
-import { createOwnedWorkspaceFileReader } from "./ownedWorkspaceFileReader";
+import {
+  createOwnedWorkspaceFileReader,
+  type OwnedWorkspaceDatabaseReader,
+} from "./ownedWorkspaceFileReader";
 import {
   createOwnedWorkspaceSdkReadPort,
   type OwnedWorkspaceSdkReadPort,
@@ -19,6 +22,7 @@ import { shareViewIsPresent } from "./shareViewMarker";
 export function createOwnedWorkspaceSdkReads(input: {
   workspace: ShareViewFilesWorkspaceRecord;
   files: Pick<ShareViewFiles, "read">;
+  databaseReader?: OwnedWorkspaceDatabaseReader;
   listFiles(): Promise<ListWorkspaceFilesResult>;
   repairProjection(target: ShareViewFilesTarget): Promise<void>;
   onSearchSourceFailure?: (
@@ -29,6 +33,7 @@ export function createOwnedWorkspaceSdkReads(input: {
   const fileReader = createOwnedWorkspaceFileReader({
     workspace: input.workspace,
     files: input.files,
+    ...(input.databaseReader ? { databaseReader: input.databaseReader } : {}),
   });
   const mounts = storedShareMounts(input.workspace);
   const searchSources: OwnedWorkspaceSearchSource[] = shareViewIsPresent(

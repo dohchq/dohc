@@ -15,7 +15,10 @@ import { JsonRpcTransport } from "../agents/JsonRpcTransport";
 import { stopProcessTreePosix } from "../process/posixSpawn";
 import { createTestScratch } from "../workspaces/testTemp";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
-import { localWorkspaceSdkReads } from "../testing/localWorkspaceSdkReads";
+import {
+  localWorkspaceSdkDatabaseEditor,
+  localWorkspaceSdkReads,
+} from "../testing/localWorkspaceSdkReads";
 import { createWorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 import { PluginHost, type PluginHostOptions } from "./PluginHost";
 import { PluginHostOwnership } from "./pluginHostOwnership";
@@ -301,6 +304,7 @@ function workspaceFileRouter(
         pluginId,
         workspaceRoot,
         reads: localWorkspaceSdkReads(workspaceRoot),
+        editDatabase: localWorkspaceSdkDatabaseEditor(workspaceRoot),
         spawnId,
         requestPath: "plugin-process",
         isWritable: () => true,
@@ -372,6 +376,7 @@ describe("PluginHost", () => {
             pluginId,
             workspaceRoot: root,
             reads: localWorkspaceSdkReads(root),
+            editDatabase: localWorkspaceSdkDatabaseEditor(root),
             spawnId,
             requestPath: "plugin-process",
             isWritable: () => true,
@@ -426,6 +431,7 @@ describe("PluginHost", () => {
             pluginId,
             workspaceRoot: root,
             reads: localWorkspaceSdkReads(root),
+            editDatabase: localWorkspaceSdkDatabaseEditor(root),
             spawnId,
             requestPath: "plugin-process",
             isWritable: () => true,
@@ -1753,6 +1759,7 @@ describe("PluginHost", () => {
         pluginId: "hello-plugin",
         workspaceRoot: root,
         reads: localWorkspaceSdkReads(root),
+        editDatabase: localWorkspaceSdkDatabaseEditor(root),
         spawnId: authority.spawnId,
         requestPath: "panel",
         isWritable: () => true,
@@ -1844,6 +1851,7 @@ describe("PluginHost", () => {
         pluginId: "hello-plugin",
         workspaceRoot: root,
         reads: localWorkspaceSdkReads(root),
+        editDatabase: localWorkspaceSdkDatabaseEditor(root),
         spawnId,
         requestPath: "panel",
         isWritable: () => true,
@@ -1946,6 +1954,7 @@ describe("PluginHost", () => {
         pluginId: "hello-plugin",
         workspaceRoot: root,
         reads: localWorkspaceSdkReads(root),
+        editDatabase: localWorkspaceSdkDatabaseEditor(root),
         spawnId,
         requestPath: "panel",
         isWritable: () => true,

@@ -10,7 +10,10 @@ import {
   type WorkspaceSdkHostContext,
   type WorkspaceSdkReadPort,
 } from "./workspaceSdkHost";
-import { localWorkspaceSdkReads } from "../testing/localWorkspaceSdkReads";
+import {
+  localWorkspaceSdkDatabaseEditor,
+  localWorkspaceSdkReads,
+} from "../testing/localWorkspaceSdkReads";
 import { createTestScratch } from "./testTemp";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 
@@ -48,6 +51,7 @@ function hostContext(
     writable: true,
     author: USER_AUTHOR,
     reads: localWorkspaceSdkReads(root),
+    editDatabase: localWorkspaceSdkDatabaseEditor(root),
     ...overrides,
   };
 }

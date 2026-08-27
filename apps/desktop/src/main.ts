@@ -1,4 +1,5 @@
 import {
+  databaseOpLogPath,
   defaultWorkspaceRoot,
   isSharedWithMePath,
   normalizeAbsolutePath,
@@ -8,6 +9,7 @@ import {
   validateWorkspaceRootChoice,
 } from "@dohc/workspace-core";
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
+import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import { randomUUID } from "node:crypto";
 import {
   CHATS_METHOD,
@@ -654,6 +656,7 @@ import {
 import type { DohcPluginManifest } from "./plugins/pluginManifestSchema";
 import {
   mediaTypeForExtension,
+  prepareWorkspaceFileRead,
   readWorkspaceText,
   resolveWorkspaceFile,
   withExclusiveWorkspaceOperation,
@@ -675,7 +678,12 @@ import {
 import { createOwnedProjectionRepairer } from "./workspaces/ownedProjectionRepair";
 import { createOwnedWorkspaceFileReader } from "./workspaces/ownedWorkspaceFileReader";
 import { importOwnedWorkspaceDatabase } from "./workspaces/ownedWorkspaceDatabaseImport";
-import { applyDatabaseEdit } from "./workspaces/workspaceDatabase";
+import {
+  workspaceDatabaseWorker,
+  type DatabaseEdit,
+} from "./workspaces/workspaceDatabase";
+import type { OwnedWorkspaceDatabaseReader } from "./workspaces/ownedWorkspaceFileReader";
+import { registerWorkspaceDatabaseIpcHandlers } from "./ipc/workspaceDatabaseIpc";
 import { WorkspaceGraphIndex } from "./workspaces/workspaceGraph";
 import {
   extractWorkspaceHeadings,
@@ -4394,7 +4402,17 @@ async function invokeWorkspacePluginSdk(input: {
           ?.manifest.webApps,
         isWritable: input.isWritable,
         /** Main supplies this read authority. Plugins cannot select or widen it. */
-        reads: ownedWorkspaceReadsFor(workspace),
+        reads: ownedWorkspaceReadsFor(workspace, workerDatabaseReader(signal)),
+        editDatabase: ({ path, edit, author, nowMs, operationId, signal: editSignal }) =>
+          editWorkspaceDatabaseInWorker({
+            rootPath: workspace.rootPath,
+            relativePath: path,
+            edit,
+            author,
+            nowMs,
+            ...(operationId ? { operationId } : {}),
+            ...(editSignal ? { signal: editSignal } : {}),
+          }),
         writeAvailable: async () => {
           try {
             await openWorkspaceActivityForOperation(
@@ -5451,12 +5469,89 @@ function listOwnedWorkspaceFiles(workspace: { workspaceId: string }) {
   );
 }
 
+function workerDatabaseReader(
+  signal?: AbortSignal,
+): OwnedWorkspaceDatabaseReader {
+  return {
+    readPrepared: (path, source) =>
+      source.withVerifiedPath((absolutePath) =>
+        workspaceDatabaseWorker.readPath({ absolutePath, path, signal }),
+      ),
+    readBytes: (path, bytes) =>
+      workspaceDatabaseWorker.readBytes({ bytes, path, signal }),
+    readPagePrepared: (path, source, table, offset) =>
+      source.withVerifiedPath((absolutePath) =>
+        workspaceDatabaseWorker.readPagePath({
+          absolutePath,
+          path,
+          table,
+          offset,
+          signal,
+        }),
+      ),
+    readPageBytes: (path, bytes, table, offset) =>
+      workspaceDatabaseWorker.readPageBytes({
+        bytes,
+        path,
+        table,
+        offset,
+        signal,
+      }),
+  };
+}
+
+async function editWorkspaceDatabaseInWorker(input: {
+  rootPath: string;
+  relativePath: string;
+  edit: DatabaseEdit;
+  author: ChangeAuthor;
+  nowMs: number;
+  operationId?: string;
+  signal?: AbortSignal;
+}) {
+  const resolved = await resolveWorkspaceFile(
+    input.rootPath,
+    input.relativePath,
+  );
+  if (input.signal?.aborted) throw new Error("Database edit was cancelled.");
+  const source = await prepareWorkspaceFileRead(
+    input.rootPath,
+    resolved.resolvedPath,
+  );
+  const logPath = join(
+    input.rootPath,
+    databaseOpLogPath(resolved.normalized),
+  );
+  return source.withVerifiedPath((absolutePath) =>
+    workspaceDatabaseWorker.editPath({
+      absolutePath,
+      path: resolved.normalized,
+      logPath,
+      statePath: join(dirname(logPath), "state.sqlite"),
+      edit: input.edit,
+      operation: {
+        operationId: input.operationId ?? randomUUID(),
+        databasePath: resolved.normalized,
+        table: input.edit.table,
+        op: input.edit.op,
+        rowId: String(input.edit.rowId),
+        payload: input.edit.payload ?? {},
+        appliedAt: input.nowMs,
+        author: input.author,
+      },
+      signal: input.signal,
+    }),
+  );
+}
+
 function ownedWorkspaceReadsFor(
   workspace: RegistryEntry & { readonly attachmentId: symbol },
+  databaseReader?: OwnedWorkspaceDatabaseReader,
 ) {
   return createOwnedWorkspaceSdkReads({
     workspace,
     files: shareViewFiles,
+    ...(databaseReader ? { databaseReader } : {}),
     listFiles: () => listOwnedWorkspaceFilesFor(workspace),
     repairProjection: (target) =>
       ensureOwnedProjectionTargetCurrent({
@@ -5796,6 +5891,7 @@ app.on("will-quit", (event) => {
     .then(() => workspaceAuthorities.close())
     .catch(() => undefined);
   const workspaceShutdown = workspaceAuthorityStop
+    .then(async () => await workspaceDatabaseWorker.dispose())
     .then(async () => await closeAllRelayTransportWorkspaces())
     .catch(() => undefined)
     .then(async () => await rustEngineDaemon?.stop());
@@ -8683,43 +8779,49 @@ function registerIpcHandlers(
     commands: shareMountCommands,
   });
 
-  ipcMain.handle(CHANNELS.readWorkspaceDatabase, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ReadWorkspaceDatabasePayload.parse(payload);
-    return withRendererWorkspaceOperation(
-      event.sender,
-      input.workspaceId,
-      "Database read stopped because this window changed workspaces.",
-      async (operation) =>
-        DatabaseSnapshotResult.parse(
-          await ownedWorkspaceReadsFor(operation.workspace).readDatabase(
-            input.relativePath,
-          ),
-        ),
-    );
-  });
-
-  ipcMain.handle(CHANNELS.applyDatabaseEdit, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ApplyDatabaseEditPayload.parse(payload);
-    return withRendererWorkspaceOperation(
-      event.sender,
-      input.workspaceId,
-      "Database edit stopped because this window changed workspaces.",
-      async (operation) => {
-        assertWritableWorkspace(operation.workspace);
-        return DatabaseSnapshotResult.parse(
-          await applyDatabaseEdit(
-            operation.workspace.rootPath,
-            input.relativePath,
-            input.edit,
-            { kind: "user", userId: "local" },
-            now(),
-            deps.createId ? { createId: deps.createId } : {},
-          ),
-        );
-      },
-    );
+  registerWorkspaceDatabaseIpcHandlers<
+    IpcMainInvokeEvent,
+    DesktopWorkspaceOperation["workspace"]
+  >({
+    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    assertTrustedSender,
+    withWorkspaceOperation: (
+      event,
+      workspaceId,
+      inactiveMessage,
+      work,
+    ) =>
+      withRendererWorkspaceOperation(
+        event.sender,
+        workspaceId,
+        inactiveMessage,
+        work,
+      ),
+    assertWritableWorkspace,
+    read: (operation, relativePath) =>
+      createOwnedWorkspaceFileReader({
+        workspace: operation.workspace,
+        files: shareViewFiles,
+        databaseReader: workerDatabaseReader(operation.signal),
+      }).readDatabase(relativePath),
+    readPage: (operation, input) =>
+      createOwnedWorkspaceFileReader({
+        workspace: operation.workspace,
+        files: shareViewFiles,
+        databaseReader: workerDatabaseReader(operation.signal),
+      }).readDatabasePage(input.relativePath, input.table, input.offset),
+    edit: (operation, input) =>
+      editWorkspaceDatabaseInWorker({
+        rootPath: operation.workspace.rootPath,
+        relativePath: input.relativePath,
+        edit: input.edit,
+        author: { kind: "user", userId: "local" },
+        nowMs: input.nowMs,
+        operationId: input.operationId,
+        signal: operation.signal,
+      }),
+    now,
+    createId: deps.createId ?? randomUUID,
   });
 
   ipcMain.handle(CHANNELS.importToDatabase, async (event, payload) => {
