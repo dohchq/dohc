@@ -78,7 +78,7 @@ describe("bootstrap window gate", () => {
     const handler = handlerSource("second-instance");
     const gateAt = handler.indexOf("if (!bootstrapComplete)");
     const queueAt = handler.indexOf(
-      "pendingOpenPaths.push(...collectOpenWorkspaceArgs(argv))",
+      "pendingOpenPaths.push(...workspacePaths)",
     );
     expect(queueAt).toBeGreaterThan(gateAt);
     expect(queueAt).toBeLessThan(handler.indexOf("return;", gateAt));

@@ -751,6 +751,12 @@ import {
 import { ensureAgentsChatBlock } from "./cli/agentsChatBlock";
 import { createWorkspaceChatLifecycle } from "./workspaces/workspaceChatLifecycle";
 import { makeProcessDiagnosticsNonFatal } from "./process/stdioResilience";
+import {
+  createShareHandoffIntentSlot,
+  focusShareHandoffWindow,
+  receiveShareHandoffArguments,
+  registerShareHandoffProtocol,
+} from "./shareHandoffIngress";
 
 // A launcher that exited leaves main's stdout/stderr a pipe with no reader, and
 // a pipe write throws synchronously. Diagnostics must never be able to crash the
@@ -758,6 +764,9 @@ import { makeProcessDiagnosticsNonFatal } from "./process/stdioResilience";
 // logging in the imports above is still unguarded, which is why this stays a
 // top-level statement rather than moving inside app.whenReady.
 makeProcessDiagnosticsNonFatal();
+
+const shareHandoffIntentSlot = createShareHandoffIntentSlot();
+registerShareHandoffProtocol(app, process);
 
 // Custom scheme that serves a workspace file's bytes to the renderer:
 //   dohc-file://<workspaceId>/<relative/path>
@@ -4948,19 +4957,17 @@ function dispatchTrayIcon() {
   return icon;
 }
 
-async function showOrCreateMainWindow(): Promise<void> {
+async function showOrCreateMainWindow(): Promise<BrowserWindow> {
   const existing = targetWindow(undefined);
   if (existing) {
-    if (existing.isMinimized()) existing.restore();
-    existing.show();
-    existing.focus();
-    return;
+    focusShareHandoffWindow(existing);
+    return existing;
   }
   const window = trackWorkspaceWindow(
     createMainWindow({ beforeRendererReload: prepareAfterRendererCrash }),
   );
-  window.show();
-  window.focus();
+  focusShareHandoffWindow(window);
+  return window;
 }
 
 function rebuildDispatchTrayMenu(): void {
@@ -12446,6 +12453,17 @@ async function startRustEngineDaemon(): Promise<boolean> {
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
+  if (process.platform !== "darwin") {
+    receiveShareHandoffArguments(process.argv, shareHandoffIntentSlot);
+  }
+
+  app.on("open-url", (event, rawArgument) => {
+    event.preventDefault();
+    const accepted = receiveShareHandoffArguments([rawArgument], shareHandoffIntentSlot);
+    if (!accepted || !bootstrapComplete) return;
+    void showOrCreateMainWindow();
+  });
+
   app.on("open-file", (event, path) => {
     event.preventDefault();
     pendingOpenPaths.push(path);
@@ -12454,31 +12472,23 @@ if (!app.requestSingleInstanceLock()) {
     if (window) {
       void flushPendingOpenPaths(window);
     } else {
-      void showOrCreateMainWindow().then(() =>
-        flushPendingOpenPaths(targetWindow(undefined)),
+      void showOrCreateMainWindow().then((createdWindow) =>
+        flushPendingOpenPaths(createdWindow),
       );
     }
   });
 
   app.on("second-instance", (_event, argv) => {
+    const accepted = receiveShareHandoffArguments(argv, shareHandoffIntentSlot);
+    const workspacePaths = collectOpenWorkspaceArgs(argv);
     if (!bootstrapComplete) {
-      pendingOpenPaths.push(...collectOpenWorkspaceArgs(argv));
+      pendingOpenPaths.push(...workspacePaths);
       return;
     }
-    const window = targetWindow(undefined);
-    if (window) {
-      if (window.isMinimized()) window.restore();
-      window.show();
-      window.focus();
-      void openWorkspacePaths(collectOpenWorkspaceArgs(argv), window);
-    } else {
-      void showOrCreateMainWindow().then(() =>
-        openWorkspacePaths(
-          collectOpenWorkspaceArgs(argv),
-          targetWindow(undefined),
-        ),
-      );
-    }
+    if (!accepted && workspacePaths.length === 0) return;
+    void showOrCreateMainWindow().then((window) =>
+      openWorkspacePaths(workspacePaths, window),
+    );
   });
 
   // Quit interception (#567 / #579 review, r10): a set-aside draft storage
