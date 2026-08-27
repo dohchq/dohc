@@ -197,7 +197,7 @@ describe("share op filter", () => {
     }
   });
 
-  it("serves a MINIMAL moment.append payload with no author, summary, ids, or lineage", () => {
+  it("serves a MINIMAL moment.append payload with the lineage content hash", () => {
     const decision = filterOpForShare(
       pathShare,
       "moment.append",
@@ -251,9 +251,19 @@ describe("share op filter", () => {
       payloadAfterPath: "docs/a.md",
       payloadBeforePath: "docs/a.md",
       payloadAfterBlobSha256: "a".repeat(64),
+      payloadBeforeBlobSha256: "b".repeat(64),
     });
-    // Only the after-blob is reachable; the before-blob hash is not served.
+    // Only the after-blob is reachable; serving the before-blob hash does not
+    // authorize reading its content.
     expect(decision.blobSha256s).toEqual(["a".repeat(64)]);
+  });
+
+  it("serves a null lineage content hash when the moment has no prior blob", () => {
+    const decision = filterOpForShare(pathShare, "moment.append", momentPayload());
+
+    expect(decision.allowed).toBe(true);
+    if (!decision.allowed) return;
+    expect(decision.payload).toHaveProperty("payloadBeforeBlobSha256", null);
   });
 
   it("serves a MINIMAL version.create payload with redacted, metadata-free snapshots", () => {

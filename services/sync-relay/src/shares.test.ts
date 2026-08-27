@@ -697,6 +697,57 @@ describe("share grants", () => {
     expect(await denialBytes(await h(request(STRANGER, `/sync/shares/share-0/blobs/${sharedSha}`)))).toBe(unknown);
   });
 
+  it("serves an earlier write's blob to an authenticated recipient replaying share history", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const earlierContent = "earlier body";
+    const replacementContent = "replacement body";
+    const earlierSha = await putBlob(h, earlierContent);
+    await putBlob(h, replacementContent);
+    await appendOps(h, [
+      momentOp("docs/shared.md", earlierContent),
+      momentOp("docs/shared.md", replacementContent, {
+        payloadBeforeBlobSha256: earlierSha,
+        payloadBeforePath: "docs/shared.md",
+        beforePresent: "present",
+      }),
+    ]);
+    await createShare(h);
+
+    const earlier = await h(
+      request(RECIPIENT, `/sync/shares/share-0/blobs/${earlierSha}`),
+    );
+    expect(earlier.status, await earlier.clone().text()).toBe(200);
+    expect(await earlier.text()).toBe(earlierContent);
+  });
+
+  it("serves a deleted file's blob to an authenticated recipient replaying share history", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const deletedContent = "deleted body";
+    const deletedSha = await putBlob(h, deletedContent);
+    await appendOps(h, [
+      momentOp("docs/shared.md", deletedContent),
+      momentOp("docs/shared.md", deletedContent, {
+        operation: "delete",
+        payloadBeforeBlobSha256: deletedSha,
+        payloadBeforePath: "docs/shared.md",
+        payloadAfterBlobSha256: null,
+        payloadAfterPath: null,
+        beforePresent: "present",
+      }),
+    ]);
+    await createShare(h);
+
+    const deleted = await h(
+      request(RECIPIENT, `/sync/shares/share-0/blobs/${deletedSha}`),
+    );
+    expect(deleted.status, await deleted.clone().text()).toBe(200);
+    expect(await deleted.text()).toBe(deletedContent);
+  });
+
   it("stops serving a revoked share on the next fetch, byte-identically to one that never existed", async () => {
     const storage = await testStorage();
     const h = handler(storage);

@@ -520,6 +520,27 @@ function collectString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+export function parseShareOpPayloadWithReferencedPaths(
+  payloadJson: string,
+): { payload: unknown; referencedPaths: string[] } | null {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(payloadJson);
+  } catch {
+    return null;
+  }
+  const record = asRecord(payload);
+  const referencedPaths = record
+    ? [
+        collectString(record.path),
+        collectString(record.payloadBeforePath),
+        collectString(record.payloadAfterPath),
+        collectString(record.beforePath),
+      ].filter((path): path is string => path !== null)
+    : [];
+  return { payload, referencedPaths };
+}
+
 // Rebuilds the SERVED payload from an explicit per-kind allowlist (the same
 // posture as the moment.append/version.create branches): a stored payload
 // that grows an internal-only field (audit metadata, device ids, ...) must
@@ -800,12 +821,9 @@ export function filterOpForShare(
   payloadJson: string,
   chat?: ChatShareThreadResolver,
 ): ShareOpDecision {
-  let payload: unknown;
-  try {
-    payload = JSON.parse(payloadJson);
-  } catch {
-    return { allowed: false };
-  }
+  const parsed = parseShareOpPayloadWithReferencedPaths(payloadJson);
+  if (!parsed) return { allowed: false };
+  const { payload, referencedPaths } = parsed;
 
   if (isChatChannelSelector(selector)) {
     return filterChatOpForChannelShare(selector, opKind, payload, chat);
@@ -829,28 +847,25 @@ export function filterOpForShare(
     if (!record) return { allowed: false };
     const claimedVersionId = collectString(record.versionId);
     if (claimedVersionId !== targetVersionId(selector)) return { allowed: false };
-    const paths = [
-      collectString(record.path),
-      collectString(record.payloadBeforePath),
-      collectString(record.payloadAfterPath),
-      collectString(record.beforePath),
-    ].filter((path): path is string => path !== null);
-    if (paths.length === 0) return { allowed: false };
-    // ALL referenced paths must be visible — a rename that crosses the share
-    // boundary (either direction) is excluded rather than leaking the
-    // outside path. Known limitation: such a file goes stale in the shared
-    // view until its next in-boundary write.
-    if (!paths.every((path) => pathVisibleThroughShare(selector, path))) {
+    if (referencedPaths.length === 0) return { allowed: false };
+    // ALL referenced paths must be visible. A rename across the share boundary
+    // is excluded rather than leaking the outside path. Existing replicas keep
+    // their prior view, but accountless current-state blob reads do not
+    // hydrate it after the move.
+    if (!referencedPaths.every((path) => pathVisibleThroughShare(selector, path))) {
       return { allowed: false };
     }
     // Build a MINIMAL served payload from the allowlist of fields the
     // recipient's Rust share-view replay actually needs.
     // Everything else in the stored moment — author, metadata.summary,
-    // metadata.correlationId, moment/object ids, lineage (before* fields),
+    // metadata.correlationId, moment/object ids, lineage identity fields,
     // and raw recorded timestamps — is dropped so nothing beyond the
-    // in-selector change description crosses the share boundary. The author
-    // is replaced with a neutral sync origin.
+    // in-selector change description crosses the share boundary. The lineage
+    // content hash survives because share-view replay uses it to apply
+    // mutations fast-forward-only. The author is replaced with a neutral sync
+    // origin.
     const afterSha = collectString(record.payloadAfterBlobSha256);
+    const beforeSha = collectString(record.payloadBeforeBlobSha256);
     const served: Record<string, unknown> = {
       operation: typeof record.operation === "string" ? record.operation : null,
       // The MOMENT's own version, read from the stored op — deliberately not
@@ -863,6 +878,7 @@ export function filterOpForShare(
       // rather than a copy of this one.
       versionId: claimedVersionId,
       metadata: { origin: "sync" },
+      payloadBeforeBlobSha256: beforeSha,
     };
     const inPath = collectString(record.path);
     if (inPath) served.path = inPath;
@@ -875,7 +891,7 @@ export function filterOpForShare(
       served.payloadAfterContentKind = "binary";
     }
     // Only the after-blob is ever fetched by the recipient (before-blobs are
-    // never replayed), so it is the only hash we make reachable.
+    // never replayed), so the lineage hash does not make its blob reachable.
     const blobSha256s = afterSha ? [afterSha] : [];
     return { allowed: true, payload: served, blobSha256s };
   }

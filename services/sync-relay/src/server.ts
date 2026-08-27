@@ -7,13 +7,25 @@ import {
 } from "@dohc/security-contract";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import type { ResolveActor } from "@dohc/workspace-auth/session";
+import { createAccountlessPathProjection } from "./accountlessPathProjection";
 import { stableJsonStringify } from "./canonicalJson";
 import {
   constantTimeHashEqual,
   hashLinkBearer,
+  hashRelayExchangeKey,
   LinkExchangeRateLimiter,
+  LinkReadRateLimiter,
+  LINK_GRANT_LOG_READ_BUCKET_CAPACITY,
+  LINK_GRANT_LOG_READ_REFILL_PER_SECOND,
+  LINK_GRANT_READ_BUCKET_CAPACITY,
+  LINK_GRANT_READ_REFILL_PER_SECOND,
+  LINK_LOG_READ_BUCKET_CAPACITY,
+  LINK_LOG_READ_REFILL_PER_SECOND,
+  LINK_SESSION_RENEWAL_GRACE_MS,
   LINK_SESSION_TTL_MS,
   mintLinkBearer,
+  validateLinkCapability,
+  verifyRelayExchangeKey,
 } from "./linkSecurity";
 import {
   PresenceCapacityError,
@@ -27,6 +39,7 @@ import {
   filterOpForShareAppend,
   filterProposedChangeForShare,
   isChatChannelSelector,
+  parseShareOpPayloadWithReferencedPaths,
   parseStoredAnyShareSelectorJson,
   presenceTopicAllowedForShare,
   targetVersionId,
@@ -34,6 +47,7 @@ import {
   validateChatShareAccess,
   validateFileShareAccess,
   validateShareSelector,
+  type AnyShareSelector,
   type ChatShareChannelKind,
   type ChatShareThreadResolver,
   type ShareSelector,
@@ -41,6 +55,7 @@ import {
   type ThreadFileBinding,
 } from "./shareFilter";
 import {
+  SHARED_BLOB_CANDIDATE_LIMIT,
   SyncRelayBlobMissingError,
   SyncRelayConflictError,
   SyncRelayQuotaExceededError,
@@ -48,6 +63,7 @@ import {
   type ObjectMomentRow,
   type ShareProposalOpRow,
   type SyncRelayLogInput,
+  type SyncRelayLogRow,
   type SyncRelayShareWithGrantRow,
   type SyncRelayStorage,
 } from "./storage";
@@ -92,12 +108,22 @@ export interface CreateSyncRelayHandlerOptions {
   // Relay-instance HMAC key. When absent, every link route refuses without
   // touching storage. main.ts requires it outside development and test.
   linkKey?: string | Uint8Array;
+  relayExchangeKey?: string;
   linkExchangeRateLimiter?: LinkExchangeRateLimiter;
+  linkReadRateLimiter?: LinkReadRateLimiter;
+  linkGrantReadRateLimiter?: LinkReadRateLimiter;
+  linkLogReadRateLimiter?: LinkReadRateLimiter;
+  linkGrantLogReadRateLimiter?: LinkReadRateLimiter;
+  linkCapabilityReadFallbackPageSize?: number;
   newLinkBearer?: () => string;
 }
 
 type SyncRelayRoute =
   | { route: "link-exchange" }
+  | { route: "link-refresh" }
+  | { route: "link-share" }
+  | { route: "link-log" }
+  | { route: "link-blob"; sha256: string }
   | { route: "workspaces" }
   | { route: "blob"; workspaceId: string; sha256: string }
   | { route: "blob-have"; workspaceId: string }
@@ -160,6 +186,8 @@ type SyncRelayRoute =
 // (crates/dohc-engine-sync-http/tests/relay_http.rs) reads this line and fails
 // if the two drift.
 export const MAX_BLOB_BYTES = 20 * 1024 * 1024;
+const LINK_BLOB_STREAM_CHUNK_BYTES = 64 * 1024;
+export const LINK_BLOB_INFLIGHT_BYTES_PER_GRANT = 64 * 1024 * 1024;
 export const MAX_KEY_ENVELOPE_BYTES = 16 * 1024;
 // One PAGE of the continuous replication lane, for the two log routes. It is
 // not the submit bound: a submit is one user act carrying one intent, and it
@@ -169,6 +197,10 @@ export const MAX_KEY_ENVELOPE_BYTES = 16 * 1024;
 export const MAX_OPS_PER_REQUEST = 500;
 export const DEFAULT_LOG_PAGE_SIZE = 100;
 export const MAX_LOG_PAGE_SIZE = 500;
+// One accountless response may scan this many raw log rows for admitted ops.
+export const MAX_RAW_ROWS_PER_LINK_PAGE = 10_000;
+// Capability reads may synchronously inspect at most 10,000 fallback rows.
+export const LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET = 20;
 // Presence (ephemeral awareness) transport limits.
 export const MAX_PRESENCE_TOPIC_CHARS = 1024;
 export const MAX_CLIENT_ID_CHARS = 128;
@@ -180,6 +212,12 @@ const SHA256_HEX = /^[a-f0-9]{64}$/u;
 const MAX_WORKSPACE_ID_CHARS = 256;
 const MAX_ORIGIN_ID_CHARS = 256;
 const MAX_OP_KIND_CHARS = 128;
+const ACCOUNTLESS_FILE_REPLAY_OP_KINDS = new Set([
+  "workspace.init",
+  "moment.append",
+  "version.create",
+]);
+const FILE_FRESHNESS_OP_KINDS = new Set(["moment.append", "version.create"]);
 const MAX_EMAIL_CHARS = 320;
 const MAX_SHARE_ID_CHARS = 128;
 // #646 PR3a. A submit's idempotency key is the client's own string, not a
@@ -214,6 +252,46 @@ function storedSelectorKind(
   return {};
 }
 
+interface SettledMomentIdentity {
+  objectId: string | null;
+  versionId: string | null;
+  referencedPaths: string[];
+  settledPath: string | null;
+  deleted: boolean;
+}
+
+interface LinkCapabilityReadFallbackAllowance {
+  pagesRemaining: number;
+}
+
+function settledMomentIdentity(row: SyncRelayLogRow): SettledMomentIdentity | null {
+  if (row.opKind !== "moment.append") return null;
+  const parsed = parseShareOpPayloadWithReferencedPaths(row.payloadJson);
+  if (!parsed) return null;
+  const { payload, referencedPaths } = parsed;
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+    return null;
+  }
+  const record = payload as Record<string, unknown>;
+  const objectId =
+    typeof record.objectId === "string" && record.objectId.length > 0
+      ? record.objectId
+      : null;
+  const versionId =
+    typeof record.versionId === "string" && record.versionId.length > 0
+      ? record.versionId
+      : null;
+  const deleted = record.operation === "delete";
+  const settledPath = deleted
+    ? null
+    : typeof record.path === "string" && record.path.length > 0
+      ? record.path
+      : typeof record.payloadAfterPath === "string" && record.payloadAfterPath.length > 0
+        ? record.payloadAfterPath
+        : null;
+  return { objectId, versionId, referencedPaths, settledPath, deleted };
+}
+
 export function createSyncRelayHandler({
   storage,
   resolveActor,
@@ -225,9 +303,147 @@ export function createSyncRelayHandler({
   newId = () => randomUUID(),
   presence = new PresenceHub(),
   linkKey,
+  relayExchangeKey,
   linkExchangeRateLimiter = new LinkExchangeRateLimiter(),
+  linkReadRateLimiter = new LinkReadRateLimiter(),
+  linkGrantReadRateLimiter = new LinkReadRateLimiter(
+    LINK_GRANT_READ_BUCKET_CAPACITY,
+    LINK_GRANT_READ_REFILL_PER_SECOND,
+  ),
+  linkLogReadRateLimiter = new LinkReadRateLimiter(
+    LINK_LOG_READ_BUCKET_CAPACITY,
+    LINK_LOG_READ_REFILL_PER_SECOND,
+  ),
+  linkGrantLogReadRateLimiter = new LinkReadRateLimiter(
+    LINK_GRANT_LOG_READ_BUCKET_CAPACITY,
+    LINK_GRANT_LOG_READ_REFILL_PER_SECOND,
+  ),
+  linkCapabilityReadFallbackPageSize = MAX_LOG_PAGE_SIZE,
   newLinkBearer = () => mintLinkBearer(),
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler {
+  const relayExchangeKeyHash =
+    relayExchangeKey === undefined ? undefined : hashRelayExchangeKey(relayExchangeKey);
+
+  const hasValidRelayExchangeKey = (request: Request): boolean => {
+    // An unconfigured key permits the request — that only occurs in
+    // development and test; production and self-host require the key.
+    if (relayExchangeKeyHash === undefined) return true;
+    const presented = request.headers.get("x-dohc-relay-exchange-key");
+    return verifyRelayExchangeKey(presented, relayExchangeKeyHash);
+  };
+
+  type ActiveLinkBlobStream = {
+    shareId: string;
+    terminate: () => void;
+  };
+  // The relay runs as one process and main.ts creates one handler, so this
+  // intentionally per-process registry reaches every open link-blob response.
+  const activeLinkBlobStreams = new Map<string, Set<ActiveLinkBlobStream>>();
+  const activeLinkBlobBytes = new Map<string, number>();
+  const admitLinkBlobBytes = (
+    grantId: string,
+    byteLength: number,
+  ): (() => void) | null => {
+    const retainedBytes = activeLinkBlobBytes.get(grantId) ?? 0;
+    if (byteLength > LINK_BLOB_INFLIGHT_BYTES_PER_GRANT - retainedBytes) {
+      return null;
+    }
+    activeLinkBlobBytes.set(grantId, retainedBytes + byteLength);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const remaining = (activeLinkBlobBytes.get(grantId) ?? byteLength) - byteLength;
+      if (remaining > 0) activeLinkBlobBytes.set(grantId, remaining);
+      else activeLinkBlobBytes.delete(grantId);
+    };
+  };
+  const registerLinkBlobStream = (
+    grantId: string,
+    stream: ActiveLinkBlobStream,
+  ): (() => void) => {
+    let streams = activeLinkBlobStreams.get(grantId);
+    if (!streams) {
+      streams = new Set();
+      activeLinkBlobStreams.set(grantId, streams);
+    }
+    streams.add(stream);
+    return () => {
+      const registered = activeLinkBlobStreams.get(grantId);
+      if (!registered) return;
+      registered.delete(stream);
+      if (registered.size === 0) activeLinkBlobStreams.delete(grantId);
+    };
+  };
+  const terminateLinkBlobStreamsForGrant = (grantId: string): void => {
+    const streams = activeLinkBlobStreams.get(grantId);
+    if (!streams) return;
+    activeLinkBlobStreams.delete(grantId);
+    for (const stream of streams) stream.terminate();
+  };
+  const terminateLinkBlobStreamsForShare = (shareId: string): void => {
+    const grantIds = [...activeLinkBlobStreams]
+      .filter(([, streams]) => [...streams].some((stream) => stream.shareId === shareId))
+      .map(([grantId]) => grantId);
+    for (const grantId of grantIds) terminateLinkBlobStreamsForGrant(grantId);
+  };
+  const respondWithLinkBlob = (
+    bytes: Uint8Array,
+    shareId: string,
+    grantId: string,
+    releaseBytes: () => void,
+  ): Response => {
+    let offset = 0;
+    let active = true;
+    let unregister = (): void => undefined;
+    const release = (): void => {
+      if (!active) return;
+      active = false;
+      unregister();
+      releaseBytes();
+    };
+    const body = new ReadableStream<Uint8Array>(
+      {
+        start(controller) {
+          const stream: ActiveLinkBlobStream = {
+            shareId,
+            terminate: () => {
+              if (!active) return;
+              release();
+              controller.error(new Error("link grant changed during blob stream"));
+            },
+          };
+          unregister = registerLinkBlobStream(grantId, stream);
+        },
+        pull(controller) {
+          if (!active) return;
+          if (offset >= bytes.byteLength) {
+            release();
+            controller.close();
+            return;
+          }
+          const end = Math.min(offset + LINK_BLOB_STREAM_CHUNK_BYTES, bytes.byteLength);
+          controller.enqueue(bytes.subarray(offset, end));
+          offset = end;
+        },
+        cancel() {
+          if (!active) return;
+          release();
+        },
+      },
+      // Pull only when the transport asks for another chunk. This keeps one
+      // bounded view, rather than the full blob, queued ahead of backpressure.
+      { highWaterMark: 0 },
+    );
+    return new Response(body, {
+      status: 200,
+      headers: {
+        "content-length": String(bytes.byteLength),
+        "content-type": "application/octet-stream",
+      },
+    });
+  };
+
   // Handle a publish (POST) or long-poll (GET) against an already-authorized
   // presence scope. The actor's user id is the SERVER-DERIVED attribution;
   // the client-supplied `state` is opaque display data only. `reauthorize`
@@ -556,9 +772,480 @@ export function createSyncRelayHandler({
     parentGrantId: grant.parentGrantId,
   });
 
+  const matchRefusedOutwardMove = (
+    selector: AnyShareSelector,
+    projection: ReturnType<typeof createAccountlessPathProjection>,
+    row: Pick<SyncRelayLogRow, "opKind" | "payloadJson">,
+    chatResolver: ChatShareThreadResolver,
+  ): unknown | null => {
+    if (isChatChannelSelector(selector) || row.opKind !== "moment.append") {
+      return null;
+    }
+    const parsed = parseShareOpPayloadWithReferencedPaths(row.payloadJson);
+    if (!parsed) return null;
+    const { payload } = parsed;
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return null;
+    }
+    const record = payload as Record<string, unknown>;
+    if (record.operation !== "rename") return null;
+    const beforePath = record.payloadBeforePath;
+    const afterPath = record.payloadAfterPath;
+    if (typeof beforePath !== "string" || typeof afterPath !== "string") {
+      return null;
+    }
+    if (record.path !== afterPath) return null;
+    if (
+      record.beforePath !== undefined &&
+      record.beforePath !== null &&
+      record.beforePath !== beforePath
+    ) {
+      return null;
+    }
+    if (
+      projection.projectPath(beforePath) === null ||
+      projection.projectPath(afterPath) !== null
+    ) {
+      return null;
+    }
+
+    // Re-run the visible half as a delete so the existing filter validates
+    // its version and before-path, then emits the standard minimal payload.
+    // An inward move remains absent until its next in-boundary write.
+    const deletion = filterOpForShare(
+      selector,
+      row.opKind,
+      JSON.stringify({
+        operation: "delete",
+         versionId: record.versionId,
+         path: beforePath,
+         payloadBeforeBlobSha256: record.payloadBeforeBlobSha256,
+         payloadBeforePath: beforePath,
+        ...(record.beforePath === beforePath ? { beforePath } : {}),
+      }),
+      chatResolver,
+    );
+    return deletion.allowed ? projection.projectPayload(deletion.payload) : null;
+  };
+
+  const filteredLogPage = (
+    workspaceId: string,
+    selector: AnyShareSelector,
+    since: number,
+    limit: number,
+    audience: "authenticated" | "accountless",
+  ): {
+    ops: Array<Record<string, unknown>>;
+    nextCursor: number;
+    hasMore: boolean;
+  } => {
+    const chatResolver = chatResolverFor(workspaceId);
+    const accountlessProjection =
+      audience === "accountless" && !isChatChannelSelector(selector)
+        ? createAccountlessPathProjection(selector)
+        : null;
+    const ops: Array<Record<string, unknown>> = [];
+    let nextCursor = since;
+    let rawRowsConsumed = 0;
+
+    for (;;) {
+      const rawLimit =
+        audience === "accountless"
+          ? Math.min(
+              MAX_LOG_PAGE_SIZE,
+              MAX_RAW_ROWS_PER_LINK_PAGE - rawRowsConsumed,
+            )
+          : limit;
+      const page = storage.fetchLogPage({
+        workspaceId,
+        sinceRelaySeq: nextCursor,
+        limit: rawLimit,
+      });
+
+      for (const [index, row] of page.rows.entries()) {
+        rawRowsConsumed += 1;
+        nextCursor = row.relaySeq;
+        if (
+          audience === "accountless" &&
+          !ACCOUNTLESS_FILE_REPLAY_OP_KINDS.has(row.opKind)
+        ) {
+          continue;
+        }
+        const decision = filterOpForShare(
+          selector,
+          row.opKind,
+          row.payloadJson,
+          chatResolver,
+        );
+        const payload = decision.allowed
+          ? accountlessProjection
+            ? accountlessProjection.projectPayload(decision.payload)
+            : decision.payload
+          : accountlessProjection
+            ? matchRefusedOutwardMove(
+                selector,
+                accountlessProjection,
+                row,
+                chatResolver,
+              )
+            : null;
+        if (payload === null) continue;
+        ops.push({
+          relaySeq: row.relaySeq,
+          ...(audience === "authenticated" ? { originId: row.originId } : {}),
+          originSeq: row.originSeq,
+          opKind: row.opKind,
+          payload,
+          recordedAtMs: row.recordedAtMs,
+        });
+        if (ops.length === limit) {
+          return {
+            ops,
+            nextCursor,
+            hasMore:
+              (audience === "accountless" &&
+                rawRowsConsumed === MAX_RAW_ROWS_PER_LINK_PAGE) ||
+              index < page.rows.length - 1 ||
+              page.hasMore,
+          };
+        }
+      }
+
+      if (audience === "authenticated" || !page.hasMore) {
+        return { ops, nextCursor, hasMore: page.hasMore };
+      }
+      if (rawRowsConsumed === MAX_RAW_ROWS_PER_LINK_PAGE) {
+        return { ops, nextCursor, hasMore: true };
+      }
+    }
+  };
+
+  const newestFilteredOpFreshness = (
+    workspaceId: string,
+    selector: AnyShareSelector,
+    epochLogFloor: number,
+  ):
+    | { lastSettledAtMs: number; lastSettledKnown: true }
+    | { lastSettledAtMs: null; lastSettledKnown: true }
+    | { lastSettledAtMs: null; lastSettledKnown: false } => {
+    let beforeRelaySeq: number | null = null;
+    const chatResolver = chatResolverFor(workspaceId);
+    const accountlessProjection = isChatChannelSelector(selector)
+      ? null
+      : createAccountlessPathProjection(selector);
+    for (
+      let pagesRead = 0;
+      pagesRead < LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET;
+      pagesRead += 1
+    ) {
+      const rows = storage.fetchLogPageDescending({
+        workspaceId,
+        beforeRelaySeq,
+        limit: linkCapabilityReadFallbackPageSize,
+      });
+      for (const row of rows) {
+        if (row.relaySeq <= epochLogFloor) {
+          return { lastSettledAtMs: null, lastSettledKnown: true };
+        }
+        if (
+          !isChatChannelSelector(selector) &&
+          !FILE_FRESHNESS_OP_KINDS.has(row.opKind)
+        ) {
+          continue;
+        }
+        if (filterOpForShare(selector, row.opKind, row.payloadJson, chatResolver).allowed) {
+          return { lastSettledAtMs: row.recordedAtMs, lastSettledKnown: true };
+        }
+        if (
+          accountlessProjection !== null &&
+          matchRefusedOutwardMove(
+            selector,
+            accountlessProjection,
+            row,
+            chatResolver,
+          ) !== null
+        ) {
+          return { lastSettledAtMs: row.recordedAtMs, lastSettledKnown: true };
+        }
+      }
+      if (rows.length < linkCapabilityReadFallbackPageSize) {
+        return { lastSettledAtMs: null, lastSettledKnown: true };
+      }
+      beforeRelaySeq = rows[rows.length - 1]!.relaySeq;
+    }
+    return { lastSettledAtMs: null, lastSettledKnown: false };
+  };
+
+  const latestPathRelatedMoment = (
+    workspaceId: string,
+    versionId: string,
+    candidate: SyncRelayLogRow,
+    candidateIdentity: SettledMomentIdentity,
+    allowance: LinkCapabilityReadFallbackAllowance,
+  ): SyncRelayLogRow | null => {
+    let latest = candidateIdentity.versionId === versionId ? candidate : null;
+    let trackedObjectId = candidateIdentity.objectId;
+    let trackedPath =
+      candidateIdentity.settledPath ?? candidateIdentity.referencedPaths[0] ?? null;
+    let cursor = candidate.relaySeq;
+    while (allowance.pagesRemaining > 0) {
+      allowance.pagesRemaining -= 1;
+      const page = storage.fetchLogPage({
+        workspaceId,
+        sinceRelaySeq: cursor,
+        limit: linkCapabilityReadFallbackPageSize,
+      });
+      for (const row of page.rows) {
+        const identity = settledMomentIdentity(row);
+        if (!identity || identity.versionId !== versionId) continue;
+        const sameObject =
+          trackedObjectId !== null && identity.objectId === trackedObjectId;
+        const samePath =
+          trackedPath !== null && identity.referencedPaths.includes(trackedPath);
+        if (!sameObject && !samePath) continue;
+        latest = row;
+        trackedObjectId = identity.objectId ?? trackedObjectId;
+        if (!identity.deleted) trackedPath = identity.settledPath ?? trackedPath;
+      }
+      if (!page.hasMore) return latest;
+      cursor = page.nextCursor;
+    }
+    return null;
+  };
+
+  const currentSettledBlobMoment = (
+    workspaceId: string,
+    versionId: string,
+    candidate: SyncRelayLogRow,
+    allowance: LinkCapabilityReadFallbackAllowance,
+  ): SyncRelayLogRow | null => {
+    const candidateIdentity = settledMomentIdentity(candidate);
+    if (!candidateIdentity) return null;
+
+    let current = candidateIdentity.objectId
+      ? storage.latestLogRowForObjectInVersion({
+          workspaceId,
+          objectId: candidateIdentity.objectId,
+          versionId,
+        })
+      : null;
+    if (!current) {
+      const candidatePath =
+        candidateIdentity.settledPath ?? candidateIdentity.referencedPaths[0] ?? null;
+      const currentObjectId = candidatePath
+        ? storage.objectIdAtPathInVersion({ workspaceId, versionId, path: candidatePath })
+        : undefined;
+      current = currentObjectId
+        ? storage.latestLogRowForObjectInVersion({
+            workspaceId,
+            objectId: currentObjectId,
+            versionId,
+          })
+        : latestPathRelatedMoment(
+            workspaceId,
+            versionId,
+            candidate,
+            candidateIdentity,
+            allowance,
+          );
+    }
+    if (!current) return null;
+
+    let currentIdentity = settledMomentIdentity(current);
+    if (!currentIdentity || currentIdentity.deleted) return null;
+
+    if (currentIdentity.objectId && currentIdentity.settledPath) {
+      const occupyingObjectId = storage.objectIdAtPathInVersion({
+        workspaceId,
+        versionId,
+        path: currentIdentity.settledPath,
+      });
+      if (occupyingObjectId && occupyingObjectId !== currentIdentity.objectId) {
+        const occupyingMoment = storage.latestLogRowForObjectInVersion({
+          workspaceId,
+          objectId: occupyingObjectId,
+          versionId,
+        });
+        if (!occupyingMoment) return null;
+        current = occupyingMoment;
+        currentIdentity = settledMomentIdentity(current);
+        if (!currentIdentity || currentIdentity.deleted) return null;
+      }
+    }
+    return current;
+  };
+
+  const filteredSharedBlob = (
+    workspaceId: string,
+    selector: AnyShareSelector,
+    sha256: string,
+    semantics:
+      | { kind: "historical-log" }
+      | { kind: "current-state"; epochLogFloor: number },
+  ): Uint8Array | null => {
+    if (isChatChannelSelector(selector)) return null;
+    const versionId = targetVersionId(selector);
+    const candidates = [
+      ...storage.listObjectMomentLogRowsByBlob({
+        workspaceId,
+        versionId,
+        sha256,
+        semantics:
+          semantics.kind === "current-state" && selector.versionId === null
+            ? "current-state"
+            : "historical-log",
+        ...(selector.paths.length > 0
+          ? { selectorPaths: selector.paths }
+          : {}),
+      }),
+      ...storage.listVersionCreateLogRowsByBlob({ workspaceId, versionId, sha256 }),
+    ]
+      .sort((left, right) => right.relaySeq - left.relaySeq)
+      .slice(0, SHARED_BLOB_CANDIDATE_LIMIT);
+    const chatResolver = chatResolverFor(workspaceId);
+    const fallbackAllowance: LinkCapabilityReadFallbackAllowance = {
+      pagesRemaining: LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET,
+    };
+    const reachable = candidates.some((row) => {
+      const establishingRow =
+        semantics.kind === "current-state" && selector.versionId === null
+          ? currentSettledBlobMoment(
+              workspaceId,
+              versionId,
+              row,
+              fallbackAllowance,
+            )
+          : row;
+      if (
+        !establishingRow ||
+        (semantics.kind === "current-state" &&
+          establishingRow.relaySeq <= semantics.epochLogFloor)
+      ) {
+        return false;
+      }
+      const decision = filterOpForShare(
+        selector,
+        establishingRow.opKind,
+        establishingRow.payloadJson,
+        chatResolver,
+      );
+      return decision.allowed && decision.blobSha256s.includes(sha256);
+    });
+    return reachable ? storage.getBlob(workspaceId, sha256) : null;
+  };
+
+  const historicalSharedBlob = (
+    workspaceId: string,
+    selector: AnyShareSelector,
+    sha256: string,
+  ): Uint8Array | null =>
+    filteredSharedBlob(workspaceId, selector, sha256, { kind: "historical-log" });
+
+  const currentSharedBlob = (
+    workspaceId: string,
+    selector: AnyShareSelector,
+    sha256: string,
+    epochLogFloor: number,
+  ): Uint8Array | null =>
+    filteredSharedBlob(workspaceId, selector, sha256, {
+      kind: "current-state",
+      epochLogFloor,
+    });
+
+  const requireLinkRead = (
+    request: Request,
+    capabilityRateLimiter: LinkReadRateLimiter,
+    grantRateLimiter: LinkReadRateLimiter,
+  ) => {
+    if (!linkKey) throw invalidLinkCapability();
+    const match = /^LinkCapability ([A-Za-z0-9_-]{43})$/u.exec(
+      request.headers.get("authorization") ?? "",
+    );
+    if (!match) throw invalidLinkCapability();
+    const capabilityToken = match[1]!;
+    const capability = validateLinkCapability({
+      storage,
+      capabilityToken,
+      linkKey,
+      nowMs: nowMs(),
+    });
+    if (!capability) throw invalidLinkCapability();
+    const admittedAtMs = nowMs();
+    if (
+      !capabilityRateLimiter.allow(
+        capability.session.capabilityHash,
+        admittedAtMs,
+      ) || !grantRateLimiter.allow(capability.grantId, admittedAtMs)
+    ) {
+      throw linkReadRateLimited();
+    }
+    return { capabilityToken, capability };
+  };
+
+  const requireFreshLinkRead = (
+    capabilityToken: string,
+    expected: { shareId: string; grantId: string; generation: number },
+  ) => {
+    if (!linkKey) throw invalidLinkCapability();
+    const fresh = validateLinkCapability({
+      storage,
+      capabilityToken,
+      linkKey,
+      nowMs: nowMs(),
+    });
+    if (
+      !fresh ||
+      fresh.shareId !== expected.shareId ||
+      fresh.grantId !== expected.grantId ||
+      fresh.generation !== expected.generation
+    ) {
+      throw invalidLinkCapability();
+    }
+    return fresh;
+  };
+
+  const requireRefreshableLinkSession = (request: Request, refreshedAtMs: number) => {
+    if (!linkKey) throw invalidLinkCapability();
+    const match = /^LinkCapability ([A-Za-z0-9_-]{43})$/u.exec(
+      request.headers.get("authorization") ?? "",
+    );
+    if (!match) throw invalidLinkCapability();
+    const capabilityToken = match[1]!;
+    const capabilityHash = hashLinkBearer(capabilityToken, linkKey);
+    const session = storage.findLinkSessionByCapabilityHash(capabilityHash);
+    if (
+      !session ||
+      !constantTimeHashEqual(capabilityHash, session.capabilityHash) ||
+      session.expiresAtMs + LINK_SESSION_RENEWAL_GRACE_MS < refreshedAtMs
+    ) {
+      throw invalidLinkCapability();
+    }
+    return { capabilityHash, session };
+  };
+
+  const linkExchangeResult = (
+    authorized: AuthorizedShareAction<ShareSelector>,
+    capabilityToken: string,
+    capabilityExpiresAtMs: number,
+  ): LinkExchangeResult => {
+    const presentation = createAccountlessPathProjection(
+      authorized.effectiveSelector,
+    );
+    return {
+      shareId: authorized.share.shareId,
+      grantId: authorized.grant.grantId,
+      generation: authorized.grant.generation,
+      access: authorized.effectiveSelector.access,
+      effectiveSelector: presentation.selector,
+      capabilityToken,
+      capabilityExpiresAtMs,
+    };
+  };
+
   const respondToLinkExchange = async (request: Request): Promise<Response> => {
     const refused = (): Response => errorResponse(notFound());
     if (!linkKey) return refused();
+    if (!hasValidRelayExchangeKey(request)) return refused();
     const ip = request.headers.get("x-dohc-relay-client-ip") ?? "unknown";
     if (!linkExchangeRateLimiter.allow(ip, nowMs())) return refused();
 
@@ -593,7 +1280,8 @@ export function createSyncRelayHandler({
       });
       if (
         !authorized.ok ||
-        authorized.grant.generation !== found.credential.generation
+        authorized.grant.generation !== found.credential.generation ||
+        authorized.grant.access !== "view"
       ) {
         return refused();
       }
@@ -641,20 +1329,80 @@ export function createSyncRelayHandler({
       });
       if (!minted) return refused();
 
-      const exchange: LinkExchangeResult = {
-        shareId: authorized.share.shareId,
-        grantId: authorized.grant.grantId,
-        generation: authorized.grant.generation,
-        access: authorized.effectiveSelector.access,
-        effectiveSelector: authorized.effectiveSelector,
+      const exchange = linkExchangeResult(
+        authorized,
         capabilityToken,
         capabilityExpiresAtMs,
-      };
+      );
       return jsonResponse({ ok: true, ...exchange });
     } catch (error) {
       if (error instanceof HttpError) return refused();
       throw error;
     }
+  };
+
+  const respondToLinkRefresh = (request: Request): Response => {
+    if (!hasValidRelayExchangeKey(request)) {
+      return errorResponse(notFound());
+    }
+    if (!linkKey) throw invalidLinkCapability();
+    const refreshLinkKey = linkKey;
+    const refreshedAtMs = nowMs();
+    const current = requireRefreshableLinkSession(request, refreshedAtMs);
+    if (
+      !linkReadRateLimiter.allow(current.capabilityHash, refreshedAtMs) ||
+      !linkGrantReadRateLimiter.allow(current.session.grantId, refreshedAtMs)
+    ) {
+      throw linkReadRateLimited();
+    }
+    const authorized = authorizeLinkShareAction({
+      storage,
+      grantId: current.session.grantId,
+      action: "read",
+    });
+    if (
+      !authorized.ok ||
+      authorized.grant.generation !== current.session.generation
+    ) {
+      throw invalidLinkCapability();
+    }
+
+    const capabilityToken = newLinkBearer();
+    const capabilityExpiresAtMs = refreshedAtMs + LINK_SESSION_TTL_MS;
+    const replaced = storage.replaceLinkSession({
+      currentSession: current.session,
+      session: {
+        sessionId: newId(),
+        capabilityHash: hashLinkBearer(capabilityToken, refreshLinkKey),
+        grantId: authorized.grant.grantId,
+        generation: authorized.grant.generation,
+        mintedAtMs: refreshedAtMs,
+        expiresAtMs: capabilityExpiresAtMs,
+      },
+      guard: () => {
+        const fresh = authorizeLinkShareAction({
+          storage,
+          grantId: current.session.grantId,
+          action: "read",
+        });
+        if (
+          !fresh.ok ||
+          fresh.share.shareId !== authorized.share.shareId ||
+          fresh.grant.grantId !== authorized.grant.grantId ||
+          fresh.grant.generation !== authorized.grant.generation
+        ) {
+          throw invalidLinkCapability();
+        }
+      },
+    });
+    if (!replaced) throw invalidLinkCapability();
+
+    const refresh = linkExchangeResult(
+      authorized,
+      capabilityToken,
+      capabilityExpiresAtMs,
+    );
+    return jsonResponse({ ok: true, ...refresh });
   };
 
   return async (request) => {
@@ -663,6 +1411,86 @@ export function createSyncRelayHandler({
       if (route.route === "link-exchange") {
         if (request.method !== "POST") throw methodNotAllowed();
         return await respondToLinkExchange(request);
+      }
+      if (route.route === "link-refresh") {
+        if (request.method !== "POST") throw methodNotAllowed();
+        return respondToLinkRefresh(request);
+      }
+      if (
+        route.route === "link-share" ||
+        route.route === "link-log" ||
+        route.route === "link-blob"
+      ) {
+        const capabilityRateLimiter =
+          route.route === "link-log" ? linkLogReadRateLimiter : linkReadRateLimiter;
+        const grantRateLimiter =
+          route.route === "link-log"
+            ? linkGrantLogReadRateLimiter
+            : linkGrantReadRateLimiter;
+        const { capabilityToken, capability } = requireLinkRead(
+          request,
+          capabilityRateLimiter,
+          grantRateLimiter,
+        );
+        if (request.method !== "GET") throw methodNotAllowed();
+        const share = storage.getShare(capability.shareId);
+        if (!share) throw notFound();
+        const epochLogFloor = storage.getEpochLogFloor(share.workspaceId);
+
+        if (route.route === "link-share") {
+          const freshness = newestFilteredOpFreshness(
+            share.workspaceId,
+            capability.effectiveSelector,
+            epochLogFloor,
+          );
+          requireFreshLinkRead(capabilityToken, capability);
+          const presentation = createAccountlessPathProjection(
+            capability.effectiveSelector,
+          );
+          return jsonResponse({
+            ok: true,
+            effectiveSelector: presentation.selector,
+            access: capability.access,
+            ...freshness,
+          });
+        }
+
+        if (route.route === "link-log") {
+          const url = new URL(request.url);
+          const requestedSince = parseCursor(url.searchParams.get("since"));
+          const since = Math.max(requestedSince, epochLogFloor);
+          const limit = parseLimit(url.searchParams.get("limit"));
+          const page = filteredLogPage(
+            share.workspaceId,
+            capability.effectiveSelector,
+            since,
+            limit,
+            "accountless",
+          );
+          requireFreshLinkRead(capabilityToken, capability);
+          return jsonResponse({ ok: true, ...page, epochLogFloor });
+        }
+
+        assertSha256(route.sha256);
+        const blob = currentSharedBlob(
+          share.workspaceId,
+          capability.effectiveSelector,
+          route.sha256,
+          epochLogFloor,
+        );
+        if (!blob) throw notFound();
+        requireFreshLinkRead(capabilityToken, capability);
+        const releaseBytes = admitLinkBlobBytes(
+          capability.grantId,
+          blob.byteLength,
+        );
+        if (!releaseBytes) throw linkReadRateLimited();
+        return respondWithLinkBlob(
+          blob,
+          capability.shareId,
+          capability.grantId,
+          releaseBytes,
+        );
       }
       const actor = await resolveActor(request, "workspaceId" in route ? route.workspaceId : "");
 
@@ -763,6 +1591,7 @@ export function createSyncRelayHandler({
           rotatedAtMs: nowMs(),
         });
         if (!result.ok) throw notFound();
+        terminateLinkBlobStreamsForGrant(result.grant.grantId);
         return jsonResponse({ ok: true, ...linkGrantBody(result.grant), secret });
       }
       if (route.route === "share-link-rotate") throw methodNotAllowed();
@@ -797,6 +1626,7 @@ export function createSyncRelayHandler({
             : {}),
         });
         if (!result.ok) throw notFound();
+        terminateLinkBlobStreamsForGrant(result.grant.grantId);
         return jsonResponse({
           ok: true,
           ...linkGrantBody(result.grant),
@@ -831,9 +1661,12 @@ export function createSyncRelayHandler({
             revokedAtMs: nowMs(),
           });
           if (!result.ok) throw notFound();
+          terminateLinkBlobStreamsForGrant(result.grant.grantId);
           return jsonResponse({ ok: true, ...linkGrantBody(result.grant) });
         }
-        storage.revokeShare(route.shareId, nowMs());
+        if (storage.revokeShare(route.shareId, nowMs())) {
+          terminateLinkBlobStreamsForShare(route.shareId);
+        }
         return jsonResponse({ ok: true, shareId: route.shareId });
       }
       if (route.route === "share-revoke") throw methodNotAllowed();
@@ -853,29 +1686,15 @@ export function createSyncRelayHandler({
         }
         const since = parseCursor(url.searchParams.get("since"));
         const limit = parseLimit(url.searchParams.get("limit"));
-        const page = storage.fetchLogPage({
-          workspaceId: share.workspaceId,
-          sinceRelaySeq: since,
+        // Both routes share selector filtering and cursor behavior. The
+        // accountless route applies a narrower metadata boundary afterward.
+        const page = filteredLogPage(
+          share.workspaceId,
+          share.selector,
+          since,
           limit,
-        });
-        // THE share security boundary: each op passes the fail-closed filter
-        // or is dropped from the response. The cursor still advances over
-        // dropped rows (the recipient sees a sparser page, never a stalled
-        // one), and payloads are the filter's (possibly redacted) copy.
-        const chatResolver = chatResolverFor(share.workspaceId);
-        const ops: Array<Record<string, unknown>> = [];
-        for (const row of page.rows) {
-          const decision = filterOpForShare(share.selector, row.opKind, row.payloadJson, chatResolver);
-          if (!decision.allowed) continue;
-          ops.push({
-            relaySeq: row.relaySeq,
-            originId: row.originId,
-            originSeq: row.originSeq,
-            opKind: row.opKind,
-            payload: decision.payload,
-            recordedAtMs: row.recordedAtMs,
-          });
-        }
+          "authenticated",
+        );
         // Re-check revocation immediately before returning the body: a revoke
         // that raced with this in-flight read (after the entry check, while
         // the page was assembled) must abort the response, not leak a final
@@ -883,9 +1702,7 @@ export function createSyncRelayHandler({
         requireShareAction(route.shareId, actor.userId, "read");
         return jsonResponse({
           ok: true,
-          ops,
-          nextCursor: page.nextCursor,
-          hasMore: page.hasMore,
+          ...page,
         });
       }
 
@@ -1063,17 +1880,12 @@ export function createSyncRelayHandler({
         // passes the share filter legitimately references it. Everything
         // else — a blob of an unshared file, a secret ciphertext blob, a
         // random hash — is the same generic 404 as a nonexistent share.
-        const candidates = storage.listLogRowsReferencing(share.workspaceId, route.sha256);
-        const chatResolver = chatResolverFor(share.workspaceId);
-        // Chat ops are blob-free (their decisions carry no blobSha256s), so a
-        // chat-channel share can never make ANY blob reachable — every blob
-        // probe on one is the same generic 404.
-        const reachable = candidates.some((row) => {
-          const decision = filterOpForShare(share.selector, row.opKind, row.payloadJson, chatResolver);
-          return decision.allowed && decision.blobSha256s.includes(route.sha256);
-        });
-        if (!reachable) throw notFound();
-        const blob = storage.getBlob(share.workspaceId, route.sha256);
+        // Chat shares expose no blob because their filter decisions name none.
+        const blob = historicalSharedBlob(
+          share.workspaceId,
+          share.selector,
+          route.sha256,
+        );
         if (!blob) throw notFound();
         // Re-check revocation immediately before returning the blob body: a
         // revoke that raced with this in-flight read must abort rather than
@@ -2012,6 +2824,21 @@ function parseRoute(request: Request): SyncRelayRoute {
   if (parts.length === 2 && parts[0] === "sync" && parts[1] === "link-exchange") {
     return { route: "link-exchange" };
   }
+  if (parts.length === 2 && parts[0] === "sync" && parts[1] === "link-refresh") {
+    return { route: "link-refresh" };
+  }
+  if (parts.length === 3 && parts[0] === "sync" && parts[1] === "link") {
+    if (parts[2] === "share") return { route: "link-share" };
+    if (parts[2] === "log") return { route: "link-log" };
+  }
+  if (
+    parts.length === 4 &&
+    parts[0] === "sync" &&
+    parts[1] === "link" &&
+    parts[2] === "blobs"
+  ) {
+    return { route: "link-blob", sha256: parts[3]! };
+  }
   if (parts.length === 2 && parts[0] === "sync" && parts[1] === "workspaces") {
     return { route: "workspaces" };
   }
@@ -2666,6 +3493,14 @@ function proposalNotOpen(): HttpError {
 
 function notFound(): HttpError {
   return relayHttpError(RELAY_ERRORS.not_found, "not found");
+}
+
+function invalidLinkCapability(): HttpError {
+  return new HttpError(401, RELAY_ERRORS.not_found.code, "not found");
+}
+
+function linkReadRateLimited(): HttpError {
+  return relayHttpError(RELAY_ERRORS.link_read_rate_limited, "too many link reads");
 }
 
 function blobNotFound(): HttpError {

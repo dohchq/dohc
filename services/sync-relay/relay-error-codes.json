@@ -15,6 +15,7 @@
   { "code": "invalid_path", "status": 400 },
   { "code": "invalid_version", "status": 400 },
   { "code": "key_envelope_not_found", "status": 404 },
+  { "code": "link_read_rate_limited", "status": 429 },
   { "code": "method_not_allowed", "status": 405 },
   { "code": "not_found", "status": 404 },
   { "code": "payload_too_large", "status": 413 },

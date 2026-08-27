@@ -13,12 +13,10 @@
 // chat/co-editing still work fully — only presence degrades, exactly the
 // G2-C/design contract.
 //
-// Transport shape: long-poll, not a websocket. The relay's node adapter
-// buffers each request/response, so a streaming SSE/ws body cannot flow
-// through it; a long-poll GET (hold until a change or a bounded timeout, then
-// return a finite snapshot + version cursor) fits that adapter and needs no
-// new server primitive. A publisher heartbeats faster than the entry TTL to
-// stay "present"; a peer polls with the last version and re-parks.
+// Transport shape: long-poll, not a websocket. A long-poll GET holds until a
+// change or a bounded timeout, then returns a finite snapshot plus version
+// cursor. A publisher heartbeats faster than the entry TTL to stay "present";
+// a peer polls with the last version and re-parks.
 //
 // Identity is NEVER trusted from the client. The relay stamps each entry's
 // `userId` from the authenticated Better Auth actor (server-derived, the same

@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { request as httpRequest } from "node:http";
+import { type IncomingMessage, request as httpRequest } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { LINK_EXCHANGE_BUCKET_CAPACITY } from "./linkSecurity";
 
 // This file's spawn helper allows 45s for the relay to report a port (tsx compiles
 // on startup), and the package default is 30s — so a slow launch would be killed by
@@ -17,6 +18,15 @@ vi.setConfig({ testTimeout: 90_000, hookTimeout: 30_000 });
 
 const WORKSPACE_ID = "workspace-live-relay";
 const USER_ID = "sync-user";
+const TEST_SHUTDOWN_GRACE_PERIOD_MS = 250;
+const WITHIN_SHUTDOWN_GRACE_MS = 100;
+const FORCED_SHUTDOWN_TIMEOUT_MS = 2_000;
+
+interface RunningRelay {
+  baseUrl: string;
+  child: ChildProcess;
+  stderr: () => string;
+}
 
 let roots: string[] = [];
 let children: ChildProcess[] = [];
@@ -64,7 +74,28 @@ async function spawnRelay(
   dbPath: string,
   envOverrides: Record<string, string | undefined> = {},
 ): Promise<string> {
-  const child = spawn(process.execPath, ["--import", "tsx/esm", "src/main.ts"], {
+  return (await spawnRunningRelay(dbPath, envOverrides)).baseUrl;
+}
+
+async function spawnRunningRelay(
+  dbPath: string,
+  envOverrides: Record<string, string | undefined> = {},
+): Promise<RunningRelay> {
+  const mainUrl = new URL("./main.ts", import.meta.url);
+  const childArguments = [
+    "--import",
+    process.platform === "win32" ? "tsx" : "tsx/esm",
+    "--input-type=module",
+    "--eval",
+    `process.on("message", (message) => {
+      if (message === "SIGTERM") process.emit("SIGTERM");
+      if (message === "DOUBLE_SIGTERM") {
+        process.emit("SIGTERM");
+        process.emit("SIGTERM");
+      }
+    }); await import(${JSON.stringify(mainUrl.href)});`,
+  ];
+  const child = spawn(process.execPath, childArguments, {
     cwd: packageRoot(),
     env: {
       ...process.env,
@@ -75,8 +106,15 @@ async function spawnRelay(
       FORCE_COLOR: "0",
       ...envOverrides,
     },
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "pipe", "pipe", "ipc"],
+    windowsHide: true,
   });
+  const childStdout = child.stdout;
+  const childStderr = child.stderr;
+  if (!childStdout || !childStderr) {
+    child.kill();
+    throw new Error("sync relay test child did not expose piped output");
+  }
   children.push(child);
   return await new Promise((resolve, reject) => {
     let stdout = "";
@@ -84,15 +122,19 @@ async function spawnRelay(
     const timeout = setTimeout(() => {
       reject(new Error(`sync relay did not report a port\nstdout:\n${stdout}\nstderr:\n${stderr}`));
     }, 45_000); // tsx startup under load, not a hang — see presence.integration.test.ts (#372)
-    child.stdout.on("data", (chunk) => {
+    childStdout.on("data", (chunk) => {
       stdout += String(chunk);
       const match = /SYNC_RELAY_LISTENING host=([^\s]+) port=(\d+)/u.exec(stdout);
       if (match) {
         clearTimeout(timeout);
-        resolve(`http://${match[1]}:${match[2]}`);
+        resolve({
+          baseUrl: `http://${match[1]}:${match[2]}`,
+          child,
+          stderr: () => stderr,
+        });
       }
     });
-    child.stderr.on("data", (chunk) => {
+    childStderr.on("data", (chunk) => {
       stderr += String(chunk);
     });
     child.on("exit", (code) => {
@@ -123,6 +165,44 @@ async function postJson(baseUrl: string, path: string, value: unknown): Promise<
     method: "POST",
     headers: authHeaders({ "content-type": "application/json" }),
     body: JSON.stringify(value),
+  });
+}
+
+async function seedExchangeLink(baseUrl: string, workspaceId: string): Promise<string> {
+  expect((await postJson(baseUrl, "/sync/workspaces", { workspaceId })).status).toBe(200);
+  const shareResponse = await postJson(baseUrl, `/sync/${workspaceId}/shares`, {
+    recipientUserId: "link-recipient",
+    paths: ["docs"],
+    access: "view",
+  });
+  expect(shareResponse.status).toBe(200);
+  const share = (await shareResponse.json()) as { shareId: string };
+  const linkResponse = await postJson(
+    baseUrl,
+    `/sync/${workspaceId}/shares/${share.shareId}/links`,
+    { access: "view" },
+  );
+  expect(linkResponse.status).toBe(200);
+  const link = (await linkResponse.json()) as { secret: string };
+  return link.secret;
+}
+
+function exchangeLink(
+  baseUrl: string,
+  secret: string,
+  clientAddress: string,
+  relayExchangeKey?: string,
+): Promise<Response> {
+  return fetch(`${baseUrl}/sync/link-exchange`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-dohc-relay-client-ip": clientAddress,
+      ...(relayExchangeKey === undefined
+        ? {}
+        : { "x-dohc-relay-exchange-key": relayExchangeKey }),
+    },
+    body: JSON.stringify({ secret }),
   });
 }
 
@@ -157,7 +237,261 @@ function sha256(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+async function settleWithin<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+): Promise<{ kind: "settled"; value: T } | { kind: "pending" }> {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise.then((value) => ({ kind: "settled" as const, value })),
+      new Promise<{ kind: "pending" }>((resolve) => {
+        timeout = setTimeout(() => resolve({ kind: "pending" }), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
 describe("sync relay main process", () => {
+
+  it("force-closes a stalled streamed response after the shutdown grace period", { timeout: 15_000 }, async (context) => {
+    const relayRoot = await tempRoot("relay-stalled-shutdown");
+    let relay: RunningRelay;
+    try {
+      relay = await spawnRunningRelay(join(relayRoot, "relay.sqlite"), {
+        SYNC_RELAY_TEST_CONTROLLED_STREAM: "1",
+        SYNC_RELAY_TEST_SHUTDOWN_GRACE_PERIOD_MS: String(
+          TEST_SHUTDOWN_GRACE_PERIOD_MS,
+        ),
+      });
+    } catch (error) {
+      if (error instanceof ListenPermissionError) {
+        context.skip();
+        return;
+      }
+      throw error;
+    }
+
+    let streamedResponse: IncomingMessage | undefined;
+    const clientRequest = httpRequest(
+      `${relay.baseUrl}/__test/controlled-stream`,
+      (response) => {
+        streamedResponse = response;
+      },
+    );
+    const firstChunk = new Promise<Buffer>((resolve, reject) => {
+      clientRequest.once("response", (response) => {
+        response.once("data", (chunk: Buffer) => resolve(Buffer.from(chunk)));
+        response.once("error", reject);
+        response.once("end", () =>
+          reject(new Error("controlled response ended before its first chunk")),
+        );
+      });
+      clientRequest.once("error", reject);
+    });
+    clientRequest.end();
+    expect((await firstChunk).length).toBeGreaterThan(0);
+
+    try {
+      const exited = waitForExit(relay.child);
+      sendTerminationSignal(relay.child);
+
+      expect(
+        await settleWithin(exited, WITHIN_SHUTDOWN_GRACE_MS),
+        `sync relay exited before its shutdown grace period\n${relay.stderr()}`,
+      ).toEqual({ kind: "pending" });
+      expect(
+        await settleWithin(exited, FORCED_SHUTDOWN_TIMEOUT_MS),
+        `sync relay remained alive after its shutdown grace period\n${relay.stderr()}`,
+      ).toEqual({
+        kind: "settled",
+        value: { code: 0, signal: null },
+      });
+    } finally {
+      streamedResponse?.destroy();
+      clientRequest.destroy();
+    }
+  });
+
+  it("shuts down promptly when no responses are active", async (context) => {
+    const relayRoot = await tempRoot("relay-quiet-shutdown");
+    let relay: RunningRelay;
+    try {
+      relay = await spawnRunningRelay(join(relayRoot, "relay.sqlite"), {
+        SYNC_RELAY_TEST_SHUTDOWN_GRACE_PERIOD_MS: String(
+          TEST_SHUTDOWN_GRACE_PERIOD_MS,
+        ),
+      });
+    } catch (error) {
+      if (error instanceof ListenPermissionError) {
+        context.skip();
+        return;
+      }
+      throw error;
+    }
+    const exited = waitForExit(relay.child);
+
+    sendTerminationSignal(relay.child);
+
+    expect(
+      await settleWithin(exited, 1_000),
+      `quiet sync relay did not exit promptly\n${relay.stderr()}`,
+    ).toEqual({
+      kind: "settled",
+      value: { code: 0, signal: null },
+    });
+  });
+
+  it("ignores a second SIGTERM while shutdown is in progress", async (context) => {
+    const relayRoot = await tempRoot("relay-double-sigterm");
+    let relay: RunningRelay;
+    try {
+      relay = await spawnRunningRelay(join(relayRoot, "relay.sqlite"), {
+        SYNC_RELAY_TEST_AUTH: "0",
+        SYNC_RELAY_BIND: "127.0.0.1",
+        BETTER_AUTH_SECRET: "test-secret-that-is-at-least-32-characters",
+        POSTGRES_URL: "postgres://dohc:dohc@127.0.0.1:1/dohc",
+      });
+    } catch (error) {
+      if (error instanceof ListenPermissionError) {
+        context.skip();
+        return;
+      }
+      throw error;
+    }
+    const exited = waitForExit(relay.child);
+
+    sendDoubleTerminationSignal(relay.child);
+
+    expect(
+      await settleWithin(exited, 1_000),
+      `sync relay did not exit cleanly after duplicate SIGTERM\n${relay.stderr()}`,
+    ).toEqual({
+      kind: "settled",
+      value: { code: 0, signal: null },
+    });
+  });
+
+  it("survives a response error during a pipe and cancels the source stream", async (context) => {
+    const relayRoot = await tempRoot("relay-response-error");
+    let relay: RunningRelay;
+    try {
+      relay = await spawnRunningRelay(join(relayRoot, "relay.sqlite"), {
+        SYNC_RELAY_TEST_CONTROLLED_STREAM: "1",
+        SYNC_RELAY_TEST_RESPONSE_ERROR_DURING_PIPE: "1",
+      });
+    } catch (error) {
+      if (error instanceof ListenPermissionError) {
+        context.skip();
+        return;
+      }
+      throw error;
+    }
+
+    const requestSettled = new Promise<void>((resolve) => {
+      const request = httpRequest(
+        `${relay.baseUrl}/__test/controlled-stream`,
+        (response) => {
+          response.once("error", () => resolve());
+          response.once("close", () => resolve());
+          response.resume();
+        },
+      );
+      request.once("error", () => resolve());
+      request.end();
+    });
+    expect(await settleWithin(requestSettled, 1_000)).toEqual({
+      kind: "settled",
+      value: undefined,
+    });
+
+    const cleanup = await fetch(`${relay.baseUrl}/__test/controlled-stream`, {
+      method: "POST",
+    });
+    expect(cleanup.status).toBe(409);
+    expect((await fetch(`${relay.baseUrl}/health`)).status).toBe(200);
+  });
+
+  it("streams response headers and first body chunk before completion", async (context) => {
+    const relayRoot = await tempRoot("relay-streamed-response");
+    let baseUrl: string;
+    try {
+      baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"), {
+        SYNC_RELAY_TEST_CONTROLLED_STREAM: "1",
+      });
+    } catch (error) {
+      if (error instanceof ListenPermissionError) {
+        context.skip();
+        return;
+      }
+      throw error;
+    }
+
+    const chunks: Buffer[] = [];
+    let responseEnded = false;
+    let resolveComplete: ((body: Buffer) => void) | undefined;
+    const complete = new Promise<Buffer>((resolve) => {
+      resolveComplete = resolve;
+    });
+    const firstChunk = new Promise<{
+      bytes: Buffer;
+      complete: boolean;
+      contentType: string | undefined;
+      marker: string | undefined;
+      readableEnded: boolean;
+      statusCode: number | undefined;
+    }>((resolve, reject) => {
+      const clientRequest = httpRequest(`${baseUrl}/__test/controlled-stream`, (response) => {
+        response.once("error", reject);
+        response.on("data", (chunk: Buffer) => {
+          const bytes = Buffer.from(chunk);
+          chunks.push(bytes);
+          if (chunks.length === 1) {
+            const marker = response.headers["x-dohc-test-stream"];
+            resolve({
+              bytes,
+              complete: response.complete,
+              contentType: response.headers["content-type"],
+              marker: Array.isArray(marker) ? marker[0] : marker,
+              readableEnded: response.readableEnded,
+              statusCode: response.statusCode,
+            });
+          }
+        });
+        response.once("end", () => {
+          responseEnded = true;
+          resolveComplete?.(Buffer.concat(chunks));
+        });
+      });
+      clientRequest.once("error", reject);
+      clientRequest.end();
+    });
+
+    const observed = await settleWithin(firstChunk, 1_000);
+    const finish = await fetch(`${baseUrl}/__test/controlled-stream`, { method: "POST" });
+    expect(finish.status).toBe(204);
+    const body = await complete;
+
+    expect(observed).toMatchObject({
+      kind: "settled",
+      value: {
+        complete: false,
+        contentType: "application/octet-stream",
+        marker: "controlled",
+        readableEnded: false,
+        statusCode: 200,
+      },
+    });
+    if (observed.kind !== "settled") return;
+    expect(responseEnded).toBe(true);
+    expect(observed.value.bytes.length).toBeGreaterThan(0);
+    expect(observed.value.bytes.every((byte) => byte === 0x61)).toBe(true);
+    expect(body).toHaveLength(2 * 1024 * 1024);
+    expect(body.subarray(0, 1024 * 1024).every((byte) => byte === 0x61)).toBe(true);
+    expect(body.subarray(1024 * 1024).every((byte) => byte === 0x62)).toBe(true);
+  });
 
   // WS-MU-C0 over real HTTP: a second authenticated user cannot forge the first
   // user's chat authorship. The relay derives the pusher's identity from the
@@ -368,6 +702,7 @@ describe("sync relay main process", () => {
     try {
       baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"), {
         DOHC_RELAY_LINK_KEY: "integration-link-key-with-at-least-thirty-two-bytes",
+        DOHC_RELAY_EXCHANGE_KEY: "integration-relay-exchange-key-at-least-32",
       });
     } catch (error) {
       if (error instanceof ListenPermissionError) {
@@ -402,6 +737,14 @@ describe("sync relay main process", () => {
     expect(missing.status).toBe(404);
     const missingBody = await missing.text();
 
+    const missingWorkloadIdentity = await fetch(`${baseUrl}/sync/link-exchange`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ secret: link.secret }),
+    });
+    expect(missingWorkloadIdentity.status).toBe(404);
+    expect(await missingWorkloadIdentity.text()).toBe(missingBody);
+
     const emptyPaddingBody = JSON.stringify({ secret: link.secret, padding: "" });
     const oversizedBody = JSON.stringify({
       secret: link.secret,
@@ -418,10 +761,107 @@ describe("sync relay main process", () => {
 
     const small = await fetch(`${baseUrl}/sync/link-exchange`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "x-dohc-relay-exchange-key": "integration-relay-exchange-key-at-least-32",
+      },
       body: JSON.stringify({ secret: link.secret }),
     });
     expect(small.status).toBe(200);
+  });
+
+  it("keeps keyed forwarded client addresses in separate exchange buckets", async (context) => {
+    const relayRoot = await tempRoot("keyed-exchange-buckets");
+    const relayExchangeKey = "integration-relay-exchange-key-at-least-32";
+    let baseUrl: string;
+    try {
+      baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"), {
+        DOHC_RELAY_LINK_KEY: "integration-link-key-with-at-least-thirty-two-bytes",
+        DOHC_RELAY_EXCHANGE_KEY: relayExchangeKey,
+      });
+    } catch (error) {
+      if (error instanceof ListenPermissionError) {
+        context.skip();
+        return;
+      }
+      throw error;
+    }
+
+    const secret = await seedExchangeLink(baseUrl, "workspace-keyed-exchange-buckets");
+    const firstClientStatuses = await Promise.all(
+      Array.from({ length: LINK_EXCHANGE_BUCKET_CAPACITY + 1 }, async () =>
+        (
+          await exchangeLink(
+            baseUrl,
+            secret,
+            "198.51.100.10",
+            relayExchangeKey,
+          )
+        ).status,
+      ),
+    );
+
+    // Prove the first address's bucket is exhausted within one batch before
+    // asserting the second address succeeds — otherwise one larger shared
+    // bucket passes.
+    const secondClient = await exchangeLink(
+      baseUrl,
+      secret,
+      "198.51.100.11",
+      relayExchangeKey,
+    );
+    expect({
+      firstClientStatuses: [...firstClientStatuses].sort(
+        (left: number, right: number) => left - right,
+      ),
+      secondClientStatus: secondClient.status,
+    }).toEqual({
+      firstClientStatuses: [
+        ...Array.from({ length: LINK_EXCHANGE_BUCKET_CAPACITY }, () => 200),
+        404,
+      ],
+      secondClientStatus: 200,
+    });
+  });
+
+  it("ignores a forwarded client address when no exchange key is configured", async (context) => {
+    const relayRoot = await tempRoot("unkeyed-exchange-bucket");
+    let baseUrl: string;
+    try {
+      baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"), {
+        DOHC_RELAY_LINK_KEY: "integration-link-key-with-at-least-thirty-two-bytes",
+        DOHC_RELAY_EXCHANGE_KEY: undefined,
+      });
+    } catch (error) {
+      if (error instanceof ListenPermissionError) {
+        context.skip();
+        return;
+      }
+      throw error;
+    }
+
+    const secret = await seedExchangeLink(baseUrl, "workspace-unkeyed-exchange-bucket");
+    const firstClientStatuses = await Promise.all(
+      Array.from({ length: LINK_EXCHANGE_BUCKET_CAPACITY + 1 }, async () =>
+        (await exchangeLink(baseUrl, secret, "203.0.113.10")).status,
+      ),
+    );
+
+    // Prove the shared bucket is exhausted within one batch before asserting
+    // the spoofed address shares it.
+    const spoofedSecondClient = await exchangeLink(baseUrl, secret, "203.0.113.11");
+    expect({
+      firstClientStatuses: [...firstClientStatuses].sort(
+        (left: number, right: number) => left - right,
+      ),
+      secondClientStatus: spoofedSecondClient.status,
+    }).toEqual({
+      firstClientStatuses: [
+        ...Array.from({ length: LINK_EXCHANGE_BUCKET_CAPACITY }, () => 200),
+        404,
+      ],
+      secondClientStatus: 404,
+    });
   });
 });
 
@@ -441,10 +881,22 @@ async function spawnRelayExpectExit(
   });
   children.push(child);
   return await new Promise((resolve, reject) => {
+    let stdout = "";
     let stderr = "";
     const timeout = setTimeout(() => {
-      reject(new Error(`sync relay did not exit\nstderr:\n${stderr}`));
+      reject(new Error(`sync relay did not exit\nstdout:\n${stdout}\nstderr:\n${stderr}`));
     }, 45_000); // tsx startup under load, not a hang — see presence.integration.test.ts (#372)
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+      if (/SYNC_RELAY_LISTENING/u.test(stdout)) {
+        clearTimeout(timeout);
+        reject(
+          new Error(
+            `sync relay started listening instead of exiting\nstdout:\n${stdout}\nstderr:\n${stderr}`,
+          ),
+        );
+      }
+    });
     child.stderr.on("data", (chunk) => {
       stderr += String(chunk);
     });
@@ -453,6 +905,28 @@ async function spawnRelayExpectExit(
       resolve({ code, stderr });
     });
   });
+}
+
+function waitForExit(
+  child: ChildProcess,
+): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
+  }
+  return new Promise((resolve) => {
+    child.once("exit", (code, signal) => resolve({ code, signal }));
+  });
+}
+
+function sendTerminationSignal(child: ChildProcess): void {
+  const sent =
+    process.platform === "win32" ? child.send("SIGTERM") : child.kill("SIGTERM");
+  if (!sent) throw new Error("failed to send SIGTERM to sync relay");
+}
+
+function sendDoubleTerminationSignal(child: ChildProcess): void {
+  const sent = child.send("DOUBLE_SIGTERM");
+  if (!sent) throw new Error("failed to send duplicate SIGTERM to sync relay");
 }
 
 describe("sync relay startup guards", () => {
@@ -506,6 +980,7 @@ describe("sync relay startup guards", () => {
       SYNC_RELAY_TEST_AUTH: undefined,
       POSTGRES_URL: "postgres://unused:unused@127.0.0.1:1/unused",
       DOHC_RELAY_LINK_KEY: undefined,
+      DOHC_RELAY_EXCHANGE_KEY: "integration-relay-exchange-key-at-least-32",
       SYNC_RELAY_PORT: "0",
       BETTER_AUTH_SECRET: "x".repeat(32),
       SYNC_RELAY_DB_PATH: dbPath,
@@ -513,5 +988,60 @@ describe("sync relay startup guards", () => {
     });
     expect(code).toBe(1);
     expect(stderr).toContain("DOHC_RELAY_LINK_KEY must be set");
+  });
+
+  it("refuses to start in production when DOHC_RELAY_EXCHANGE_KEY is unset", async () => {
+    const dbPath = join(await tempRoot("no-relay-exchange-key"), "relay.sqlite");
+    const { code, stderr } = await spawnRelayExpectExit({
+      NODE_ENV: "production",
+      SYNC_RELAY_TEST_AUTH: undefined,
+      POSTGRES_URL: "postgres://unused:unused@127.0.0.1:1/unused",
+      DOHC_RELAY_LINK_KEY: "integration-link-key-with-at-least-thirty-two-bytes",
+      DOHC_RELAY_EXCHANGE_KEY: undefined,
+      SYNC_RELAY_PORT: "0",
+      BETTER_AUTH_SECRET: "x".repeat(32),
+      SYNC_RELAY_DB_PATH: dbPath,
+      FORCE_COLOR: "0",
+    });
+    expect(code).toBe(1);
+    expect(stderr).toContain("DOHC_RELAY_EXCHANGE_KEY must be set");
+  });
+
+  it("refuses to start when DOHC_RELAY_EXCHANGE_KEY is shorter than 32 characters", async () => {
+    const dbPath = join(await tempRoot("short-relay-exchange-key"), "relay.sqlite");
+    const { code, stderr } = await spawnRelayExpectExit({
+      NODE_ENV: "test",
+      SYNC_RELAY_TEST_AUTH: "1",
+      DOHC_RELAY_EXCHANGE_KEY: "x".repeat(31),
+      SYNC_RELAY_PORT: "0",
+      SYNC_RELAY_DB_PATH: dbPath,
+      FORCE_COLOR: "0",
+    });
+    expect(code).toBe(1);
+    expect(stderr).toContain(
+      "FATAL: DOHC_RELAY_EXCHANGE_KEY must be at least 32 characters.",
+    );
+  });
+
+  it("starts in test with a 32-character or unset relay exchange key", async (context) => {
+    for (const [label, relayExchangeKey] of [
+      ["minimum-relay-exchange-key", "x".repeat(32)],
+      ["unset-relay-exchange-key", undefined],
+    ] as const) {
+      const relayRoot = await tempRoot(label);
+      try {
+        expect(
+          await spawnRelay(join(relayRoot, "relay.sqlite"), {
+            DOHC_RELAY_EXCHANGE_KEY: relayExchangeKey,
+          }),
+        ).toMatch(/^http:\/\//u);
+      } catch (error) {
+        if (error instanceof ListenPermissionError) {
+          context.skip();
+          return;
+        }
+        throw error;
+      }
+    }
   });
 });

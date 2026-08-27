@@ -9,7 +9,12 @@ import {
   type ConflictResolveEnvelopeContext,
 } from "./conflictResolve";
 import { RELAY_ERRORS } from "./errorCodes";
-import { LINK_SESSIONS_PER_GRANT_LIMIT } from "./linkSecurity";
+import {
+  LINK_SESSIONS_PER_GRANT_LIMIT,
+  LINK_SESSION_RENEWAL_GRACE_MS,
+} from "./linkSecurity";
+
+export const SHARED_BLOB_CANDIDATE_LIMIT = 64;
 
 export interface SyncRelayLogInput {
   originSeq: number;
@@ -277,6 +282,11 @@ export interface SyncRelayStorage {
     sinceRelaySeq: number;
     limit: number;
   }): FetchLogPageResult;
+  fetchLogPageDescending(input: {
+    workspaceId: string;
+    beforeRelaySeq: number | null;
+    limit: number;
+  }): SyncRelayLogRow[];
   fetchLogCoordinate(input: {
     workspaceId: string;
     originId: string;
@@ -330,6 +340,11 @@ export interface SyncRelayStorage {
     session: SyncRelayLinkSessionRow;
     guard?: () => void;
   }): boolean;
+  replaceLinkSession(input: {
+    currentSession: SyncRelayLinkSessionRow;
+    session: SyncRelayLinkSessionRow;
+    guard: () => void;
+  }): boolean;
   findLinkSessionByCapabilityHash(
     capabilityHash: string,
   ): SyncRelayLinkSessionRow | null;
@@ -351,11 +366,33 @@ export interface SyncRelayStorage {
   listSharesReceivedBy(recipientUserId: string): SyncRelayShareWithGrantRow[];
   // Idempotent; returns false only when the share does not exist.
   revokeShare(shareId: string, revokedAtMs: number): boolean;
-  // Candidate rows for the shared-blob allowlist: every log row whose payload
-  // MIGHT reference the given sha256 (LIKE pre-filter; the share filter makes
-  // the actual decision). sha256 is validated hex upstream, so it cannot
-  // carry LIKE wildcards.
-  listLogRowsReferencing(workspaceId: string, sha256: string): SyncRelayLogRow[];
+  // Candidate moment rows for the shared-blob allowlist. Both semantics start
+  // from objects that used the exact hash. Historical reads choose each
+  // object's latest matching moment. Current-state reads resolve only those
+  // objects' latest moments, then match the blob and path before applying the
+  // cap. The share filter still makes the authorization decision.
+  listObjectMomentLogRowsByBlob(input: {
+    workspaceId: string;
+    versionId: string;
+    sha256: string;
+    semantics: "historical-log" | "current-state";
+    selectorPaths?: readonly string[];
+  }): SyncRelayLogRow[];
+  // version.create snapshot candidates use their own exact-hash index. The
+  // share filter still decides which snapshots the selector exposes.
+  listVersionCreateLogRowsByBlob(input: {
+    workspaceId: string;
+    versionId: string;
+    sha256: string;
+  }): SyncRelayLogRow[];
+  // The latest moment for this file identity within the one version a share
+  // exposes. Share filters run only after this lookup: the decisive row may
+  // move the file outside a selector and therefore be invisible to it.
+  latestLogRowForObjectInVersion(input: {
+    workspaceId: string;
+    objectId: string;
+    versionId: string;
+  }): SyncRelayLogRow | null;
   // MU-C4 shared channels: the channelWireId bound by the EARLIEST
   // chat.thread.create op for this threadId in the workspace's log (relay
   // order). undefined means no create exists; null means the earliest create
@@ -760,6 +797,17 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       -- the most recent moment that produced it.
       CREATE INDEX IF NOT EXISTS idx_sync_relay_object_moments_blob
         ON sync_relay_object_moments(workspace_id, object_id, blob_sha256, relay_seq);
+      -- Blob authorization knows the share's target version and hash, but not
+      -- the object. The object-first index above serves proposal-base lookups
+      -- and cannot seek this query.
+      CREATE INDEX IF NOT EXISTS idx_sync_relay_object_moments_blob_lookup
+        ON sync_relay_object_moments(
+          workspace_id, version_id, blob_sha256, object_id, relay_seq DESC
+        );
+      CREATE INDEX IF NOT EXISTS idx_sync_relay_object_moments_latest
+        ON sync_relay_object_moments(
+          workspace_id, version_id, object_id, relay_seq DESC
+        );
       -- WHICH object sits at a path IN ONE VERSION. sync_relay_object_paths
       -- answers the same question across every version at once, latest-wins,
       -- so a path last touched in a side version resolves to the wrong object
@@ -767,6 +815,25 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       -- instead, and it must not scan.
       CREATE INDEX IF NOT EXISTS idx_sync_relay_object_moments_path
         ON sync_relay_object_moments(workspace_id, version_id, path, relay_seq);
+
+      -- version.create can establish snapshot blobs without a moment.append
+      -- row. Keep those log rows discoverable by exact workspace/hash lookup;
+      -- authorization still runs against the original version.create payload.
+      CREATE TABLE IF NOT EXISTS sync_relay_version_snapshot_blobs (
+        workspace_id TEXT NOT NULL,
+        relay_seq     INTEGER NOT NULL,
+        version_id    TEXT NOT NULL,
+        blob_sha256  TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, relay_seq, blob_sha256),
+        FOREIGN KEY (workspace_id)
+          REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
+        FOREIGN KEY (relay_seq)
+          REFERENCES sync_relay_log(relay_seq) ON DELETE CASCADE
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS idx_sync_relay_version_snapshot_blobs_lookup
+        ON sync_relay_version_snapshot_blobs(
+          workspace_id, version_id, blob_sha256, relay_seq DESC
+        );
 
       -- #646 PR3a: a recipient's submitted changes, held until the granter
       -- accepts or declines them. Nothing here is in the granter's log: accept
@@ -926,13 +993,13 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     } catch {}
     throw error;
   }
-  // AFTER the schema transaction commits, in its own. The seed scans every
-  // moment.append the log holds, and holding the schema-init write lock for
-  // the length of that scan stalls every other opener against
-  // SYNC_RELAY_BUSY_TIMEOUT_MS on the first open after a deploy. Its own
-  // transaction still makes it atomic — a crash part-way leaves the migration
-  // unrecorded and the next open redoes it.
+  // AFTER the schema transaction commits, each in its own transaction. The
+  // seeds scan existing log rows, and holding the schema-init write lock for
+  // those scans stalls every other opener against SYNC_RELAY_BUSY_TIMEOUT_MS
+  // on the first open after a deploy. Each transaction is still atomic: a
+  // crash part-way leaves its migration unrecorded and the next open redoes it.
   seedObjectPaths(db);
+  seedVersionSnapshotBlobs(db);
 }
 
 // Where a `moment.append` payload says its object is AFTER the op: the
@@ -1033,6 +1100,12 @@ const OBJECT_MOMENT_INSERT_SQL = `
   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(workspace_id, object_id, relay_seq) DO NOTHING`;
 
+const VERSION_SNAPSHOT_BLOB_INSERT_SQL = `
+  INSERT INTO sync_relay_version_snapshot_blobs (
+    workspace_id, relay_seq, version_id, blob_sha256
+  ) VALUES (?, ?, ?, ?)
+  ON CONFLICT(workspace_id, relay_seq, blob_sha256) DO NOTHING`;
+
 // #646 PR2 one-time seed. `sync_relay_object_paths` is maintained at insert
 // time, so without this every moment.append already in the log would resolve
 // to "the relay has never seen this object" — and the share filter would deny
@@ -1075,6 +1148,64 @@ function seedObjectPaths(db: SqliteDb): void {
         resolved.path,
         Number(row.relay_seq),
       );
+    }
+    db.prepare("INSERT INTO sync_relay_migrations (migration_id,completed_at_ms) VALUES (?,?)").run(
+      migrationId,
+      Date.now(),
+    );
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {}
+    throw error;
+  }
+}
+
+function seedVersionSnapshotBlobs(db: SqliteDb): void {
+  const migrationId = "version-snapshot-blobs-seed-v1";
+  const seeded = db
+    .prepare("SELECT EXISTS(SELECT 1 FROM sync_relay_migrations WHERE migration_id=?) AS complete")
+    .get(migrationId);
+  if (Number(seeded?.complete ?? 0) !== 0) return;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const claimed = db
+      .prepare(
+        "SELECT EXISTS(SELECT 1 FROM sync_relay_migrations WHERE migration_id=?) AS complete",
+      )
+      .get(migrationId);
+    if (Number(claimed?.complete ?? 0) !== 0) {
+      db.exec("COMMIT");
+      return;
+    }
+    const insert = db.prepare(VERSION_SNAPSHOT_BLOB_INSERT_SQL);
+    const rows = db
+      .prepare(
+        `SELECT log.workspace_id, log.payload_json, log.recorded_at_ms, log.relay_seq
+         FROM sync_relay_log log
+         WHERE log.op_kind = 'version.create'
+           AND NOT EXISTS (
+             SELECT 1
+             FROM sync_relay_version_snapshot_blobs candidate
+             WHERE candidate.workspace_id = log.workspace_id
+               AND candidate.relay_seq = log.relay_seq
+           )
+         ORDER BY log.relay_seq`,
+      )
+      .all();
+    for (const row of rows) {
+      const workspaceId = String(row.workspace_id);
+      const payloadJson = String(row.payload_json);
+      const versionId = versionIdFromVersionCreatePayload(payloadJson);
+      if (!versionId) continue;
+      const shas = referencedBlobShas("version.create", payloadJson, {
+        workspaceId,
+        recordedAtMs: Number(row.recorded_at_ms),
+      });
+      for (const sha256 of new Set(shas)) {
+        insert.run(workspaceId, Number(row.relay_seq), versionId, sha256);
+      }
     }
     db.prepare("INSERT INTO sync_relay_migrations (migration_id,completed_at_ms) VALUES (?,?)").run(
       migrationId,
@@ -1940,6 +2071,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       );
       const objectPathStmt = this.db.prepare(OBJECT_PATH_UPSERT_SQL);
       const objectMomentStmt = this.db.prepare(OBJECT_MOMENT_INSERT_SQL);
+      const versionSnapshotBlobStmt = this.db.prepare(VERSION_SNAPSHOT_BLOB_INSERT_SQL);
       for (const op of newOps) {
         const result = insertStmt.run(
           input.workspaceId,
@@ -1982,6 +2114,23 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
               moment.byteLength,
               moment.recordedAtMs,
             );
+          }
+        }
+        if (op.opKind === "version.create") {
+          const versionId = versionIdFromVersionCreatePayload(op.payloadJson);
+          if (versionId) {
+            const shas = referencedBlobShas(op.opKind, op.payloadJson, {
+              workspaceId: input.workspaceId,
+              recordedAtMs: op.recordedAtMs,
+            });
+            for (const sha256 of new Set(shas)) {
+              versionSnapshotBlobStmt.run(
+                input.workspaceId,
+                Number(result.lastInsertRowid),
+                versionId,
+                sha256,
+              );
+            }
           }
         }
       }
@@ -2452,8 +2601,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         return false;
       }
       this.db
-        .prepare("DELETE FROM sync_relay_link_sessions WHERE expires_at_ms <= ?")
-        .run(Math.trunc(session.mintedAtMs));
+        .prepare("DELETE FROM sync_relay_link_sessions WHERE expires_at_ms < ?")
+        .run(Math.trunc(session.mintedAtMs - LINK_SESSION_RENEWAL_GRACE_MS));
       const liveSessionCount = Number(
         this.db
           .prepare(
@@ -2477,6 +2626,63 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           )
           .run(session.grantId, sessionsToDelete);
       }
+      this.db
+        .prepare(
+          `INSERT INTO sync_relay_link_sessions (
+             session_id, capability_hash, grant_id, generation, minted_at_ms, expires_at_ms
+           ) VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          session.sessionId,
+          session.capabilityHash,
+          session.grantId,
+          session.generation,
+          Math.trunc(session.mintedAtMs),
+          Math.trunc(session.expiresAtMs),
+        );
+      return true;
+    });
+  }
+
+  replaceLinkSession(input: {
+    currentSession: SyncRelayLinkSessionRow;
+    session: SyncRelayLinkSessionRow;
+    guard: () => void;
+  }): boolean {
+    const { currentSession, session } = input;
+    if (
+      !currentSession.capabilityHash ||
+      !session.capabilityHash ||
+      currentSession.sessionId === session.sessionId ||
+      currentSession.capabilityHash === session.capabilityHash ||
+      currentSession.grantId !== session.grantId ||
+      currentSession.generation !== session.generation ||
+      currentSession.expiresAtMs + LINK_SESSION_RENEWAL_GRACE_MS <
+        session.mintedAtMs ||
+      session.expiresAtMs <= session.mintedAtMs ||
+      session.generation < 1
+    ) {
+      return false;
+    }
+    return this.tx(() => {
+      input.guard();
+      const retired = this.db
+        .prepare(
+          `DELETE FROM sync_relay_link_sessions
+           WHERE session_id = ?
+             AND capability_hash = ?
+             AND grant_id = ?
+             AND generation = ?
+             AND expires_at_ms >= ?`,
+        )
+        .run(
+          currentSession.sessionId,
+          currentSession.capabilityHash,
+          currentSession.grantId,
+          currentSession.generation,
+          Math.trunc(session.mintedAtMs - LINK_SESSION_RENEWAL_GRACE_MS),
+        );
+      if (Number(retired.changes ?? 0) !== 1) return false;
       this.db
         .prepare(
           `INSERT INTO sync_relay_link_sessions (
@@ -2712,16 +2918,137 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     });
   }
 
-  listLogRowsReferencing(workspaceId: string, sha256: string): SyncRelayLogRow[] {
+  listObjectMomentLogRowsByBlob(input: {
+    workspaceId: string;
+    versionId: string;
+    sha256: string;
+    semantics: "historical-log" | "current-state";
+    selectorPaths?: readonly string[];
+  }): SyncRelayLogRow[] {
+    if (input.selectorPaths?.length === 0) return [];
+    const selectorPathsCte = input.selectorPaths
+      ? `selector_paths(path) AS (
+           VALUES ${input.selectorPaths.map(() => "(?)").join(", ")}
+         ),`
+      : "";
+    const selectorPathsCondition = input.selectorPaths
+      ? `AND EXISTS (
+             SELECT 1
+             FROM selector_paths selected
+             WHERE candidate_moment.path = selected.path
+                OR substr(candidate_moment.path, 1, length(selected.path) + 1) = selected.path || '/'
+           )`
+      : "";
+    const candidateCtes =
+      input.semantics === "current-state"
+        ? `candidate_objects AS MATERIALIZED (
+             SELECT DISTINCT matching.object_id
+             FROM sync_relay_object_moments matching
+             WHERE matching.workspace_id = ? AND matching.version_id = ?
+               AND matching.blob_sha256 = ?
+           ),
+           latest_by_object AS (
+             SELECT candidate.object_id,
+                    (
+                      SELECT latest.relay_seq
+                      FROM sync_relay_object_moments latest
+                      WHERE latest.workspace_id = ? AND latest.version_id = ?
+                        AND latest.object_id = candidate.object_id
+                      ORDER BY latest.relay_seq DESC
+                      LIMIT 1
+                    ) AS relay_seq
+             FROM candidate_objects candidate
+           ),
+           candidates AS (
+             SELECT candidate_moment.relay_seq
+             FROM latest_by_object latest
+             JOIN sync_relay_object_moments candidate_moment
+               ON candidate_moment.workspace_id = ?
+              AND candidate_moment.object_id = latest.object_id
+              AND candidate_moment.relay_seq = latest.relay_seq
+             WHERE candidate_moment.blob_sha256 = ?
+               ${selectorPathsCondition}
+             ORDER BY candidate_moment.relay_seq DESC
+             LIMIT ?
+           )`
+        : `candidates AS (
+             SELECT MAX(candidate_moment.relay_seq) AS relay_seq
+             FROM sync_relay_object_moments candidate_moment
+             WHERE candidate_moment.workspace_id = ?
+               AND candidate_moment.version_id = ?
+               AND candidate_moment.blob_sha256 = ?
+               ${selectorPathsCondition}
+             GROUP BY candidate_moment.object_id
+             ORDER BY relay_seq DESC
+             LIMIT ?
+           )`;
     return this.db
       .prepare(
-        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq
-         FROM sync_relay_log
-         WHERE workspace_id = ? AND payload_json LIKE ?
-         ORDER BY relay_seq`,
+        `WITH ${selectorPathsCte}
+         ${candidateCtes}
+         SELECT l.workspace_id, l.origin_id, l.origin_seq, l.op_kind,
+                l.payload_json, l.recorded_at_ms, l.relay_seq
+         FROM candidates c
+         JOIN sync_relay_log l ON l.relay_seq = c.relay_seq
+         ORDER BY c.relay_seq DESC`,
       )
-      .all(workspaceId, `%${sha256}%`)
+      .all(
+        ...(input.selectorPaths ?? []),
+        input.workspaceId,
+        input.versionId,
+        input.sha256,
+        ...(input.semantics === "current-state"
+          ? [input.workspaceId, input.versionId, input.workspaceId, input.sha256]
+          : []),
+        SHARED_BLOB_CANDIDATE_LIMIT,
+      )
       .map(rowToLogRow);
+  }
+
+  listVersionCreateLogRowsByBlob(input: {
+    workspaceId: string;
+    versionId: string;
+    sha256: string;
+  }): SyncRelayLogRow[] {
+    return this.db
+      .prepare(
+        `SELECT l.workspace_id, l.origin_id, l.origin_seq, l.op_kind,
+                l.payload_json, l.recorded_at_ms, l.relay_seq
+         FROM sync_relay_version_snapshot_blobs candidate
+         JOIN sync_relay_log l ON l.relay_seq = candidate.relay_seq
+         WHERE candidate.workspace_id = ? AND candidate.version_id = ?
+           AND candidate.blob_sha256 = ?
+         ORDER BY candidate.relay_seq DESC
+         LIMIT ?`,
+      )
+      .all(
+        input.workspaceId,
+        input.versionId,
+        input.sha256,
+        SHARED_BLOB_CANDIDATE_LIMIT,
+      )
+      .map(rowToLogRow);
+  }
+
+  latestLogRowForObjectInVersion(input: {
+    workspaceId: string;
+    objectId: string;
+    versionId: string;
+  }): SyncRelayLogRow | null {
+    if (!input.objectId || !input.versionId) return null;
+    const row = this.db
+      .prepare(
+        `SELECT l.workspace_id, l.origin_id, l.origin_seq, l.op_kind,
+                l.payload_json, l.recorded_at_ms, l.relay_seq
+         FROM sync_relay_object_moments m
+         JOIN sync_relay_log l
+           ON l.workspace_id = m.workspace_id AND l.relay_seq = m.relay_seq
+         WHERE m.workspace_id = ? AND m.object_id = ? AND m.version_id = ?
+         ORDER BY m.relay_seq DESC
+         LIMIT 1`,
+      )
+      .get(input.workspaceId, input.objectId, input.versionId);
+    return row ? rowToLogRow(row) : null;
   }
 
   findThreadCreateChannelWireId(
@@ -2839,7 +3166,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     const row = this.db
       .prepare(
         "SELECT object_id FROM sync_relay_object_paths \
-         WHERE workspace_id = ? AND path = ? LIMIT 1",
+         WHERE workspace_id = ? AND path = ? ORDER BY relay_seq DESC LIMIT 1",
       )
       .get(workspaceId, path);
     return typeof row?.object_id === "string" ? row.object_id : undefined;
@@ -3132,6 +3459,34 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     };
   }
 
+  fetchLogPageDescending(input: {
+    workspaceId: string;
+    beforeRelaySeq: number | null;
+    limit: number;
+  }): SyncRelayLogRow[] {
+    const rows =
+      input.beforeRelaySeq === null
+        ? this.db
+            .prepare(
+              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq
+               FROM sync_relay_log
+               WHERE workspace_id = ?
+               ORDER BY relay_seq DESC
+               LIMIT ?`,
+            )
+            .all(input.workspaceId, input.limit)
+        : this.db
+            .prepare(
+              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq
+               FROM sync_relay_log
+               WHERE workspace_id = ? AND relay_seq < ?
+               ORDER BY relay_seq DESC
+               LIMIT ?`,
+            )
+            .all(input.workspaceId, input.beforeRelaySeq, input.limit);
+    return rows.map(rowToLogRow);
+  }
+
   fetchLogCoordinate(input: {
     workspaceId: string;
     originId: string;
@@ -3167,6 +3522,17 @@ function workspaceIdentityFromRow(
 function asObject(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   return value as Record<string, unknown>;
+}
+
+function versionIdFromVersionCreatePayload(payloadJson: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payloadJson);
+  } catch {
+    return null;
+  }
+  const record = asObject(parsed);
+  return record ? readableString(record.versionId) : null;
 }
 
 // Every blob sha an op REQUIRES the relay to already hold before the op may be

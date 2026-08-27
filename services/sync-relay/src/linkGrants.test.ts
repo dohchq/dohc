@@ -6,9 +6,13 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   constantTimeHashEqual,
+  hashRelayExchangeKey,
   LinkExchangeRateLimiter,
+  LinkReadRateLimiter,
+  LINK_SESSION_RENEWAL_GRACE_MS,
   LINK_SESSION_TTL_MS,
   validateLinkCapability,
+  verifyRelayExchangeKey,
 } from "./linkSecurity";
 import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
 import { authorizeShareAction } from "./shareAuthorization";
@@ -46,6 +50,23 @@ const { DatabaseSync: InspectionDatabaseSync } = createRequire(import.meta.url)(
 afterEach(async () => {
   for (const storage of storages.splice(0)) storage.close();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+describe("relay exchange key verification", () => {
+  const exchangeKey = "share-web-relay-exchange-key-at-least-32";
+  const expectedHash = hashRelayExchangeKey(exchangeKey);
+
+  it("accepts the matching key", () => {
+    expect(verifyRelayExchangeKey(exchangeKey, expectedHash)).toBe(true);
+  });
+
+  it("rejects a different key", () => {
+    expect(verifyRelayExchangeKey("wrong-key", expectedHash)).toBe(false);
+  });
+
+  it("rejects a missing key", () => {
+    expect(verifyRelayExchangeKey(null, expectedHash)).toBe(false);
+  });
 });
 
 function jsonBody(body: unknown): RequestInit {
@@ -89,7 +110,12 @@ function handler(
   storage: SyncRelayStorage,
   overrides: {
     linkKey?: string | Uint8Array;
+    relayExchangeKey?: string;
     linkExchangeRateLimiter?: LinkExchangeRateLimiter;
+    linkReadRateLimiter?: LinkReadRateLimiter;
+    linkGrantReadRateLimiter?: LinkReadRateLimiter;
+    nowMs?: () => number;
+    newLinkBearer?: () => string;
   } = {},
 ): SyncRelayHandler {
   let id = 0;
@@ -100,13 +126,17 @@ function handler(
       if (!match) throw Object.assign(new Error("unauthorized"), { statusCode: 401 });
       return { userId: match[1]!, workspaceId };
     },
-    nowMs: () => 2_000,
+    nowMs: overrides.nowMs ?? (() => 2_000),
     newShareId: () => "share-existing",
     newGrantId: () => `grant-${id++}`,
     newId: () => `id-${id++}`,
     resolveUserIdByEmail: () => null,
     linkKey: Object.hasOwn(overrides, "linkKey") ? overrides.linkKey : LINK_KEY,
+    relayExchangeKey: overrides.relayExchangeKey,
     linkExchangeRateLimiter: overrides.linkExchangeRateLimiter,
+    linkReadRateLimiter: overrides.linkReadRateLimiter,
+    linkGrantReadRateLimiter: overrides.linkGrantReadRateLimiter,
+    newLinkBearer: overrides.newLinkBearer,
   };
   return createSyncRelayHandler(options);
 }
@@ -282,11 +312,13 @@ describe("relay link grants", () => {
       access: "comment",
       generation: 2,
     });
+    // Two causes share this 404: the retune moved the credential away from
+    // firstSecret, and accountless exchange refuses the grant's comment level.
     expect(
-      await json(
-        await h(request(null, "/sync/link-exchange", jsonBody({ secret: firstSecret }))),
-      ),
-    ).toMatchObject({ access: "comment", generation: 2 });
+      (
+        await h(request(null, "/sync/link-exchange", jsonBody({ secret: firstSecret })))
+      ).status,
+    ).toBe(404);
 
     // Widen link rotates the URL and bumps dependent bindings without widening them.
     const widenedResponse = await h(
@@ -314,7 +346,7 @@ describe("relay link grants", () => {
       (
         await h(request(null, "/sync/link-exchange", jsonBody({ secret: widenedSecret })))
       ).status,
-    ).toBe(200);
+    ).toBe(404);
 
     // Rotate preserves access, replaces the URL, and bumps dependent bindings.
     const rotatedResponse = await h(
@@ -734,26 +766,11 @@ describe("relay link grants", () => {
       ),
     );
     expect(widenedResponse.status).toBe(200);
-    const widened = await json(widenedResponse);
+    expect(await json(widenedResponse)).toHaveProperty("secret");
     expect(storage.getShareGrant("grant-dependent-at-new-level")).toMatchObject({
       access: "comment",
       generation: 2,
     });
-
-    const exchange = await json(
-      await h(
-        request(null, "/sync/link-exchange", jsonBody({ secret: widened.secret })),
-      ),
-    );
-    const capabilityToken = String(exchange.capabilityToken);
-    expect(
-      validateLinkCapability({
-        storage,
-        capabilityToken,
-        linkKey: LINK_KEY,
-        nowMs: 2_001,
-      }),
-    ).toMatchObject({ grantId, generation: 2, access: "edit" });
 
     const narrowedResponse = await h(
       request(
@@ -767,14 +784,10 @@ describe("relay link grants", () => {
       access: "comment",
       generation: 3,
     });
-    expect(
-      validateLinkCapability({
-        storage,
-        capabilityToken,
-        linkKey: LINK_KEY,
-        nowMs: 2_001,
-      }),
-    ).toBeNull();
+    expect(storage.getShareGrant(grantId)).toMatchObject({
+      access: "comment",
+      generation: 3,
+    });
   });
 
   it("refuses every invalid state-machine transition without changing records", async () => {
@@ -1030,13 +1043,15 @@ describe("relay link grants", () => {
         }),
       ).toMatchObject({ ok: true, grant: { access: "comment", generation: 17 } });
       expect(credentialCounts()).toEqual({ total: 11, retired: 10, current: 1 });
+      // Two causes share this refusal: the widening retune retired the old
+      // credential, and accountless exchange refuses the comment level.
       expect(
         (
           await h(
             request(null, "/sync/link-exchange", jsonBody({ secret: wideningSecret })),
           )
         ).status,
-      ).toBe(200);
+      ).toBe(404);
     } finally {
       inspection.close();
     }
@@ -1124,11 +1139,37 @@ describe("relay link grants", () => {
     }
   });
 
+  it.each(["comment", "edit"] as const)(
+    "refuses an active %s link grant exactly like an unknown secret",
+    async (access) => {
+      const storage = await newStorage();
+      const h = handler(storage);
+      await seedFileShare(h);
+      const created = await createLink(h, access);
+
+      const unknownResponse = await h(
+        request(null, "/sync/link-exchange", jsonBody({ secret: "g".repeat(43) })),
+      );
+      const unknown = {
+        status: unknownResponse.status,
+        body: await unknownResponse.text(),
+      };
+      const exchangeResponse = await h(
+        request(null, "/sync/link-exchange", jsonBody({ secret: created.secret })),
+      );
+
+      expect({
+        status: exchangeResponse.status,
+        body: await exchangeResponse.text(),
+      }).toEqual(unknown);
+    },
+  );
+
   it("exchanges a current secret for an HMAC-stored short-lived capability", async () => {
     const storage = await newStorage();
     const h = handler(storage);
     await seedFileShare(h);
-    const created = await createLink(h, "comment");
+    const created = await createLink(h, "view");
     const secret = String(created.secret);
 
     const response = await h(
@@ -1141,11 +1182,11 @@ describe("relay link grants", () => {
       shareId: "share-existing",
       grantId: created.grantId,
       generation: 1,
-      access: "comment",
+      access: "view",
       effectiveSelector: {
         paths: ["docs"],
         versionId: null,
-        access: "comment",
+        access: "view",
       },
       capabilityExpiresAtMs: 2_000 + LINK_SESSION_TTL_MS,
     });
@@ -1169,7 +1210,7 @@ describe("relay link grants", () => {
       shareId: "share-existing",
       grantId: created.grantId,
       generation: 1,
-      access: "comment",
+      access: "view",
     });
     expect(
       validateLinkCapability({
@@ -1202,6 +1243,552 @@ describe("relay link grants", () => {
     const compare = vi.fn(timingSafeEqual);
     expect(constantTimeHashEqual(hmac(secret), hmac(secret), compare)).toBe(true);
     expect(compare).toHaveBeenCalledOnce();
+  });
+
+  it("refreshes a valid capability and retires the old session", async () => {
+    const storage = await newStorage();
+    const relayExchangeKey = "share-web-relay-refresh-exchange-key";
+    let tokenId = 30;
+    const h = handler(storage, {
+      relayExchangeKey,
+      newLinkBearer: () => Buffer.alloc(32, tokenId++).toString("base64url"),
+    });
+    await seedFileShare(h);
+    const created = await createLink(h, "view");
+    const exchanged = await json(
+      await h(
+        request(null, "/sync/link-exchange", {
+          ...jsonBody({ secret: created.secret }),
+          headers: {
+            "content-type": "application/json",
+            "x-dohc-relay-exchange-key": relayExchangeKey,
+          },
+        }),
+      ),
+    );
+    const oldCapability = String(exchanged.capabilityToken);
+
+    const refreshedResponse = await h(
+      request(null, "/sync/link-refresh", {
+        method: "POST",
+        headers: {
+          authorization: `LinkCapability ${oldCapability}`,
+          "x-dohc-relay-exchange-key": relayExchangeKey,
+        },
+      }),
+    );
+
+    expect(refreshedResponse.status).toBe(200);
+    const refreshed = await json(refreshedResponse);
+    expect(refreshed).toMatchObject({
+      ok: true,
+      shareId: "share-existing",
+      grantId: created.grantId,
+      generation: 1,
+      access: "view",
+      effectiveSelector: {
+        paths: ["docs"],
+        versionId: null,
+        access: "view",
+      },
+      capabilityExpiresAtMs: 2_000 + LINK_SESSION_TTL_MS,
+    });
+    const newCapability = String(refreshed.capabilityToken);
+    expect(newCapability).not.toBe(oldCapability);
+    expect(storage.findLinkSessionByCapabilityHash(hmac(oldCapability))).toBeNull();
+    expect(
+      validateLinkCapability({
+        storage,
+        capabilityToken: oldCapability,
+        linkKey: LINK_KEY,
+        nowMs: 2_001,
+      }),
+    ).toBeNull();
+    expect(
+      validateLinkCapability({
+        storage,
+        capabilityToken: newCapability,
+        linkKey: LINK_KEY,
+        nowMs: 2_001,
+      }),
+    ).toMatchObject({ grantId: created.grantId, access: "view" });
+  });
+
+  it("refreshes a capability expired by an hour and retires the old session", async () => {
+    const storage = await newStorage();
+    const relayExchangeKey = "share-web-relay-refresh-exchange-key";
+    let now = 2_000;
+    let tokenId = 40;
+    const h = handler(storage, {
+      relayExchangeKey,
+      nowMs: () => now,
+      newLinkBearer: () => Buffer.alloc(32, tokenId++).toString("base64url"),
+    });
+    await seedFileShare(h);
+    const created = await createLink(h, "view");
+    const exchanged = await json(
+      await h(
+        request(null, "/sync/link-exchange", {
+          ...jsonBody({ secret: created.secret }),
+          headers: {
+            "content-type": "application/json",
+            "x-dohc-relay-exchange-key": relayExchangeKey,
+          },
+        }),
+      ),
+    );
+    const oldCapability = String(exchanged.capabilityToken);
+    now += LINK_SESSION_TTL_MS + 60 * 60 * 1_000;
+    expect(
+      (
+        await h(
+          request(null, "/sync/link-exchange", {
+            ...jsonBody({ secret: created.secret }),
+            headers: {
+              "content-type": "application/json",
+              "x-dohc-relay-exchange-key": relayExchangeKey,
+            },
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    expect(storage.findLinkSessionByCapabilityHash(hmac(oldCapability))).not.toBeNull();
+
+    expect(
+      validateLinkCapability({
+        storage,
+        capabilityToken: oldCapability,
+        linkKey: LINK_KEY,
+        nowMs: now,
+      }),
+    ).toBeNull();
+    const refreshedResponse = await h(
+      request(null, "/sync/link-refresh", {
+        method: "POST",
+        headers: {
+          authorization: `LinkCapability ${oldCapability}`,
+          "x-dohc-relay-exchange-key": relayExchangeKey,
+        },
+      }),
+    );
+
+    expect(refreshedResponse.status).toBe(200);
+    const refreshed = await json(refreshedResponse);
+    const newCapability = String(refreshed.capabilityToken);
+    expect(newCapability).not.toBe(oldCapability);
+    expect(storage.findLinkSessionByCapabilityHash(hmac(oldCapability))).toBeNull();
+    expect(
+      validateLinkCapability({
+        storage,
+        capabilityToken: oldCapability,
+        linkKey: LINK_KEY,
+        nowMs: now,
+      }),
+    ).toBeNull();
+    expect(
+      validateLinkCapability({
+        storage,
+        capabilityToken: newCapability,
+        linkKey: LINK_KEY,
+        nowMs: now,
+      }),
+    ).toMatchObject({ grantId: created.grantId, access: "view" });
+  });
+
+  it("rate-limits refresh with the capability read bucket", async () => {
+    const storage = await newStorage();
+    const limiter = new LinkReadRateLimiter(1, 0.000_001, 10);
+    const h = handler(storage, { linkReadRateLimiter: limiter });
+    await seedFileShare(h);
+    const created = await createLink(h);
+    const exchanged = await json(
+      await h(request(null, "/sync/link-exchange", jsonBody({ secret: created.secret }))),
+    );
+    const capability = String(exchanged.capabilityToken);
+    expect(limiter.allow(hmac(capability), 2_000)).toBe(true);
+
+    const refused = await h(
+      request(null, "/sync/link-refresh", {
+        method: "POST",
+        headers: { authorization: `LinkCapability ${capability}` },
+      }),
+    );
+
+    expect(refused.status).toBe(429);
+    expect(await json(refused)).toEqual({
+      ok: false,
+      error: "too many link reads",
+      code: "link_read_rate_limited",
+    });
+    expect(storage.findLinkSessionByCapabilityHash(hmac(capability))).not.toBeNull();
+  });
+
+  it("spends refreshes from the grant read budget", async () => {
+    const storage = await newStorage();
+    const h = handler(storage, {
+      linkReadRateLimiter: new LinkReadRateLimiter(10, 0.000_001, 10),
+      linkGrantReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
+    });
+    await seedFileShare(h);
+    const created = await createLink(h);
+    const exchanged = await json(
+      await h(request(null, "/sync/link-exchange", jsonBody({ secret: created.secret }))),
+    );
+    const firstRefresh = await h(
+      request(null, "/sync/link-refresh", {
+        method: "POST",
+        headers: {
+          authorization: `LinkCapability ${String(exchanged.capabilityToken)}`,
+        },
+      }),
+    );
+    expect(firstRefresh.status).toBe(200);
+    const refreshed = await json(firstRefresh);
+
+    const refused = await h(
+      request(null, "/sync/link-refresh", {
+        method: "POST",
+        headers: {
+          authorization: `LinkCapability ${String(refreshed.capabilityToken)}`,
+        },
+      }),
+    );
+
+    expect(refused.status).toBe(429);
+    expect(await json(refused)).toEqual({
+      ok: false,
+      error: "too many link reads",
+      code: "link_read_rate_limited",
+    });
+  });
+
+  it("refreshes a valid capability when the relay exchange key is not configured", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    await seedFileShare(h);
+    const created = await createLink(h);
+    const exchangeResponse = await h(
+      request(null, "/sync/link-exchange", jsonBody({ secret: created.secret })),
+    );
+    expect(exchangeResponse.status).toBe(200);
+    const exchanged = await json(exchangeResponse);
+
+    const refreshed = await h(
+      request(null, "/sync/link-refresh", {
+        method: "POST",
+        headers: {
+          authorization: `LinkCapability ${String(exchanged.capabilityToken)}`,
+        },
+      }),
+    );
+
+    expect(refreshed.status).toBe(200);
+  });
+
+  it("refuses refresh without the configured relay exchange key", async () => {
+    const storage = await newStorage();
+    const relayExchangeKey = "share-web-relay-refresh-exchange-key";
+    const h = handler(storage, { relayExchangeKey });
+    await seedFileShare(h);
+    const created = await createLink(h);
+    const exchangeResponse = await h(
+      request(null, "/sync/link-exchange", {
+        ...jsonBody({ secret: created.secret }),
+        headers: {
+          "content-type": "application/json",
+          "x-dohc-relay-exchange-key": relayExchangeKey,
+        },
+      }),
+    );
+    expect(exchangeResponse.status).toBe(200);
+    const exchanged = await json(exchangeResponse);
+
+    const missingKey = await h(
+      request(null, "/sync/link-refresh", {
+        method: "POST",
+        headers: {
+          authorization: `LinkCapability ${String(exchanged.capabilityToken)}`,
+        },
+      }),
+    );
+    expect(await denialBytes(missingKey)).toBe(
+      await denialBytes(await h(request(null, "/missing"))),
+    );
+  });
+
+  it("refuses refresh after the link grant is revoked", async () => {
+    const storage = await newStorage();
+    const relayExchangeKey = "share-web-relay-refresh-exchange-key";
+    let now = 2_000;
+    const h = handler(storage, { relayExchangeKey, nowMs: () => now });
+    await seedFileShare(h);
+    const created = await createLink(h);
+    const exchangeResponse = await h(
+      request(null, "/sync/link-exchange", {
+        ...jsonBody({ secret: created.secret }),
+        headers: {
+          "content-type": "application/json",
+          "x-dohc-relay-exchange-key": relayExchangeKey,
+        },
+      }),
+    );
+    expect(exchangeResponse.status).toBe(200);
+    const exchanged = await json(exchangeResponse);
+    expect(
+      (
+        await h(
+          request(
+            OWNER,
+            "/sync/shares/share-existing/revoke",
+            jsonBody({ grantId: created.grantId }),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    now += LINK_SESSION_TTL_MS + 60 * 60 * 1_000;
+
+    const refused = await h(
+      request(null, "/sync/link-refresh", {
+        method: "POST",
+        headers: {
+          authorization: `LinkCapability ${String(exchanged.capabilityToken)}`,
+          "x-dohc-relay-exchange-key": relayExchangeKey,
+        },
+      }),
+    );
+    expect(refused.status).toBe(401);
+    expect(await refused.text()).toBe(
+      '{"ok":false,"error":"not found","code":"not_found"}',
+    );
+  });
+
+  it("refuses an in-grace refresh after rotation changes the generation", async () => {
+    const storage = await newStorage();
+    const relayExchangeKey = "share-web-relay-refresh-exchange-key";
+    let now = 2_000;
+    const h = handler(storage, { relayExchangeKey, nowMs: () => now });
+    await seedFileShare(h);
+    const created = await createLink(h);
+    const exchangeResponse = await h(
+      request(null, "/sync/link-exchange", {
+        ...jsonBody({ secret: created.secret }),
+        headers: {
+          "content-type": "application/json",
+          "x-dohc-relay-exchange-key": relayExchangeKey,
+        },
+      }),
+    );
+    expect(exchangeResponse.status).toBe(200);
+    const exchanged = await json(exchangeResponse);
+    now += LINK_SESSION_TTL_MS + 60 * 60 * 1_000;
+    expect(
+      (
+        await h(
+          request(
+            OWNER,
+            `/sync/shares/share-existing/links/${String(created.grantId)}/rotate`,
+            { method: "POST" },
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    expect(storage.getShareGrant(String(created.grantId))).toMatchObject({
+      status: "active",
+      generation: 2,
+    });
+
+    const refused = await h(
+      request(null, "/sync/link-refresh", {
+        method: "POST",
+        headers: {
+          authorization: `LinkCapability ${String(exchanged.capabilityToken)}`,
+          "x-dohc-relay-exchange-key": relayExchangeKey,
+        },
+      }),
+    );
+
+    expect(refused.status).toBe(401);
+    expect(await refused.text()).toBe(
+      '{"ok":false,"error":"not found","code":"not_found"}',
+    );
+  });
+
+  it("refuses refresh when revocation wins before session replacement", async () => {
+    const target = await newStorage();
+    const relayExchangeKey = "share-web-relay-refresh-exchange-key";
+    let grantId = "";
+    let armed = false;
+    let replaceLinkSessionInterceptions = 0;
+    const raced = new Proxy(target, {
+      get(storage, property, receiver) {
+        if (property === "replaceLinkSession") {
+          return (
+            input: Parameters<SyncRelayStorage["replaceLinkSession"]>[0],
+          ): boolean => {
+            replaceLinkSessionInterceptions += 1;
+            if (armed) {
+              armed = false;
+              storage.revokeShareGrant({
+                shareId: "share-existing",
+                grantId,
+                revokedAtMs: 2_001,
+              });
+            }
+            return storage.replaceLinkSession(input);
+          };
+        }
+        const value = Reflect.get(storage, property, receiver) as unknown;
+        return typeof value === "function" ? value.bind(storage) : value;
+      },
+    });
+    const h = handler(raced, { relayExchangeKey });
+    await seedFileShare(h);
+    const created = await createLink(h);
+    grantId = String(created.grantId);
+    const exchangeResponse = await h(
+      request(null, "/sync/link-exchange", {
+        ...jsonBody({ secret: created.secret }),
+        headers: {
+          "content-type": "application/json",
+          "x-dohc-relay-exchange-key": relayExchangeKey,
+        },
+      }),
+    );
+    expect(exchangeResponse.status).toBe(200);
+    const exchanged = await json(exchangeResponse);
+    armed = true;
+
+    const refused = await h(
+      request(null, "/sync/link-refresh", {
+        method: "POST",
+        headers: {
+          authorization: `LinkCapability ${String(exchanged.capabilityToken)}`,
+          "x-dohc-relay-exchange-key": relayExchangeKey,
+        },
+      }),
+    );
+
+    expect(replaceLinkSessionInterceptions).toBe(1);
+    expect(refused.status).toBe(401);
+    expect(await refused.text()).toBe(
+      '{"ok":false,"error":"not found","code":"not_found"}',
+    );
+  });
+
+  it("accepts the renewal grace boundary and refuses beyond it", async () => {
+    expect(LINK_SESSION_RENEWAL_GRACE_MS).toBe(7 * 24 * 60 * 60 * 1_000);
+    const storage = await newStorage();
+    const relayExchangeKey = "share-web-relay-refresh-exchange-key";
+    let now = 2_000;
+    const h = handler(storage, { relayExchangeKey, nowMs: () => now });
+    await seedFileShare(h);
+    const created = await createLink(h);
+    const exchanged = await json(
+      await h(
+        request(null, "/sync/link-exchange", {
+          ...jsonBody({ secret: created.secret }),
+          headers: {
+            "content-type": "application/json",
+            "x-dohc-relay-exchange-key": relayExchangeKey,
+          },
+        }),
+      ),
+    );
+    const beyondGraceExchangeResponse = await h(
+      request(null, "/sync/link-exchange", {
+        ...jsonBody({ secret: created.secret }),
+        headers: {
+          "content-type": "application/json",
+          "x-dohc-relay-exchange-key": relayExchangeKey,
+        },
+      }),
+    );
+    expect(beyondGraceExchangeResponse.status).toBe(200);
+    const beyondGrace = await json(beyondGraceExchangeResponse);
+    now += LINK_SESSION_TTL_MS + LINK_SESSION_RENEWAL_GRACE_MS;
+
+    const boundary = await h(
+      request(null, "/sync/link-refresh", {
+        method: "POST",
+        headers: {
+          authorization: `LinkCapability ${String(exchanged.capabilityToken)}`,
+          "x-dohc-relay-exchange-key": relayExchangeKey,
+        },
+      }),
+    );
+    expect(boundary.status).toBe(200);
+
+    now += 1;
+    const refused = await h(
+      request(null, "/sync/link-refresh", {
+        method: "POST",
+        headers: {
+          authorization: `LinkCapability ${String(beyondGrace.capabilityToken)}`,
+          "x-dohc-relay-exchange-key": relayExchangeKey,
+        },
+      }),
+    );
+    expect(refused.status).toBe(401);
+    expect(await refused.text()).toBe(
+      '{"ok":false,"error":"not found","code":"not_found"}',
+    );
+  });
+
+  it("requires the configured relay exchange key before rate limiting", async () => {
+    const target = await newStorage();
+    let credentialLookups = 0;
+    const counted = new Proxy(target, {
+      get(storage, property, receiver) {
+        if (property === "findLinkGrantByCredentialHash") {
+          return (secretHash: string) => {
+            credentialLookups += 1;
+            return storage.findLinkGrantByCredentialHash(secretHash);
+          };
+        }
+        const value = Reflect.get(storage, property, receiver) as unknown;
+        return typeof value === "function" ? value.bind(storage) : value;
+      },
+    });
+    const relayExchangeKey = "share-web-relay-exchange-key-at-least-32";
+    const h = handler(counted, {
+      relayExchangeKey,
+      linkExchangeRateLimiter: new LinkExchangeRateLimiter(1, 0.000_001, 10),
+    });
+    await seedFileShare(h);
+    const created = await createLink(h);
+    const generic = await denialBytes(await h(request(null, "/missing")));
+
+    const missing = await denialBytes(
+      await h(
+        request(null, "/sync/link-exchange", jsonBody({ secret: created.secret })),
+      ),
+    );
+    expect(missing).toBe(generic);
+    const wrong = await denialBytes(
+      await h(
+        request(null, "/sync/link-exchange", {
+          ...jsonBody({ secret: created.secret }),
+          headers: {
+            "content-type": "application/json",
+            "x-dohc-relay-exchange-key": "wrong-key",
+          },
+        }),
+      ),
+    );
+    expect(wrong).toBe(generic);
+    expect(credentialLookups).toBe(0);
+
+    const admitted = await h(
+      request(null, "/sync/link-exchange", {
+        ...jsonBody({ secret: created.secret }),
+        headers: {
+          "content-type": "application/json",
+          "x-dohc-relay-exchange-key": relayExchangeKey,
+        },
+      }),
+    );
+    expect(admitted.status).toBe(200);
+    expect(credentialLookups).toBeGreaterThan(0);
   });
 
   it("makes every exchange refusal byte-identical", async () => {
