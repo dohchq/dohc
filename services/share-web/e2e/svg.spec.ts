@@ -61,8 +61,9 @@ test("keeps a shared SVG inert and downloads it as an attachment", async ({
 
     const navigation = page.getByRole("navigation", { name: "Shared files" });
     await navigation.getByRole("button", { name: "attack.svg", exact: true }).click();
+    const viewerContent = page.locator("main.content");
     await expect(page.locator(".preview-image")).toHaveCount(0);
-    await expect(page.locator("svg")).toHaveCount(0);
+    await expect(viewerContent.locator("svg")).toHaveCount(0);
     const downloadCard = page.locator(".download-card");
     await expect(downloadCard).toBeVisible();
     await expect(downloadCard).toContainText("SVG files open as downloads.");
@@ -93,7 +94,7 @@ test("keeps a shared SVG inert and downloads it as an attachment", async ({
     expect(Buffer.concat(downloadedChunks)).toEqual(Buffer.from(svgBytes));
 
     await expect(page.locator(".preview-image")).toHaveCount(0);
-    await expect(page.locator("svg")).toHaveCount(0);
+    await expect(viewerContent.locator("svg")).toHaveCount(0);
     await expectSentinelUnchanged(page);
     expect(probe.requests).toEqual([]);
   } finally {

@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { type Browser } from "@playwright/test";
 import {
   expect,
+  ownerHeaders,
   seedShare,
   type SeededShare,
   test,
@@ -25,10 +26,7 @@ async function revokeLink(relayUrl: string, seeded: SeededShare): Promise<void> 
     `${relayUrl}/sync/shares/${encodeURIComponent(seeded.shareId)}/revoke`,
     {
       method: "POST",
-      headers: {
-        authorization: `Bearer test:${seeded.ownerUserId}`,
-        "content-type": "application/json",
-      },
+      headers: ownerHeaders(seeded.ownerUserId, true),
       body: JSON.stringify({ grantId: seeded.grantId }),
     },
   );

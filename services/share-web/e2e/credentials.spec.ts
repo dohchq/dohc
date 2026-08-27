@@ -253,6 +253,7 @@ test("keeps the viewer bearer and authored credential probes outside page reach"
     await expect(page.locator("article.markdown")).toContainText(
       "Viewer credential browser conformance",
     );
+    await page.waitForLoadState("networkidle");
     expect(page.url()).toBe(finalUrl);
     expect(new URL(page.url()).hash).toBe("");
     expect(page.url().includes(seeded.secret)).toBe(false);

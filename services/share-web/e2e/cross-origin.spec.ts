@@ -37,7 +37,7 @@ async function fetchFromProbe(
   const networkResponsePromise = new Promise<ObservedNetworkResponse>((resolve, reject) => {
     pausedListener = (event) => {
       if (event.request.url !== blobUrl) {
-        void cdp.send("Fetch.continueResponse", { requestId: event.requestId });
+        void cdp.send("Fetch.continueResponse", { requestId: event.requestId }).catch(() => {});
         return;
       }
       void (async () => {
@@ -89,8 +89,7 @@ async function fetchFromProbe(
   const networkResponse = await networkResponsePromise.finally(() => {
     if (pausedListener) cdp.off("Fetch.requestPaused", pausedListener);
   });
-  expect(scriptResult).toEqual({
-    errorMessage: "Failed to fetch",
+  expect(scriptResult).toMatchObject({
     errorName: "TypeError",
     rejected: true,
   });

@@ -6,8 +6,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test as base } from "@playwright/test";
+import { buildHarnessEnvironment } from "./harnessEnvironment";
 
 const LOOPBACK_HOST = "127.0.0.1";
+const CROSS_SITE_HOST = "localhost";
 const RELAY_STARTUP_TIMEOUT_MS = 45_000;
 const SHARE_WEB_STARTUP_TIMEOUT_MS = 45_000;
 const CHILD_STOP_TIMEOUT_MS = 15_000;
@@ -259,8 +261,7 @@ async function startStack(): Promise<RunningStack> {
   const tempRoot = await mkdtemp(join(tmpdir(), "dohc-share-web-browser-"));
   const relayExchangeKey = randomBytes(32).toString("base64url");
   const relayLinkKey = randomBytes(32).toString("base64url");
-  const relayEnv: NodeJS.ProcessEnv = {
-    ...process.env,
+  const relayEnv = buildHarnessEnvironment(process.env, {
     NODE_ENV: "test",
     SYNC_RELAY_TEST_AUTH: "1",
     SYNC_RELAY_PORT: "0",
@@ -268,18 +269,15 @@ async function startStack(): Promise<RunningStack> {
     DOHC_RELAY_EXCHANGE_KEY: relayExchangeKey,
     DOHC_RELAY_LINK_KEY: relayLinkKey,
     FORCE_COLOR: "0",
-  };
-  const shareWebEnv: NodeJS.ProcessEnv = {
-    ...process.env,
+  });
+  const shareWebEnv = buildHarnessEnvironment(process.env, {
     NODE_ENV: "test",
     DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: relayExchangeKey,
     DOHC_SHARE_WEB_PUBLIC_HOSTS: `${LOOPBACK_HOST}:${String(shareWebPort)}`,
     DOHC_SHARE_WEB_PORT: String(shareWebPort),
     DOHC_SHARE_WEB_BIND: LOOPBACK_HOST,
     FORCE_COLOR: "0",
-  };
-  delete shareWebEnv.DOHC_SHARE_WEB_DEV;
-  delete shareWebEnv.DOHC_SHARE_WEB_TEST_VIEWER_ASSETS_DIR;
+  });
 
   const services: ServiceProcess[] = [];
   let stopped = false;
@@ -361,7 +359,7 @@ function randomId(prefix: string): string {
   return `${prefix}-${randomBytes(8).toString("hex")}`;
 }
 
-function ownerHeaders(ownerUserId: string, json = false): Headers {
+export function ownerHeaders(ownerUserId: string, json = false): Headers {
   const headers = new Headers({ authorization: `Bearer test:${ownerUserId}` });
   if (json) headers.set("content-type", "application/json");
   return headers;
@@ -511,6 +509,7 @@ function recordedHeaders(headers: IncomingHttpHeaders): Record<string, string> {
 async function listenProbe(
   origin: ProbeRequest["origin"],
   requests: ProbeRequest[],
+  host: string,
 ): Promise<{ port: number; server: Server }> {
   const server = createServer((request, response) => {
     requests.push({
@@ -529,7 +528,7 @@ async function listenProbe(
   await new Promise<void>((resolve, reject) => {
     const onError = (error: Error): void => reject(error);
     server.once("error", onError);
-    server.listen(0, LOOPBACK_HOST, () => {
+    server.listen(0, host, () => {
       server.off("error", onError);
       resolve();
     });
@@ -552,13 +551,13 @@ async function stopServer(server: Server): Promise<void> {
 
 async function startProbe(): Promise<RunningProbe> {
   const requests: ProbeRequest[] = [];
-  const crossSite = await listenProbe("cross-site", requests);
+  const crossSite = await listenProbe("cross-site", requests, CROSS_SITE_HOST);
   try {
-    const sameHostname = await listenProbe("same-hostname", requests);
+    const sameHostname = await listenProbe("same-hostname", requests, LOOPBACK_HOST);
     let stopped = false;
     return {
       requests,
-      url: `http://localhost:${String(crossSite.port)}`,
+      url: `http://${CROSS_SITE_HOST}:${String(crossSite.port)}`,
       sameHostnameUrl: `http://${LOOPBACK_HOST}:${String(sameHostname.port)}`,
       stop: async () => {
         if (stopped) return;

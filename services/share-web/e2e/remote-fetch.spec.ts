@@ -140,11 +140,10 @@ test("blocks remote media and cross-origin connection egress", async ({ browser,
       errorName: "TypeError",
       rejected: true,
     });
-    expect(directFetchConsoleErrors.length).toBeGreaterThan(0);
-    expect(probe.requests).toEqual([]);
-    expect(
-      directFetchConsoleErrors.some((message) => message.includes("Content Security Policy")),
+    await expect.poll(() =>
+      directFetchConsoleErrors.some((message) => message.includes("Content Security Policy"))
     ).toBe(true);
+    expect(probe.requests).toEqual([]);
 
     const viewerUrl = page.url();
     expect(new URL(viewerUrl).pathname).toMatch(/^\/s\/[A-Za-z0-9_-]{12}$/u);
