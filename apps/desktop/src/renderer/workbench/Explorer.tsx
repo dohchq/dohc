@@ -56,6 +56,7 @@ import {
   parsePluginWebAppTabPath,
   parseSiteTabPath,
 } from "./workbenchState";
+import { useCommitOnRelease } from "./useCommitOnRelease";
 
 // The explorer: a real nested tree over the flat (files, folders) lists with
 // inline create/rename editboxes, optimistic pending ops (rollback on error),
@@ -78,7 +79,7 @@ export interface ExplorerProps {
   pinned: string[];
   // Max height of the Open Editors list (workbench state, persisted): the
   // list caps here and scrolls internally; the section's bottom-edge drag
-  // handle streams clamped heights up (SidePanel width precedent).
+  // handle previews locally and commits the final clamped height on release.
   openEditorsHeight: number;
   onOpenEditorsHeightChange: (height: number) => void;
   // Incrementing request to begin an inline create at the root (palette /
@@ -422,6 +423,13 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   // collapse the saved cap to the content height on the first move.
   const openEditorsDrag = useRef<{ startY: number; startHeight: number } | null>(
     null,
+  );
+  const openEditorsResize = useCommitOnRelease(
+    props.onOpenEditorsHeightChange,
+  );
+  const openEditorsHeight = Math.min(
+    openEditorsResize.previewValue ?? props.openEditorsHeight,
+    viewportCap,
   );
   const editInputRef = useRef<HTMLInputElement>(null);
   // One commit per edit session: Enter/Escape unmount the input, whose blur
@@ -1346,7 +1354,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 // Editors pane). The cap is workbench state: the section's
                 // bottom-edge handle resizes it and the value persists — the
                 // render additionally bounds it to the viewport cap.
-                style={{ maxHeight: Math.min(props.openEditorsHeight, viewportCap) }}
+                style={{ maxHeight: openEditorsHeight }}
                 className="m-0 list-none overflow-y-auto overscroll-contain p-0"
               >
                 {props.editorGroups.map((group, groupIndex) => (
@@ -1455,35 +1463,31 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 // before anything visibly moves.
                 openEditorsDrag.current = {
                   startY: event.clientY,
-                  startHeight: Math.min(props.openEditorsHeight, viewportCap),
+                  startHeight: openEditorsHeight,
                 };
+                openEditorsResize.begin(event.pointerId, openEditorsHeight);
                 event.currentTarget.setPointerCapture(event.pointerId);
               }}
               onPointerMove={(event) => {
                 const drag = openEditorsDrag.current;
-                if (drag === null) return;
-                // If the release was missed (capture lost outside the
-                // window), a buttons-up move must end the drag — or plain
-                // hovering would keep resizing and persist bogus heights.
-                if ((event.buttons & 1) === 0) {
-                  openEditorsDrag.current = null;
+                if (drag === null || !openEditorsResize.isActive(event.pointerId)) {
                   return;
                 }
-                props.onOpenEditorsHeightChange(
+                openEditorsResize.update(
+                  event.pointerId,
                   clampOpenEditorsHeight(
                     drag.startHeight + event.clientY - drag.startY,
                   ),
+                  event.buttons,
                 );
               }}
-              onPointerUp={() => {
-                openEditorsDrag.current = null;
-              }}
-              onPointerCancel={() => {
-                openEditorsDrag.current = null;
-              }}
-              onLostPointerCapture={() => {
-                openEditorsDrag.current = null;
-              }}
+              onPointerUp={(event) => openEditorsResize.commit(event.pointerId)}
+              onPointerCancel={(event) =>
+                openEditorsResize.commit(event.pointerId)
+              }
+              onLostPointerCapture={(event) =>
+                openEditorsResize.commit(event.pointerId)
+              }
               className="absolute -bottom-1 left-0 z-10 h-2 w-full cursor-row-resize bg-transparent transition-colors hover:bg-line/80"
             />
           ) : null}

@@ -825,6 +825,13 @@ export function createEditorGroupRight(
 
 // Resize an adjacent pair. `leftSize` is the left group's normalized size;
 // the right group receives the pair's remaining size.
+export function clampEditorGroupPairLeftSize(
+  pairSize: number,
+  leftSize: number,
+): number {
+  return Math.min(Math.max(leftSize, pairSize * 0.05), pairSize * 0.95);
+}
+
 export function resizeEditorGroups(
   state: WorkbenchState,
   leftGroupId: string,
@@ -838,10 +845,7 @@ export function resizeEditorGroups(
   const pairSize =
     state.editorGroups[leftIndex].size + state.editorGroups[leftIndex + 1].size;
   if (!Number.isFinite(leftSize)) return state;
-  const boundedLeftSize = Math.min(
-    Math.max(leftSize, pairSize * 0.05),
-    pairSize * 0.95,
-  );
+  const boundedLeftSize = clampEditorGroupPairLeftSize(pairSize, leftSize);
   const editorGroups = [...state.editorGroups];
   editorGroups[leftIndex] = { ...editorGroups[leftIndex], size: boundedLeftSize };
   editorGroups[leftIndex + 1] = {

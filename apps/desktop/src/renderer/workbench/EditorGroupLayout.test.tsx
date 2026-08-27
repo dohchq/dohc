@@ -47,7 +47,7 @@ describe("EditorGroupLayout", () => {
     ).toBe("right");
   });
 
-  it("resizes adjacent groups with pointer movement and stops after a buttons-up move", () => {
+  it("previews pointer moves locally and commits adjacent groups once on release", () => {
     const { onResizeGroups } = renderLayout();
     const layout = screen.getByTestId("editor-group-layout");
     Object.defineProperty(layout, "getBoundingClientRect", {
@@ -66,15 +66,44 @@ describe("EditorGroupLayout", () => {
       buttons: 1,
       clientX: 600,
     });
-    expect(onResizeGroups).toHaveBeenCalledWith("left", "right", 1.2);
-
+    expect(screen.getByTestId("editor-group-left").style.flexGrow).toBe("1.2");
+    expect(screen.getByTestId("editor-group-right").style.flexGrow).toBe("0.8");
     fireEvent.pointerMove(separator, {
       pointerId: 4,
+      buttons: 1,
+      clientX: 700,
+    });
+    expect(screen.getByTestId("editor-group-left").style.flexGrow).toBe("1.4");
+    expect(onResizeGroups).not.toHaveBeenCalled();
+
+    fireEvent.pointerUp(separator, { pointerId: 4 });
+    expect(onResizeGroups).toHaveBeenCalledOnce();
+    expect(onResizeGroups).toHaveBeenCalledWith("left", "right", 1.4);
+  });
+
+  it("commits the final buttons-up move when pointerup was missed", () => {
+    const { onResizeGroups } = renderLayout();
+    const layout = screen.getByTestId("editor-group-layout");
+    Object.defineProperty(layout, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ width: 1000 }),
+    });
+    const separator = screen.getByRole("separator", { name: "Resize editor groups" });
+    Object.defineProperty(separator, "setPointerCapture", {
+      configurable: true,
+      value: vi.fn(),
+    });
+
+    fireEvent.pointerDown(separator, { button: 0, pointerId: 5, clientX: 500 });
+    fireEvent.pointerMove(separator, {
+      pointerId: 5,
       buttons: 0,
       clientX: 650,
     });
+    expect(onResizeGroups).toHaveBeenCalledOnce();
+    expect(onResizeGroups).toHaveBeenCalledWith("left", "right", 1.3);
     fireEvent.pointerMove(separator, {
-      pointerId: 4,
+      pointerId: 5,
       buttons: 1,
       clientX: 700,
     });
@@ -114,8 +143,38 @@ describe("EditorGroupLayout", () => {
       buttons: 1,
       clientX: 450,
     });
+    expect(screen.getByTestId("editor-group-left").style.flexGrow).toBe("0.5");
+    expect(onResizeGroups).not.toHaveBeenCalled();
 
+    fireEvent.pointerCancel(separator, { pointerId: 7 });
+
+    expect(onResizeGroups).toHaveBeenCalledOnce();
     expect(onResizeGroups).toHaveBeenCalledWith("left", "middle", 0.5);
+  });
+
+  it("commits the final preview on window blur", () => {
+    const { onResizeGroups } = renderLayout();
+    const layout = screen.getByTestId("editor-group-layout");
+    Object.defineProperty(layout, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ width: 1000 }),
+    });
+    const separator = screen.getByRole("separator", { name: "Resize editor groups" });
+    Object.defineProperty(separator, "setPointerCapture", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    fireEvent.pointerDown(separator, { button: 0, pointerId: 8, clientX: 500 });
+    fireEvent.pointerMove(separator, {
+      pointerId: 8,
+      buttons: 1,
+      clientX: 750,
+    });
+
+    fireEvent(window, new Event("blur"));
+
+    expect(onResizeGroups).toHaveBeenCalledOnce();
+    expect(onResizeGroups).toHaveBeenCalledWith("left", "right", 1.5);
   });
 
   it("supports keyboard resizing", () => {

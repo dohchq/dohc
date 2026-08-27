@@ -237,6 +237,7 @@ import {
   type WorkbenchState,
   type WorkbenchTab,
 } from "./workbench/workbenchState";
+import { useCommitOnRelease } from "./workbench/useCommitOnRelease";
 
 // Mounted-share paths (shared-with-me/…) are read-only projections of
 // someone else's files. This check is a renderer UX affordance only — main
@@ -692,6 +693,7 @@ export const WORKSPACE_ACTIVITY_REFRESH_DELAY_MS = 200;
 // continuously) would otherwise starve every refresh until it ends. During
 // such a burst one refresh still fires per cap window.
 export const WORKSPACE_ACTIVITY_REFRESH_MAX_WAIT_MS = 1_000;
+export const WORKBENCH_PERSIST_DELAY_MS = 500;
 
 function scheduleMarkdownEditorPreload(): () => void {
   let idleHandle: number | null = null;
@@ -1298,6 +1300,8 @@ function ChatsPanel(props: {
 }) {
   const panelRef = useRef<HTMLElement>(null);
   const dragRight = useRef<number | null>(null);
+  const resize = useCommitOnRelease(props.onWidthChange);
+  const width = resize.previewValue ?? props.width;
 
   return (
     <aside
@@ -1305,7 +1309,7 @@ function ChatsPanel(props: {
       data-testid="chats-panel"
       aria-label="Chats"
       className="relative flex shrink-0 flex-col border-l border-line bg-panel-2"
-      style={{ width: props.width }}
+      style={{ width }}
     >
       <div
         data-testid="chats-panel-resize"
@@ -1317,27 +1321,20 @@ function ChatsPanel(props: {
           if (event.button !== 0) return;
           dragRight.current =
             panelRef.current?.getBoundingClientRect().right ?? window.innerWidth;
+          resize.begin(event.pointerId, width);
           event.currentTarget.setPointerCapture(event.pointerId);
         }}
         onPointerMove={(event) => {
-          if (dragRight.current === null) return;
-          // A buttons-up move means the release was missed (capture lost
-          // outside the window): end the drag instead of resizing on hover.
-          if ((event.buttons & 1) === 0) {
-            dragRight.current = null;
-            return;
-          }
-          props.onWidthChange(clampChatsWidth(dragRight.current - event.clientX));
+          if (dragRight.current === null || !resize.isActive(event.pointerId)) return;
+          resize.update(
+            event.pointerId,
+            clampChatsWidth(dragRight.current - event.clientX),
+            event.buttons,
+          );
         }}
-        onPointerUp={() => {
-          dragRight.current = null;
-        }}
-        onPointerCancel={() => {
-          dragRight.current = null;
-        }}
-        onLostPointerCapture={() => {
-          dragRight.current = null;
-        }}
+        onPointerUp={(event) => resize.commit(event.pointerId)}
+        onPointerCancel={(event) => resize.commit(event.pointerId)}
+        onLostPointerCapture={(event) => resize.commit(event.pointerId)}
         className="absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize bg-transparent transition-colors hover:bg-line/80"
       />
       {/* Same header grammar + h-9 band as the side panel: the two
@@ -2208,10 +2205,10 @@ export function DesktopWorkspaceShell(props: {
   const mutateWb = useCallback(
     (updater: (state: WorkbenchState) => WorkbenchState) => {
       // A pending canonical DM navigation loses to a DESTINATION change, not
-      // to every workbench write. Most writes here are not one: a width drag
-      // streams a mutation per pointermove, and the share-mount poll reaches
-      // this seam with no user involved at all — cancelling on those would
-      // silently discard a DM the user had just clicked. The transition is
+      // to every workbench write. Most writes here are not one: a panel resize
+      // commits its final size, and the share-mount poll reaches this seam with
+      // no user involved at all — cancelling on those would silently discard a
+      // DM the user had just clicked. The transition is
       // computed from wbRef outside the functional updater, the idiom openFile
       // and closeFileTab already use for their marks (updaters are
       // side-effect-free by contract, so probing one is safe).
@@ -2408,7 +2405,7 @@ export function DesktopWorkspaceShell(props: {
       void bridge()
         .setWorkspaceUiState({ workspaceId, state: serializeUiState(wb) })
         .catch(() => undefined);
-    }, 500);
+    }, WORKBENCH_PERSIST_DELAY_MS);
     return () => clearTimeout(timer);
   }, [wb, workspaceId]);
 
