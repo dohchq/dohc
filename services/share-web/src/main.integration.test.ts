@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { shareWebRefusalBody } from "./server";
+import { EXCHANGE_BUCKET_CAPACITY, shareWebRefusalBody } from "./server";
 
 const PUBLIC_HOST = "share.example.test";
 const MAX_REQUEST_BODY_BYTES = 16 * 1024;
@@ -100,10 +100,10 @@ afterEach(async () => {
 
 describe("share-web Node request adapter", () => {
   it.each([
-    ["development", true],
-    ["production", false],
+    ["with development mode enabled", true],
+    ["with development mode disabled", false],
   ] as const)(
-    "fails %s startup when viewer assets are missing",
+    "fails startup %s when viewer assets are missing",
     async (mode, devMode) => {
       const viewerAssetsDir = await createViewerAssets(false);
       let server: RunningShareWeb;
@@ -125,7 +125,7 @@ describe("share-web Node request adapter", () => {
       });
       const body = await readResponse(response);
       throw new Error(
-        `share-web started in ${mode} mode with empty viewer assets; ` +
+        `share-web started ${mode} with empty viewer assets; ` +
           `GET /s/missing-viewer returned ${String(response.statusCode)} ${JSON.stringify(body)}\n` +
           `expected stderr:\n${MISSING_VIEWER_ASSETS_MESSAGE}\n`,
       );
@@ -258,7 +258,11 @@ describe("share-web Node request adapter", () => {
       expect(beforeEnd.value.raw).toContain(shareWebRefusalBody);
       expect(beforeEnd.value.raw).toMatch(/\r\nconnection: close\r\n/iu);
 
-      for (let exchangeNumber = 1; exchangeNumber <= 12; exchangeNumber += 1) {
+      for (
+        let exchangeNumber = 1;
+        exchangeNumber <= EXCHANGE_BUCKET_CAPACITY;
+        exchangeNumber += 1
+      ) {
         const response = await sendExchange(server.port, "198.51.100.1");
         expect(response, `follow-up exchange ${exchangeNumber}`).toMatchObject({
           kind: "response",
@@ -404,7 +408,11 @@ describe("share-web Node request adapter", () => {
   it("ignores X-Forwarded-For from an untrusted peer", async () => {
     const server = await startShareWeb();
 
-    for (let exchangeNumber = 1; exchangeNumber <= 12; exchangeNumber += 1) {
+    for (
+      let exchangeNumber = 1;
+      exchangeNumber <= EXCHANGE_BUCKET_CAPACITY;
+      exchangeNumber += 1
+    ) {
       const response = await sendExchange(
         server.port,
         `198.51.100.${exchangeNumber}`,
@@ -422,7 +430,11 @@ describe("share-web Node request adapter", () => {
   it("uses the rightmost untrusted address from a trusted proxy", async () => {
     const server = await startShareWeb({ trustedProxies: "127.0.0.1,10.0.0.2" });
 
-    for (let exchangeNumber = 1; exchangeNumber <= 12; exchangeNumber += 1) {
+    for (
+      let exchangeNumber = 1;
+      exchangeNumber <= EXCHANGE_BUCKET_CAPACITY;
+      exchangeNumber += 1
+    ) {
       const response = await sendExchange(
         server.port,
         `198.51.100.${exchangeNumber}, 203.0.113.5, 10.0.0.2`,
@@ -443,7 +455,11 @@ describe("share-web Node request adapter", () => {
   it("keeps two forwarded clients in distinct buckets behind one trusted proxy", async () => {
     const server = await startShareWeb({ trustedProxies: "127.0.0.1" });
 
-    for (let exchangeNumber = 1; exchangeNumber <= 12; exchangeNumber += 1) {
+    for (
+      let exchangeNumber = 1;
+      exchangeNumber <= EXCHANGE_BUCKET_CAPACITY;
+      exchangeNumber += 1
+    ) {
       const response = await sendExchange(server.port, "198.51.100.1");
       expect(response, `first client exchange ${exchangeNumber}`).toMatchObject({
         kind: "response",

@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadShareWebConfig } from "./config";
 import {
   createShareWebHandler,
+  EXCHANGE_BUCKET_CAPACITY,
   LINK_SESSION_RENEWAL_GRACE_MS,
+  MAX_SESSIONS_PER_GRANT,
   SHARE_WEB_CSP,
   shareWebRefusalBody,
 } from "./server";
@@ -31,6 +33,47 @@ function exchange(secret: string): RequestInit {
 
 function cookiePair(response: Response): string {
   return response.headers.get("set-cookie")!.split(";", 1)[0]!;
+}
+
+function capacityTestHandler(maxSessions: number): {
+  handler: ReturnType<typeof createShareWebHandler>;
+  exchangeFrom: (secret: string, clientId: number) => Promise<Response>;
+} {
+  let capabilityId = 0;
+  let sessionId = 0;
+  const token = (id: number): string => {
+    const bytes = Buffer.alloc(32);
+    bytes.writeUInt32BE(id, bytes.length - 4);
+    return bytes.toString("base64url");
+  };
+  const relay = async (relayRequest: Request): Promise<Response> => {
+    if (new URL(relayRequest.url).pathname === "/sync/link-exchange") {
+      const { secret } = (await relayRequest.json()) as { secret: string };
+      return Response.json({
+        ok: true,
+        grantId: secret === SECRET_BETA ? "grant-beta" : "grant-alpha",
+        capabilityToken: token(++capabilityId),
+        capabilityExpiresAtMs: 901_000,
+      });
+    }
+    return Response.json({ ok: true });
+  };
+  const handler = createShareWebHandler({
+    relayUrl: "http://relay.test",
+    publicHosts: new Set([HOST]),
+    fetchRelay: relay,
+    nowMs: () => 1_000,
+    newSessionToken: () => token(++sessionId),
+    maxSessions,
+  });
+  return {
+    handler,
+    exchangeFrom: async (secret, clientId) => {
+      const exchangeRequest = request("/api/exchange", exchange(secret));
+      exchangeRequest.headers.set("x-dohc-share-web-client-ip", `client-${clientId}`);
+      return await handler(exchangeRequest);
+    },
+  };
 }
 
 function expectSecurityHeaders(response: Response): void {
@@ -223,6 +266,87 @@ describe("share-web sessions", () => {
     );
     expect(rotatedAlphaMeta.status).toBe(200);
     expect(await betaAfterRotation.json()).toMatchObject({ granterEmail: "beta@example.test" });
+  });
+
+  it("evicts a full grant's oldest session before another grant's session", async () => {
+    const { handler, exchangeFrom } = capacityTestHandler(
+      MAX_SESSIONS_PER_GRANT + 1,
+    );
+
+    const betaExchange = await exchangeFrom(SECRET_BETA, 0);
+    const beta = (await betaExchange.json()) as { session: string };
+    const betaCookie = cookiePair(betaExchange);
+    let oldestAlpha: { cookie: string; session: string } | null = null;
+    for (let index = 0; index < MAX_SESSIONS_PER_GRANT; index += 1) {
+      const alphaExchange = await exchangeFrom(SECRET_ALPHA, index + 1);
+      if (index === 0) {
+        oldestAlpha = {
+          cookie: cookiePair(alphaExchange),
+          session: ((await alphaExchange.json()) as { session: string }).session,
+        };
+      }
+    }
+    expect(oldestAlpha).not.toBeNull();
+
+    await exchangeFrom(SECRET_ALPHA, MAX_SESSIONS_PER_GRANT + 1);
+
+    const betaView = await handler(
+      request("/api/view/meta", {
+        headers: { cookie: betaCookie, "x-dohc-link-session": beta.session },
+      }),
+    );
+    expect(betaView.status).toBe(200);
+    const oldestAlphaView = await handler(
+      request("/api/view/meta", {
+        headers: {
+          cookie: oldestAlpha!.cookie,
+          "x-dohc-link-session": oldestAlpha!.session,
+        },
+      }),
+    );
+    expect(oldestAlphaView.status).toBe(404);
+  });
+
+  it("uses the largest grant for global-cap backstop eviction", async () => {
+    const { handler, exchangeFrom } = capacityTestHandler(4);
+    const betaExchange = await exchangeFrom(SECRET_BETA, 0);
+    const beta = (await betaExchange.json()) as { session: string };
+    const betaCookie = cookiePair(betaExchange);
+    let oldestAlpha: { cookie: string; session: string } | null = null;
+    for (let index = 0; index < 3; index += 1) {
+      const alphaExchange = await exchangeFrom(SECRET_ALPHA, index + 1);
+      if (index === 0) {
+        oldestAlpha = {
+          cookie: cookiePair(alphaExchange),
+          session: ((await alphaExchange.json()) as { session: string }).session,
+        };
+      }
+    }
+    expect(oldestAlpha).not.toBeNull();
+
+    await exchangeFrom(SECRET_BETA, 4);
+
+    expect(
+      (
+        await handler(
+          request("/api/view/meta", {
+            headers: { cookie: betaCookie, "x-dohc-link-session": beta.session },
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await handler(
+          request("/api/view/meta", {
+            headers: {
+              cookie: oldestAlpha!.cookie,
+              "x-dohc-link-session": oldestAlpha!.session,
+            },
+          }),
+        )
+      ).status,
+    ).toBe(404);
   });
 
   it("mints the required host-only cookie and keeps relay capability data server-side", async () => {
@@ -982,7 +1106,11 @@ describe("share-web sessions", () => {
       "x-dohc-share-web-client-ip": "192.0.2.10",
     };
 
-    for (let exchangeNumber = 1; exchangeNumber <= 12; exchangeNumber += 1) {
+    for (
+      let exchangeNumber = 1;
+      exchangeNumber <= EXCHANGE_BUCKET_CAPACITY;
+      exchangeNumber += 1
+    ) {
       const accepted = await handler(
         request("/api/exchange", {
           method: "POST",

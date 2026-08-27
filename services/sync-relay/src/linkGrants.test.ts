@@ -113,6 +113,7 @@ function handler(
     relayExchangeKey?: string;
     linkExchangeRateLimiter?: LinkExchangeRateLimiter;
     linkReadRateLimiter?: LinkReadRateLimiter;
+    linkGrantReadRateLimiter?: LinkReadRateLimiter;
     nowMs?: () => number;
     newLinkBearer?: () => string;
   } = {},
@@ -134,6 +135,7 @@ function handler(
     relayExchangeKey: overrides.relayExchangeKey,
     linkExchangeRateLimiter: overrides.linkExchangeRateLimiter,
     linkReadRateLimiter: overrides.linkReadRateLimiter,
+    linkGrantReadRateLimiter: overrides.linkGrantReadRateLimiter,
     newLinkBearer: overrides.newLinkBearer,
   };
   return createSyncRelayHandler(options);
@@ -1419,6 +1421,45 @@ describe("relay link grants", () => {
       code: "link_read_rate_limited",
     });
     expect(storage.findLinkSessionByCapabilityHash(hmac(capability))).not.toBeNull();
+  });
+
+  it("spends refreshes from the grant read budget", async () => {
+    const storage = await newStorage();
+    const h = handler(storage, {
+      linkReadRateLimiter: new LinkReadRateLimiter(10, 0.000_001, 10),
+      linkGrantReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
+    });
+    await seedFileShare(h);
+    const created = await createLink(h);
+    const exchanged = await json(
+      await h(request(null, "/sync/link-exchange", jsonBody({ secret: created.secret }))),
+    );
+    const firstRefresh = await h(
+      request(null, "/sync/link-refresh", {
+        method: "POST",
+        headers: {
+          authorization: `LinkCapability ${String(exchanged.capabilityToken)}`,
+        },
+      }),
+    );
+    expect(firstRefresh.status).toBe(200);
+    const refreshed = await json(firstRefresh);
+
+    const refused = await h(
+      request(null, "/sync/link-refresh", {
+        method: "POST",
+        headers: {
+          authorization: `LinkCapability ${String(refreshed.capabilityToken)}`,
+        },
+      }),
+    );
+
+    expect(refused.status).toBe(429);
+    expect(await json(refused)).toEqual({
+      ok: false,
+      error: "too many link reads",
+      code: "link_read_rate_limited",
+    });
   });
 
   it("refreshes a valid capability when the relay exchange key is not configured", async () => {

@@ -2,10 +2,17 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { App, loadLog, MARKDOWN_PREVIEW_BYTE_CAP, MAX_LOG_PAGES } from "./App";
+import {
+  App,
+  fileTree,
+  loadLog,
+  MARKDOWN_PREVIEW_BYTE_CAP,
+  MAX_LOG_PAGES,
+} from "./App";
 import { filesFromLog, type RelayOp, type SharedFile, type ViewMeta } from "./model";
 
 const SESSION = "abcdefghijkl";
+const SETTLE_TURN_LIMIT = 200;
 
 const DEFAULT_META: ViewMeta = {
   access: "view",
@@ -30,6 +37,18 @@ function requestPath(input: RequestInfo | URL): string {
   if (input instanceof URL) return `${input.pathname}${input.search}`;
   const url = new URL(input.url);
   return `${url.pathname}${url.search}`;
+}
+
+async function settle(condition: () => boolean): Promise<void> {
+  for (let turn = 0; turn < SETTLE_TURN_LIMIT; turn += 1) {
+    await act(async () => {
+      await Promise.resolve();
+    });
+    if (condition()) return;
+  }
+  throw new Error(
+    `Condition did not settle within ${String(SETTLE_TURN_LIMIT)} act turns`,
+  );
 }
 
 function trackImageSourceRequests(image: HTMLImageElement): {
@@ -80,6 +99,47 @@ function logPage(files: readonly SharedFile[]): Response {
   );
 }
 
+interface ReferenceFolderNode {
+  name: string;
+  path: string;
+  folders: ReferenceFolderNode[];
+  files: SharedFile[];
+}
+
+function quadraticReferenceFileTree(files: SharedFile[]): ReferenceFolderNode {
+  const root: ReferenceFolderNode = {
+    name: "",
+    path: "",
+    folders: [],
+    files: [],
+  };
+  for (const file of files) {
+    const parts = file.path.split("/");
+    let folder = root;
+    for (const segment of parts.slice(0, -1)) {
+      let child = folder.folders.find((candidate) => candidate.name === segment);
+      if (!child) {
+        child = {
+          name: segment,
+          path: folder.path ? `${folder.path}/${segment}` : segment,
+          folders: [],
+          files: [],
+        };
+        folder.folders.push(child);
+      }
+      folder = child;
+    }
+    folder.files.push(file);
+  }
+  const sort = (folder: ReferenceFolderNode) => {
+    folder.folders.sort((left, right) => left.name.localeCompare(right.name));
+    folder.files.sort((left, right) => left.path.localeCompare(right.path));
+    folder.folders.forEach(sort);
+  };
+  sort(root);
+  return root;
+}
+
 describe("App", () => {
   let container: HTMLDivElement;
   let root: Root | null;
@@ -100,14 +160,17 @@ describe("App", () => {
     vi.unstubAllGlobals();
   });
 
-  async function renderApp(): Promise<void> {
+  async function renderApp(
+    condition: () => boolean = () =>
+      container.querySelector(".viewer") !== null ||
+      container.querySelector("main.state")?.textContent ===
+        "This link isn't available.",
+  ): Promise<void> {
     root = createRoot(container);
     await act(async () => {
       root?.render(<App />);
     });
-    await act(async () => {
-      for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
-    });
+    await settle(condition);
   }
 
   function renderedFilePaths(): Array<string | null> {
@@ -155,7 +218,7 @@ describe("App", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    await renderApp();
+    await renderApp(() => metaRequests === 1);
 
     expect(metaRequests).toBe(1);
     expect(container.textContent).toContain("Opening shared files");
@@ -209,6 +272,57 @@ describe("App", () => {
     expect(folderButton?.getAttribute("aria-expanded")).toBe("false");
   });
 
+  it("preserves the established tree shape for a large nested file set", () => {
+    const files: SharedFile[] = [
+      {
+        path: "z-root.txt",
+        blobSha256: "a".repeat(64),
+        contentKind: "text",
+      },
+      {
+        path: "a-root.txt",
+        blobSha256: "b".repeat(64),
+        contentKind: "text",
+      },
+      {
+        path: "workspace-255",
+        blobSha256: "c".repeat(64),
+        contentKind: "text",
+      },
+    ];
+    for (let index = 511; index >= 0; index -= 1) {
+      const folder = `workspace-${index.toString().padStart(3, "0")}`;
+      files.push(
+        {
+          path: `${folder}/zeta.txt`,
+          blobSha256: "d".repeat(64),
+          contentKind: "text",
+        },
+        {
+          path: `${folder}/alpha.txt`,
+          blobSha256: "e".repeat(64),
+          contentKind: "text",
+        },
+        {
+          path: `${folder}/nested-b/readme.md`,
+          blobSha256: "f".repeat(64),
+          contentKind: "text",
+        },
+        {
+          path: `${folder}/nested-a/deep/data.json`,
+          blobSha256: "0".repeat(64),
+          contentKind: "text",
+        },
+      );
+    }
+
+    const tree = fileTree(files);
+
+    expect(tree).toEqual(quadraticReferenceFileTree(files));
+    expect(tree.folders).toHaveLength(512);
+    expect(tree.files).toHaveLength(3);
+  });
+
   it("cancels an in-flight initial log scan on unmount", async () => {
     const logPaths: string[] = [];
     let logSignal: AbortSignal | undefined;
@@ -242,9 +356,7 @@ describe("App", () => {
     act(() => root?.unmount());
     root = null;
     releaseFirstPage?.();
-    await act(async () => {
-      for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
-    });
+    await settle(() => logSignal?.aborted === true);
 
     expect(logPaths).toEqual(["/api/view/log?since=0&limit=500"]);
     expect(logSignal).toBeInstanceOf(AbortSignal);
@@ -289,9 +401,7 @@ describe("App", () => {
     act(() => root?.unmount());
     root = null;
     releaseMeta?.(jsonResponse(DEFAULT_META));
-    await act(async () => {
-      for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
-    });
+    await settle(() => metaSignal?.aborted === true && metaAborts === 1);
 
     expect(metaSignal).toBeInstanceOf(AbortSignal);
     expect(metaSignal).toBe(logSignal);
@@ -728,13 +838,7 @@ describe("App", () => {
       if (!finishExchange) throw new Error("Exchange request did not start");
       finishExchange(jsonResponse({ session: SESSION }));
     });
-    // Wait for the condition, not a turn count: the exchange, metadata load,
-    // and log load settle when the address carries the session path.
-    for (let turn = 0; turn < 200 && location.pathname !== `/s/${SESSION}`; turn += 1) {
-      await act(async () => {
-        await Promise.resolve();
-      });
-    }
+    await settle(() => location.pathname === `/s/${SESSION}`);
 
     expect(location.pathname).toBe(`/s/${SESSION}`);
     expect(location.hash).toBe("");
@@ -759,7 +863,7 @@ describe("App", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    await renderApp();
+    await renderApp(() => exchangeBodies.length === 1);
 
     expect(`${location.pathname}${location.hash}`).toBe("/s/");
     expect(exchangeBodies).toEqual([JSON.stringify({ secret })]);
@@ -1327,6 +1431,106 @@ describe("App", () => {
     ]);
   });
 
+  it("keeps an unchanged Markdown preview across an epoch replay", async () => {
+    vi.useFakeTimers();
+    const initialFile: SharedFile = {
+      path: "guide.md",
+      blobSha256: "a".repeat(64),
+      contentKind: "text",
+    };
+    const changedFile: SharedFile = {
+      ...initialFile,
+      blobSha256: "b".repeat(64),
+    };
+    const initialOps: RelayOp[] = [{
+      relaySeq: 7,
+      opKind: "version.create",
+      payload: { forkSnapshots: [initialFile] },
+      recordedAtMs: 1,
+    }];
+    const replayOps: RelayOp[] = [{
+      relaySeq: 11,
+      opKind: "version.create",
+      payload: { forkSnapshots: [{ ...initialFile }] },
+      recordedAtMs: 2,
+    }];
+    const changedOps: RelayOp[] = [{
+      relaySeq: 12,
+      opKind: "moment.append",
+      payload: {
+        operation: "write",
+        payloadBeforePath: initialFile.path,
+        payloadBeforeBlobSha256: initialFile.blobSha256,
+        payloadAfterPath: changedFile.path,
+        payloadAfterBlobSha256: changedFile.blobSha256,
+        payloadAfterContentKind: changedFile.contentKind,
+      },
+      recordedAtMs: 3,
+    }];
+    const logPaths: string[] = [];
+    let initialBlobRequests = 0;
+    let changedBlobRequests = 0;
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path.startsWith("/api/view/log?")) logPaths.push(path);
+      if (path === "/api/view/log?since=0&limit=500") {
+        return logOpsPage(initialOps, 7);
+      }
+      if (path === "/api/view/log?since=7&limit=500") {
+        return logOpsPage([], 10, false, 10);
+      }
+      if (path === "/api/view/log?since=10&limit=500") {
+        return logOpsPage(replayOps, 11, false, 10);
+      }
+      if (path === "/api/view/log?since=11&limit=500") {
+        return logOpsPage(changedOps, 12, false, 10);
+      }
+      if (path === `/api/view/blob/${initialFile.blobSha256}`) {
+        initialBlobRequests += 1;
+        return new Response("# Initial preview");
+      }
+      if (path === `/api/view/blob/${changedFile.blobSha256}`) {
+        changedBlobRequests += 1;
+        return new Response("# Changed preview");
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+    expect(initialBlobRequests).toBe(1);
+    expect(container.querySelector("article.markdown")?.textContent).toContain(
+      "Initial preview",
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+    });
+
+    expect(initialBlobRequests).toBe(1);
+    expect(changedBlobRequests).toBe(0);
+    expect(container.querySelector("article.markdown")?.textContent).toContain(
+      "Initial preview",
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+    });
+
+    expect(initialBlobRequests).toBe(1);
+    expect(changedBlobRequests).toBe(1);
+    expect(container.querySelector("article.markdown")?.textContent).toContain(
+      "Changed preview",
+    );
+    expect(logPaths).toEqual([
+      "/api/view/log?since=0&limit=500",
+      "/api/view/log?since=7&limit=500",
+      "/api/view/log?since=10&limit=500",
+      "/api/view/log?since=11&limit=500",
+    ]);
+  });
+
   it("folds heartbeat renames, additions, and deletions onto the initial files", async () => {
     vi.useFakeTimers();
     const fileA: SharedFile = {
@@ -1339,6 +1543,10 @@ describe("App", () => {
       blobSha256: "2".repeat(64),
       contentKind: "text",
     };
+    const firstWriteSha = "3".repeat(64);
+    const divergentWriteSha = "4".repeat(64);
+    const survivingWriteSha = "5".repeat(64);
+    const createdSha = "6".repeat(64);
     const initialOps: RelayOp[] = [{
       relaySeq: 1,
       opKind: "version.create",
@@ -1352,6 +1560,7 @@ describe("App", () => {
         payload: {
           operation: "rename",
           payloadBeforePath: fileB.path,
+          payloadBeforeBlobSha256: fileB.blobSha256,
           payloadAfterPath: "renamed-b.txt",
           payloadAfterBlobSha256: fileB.blobSha256,
           payloadAfterContentKind: fileB.contentKind,
@@ -1363,23 +1572,104 @@ describe("App", () => {
         opKind: "moment.append",
         payload: {
           operation: "write",
+          payloadBeforePath: null,
+          payloadBeforeBlobSha256: null,
           payloadAfterPath: "c.txt",
-          payloadAfterBlobSha256: "3".repeat(64),
+          payloadAfterBlobSha256: createdSha,
           payloadAfterContentKind: "text",
         },
         recordedAtMs: 3,
       },
-    ];
-    const deleteOps: RelayOp[] = [{
-      relaySeq: 4,
-      opKind: "moment.append",
-      payload: {
-        operation: "delete",
-        payloadBeforePath: fileA.path,
-        path: fileA.path,
+      {
+        relaySeq: 4,
+        opKind: "moment.append",
+        payload: {
+          operation: "write",
+          payloadBeforePath: fileA.path,
+          payloadBeforeBlobSha256: fileA.blobSha256,
+          payloadAfterPath: fileA.path,
+          payloadAfterBlobSha256: firstWriteSha,
+          payloadAfterContentKind: "text",
+        },
+        recordedAtMs: 4,
       },
-      recordedAtMs: 4,
-    }];
+      {
+        relaySeq: 5,
+        opKind: "moment.append",
+        payload: {
+          operation: "write",
+          payloadBeforePath: fileA.path,
+          payloadBeforeBlobSha256: fileA.blobSha256,
+          payloadAfterPath: fileA.path,
+          payloadAfterBlobSha256: divergentWriteSha,
+          payloadAfterContentKind: "text",
+        },
+        recordedAtMs: 5,
+      },
+      {
+        relaySeq: 6,
+        opKind: "moment.append",
+        payload: {
+          operation: "write",
+          payloadBeforePath: fileA.path,
+          payloadBeforeBlobSha256: firstWriteSha,
+          payloadAfterPath: fileA.path,
+          payloadAfterBlobSha256: survivingWriteSha,
+          payloadAfterContentKind: "text",
+        },
+        recordedAtMs: 6,
+      },
+      {
+        relaySeq: 7,
+        opKind: "moment.append",
+        payload: {
+          operation: "rename",
+          payloadBeforePath: fileB.path,
+          payloadBeforeBlobSha256: fileB.blobSha256,
+          payloadAfterPath: "losing-b.txt",
+          payloadAfterBlobSha256: fileB.blobSha256,
+          payloadAfterContentKind: fileB.contentKind,
+        },
+        recordedAtMs: 7,
+      },
+      {
+        relaySeq: 8,
+        opKind: "moment.append",
+        payload: {
+          operation: "rename",
+          payloadBeforePath: "renamed-b.txt",
+          payloadBeforeBlobSha256: fileB.blobSha256,
+          payloadAfterPath: "final-b.txt",
+          payloadAfterBlobSha256: fileB.blobSha256,
+          payloadAfterContentKind: fileB.contentKind,
+        },
+        recordedAtMs: 8,
+      },
+    ];
+    const deleteOps: RelayOp[] = [
+      {
+        relaySeq: 9,
+        opKind: "moment.append",
+        payload: {
+          operation: "delete",
+          payloadBeforePath: fileA.path,
+          payloadBeforeBlobSha256: fileA.blobSha256,
+          path: fileA.path,
+        },
+        recordedAtMs: 9,
+      },
+      {
+        relaySeq: 10,
+        opKind: "moment.append",
+        payload: {
+          operation: "delete",
+          payloadBeforePath: "c.txt",
+          payloadBeforeBlobSha256: createdSha,
+          path: "c.txt",
+        },
+        recordedAtMs: 10,
+      },
+    ];
     const logPaths: string[] = [];
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
@@ -1389,10 +1679,10 @@ describe("App", () => {
         return logOpsPage(initialOps, 1);
       }
       if (path === "/api/view/log?since=1&limit=500") {
-        return logOpsPage(deltaOps, 3);
+        return logOpsPage(deltaOps, 8);
       }
-      if (path === "/api/view/log?since=3&limit=500") {
-        return logOpsPage(deleteOps, 4);
+      if (path === "/api/view/log?since=8&limit=500") {
+        return logOpsPage(deleteOps, 10);
       }
       throw new Error(`Unexpected request: ${path}`);
     });
@@ -1407,7 +1697,7 @@ describe("App", () => {
 
     const afterFirstDelta = filesFromLog([...initialOps, ...deltaOps])
       .map((file) => file.path);
-    expect(afterFirstDelta).toEqual(["a.txt", "c.txt", "renamed-b.txt"]);
+    expect(afterFirstDelta).toEqual(["a.txt", "c.txt", "final-b.txt"]);
     expect(renderedFilePaths()).toEqual(afterFirstDelta);
 
     await act(async () => {
@@ -1416,12 +1706,12 @@ describe("App", () => {
 
     const afterDelete = filesFromLog([...initialOps, ...deltaOps, ...deleteOps])
       .map((file) => file.path);
-    expect(afterDelete).toEqual(["c.txt", "renamed-b.txt"]);
+    expect(afterDelete).toEqual(["a.txt", "final-b.txt"]);
     expect(renderedFilePaths()).toEqual(afterDelete);
     expect(logPaths).toEqual([
       "/api/view/log?since=0&limit=500",
       "/api/view/log?since=1&limit=500",
-      "/api/view/log?since=3&limit=500",
+      "/api/view/log?since=8&limit=500",
     ]);
   });
 
@@ -1449,6 +1739,7 @@ describe("App", () => {
         payload: {
           operation: "rename",
           payloadBeforePath: fileB.path,
+          payloadBeforeBlobSha256: fileB.blobSha256,
           payloadAfterPath: "renamed.txt",
           payloadAfterBlobSha256: fileB.blobSha256,
           payloadAfterContentKind: fileB.contentKind,
@@ -1461,6 +1752,7 @@ describe("App", () => {
         payload: {
           operation: "delete",
           payloadBeforePath: fileA.path,
+          payloadBeforeBlobSha256: fileA.blobSha256,
         },
         recordedAtMs: 3,
       },
@@ -1469,6 +1761,8 @@ describe("App", () => {
         opKind: "moment.append",
         payload: {
           operation: "write",
+          payloadBeforePath: null,
+          payloadBeforeBlobSha256: null,
           payloadAfterPath: "new.txt",
           payloadAfterBlobSha256: "6".repeat(64),
           payloadAfterContentKind: "text",
@@ -1762,9 +2056,7 @@ describe("App", () => {
     act(() => root?.unmount());
     root = null;
     releaseHeartbeatPage?.();
-    await act(async () => {
-      for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
-    });
+    await settle(() => heartbeatSignal?.aborted === true);
 
     expect(logPaths).toEqual([
       "/api/view/log?since=0&limit=500",
@@ -1824,9 +2116,9 @@ describe("App", () => {
 
     act(() => root?.unmount());
     root = null;
-    await act(async () => {
-      for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
-    });
+    await settle(
+      () => heartbeatMetaSignal?.aborted === true && metaAborts === 1,
+    );
 
     expect(heartbeatMetaSignal?.aborted).toBe(true);
     expect(metaAborts).toBe(1);
@@ -1858,6 +2150,7 @@ describe("App", () => {
       payload: {
         operation: "rename",
         payloadBeforePath: selectedFile.path,
+        payloadBeforeBlobSha256: selectedFile.blobSha256,
         payloadAfterPath: renamedFile.path,
         payloadAfterBlobSha256: renamedFile.blobSha256,
         payloadAfterContentKind: renamedFile.contentKind,
@@ -2114,7 +2407,7 @@ describe("App", () => {
       });
       vi.stubGlobal("fetch", fetchMock);
 
-      await renderApp();
+      await renderApp(() => logPaths.length === 1);
 
       expect(container.textContent).not.toContain("This link isn't available.");
       expect(logTimes).toEqual([0]);
@@ -2158,7 +2451,7 @@ describe("App", () => {
       });
       vi.stubGlobal("fetch", fetchMock);
 
-      await renderApp();
+      await renderApp(() => logPaths.length === 1);
       await act(async () => {
         await vi.advanceTimersByTimeAsync(119_999);
       });

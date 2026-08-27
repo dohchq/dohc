@@ -304,33 +304,48 @@ interface FolderNode {
   files: SharedFile[];
 }
 
-function fileTree(files: SharedFile[]): FolderNode {
-  const root: FolderNode = { name: "", path: "", folders: [], files: [] };
+interface FolderBuilder {
+  name: string;
+  path: string;
+  children: Map<string, FolderBuilder>;
+  files: SharedFile[];
+}
+
+export function fileTree(files: SharedFile[]): FolderNode {
+  const root: FolderBuilder = {
+    name: "",
+    path: "",
+    children: new Map(),
+    files: [],
+  };
   for (const file of files) {
     const parts = file.path.split("/");
     let folder = root;
     for (const segment of parts.slice(0, -1)) {
-      let child = folder.folders.find((candidate) => candidate.name === segment);
+      let child = folder.children.get(segment);
       if (!child) {
         child = {
           name: segment,
           path: folder.path ? `${folder.path}/${segment}` : segment,
-          folders: [],
+          children: new Map(),
           files: [],
         };
-        folder.folders.push(child);
+        folder.children.set(segment, child);
       }
       folder = child;
     }
     folder.files.push(file);
   }
-  const sort = (folder: FolderNode) => {
-    folder.folders.sort((left, right) => left.name.localeCompare(right.name));
-    folder.files.sort((left, right) => left.path.localeCompare(right.path));
-    folder.folders.forEach(sort);
-  };
-  sort(root);
-  return root;
+  const complete = (folder: FolderBuilder): FolderNode => ({
+    name: folder.name,
+    path: folder.path,
+    folders: [...folder.children.values()]
+      .sort((left, right) => left.name.localeCompare(right.name))
+      .map(complete),
+    files: [...folder.files]
+      .sort((left, right) => left.path.localeCompare(right.path)),
+  });
+  return complete(root);
 }
 
 function Folder(props: {
@@ -410,7 +425,12 @@ function FileView(props: {
       current = false;
       abortController.abort();
     };
-  }, [props.file, props.session, rendersMarkdown]);
+  }, [
+    props.file.blobSha256,
+    props.file.path,
+    props.session,
+    rendersMarkdown,
+  ]);
 
   if (failed) return <Unavailable />;
   if (rendersMarkdown) {

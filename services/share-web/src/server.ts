@@ -9,10 +9,11 @@ export const SHARE_WEB_CSP =
 
 const REFUSAL_BODY = JSON.stringify({ ok: false, error: "not found" });
 const MAX_EXCHANGE_BODY_BYTES = 8 * 1024;
-const EXCHANGE_BUCKET_CAPACITY = 12;
+export const EXCHANGE_BUCKET_CAPACITY = 12;
 const EXCHANGE_REFILL_PER_SECOND = 0.2;
 const EXCHANGE_MAX_IPS = 10_000;
 const DEFAULT_MAX_SESSIONS = 10_000;
+export const MAX_SESSIONS_PER_GRANT = 512;
 const MAX_BLOB_PROXIES_PER_SESSION = 8;
 const MAX_BLOB_PROXIES_PER_GRANT = 24;
 const LINK_REFRESH_WINDOW_MS = 5 * 60 * 1_000;
@@ -63,10 +64,11 @@ class ShareWebSessionStore {
 
   set(token: string, session: ShareWebSession, nowMs: number): void {
     this.prune(nowMs);
+    while (this.countForGrant(session.grantId) >= MAX_SESSIONS_PER_GRANT) {
+      if (!this.evictOldestFromGrant(session.grantId)) break;
+    }
     while (this.sessions.size >= this.maxSessions) {
-      const oldest = this.sessions.keys().next().value as string | undefined;
-      if (oldest === undefined) break;
-      this.sessions.delete(oldest);
+      if (!this.evictOldestFromLargestGrant()) break;
     }
     this.sessions.set(sessionKey(session.discriminator, token), session);
   }
@@ -115,6 +117,41 @@ class ShareWebSessionStore {
         this.sessions.delete(key);
       }
     }
+  }
+
+  private countForGrant(grantId: string): number {
+    let count = 0;
+    for (const session of this.sessions.values()) {
+      if (session.grantId === grantId) count += 1;
+    }
+    return count;
+  }
+
+  private evictOldestFromGrant(grantId: string): boolean {
+    for (const [key, session] of this.sessions) {
+      if (session.grantId !== grantId) continue;
+      this.sessions.delete(key);
+      return true;
+    }
+    return false;
+  }
+
+  private evictOldestFromLargestGrant(): boolean {
+    const grants = new Map<string, { count: number; oldestKey: string }>();
+    for (const [key, session] of this.sessions) {
+      const grant = grants.get(session.grantId);
+      if (grant) {
+        grant.count += 1;
+      } else {
+        grants.set(session.grantId, { count: 1, oldestKey: key });
+      }
+    }
+
+    let largest: { count: number; oldestKey: string } | null = null;
+    for (const grant of grants.values()) {
+      if (!largest || grant.count > largest.count) largest = grant;
+    }
+    return largest ? this.sessions.delete(largest.oldestKey) : false;
   }
 }
 

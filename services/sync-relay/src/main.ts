@@ -442,11 +442,14 @@ server.listen(requestedPort, host, () => {
   if (testAuthSeam) console.log("[sync-relay] SYNC_RELAY_TEST_AUTH seam ENABLED (dev/test only)");
 });
 
+let shuttingDown = false;
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, shutdown);
 }
 
 function shutdown(): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
   let forceCloseTimer: ReturnType<typeof setTimeout> | undefined;
   server.close(() => {
     if (forceCloseTimer !== undefined) clearTimeout(forceCloseTimer);

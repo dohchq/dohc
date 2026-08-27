@@ -2,15 +2,26 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  filesFromAccumulator,
+  foldLogOps,
+  type FileAccumulator,
+  type RelayOp,
+} from "../../share-web/viewer/src/model";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   LinkReadRateLimiter,
+  LINK_GRANT_LOG_READ_BUCKET_CAPACITY,
+  LINK_GRANT_READ_BUCKET_CAPACITY,
+  LINK_LOG_READ_BUCKET_CAPACITY,
+  LINK_READ_BUCKET_CAPACITY,
   LINK_SESSION_TTL_MS,
 } from "./linkSecurity";
 import { filterOpForShare, type ShareSelector } from "./shareFilter";
 import {
   createSyncRelayHandler,
   LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET,
+  MAX_RAW_ROWS_PER_LINK_PAGE,
   type SyncRelayHandler,
 } from "./server";
 import {
@@ -67,14 +78,16 @@ function handler(
   options: {
     nowMs?: () => number;
     linkReadRateLimiter?: LinkReadRateLimiter;
+    linkGrantReadRateLimiter?: LinkReadRateLimiter;
     linkLogReadRateLimiter?: LinkReadRateLimiter;
+    linkGrantLogReadRateLimiter?: LinkReadRateLimiter;
     linkCapabilityReadFallbackPageSize?: number;
   } = {},
 ): SyncRelayHandler {
   let id = 0;
-  return createSyncRelayHandler({
+  const handlerOptions = {
     storage,
-    resolveActor(request, workspaceId) {
+    resolveActor(request: Request, workspaceId: string) {
       const match = /^Bearer user:([^ ]+)$/u.exec(request.headers.get("authorization") ?? "");
       if (!match) throw Object.assign(new Error("unauthorized"), { statusCode: 401 });
       return { userId: match[1]!, workspaceId };
@@ -85,10 +98,13 @@ function handler(
     newId: () => `id-${id++}`,
     linkKey: LINK_KEY,
     linkReadRateLimiter: options.linkReadRateLimiter,
+    linkGrantReadRateLimiter: options.linkGrantReadRateLimiter,
     linkLogReadRateLimiter: options.linkLogReadRateLimiter,
+    linkGrantLogReadRateLimiter: options.linkGrantLogReadRateLimiter,
     linkCapabilityReadFallbackPageSize:
       options.linkCapabilityReadFallbackPageSize,
-  });
+  };
+  return createSyncRelayHandler(handlerOptions);
 }
 
 function request(userId: string | null, path: string, init: RequestInit = {}): Request {
@@ -142,7 +158,7 @@ function viewerPaths(
         : null;
     const afterSha = record.payloadAfterBlobSha256;
     if (
-      afterPath === null ||
+      !afterPath ||
       typeof afterSha !== "string" ||
       !/^[a-f0-9]{64}$/u.test(afterSha)
     ) {
@@ -244,6 +260,20 @@ async function appendMoments(
   ).toBe(200);
 }
 
+function appendStoredMoments(
+  storage: SyncRelayStorage,
+  ops: ReturnType<typeof moment>[],
+): void {
+  storage.appendLogBatch({
+    workspaceId: WORKSPACE,
+    originId: "origin-a",
+    ops: ops.map(({ payload, ...op }) => ({
+      ...op,
+      payloadJson: JSON.stringify(payload),
+    })),
+  });
+}
+
 async function createLink(
   h: SyncRelayHandler,
   input: {
@@ -255,6 +285,7 @@ async function createLink(
   capability: string;
   exchange: Record<string, unknown>;
   grantId: string;
+  secret: string;
   shareId: string;
 }> {
   const share = await json(
@@ -287,6 +318,7 @@ async function createLink(
     capability: String(exchange.capabilityToken),
     exchange,
     grantId: String(link.grantId),
+    secret: String(link.secret),
     shareId: String(share.shareId),
   };
 }
@@ -301,7 +333,13 @@ async function seed(
     sharedObjectId?: string | null;
   } = {},
   identity?: TestWorkspaceIdentity,
-): Promise<{ capability: string; grantId: string; sharedSha: string; hiddenSha: string }> {
+): Promise<{
+  capability: string;
+  grantId: string;
+  hiddenSha: string;
+  secret: string;
+  sharedSha: string;
+}> {
   expect(
     (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
   ).toBe(200);
@@ -419,6 +457,13 @@ async function readRemainingBytes(
 }
 
 describe("relay capability reads", () => {
+  it("gives each grant four capability buckets of read capacity", () => {
+    expect(LINK_GRANT_READ_BUCKET_CAPACITY).toBe(LINK_READ_BUCKET_CAPACITY * 4);
+    expect(LINK_GRANT_LOG_READ_BUCKET_CAPACITY).toBe(
+      LINK_LOG_READ_BUCKET_CAPACITY * 4,
+    );
+  });
+
   it.each([
     [
       "keyed revocation",
@@ -480,6 +525,12 @@ describe("relay capability reads", () => {
       );
       expect(targetResponse.status).toBe(200);
       expect(untouchedResponse.status).toBe(200);
+      expect(targetResponse.headers.get("content-length")).toBe(
+        String(Buffer.byteLength(content)),
+      );
+      expect(untouchedResponse.headers.get("content-length")).toBe(
+        String(Buffer.byteLength(content)),
+      );
       const targetReader = targetResponse.body!.getReader();
       const untouchedReader = untouchedResponse.body!.getReader();
       const targetFirst = await targetReader.read();
@@ -594,6 +645,63 @@ describe("relay capability reads", () => {
     expect(
       await denialBytes(await h(linkRequest(capability, `/sync/link/blobs/${missingSha}`))),
     ).toBe(recipientMissing);
+  });
+
+  it("applies an accountless overwrite through the viewer fold", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const realPath = "docs/readme.md";
+    const projectedPath = "readme.md";
+    const firstContent = "# First\n";
+    const secondContent = "# Second\n";
+
+    expect(
+      (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
+    ).toBe(200);
+    await putBlob(h, firstContent);
+    const secondSha = await putBlob(h, secondContent);
+    await appendMoments(h, [
+      moment(0, realPath, firstContent, 1_000),
+      moment(1, realPath, secondContent, 1_100, {
+        objectId: "object-0",
+        beforePath: realPath,
+        beforeContent: firstContent,
+      }),
+    ]);
+    const link = await createLink(h, { paths: [realPath], access: "view" });
+
+    const linkLog = await json(
+      await h(linkRequest(link.capability, "/sync/link/log?since=0&limit=100")),
+    );
+    const ops = linkLog.ops;
+    expect(Array.isArray(ops)).toBe(true);
+    if (!Array.isArray(ops)) throw new Error("link log did not return ops");
+    expect(ops).toHaveLength(2);
+
+    const files: FileAccumulator = new Map();
+    foldLogOps(files, ops as RelayOp[]);
+    expect(filesFromAccumulator(files)).toEqual([
+      {
+        path: projectedPath,
+        blobSha256: secondSha,
+        contentKind: "text",
+      },
+    ]);
+    expect(ops[1]).toMatchObject({
+      payload: {
+        payloadBeforeBlobSha256: sha256(firstContent),
+        payloadAfterBlobSha256: secondSha,
+      },
+    });
+
+    const selected = files.get(projectedPath);
+    expect(selected).toBeDefined();
+    if (!selected) throw new Error("viewer fold did not select the shared file");
+    const blob = await h(
+      linkRequest(link.capability, `/sync/link/blobs/${selected.blobSha256}`),
+    );
+    expect(blob.status).toBe(200);
+    expect(await blob.text()).toBe(secondContent);
   });
 
   it("projects a nested file into the accountless namespace without changing authenticated paths", async () => {
@@ -741,6 +849,7 @@ describe("relay capability reads", () => {
             versionId: "main",
             metadata: { origin: "sync" },
             path: "docs/shared.md",
+            payloadBeforeBlobSha256: seeded.sharedSha,
             payloadBeforePath: "docs/shared.md",
           },
           recordedAtMs: 1_300,
@@ -832,23 +941,12 @@ describe("relay capability reads", () => {
         ),
       ),
     );
-    const accountlessInwardOps = accountlessInward.ops as Array<
+    const accountlessWriteOps = accountlessInward.ops as Array<
       Record<string, unknown>
     >;
-    expect(accountlessInwardOps).toEqual([]);
-    expect(viewerPaths(accountlessInwardOps, initialPaths)).toEqual(initialPaths);
-
-    const accountlessWrite = await json(
-      await h(
-        linkRequest(
-          seeded.capability,
-          `/sync/link/log?since=${String(accountlessInward.nextCursor)}&limit=1`,
-        ),
-      ),
-    );
-    const accountlessWriteOps = accountlessWrite.ops as Array<
-      Record<string, unknown>
-    >;
+    expect(accountlessInward).toMatchObject({ nextCursor: 5, hasMore: false });
+    expect(accountlessWriteOps).toHaveLength(1);
+    expect(accountlessWriteOps[0]).toMatchObject({ originSeq: 4 });
     expect(viewerPaths(accountlessWriteOps, initialPaths)).toEqual([
       "docs/arrived.md",
       "docs/shared.md",
@@ -1060,20 +1158,10 @@ describe("relay capability reads", () => {
       ),
     ).toBe(false);
 
-    const skippedThreadPage = await json(
+    const skippedChatRows = await json(
       await h(linkRequest(seeded.capability, "/sync/link/log?since=3&limit=1")),
     );
-    expect(skippedThreadPage).toEqual({
-      ok: true,
-      ops: [],
-      nextCursor: 4,
-      hasMore: true,
-      epochLogFloor: 0,
-    });
-    const skippedMessagePage = await json(
-      await h(linkRequest(seeded.capability, "/sync/link/log?since=4&limit=1")),
-    );
-    expect(skippedMessagePage).toEqual({
+    expect(skippedChatRows).toEqual({
       ok: true,
       ops: [],
       nextCursor: 5,
@@ -1081,6 +1169,125 @@ describe("relay capability reads", () => {
       epochLogFloor: 0,
     });
   });
+
+  it("fills one accountless page across unrelated raw pages", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h);
+    const unrelatedRows = Array.from({ length: 1_500 }, (_, index) =>
+      moment(
+        index + 3,
+        `private/page-noise-${index}.md`,
+        "hidden\n",
+        1_300 + index,
+      ),
+    );
+    appendStoredMoments(storage, [
+      ...unrelatedRows,
+      moment(1_503, "docs/behind-pages.md", "# shared\n", 2_800),
+    ]);
+
+    const pages: Array<Record<string, unknown>> = [];
+    let since = 3;
+    let hasMore = true;
+    while (hasMore && pages.length < 5) {
+      const page = await json(
+        await h(
+          linkRequest(
+            seeded.capability,
+            `/sync/link/log?since=${String(since)}&limit=500`,
+          ),
+        ),
+      );
+      pages.push(page);
+      since = Number(page.nextCursor);
+      hasMore = page.hasMore === true;
+    }
+
+    expect(pages).toEqual([
+      {
+        ok: true,
+        ops: [
+          expect.objectContaining({
+            relaySeq: 1_504,
+            originSeq: 1_503,
+            opKind: "moment.append",
+            payload: expect.objectContaining({
+              path: "docs/behind-pages.md",
+              payloadAfterPath: "docs/behind-pages.md",
+            }),
+            recordedAtMs: 2_800,
+          }),
+        ],
+        nextCursor: 1_504,
+        hasMore: false,
+        epochLogFloor: 0,
+      },
+    ]);
+  });
+
+  it("continues an accountless page after the raw-row work bound", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h);
+    const firstAdmitted = moment(3, "docs/before-bound.md", "# shared\n", 1_300);
+    const unrelatedRows = Array.from(
+      { length: MAX_RAW_ROWS_PER_LINK_PAGE - 1 },
+      (_, index) =>
+        moment(
+          index + 4,
+          `private/bound-noise-${index}.md`,
+          "hidden\n",
+          1_301 + index,
+        ),
+    );
+    const secondAdmitted = moment(
+      MAX_RAW_ROWS_PER_LINK_PAGE + 3,
+      "docs/after-bound.md",
+      "# shared\n",
+      1_300 + MAX_RAW_ROWS_PER_LINK_PAGE,
+    );
+    appendStoredMoments(storage, [firstAdmitted, ...unrelatedRows, secondAdmitted]);
+
+    const first = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/log?since=3&limit=2")),
+    );
+    expect(first).toEqual({
+      ok: true,
+      ops: [
+        expect.objectContaining({
+          relaySeq: 4,
+          originSeq: 3,
+          payload: expect.objectContaining({ path: "docs/before-bound.md" }),
+        }),
+      ],
+      nextCursor: MAX_RAW_ROWS_PER_LINK_PAGE + 3,
+      hasMore: true,
+      epochLogFloor: 0,
+    });
+
+    const second = await json(
+      await h(
+        linkRequest(
+          seeded.capability,
+          `/sync/link/log?since=${String(first.nextCursor)}&limit=2`,
+        ),
+      ),
+    );
+    expect(second).toEqual({
+      ok: true,
+      ops: [
+        expect.objectContaining({
+          relaySeq: MAX_RAW_ROWS_PER_LINK_PAGE + 4,
+          originSeq: MAX_RAW_ROWS_PER_LINK_PAGE + 3,
+          payload: expect.objectContaining({ path: "docs/after-bound.md" }),
+        }),
+      ],
+      nextCursor: MAX_RAW_ROWS_PER_LINK_PAGE + 4,
+      hasMore: false,
+      epochLogFloor: 0,
+    });
+  }, 20_000);
 
   it("keeps link log pages and freshness above the workspace epoch floor", async () => {
     const storage = await newStorage();
@@ -1997,11 +2204,52 @@ describe("relay capability reads", () => {
     expect(await json(limited)).toMatchObject({ code: "link_read_rate_limited" });
   });
 
+  it("shares a grant read budget across capabilities minted by re-exchange", async () => {
+    const storage = await newStorage();
+    const h = handler(storage, {
+      linkReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
+      linkGrantReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
+    });
+    const seeded = await seed(h);
+    expect((await h(linkRequest(seeded.capability, "/sync/link/share"))).status).toBe(200);
+
+    const secondExchange = await json(
+      await h(request(null, "/sync/link-exchange", jsonBody({ secret: seeded.secret }))),
+    );
+    expect(secondExchange.grantId).toBe(seeded.grantId);
+    const pastCapabilityBound = await h(
+      linkRequest(String(secondExchange.capabilityToken), "/sync/link/share"),
+    );
+
+    expect(pastCapabilityBound.status).toBe(429);
+    expect(await json(pastCapabilityBound)).toEqual({
+      ok: false,
+      error: "too many link reads",
+      code: "link_read_rate_limited",
+    });
+  });
+
+  it("keeps grant read budgets independent for different grants", async () => {
+    const storage = await newStorage();
+    const h = handler(storage, {
+      linkReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
+      linkGrantReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
+    });
+    const first = await seed(h);
+    const second = await createLink(h, { paths: ["docs"], access: "view" });
+    expect(second.grantId).not.toBe(first.grantId);
+
+    expect((await h(linkRequest(first.capability, "/sync/link/share"))).status).toBe(200);
+    expect((await h(linkRequest(second.capability, "/sync/link/share"))).status).toBe(200);
+  });
+
   it("uses a separate read bucket for link log pages", async () => {
     const storage = await newStorage();
     const h = handler(storage, {
       linkReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
+      linkGrantReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
       linkLogReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
+      linkGrantLogReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
     });
     const seeded = await seed(h);
 

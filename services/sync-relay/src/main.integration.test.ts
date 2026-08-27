@@ -82,16 +82,19 @@ async function spawnRunningRelay(
   envOverrides: Record<string, string | undefined> = {},
 ): Promise<RunningRelay> {
   const mainUrl = new URL("./main.ts", import.meta.url);
-  const childArguments =
-    process.platform === "win32"
-      ? [
-          "--import",
-          "tsx",
-          "--input-type=module",
-          "--eval",
-          `process.on("message", (message) => { if (message === "SIGTERM") process.emit("SIGTERM"); }); await import(${JSON.stringify(mainUrl.href)});`,
-        ]
-      : ["--import", "tsx/esm", "src/main.ts"];
+  const childArguments = [
+    "--import",
+    process.platform === "win32" ? "tsx" : "tsx/esm",
+    "--input-type=module",
+    "--eval",
+    `process.on("message", (message) => {
+      if (message === "SIGTERM") process.emit("SIGTERM");
+      if (message === "DOUBLE_SIGTERM") {
+        process.emit("SIGTERM");
+        process.emit("SIGTERM");
+      }
+    }); await import(${JSON.stringify(mainUrl.href)});`,
+  ];
   const child = spawn(process.execPath, childArguments, {
     cwd: packageRoot(),
     env: {
@@ -335,6 +338,36 @@ describe("sync relay main process", () => {
     expect(
       await settleWithin(exited, 1_000),
       `quiet sync relay did not exit promptly\n${relay.stderr()}`,
+    ).toEqual({
+      kind: "settled",
+      value: { code: 0, signal: null },
+    });
+  });
+
+  it("ignores a second SIGTERM while shutdown is in progress", async (context) => {
+    const relayRoot = await tempRoot("relay-double-sigterm");
+    let relay: RunningRelay;
+    try {
+      relay = await spawnRunningRelay(join(relayRoot, "relay.sqlite"), {
+        SYNC_RELAY_TEST_AUTH: "0",
+        SYNC_RELAY_BIND: "127.0.0.1",
+        BETTER_AUTH_SECRET: "test-secret-that-is-at-least-32-characters",
+        POSTGRES_URL: "postgres://dohc:dohc@127.0.0.1:1/dohc",
+      });
+    } catch (error) {
+      if (error instanceof ListenPermissionError) {
+        context.skip();
+        return;
+      }
+      throw error;
+    }
+    const exited = waitForExit(relay.child);
+
+    sendDoubleTerminationSignal(relay.child);
+
+    expect(
+      await settleWithin(exited, 1_000),
+      `sync relay did not exit cleanly after duplicate SIGTERM\n${relay.stderr()}`,
     ).toEqual({
       kind: "settled",
       value: { code: 0, signal: null },
@@ -889,6 +922,11 @@ function sendTerminationSignal(child: ChildProcess): void {
   const sent =
     process.platform === "win32" ? child.send("SIGTERM") : child.kill("SIGTERM");
   if (!sent) throw new Error("failed to send SIGTERM to sync relay");
+}
+
+function sendDoubleTerminationSignal(child: ChildProcess): void {
+  const sent = child.send("DOUBLE_SIGTERM");
+  if (!sent) throw new Error("failed to send duplicate SIGTERM to sync relay");
 }
 
 describe("sync relay startup guards", () => {

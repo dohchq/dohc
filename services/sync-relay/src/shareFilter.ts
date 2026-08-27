@@ -846,11 +846,14 @@ export function filterOpForShare(
     // Build a MINIMAL served payload from the allowlist of fields the
     // recipient's Rust share-view replay actually needs.
     // Everything else in the stored moment — author, metadata.summary,
-    // metadata.correlationId, moment/object ids, lineage (before* fields),
+    // metadata.correlationId, moment/object ids, lineage identity fields,
     // and raw recorded timestamps — is dropped so nothing beyond the
-    // in-selector change description crosses the share boundary. The author
-    // is replaced with a neutral sync origin.
+    // in-selector change description crosses the share boundary. The lineage
+    // content hash survives because share-view replay uses it to apply
+    // mutations fast-forward-only. The author is replaced with a neutral sync
+    // origin.
     const afterSha = collectString(record.payloadAfterBlobSha256);
+    const beforeSha = collectString(record.payloadBeforeBlobSha256);
     const served: Record<string, unknown> = {
       operation: typeof record.operation === "string" ? record.operation : null,
       // The MOMENT's own version, read from the stored op — deliberately not
@@ -863,6 +866,7 @@ export function filterOpForShare(
       // rather than a copy of this one.
       versionId: claimedVersionId,
       metadata: { origin: "sync" },
+      payloadBeforeBlobSha256: beforeSha,
     };
     const inPath = collectString(record.path);
     if (inPath) served.path = inPath;
@@ -875,7 +879,7 @@ export function filterOpForShare(
       served.payloadAfterContentKind = "binary";
     }
     // Only the after-blob is ever fetched by the recipient (before-blobs are
-    // never replayed), so it is the only hash we make reachable.
+    // never replayed), so the lineage hash does not make its blob reachable.
     const blobSha256s = afterSha ? [afterSha] : [];
     return { allowed: true, payload: served, blobSha256s };
   }

@@ -52,6 +52,16 @@ function storedFile(value: unknown): SharedFile | null {
   };
 }
 
+function path(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function blobSha256(value: unknown): string | null {
+  return typeof value === "string" && /^[a-f0-9]{64}$/u.test(value)
+    ? value
+    : null;
+}
+
 export function foldLogOps(
   files: FileAccumulator,
   ops: readonly RelayOp[],
@@ -67,27 +77,49 @@ export function foldLogOps(
       continue;
     }
     if (op.opKind !== "moment.append") continue;
-    const beforePath =
-      typeof payload.payloadBeforePath === "string" ? payload.payloadBeforePath : null;
-    const currentPath = typeof payload.path === "string" ? payload.path : null;
+    if (!matchesOperation(payload.operation)) continue;
+    const rawBeforePath = payload.payloadBeforePath;
+    const rawBeforeBlobSha256 = payload.payloadBeforeBlobSha256;
+    const hasNoBefore =
+      (rawBeforePath === null || rawBeforePath === undefined) &&
+      (rawBeforeBlobSha256 === null || rawBeforeBlobSha256 === undefined);
+    const beforePath = path(rawBeforePath);
+    const beforeBlobSha256 = blobSha256(rawBeforeBlobSha256);
+    const before = beforePath && beforeBlobSha256
+      ? { path: beforePath, blobSha256: beforeBlobSha256 }
+      : null;
+    if (!hasNoBefore && !before) continue;
+
     if (payload.operation === "delete") {
-      if (beforePath) files.delete(beforePath);
-      if (currentPath) files.delete(currentPath);
+      if (!before) continue;
+      const current = files.get(before.path);
+      if (!current || current.blobSha256 !== before.blobSha256) continue;
+      files.delete(before.path);
       continue;
     }
-    const afterPath =
-      typeof payload.payloadAfterPath === "string" ? payload.payloadAfterPath : null;
-    const blobSha256 = payload.payloadAfterBlobSha256;
-    if (!afterPath || typeof blobSha256 !== "string" || !/^[a-f0-9]{64}$/u.test(blobSha256)) {
-      continue;
+
+    const afterPath = path(payload.payloadAfterPath);
+    const afterBlobSha256 = blobSha256(payload.payloadAfterBlobSha256);
+    if (!afterPath || !afterBlobSha256) continue;
+    if (hasNoBefore) {
+      if (files.has(afterPath)) continue;
+    } else {
+      if (!before) continue;
+      const current = files.get(before.path);
+      if (!current || current.blobSha256 !== before.blobSha256) continue;
+      if (before.path !== afterPath && files.has(afterPath)) continue;
+      if (before.path !== afterPath) files.delete(before.path);
     }
-    if (beforePath && beforePath !== afterPath) files.delete(beforePath);
     files.set(afterPath, {
       path: afterPath,
-      blobSha256,
+      blobSha256: afterBlobSha256,
       contentKind: payload.payloadAfterContentKind === "binary" ? "binary" : "text",
     });
   }
+}
+
+function matchesOperation(value: unknown): value is "write" | "rename" | "delete" {
+  return value === "write" || value === "rename" || value === "delete";
 }
 
 export function filesFromAccumulator(

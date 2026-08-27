@@ -15,6 +15,10 @@ import {
   hashRelayExchangeKey,
   LinkExchangeRateLimiter,
   LinkReadRateLimiter,
+  LINK_GRANT_LOG_READ_BUCKET_CAPACITY,
+  LINK_GRANT_LOG_READ_REFILL_PER_SECOND,
+  LINK_GRANT_READ_BUCKET_CAPACITY,
+  LINK_GRANT_READ_REFILL_PER_SECOND,
   LINK_LOG_READ_BUCKET_CAPACITY,
   LINK_LOG_READ_REFILL_PER_SECOND,
   LINK_SESSION_RENEWAL_GRACE_MS,
@@ -106,7 +110,9 @@ export interface CreateSyncRelayHandlerOptions {
   relayExchangeKey?: string;
   linkExchangeRateLimiter?: LinkExchangeRateLimiter;
   linkReadRateLimiter?: LinkReadRateLimiter;
+  linkGrantReadRateLimiter?: LinkReadRateLimiter;
   linkLogReadRateLimiter?: LinkReadRateLimiter;
+  linkGrantLogReadRateLimiter?: LinkReadRateLimiter;
   linkCapabilityReadFallbackPageSize?: number;
   newLinkBearer?: () => string;
 }
@@ -189,6 +195,8 @@ export const MAX_KEY_ENVELOPE_BYTES = 16 * 1024;
 export const MAX_OPS_PER_REQUEST = 500;
 export const DEFAULT_LOG_PAGE_SIZE = 100;
 export const MAX_LOG_PAGE_SIZE = 500;
+// One accountless response may scan this many raw log rows for admitted ops.
+export const MAX_RAW_ROWS_PER_LINK_PAGE = 10_000;
 // Capability reads may synchronously inspect at most 10,000 fallback rows.
 export const LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET = 20;
 // Presence (ephemeral awareness) transport limits.
@@ -300,9 +308,17 @@ export function createSyncRelayHandler({
   relayExchangeKey,
   linkExchangeRateLimiter = new LinkExchangeRateLimiter(),
   linkReadRateLimiter = new LinkReadRateLimiter(),
+  linkGrantReadRateLimiter = new LinkReadRateLimiter(
+    LINK_GRANT_READ_BUCKET_CAPACITY,
+    LINK_GRANT_READ_REFILL_PER_SECOND,
+  ),
   linkLogReadRateLimiter = new LinkReadRateLimiter(
     LINK_LOG_READ_BUCKET_CAPACITY,
     LINK_LOG_READ_REFILL_PER_SECOND,
+  ),
+  linkGrantLogReadRateLimiter = new LinkReadRateLimiter(
+    LINK_GRANT_LOG_READ_BUCKET_CAPACITY,
+    LINK_GRANT_LOG_READ_REFILL_PER_SECOND,
   ),
   linkCapabilityReadFallbackPageSize = MAX_LOG_PAGE_SIZE,
   newLinkBearer = () => mintLinkBearer(),
@@ -400,7 +416,10 @@ export function createSyncRelayHandler({
     );
     return new Response(body, {
       status: 200,
-      headers: { "content-type": "application/octet-stream" },
+      headers: {
+        "content-length": String(bytes.byteLength),
+        "content-type": "application/octet-stream",
+      },
     });
   };
 
@@ -780,9 +799,10 @@ export function createSyncRelayHandler({
       row.opKind,
       JSON.stringify({
         operation: "delete",
-        versionId: record.versionId,
-        path: beforePath,
-        payloadBeforePath: beforePath,
+         versionId: record.versionId,
+         path: beforePath,
+         payloadBeforeBlobSha256: record.payloadBeforeBlobSha256,
+         payloadBeforePath: beforePath,
         ...(record.beforePath === beforePath ? { beforePath } : {}),
       }),
       chatResolver,
@@ -801,45 +821,85 @@ export function createSyncRelayHandler({
     nextCursor: number;
     hasMore: boolean;
   } => {
-    const page = storage.fetchLogPage({
-      workspaceId,
-      sinceRelaySeq: since,
-      limit,
-    });
     const chatResolver = chatResolverFor(workspaceId);
     const accountlessProjection =
       audience === "accountless" && !isChatChannelSelector(selector)
         ? createAccountlessPathProjection(selector)
         : null;
     const ops: Array<Record<string, unknown>> = [];
-    for (const row of page.rows) {
-      if (audience === "accountless" && !FILE_FRESHNESS_OP_KINDS.has(row.opKind)) {
-        continue;
-      }
-      const decision = filterOpForShare(selector, row.opKind, row.payloadJson, chatResolver);
-      const payload = decision.allowed
-        ? accountlessProjection
-          ? accountlessProjection.projectPayload(decision.payload)
-          : decision.payload
-        : accountlessProjection
-          ? matchRefusedOutwardMove(
-              selector,
-              accountlessProjection,
-              row,
-              chatResolver,
+    let nextCursor = since;
+    let rawRowsConsumed = 0;
+
+    for (;;) {
+      const rawLimit =
+        audience === "accountless"
+          ? Math.min(
+              MAX_LOG_PAGE_SIZE,
+              MAX_RAW_ROWS_PER_LINK_PAGE - rawRowsConsumed,
             )
-          : null;
-      if (payload === null) continue;
-      ops.push({
-        relaySeq: row.relaySeq,
-        ...(audience === "authenticated" ? { originId: row.originId } : {}),
-        originSeq: row.originSeq,
-        opKind: row.opKind,
-        payload,
-        recordedAtMs: row.recordedAtMs,
+          : limit;
+      const page = storage.fetchLogPage({
+        workspaceId,
+        sinceRelaySeq: nextCursor,
+        limit: rawLimit,
       });
+
+      for (const [index, row] of page.rows.entries()) {
+        rawRowsConsumed += 1;
+        nextCursor = row.relaySeq;
+        if (
+          audience === "accountless" &&
+          !FILE_FRESHNESS_OP_KINDS.has(row.opKind)
+        ) {
+          continue;
+        }
+        const decision = filterOpForShare(
+          selector,
+          row.opKind,
+          row.payloadJson,
+          chatResolver,
+        );
+        const payload = decision.allowed
+          ? accountlessProjection
+            ? accountlessProjection.projectPayload(decision.payload)
+            : decision.payload
+          : accountlessProjection
+            ? matchRefusedOutwardMove(
+                selector,
+                accountlessProjection,
+                row,
+                chatResolver,
+              )
+            : null;
+        if (payload === null) continue;
+        ops.push({
+          relaySeq: row.relaySeq,
+          ...(audience === "authenticated" ? { originId: row.originId } : {}),
+          originSeq: row.originSeq,
+          opKind: row.opKind,
+          payload,
+          recordedAtMs: row.recordedAtMs,
+        });
+        if (ops.length === limit) {
+          return {
+            ops,
+            nextCursor,
+            hasMore:
+              (audience === "accountless" &&
+                rawRowsConsumed === MAX_RAW_ROWS_PER_LINK_PAGE) ||
+              index < page.rows.length - 1 ||
+              page.hasMore,
+          };
+        }
+      }
+
+      if (audience === "authenticated" || !page.hasMore) {
+        return { ops, nextCursor, hasMore: page.hasMore };
+      }
+      if (rawRowsConsumed === MAX_RAW_ROWS_PER_LINK_PAGE) {
+        return { ops, nextCursor, hasMore: true };
+      }
     }
-    return { ops, nextCursor: page.nextCursor, hasMore: page.hasMore };
   };
 
   const newestFilteredOpFreshness = (
@@ -1063,7 +1123,8 @@ export function createSyncRelayHandler({
 
   const requireLinkRead = (
     request: Request,
-    rateLimiter: LinkReadRateLimiter,
+    capabilityRateLimiter: LinkReadRateLimiter,
+    grantRateLimiter: LinkReadRateLimiter,
   ) => {
     if (!linkKey) throw invalidLinkCapability();
     const match = /^LinkCapability ([A-Za-z0-9_-]{43})$/u.exec(
@@ -1078,7 +1139,13 @@ export function createSyncRelayHandler({
       nowMs: nowMs(),
     });
     if (!capability) throw invalidLinkCapability();
-    if (!rateLimiter.allow(capability.session.capabilityHash, nowMs())) {
+    const admittedAtMs = nowMs();
+    if (
+      !capabilityRateLimiter.allow(
+        capability.session.capabilityHash,
+        admittedAtMs,
+      ) || !grantRateLimiter.allow(capability.grantId, admittedAtMs)
+    ) {
       throw linkReadRateLimited();
     }
     return { capabilityToken, capability };
@@ -1251,7 +1318,10 @@ export function createSyncRelayHandler({
     const refreshLinkKey = linkKey;
     const refreshedAtMs = nowMs();
     const current = requireRefreshableLinkSession(request, refreshedAtMs);
-    if (!linkReadRateLimiter.allow(current.capabilityHash, refreshedAtMs)) {
+    if (
+      !linkReadRateLimiter.allow(current.capabilityHash, refreshedAtMs) ||
+      !linkGrantReadRateLimiter.allow(current.session.grantId, refreshedAtMs)
+    ) {
       throw linkReadRateLimited();
     }
     const authorized = authorizeLinkShareAction({
@@ -1320,9 +1390,17 @@ export function createSyncRelayHandler({
         route.route === "link-log" ||
         route.route === "link-blob"
       ) {
-        const rateLimiter =
+        const capabilityRateLimiter =
           route.route === "link-log" ? linkLogReadRateLimiter : linkReadRateLimiter;
-        const { capabilityToken, capability } = requireLinkRead(request, rateLimiter);
+        const grantRateLimiter =
+          route.route === "link-log"
+            ? linkGrantLogReadRateLimiter
+            : linkGrantReadRateLimiter;
+        const { capabilityToken, capability } = requireLinkRead(
+          request,
+          capabilityRateLimiter,
+          grantRateLimiter,
+        );
         if (request.method !== "GET") throw methodNotAllowed();
         const share = storage.getShare(capability.shareId);
         if (!share) throw notFound();
