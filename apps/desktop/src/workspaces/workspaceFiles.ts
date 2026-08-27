@@ -186,7 +186,7 @@ async function getMarkdownListingMetadata(
 const LISTING_DIRECTORY_CONCURRENCY = 8;
 const LISTING_MARKDOWN_ICON_CONCURRENCY = 8;
 
-function createBoundedTaskQueue(concurrency: number) {
+export function createBoundedTaskQueue(concurrency: number) {
   let active = 0;
   const waiting = new Set<() => void>();
 
