@@ -23,7 +23,8 @@ import {
 const SESSION_HEADER = "x-dohc-link-session";
 const SESSION_PATH = /^\/s\/([A-Za-z0-9_-]{12})\/?$/u;
 const VIEW_HEARTBEAT_INTERVAL_MS = 4 * 60_000;
-const MAX_LOG_PAGES = 10_000;
+const TERMINAL_HEARTBEAT_STATUSES = new Set([401, 403, 404]);
+export const MAX_LOG_PAGES = 10_000;
 export const MARKDOWN_PREVIEW_BYTE_CAP = 2 * 1024 * 1024;
 
 type ViewerState =
@@ -535,7 +536,7 @@ export function App() {
           if (
             current &&
             error instanceof ViewResponseError &&
-            error.status === 404
+            TERMINAL_HEARTBEAT_STATUSES.has(error.status)
           ) {
             setState({ status: "refused" });
           }

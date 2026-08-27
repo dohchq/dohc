@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MarkdownContent } from "./MarkdownContent";
 import { MARKDOWN_SANITIZE_CONFIG, renderSafeMarkdown } from "./markdown";
+import { resolveSharedImage, type SharedFile } from "./model";
 
 function trackImageSourceRequests(image: HTMLImageElement): {
   sources: string[];
@@ -92,6 +93,23 @@ describe("renderSafeMarkdown", () => {
 
     await act(() => root.unmount());
     container.remove();
+  });
+
+  it("rewrites an authored blob session to the current viewer session", () => {
+    const blobSha256 = "a".repeat(64);
+    const authoredSession = "ForeignSes01";
+    const currentSession = "CurrentSes01";
+    const files = new Map<string, SharedFile>();
+    const html = renderSafeMarkdown(
+      `![private](/api/view/blob/${blobSha256}?session=${authoredSession})`,
+      (href) => resolveSharedImage(href, "note.md", files, currentSession),
+    );
+    const template = document.createElement("template");
+    template.innerHTML = html;
+
+    expect(template.content.querySelector("img")?.getAttribute("src")).toBe(
+      `/api/view/blob/${blobSha256}?session=${currentSession}`,
+    );
   });
 
   it("keeps ordinary text and escapes forbidden elements", () => {

@@ -7,6 +7,7 @@ import {
 } from "@dohc/security-contract";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import type { ResolveActor } from "@dohc/workspace-auth/session";
+import { createAccountlessPathProjection } from "./accountlessPathProjection";
 import { stableJsonStringify } from "./canonicalJson";
 import {
   constantTimeHashEqual,
@@ -305,11 +306,10 @@ export function createSyncRelayHandler({
   const relayExchangeKeyHash =
     relayExchangeKey === undefined ? undefined : sha256Base64Url(relayExchangeKey);
 
-  const hasValidRelayExchangeKey = (
-    request: Request,
-    requireConfigured: boolean,
-  ): boolean => {
-    if (relayExchangeKeyHash === undefined) return !requireConfigured;
+  const hasValidRelayExchangeKey = (request: Request): boolean => {
+    // An unconfigured key permits the request — that only occurs in
+    // development and test; production and self-host require the key.
+    if (relayExchangeKeyHash === undefined) return true;
     const presented = request.headers.get("x-dohc-relay-exchange-key");
     const presentedHash = sha256Base64Url(presented ?? "");
     return (
@@ -663,6 +663,10 @@ export function createSyncRelayHandler({
       limit,
     });
     const chatResolver = chatResolverFor(workspaceId);
+    const accountlessProjection =
+      audience === "accountless" && !isChatChannelSelector(selector)
+        ? createAccountlessPathProjection(selector)
+        : null;
     const ops: Array<Record<string, unknown>> = [];
     for (const row of page.rows) {
       if (audience === "accountless" && !FILE_FRESHNESS_OP_KINDS.has(row.opKind)) {
@@ -670,12 +674,16 @@ export function createSyncRelayHandler({
       }
       const decision = filterOpForShare(selector, row.opKind, row.payloadJson, chatResolver);
       if (!decision.allowed) continue;
+      const payload = accountlessProjection
+        ? accountlessProjection.projectPayload(decision.payload)
+        : decision.payload;
+      if (payload === null) continue;
       ops.push({
         relaySeq: row.relaySeq,
         ...(audience === "authenticated" ? { originId: row.originId } : {}),
         originSeq: row.originSeq,
         opKind: row.opKind,
-        payload: decision.payload,
+        payload,
         recordedAtMs: row.recordedAtMs,
       });
     }
@@ -837,7 +845,7 @@ export function createSyncRelayHandler({
           semantics.kind === "current-state" && selector.versionId === null
             ? "current-state"
             : "historical-log",
-        ...(selector.versionId === null
+        ...(selector.paths.length > 0
           ? { selectorPaths: selector.paths }
           : {}),
       }),
@@ -955,20 +963,25 @@ export function createSyncRelayHandler({
     authorized: AuthorizedShareAction<ShareSelector>,
     capabilityToken: string,
     capabilityExpiresAtMs: number,
-  ): LinkExchangeResult => ({
-    shareId: authorized.share.shareId,
-    grantId: authorized.grant.grantId,
-    generation: authorized.grant.generation,
-    access: authorized.effectiveSelector.access,
-    effectiveSelector: authorized.effectiveSelector,
-    capabilityToken,
-    capabilityExpiresAtMs,
-  });
+  ): LinkExchangeResult => {
+    const presentation = createAccountlessPathProjection(
+      authorized.effectiveSelector,
+    );
+    return {
+      shareId: authorized.share.shareId,
+      grantId: authorized.grant.grantId,
+      generation: authorized.grant.generation,
+      access: authorized.effectiveSelector.access,
+      effectiveSelector: presentation.selector,
+      capabilityToken,
+      capabilityExpiresAtMs,
+    };
+  };
 
   const respondToLinkExchange = async (request: Request): Promise<Response> => {
     const refused = (): Response => errorResponse(notFound());
     if (!linkKey) return refused();
-    if (!hasValidRelayExchangeKey(request, false)) return refused();
+    if (!hasValidRelayExchangeKey(request)) return refused();
     const ip = request.headers.get("x-dohc-relay-client-ip") ?? "unknown";
     if (!linkExchangeRateLimiter.allow(ip, nowMs())) return refused();
 
@@ -1065,7 +1078,7 @@ export function createSyncRelayHandler({
   };
 
   const respondToLinkRefresh = (request: Request): Response => {
-    if (!hasValidRelayExchangeKey(request, false)) {
+    if (!hasValidRelayExchangeKey(request)) {
       return errorResponse(notFound());
     }
     if (!linkKey) throw invalidLinkCapability();
@@ -1156,9 +1169,12 @@ export function createSyncRelayHandler({
             epochLogFloor,
           );
           requireFreshLinkRead(capabilityToken, capability);
+          const presentation = createAccountlessPathProjection(
+            capability.effectiveSelector,
+          );
           return jsonResponse({
             ok: true,
-            effectiveSelector: capability.effectiveSelector,
+            effectiveSelector: presentation.selector,
             access: capability.access,
             ...freshness,
           });

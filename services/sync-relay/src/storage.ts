@@ -363,10 +363,11 @@ export interface SyncRelayStorage {
   listSharesReceivedBy(recipientUserId: string): SyncRelayShareWithGrantRow[];
   // Idempotent; returns false only when the share does not exist.
   revokeShare(shareId: string, revokedAtMs: number): boolean;
-  // Candidate moment rows for the shared-blob allowlist. Historical reads
-  // find any matching moment. Current-state reads find each object's latest
-  // moment first, then match its blob and path before applying the cap. The
-  // share filter still makes the authorization decision.
+  // Candidate moment rows for the shared-blob allowlist. Both semantics start
+  // from objects that used the exact hash. Historical reads choose each
+  // object's latest matching moment. Current-state reads resolve only those
+  // objects' latest moments, then match the blob and path before applying the
+  // cap. The share filter still makes the authorization decision.
   listObjectMomentLogRowsByBlob(input: {
     workspaceId: string;
     versionId: string;
@@ -2929,38 +2930,50 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       ? `AND EXISTS (
              SELECT 1
              FROM selector_paths selected
-             WHERE m.path = selected.path
-                OR substr(m.path, 1, length(selected.path) + 1) = selected.path || '/'
+             WHERE candidate_moment.path = selected.path
+                OR substr(candidate_moment.path, 1, length(selected.path) + 1) = selected.path || '/'
            )`
       : "";
     const candidateCtes =
       input.semantics === "current-state"
-        ? `latest_by_object AS (
-             SELECT m.workspace_id, m.object_id, m.version_id,
-                    MAX(m.relay_seq) AS relay_seq
-             FROM sync_relay_object_moments m
-             WHERE m.workspace_id = ? AND m.version_id = ?
-             GROUP BY m.workspace_id, m.object_id, m.version_id
+        ? `candidate_objects AS MATERIALIZED (
+             SELECT DISTINCT matching.object_id
+             FROM sync_relay_object_moments matching
+             WHERE matching.workspace_id = ? AND matching.version_id = ?
+               AND matching.blob_sha256 = ?
+           ),
+           latest_by_object AS (
+             SELECT candidate.object_id,
+                    (
+                      SELECT latest.relay_seq
+                      FROM sync_relay_object_moments latest
+                      WHERE latest.workspace_id = ? AND latest.version_id = ?
+                        AND latest.object_id = candidate.object_id
+                      ORDER BY latest.relay_seq DESC
+                      LIMIT 1
+                    ) AS relay_seq
+             FROM candidate_objects candidate
            ),
            candidates AS (
-             SELECT m.relay_seq
+             SELECT candidate_moment.relay_seq
              FROM latest_by_object latest
-             JOIN sync_relay_object_moments m
-               ON m.workspace_id = latest.workspace_id
-              AND m.object_id = latest.object_id
-              AND m.version_id = latest.version_id
-              AND m.relay_seq = latest.relay_seq
-             WHERE m.blob_sha256 = ?
+             JOIN sync_relay_object_moments candidate_moment
+               ON candidate_moment.workspace_id = ?
+              AND candidate_moment.object_id = latest.object_id
+              AND candidate_moment.relay_seq = latest.relay_seq
+             WHERE candidate_moment.blob_sha256 = ?
                ${selectorPathsCondition}
-             ORDER BY m.relay_seq DESC
+             ORDER BY candidate_moment.relay_seq DESC
              LIMIT ?
            )`
         : `candidates AS (
-             SELECT MAX(m.relay_seq) AS relay_seq
-             FROM sync_relay_object_moments m
-             WHERE m.workspace_id = ? AND m.version_id = ? AND m.blob_sha256 = ?
+             SELECT MAX(candidate_moment.relay_seq) AS relay_seq
+             FROM sync_relay_object_moments candidate_moment
+             WHERE candidate_moment.workspace_id = ?
+               AND candidate_moment.version_id = ?
+               AND candidate_moment.blob_sha256 = ?
                ${selectorPathsCondition}
-             GROUP BY m.object_id
+             GROUP BY candidate_moment.object_id
              ORDER BY relay_seq DESC
              LIMIT ?
            )`;
@@ -2979,6 +2992,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         input.workspaceId,
         input.versionId,
         input.sha256,
+        ...(input.semantics === "current-state"
+          ? [input.workspaceId, input.versionId, input.workspaceId, input.sha256]
+          : []),
         SHARED_BLOB_CANDIDATE_LIMIT,
       )
       .map(rowToLogRow);

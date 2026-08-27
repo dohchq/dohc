@@ -137,15 +137,13 @@ export function resolveSharedImage(
   href: string,
   currentPath: string,
   files: ReadonlyMap<string, SharedFile>,
-  session?: string,
+  session: string,
 ): string | null {
-  if (
-    /^\/api\/view\/blob\/[a-f0-9]{64}(?:\?session=[A-Za-z0-9_-]{12})?$/u.test(href)
-  ) {
-    return href;
-  }
+  const blobMatch =
+    /^\/api\/view\/blob\/([a-f0-9]{64})(?:\?session=[A-Za-z0-9_-]{12})?$/u.exec(href);
+  if (blobMatch) return `/api/view/blob/${blobMatch[1]}?session=${session}`;
   const file = resolveSharedFile(href, currentPath, files);
   return file && isRasterImage(file.path)
-    ? `/api/view/blob/${file.blobSha256}${session ? `?session=${session}` : ""}`
+    ? `/api/view/blob/${file.blobSha256}?session=${session}`
     : null;
 }

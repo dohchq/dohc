@@ -213,7 +213,12 @@ async function createLink(
     versionId?: string;
     access: "view" | "comment" | "edit";
   },
-): Promise<{ capability: string; grantId: string }> {
+): Promise<{
+  capability: string;
+  exchange: Record<string, unknown>;
+  grantId: string;
+  shareId: string;
+}> {
   const share = await json(
     await h(
       request(
@@ -242,7 +247,9 @@ async function createLink(
   );
   return {
     capability: String(exchange.capabilityToken),
+    exchange,
     grantId: String(link.grantId),
+    shareId: String(share.shareId),
   };
 }
 
@@ -435,6 +442,155 @@ describe("relay capability reads", () => {
     expect(
       await denialBytes(await h(linkRequest(capability, `/sync/link/blobs/${missingSha}`))),
     ).toBe(recipientMissing);
+  });
+
+  it("projects a nested file into the accountless namespace without changing authenticated paths", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const realPath = "clients/acme/private/report.md";
+    const projectedPath = "report.md";
+    const before = "# Before\n";
+    const after = "# After\n";
+
+    expect(
+      (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
+    ).toBe(200);
+    await putBlob(h, before);
+    await putBlob(h, after);
+    const storedMoment = moment(0, realPath, after, 1_100, {
+      objectId: "object-report",
+      beforePath: realPath,
+      beforeContent: before,
+    });
+    await appendMoments(h, [storedMoment]);
+    const link = await createLink(h, { paths: [realPath], access: "view" });
+
+    const linkMeta = await json(
+      await h(linkRequest(link.capability, "/sync/link/share")),
+    );
+    expect(linkMeta.effectiveSelector).toEqual({
+      paths: [projectedPath],
+      versionId: null,
+      access: "view",
+    });
+    expect(link.exchange.effectiveSelector).toEqual({
+      paths: [projectedPath],
+      versionId: null,
+      access: "view",
+    });
+    const linkLog = await json(
+      await h(linkRequest(link.capability, "/sync/link/log?since=0&limit=100")),
+    );
+    const linkPayload = (
+      linkLog.ops as Array<{ payload: Record<string, unknown> }>
+    )[0]!.payload;
+    expect(linkPayload).toMatchObject({
+      path: projectedPath,
+      payloadBeforePath: projectedPath,
+      payloadAfterPath: projectedPath,
+    });
+    expect(linkPayload).not.toHaveProperty("beforePath");
+    expect(JSON.stringify({ exchange: link.exchange, meta: linkMeta, log: linkLog }))
+      .not.toContain(realPath);
+
+    const authenticatedMeta = await json(
+      await h(request(RECIPIENT, `/sync/shares/${link.shareId}`)),
+    );
+    expect(authenticatedMeta.selector).toMatchObject({ paths: [realPath] });
+    const authenticatedLog = await json(
+      await h(request(RECIPIENT, `/sync/shares/${link.shareId}/log?since=0&limit=100`)),
+    );
+    const authenticatedPayload = (
+      authenticatedLog.ops as Array<{ payload: Record<string, unknown> }>
+    )[0]!.payload;
+    expect(authenticatedPayload).toMatchObject({
+      path: realPath,
+      payloadBeforePath: realPath,
+      payloadAfterPath: realPath,
+    });
+
+    const refreshed = await json(
+      await h(request(null, "/sync/link-refresh", {
+        method: "POST",
+        headers: { authorization: `LinkCapability ${link.capability}` },
+      })),
+    );
+    expect(refreshed.effectiveSelector).toEqual({
+      paths: [projectedPath],
+      versionId: null,
+      access: "view",
+    });
+  });
+
+  it("keeps a nested folder's visible name as its accountless root", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const realRoot = "clients/acme/private/docs";
+    const realPath = `${realRoot}/guides/start.md`;
+
+    expect(
+      (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
+    ).toBe(200);
+    await putBlob(h, "# Start\n");
+    await appendMoments(h, [
+      moment(0, realPath, "# Start\n", 1_100, { objectId: "object-start" }),
+    ]);
+    const link = await createLink(h, { paths: [realRoot], access: "view" });
+
+    const linkMeta = await json(
+      await h(linkRequest(link.capability, "/sync/link/share")),
+    );
+    expect(linkMeta.effectiveSelector).toMatchObject({ paths: ["docs"] });
+    const linkLog = await json(
+      await h(linkRequest(link.capability, "/sync/link/log?since=0&limit=100")),
+    );
+    expect(
+      (linkLog.ops as Array<{ payload: Record<string, unknown> }>)[0]!.payload,
+    ).toMatchObject({
+      path: "docs/guides/start.md",
+      payloadAfterPath: "docs/guides/start.md",
+    });
+    expect(JSON.stringify({ meta: linkMeta, log: linkLog })).not.toContain("clients/acme/private");
+  });
+
+  it("disambiguates accountless roots with the same visible name", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const firstRoot = "clients/acme/private/docs";
+    const secondRoot = "teams/blue/private/docs";
+    const firstPath = `${firstRoot}/first.md`;
+    const secondPath = `${secondRoot}/second.md`;
+
+    expect(
+      (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
+    ).toBe(200);
+    await putBlob(h, "first\n");
+    await putBlob(h, "second\n");
+    await appendMoments(h, [
+      moment(0, firstPath, "first\n", 1_100, { objectId: "object-first" }),
+      moment(1, secondPath, "second\n", 1_200, { objectId: "object-second" }),
+    ]);
+    const link = await createLink(h, {
+      paths: [firstRoot, secondRoot],
+      access: "view",
+    });
+
+    const linkMeta = await json(
+      await h(linkRequest(link.capability, "/sync/link/share")),
+    );
+    expect(linkMeta.effectiveSelector).toMatchObject({
+      paths: ["docs", "2~docs"],
+    });
+    const linkLog = await json(
+      await h(linkRequest(link.capability, "/sync/link/log?since=0&limit=100")),
+    );
+    const projectedPaths = (
+      linkLog.ops as Array<{ payload: { payloadAfterPath?: string } }>
+    ).map((op) => op.payload.payloadAfterPath);
+    expect(projectedPaths).toEqual(["docs/first.md", "2~docs/second.md"]);
+    const serialized = JSON.stringify({ meta: linkMeta, log: linkLog });
+    expect(serialized).not.toContain("clients/acme/private");
+    expect(serialized).not.toContain("teams/blue/private");
   });
 
   it("keeps accountless log pages to viewer artifact rows without changing authenticated logs", async () => {
@@ -810,6 +966,51 @@ describe("relay capability reads", () => {
     expect(pinned.status).toBe(200);
     expect(await pinned.text()).toBe("# shared\n");
   });
+
+  it.each(["accountless", "authenticated"] as const)(
+    "serves a selected pinned-version path blob after newer out-of-selector candidates on the %s route",
+    async (route) => {
+      const storage = await newStorage();
+      const h = handler(storage);
+      const seeded = await seed(h, "view", {
+        paths: ["docs"],
+        versionId: "snapshot-1",
+        sharedVersionId: "snapshot-1",
+      });
+      await appendMoments(
+        h,
+        Array.from(
+          { length: SHARED_BLOB_CANDIDATE_LIMIT + 1 },
+          (_, index) =>
+            moment(
+              index + 3,
+              `private/copy-${index}.md`,
+              "# shared\n",
+              1_300 + index,
+              {
+                versionId: "snapshot-1",
+                objectId: `object-private-copy-${index}`,
+              },
+            ),
+        ),
+      );
+
+      const blob = await h(
+        route === "accountless"
+          ? linkRequest(
+              seeded.capability,
+              `/sync/link/blobs/${seeded.sharedSha}`,
+            )
+          : request(
+              RECIPIENT,
+              `/sync/shares/share-0/blobs/${seeded.sharedSha}`,
+            ),
+      );
+
+      expect(blob.status).toBe(200);
+      expect(await blob.text()).toBe("# shared\n");
+    },
+  );
 
   it("serves a version.create-only snapshot blob only through a selector that covers it", async () => {
     const storage = await newStorage();

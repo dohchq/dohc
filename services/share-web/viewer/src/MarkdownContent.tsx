@@ -17,6 +17,11 @@ export function MarkdownContent(props: {
     if (!props.resolveLink || !props.onNavigate || !(event.target instanceof Element)) {
       return;
     }
+    // A modified or non-primary click asks the browser for its own behavior
+    // (new tab, new window); in-place navigation handles plain clicks only.
+    if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) {
+      return;
+    }
     const anchor = event.target.closest("a");
     const href = anchor?.getAttribute("href");
     if (!href) return;

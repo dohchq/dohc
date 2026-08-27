@@ -2,11 +2,10 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { App, MARKDOWN_PREVIEW_BYTE_CAP } from "./App";
+import { App, MARKDOWN_PREVIEW_BYTE_CAP, MAX_LOG_PAGES } from "./App";
 import { filesFromLog, type RelayOp, type SharedFile, type ViewMeta } from "./model";
 
 const SESSION = "abcdefghijkl";
-const EXPECTED_MAX_LOG_PAGES = 10_000;
 
 const DEFAULT_META: ViewMeta = {
   access: "view",
@@ -197,14 +196,14 @@ describe("App", () => {
     );
   });
 
-  it("navigates resolved relative Markdown links inside the share", async () => {
+  it("keeps tree selection and relative Markdown links inside the projected namespace", async () => {
     const readme: SharedFile = {
-      path: "docs/readme.md",
+      path: "docs/guides/readme.md",
       blobSha256: "a".repeat(64),
       contentKind: "text",
     };
     const target: SharedFile = {
-      path: "notes/next.txt",
+      path: "docs/notes/next.txt",
       blobSha256: "b".repeat(64),
       contentKind: "text",
     };
@@ -216,7 +215,15 @@ describe("App", () => {
     ].join("\n\n");
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
-      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/meta") {
+        return jsonResponse({
+          ...DEFAULT_META,
+          effectiveSelector: {
+            ...DEFAULT_META.effectiveSelector,
+            paths: ["docs"],
+          },
+        });
+      }
       if (path === "/api/view/log?since=0&limit=500") {
         return logPage([readme, target]);
       }
@@ -241,6 +248,9 @@ describe("App", () => {
     expect(missingLink).toBeUndefined();
     expect(webLink?.getAttribute("href")).toBe("https://example.com/docs");
     expect(mailLink?.getAttribute("href")).toBe("mailto:reader@example.com");
+    expect(container.querySelector("nav")?.textContent).toContain("guides");
+    expect(container.querySelector("nav")?.textContent).toContain("notes");
+    expect(container.textContent).not.toContain("clients/acme/private");
 
     let followedPageLink = true;
     act(() => {
@@ -250,7 +260,7 @@ describe("App", () => {
     });
 
     expect(followedPageLink).toBe(false);
-    expect(container.querySelector("h1")?.textContent).toBe("notes/next.txt");
+    expect(container.querySelector("h1")?.textContent).toBe("docs/notes/next.txt");
     expect(location.pathname).toBe(`/s/${SESSION}`);
   });
 
@@ -1330,33 +1340,36 @@ describe("App", () => {
     );
   });
 
-  it("shows the unavailable state when a meta heartbeat is refused", async () => {
-    vi.useFakeTimers();
-    let metaRequests = 0;
-    const fetchMock = vi.fn<typeof fetch>(async (input) => {
-      const path = requestPath(input);
-      if (path === "/api/view/meta") {
-        metaRequests += 1;
-        return metaRequests === 1
-          ? jsonResponse(DEFAULT_META)
-          : new Response(null, { status: 404 });
-      }
-      if (path === "/api/view/log?since=0&limit=500") return logPage([]);
-      throw new Error(`Unexpected request: ${path}`);
-    });
-    vi.stubGlobal("fetch", fetchMock);
+  it.each([401, 403, 404])(
+    "shows the unavailable state when a meta heartbeat returns %i",
+    async (status) => {
+      vi.useFakeTimers();
+      let metaRequests = 0;
+      const fetchMock = vi.fn<typeof fetch>(async (input) => {
+        const path = requestPath(input);
+        if (path === "/api/view/meta") {
+          metaRequests += 1;
+          return metaRequests === 1
+            ? jsonResponse(DEFAULT_META)
+            : new Response(null, { status });
+        }
+        if (path === "/api/view/log?since=0&limit=500") return logPage([]);
+        throw new Error(`Unexpected request: ${path}`);
+      });
+      vi.stubGlobal("fetch", fetchMock);
 
-    await renderApp();
+      await renderApp();
 
-    expect(container.textContent).not.toContain("This link isn't available.");
+      expect(container.textContent).not.toContain("This link isn't available.");
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(4 * 60_000);
-    });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4 * 60_000);
+      });
 
-    expect(metaRequests).toBe(2);
-    expect(container.textContent).toContain("This link isn't available.");
-  });
+      expect(metaRequests).toBe(2);
+      expect(container.textContent).toContain("This link isn't available.");
+    },
+  );
 
   it("keeps loaded files when a meta heartbeat returns 500", async () => {
     vi.useFakeTimers();
@@ -1412,7 +1425,7 @@ describe("App", () => {
         return logOpsPage(
           [],
           cursor + 1,
-          heartbeatLogPaths.length <= EXPECTED_MAX_LOG_PAGES,
+          heartbeatLogPaths.length <= MAX_LOG_PAGES,
         );
       }
       throw new Error(`Unexpected request: ${path}`);
@@ -1425,7 +1438,7 @@ describe("App", () => {
       await vi.advanceTimersByTimeAsync(4 * 60_000);
     });
 
-    expect(heartbeatLogPaths).toHaveLength(EXPECTED_MAX_LOG_PAGES);
+    expect(heartbeatLogPaths).toHaveLength(MAX_LOG_PAGES);
     expect(heartbeatLogPaths.at(-1)).toBe(
       "/api/view/log?since=10000&limit=500",
     );
