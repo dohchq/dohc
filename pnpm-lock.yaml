@@ -688,6 +688,9 @@ importers:
       '@dohc/sync-relay':
         specifier: workspace:*
         version: link:../sync-relay
+      '@playwright/test':
+        specifier: ^1.62.1
+        version: 1.62.1
       '@types/node':
         specifier: ^24.13.3
         version: 24.13.3

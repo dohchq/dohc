@@ -16,6 +16,7 @@
     "dev:viewer": "vite --config viewer/vite.config.ts",
     "start": "node dist/main.js",
     "test": "vitest run",
+    "test:e2e": "pnpm run build && node ../../apps/desktop/scripts/run-playwright.mjs --config playwright.config.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -26,6 +27,7 @@
   },
   "devDependencies": {
     "@dohc/sync-relay": "workspace:*",
+    "@playwright/test": "^1.62.1",
     "@types/node": "^24.13.3",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
