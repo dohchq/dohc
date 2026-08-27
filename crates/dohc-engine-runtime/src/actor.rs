@@ -52,8 +52,8 @@ use dohc_engine_domain::{
     CompareTextFileVersions, CreateFileThread, CreateNamedVersion, DeleteResult, DeleteTextFile,
     DispatchClaim, DispatchRecovery, DomainError, InbandBinary, InbandSecret, InbandText,
     LinkedChatStore, ListMomentsQuery, MentionCursor, MergeTextFileFromVersion,
-    MergeTextFileResult, MomentPage, MomentRecord, PendingBookmarkRow, RenameResult,
-    RenameTextFile, ResolveDecision, ResolveTextConflict, ResolveTextConflictResult,
+    MergeTextFileResult, MomentPage, MomentRecord, PendingBookmarkRow, ProjectedWriteText,
+    RenameResult, RenameTextFile, ResolveDecision, ResolveTextConflict, ResolveTextConflictResult,
     RollbackTextFileMutation, RunRecordLink, SaveBookmark, SecretComparePage, SecretDelete,
     SecretFileStat, SecretFileStore, SecretMomentPage, SecretMomentRecord, SecretOp,
     SecretRestoreResult, SecretWrite, SecretWriteResult, SendMessage, SetFollow, SetReaction,
@@ -100,6 +100,7 @@ use dohc_engine_sync::{
 };
 use dohc_engine_sync_http::HttpRelayTransport;
 use rusqlite::{OptionalExtension, params};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -10664,7 +10665,12 @@ fn ydoc_settle_on_store(
             projection,
         });
     }
-    let projection_for_write = projection.clone();
+    let Projection {
+        content: projected_text,
+        content_kind: projected_content_kind,
+        source_state_vector_sha256,
+        destructive: projection_destructive,
+    } = projection;
     let outcome = store.write_with(faults, |tx| {
         let current = select_snapshot_by_path_in_tx(tx, &key.workspace_id, &key.version_id, path)?;
         if current.binary_sha256.is_some() {
@@ -10707,7 +10713,7 @@ fn ydoc_settle_on_store(
             path,
             session_id,
             previous_moment,
-            projection_for_write.source_state_vector_sha256,
+            source_state_vector_sha256,
         );
         let moment_id = format!(
             "moment-ydoc-{}",
@@ -10715,14 +10721,14 @@ fn ydoc_settle_on_store(
         );
         let result = write_projected_text_in_tx(
             tx,
-            &WriteText {
-                workspace_id: key.workspace_id.clone(),
-                version_id: key.version_id.clone(),
-                object_id: key.object_id.clone(),
-                path: path.to_owned(),
-                text: projection_for_write.content.clone(),
-                moment_id,
-                metadata_origin: "ydoc".to_owned(),
+            ProjectedWriteText {
+                workspace_id: &key.workspace_id,
+                version_id: &key.version_id,
+                object_id: &key.object_id,
+                path: Cow::Borrowed(path),
+                text: Cow::Owned(projected_text),
+                moment_id: &moment_id,
+                metadata_origin: "ydoc",
                 metadata_summary: None,
                 metadata_correlation_id: None,
                 author_json: None,
@@ -10888,10 +10894,18 @@ fn ydoc_settle_on_store(
         }
         JobOutcome::Crashed(_) => return Err(RuntimeError::OperationCrashed),
     }
+    let projection = Projection {
+        content: write.snapshot.text,
+        content_kind: projected_content_kind,
+        source_state_vector_sha256,
+        destructive: projection_destructive,
+    };
+    let content = (projection.content.len() <= dohc_engine_domain::INBAND_CONTENT_CAP_BYTES)
+        .then(|| projection.content.clone());
     Ok(YdocSettlement {
         moment_id: write.moment.moment_id,
         path: write.snapshot.path,
-        content: inband_settled_content(write.snapshot.text),
+        content,
         sha256: write.snapshot.blob_sha256,
         materialized,
         projection,

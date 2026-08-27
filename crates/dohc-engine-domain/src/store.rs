@@ -34,6 +34,7 @@ use dohc_engine_storage::{
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 /// Maximum text-file size accepted by [`VersionedTextStore::write_text`], in
@@ -2068,31 +2069,96 @@ pub(crate) struct RecordedRequest {
 // Free helpers (SQL over a borrowed connection/transaction).
 // ============================================================================
 
-/// Validate a write and return the input with its path normalized through the
-/// R07 plaintext-storable path floor (a secret/ignored path is rejected here).
-/// Shared by direct writes and merge/resolve writes so plaintext never lands on
-/// a protected path via any route.
-fn normalized_write_input(input: &WriteText) -> Result<WriteText, DomainError> {
-    validate_identifier(&input.workspace_id, "workspace_id")?;
-    validate_identifier(&input.version_id, "version_id")?;
-    bounded_identifier(&input.object_id, "object_id")?;
-    validate_moment_id(&input.moment_id)?;
+/// A projected write can borrow every small field while transferring ownership
+/// of its document body into the returned snapshot.
+#[doc(hidden)]
+pub struct ProjectedWriteText<'a> {
+    pub workspace_id: &'a str,
+    pub version_id: &'a str,
+    pub object_id: &'a str,
+    pub path: Cow<'a, str>,
+    pub text: Cow<'a, str>,
+    pub moment_id: &'a str,
+    pub metadata_origin: &'a str,
+    pub metadata_summary: Option<&'a str>,
+    pub metadata_correlation_id: Option<&'a str>,
+    pub author_json: Option<&'a str>,
+    pub now_ms: i64,
+    pub request_id: Option<&'a str>,
+}
+
+impl<'a> From<&'a WriteText> for ProjectedWriteText<'a> {
+    fn from(input: &'a WriteText) -> Self {
+        Self {
+            workspace_id: &input.workspace_id,
+            version_id: &input.version_id,
+            object_id: &input.object_id,
+            path: Cow::Borrowed(&input.path),
+            text: Cow::Borrowed(&input.text),
+            moment_id: &input.moment_id,
+            metadata_origin: &input.metadata_origin,
+            metadata_summary: input.metadata_summary.as_deref(),
+            metadata_correlation_id: input.metadata_correlation_id.as_deref(),
+            author_json: input.author_json.as_deref(),
+            now_ms: input.now_ms,
+            request_id: input.request_id.as_deref(),
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static WRITE_TEXT_OWNERSHIP_COUNTS: std::cell::Cell<(usize, usize)> =
+        const { std::cell::Cell::new((0, 0)) };
+}
+
+#[cfg(test)]
+fn note_write_text_ownership(owned_text: bool) {
+    WRITE_TEXT_OWNERSHIP_COUNTS.with(|counts| {
+        let (borrowed, owned) = counts.get();
+        counts.set(if owned_text {
+            (borrowed, owned + 1)
+        } else {
+            (borrowed + 1, owned)
+        });
+    });
+}
+
+#[cfg(test)]
+fn reset_write_text_ownership_counts() {
+    WRITE_TEXT_OWNERSHIP_COUNTS.with(|counts| counts.set((0, 0)));
+}
+
+#[cfg(test)]
+fn write_text_ownership_counts() -> (usize, usize) {
+    WRITE_TEXT_OWNERSHIP_COUNTS.with(std::cell::Cell::get)
+}
+
+/// Validate a write and normalize only its path through the R07
+/// plaintext-storable path floor. The document body stays borrowed or owned as
+/// supplied, so validation never copies it.
+fn normalized_write_input<'a>(
+    mut input: ProjectedWriteText<'a>,
+) -> Result<ProjectedWriteText<'a>, DomainError> {
+    validate_identifier(input.workspace_id, "workspace_id")?;
+    validate_identifier(input.version_id, "version_id")?;
+    bounded_identifier(input.object_id, "object_id")?;
+    validate_moment_id(input.moment_id)?;
     validate_moment_metadata(
-        input.metadata_origin.as_str(),
-        input.metadata_summary.as_deref(),
-        input.metadata_correlation_id.as_deref(),
-        input.author_json.as_deref(),
+        input.metadata_origin,
+        input.metadata_summary,
+        input.metadata_correlation_id,
+        input.author_json,
     )?;
-    let mut normalized = input.clone();
-    normalized.path = validate_plaintext_storable_path(&input.path)?;
-    validate_text(&normalized.text)?;
-    Ok(normalized)
+    input.path = Cow::Owned(validate_plaintext_storable_path(&input.path)?);
+    validate_text(&input.text)?;
+    Ok(input)
 }
 
 #[doc(hidden)]
 pub fn validate_write_input(input: &WriteText) -> Result<(), DomainError> {
     reject_reserved_capture_origin(&input.metadata_origin)?;
-    normalized_write_input(input).map(|_| ())
+    normalized_write_input(input.into()).map(|_| ())
 }
 
 /// The shared reservation check for the capture-owned metadata origin.
@@ -3061,15 +3127,16 @@ pub(crate) fn write_text_in_tx_without_diagnostic_journal(
 /// edits that produced this projection, so journaling the derived markdown a
 /// second time would create a competing replication mutation.
 #[doc(hidden)]
-pub fn write_projected_text_in_tx(
+pub fn write_projected_text_in_tx<'a>(
     tx: &Transaction<'_>,
-    input: &WriteText,
+    input: impl Into<ProjectedWriteText<'a>>,
 ) -> Result<WriteResult, DomainError> {
     // allow_preallocated_object: the live Y.Doc seed pre-creates the
     // file_objects row (FK parent for the marker) before any snapshot or
     // alias exists — the settle that follows is binding ITS OWN object,
     // not colliding with another.
-    write_text_in_tx_with_journal(tx, input, false, true)
+    let input = normalized_write_input(input.into())?;
+    write_normalized_text_in_tx_with_journal(tx, input, false, true)
 }
 
 fn write_text_in_tx_with_journal(
@@ -3078,18 +3145,28 @@ fn write_text_in_tx_with_journal(
     journal: bool,
     allow_preallocated_object: bool,
 ) -> Result<WriteResult, DomainError> {
-    let normalized_input = normalized_write_input(input)?;
-    let input = &normalized_input;
-    let ws = &input.workspace_id;
-    if !version_exists(tx, ws, &input.version_id)? {
+    let input = normalized_write_input(input.into())?;
+    write_normalized_text_in_tx_with_journal(tx, input, journal, allow_preallocated_object)
+}
+
+fn write_normalized_text_in_tx_with_journal(
+    tx: &Transaction<'_>,
+    input: ProjectedWriteText<'_>,
+    journal: bool,
+    allow_preallocated_object: bool,
+) -> Result<WriteResult, DomainError> {
+    #[cfg(test)]
+    note_write_text_ownership(matches!(&input.text, Cow::Owned(_)));
+    let ws = input.workspace_id;
+    if !version_exists(tx, ws, input.version_id)? {
         return Err(DomainError::VersionNotFound);
     }
 
     let blob = text_blob_sha256(&input.text);
-    let (author_kind, author_json) = hash_author_fields(input.author_json.as_deref());
-    let (summary_kind, summary) = hash_optional_text_fields(input.metadata_summary.as_deref());
+    let (author_kind, author_json) = hash_author_fields(input.author_json);
+    let (summary_kind, summary) = hash_optional_text_fields(input.metadata_summary);
     let (correlation_kind, correlation_id) =
-        hash_optional_text_fields(input.metadata_correlation_id.as_deref());
+        hash_optional_text_fields(input.metadata_correlation_id);
     let payload_hash = hash_fields(&[
         input.version_id.as_bytes(),
         input.path.as_bytes(),
@@ -3104,24 +3181,24 @@ fn write_text_in_tx_with_journal(
         author_kind,
         author_json,
     ]);
-    if let Some(request_id) = &input.request_id
+    if let Some(request_id) = input.request_id
         && let Some(recorded) = lookup_request(tx, request_id)?
     {
         if recorded.payload_hash != payload_hash {
             return Err(DomainError::IdempotencyKeyReuseMismatch);
         }
-        return reconstruct_write(tx, input);
+        return reconstruct_write(tx, input.workspace_id, input.moment_id);
     }
-    if let Some(existing) = get_moment(tx, ws, &input.moment_id)? {
+    if let Some(existing) = get_moment(tx, ws, input.moment_id)? {
         let exact = existing.version_id == input.version_id
-            && existing.path == input.path
+            && existing.path == input.path.as_ref()
             && existing.operation == MomentOp::Write
             && existing.after_content_kind == "text"
             && existing.after_blob_sha256.as_deref() == Some(blob.as_str())
             && existing.metadata_origin == input.metadata_origin
-            && existing.metadata_summary == input.metadata_summary
-            && existing.metadata_correlation_id == input.metadata_correlation_id
-            && existing.author_json == input.author_json;
+            && existing.metadata_summary.as_deref() == input.metadata_summary
+            && existing.metadata_correlation_id.as_deref() == input.metadata_correlation_id
+            && existing.author_json.as_deref() == input.author_json;
         if exact {
             return write_result_from_moment(tx, ws, existing, true);
         }
@@ -3135,22 +3212,22 @@ fn write_text_in_tx_with_journal(
     // `get_moment` intentionally resolves only plaintext history, so retain
     // the exact-text replay above and then reject a secret-table collision in
     // this same transaction before inserting the text row.
-    if moment_exists(tx, ws, &input.moment_id)? {
+    if moment_exists(tx, ws, input.moment_id)? {
         return Err(DomainError::DuplicateMomentId);
     }
 
-    let existing_object = alias_object_id(tx, ws, &input.version_id, &input.path)?;
+    let existing_object = alias_object_id(tx, ws, input.version_id, &input.path)?;
     let before = match &existing_object {
-        Some(object_id) => get_snapshot(tx, ws, &input.version_id, object_id)?,
+        Some(object_id) => get_snapshot(tx, ws, input.version_id, object_id)?,
         None => {
             if input.object_id.is_empty() {
                 return Err(DomainError::InvalidInput {
                     reason: "object_id must not be empty for a new path",
                 });
             }
-            if object_exists(tx, ws, &input.object_id)? {
+            if object_exists(tx, ws, input.object_id)? {
                 let bare_preallocation =
-                    allow_preallocated_object && !object_has_any_binding(tx, ws, &input.object_id)?;
+                    allow_preallocated_object && !object_has_any_binding(tx, ws, input.object_id)?;
                 if !bare_preallocation {
                     return Err(DomainError::InvalidInput {
                         reason: "object_id is already bound to another object",
@@ -3161,7 +3238,7 @@ fn write_text_in_tx_with_journal(
         }
     };
     let is_new_object = existing_object.is_none();
-    let object_id = existing_object.unwrap_or_else(|| input.object_id.clone());
+    let object_id = existing_object.unwrap_or_else(|| input.object_id.to_owned());
     let before_blob = before.as_ref().and_then(|s| s.blob_sha256.clone());
     let before_content_kind = before
         .as_ref()
@@ -3181,13 +3258,13 @@ fn write_text_in_tx_with_journal(
     }
     tx.execute(
         "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
-        params![blob, input.text.len() as i64, input.text],
+        params![blob, input.text.len() as i64, input.text.as_ref()],
     )
     .map_err(DomainError::sql_persist)?;
     tx.execute(
         "INSERT OR IGNORE INTO path_aliases (workspace_id, version_id, path, object_id) \
          VALUES (?1, ?2, ?3, ?4)",
-        params![ws, input.version_id, input.path, object_id],
+        params![ws, input.version_id, input.path.as_ref(), object_id],
     )
     .map_err(DomainError::sql_persist)?;
     tx.execute(
@@ -3210,7 +3287,7 @@ fn write_text_in_tx_with_journal(
             input.moment_id,
             input.version_id,
             object_id,
-            input.path,
+            input.path.as_ref(),
             input.now_ms,
             blob,
             if before.is_some() { 2 } else { 1 },
@@ -3243,7 +3320,7 @@ fn write_text_in_tx_with_journal(
             ws,
             input.version_id,
             object_id,
-            input.path,
+            input.path.as_ref(),
             blob,
             input.now_ms,
             input.moment_id,
@@ -3263,43 +3340,47 @@ fn write_text_in_tx_with_journal(
     }
     record_request(
         tx,
-        input.request_id.as_deref(),
+        input.request_id,
         &payload_hash,
         moment_order,
         input.now_ms,
     )?;
 
+    let object = get_file_object(tx, ws, &object_id)?.ok_or(DomainError::StateCorrupt {
+        reason: "written snapshot points at a missing object",
+    })?;
+    let moment = get_moment(tx, ws, input.moment_id)?.ok_or(DomainError::StateCorrupt {
+        reason: "moment vanished within its own write transaction",
+    })?;
     Ok(WriteResult {
-        object: get_file_object(tx, ws, &object_id)?.ok_or(DomainError::StateCorrupt {
-            reason: "written snapshot points at a missing object",
-        })?,
+        object,
         snapshot: TextSnapshot {
-            workspace_id: ws.clone(),
-            version_id: input.version_id.clone(),
+            workspace_id: ws.to_owned(),
+            version_id: input.version_id.to_owned(),
             object_id: object_id.clone(),
-            path: input.path.clone(),
-            text: input.text.clone(),
+            path: input.path.into_owned(),
+            text: input.text.into_owned(),
             blob_sha256: blob.clone(),
             updated_at_ms: input.now_ms,
-            latest_moment_id: input.moment_id.clone(),
-            metadata_origin: input.metadata_origin.clone(),
-            metadata_summary: input.metadata_summary.clone(),
-            metadata_correlation_id: input.metadata_correlation_id.clone(),
+            latest_moment_id: input.moment_id.to_owned(),
+            metadata_origin: input.metadata_origin.to_owned(),
+            metadata_summary: input.metadata_summary.map(str::to_owned),
+            metadata_correlation_id: input.metadata_correlation_id.map(str::to_owned),
         },
-        moment: get_moment(tx, ws, &input.moment_id)?.ok_or(DomainError::StateCorrupt {
-            reason: "moment vanished within its own write transaction",
-        })?,
+        moment,
         deduped: false,
     })
 }
 
-fn reconstruct_write(conn: &Connection, input: &WriteText) -> Result<WriteResult, DomainError> {
-    let moment = get_moment(conn, &input.workspace_id, &input.moment_id)?.ok_or(
-        DomainError::StateCorrupt {
-            reason: "deduped write has no moment",
-        },
-    )?;
-    write_result_from_moment(conn, &input.workspace_id, moment, true)
+fn reconstruct_write(
+    conn: &Connection,
+    workspace_id: &str,
+    moment_id: &str,
+) -> Result<WriteResult, DomainError> {
+    let moment = get_moment(conn, workspace_id, moment_id)?.ok_or(DomainError::StateCorrupt {
+        reason: "deduped write has no moment",
+    })?;
+    write_result_from_moment(conn, workspace_id, moment, true)
 }
 
 /// Apply a caller-originated binary write inside a caller-owned transaction.
@@ -5890,8 +5971,86 @@ fn hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::object_has_references;
+    use std::borrow::Cow;
+
+    use super::{
+        ProjectedWriteText, VersionedTextStore, object_has_references,
+        reset_write_text_ownership_counts, write_projected_text_in_tx, write_text_in_tx,
+        write_text_ownership_counts,
+    };
+    use crate::WriteText;
+    use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
+    use dohc_engine_testkit::ScratchDir;
     use rusqlite::Connection;
+
+    #[test]
+    fn direct_write_borrows_text_and_projected_write_moves_owned_text() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let mut store =
+            EngineStore::open(&scratch.engine_db_path().expect("db"), 1).expect("open store");
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .expect("ensure main version");
+
+        reset_write_text_ownership_counts();
+        let direct = WriteText {
+            workspace_id: "ws".to_owned(),
+            version_id: "main".to_owned(),
+            object_id: "direct-object".to_owned(),
+            path: "direct.md".to_owned(),
+            text: "direct body".to_owned(),
+            moment_id: "direct-moment".to_owned(),
+            metadata_origin: "test".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            author_json: None,
+            now_ms: 2,
+            request_id: None,
+        };
+        let direct_outcome = store
+            .write_with(&NoFaults, |tx| write_text_in_tx(tx, &direct))
+            .expect("direct write");
+        assert!(matches!(direct_outcome, TxnOutcome::Committed(_)));
+
+        let projected_text = "projected body".repeat(4_096);
+        let projected_allocation = projected_text.as_ptr();
+        let projected_outcome = store
+            .write_with(&NoFaults, |tx| {
+                write_projected_text_in_tx(
+                    tx,
+                    ProjectedWriteText {
+                        workspace_id: "ws",
+                        version_id: "main",
+                        object_id: "projected-object",
+                        path: Cow::Borrowed("projected.md"),
+                        text: Cow::Owned(projected_text),
+                        moment_id: "projected-moment",
+                        metadata_origin: "ydoc",
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 3,
+                        request_id: None,
+                    },
+                )
+            })
+            .expect("projected write");
+        let projected = match projected_outcome {
+            TxnOutcome::Committed(projected) => projected,
+            TxnOutcome::Crashed { .. } => panic!("projected write crashed"),
+        };
+
+        assert_eq!(
+            projected.snapshot.text.as_ptr(),
+            projected_allocation,
+            "the projected body allocation must move into the returned snapshot"
+        );
+        assert_eq!(
+            write_text_ownership_counts(),
+            (1, 1),
+            "the shared writer must exercise one borrowed and one owned text path"
+        );
+    }
 
     #[test]
     fn inactive_ydoc_lineage_keeps_file_object_referenced() {

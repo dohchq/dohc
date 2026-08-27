@@ -274,7 +274,24 @@ pub enum CloseOutcome {
 
 /// Read a doc's marker, or `None` if the object is not Y.Doc-driven.
 pub fn read_marker(store: &EngineStore, key: &DocKey) -> Result<Option<Marker>, CollabError> {
+    #[cfg(test)]
+    READ_MARKER_COUNT.with(|count| count.set(count.get() + 1));
     store.read_with(|conn| query_marker(conn, key))
+}
+
+#[cfg(test)]
+thread_local! {
+    static READ_MARKER_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_read_marker_count() {
+    READ_MARKER_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn read_marker_count() -> usize {
+    READ_MARKER_COUNT.with(std::cell::Cell::get)
 }
 
 /// Reconstruct the persisted Y.Doc from its latest snapshot + trailing update
@@ -456,6 +473,7 @@ pub fn record_local_update_with_origin(
     let sha = crate::hex_sha256(update);
 
     let mut probe = GateBaseProbe::default();
+    let mut pending_after_append = None;
     let outcome = store.write_with(faults, |tx| -> Result<AppendOutcome, CollabError> {
         let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
         let outcome = append_local_update_cached(
@@ -469,11 +487,23 @@ pub fn record_local_update_with_origin(
             cache,
             &mut probe,
         )?;
+        if !outcome.deduped {
+            pending_after_append = Some(outcome.seq - marker.head_snapshot_seq);
+        }
         probe.capture_commit(tx, key);
         Ok(outcome)
     })?;
     finalize_local_append(
-        store, cache, key, outcome, update, &sha, probe, faults, now_ms,
+        store,
+        cache,
+        key,
+        outcome,
+        pending_after_append,
+        update,
+        &sha,
+        probe,
+        faults,
+        now_ms,
     )
 }
 
@@ -665,6 +695,7 @@ where
         )
     });
     let mut probe = GateBaseProbe::default();
+    let mut pending_after_append = None;
     let outcome = store.write_with(faults, |tx| -> Result<AppendOutcome, CollabError> {
         if let (Some(request_id), Some(hash)) = (request_id, request_hash.as_deref()) {
             let recorded: Option<(String, i64)> = tx
@@ -785,6 +816,7 @@ where
                 &mut probe,
             )?;
             if !outcome.deduped {
+                pending_after_append = Some(outcome.seq - marker.head_snapshot_seq);
                 // The seed's provenance commits WITH the seed append: the
                 // marker now records which captured head this lineage's
                 // first update imported (#815). A dedup replays the original
@@ -829,6 +861,7 @@ where
         cache,
         key,
         outcome,
+        pending_after_append,
         update,
         &update_sha,
         probe,
@@ -926,6 +959,7 @@ fn finalize_local_append(
     cache: &mut WriterDocCache,
     key: &DocKey,
     outcome: TxnOutcome<AppendOutcome>,
+    pending_after_append: Option<i64>,
     update: &[u8],
     update_sha: &str,
     probe: GateBaseProbe,
@@ -935,7 +969,15 @@ fn finalize_local_append(
     // This order is part of CACHE-VALID: advance or install against the append
     // commit first, then let a resulting fold re-base that entry.
     cache.finish_local_append(key, &outcome, update, update_sha, probe);
-    self_bound_log(store, cache, key, &outcome, faults, now_ms)?;
+    self_bound_log(
+        store,
+        cache,
+        key,
+        &outcome,
+        pending_after_append,
+        faults,
+        now_ms,
+    )?;
     Ok(outcome)
 }
 
@@ -949,11 +991,18 @@ pub(crate) fn self_bound_log(
     cache: &mut WriterDocCache,
     key: &DocKey,
     outcome: &TxnOutcome<AppendOutcome>,
+    pending_after_append: Option<i64>,
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<(), CollabError> {
     if let TxnOutcome::Committed(app) = outcome {
         if !app.deduped {
+            let pending = pending_after_append.ok_or_else(|| CollabError::Corrupt {
+                reason: "committed Y.Doc append is missing its pending count".to_owned(),
+            })?;
+            if below_threshold(pending, DEFAULT_COMPACTION_THRESHOLD) {
+                return Ok(());
+            }
             // Best-effort fold; a fault-injected compaction crash is harmless
             // (the append is already durable) and leaves the log for the next
             // fold. `maybe_compact` no-ops below threshold.
@@ -2840,5 +2889,65 @@ mod successor_validation_tests {
                 ..
             }
         ));
+    }
+}
+
+#[cfg(test)]
+mod append_compaction_query_tests {
+    use super::*;
+    use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
+    use dohc_test_scratch::ScratchDir;
+
+    #[test]
+    fn below_threshold_append_does_not_read_marker_for_compaction() {
+        let scratch = ScratchDir::new_named("append-no-compaction-marker-read").expect("scratch");
+        let mut store = EngineStore::open(&scratch.join("engine.db"), 1).expect("open store");
+        let key = DocKey::new("ws", "main", "object").expect("key");
+        let parents = store
+            .write_with(&NoFaults, |tx| -> Result<(), CollabError> {
+                tx.execute(
+                    "INSERT INTO versioned_workspaces (workspace_id, main_version_id) \
+                     VALUES (?1, ?2)",
+                    rusqlite::params![key.workspace_id, key.version_id],
+                )
+                .map_err(map_sql)?;
+                tx.execute(
+                    "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
+                     VALUES (?1, ?2, 1)",
+                    rusqlite::params![key.workspace_id, key.object_id],
+                )
+                .map_err(map_sql)?;
+                Ok(())
+            })
+            .expect("seed parents");
+        assert!(matches!(parents, TxnOutcome::Committed(())));
+        let marker = ensure_marker(
+            &mut store,
+            &key,
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            &NoFaults,
+            2,
+        )
+        .expect("ensure marker");
+        assert!(matches!(marker, TxnOutcome::Committed(_)));
+
+        reset_read_marker_count();
+        let update = Ydoc::wire().plaintext_insert(0, "first");
+        let append = record_local_update(
+            &mut store,
+            &mut WriterDocCache::new(),
+            &key,
+            &update,
+            &NoFaults,
+            3,
+        )
+        .expect("append");
+        assert!(matches!(append, TxnOutcome::Committed(_)));
+        assert_eq!(
+            read_marker_count(),
+            0,
+            "a below-threshold append must not enter maybe_compact's marker read"
+        );
     }
 }
