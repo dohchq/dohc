@@ -1482,17 +1482,17 @@ describe("relay link grants", () => {
     const h = handler(storage, { relayExchangeKey, nowMs: () => now });
     await seedFileShare(h);
     const created = await createLink(h);
-    const exchanged = await json(
-      await h(
-        request(null, "/sync/link-exchange", {
-          ...jsonBody({ secret: created.secret }),
-          headers: {
-            "content-type": "application/json",
-            "x-dohc-relay-exchange-key": relayExchangeKey,
-          },
-        }),
-      ),
+    const exchangeResponse = await h(
+      request(null, "/sync/link-exchange", {
+        ...jsonBody({ secret: created.secret }),
+        headers: {
+          "content-type": "application/json",
+          "x-dohc-relay-exchange-key": relayExchangeKey,
+        },
+      }),
     );
+    expect(exchangeResponse.status).toBe(200);
+    const exchanged = await json(exchangeResponse);
     expect(
       (
         await h(
@@ -1528,17 +1528,17 @@ describe("relay link grants", () => {
     const h = handler(storage, { relayExchangeKey, nowMs: () => now });
     await seedFileShare(h);
     const created = await createLink(h);
-    const exchanged = await json(
-      await h(
-        request(null, "/sync/link-exchange", {
-          ...jsonBody({ secret: created.secret }),
-          headers: {
-            "content-type": "application/json",
-            "x-dohc-relay-exchange-key": relayExchangeKey,
-          },
-        }),
-      ),
+    const exchangeResponse = await h(
+      request(null, "/sync/link-exchange", {
+        ...jsonBody({ secret: created.secret }),
+        headers: {
+          "content-type": "application/json",
+          "x-dohc-relay-exchange-key": relayExchangeKey,
+        },
+      }),
     );
+    expect(exchangeResponse.status).toBe(200);
+    const exchanged = await json(exchangeResponse);
     now += LINK_SESSION_TTL_MS + 60 * 60 * 1_000;
     expect(
       (
@@ -1602,17 +1602,17 @@ describe("relay link grants", () => {
     await seedFileShare(h);
     const created = await createLink(h);
     grantId = String(created.grantId);
-    const exchanged = await json(
-      await h(
-        request(null, "/sync/link-exchange", {
-          ...jsonBody({ secret: created.secret }),
-          headers: {
-            "content-type": "application/json",
-            "x-dohc-relay-exchange-key": relayExchangeKey,
-          },
-        }),
-      ),
+    const exchangeResponse = await h(
+      request(null, "/sync/link-exchange", {
+        ...jsonBody({ secret: created.secret }),
+        headers: {
+          "content-type": "application/json",
+          "x-dohc-relay-exchange-key": relayExchangeKey,
+        },
+      }),
     );
+    expect(exchangeResponse.status).toBe(200);
+    const exchanged = await json(exchangeResponse);
     armed = true;
 
     const refused = await h(
@@ -1650,17 +1650,17 @@ describe("relay link grants", () => {
         }),
       ),
     );
-    const beyondGrace = await json(
-      await h(
-        request(null, "/sync/link-exchange", {
-          ...jsonBody({ secret: created.secret }),
-          headers: {
-            "content-type": "application/json",
-            "x-dohc-relay-exchange-key": relayExchangeKey,
-          },
-        }),
-      ),
+    const beyondGraceExchangeResponse = await h(
+      request(null, "/sync/link-exchange", {
+        ...jsonBody({ secret: created.secret }),
+        headers: {
+          "content-type": "application/json",
+          "x-dohc-relay-exchange-key": relayExchangeKey,
+        },
+      }),
     );
+    expect(beyondGraceExchangeResponse.status).toBe(200);
+    const beyondGrace = await json(beyondGraceExchangeResponse);
     now += LINK_SESSION_TTL_MS + LINK_SESSION_RENEWAL_GRACE_MS;
 
     const boundary = await h(

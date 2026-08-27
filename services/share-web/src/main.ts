@@ -11,6 +11,9 @@ import {
 
 const DEFAULT_SHUTDOWN_GRACE_PERIOD_MS = 10_000;
 const SHUTDOWN_GRACE_PERIOD_MS = shutdownGracePeriodMs();
+const responseErrorDuringPipeTestSeam =
+  process.env.NODE_ENV === "test" &&
+  process.env.DOHC_SHARE_WEB_TEST_RESPONSE_ERROR_DURING_PIPE === "1";
 
 const config = loadConfig();
 const viewerAssetsDir = viewerAssetsDirectory();
@@ -94,7 +97,12 @@ const server = createServer((incoming, outgoing) => {
           outgoing.end();
           return;
         }
-        void pipeResponseBody(webResponse.body, outgoing);
+        void pipeResponseBody(
+          webResponse.body,
+          outgoing,
+          responseErrorDuringPipeTestSeam &&
+            incoming.headers["x-dohc-test-response-error"] === "1",
+        );
       })
       .catch(() => {
         if (!outgoing.destroyed) refuse(outgoing);
@@ -170,12 +178,17 @@ function refuse(outgoing: ServerResponse): void {
 async function pipeResponseBody(
   body: ReadableStream<Uint8Array>,
   outgoing: ServerResponse,
+  emitResponseErrorDuringPipeTestSeam: boolean,
 ): Promise<void> {
   const reader = body.getReader();
   const cancelOnClose = (): void => {
     if (!outgoing.writableFinished) void reader.cancel().catch(() => undefined);
   };
+  const destroyOnError = (): void => {
+    if (!outgoing.destroyed) outgoing.destroy();
+  };
   outgoing.once("close", cancelOnClose);
+  outgoing.on("error", destroyOnError);
   try {
     while (!outgoing.destroyed) {
       const read = await reader.read();
@@ -183,7 +196,14 @@ async function pipeResponseBody(
         outgoing.end();
         return;
       }
-      if (!outgoing.write(Buffer.from(read.value))) {
+      const needsDrain = !outgoing.write(Buffer.from(read.value));
+      if (emitResponseErrorDuringPipeTestSeam) {
+        emitResponseErrorDuringPipeTestSeam = false;
+        queueMicrotask(() => {
+          outgoing.emit("error", new Error("controlled response error during pipe"));
+        });
+      }
+      if (needsDrain) {
         const drained = await waitForDrain(outgoing);
         if (!drained) return;
       }
@@ -192,6 +212,7 @@ async function pipeResponseBody(
     if (!outgoing.destroyed) outgoing.destroy();
   } finally {
     outgoing.off("close", cancelOnClose);
+    outgoing.off("error", destroyOnError);
     if (!outgoing.writableFinished) await reader.cancel().catch(() => undefined);
   }
 }

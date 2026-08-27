@@ -139,6 +139,47 @@ describe("App", () => {
     expect(container.textContent).not.toContain("This link isn't available.");
   });
 
+  it("retries throttled metadata during the initial load", async () => {
+    vi.useFakeTimers();
+    let metaRequests = 0;
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") {
+        metaRequests += 1;
+        return metaRequests === 1
+          ? new Response(null, { status: 429 })
+          : jsonResponse(DEFAULT_META);
+      }
+      if (path === "/api/view/log?since=0&limit=500") return logPage([]);
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+
+    expect(metaRequests).toBe(1);
+    expect(container.textContent).toContain("Opening shared files");
+    expect(container.textContent).not.toContain("This link isn't available.");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(999);
+    });
+    expect(metaRequests).toBe(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+
+    expect(metaRequests).toBe(2);
+    expect(container.querySelector("header")?.textContent).toContain(
+      "Shared by a dohc user",
+    );
+    expect(container.querySelector("main.content")?.textContent).toBe(
+      "No files in this share yet.",
+    );
+    expect(container.textContent).not.toContain("This link isn't available.");
+  });
+
   it("exposes each folder's disclosure state", async () => {
     const file: SharedFile = {
       path: "docs/readme.md",
@@ -880,6 +921,75 @@ describe("App", () => {
     expect(createObjectUrl).toHaveBeenCalledTimes(1);
     expect(revokeObjectUrl).toHaveBeenCalledWith(objectUrl);
     expect(document.body.querySelector(`a[href="${objectUrl}"]`)).toBeNull();
+  });
+
+  it("cancels a throttled download retry when the viewer unmounts", async () => {
+    vi.useFakeTimers();
+    const file: SharedFile = {
+      path: "payload.bin",
+      blobSha256: "4".repeat(64),
+      contentKind: "binary",
+    };
+    const downloadPath = `/api/view/blob/${file.blobSha256}`;
+    const downloadRequests: string[] = [];
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
+      if (path === downloadPath) {
+        downloadRequests.push(path);
+        return downloadRequests.length === 1
+          ? new Response(null, { status: 429 })
+          : new Response("stale file bytes");
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+
+    const createObjectUrl = vi.spyOn(URL, "createObjectURL")
+      .mockReturnValue("blob:stale-download");
+    const appendedAnchors: HTMLAnchorElement[] = [];
+    const append = vi.spyOn(document.body, "append")
+      .mockImplementation((...nodes) => {
+        for (const node of nodes) {
+          if (node instanceof HTMLAnchorElement) appendedAnchors.push(node);
+        }
+      });
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => undefined);
+    const visibleDownload = container.querySelector("a[download]");
+
+    await act(async () => {
+      visibleDownload?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
+      );
+      await Promise.resolve();
+    });
+    expect(downloadRequests).toEqual([downloadPath]);
+
+    act(() => {
+      root?.unmount();
+      root = null;
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+
+    expect({
+      downloadRequests,
+      createObjectUrlCalls: createObjectUrl.mock.calls.length,
+      appendedAnchorCount: appendedAnchors.length,
+      appendCalls: append.mock.calls.length,
+      clickCalls: click.mock.calls.length,
+    }).toEqual({
+      downloadRequests: [downloadPath],
+      createObjectUrlCalls: 0,
+      appendedAnchorCount: 0,
+      appendCalls: 0,
+      clickCalls: 0,
+    });
   });
 
   async function renderRasterImage(): Promise<{

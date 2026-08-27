@@ -11,6 +11,8 @@ import { PresenceHub } from "./presence";
 import { MAX_BLOB_BYTES, createSyncRelayHandler } from "./server";
 import { DEFAULT_WORKSPACE_QUOTA_BYTES, openSyncRelayStorage } from "./storage";
 
+const DEFAULT_SHUTDOWN_GRACE_PERIOD_MS = 10_000;
+const SHUTDOWN_GRACE_PERIOD_MS = shutdownGracePeriodMs();
 const requestedPort = process.env.SYNC_RELAY_PORT === undefined ? 1788 : Number(process.env.SYNC_RELAY_PORT);
 const workspaceQuotaBytes =
   process.env.SYNC_RELAY_WORKSPACE_QUOTA_BYTES === undefined
@@ -23,6 +25,9 @@ const isDevOrTest = nodeEnv === "development" || nodeEnv === "test";
 const testAuthSeam = process.env.SYNC_RELAY_TEST_AUTH === "1" && isDevOrTest;
 const controlledStreamTestSeam =
   testAuthSeam && process.env.SYNC_RELAY_TEST_CONTROLLED_STREAM === "1";
+let emitResponseErrorDuringPipeTestSeam =
+  controlledStreamTestSeam &&
+  process.env.SYNC_RELAY_TEST_RESPONSE_ERROR_DURING_PIPE === "1";
 const linkKey = process.env.DOHC_RELAY_LINK_KEY;
 const relayExchangeKey = process.env.DOHC_RELAY_EXCHANGE_KEY;
 const relayExchangeKeyHash =
@@ -375,7 +380,11 @@ async function pipeResponseBody(
   const cancelOnClose = (): void => {
     if (!outgoing.writableFinished) void reader.cancel().catch(() => undefined);
   };
+  const destroyOnError = (): void => {
+    if (!outgoing.destroyed) outgoing.destroy();
+  };
   outgoing.once("close", cancelOnClose);
+  outgoing.on("error", destroyOnError);
   try {
     while (!outgoing.destroyed) {
       const read = await reader.read();
@@ -383,7 +392,14 @@ async function pipeResponseBody(
         outgoing.end();
         return;
       }
-      if (!outgoing.write(read.value)) {
+      const needsDrain = !outgoing.write(read.value);
+      if (emitResponseErrorDuringPipeTestSeam) {
+        emitResponseErrorDuringPipeTestSeam = false;
+        queueMicrotask(() => {
+          outgoing.emit("error", new Error("controlled response error during pipe"));
+        });
+      }
+      if (needsDrain) {
         const drained = await waitForDrain(outgoing);
         if (!drained) return;
       }
@@ -392,6 +408,7 @@ async function pipeResponseBody(
     if (!outgoing.destroyed) outgoing.destroy();
   } finally {
     outgoing.off("close", cancelOnClose);
+    outgoing.off("error", destroyOnError);
     if (!outgoing.writableFinished) await reader.cancel().catch(() => undefined);
   }
 }
@@ -426,11 +443,29 @@ server.listen(requestedPort, host, () => {
 });
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.on(signal, () => {
-    server.close(() => {
-      storage.close();
-      void pool?.end().finally(() => process.exit(0));
-      if (!pool) process.exit(0);
-    });
+  process.on(signal, shutdown);
+}
+
+function shutdown(): void {
+  let forceCloseTimer: ReturnType<typeof setTimeout> | undefined;
+  server.close(() => {
+    if (forceCloseTimer !== undefined) clearTimeout(forceCloseTimer);
+    storage.close();
+    void pool?.end().finally(() => process.exit(0));
+    if (!pool) process.exit(0);
   });
+  forceCloseTimer = setTimeout(() => {
+    server.closeAllConnections();
+  }, SHUTDOWN_GRACE_PERIOD_MS);
+  forceCloseTimer.unref();
+}
+
+function shutdownGracePeriodMs(): number {
+  if (process.env.NODE_ENV !== "test") return DEFAULT_SHUTDOWN_GRACE_PERIOD_MS;
+  const configured = process.env.SYNC_RELAY_TEST_SHUTDOWN_GRACE_PERIOD_MS;
+  if (configured === undefined) return DEFAULT_SHUTDOWN_GRACE_PERIOD_MS;
+  const parsed = Number(configured);
+  return Number.isSafeInteger(parsed) && parsed >= 0
+    ? parsed
+    : DEFAULT_SHUTDOWN_GRACE_PERIOD_MS;
 }

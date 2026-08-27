@@ -218,7 +218,7 @@ export async function loadLog(
 }
 
 async function loadMeta(session: string, signal?: AbortSignal): Promise<ViewMeta> {
-  const response = await api(session, "/api/view/meta", signal);
+  const response = await apiWithThrottleRetry(session, "/api/view/meta", signal);
   if (!response.ok) throw new ViewResponseError(response.status);
   const meta = (await response.json()) as ViewMeta;
   if (meta.access !== "view" || meta.effectiveSelector.access !== "view") {
@@ -459,26 +459,43 @@ function RasterImage(props: { source: string; alt: string }) {
 function DownloadCard(props: { file: SharedFile; session: string }) {
   const fileName = props.file.path.split("/").at(-1);
   const visibleDownloadPath = `/api/view/blob/${props.file.blobSha256}?session=${props.session}`;
+  const downloadControllerRef = useRef<AbortController | null>(null);
+  useEffect(() => () => {
+    downloadControllerRef.current?.abort();
+    downloadControllerRef.current = null;
+  }, [props.file.blobSha256, props.session]);
   const download = async () => {
-    const response = await apiWithThrottleRetry(
-      props.session,
-      `/api/view/blob/${props.file.blobSha256}`,
-    );
-    if (!response.ok) throw new Error("refused");
-    const objectUrl = URL.createObjectURL(await response.blob());
+    downloadControllerRef.current?.abort();
+    const controller = new AbortController();
+    downloadControllerRef.current = controller;
     try {
-      const anchor = document.createElement("a");
-      anchor.href = objectUrl;
-      anchor.download = fileName ?? "";
-      anchor.hidden = true;
-      document.body.append(anchor);
+      const response = await apiWithThrottleRetry(
+        props.session,
+        `/api/view/blob/${props.file.blobSha256}`,
+        controller.signal,
+      );
+      if (!response.ok) throw new Error("refused");
+      const blob = await response.blob();
+      if (controller.signal.aborted) return;
+      const objectUrl = URL.createObjectURL(blob);
       try {
-        anchor.click();
+        const anchor = document.createElement("a");
+        anchor.href = objectUrl;
+        anchor.download = fileName ?? "";
+        anchor.hidden = true;
+        document.body.append(anchor);
+        try {
+          anchor.click();
+        } finally {
+          anchor.remove();
+        }
       } finally {
-        anchor.remove();
+        URL.revokeObjectURL(objectUrl);
       }
     } finally {
-      URL.revokeObjectURL(objectUrl);
+      if (downloadControllerRef.current === controller) {
+        downloadControllerRef.current = null;
+      }
     }
   };
   return (

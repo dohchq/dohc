@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { request as httpRequest } from "node:http";
+import { type IncomingMessage, request as httpRequest } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +18,15 @@ vi.setConfig({ testTimeout: 90_000, hookTimeout: 30_000 });
 
 const WORKSPACE_ID = "workspace-live-relay";
 const USER_ID = "sync-user";
+const TEST_SHUTDOWN_GRACE_PERIOD_MS = 250;
+const WITHIN_SHUTDOWN_GRACE_MS = 100;
+const FORCED_SHUTDOWN_TIMEOUT_MS = 2_000;
+
+interface RunningRelay {
+  baseUrl: string;
+  child: ChildProcess;
+  stderr: () => string;
+}
 
 let roots: string[] = [];
 let children: ChildProcess[] = [];
@@ -65,7 +74,25 @@ async function spawnRelay(
   dbPath: string,
   envOverrides: Record<string, string | undefined> = {},
 ): Promise<string> {
-  const child = spawn(process.execPath, ["--import", "tsx/esm", "src/main.ts"], {
+  return (await spawnRunningRelay(dbPath, envOverrides)).baseUrl;
+}
+
+async function spawnRunningRelay(
+  dbPath: string,
+  envOverrides: Record<string, string | undefined> = {},
+): Promise<RunningRelay> {
+  const mainUrl = new URL("./main.ts", import.meta.url);
+  const childArguments =
+    process.platform === "win32"
+      ? [
+          "--import",
+          "tsx",
+          "--input-type=module",
+          "--eval",
+          `process.on("message", (message) => { if (message === "SIGTERM") process.emit("SIGTERM"); }); await import(${JSON.stringify(mainUrl.href)});`,
+        ]
+      : ["--import", "tsx/esm", "src/main.ts"];
+  const child = spawn(process.execPath, childArguments, {
     cwd: packageRoot(),
     env: {
       ...process.env,
@@ -76,8 +103,15 @@ async function spawnRelay(
       FORCE_COLOR: "0",
       ...envOverrides,
     },
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "pipe", "pipe", "ipc"],
+    windowsHide: true,
   });
+  const childStdout = child.stdout;
+  const childStderr = child.stderr;
+  if (!childStdout || !childStderr) {
+    child.kill();
+    throw new Error("sync relay test child did not expose piped output");
+  }
   children.push(child);
   return await new Promise((resolve, reject) => {
     let stdout = "";
@@ -85,15 +119,19 @@ async function spawnRelay(
     const timeout = setTimeout(() => {
       reject(new Error(`sync relay did not report a port\nstdout:\n${stdout}\nstderr:\n${stderr}`));
     }, 45_000); // tsx startup under load, not a hang — see presence.integration.test.ts (#372)
-    child.stdout.on("data", (chunk) => {
+    childStdout.on("data", (chunk) => {
       stdout += String(chunk);
       const match = /SYNC_RELAY_LISTENING host=([^\s]+) port=(\d+)/u.exec(stdout);
       if (match) {
         clearTimeout(timeout);
-        resolve(`http://${match[1]}:${match[2]}`);
+        resolve({
+          baseUrl: `http://${match[1]}:${match[2]}`,
+          child,
+          stderr: () => stderr,
+        });
       }
     });
-    child.stderr.on("data", (chunk) => {
+    childStderr.on("data", (chunk) => {
       stderr += String(chunk);
     });
     child.on("exit", (code) => {
@@ -214,6 +252,134 @@ async function settleWithin<T>(
 }
 
 describe("sync relay main process", () => {
+
+  it("force-closes a stalled streamed response after the shutdown grace period", { timeout: 15_000 }, async (context) => {
+    const relayRoot = await tempRoot("relay-stalled-shutdown");
+    let relay: RunningRelay;
+    try {
+      relay = await spawnRunningRelay(join(relayRoot, "relay.sqlite"), {
+        SYNC_RELAY_TEST_CONTROLLED_STREAM: "1",
+        SYNC_RELAY_TEST_SHUTDOWN_GRACE_PERIOD_MS: String(
+          TEST_SHUTDOWN_GRACE_PERIOD_MS,
+        ),
+      });
+    } catch (error) {
+      if (error instanceof ListenPermissionError) {
+        context.skip();
+        return;
+      }
+      throw error;
+    }
+
+    let streamedResponse: IncomingMessage | undefined;
+    const clientRequest = httpRequest(
+      `${relay.baseUrl}/__test/controlled-stream`,
+      (response) => {
+        streamedResponse = response;
+      },
+    );
+    const firstChunk = new Promise<Buffer>((resolve, reject) => {
+      clientRequest.once("response", (response) => {
+        response.once("data", (chunk: Buffer) => resolve(Buffer.from(chunk)));
+        response.once("error", reject);
+        response.once("end", () =>
+          reject(new Error("controlled response ended before its first chunk")),
+        );
+      });
+      clientRequest.once("error", reject);
+    });
+    clientRequest.end();
+    expect((await firstChunk).length).toBeGreaterThan(0);
+
+    try {
+      const exited = waitForExit(relay.child);
+      sendTerminationSignal(relay.child);
+
+      expect(
+        await settleWithin(exited, WITHIN_SHUTDOWN_GRACE_MS),
+        `sync relay exited before its shutdown grace period\n${relay.stderr()}`,
+      ).toEqual({ kind: "pending" });
+      expect(
+        await settleWithin(exited, FORCED_SHUTDOWN_TIMEOUT_MS),
+        `sync relay remained alive after its shutdown grace period\n${relay.stderr()}`,
+      ).toEqual({
+        kind: "settled",
+        value: { code: 0, signal: null },
+      });
+    } finally {
+      streamedResponse?.destroy();
+      clientRequest.destroy();
+    }
+  });
+
+  it("shuts down promptly when no responses are active", async (context) => {
+    const relayRoot = await tempRoot("relay-quiet-shutdown");
+    let relay: RunningRelay;
+    try {
+      relay = await spawnRunningRelay(join(relayRoot, "relay.sqlite"), {
+        SYNC_RELAY_TEST_SHUTDOWN_GRACE_PERIOD_MS: String(
+          TEST_SHUTDOWN_GRACE_PERIOD_MS,
+        ),
+      });
+    } catch (error) {
+      if (error instanceof ListenPermissionError) {
+        context.skip();
+        return;
+      }
+      throw error;
+    }
+    const exited = waitForExit(relay.child);
+
+    sendTerminationSignal(relay.child);
+
+    expect(
+      await settleWithin(exited, 1_000),
+      `quiet sync relay did not exit promptly\n${relay.stderr()}`,
+    ).toEqual({
+      kind: "settled",
+      value: { code: 0, signal: null },
+    });
+  });
+
+  it("survives a response error during a pipe and cancels the source stream", async (context) => {
+    const relayRoot = await tempRoot("relay-response-error");
+    let relay: RunningRelay;
+    try {
+      relay = await spawnRunningRelay(join(relayRoot, "relay.sqlite"), {
+        SYNC_RELAY_TEST_CONTROLLED_STREAM: "1",
+        SYNC_RELAY_TEST_RESPONSE_ERROR_DURING_PIPE: "1",
+      });
+    } catch (error) {
+      if (error instanceof ListenPermissionError) {
+        context.skip();
+        return;
+      }
+      throw error;
+    }
+
+    const requestSettled = new Promise<void>((resolve) => {
+      const request = httpRequest(
+        `${relay.baseUrl}/__test/controlled-stream`,
+        (response) => {
+          response.once("error", () => resolve());
+          response.once("close", () => resolve());
+          response.resume();
+        },
+      );
+      request.once("error", () => resolve());
+      request.end();
+    });
+    expect(await settleWithin(requestSettled, 1_000)).toEqual({
+      kind: "settled",
+      value: undefined,
+    });
+
+    const cleanup = await fetch(`${relay.baseUrl}/__test/controlled-stream`, {
+      method: "POST",
+    });
+    expect(cleanup.status).toBe(409);
+    expect((await fetch(`${relay.baseUrl}/health`)).status).toBe(200);
+  });
 
   it("streams response headers and first body chunk before completion", async (context) => {
     const relayRoot = await tempRoot("relay-streamed-response");
@@ -706,6 +872,23 @@ async function spawnRelayExpectExit(
       resolve({ code, stderr });
     });
   });
+}
+
+function waitForExit(
+  child: ChildProcess,
+): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
+  }
+  return new Promise((resolve) => {
+    child.once("exit", (code, signal) => resolve({ code, signal }));
+  });
+}
+
+function sendTerminationSignal(child: ChildProcess): void {
+  const sent =
+    process.platform === "win32" ? child.send("SIGTERM") : child.kill("SIGTERM");
+  if (!sent) throw new Error("failed to send SIGTERM to sync relay");
 }
 
 describe("sync relay startup guards", () => {
