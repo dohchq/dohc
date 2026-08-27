@@ -744,6 +744,15 @@ function makeEngineBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
       async (_payload: SyncDmsPayload): Promise<SyncDmsResult> =>
         dmSyncResult([], false),
     ),
+    // A fresh revision per read preserves the pre-gating contract for this
+    // suite: every open-DM tick reloads. A test exercising the revision gate
+    // itself overrides this with a stable value.
+    getChatThreadRevision: vi.fn(
+      (() => {
+        let revision = 0;
+        return async () => ({ revision: ++revision });
+      })(),
+    ),
     listFileChats: vi.fn(
       async (): Promise<ListFileChatsResult> => ({ fileObjectId: null, threads: [] }),
     ),
