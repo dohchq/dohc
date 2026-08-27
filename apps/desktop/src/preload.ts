@@ -60,6 +60,7 @@ import {
   parseEngineYDocLineageReplacementEvent,
   parseEngineYDocSaveStateEvent,
   parseSearchResultsEvent,
+  parseShareHandoffStatus,
   parseUpdateStateEvent,
   parseWorkspaceActivatedEvent,
 } from "./ipc/channels";
@@ -313,6 +314,26 @@ const bridge: DohcDesktopBridge = {
   cloudLoginPoll: () => ipcRenderer.invoke(CHANNELS.cloudLoginPoll),
   cloudStatus: (payload) => ipcRenderer.invoke(CHANNELS.cloudStatus, payload),
   cloudLogout: () => ipcRenderer.invoke(CHANNELS.cloudLogout),
+  getShareHandoffStatus: async () => {
+    const result: unknown = await ipcRenderer.invoke(
+      CHANNELS.getShareHandoffStatus,
+    );
+    const status = parseShareHandoffStatus(result);
+    if (!status) throw new Error("Invalid share handoff status from main");
+    return status;
+  },
+  retryShareHandoff: () => ipcRenderer.invoke(CHANNELS.retryShareHandoff),
+  dismissShareHandoff: () =>
+    ipcRenderer.invoke(CHANNELS.dismissShareHandoff),
+  onShareHandoffStatus: (listener) => {
+    const handler = (_event: unknown, raw: unknown) => {
+      const status = parseShareHandoffStatus(raw);
+      if (status) listener(status);
+    };
+    ipcRenderer.on(CHANNELS.shareHandoffStatus, handler);
+    return () =>
+      ipcRenderer.removeListener(CHANNELS.shareHandoffStatus, handler);
+  },
   cloudEnableSync: (payload) =>
     ipcRenderer.invoke(CHANNELS.cloudEnableSync, payload),
   cloudJoinWorkspace: (payload) =>

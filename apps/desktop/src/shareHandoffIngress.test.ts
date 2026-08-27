@@ -74,12 +74,19 @@ describe("share handoff memory slot", () => {
     expect(second).not.toBeNull();
     if (!first || !second) return;
 
+    expect(slot.snapshot()).toEqual({ code: null, generation: 0 });
     expect(slot.offer(first)).toBe("stored");
+    expect(slot.snapshot()).toEqual({ code: CODE_A, generation: 1 });
+    expect(slot.offer(first)).toBe("duplicate");
+    expect(slot.snapshot()).toEqual({ code: CODE_A, generation: 1 });
     expect(slot.offer(second)).toBe("replaced");
+    expect(slot.snapshot()).toEqual({ code: CODE_B, generation: 2 });
     expect(slot.pending()).toBe(CODE_B);
     expect(slot.settle(first)).toBe(false);
+    expect(slot.snapshot()).toEqual({ code: CODE_B, generation: 2 });
     expect(slot.pending()).toBe(CODE_B);
     expect(slot.settle(second)).toBe(true);
+    expect(slot.snapshot()).toEqual({ code: null, generation: 3 });
     expect(slot.pending()).toBeNull();
   });
 });

@@ -261,6 +261,7 @@ import {
   UpdateActionResult,
   UpdateCheckResult,
   UpdateStateEvent,
+  ShareHandoffStatus as ShareHandoffStatusContract,
 } from "./ipc/bridgeContract";
 import { CHANNELS } from "./ipc/channels";
 import { createSitesIpcHandlers } from "./ipc/sitesIpc";
@@ -757,6 +758,10 @@ import {
   receiveShareHandoffArguments,
   registerShareHandoffProtocol,
 } from "./shareHandoffIngress";
+import {
+  createShareHandoffRedemptionCoordinator,
+  type ShareHandoffStatus,
+} from "./shareHandoffRedemption";
 
 // A launcher that exited leaves main's stdout/stderr a pipe with no reader, and
 // a pipe write throws synchronously. Diagnostics must never be able to crash the
@@ -1646,6 +1651,32 @@ function clearCachedCredentials(): void {
     }
   }
 }
+
+function publishShareHandoffStatus(status: ShareHandoffStatus): void {
+  const publicStatus = ShareHandoffStatusContract.parse(status);
+  if (!app.isReady()) return;
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send(CHANNELS.shareHandoffStatus, publicStatus);
+  }
+}
+
+const shareHandoffRedemption = createShareHandoffRedemptionCoordinator({
+  intent: shareHandoffIntentSlot,
+  credentialSnapshot: () => credentialSessionCache.snapshot(),
+  fetch: (input, init) => fetch(input, init),
+  handleUnauthorized: (requestCredentials) =>
+    handleRelayUnauthorized({
+      requestCredentials,
+      currentCredentials: cachedCredentials,
+      clearCachedCredentials: () => clearCachedCredentials(),
+      notifySessionChanging: () => notifyCloudSessionChanged("changing"),
+      notifyCloudSessionChanged: () => notifyCloudSessionChanged("ready"),
+      invalidatePersistedSessionIf: (expected) =>
+        cloudLogin().invalidateSessionIf(expected),
+    }),
+  publishStatus: publishShareHandoffStatus,
+});
+
 async function loadAndCacheCurrentCredentials(): Promise<CloudSessionCredentials | null> {
   const loaded = await credentialSessionCache.adoptCurrent(() =>
     cloudLogin().credentials(),
@@ -7135,6 +7166,30 @@ function registerIpcHandlers(
     await shell.openExternal(input.url);
   });
 
+  function assertNoShareHandoffArguments(args: unknown[]): void {
+    if (args.length !== 0) {
+      throw new Error("Share handoff actions do not accept arguments.");
+    }
+  }
+
+  ipcMain.handle(CHANNELS.getShareHandoffStatus, (event, ...args: unknown[]) => {
+    assertTrustedSender(event);
+    assertNoShareHandoffArguments(args);
+    return ShareHandoffStatusContract.parse(shareHandoffRedemption.status());
+  });
+
+  ipcMain.handle(CHANNELS.retryShareHandoff, (event, ...args: unknown[]) => {
+    assertTrustedSender(event);
+    assertNoShareHandoffArguments(args);
+    shareHandoffRedemption.retry();
+  });
+
+  ipcMain.handle(CHANNELS.dismissShareHandoff, (event, ...args: unknown[]) => {
+    assertTrustedSender(event);
+    assertNoShareHandoffArguments(args);
+    shareHandoffRedemption.dismiss();
+  });
+
   ipcMain.handle(CHANNELS.cloudLoginStart, async (event, payload) => {
     assertTrustedSender(event);
     const input = CloudLoginStartPayload.parse(payload ?? {});
@@ -7169,6 +7224,7 @@ function registerIpcHandlers(
           notifyCloudSessionChangedWithKey(incomingKey, "changing"),
         notifyCloudSessionChanged: () => notifyCloudSessionChanged("ready"),
       });
+      shareHandoffRedemption.credentialsChanged();
     }
     return CloudLoginPollResult.parse(result);
   });
@@ -7213,17 +7269,21 @@ function registerIpcHandlers(
 
   ipcMain.handle(CHANNELS.cloudLogout, async (event) => {
     assertTrustedSender(event);
-    await runCloudLogoutTransition({
-      clearCachedCredentials: () => clearCachedCredentials(),
-      logout: () => cloudLogin().logout(),
-      stopEngines: () => activity.stopEngines(),
-      closeRelayTransportWorkspaces: () => closeAllRelayTransportWorkspaces(),
-      // Scope-free: logout changes every workspace's sync state at once.
-      notifyWorkspaceActivity: () => notifyRenderer(),
-      // Logout is a one-event transition to a known state: signed out. The
-      // key change is what makes every view clear and refresh.
-      notifyCloudSessionChanged: () => notifyCloudSessionChanged("ready"),
-    });
+    try {
+      await runCloudLogoutTransition({
+        clearCachedCredentials: () => clearCachedCredentials(),
+        logout: () => cloudLogin().logout(),
+        stopEngines: () => activity.stopEngines(),
+        closeRelayTransportWorkspaces: () => closeAllRelayTransportWorkspaces(),
+        // Scope-free: logout changes every workspace's sync state at once.
+        notifyWorkspaceActivity: () => notifyRenderer(),
+        // Logout is a one-event transition to a known state: signed out. The
+        // key change is what makes every view clear and refresh.
+        notifyCloudSessionChanged: () => notifyCloudSessionChanged("ready"),
+      });
+    } finally {
+      shareHandoffRedemption.credentialsChanged();
+    }
   });
 
   // Enabling sync claims the workspace id. The first claimant owns it. The
@@ -12454,12 +12514,15 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   if (process.platform !== "darwin") {
-    receiveShareHandoffArguments(process.argv, shareHandoffIntentSlot);
+    if (receiveShareHandoffArguments(process.argv, shareHandoffIntentSlot)) {
+      shareHandoffRedemption.pendingCodeChanged();
+    }
   }
 
   app.on("open-url", (event, rawArgument) => {
     event.preventDefault();
     const accepted = receiveShareHandoffArguments([rawArgument], shareHandoffIntentSlot);
+    if (accepted) shareHandoffRedemption.pendingCodeChanged();
     if (!accepted || !bootstrapComplete) return;
     void showOrCreateMainWindow();
   });
@@ -12480,6 +12543,7 @@ if (!app.requestSingleInstanceLock()) {
 
   app.on("second-instance", (_event, argv) => {
     const accepted = receiveShareHandoffArguments(argv, shareHandoffIntentSlot);
+    if (accepted) shareHandoffRedemption.pendingCodeChanged();
     const workspacePaths = collectOpenWorkspaceArgs(argv);
     if (!bootstrapComplete) {
       pendingOpenPaths.push(...workspacePaths);
@@ -12657,6 +12721,7 @@ if (!app.requestSingleInstanceLock()) {
     // Load persisted cloud credentials after the first window exists so local
     // workspaces do not pay credential-store I/O on the visible-launch path.
     void warmCredentialCache().then(() => {
+      shareHandoffRedemption.credentialsChanged();
       activity.reconcileCloud(engineForWorkspace);
     });
 

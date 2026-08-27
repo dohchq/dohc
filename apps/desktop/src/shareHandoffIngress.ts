@@ -10,9 +10,15 @@ export type ShareHandoffCode = string & {
 };
 export type ShareHandoffOfferResult = "stored" | "duplicate" | "replaced";
 
+export interface ShareHandoffIntentSnapshot {
+  code: ShareHandoffCode | null;
+  generation: number;
+}
+
 export interface ShareHandoffIntentSlot {
   offer(code: ShareHandoffCode): ShareHandoffOfferResult;
   pending(): ShareHandoffCode | null;
+  snapshot(): ShareHandoffIntentSnapshot;
   settle(code: ShareHandoffCode): boolean;
 }
 
@@ -45,19 +51,25 @@ export function parseShareHandoffUrl(rawArgument: string): ShareHandoffCode | nu
 
 export function createShareHandoffIntentSlot(): ShareHandoffIntentSlot {
   let pendingCode: ShareHandoffCode | null = null;
+  let generation = 0;
   return {
     offer(code) {
       if (pendingCode === code) return "duplicate";
       const result = pendingCode === null ? "stored" : "replaced";
       pendingCode = code;
+      generation += 1;
       return result;
     },
     pending() {
       return pendingCode;
     },
+    snapshot() {
+      return { code: pendingCode, generation };
+    },
     settle(code) {
       if (pendingCode !== code) return false;
       pendingCode = null;
+      generation += 1;
       return true;
     },
   };
