@@ -1,0 +1,173 @@
+import { ArrowLeft } from "lucide-react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import type { ShareHandoffStatus } from "../ipc/bridgeContract";
+import { bridge } from "./bridge";
+import { CloudLogin } from "./CloudLogin";
+import type { Workspace } from "./DesktopWorkspaceShell";
+import { OpenSharedView } from "./OpenSharedView";
+import { IconButton, SecondaryButton } from "./ui/controls";
+
+const REFUSED_COPY =
+  "dohc couldn't open this share link. It may have expired or already been used. Go back to the share page in your browser and choose Open in dohc again.";
+const NETWORK_COPY =
+  "dohc couldn't reach dohc Cloud. Check your connection, then choose Try again.";
+
+type InventoryState =
+  | { kind: "idle" }
+  | { kind: "loading"; shareId: string }
+  | { kind: "failed"; shareId: string }
+  | { kind: "ready"; shareId: string; shareCode: string };
+
+function HandoffCard(props: {
+  title: string;
+  onBack: () => void;
+  children?: ReactNode;
+}) {
+  return (
+    <div
+      data-testid="share-handoff-surface"
+      className="dohc-elevated flex w-105 flex-col gap-3 rounded-xl border border-line bg-panel p-5"
+    >
+      <div className="flex items-center gap-2">
+        <IconButton aria-label="Back" onClick={props.onBack} className="shrink-0">
+          <ArrowLeft size={13} aria-hidden />
+        </IconButton>
+        <h2 className="m-0 text-sm font-semibold text-ink">{props.title}</h2>
+      </div>
+      {props.children}
+    </div>
+  );
+}
+
+export function ShareHandoffSurface(props: {
+  status: ShareHandoffStatus;
+  onWorkspaceReady: (workspace: Workspace) => void;
+  onBack: () => void;
+  onOpened: () => void;
+  mountInto?: {
+    workspaceId: string;
+    onMounted: (label: string) => void;
+  };
+}) {
+  const shareId = props.status.status === "done" ? props.status.shareId : null;
+  const [inventoryAttempt, setInventoryAttempt] = useState(0);
+  const [inventory, setInventory] = useState<InventoryState>({ kind: "idle" });
+  const inventoryRequest = useRef(0);
+
+  useEffect(() => {
+    const request = ++inventoryRequest.current;
+    let active = true;
+    if (shareId === null) {
+      setInventory({ kind: "idle" });
+      return () => {
+        active = false;
+        inventoryRequest.current += 1;
+      };
+    }
+
+    setInventory({ kind: "loading", shareId });
+    void bridge()
+      .listRelayShares()
+      .then((result) => {
+        if (!active || request !== inventoryRequest.current) return;
+        const received = result.received.find((row) => row.shareId === shareId);
+        setInventory(
+          received
+            ? { kind: "ready", shareId, shareCode: received.shareCode }
+            : { kind: "failed", shareId },
+        );
+      })
+      .catch(() => {
+        if (!active || request !== inventoryRequest.current) return;
+        setInventory({ kind: "failed", shareId });
+      });
+
+    return () => {
+      active = false;
+      inventoryRequest.current += 1;
+    };
+  }, [inventoryAttempt, shareId]);
+
+  if (props.status.status === "idle") return null;
+
+  if (props.status.status === "waiting-for-sign-in") {
+    return (
+      <HandoffCard title="Open a share" onBack={props.onBack}>
+        <p className="m-0 text-xs leading-relaxed text-muted">
+          Sign in to open the share from your browser.
+        </p>
+        <CloudLogin onConnected={() => undefined} embedded />
+      </HandoffCard>
+    );
+  }
+
+  if (props.status.status === "redeeming") {
+    return <HandoffCard title="Opening share…" onBack={props.onBack} />;
+  }
+
+  if (props.status.status === "failed-refused") {
+    return (
+      <HandoffCard title="Open a share" onBack={props.onBack}>
+        <p role="alert" className="m-0 text-xs leading-relaxed text-danger">
+          {REFUSED_COPY}
+        </p>
+      </HandoffCard>
+    );
+  }
+
+  if (props.status.status === "failed-network") {
+    return (
+      <HandoffCard title="Open a share" onBack={props.onBack}>
+        <p role="alert" className="m-0 text-xs leading-relaxed text-danger">
+          {NETWORK_COPY}
+        </p>
+        <SecondaryButton
+          type="button"
+          onClick={() => void bridge().retryShareHandoff().catch(() => undefined)}
+        >
+          Try again
+        </SecondaryButton>
+      </HandoffCard>
+    );
+  }
+
+  if (
+    inventory.kind === "ready" &&
+    inventory.shareId === shareId
+  ) {
+    return (
+      <OpenSharedView
+        key={inventory.shareId}
+        resolvedShare={{
+          shareId: inventory.shareId,
+          shareCode: inventory.shareCode,
+        }}
+        onWorkspaceReady={props.onWorkspaceReady}
+        onBack={props.onBack}
+        onOpened={props.onOpened}
+        {...(props.mountInto ? { mountInto: props.mountInto } : {})}
+      />
+    );
+  }
+
+  if (
+    inventory.kind === "failed" &&
+    inventory.shareId === shareId
+  ) {
+    return (
+      <HandoffCard title="Open a share" onBack={props.onBack}>
+        <p role="alert" className="m-0 text-xs leading-relaxed text-danger">
+          {NETWORK_COPY}
+        </p>
+        <SecondaryButton
+          type="button"
+          onClick={() => setInventoryAttempt((attempt) => attempt + 1)}
+        >
+          Try again
+        </SecondaryButton>
+      </HandoffCard>
+    );
+  }
+
+  return <HandoffCard title="Opening share…" onBack={props.onBack} />;
+}

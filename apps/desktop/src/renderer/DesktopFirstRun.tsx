@@ -1,10 +1,12 @@
 import { DohcMark } from "@dohc/brand";
 import { Cloud, FolderOpen } from "lucide-react";
 import { useEffect, useState } from "react";
+import type { ShareHandoffStatus } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { JoinSyncedWorkspace } from "./JoinSyncedWorkspace";
 import { OpenSharedView } from "./OpenSharedView";
+import { ShareHandoffSurface } from "./ShareHandoffSurface";
 import { Titlebar } from "./Titlebar";
 import { PrimaryButton } from "./ui/controls";
 
@@ -14,6 +16,9 @@ import { PrimaryButton } from "./ui/controls";
 // "Join a synced workspace" path.
 export function DesktopFirstRun(props: {
   onWorkspaceReady: (workspace: Workspace) => void;
+  handoffStatus?: ShareHandoffStatus;
+  onDismissShareHandoff?: () => void;
+  onShareHandoffOpened?: () => void;
 }) {
   const [root, setRoot] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -21,6 +26,7 @@ export function DesktopFirstRun(props: {
   const [cloudNote, setCloudNote] = useState(false);
   const [joining, setJoining] = useState(false);
   const [openingShare, setOpeningShare] = useState(false);
+  const handoffStatus = props.handoffStatus ?? { status: "idle" as const };
 
   useEffect(() => {
     void bridge()
@@ -30,6 +36,12 @@ export function DesktopFirstRun(props: {
         setError(cause instanceof Error ? cause.message : String(cause));
       });
   }, []);
+
+  useEffect(() => {
+    if (handoffStatus.status === "idle") return;
+    setJoining(false);
+    setOpeningShare(false);
+  }, [handoffStatus.status]);
 
   async function chooseFolder() {
     const picked = await bridge().pickWorkspaceRoot();
@@ -78,7 +90,14 @@ export function DesktopFirstRun(props: {
         <p className="m-0 text-sm text-muted">Your workspace is a folder.</p>
       </div>
 
-      {joining ? (
+      {handoffStatus.status !== "idle" ? (
+        <ShareHandoffSurface
+          status={handoffStatus}
+          onWorkspaceReady={props.onWorkspaceReady}
+          onBack={() => props.onDismissShareHandoff?.()}
+          onOpened={() => props.onShareHandoffOpened?.()}
+        />
+      ) : joining ? (
         <JoinSyncedWorkspace
           onWorkspaceReady={props.onWorkspaceReady}
           onBack={() => setJoining(false)}

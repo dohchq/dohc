@@ -41,6 +41,7 @@ import type {
   RefreshSharedViewResult,
   RebuildEngineStoreResult,
   AgentRunStatusResult,
+  ShareHandoffStatus,
   ShareProposalRow,
   SyncStatusResult,
   TryInVersionRunState,
@@ -97,6 +98,7 @@ import {
 import { NewFileDialog } from "./NewFileDialog";
 import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
+import { ShareHandoffSurface } from "./ShareHandoffSurface";
 import { useGuestBlockingUi } from "./guestBlockingUi";
 import {
   DEFAULT_SETTINGS_SECTION,
@@ -1485,6 +1487,9 @@ export function DesktopWorkspaceShell(props: {
   userSettings: DesktopUserSettingsResult | null;
   refreshWorkspaceRegistry: () => Promise<Workspace[]>;
   onSwitchWorkspace: (workspace: Workspace) => void;
+  handoffStatus?: ShareHandoffStatus;
+  onDismissShareHandoff?: () => void;
+  onShareHandoffOpened?: () => void;
 }) {
   const workspaceShareMounts = props.workspace.shareMounts ?? EMPTY_SHARE_MOUNTS;
   const [files, setFiles] = useState<WorkspaceFileEntry[]>([]);
@@ -1546,6 +1551,10 @@ export function DesktopWorkspaceShell(props: {
   // Relay-share dialog target (PR 18): paths, or a version.
   const [shareTarget, setShareTarget] = useState<RelayShareTarget | null>(null);
   const [openShareOpen, setOpenShareOpen] = useState(false);
+  const handoffStatus = props.handoffStatus ?? { status: "idle" as const };
+  useEffect(() => {
+    if (handoffStatus.status !== "idle") setOpenShareOpen(false);
+  }, [handoffStatus.status]);
   // The banner carries its own way out. An error that names a value the user
   // can see and gives no way to ask again leaves them with a stale reading and
   // nothing to do about it — the reverse path every reversible state change
@@ -5603,6 +5612,17 @@ export function DesktopWorkspaceShell(props: {
     onSetupAgent: openAgentSettings,
   } as const;
 
+  function handleMountedShare(label: string) {
+    setOpenShareOpen(false);
+    void reloadShareMounts();
+    void refreshFiles().catch(() => undefined);
+    setExplorerFolderExpanded("shared-with-me", true);
+    setExplorerFolderExpanded(`shared-with-me/${label}`, true);
+    showShellNotice(
+      `Added ${label} to shared-with-me — read-only, kept up to date.`,
+    );
+  }
+
   return (
     <div
       data-testid="workspace-shell"
@@ -6826,7 +6846,24 @@ export function DesktopWorkspaceShell(props: {
           </Suspense>
         </Overlay>
       ) : null}
-      {openShareOpen ? (
+      {handoffStatus.status !== "idle" ? (
+        <Overlay onClose={() => props.onDismissShareHandoff?.()}>
+          <ShareHandoffSurface
+            status={handoffStatus}
+            onWorkspaceReady={props.onSwitchWorkspace}
+            onBack={() => props.onDismissShareHandoff?.()}
+            onOpened={() => props.onShareHandoffOpened?.()}
+            {...(shareView
+              ? {}
+              : {
+                  mountInto: {
+                    workspaceId,
+                    onMounted: handleMountedShare,
+                  },
+                })}
+          />
+        </Overlay>
+      ) : openShareOpen ? (
         <Overlay onClose={() => setOpenShareOpen(false)}>
           <OpenSharedView
             onWorkspaceReady={(workspace) => {
@@ -6839,16 +6876,7 @@ export function DesktopWorkspaceShell(props: {
               : {
                   mountInto: {
                     workspaceId,
-                    onMounted: (label: string) => {
-                      setOpenShareOpen(false);
-                      void reloadShareMounts();
-                      void refreshFiles().catch(() => undefined);
-                      setExplorerFolderExpanded("shared-with-me", true);
-                      setExplorerFolderExpanded(`shared-with-me/${label}`, true);
-                      showShellNotice(
-                        `Added ${label} to shared-with-me — read-only, kept up to date.`,
-                      );
-                    },
+                    onMounted: handleMountedShare,
                   },
                 })}
           />

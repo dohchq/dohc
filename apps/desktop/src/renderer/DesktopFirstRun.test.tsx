@@ -25,6 +25,9 @@ const bridge = {
   importWorkspaceFiles: vi.fn(async () => ({ imported: [], skipped: 0 })),
   cloudStatus: vi.fn(async () => ({ connected: false })),
   cloudJoinWorkspace: vi.fn(),
+  listRelayShares: vi.fn(),
+  retryShareHandoff: vi.fn(async () => undefined),
+  dismissShareHandoff: vi.fn(async () => undefined),
 };
 
 beforeEach(() => {
@@ -38,6 +41,27 @@ afterEach(() => {
 });
 
 describe("first run", () => {
+  it("places a browser share handoff ahead of the ordinary first-run card", async () => {
+    const onDismissShareHandoff = vi.fn();
+    render(
+      <DesktopFirstRun
+        onWorkspaceReady={() => {}}
+        handoffStatus={{ status: "waiting-for-sign-in" }}
+        onDismissShareHandoff={onDismissShareHandoff}
+        onShareHandoffOpened={() => {}}
+      />,
+    );
+
+    expect(
+      await screen.findByText("Sign in to open the share from your browser."),
+    ).toBeTruthy();
+    expect(screen.getByTestId("cloud-sync-panel")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /create workspace/i })).toBeNull();
+
+    await userEvent.setup().click(screen.getByRole("button", { name: "Back" }));
+    expect(onDismissShareHandoff).toHaveBeenCalledOnce();
+  });
+
   it("suggests ~/dohc as the workspace location", async () => {
     render(<DesktopFirstRun onWorkspaceReady={() => {}} />);
     expect(await screen.findByText("/home/ice/dohc")).toBeTruthy();
