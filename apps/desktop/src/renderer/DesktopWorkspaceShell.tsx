@@ -31,6 +31,7 @@ import type {
   ChatFileMentionRecord,
   ChatThreadRecord,
   CloudStatusResult,
+  DesktopUserSettingsResult,
   DmRecord,
   EngineMomentDetailRecord,
   EngineMomentRecord,
@@ -39,6 +40,7 @@ import type {
   MyShareChangeRow,
   RefreshSharedViewResult,
   RebuildEngineStoreResult,
+  AgentRunStatusResult,
   ShareProposalRow,
   SyncStatusResult,
   TryInVersionRunState,
@@ -668,6 +670,7 @@ export function pendingHeadingTargetForOpen(
 }
 
 export type Workspace = WorkspaceSummary;
+const EMPTY_SHARE_MOUNTS: NonNullable<Workspace["shareMounts"]> = [];
 
 const LazyRelayShareDialog = lazy(() =>
   import("./RelayShareDialog").then((mod) => ({ default: mod.RelayShareDialog })),
@@ -1482,8 +1485,11 @@ function shareUnjournalableNotice(
 export function DesktopWorkspaceShell(props: {
   workspace: Workspace;
   workspaces: Workspace[];
+  userSettings: DesktopUserSettingsResult | null;
+  refreshWorkspaceRegistry: () => Promise<Workspace[]>;
   onSwitchWorkspace: (workspace: Workspace) => void;
 }) {
+  const workspaceShareMounts = props.workspace.shareMounts ?? EMPTY_SHARE_MOUNTS;
   const [files, setFiles] = useState<WorkspaceFileEntry[]>([]);
   // An empty workspace also lists zero files, so freshness needs its own flag.
   // A completed main-process cache hit can paint the explorer immediately,
@@ -1537,8 +1543,9 @@ export function DesktopWorkspaceShell(props: {
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
   const [cloudOpen, setCloudOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId | null>(null);
-  const [agentSetup, setAgentSetup] = useState<AgentSetupSummary | null>(null);
+  const [agentRunStatus, setAgentRunStatus] = useState<AgentRunStatusResult | null>(null);
   const agentSetupRequestRef = useRef(0);
+  const bootstrapAgentStatusRead = useRef<Promise<AgentRunStatusResult> | null>(null);
   // Relay-share dialog target (PR 18): paths, or a version.
   const [shareTarget, setShareTarget] = useState<RelayShareTarget | null>(null);
   const [openShareOpen, setOpenShareOpen] = useState(false);
@@ -1610,30 +1617,55 @@ export function DesktopWorkspaceShell(props: {
   );
   const closeSettings = useCallback(() => setSettingsSection(null), []);
 
-  // Refresh after Settings closes as well as on workspace changes. A request
-  // version prevents a slow response for workspace A from painting workspace B.
+  const agentSetup = useMemo<AgentSetupSummary | null>(() => {
+    if (!props.userSettings || !agentRunStatus) return null;
+    return {
+      preferredName: props.userSettings.settings.profile.preferredName,
+      runnerConfigured:
+        props.userSettings.settings.runner.command.trim().length > 0,
+      runnerEnabled: props.userSettings.settings.runner.enabled,
+      mcpEnabled: agentRunStatus.mcpEnabled,
+    };
+  }, [agentRunStatus, props.userSettings]);
+
+  // The workspace-scoped half of the setup snapshot is also the initial
+  // history lane's agent-status answer. Both consumers share this promise.
   useEffect(() => {
     const version = agentSetupRequestRef.current + 1;
     agentSetupRequestRef.current = version;
-    void Promise.all([
-      bridge().getUserSettings(),
-      bridge().getAgentRunStatus({ workspaceId: props.workspace.workspaceId }),
-    ])
-      .then(([user, run]) => {
+    setAgentRunStatus(null);
+    const read = bridge().getAgentRunStatus({
+      workspaceId: props.workspace.workspaceId,
+    });
+    bootstrapAgentStatusRead.current = read;
+    void read
+      .then((run) => {
         if (agentSetupRequestRef.current !== version) return;
-        setAgentSetup({
-          preferredName: user.settings.profile.preferredName,
-          runnerConfigured: user.settings.runner.command.trim().length > 0,
-          runnerEnabled: user.settings.runner.enabled,
-          mcpEnabled: run.mcpEnabled,
-        });
+        setAgentRunStatus(run);
       })
       .catch(() => {
-        if (agentSetupRequestRef.current === version) setAgentSetup(null);
+        if (agentSetupRequestRef.current === version) setAgentRunStatus(null);
       });
     return () => {
       if (agentSetupRequestRef.current === version) agentSetupRequestRef.current += 1;
     };
+  }, [props.workspace.workspaceId]);
+
+  const previousSettingsSection = useRef<SettingsSectionId | null>(null);
+  useEffect(() => {
+    const wasOpen = previousSettingsSection.current !== null;
+    previousSettingsSection.current = settingsSection;
+    if (!wasOpen || settingsSection !== null) return;
+    const version = agentSetupRequestRef.current + 1;
+    agentSetupRequestRef.current = version;
+    void bridge()
+      .getAgentRunStatus({ workspaceId: props.workspace.workspaceId })
+      .then((run) => {
+        if (agentSetupRequestRef.current === version) setAgentRunStatus(run);
+      })
+      .catch(() => {
+        if (agentSetupRequestRef.current === version) setAgentRunStatus(null);
+      });
   }, [props.workspace.workspaceId, settingsSection]);
 
   // An Explorer operation retains every closure that is current while its
@@ -2862,6 +2894,14 @@ export function DesktopWorkspaceShell(props: {
         ),
     );
   }, [agentActiveLane, reportLaneFailure, workspaceId]);
+  const readAgentStatusForHistory = useCallback(() => {
+    const bootstrapRead = bootstrapAgentStatusRead.current;
+    if (bootstrapRead) {
+      bootstrapAgentStatusRead.current = null;
+      return bootstrapRead;
+    }
+    return bridge().getAgentRunStatus({ workspaceId });
+  }, [workspaceId]);
   const onSettingsAgentActiveChange = useCallback(
     ({ active, mutated }: { active: boolean; mutated: boolean }) => {
       if (!mutated) {
@@ -2931,7 +2971,7 @@ export function DesktopWorkspaceShell(props: {
       );
       agentActiveLane.settle(
         token,
-        bridge().getAgentRunStatus({ workspaceId }),
+        readAgentStatusForHistory(),
         (agent) => agent.activeRun !== null,
         (error) =>
           reportLaneFailure("dohc could not refresh agent runs.", error, askAgain),
@@ -3004,7 +3044,7 @@ export function DesktopWorkspaceShell(props: {
     const token = ++engineHistoryToken.current;
     const [status, agent] = await Promise.all([
       bridge().getSyncStatus({ workspaceId }),
-      bridge().getAgentRunStatus({ workspaceId }),
+      readAgentStatusForHistory(),
     ]);
     syncStatusLane.commit(token, status);
     agentActiveLane.commit(token, agent.activeRun !== null);
@@ -3012,6 +3052,7 @@ export function DesktopWorkspaceShell(props: {
     agentActiveLane,
     engineEnabled,
     isShareView,
+    readAgentStatusForHistory,
     reportLaneFailure,
     reportShellError,
     syncStatusLane,
@@ -4124,7 +4165,7 @@ export function DesktopWorkspaceShell(props: {
   // unmount / refresh — otherwise the poll gate and unmount lookups would
   // run against a stale boot-time snapshot (gpt-5.6-sol P1).
   const [shareMounts, setShareMounts] = useState(
-    props.workspace.shareMounts ?? [],
+    workspaceShareMounts,
   );
   // Bumped whenever a share pull changed files: mounted content has no host
   // history, so the open-file refresh key needs its own signal or an open
@@ -4143,18 +4184,9 @@ export function DesktopWorkspaceShell(props: {
   // a folder delete over files that are still there.
   const foldersLeftBehind = useRef(new Set<string>());
   const shareMountsToken = useRef(0);
-  const reloadShareMounts = useCallback(async () => {
-    const token = ++shareMountsToken.current;
-    try {
-      const registry = await bridge().getWorkspaceRegistry();
-      if (token !== shareMountsToken.current) return;
-      const entry = registry.workspaces.find(
-        (candidate) => candidate.workspaceId === workspaceId,
-      );
-      const next = entry?.shareMounts ?? [];
-      // A mount that vanished (removed from Settings or another surface)
-      // reprojects tabs/pins exactly like the Explorer unmount path — open
-      // tabs under the deleted folder must not linger with stale content.
+  const commitShareMounts = useCallback(
+    (next: NonNullable<Workspace["shareMounts"]>) => {
+      if (next === shareMountsRef.current) return;
       const gone = goneMountProjections({
         previous: shareMountsRef.current,
         next,
@@ -4162,10 +4194,22 @@ export function DesktopWorkspaceShell(props: {
       });
       if (gone.length > 0) onExplorerPathsChanged(gone);
       setShareMounts(next);
+    },
+    [onExplorerPathsChanged],
+  );
+  const reloadShareMounts = useCallback(async () => {
+    const token = ++shareMountsToken.current;
+    try {
+      const workspaces = await props.refreshWorkspaceRegistry();
+      if (token !== shareMountsToken.current) return;
+      const entry = workspaces.find(
+        (candidate) => candidate.workspaceId === workspaceId,
+      );
+      commitShareMounts(entry?.shareMounts ?? []);
     } catch {
       // Keep the last known set; the next reload corrects it.
     }
-  }, [workspaceId, onExplorerPathsChanged]);
+  }, [commitShareMounts, props.refreshWorkspaceRegistry, workspaceId]);
 
   // Share mounts: pull every mount's share once (quietly — offline or
   // signed-out refreshes are no-ops main-side). `announce` adds the visible
@@ -4194,12 +4238,12 @@ export function DesktopWorkspaceShell(props: {
     [workspaceId, refreshFiles, reportShellError, showShellNotice, reloadShareMounts],
   );
 
-  // The workspace prop is DesktopRoot's boot-time registry snapshot — a
-  // shell that remounts after workspace switching needs a fresh read or a
-  // mount added/removed in the previous visit is invisible (codex P2).
+  // DesktopRoot owns the live registry snapshot above this keyed shell. A
+  // switch consumes that snapshot without another full-registry IPC; registry
+  // change events and explicit writers refresh it at the root.
   useEffect(() => {
-    void reloadShareMounts();
-  }, [reloadShareMounts]);
+    commitShareMounts(workspaceShareMounts);
+  }, [commitShareMounts, workspaceShareMounts]);
 
   const mountCount = shareMounts.length;
 
@@ -5114,9 +5158,9 @@ export function DesktopWorkspaceShell(props: {
   const shareSkippedToken = useRef(0);
   const reloadShareSkipped = useCallback(async () => {
     const token = ++shareSkippedToken.current;
-    const registry = await bridge().getWorkspaceRegistry();
+    const workspaces = await props.refreshWorkspaceRegistry();
     if (token !== shareSkippedToken.current) return;
-    const entry = registry.workspaces.find(
+    const entry = workspaces.find(
       (candidate) => candidate.workspaceId === workspaceId,
     );
     const skipped = entry?.shareView?.skippedOps ?? null;
@@ -5124,7 +5168,7 @@ export function DesktopWorkspaceShell(props: {
     // without deleting the record, so this reads the marker rather than the
     // record's presence.
     setShareSkipped(hasUnacknowledgedShareSkips(skipped) ? skipped : null);
-  }, [workspaceId]);
+  }, [props.refreshWorkspaceRegistry, workspaceId]);
   const refreshShareView = useCallback(async () => {
     if (!shareView || shareViewDamaged) return;
     const token = ++shareRefreshToken.current;

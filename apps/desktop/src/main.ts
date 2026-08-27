@@ -8819,7 +8819,6 @@ function registerIpcHandlers(
         input.rendererDocumentId,
       );
       preferredWorkspaceId = workspace.workspaceId;
-      refreshNativeWorkspaceSurfaces();
       const status = SyncStatusResult.parse(
         await syncStatusWithOwnedProjection(
           workspace,

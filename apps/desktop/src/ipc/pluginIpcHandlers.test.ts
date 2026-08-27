@@ -9,6 +9,7 @@ const directOperations = vi.hoisted(() => ({
   listOffers: vi.fn(),
   loadPanel: vi.fn(),
   loadWebApp: vi.fn(),
+  readBuiltinOfferManifest: vi.fn(),
   removeOffer: vi.fn(),
 }));
 
@@ -24,6 +25,7 @@ vi.mock("../plugins/pluginOffers", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../plugins/pluginOffers")>()),
   addOfferedPlugin: directOperations.addOffer,
   listOfferedPlugins: directOperations.listOffers,
+  readBuiltinPluginOfferManifest: directOperations.readBuiltinOfferManifest,
   removeAddedOfferedPlugin: directOperations.removeOffer,
 }));
 
@@ -527,6 +529,15 @@ beforeEach(() => {
     webApp: manifest.webApps[0],
   });
   directOperations.listOffers.mockReset().mockResolvedValue([]);
+  directOperations.readBuiltinOfferManifest.mockReset().mockImplementation(
+    async (directoryName: "codex" | "claude-code") => ({
+      directoryName,
+      pluginId: directoryName,
+      displayName: directoryName,
+      description: null,
+      publisher: null,
+    }),
+  );
   directOperations.addOffer.mockReset().mockResolvedValue({
     identity: { kind: "added" },
     contentHash: "b".repeat(64),
@@ -535,6 +546,33 @@ beforeEach(() => {
 });
 
 describe("plugin IPC handlers", () => {
+  it("caches built-in offer manifests for the app session and invalidates on install and uninstall", async () => {
+    directOperations.listOffers.mockImplementation(
+      async (
+        _builtinRoot: string,
+        _workspaceRoot: string,
+        _existingPluginIds: ReadonlySet<string>,
+        readBuiltinManifest: (directoryName: "codex") => Promise<unknown>,
+      ) => {
+        await readBuiltinManifest("codex");
+        return [];
+      },
+    );
+    const harness = createHarness();
+
+    await harness.invoke(CHANNELS.listOfferedPlugins);
+    await harness.invoke(CHANNELS.listOfferedPlugins);
+    expect(directOperations.readBuiltinOfferManifest).toHaveBeenCalledTimes(1);
+
+    await harness.invoke(CHANNELS.installPlugin);
+    await harness.invoke(CHANNELS.listOfferedPlugins);
+    expect(directOperations.readBuiltinOfferManifest).toHaveBeenCalledTimes(2);
+
+    await harness.invoke(CHANNELS.uninstallPlugin);
+    await harness.invoke(CHANNELS.listOfferedPlugins);
+    expect(directOperations.readBuiltinOfferManifest).toHaveBeenCalledTimes(3);
+  });
+
   it("holds workspace authority across an awaited plugin operation", async () => {
     const harness = createHarness();
     const pending = deferred<typeof harness.runtime>();

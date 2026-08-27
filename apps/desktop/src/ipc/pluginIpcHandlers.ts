@@ -54,7 +54,10 @@ import {
 import {
   addOfferedPlugin,
   listOfferedPlugins,
+  readBuiltinPluginOfferManifest,
   removeAddedOfferedPlugin,
+  type BuiltinPluginOfferManifest,
+  type BuiltinPluginOfferManifestReader,
 } from "../plugins/pluginOffers";
 import {
   assertInstanceBudget,
@@ -216,6 +219,33 @@ class StructuredPluginFailure {
   constructor(readonly result: unknown) {}
 }
 
+export function createBuiltinPluginOfferManifestCache(
+  read: BuiltinPluginOfferManifestReader,
+): {
+  read: BuiltinPluginOfferManifestReader;
+  invalidate(): void;
+} {
+  const cached = new Map<
+    (typeof BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES)[number],
+    Promise<BuiltinPluginOfferManifest>
+  >();
+  return {
+    read(directoryName) {
+      const existing = cached.get(directoryName);
+      if (existing) return existing;
+      const pending = read(directoryName).catch((error: unknown) => {
+        if (cached.get(directoryName) === pending) cached.delete(directoryName);
+        throw error;
+      });
+      cached.set(directoryName, pending);
+      return pending;
+    },
+    invalidate() {
+      cached.clear();
+    },
+  };
+}
+
 function preserveStructuredPluginFailure(
   result: unknown,
   isCurrent: () => boolean,
@@ -276,6 +306,14 @@ export function registerPluginIpcHandlers<
       });
     },
   };
+  // Built-ins come from the app's checked-in dev tree or packaged
+  // extraResources, so their manifests are static for this app session. Keep
+  // workspace path and existing ID checks live. Only packaged manifest reads
+  // are shared across catalog mounts. Plugin writes invalidate explicitly.
+  const builtinOfferManifests = createBuiltinPluginOfferManifestCache(
+    (directoryName) =>
+      readBuiltinPluginOfferManifest(platform.builtinPluginsRoot(), directoryName),
+  );
 
   const createReadableActiveWorkspacePolicy = (
     active: ActiveWorkspacePolicy<TWorkspace> | undefined,
@@ -723,6 +761,7 @@ export function registerPluginIpcHandlers<
         platform.builtinPluginsRoot(),
         workspace.rootPath,
         existingPluginIds,
+        builtinOfferManifests.read,
       );
       return ListOfferedPluginsResult.parse({ ok: true, offers });
     } catch (error) {
@@ -806,8 +845,13 @@ export function registerPluginIpcHandlers<
     });
   };
 
-  pluginAction(CHANNELS.installPlugin, (pipeline, pluginId) =>
-    pipeline.install(pluginId));
+  pluginAction(CHANNELS.installPlugin, async (pipeline, pluginId) => {
+    try {
+      return await pipeline.install(pluginId);
+    } finally {
+      builtinOfferManifests.invalidate();
+    }
+  });
   pluginAction(CHANNELS.disablePlugin, (pipeline, pluginId, workspaceId) =>
     surfaces.withPluginSdkGrantSuspensions(workspaceId, (suspend) =>
       pipeline.disable(pluginId, {
@@ -906,8 +950,9 @@ export function registerPluginIpcHandlers<
         active,
         input.workspaceId,
       );
-      const result: PluginPipelineUninstallResult =
-        await surfaces.withPluginSdkGrantSuspensions(
+      let result: PluginPipelineUninstallResult;
+      try {
+        result = await surfaces.withPluginSdkGrantSuspensions(
           input.workspaceId,
           (suspend) =>
             pipeline.uninstall(
@@ -920,6 +965,9 @@ export function registerPluginIpcHandlers<
               },
             ),
         );
+      } finally {
+        builtinOfferManifests.invalidate();
+      }
       const rendererResult = PluginActionResult.parse(
         result.ok
           ? { ok: true, plugin: result.plugin }
