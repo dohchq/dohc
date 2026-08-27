@@ -8,7 +8,7 @@ import { open } from "node:fs/promises";
 // interaction here -- an RPC would add a failure mode where today there is none.
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 import { resolveWorkspaceFile } from "./workspaceAssets";
-import { listFiles } from "./workspaceFiles";
+import { createBoundedTaskQueue, listFiles } from "./workspaceFiles";
 
 export type WorkspaceGraphEdgeKind = "wikilink" | "markdown";
 
@@ -74,6 +74,9 @@ const MAX_GRAPH_EDGES = 10000;
 const MAX_GRAPH_LINK_CANDIDATES = 20000;
 const MAX_GRAPH_FILE_TEXT_BYTES = 512 * 1024;
 const MAX_GRAPH_TOTAL_TEXT_BYTES = 32 * 1024 * 1024;
+const GRAPH_TEXT_READ_CONCURRENCY = 8;
+
+const runGraphTextRead = createBoundedTaskQueue(GRAPH_TEXT_READ_CONCURRENCY);
 
 const MARKDOWN_EXTENSIONS = new Set([".md", ".markdown", ".mdx"]);
 const WIKILINK_RE = /(?<!!)\[\[([^\]\n]{1,500})\]\]/g;
@@ -1145,52 +1148,83 @@ export class WorkspaceGraphIndex {
       }
     };
 
-    for (let index = 0; index < markdown.length; index += 1) {
-      const file = markdown[index];
-      const cached = this.#documents.get(file.path);
-      const pathInvalidation = this.#dirtyPaths.get(file.path) ?? 0;
-      const needsRead =
-        !cached ||
-        cached.contentIdentity !== file.contentIdentity ||
-        pathInvalidation > cached.indexedAtInvalidation ||
-        (file.contentIdentity === undefined &&
-          this.#broadInvalidation > cached.indexedAtInvalidation);
-      let document = cached;
+    graphRead: for (
+      let batchStart = 0;
+      batchStart < markdown.length;
+      batchStart += GRAPH_TEXT_READ_CONCURRENCY
+    ) {
+      const batch = markdown.slice(
+        batchStart,
+        batchStart + GRAPH_TEXT_READ_CONCURRENCY,
+      );
+      const reads = await Promise.all(
+        batch.map(async (file) => {
+          const cached = this.#documents.get(file.path);
+          const pathInvalidation = this.#dirtyPaths.get(file.path) ?? 0;
+          const needsRead =
+            !cached ||
+            cached.contentIdentity !== file.contentIdentity ||
+            pathInvalidation > cached.indexedAtInvalidation ||
+            (file.contentIdentity === undefined &&
+              this.#broadInvalidation > cached.indexedAtInvalidation);
+          if (!needsRead) {
+            return { status: "cached" as const, file, cached };
+          }
+          try {
+            const result = await runGraphTextRead(() =>
+              readGraphText(rootPath, file.path, source),
+            );
+            return { status: "fulfilled" as const, file, cached, result };
+          } catch {
+            return { status: "rejected" as const, file, cached };
+          }
+        }),
+      );
 
-      if (needsRead) {
-        try {
-          const result = await readGraphText(rootPath, file.path, source);
-          if (totalTextBytes + result.bytesRead > MAX_GRAPH_TOTAL_TEXT_BYTES) {
+      // Promise.all retains the listing order even when reads settle in a
+      // different order. Keep every cache and budget decision on that order.
+      for (let batchIndex = 0; batchIndex < reads.length; batchIndex += 1) {
+        const index = batchStart + batchIndex;
+        const read = reads[batchIndex];
+        let document = read.cached;
+
+        if (read.status === "rejected") {
+          // Match the fresh reader's watcher race behavior: the missing body is
+          // absent from this view and retried on the next request.
+          this.#documents.delete(read.file.path);
+          continue;
+        }
+
+        if (read.status === "fulfilled") {
+          if (
+            totalTextBytes + read.result.bytesRead >
+            MAX_GRAPH_TOTAL_TEXT_BYTES
+          ) {
             omitRemaining(index);
-            break;
+            break graphRead;
           }
           document = {
             ...parseMarkdownGraphDocument({
-              path: file.path,
-              text: result.text,
-              truncated: result.truncated,
+              path: read.file.path,
+              text: read.result.text,
+              truncated: read.result.truncated,
             }),
-            contentIdentity: file.contentIdentity,
-            bytesRead: result.bytesRead,
+            contentIdentity: read.file.contentIdentity,
+            bytesRead: read.result.bytesRead,
             indexedAtInvalidation: invalidationAtStart,
             serial: ++this.#documentSerial,
           };
-          this.#documents.set(file.path, document);
-        } catch {
-          // Match the fresh reader's watcher race behavior: the missing body is
-          // absent from this view and retried on the next request.
-          this.#documents.delete(file.path);
-          continue;
+          this.#documents.set(read.file.path, document);
         }
-      }
 
-      if (!document) continue;
-      if (totalTextBytes + document.bytesRead > MAX_GRAPH_TOTAL_TEXT_BYTES) {
-        omitRemaining(index);
-        break;
+        if (!document) continue;
+        if (totalTextBytes + document.bytesRead > MAX_GRAPH_TOTAL_TEXT_BYTES) {
+          omitRemaining(index);
+          break graphRead;
+        }
+        totalTextBytes += document.bytesRead;
+        docs.push(document);
       }
-      totalTextBytes += document.bytesRead;
-      docs.push(document);
     }
 
     for (const [path, version] of this.#dirtyPaths) {

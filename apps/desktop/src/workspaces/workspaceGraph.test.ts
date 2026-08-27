@@ -460,7 +460,15 @@ describe("readWorkspaceGraph", () => {
 
   it("preserves the cold file and byte budgets", async () => {
     const large = `# Large\n${"x".repeat(600 * 1024)}`;
-    const readText = vi.fn(async () => ({ text: large, truncated: false }));
+    let activeReads = 0;
+    let peakReads = 0;
+    const readText = vi.fn(async () => {
+      activeReads += 1;
+      peakReads = Math.max(peakReads, activeReads);
+      await Promise.resolve();
+      activeReads -= 1;
+      return { text: large, truncated: false };
+    });
     const source = {
       list: async () => ({
         files: Array.from({ length: 70 }, (_, index) => ({
@@ -476,7 +484,93 @@ describe("readWorkspaceGraph", () => {
       omittedFileCount: 6,
       truncatedFileCount: 64,
     });
-    expect(readText).toHaveBeenCalledTimes(65);
+    expect(readText).toHaveBeenCalledTimes(70);
+    expect(peakReads).toBe(8);
+  });
+
+  it("applies the cold byte budget in listing order across out-of-order reads and retries failures", async () => {
+    const files = Array.from({ length: 66 }, (_, index) => ({
+      path: `large-${String(index).padStart(2, "0")}.md`,
+      contentIdentity: `large-${index}`,
+    }));
+    const largeBody = "x".repeat(600 * 1024);
+    const indexFor = (path: string) => Number(path.slice(6, 8));
+    const textFor = (path: string) =>
+      `# Loaded ${String(indexFor(path)).padStart(2, "0")}\n${largeBody}`;
+    const failedPath = "large-32.md";
+    let failIncrementalRead = true;
+    let activeReads = 0;
+    let peakReads = 0;
+    const completionOrder: string[] = [];
+    const attempts = new Map<string, number>();
+    const source = {
+      list: async () => ({ files }),
+      readText: async (path: string) => {
+        attempts.set(path, (attempts.get(path) ?? 0) + 1);
+        activeReads += 1;
+        peakReads = Math.max(peakReads, activeReads);
+        try {
+          const index = indexFor(path);
+          for (let turn = index % 8; turn < 7; turn += 1) {
+            await Promise.resolve();
+          }
+          completionOrder.push(path);
+          if (path === failedPath && failIncrementalRead) {
+            failIncrementalRead = false;
+            throw new Error("transient read failure");
+          }
+          return { text: textFor(path), truncated: false };
+        } finally {
+          activeReads -= 1;
+        }
+      },
+    };
+    const freshSource = (failOnce: boolean) => {
+      let shouldFail = failOnce;
+      return {
+        list: async () => ({ files }),
+        readText: async (path: string) => {
+          if (path === failedPath && shouldFail) {
+            shouldFail = false;
+            throw new Error("transient read failure");
+          }
+          return { text: textFor(path), truncated: false };
+        },
+      };
+    };
+    const title = (
+      graph: Awaited<ReturnType<WorkspaceGraphIndex["readGraph"]>>,
+      path: string,
+    ) => graph.nodes.find((node) => node.path === path)!.title;
+    const index = new WorkspaceGraphIndex();
+
+    const first = await index.readGraph(root, source);
+    expect(first).toEqual(await readWorkspaceGraph(root, freshSource(true)));
+    expect(first).toMatchObject({
+      scannedFileCount: 66,
+      omittedFileCount: 1,
+      truncatedFileCount: 64,
+    });
+    expect(title(first, failedPath)).toBe(failedPath);
+    expect(title(first, "large-64.md")).toBe("Loaded 64");
+    expect(title(first, "large-65.md")).toBe("large-65.md");
+    expect(completionOrder[0]).toBe("large-07.md");
+    expect(completionOrder.slice(0, 8)).not.toEqual(
+      files.slice(0, 8).map((file) => file.path),
+    );
+    expect(peakReads).toBe(8);
+
+    const second = await index.readGraph(root, source);
+    expect(second).toEqual(await readWorkspaceGraph(root, freshSource(false)));
+    expect(second).toMatchObject({
+      scannedFileCount: 66,
+      omittedFileCount: 2,
+      truncatedFileCount: 64,
+    });
+    expect(attempts.get(failedPath)).toBe(2);
+    expect(title(second, failedPath)).toBe("Loaded 32");
+    expect(title(second, "large-64.md")).toBe("large-64.md");
+    expect(title(second, "large-65.md")).toBe("large-65.md");
   });
 
   it("uses a supplied file source instead of a stale disk projection", async () => {
