@@ -54,6 +54,7 @@ const CHAT_REQUEST_CASES: ChatRequestCase[] = [
   { method: CHATS_METHOD.threadsListForFile, params: { objectId: "o" } },
   { method: CHATS_METHOD.threadsListForChannel, params: { channelId: "c" } },
   { method: CHATS_METHOD.threadFindChannelId, params: { threadId: "t" } },
+  { method: CHATS_METHOD.threadRevision, params: { threadId: "t" } },
   { method: CHATS_METHOD.threadGetProjection, params: { threadId: "t" } },
   {
     method: CHATS_METHOD.messageSend,
@@ -278,6 +279,7 @@ const NEW_DECODER_CASES: Array<{
     valid: { channels: [{ ...channel, threadCount: 1, unreadCount: 0 }], nextCursor: null },
   },
   { method: CHATS_METHOD.threadsList, valid: { threads: [threadWire], nextCursor: null } },
+  { method: CHATS_METHOD.threadRevision, valid: { revision: 1 } },
   {
     method: CHATS_METHOD.messagesList,
     valid: { messages: [message], nextAfterMessageOrder: null },
@@ -447,8 +449,8 @@ function loopbackAdapter(): {
 }
 
 describe("ChatsLiveAdapter", () => {
-  it("encodes every one of the 60 chats methods with the workspace handle and exact params", async () => {
-    expect(CHAT_REQUEST_CASES).toHaveLength(60);
+  it("encodes every one of the 61 chats methods with the workspace handle and exact params", async () => {
+    expect(CHAT_REQUEST_CASES).toHaveLength(61);
     const requests: Request[] = [];
     const adapter = new ChatsLiveAdapter(
       captureClient(requests),

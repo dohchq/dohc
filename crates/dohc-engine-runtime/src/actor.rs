@@ -1609,6 +1609,11 @@ enum Command {
         after_message_order: Option<i64>,
         reply: oneshot::Sender<Result<ChatMessagePage, RuntimeError>>,
     },
+    ChatThreadRevision {
+        workspace_id: String,
+        thread_id: String,
+        reply: oneshot::Sender<Result<i64, RuntimeError>>,
+    },
     ChatReadStateMarkThreadRead {
         workspace_id: String,
         thread_id: String,
@@ -4511,6 +4516,23 @@ impl ActorHandle {
                 thread_id,
                 limit,
                 after_message_order,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn chat_thread_revision(
+        &self,
+        workspace_id: String,
+        thread_id: String,
+    ) -> Result<i64, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ChatThreadRevision {
+                workspace_id,
+                thread_id,
                 reply,
             })
             .await
@@ -8580,6 +8602,16 @@ fn worker_main(
             } => {
                 let outcome = LinkedChatStore::new(&mut store)
                     .list_messages(&workspace_id, &thread_id, limit, after_message_order)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ChatThreadRevision {
+                workspace_id,
+                thread_id,
+                reply,
+            } => {
+                let outcome = LinkedChatStore::new(&mut store)
+                    .conversation_revision(&workspace_id, &thread_id)
                     .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }

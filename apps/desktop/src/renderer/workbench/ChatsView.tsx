@@ -2024,6 +2024,11 @@ export function ChatsView(props: {
   const channelRefreshSeq = useRef(0);
   const feedRefreshSeq = useRef(0);
   const dmRefreshSeq = useRef(0);
+  const paintedDmRevision = useRef<{
+    workspaceId: string;
+    threadId: string;
+    revision: number;
+  } | null>(null);
   // Per-(message, emoji) toggle sequence so overlapping reaction toggles resolve
   // in order (see runReactionToggle).
   const reactionSeq = useRef(new Map<string, number>());
@@ -2634,6 +2639,7 @@ export function ChatsView(props: {
   useEffect(() => {
     liveToken.current += 1;
     dmRefreshSeq.current += 1;
+    paintedDmRevision.current = null;
     feedRefreshSeq.current += 1;
     bookmarkWorkspaceGeneration.current += 1;
     bookmarkListGeneration.current += 1;
@@ -2925,9 +2931,22 @@ export function ChatsView(props: {
   );
 
   const loadDmConversation = useCallback(
-    async (dm: DmRecord, token: number, request = ++dmRefreshSeq.current) => {
+    async (
+      dm: DmRecord,
+      token: number,
+      request = ++dmRefreshSeq.current,
+      knownRevision?: number,
+    ) => {
       if (!dm.threadId) return;
       const session = sessionGeneration.current;
+      const revision =
+        knownRevision ??
+        (
+          await bridge().getChatThreadRevision({
+            workspaceId,
+            threadId: dm.threadId,
+          })
+        ).revision;
       const [result, reactionResult] = await Promise.all([
         bridge().listChatMessages({ workspaceId, threadId: dm.threadId }),
         bridge().listChatReactions({ workspaceId, threadId: dm.threadId }),
@@ -2942,6 +2961,11 @@ export function ChatsView(props: {
       setMessages(keepIfUnchanged(result.messages));
       setReactions(keepIfUnchanged(reactionResult.reactions));
       setViewerAuthorId(reactionResult.viewerAuthorId);
+      paintedDmRevision.current = {
+        workspaceId,
+        threadId: dm.threadId,
+        revision,
+      };
       if (dm.connected) {
         const clearedUnread = dm.unreadCount > 0;
         void bridge()
@@ -3002,7 +3026,27 @@ export function ChatsView(props: {
             ? current
             : { ...current, dm: syncedDm };
         });
-        await loadDmConversation(syncedDm, token, request);
+        if (!syncedDm.threadId) return;
+        const { revision } = await bridge().getChatThreadRevision({
+          workspaceId,
+          threadId: syncedDm.threadId,
+        });
+        if (
+          token !== liveToken.current ||
+          request !== dmRefreshSeq.current ||
+          session !== sessionGeneration.current
+        ) {
+          return;
+        }
+        const painted = paintedDmRevision.current;
+        if (
+          painted?.workspaceId === workspaceId &&
+          painted.threadId === syncedDm.threadId &&
+          painted.revision === revision
+        ) {
+          return;
+        }
+        await loadDmConversation(syncedDm, token, request, revision);
       } catch {
         // Offline: keep the conversation as-is; the next tick retries.
       } finally {
@@ -3570,6 +3614,7 @@ export function ChatsView(props: {
     async (dm: DmRecord, focusMessageId?: string) => {
       const token = ++liveToken.current;
       const request = ++dmRefreshSeq.current;
+      paintedDmRevision.current = null;
       setNav({
         level: "dm",
         dm,
@@ -3809,11 +3854,11 @@ export function ChatsView(props: {
     props.initialNav,
   ]);
 
-  // While a DM is open, poll: sync (push the member's ops, pull the peers')
-  // then reload the conversation. Pending DMs also sync immediately so they
-  // can acquire their relay-created thread while the outer list poll is
-  // paused. Token and request guards prevent an older pass from repainting a
-  // newer snapshot or a local send.
+  // While a DM is open, poll: sync (push the member's ops, pull the peers'),
+  // then reload only when its content revision changed. Pending DMs also sync
+  // immediately so they can acquire their relay-created thread while the outer
+  // list poll is paused. Token and request guards prevent an older pass from
+  // repainting a newer snapshot or a local send.
   useEffect(() => {
     if (props.suspendPolling || nav.level !== "dm") return;
     const dm = nav.dm;

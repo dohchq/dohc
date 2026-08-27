@@ -1590,6 +1590,10 @@ export interface LinkedChatStore {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;
   }): Promise<ChatMessage[]>;
+  getThreadRevision(input: {
+    workspaceId: WorkspaceId;
+    threadId: ChatThreadId;
+  }): Promise<number>;
   resolveChatDecision(input: {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;

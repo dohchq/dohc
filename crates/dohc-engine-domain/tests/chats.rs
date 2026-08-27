@@ -9,7 +9,7 @@ use dohc_engine_domain::{
     AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChatActorKind, ChatChannelKind,
     ChatReactionState, FeedCursorValue, FollowState, FollowTargetKind, GENERAL_CHANNEL_WIRE_ID,
     LinkedChatStore, LocalAttachmentInput, NoFaults, PENDING_CHAT_WORKSPACE_EXISTS_SQL,
-    SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread,
+    ResolveDecision, SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread,
     base32_lowercase_no_padding, bookmark_id_for, channel_slug_for_name, decode_feed_cursor,
     encode_feed_cursor, linked_chat_projection_path,
 };
@@ -365,6 +365,142 @@ fn start_channel_thread_creates_thread_and_first_message_atomically() {
     let rs = chats.read_state(WS, "t1").expect("read state");
     assert_eq!(rs.last_read_sequence, 1);
     assert_eq!(rs.revision, 1);
+}
+
+#[test]
+fn conversation_revision_tracks_local_content_winners_but_not_read_state() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+
+    assert_eq!(
+        chats
+            .conversation_revision(WS, "no-revision-row")
+            .expect("absent revision"),
+        0
+    );
+    chats
+        .ensure_general_channel(WS, "gen-revision", 10, &NO_FAULTS)
+        .expect("general");
+
+    let mut opening = start_thread(
+        "gen-revision",
+        "thread-revision",
+        "message-opening",
+        "Choose",
+        ChatActorKind::Agent,
+        20,
+    );
+    opening.needs_decision = true;
+    chats
+        .start_channel_thread(&opening, &NO_FAULTS)
+        .expect("start with open decision");
+    assert_eq!(
+        chats
+            .conversation_revision(WS, "thread-revision")
+            .expect("start revision"),
+        2,
+        "thread start/opening message and the opened decision each bump"
+    );
+
+    let mut reply = send_msg("thread-revision", "message-reply", None, "Resolve", 30);
+    reply.author_kind = ChatActorKind::Agent;
+    reply.attachments = vec![LocalAttachmentInput {
+        object_id: "object-revision".to_owned(),
+        path_hint: Some("notes/revision.md".to_owned()),
+        heading_text: None,
+        heading_anchor: None,
+        heading_occurrence: None,
+    }];
+    chats
+        .send_message(&reply, &NO_FAULTS)
+        .expect("send with attachment");
+    assert_eq!(
+        chats
+            .conversation_revision(WS, "thread-revision")
+            .expect("send revision"),
+        4,
+        "message send and its local attachment each bump"
+    );
+
+    let reaction = SetReaction {
+        workspace_id: WS.to_owned(),
+        thread_id: "thread-revision".to_owned(),
+        message_id: "message-opening".to_owned(),
+        emoji: "👍".to_owned(),
+        author_id: "user-ada".to_owned(),
+        replication_author_id: Some("user-ada".to_owned()),
+        author_kind: ChatActorKind::Human,
+        author_display_name: "Ada".to_owned(),
+        state: ChatReactionState::Added,
+        now_ms: 40,
+        request_id: "reaction-revision".to_owned(),
+    };
+    chats
+        .set_reaction(&reaction, &NO_FAULTS)
+        .expect("winning reaction");
+    assert_eq!(
+        chats
+            .conversation_revision(WS, "thread-revision")
+            .expect("reaction revision"),
+        5
+    );
+    chats
+        .set_reaction(&reaction, &NO_FAULTS)
+        .expect("idempotent reaction retry");
+    assert_eq!(
+        chats
+            .conversation_revision(WS, "thread-revision")
+            .expect("reaction retry revision"),
+        5
+    );
+
+    chats
+        .resolve_decision(
+            &ResolveDecision {
+                workspace_id: WS.to_owned(),
+                thread_id: "thread-revision".to_owned(),
+                message_id: "message-opening".to_owned(),
+                resolved_by_message_id: "message-reply".to_owned(),
+                now_ms: 50,
+                request_id: "decision-revision".to_owned(),
+            },
+            &NO_FAULTS,
+        )
+        .expect("resolve decision");
+    assert_eq!(
+        chats
+            .conversation_revision(WS, "thread-revision")
+            .expect("decision revision"),
+        6
+    );
+
+    let read_state = chats
+        .mark_thread_read(WS, "thread-revision", 2, None, 60, &NO_FAULTS)
+        .expect("mark read");
+    assert_eq!(read_state.last_read_sequence, 2);
+    assert_eq!(read_state.revision, 1);
+    let agent_read_state = chats
+        .mark_thread_read_by_agent(
+            WS,
+            "thread-revision",
+            30,
+            "message-reply",
+            None,
+            61,
+            &NO_FAULTS,
+        )
+        .expect("mark agent read");
+    assert_eq!(agent_read_state.last_read_message_id, "message-reply");
+    assert_eq!(agent_read_state.revision, 1);
+    assert_eq!(
+        chats
+            .conversation_revision(WS, "thread-revision")
+            .expect("content revision after read"),
+        6,
+        "human and agent read state must not invalidate conversation content"
+    );
 }
 
 #[test]

@@ -1297,6 +1297,21 @@ export const ListChatMessagesResult = z.object({
 });
 export type ListChatMessagesResult = z.infer<typeof ListChatMessagesResult>;
 
+export const GetChatThreadRevisionPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  threadId: CHAT_THREAD_ID,
+});
+export type GetChatThreadRevisionPayload = z.infer<
+  typeof GetChatThreadRevisionPayload
+>;
+
+export const GetChatThreadRevisionResult = z.object({
+  revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+});
+export type GetChatThreadRevisionResult = z.infer<
+  typeof GetChatThreadRevisionResult
+>;
+
 export const SendChatMessagePayload = z.object({
   workspaceId: WORKSPACE_ID,
   threadId: CHAT_THREAD_ID,
@@ -4997,6 +5012,9 @@ export interface DohcDesktopBridge {
   listChatMessages(
     payload: ListChatMessagesPayload,
   ): Promise<ListChatMessagesResult>;
+  getChatThreadRevision(
+    payload: GetChatThreadRevisionPayload,
+  ): Promise<GetChatThreadRevisionResult>;
   sendChatMessage(payload: SendChatMessagePayload): Promise<SendChatMessageResult>;
   listChatThreadDecisions(
     payload: ListChatThreadDecisionsPayload,

@@ -1932,6 +1932,230 @@ fn pending_chat_coordinate_count(engine: &EngineStore) -> i64 {
         .expect("pending chat coordinate count")
 }
 
+fn chat_content_revision(engine: &EngineStore, thread_id: &str) -> i64 {
+    engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT content_revision FROM chat_conversation_revisions \
+                 WHERE workspace_id='ws' AND thread_id=?1",
+                [thread_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(|revision| revision.unwrap_or(0))
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("chat content revision")
+}
+
+fn seed_unowned_chat_thread(engine: &mut EngineStore, thread_id: &str) {
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO chat_threads \
+                 (workspace_id,thread_id,title,created_at_ms,updated_at_ms) \
+                 VALUES ('ws',?1,'',10,10)",
+                [thread_id],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed chat thread");
+}
+
+#[test]
+fn imported_chat_winners_bump_and_losing_lww_coordinates_do_not() {
+    let (_scratch, _path, mut engine) = store();
+    seed_unowned_chat_thread(&mut engine, "thread");
+    assert_eq!(chat_content_revision(&engine, "thread"), 0);
+
+    let message = envelope(
+        "message-winner",
+        0,
+        "chat.message.append",
+        json!({
+            "messageId": "message",
+            "threadId": "thread",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Imported",
+            "createdAtMs": 20
+        }),
+    );
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &message, &NoFaults),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+    assert_eq!(chat_content_revision(&engine, "thread"), 1);
+
+    let attachment_id = attachment_id_for("message", "object", None, None);
+    let attachment = envelope(
+        "attachment-winner",
+        0,
+        "chat.attachment.add",
+        json!({
+            "attachmentId": attachment_id,
+            "threadId": "thread",
+            "messageId": "message",
+            "targetKind": "file",
+            "objectId": "object",
+            "pathHint": "notes/imported.md",
+            "createdAtMs": 21
+        }),
+    );
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &attachment, &NoFaults),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+    assert_eq!(chat_content_revision(&engine, "thread"), 2);
+
+    let reaction_winner = envelope(
+        "reaction-winner",
+        0,
+        "chat.reaction.set",
+        reaction_payload("added", "👍", 100, "ada"),
+    );
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &reaction_winner, &NoFaults),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+    assert_eq!(chat_content_revision(&engine, "thread"), 3);
+    let reaction_loser = envelope(
+        "reaction-loser",
+        0,
+        "chat.reaction.set",
+        reaction_payload("removed", "👍", 99, "ada"),
+    );
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &reaction_loser, &NoFaults),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+    assert_eq!(
+        chat_content_revision(&engine, "thread"),
+        3,
+        "a losing imported reaction must not invalidate the conversation"
+    );
+
+    let decision_winner = envelope(
+        "decision-winner",
+        0,
+        "chat.decision.set",
+        decision_payload("resolved", 100, Some("message")),
+    );
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &decision_winner, &NoFaults),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+    assert_eq!(chat_content_revision(&engine, "thread"), 4);
+    let decision_loser = envelope(
+        "decision-loser",
+        0,
+        "chat.decision.set",
+        decision_payload("open", 99, None),
+    );
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &decision_loser, &NoFaults),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+    assert_eq!(
+        chat_content_revision(&engine, "thread"),
+        4,
+        "a losing imported decision must not invalidate the conversation"
+    );
+}
+
+#[test]
+fn imported_parent_arrival_repairs_the_child_and_bumps_the_conversation() {
+    let (_scratch, _path, mut engine) = store();
+    seed_unowned_chat_thread(&mut engine, "parent-thread");
+    let child = envelope(
+        "child-origin",
+        0,
+        "chat.message.append",
+        json!({
+            "messageId": "child",
+            "threadId": "parent-thread",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "parentMessageId": "parent",
+            "body": "Child first",
+            "createdAtMs": 30
+        }),
+    );
+    apply_chat_envelope(&mut engine, &child, &NoFaults).expect("child apply");
+    assert_eq!(chat_content_revision(&engine, "parent-thread"), 1);
+
+    let parent = envelope(
+        "parent-origin",
+        0,
+        "chat.message.append",
+        json!({
+            "messageId": "parent",
+            "threadId": "parent-thread",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Parent later",
+            "createdAtMs": 20
+        }),
+    );
+    apply_chat_envelope(&mut engine, &parent, &NoFaults).expect("parent apply");
+    let repaired_parent: Option<String> = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT parent_message_id FROM chat_messages \
+                 WHERE workspace_id='ws' AND message_id='child'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("repaired parent");
+    assert_eq!(repaired_parent.as_deref(), Some("parent"));
+    assert_eq!(chat_content_revision(&engine, "parent-thread"), 2);
+}
+
+#[test]
+fn ready_pending_replay_bumps_every_conversation_it_materializes() {
+    let (_scratch, _path, mut engine) = store();
+    for (origin, thread_id, message_id) in [
+        ("pending-a", "thread-a", "message-a"),
+        ("pending-b", "thread-b", "message-b"),
+    ] {
+        let operation = envelope(
+            origin,
+            0,
+            "chat.message.append",
+            json!({
+                "messageId": message_id,
+                "threadId": thread_id,
+                "authorKind": "human",
+                "authorDisplayName": "Ada",
+                "body": format!("Pending for {thread_id}"),
+                "createdAtMs": 20
+            }),
+        );
+        apply_chat_envelope(&mut engine, &operation, &NoFaults).expect("park message");
+    }
+    assert_eq!(pending_chat_coordinate_count(&engine), 2);
+    seed_unowned_chat_thread(&mut engine, "thread-a");
+    seed_unowned_chat_thread(&mut engine, "thread-b");
+
+    LinkedChatStore::new(&mut engine)
+        .create_channel(
+            "ws",
+            "replay-trigger",
+            "Replay trigger",
+            ChatChannelKind::Channel,
+            30,
+            &NoFaults,
+        )
+        .expect("trigger ready replay");
+
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
+    assert_eq!(chat_content_revision(&engine, "thread-a"), 1);
+    assert_eq!(chat_content_revision(&engine, "thread-b"), 1);
+}
+
 #[test]
 fn chat_message_before_thread_is_parked_and_replayed_after_thread_arrives() {
     let (_scratch, _path, mut engine) = store();

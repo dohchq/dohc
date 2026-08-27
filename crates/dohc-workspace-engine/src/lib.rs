@@ -1215,6 +1215,10 @@ impl EngineService {
                 self.chats_threads_get_projection(&ctx, request.workspace, request.params)
                     .await?
             }
+            "chats.threads.revision" => {
+                self.chats_threads_revision(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "chats.messages.send" => {
                 self.chats_messages_send(
                     &ctx,
@@ -5547,6 +5551,32 @@ impl EngineService {
         )
         .await?;
         Ok(channel_id.map_or(Value::Null, Value::String))
+    }
+
+    async fn chats_threads_revision(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatThreadParams = parse(params)?;
+        if params.thread_id.is_empty()
+            || params.thread_id.encode_utf16().count() > 256
+            || params.thread_id.len() > 512
+            || params.thread_id.chars().any(char::is_control)
+        {
+            return Err(wire(ErrorCode::InvalidParams, "invalid-parameters"));
+        }
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let revision = Self::read_under_ctx(
+            &cancellation,
+            "chats.threads.revision",
+            open.actor
+                .chat_thread_revision(open.workspace_id, params.thread_id),
+        )
+        .await?;
+        Ok(json!({ "revision": revision }))
     }
 
     async fn chats_threads_get_projection(

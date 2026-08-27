@@ -182,6 +182,18 @@ export class ChatsLiveAdapter {
     });
   }
 
+  async getThreadRevision(input: {
+    workspaceId: string;
+    threadId: string;
+  }): Promise<number> {
+    this.assertWorkspace(input.workspaceId);
+    return (
+      await this.request(CHATS_METHOD.threadRevision, {
+        threadId: input.threadId,
+      })
+    ).revision;
+  }
+
   async startChannelThread(input: {
     workspaceId: string;
     channelId: string;

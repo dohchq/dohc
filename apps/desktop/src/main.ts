@@ -140,6 +140,8 @@ import {
   CreateFileChatResult,
   ListChatMessagesPayload,
   ListChatMessagesResult,
+  GetChatThreadRevisionPayload,
+  GetChatThreadRevisionResult,
   SendChatMessagePayload,
   SendChatMessageResult,
   ListChatThreadDecisionsPayload,
@@ -9920,6 +9922,17 @@ function registerIpcHandlers(
     return ListChatMessagesResult.parse({
       messages: messages.map(chatMessageForIpc),
     });
+  });
+
+  ipcMain.handle(CHANNELS.getChatThreadRevision, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = GetChatThreadRevisionPayload.parse(payload);
+    const { workspace, store } = await requireChatScope(input.workspaceId);
+    const revision = await store.getThreadRevision({
+      workspaceId: workspace.workspaceId,
+      threadId: input.threadId,
+    });
+    return GetChatThreadRevisionResult.parse({ revision });
   });
 
   ipcMain.handle(CHANNELS.sendChatMessage, async (event, payload) => {

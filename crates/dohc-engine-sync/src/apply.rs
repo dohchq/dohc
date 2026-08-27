@@ -4,8 +4,8 @@ use serde::{Deserialize, Deserializer};
 use sha2::{Digest, Sha256};
 
 use dohc_engine_domain::chats::{
-    chat_thread_display_title, index_replicated_chat_message_search_rows,
-    upsert_chat_search_index_row,
+    bump_chat_conversation_revision, chat_thread_display_title,
+    index_replicated_chat_message_search_rows, upsert_chat_search_index_row,
 };
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, CHAT_THREAD_HEADER_MESSAGE_ID, DomainError,
@@ -1488,6 +1488,8 @@ fn apply_message(
         &body,
     )
     .map_err(|error| map_chat_rule(error, "replicated chat search index maintenance failed"))?;
+    bump_chat_conversation_revision(tx, &op.workspace_id, &payload.thread_id)
+        .map_err(|error| map_chat_rule(error, "chat conversation revision update failed"))?;
     Ok(())
 }
 
@@ -1509,7 +1511,15 @@ fn apply_decision(
             reason: "chat decision payload is invalid",
         });
     }
-    tx.execute(
+    let prior_thread_id = tx
+        .query_row(
+            "SELECT thread_id FROM chat_decisions WHERE workspace_id=?1 AND message_id=?2",
+            params![op.workspace_id, p.message_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    let updated = tx.execute(
         "INSERT INTO chat_decisions \
          (workspace_id, thread_id, message_id, state, resolved_by_message_id, at_ms, origin_id, origin_seq) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
@@ -1521,6 +1531,17 @@ fn apply_decision(
         params![op.workspace_id, p.thread_id, p.message_id, p.state, p.resolved_by_message_id, p.at_ms, op.origin_id, op.origin_seq],
     )
     .map_err(SyncError::persist)?;
+    if updated > 0 {
+        if let Some(prior_thread_id) = prior_thread_id
+            && prior_thread_id != p.thread_id
+        {
+            bump_chat_conversation_revision(tx, &op.workspace_id, &prior_thread_id).map_err(
+                |error| map_chat_rule(error, "chat conversation revision update failed"),
+            )?;
+        }
+        bump_chat_conversation_revision(tx, &op.workspace_id, &p.thread_id)
+            .map_err(|error| map_chat_rule(error, "chat conversation revision update failed"))?;
+    }
     Ok(())
 }
 
@@ -1552,7 +1573,16 @@ fn apply_reaction(
     }
     let author_display_name = normalize_display_name(&p.author_display_name)
         .map_err(|error| map_chat_rule(error, "chat reaction display name is invalid"))?;
-    tx.execute(
+    let prior_thread_id = tx
+        .query_row(
+            "SELECT thread_id FROM chat_reactions \
+             WHERE workspace_id=?1 AND message_id=?2 AND emoji=?3 AND author_id=?4",
+            params![op.workspace_id, p.message_id, p.emoji, author_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    let updated = tx.execute(
         "INSERT INTO chat_reactions \
          (workspace_id,reaction_id,thread_id,message_id,emoji,author_id,author_kind,author_display_name,state,at_ms,origin_id,origin_seq) \
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) \
@@ -1565,6 +1595,17 @@ fn apply_reaction(
         params![op.workspace_id,p.reaction_id,p.thread_id,p.message_id,p.emoji,author_id,p.author_kind,author_display_name,p.state,p.at_ms,op.origin_id,op.origin_seq],
     )
     .map_err(SyncError::persist)?;
+    if updated > 0 {
+        if let Some(prior_thread_id) = prior_thread_id
+            && prior_thread_id != p.thread_id
+        {
+            bump_chat_conversation_revision(tx, &op.workspace_id, &prior_thread_id).map_err(
+                |error| map_chat_rule(error, "chat conversation revision update failed"),
+            )?;
+        }
+        bump_chat_conversation_revision(tx, &op.workspace_id, &p.thread_id)
+            .map_err(|error| map_chat_rule(error, "chat conversation revision update failed"))?;
+    }
     Ok(())
 }
 
@@ -1749,13 +1790,17 @@ fn apply_attachment(
             });
         }
     }
-    tx.execute(
+    let inserted = tx.execute(
         "INSERT OR IGNORE INTO chat_attachments \
          (workspace_id,attachment_id,thread_id,message_id,target_kind,object_id,path_hint,heading_text,heading_anchor,heading_occurrence,created_at_ms) \
          VALUES (?1,?2,?3,?4,'file',?5,?6,?7,?8,?9,?10)",
         params![op.workspace_id,p.attachment_id,p.thread_id,p.message_id,p.object_id,p.path_hint,p.heading_text,p.heading_anchor,p.heading_occurrence,p.created_at_ms],
     )
     .map_err(SyncError::persist)?;
+    if inserted > 0 {
+        bump_chat_conversation_revision(tx, &op.workspace_id, &p.thread_id)
+            .map_err(|error| map_chat_rule(error, "chat conversation revision update failed"))?;
+    }
     mark_live_bookmarks_pending(tx, &op.workspace_id, &p.thread_id, p.created_at_ms)?;
     Ok(())
 }
