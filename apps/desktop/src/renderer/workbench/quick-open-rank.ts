@@ -34,23 +34,126 @@ function isSubsequence(needle: string, haystack: string): boolean {
   return needle.length === 0;
 }
 
+function quickOpenMatchTierLowercase(
+  query: string,
+  path: string,
+  basename: string,
+): number | null {
+  if (query.length === 0) return TIER_SUBSTRING;
+  if (basename.startsWith(query)) return TIER_BASENAME_PREFIX;
+  if (startsAtWordBoundary(path, query)) return TIER_WORD_BOUNDARY;
+  if (path.includes(query)) return TIER_SUBSTRING;
+  if (isSubsequence(query, path)) return TIER_FUZZY;
+  return null;
+}
+
 // The tier a path matches the query at, or null when it doesn't match.
 // Exported for direct unit testing of the tier rules.
 export function quickOpenMatchTier(query: string, path: string): number | null {
   const q = query.toLowerCase();
-  if (q.length === 0) return TIER_SUBSTRING;
   const p = path.toLowerCase();
-  if (basenameOf(p).startsWith(q)) return TIER_BASENAME_PREFIX;
-  if (startsAtWordBoundary(p, q)) return TIER_WORD_BOUNDARY;
-  if (p.includes(q)) return TIER_SUBSTRING;
-  if (isSubsequence(q, p)) return TIER_FUZZY;
-  return null;
+  return quickOpenMatchTierLowercase(q, p, basenameOf(p));
 }
 
 export interface QuickOpenContext {
   // Most recent FIRST (workbench recentFiles).
-  recent: string[];
-  pinned: string[];
+  recent: readonly string[];
+  pinned: readonly string[];
+}
+
+export interface PreparedQuickOpenPath {
+  path: string;
+  lowercasePath: string;
+  lowercaseBasename: string;
+  pinnedRank: number;
+  recentRank: number;
+  sourceIndex: number;
+}
+
+interface ScoredQuickOpenPath {
+  prepared: PreparedQuickOpenPath;
+  tier: number;
+}
+
+// Build this index only when the file list, pins, or recent files change.
+// Queries can then reuse every path-derived value.
+export function prepareQuickOpenPaths(
+  paths: readonly string[],
+  context: QuickOpenContext,
+): PreparedQuickOpenPath[] {
+  const pinned = new Set(context.pinned);
+  const recentRank = new Map(context.recent.map((path, index) => [path, index]));
+  return paths.map((path, sourceIndex) => {
+    const lowercasePath = path.toLowerCase();
+    return {
+      path,
+      lowercasePath,
+      lowercaseBasename: basenameOf(lowercasePath),
+      pinnedRank: pinned.has(path) ? 0 : 1,
+      recentRank: recentRank.get(path) ?? Number.MAX_SAFE_INTEGER,
+      sourceIndex,
+    };
+  });
+}
+
+function compareCandidate(
+  path: PreparedQuickOpenPath,
+  tier: number,
+  scored: ScoredQuickOpenPath,
+): number {
+  const other = scored.prepared;
+  return (
+    path.pinnedRank - other.pinnedRank ||
+    tier - scored.tier ||
+    path.recentRank - other.recentRank ||
+    path.path.length - other.path.length ||
+    (path.path < other.path ? -1 : path.path > other.path ? 1 : 0) ||
+    // The previous full sort was stable. Equal paths therefore kept their
+    // input order, which sourceIndex makes explicit for bounded selection.
+    path.sourceIndex - other.sourceIndex
+  );
+}
+
+function insertBounded(
+  selected: ScoredQuickOpenPath[],
+  path: PreparedQuickOpenPath,
+  tier: number,
+  limit: number,
+): void {
+  let low = 0;
+  let high = selected.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (compareCandidate(path, tier, selected[middle]) < 0) high = middle;
+    else low = middle + 1;
+  }
+  if (low >= limit) return;
+  selected.splice(low, 0, { prepared: path, tier });
+  if (selected.length > limit) selected.pop();
+}
+
+// Rank a prepared index and retain at most `limit` paths. A finite limit uses
+// bounded insertion, so a query never sorts the complete match set.
+export function rankPreparedQuickOpenPaths(
+  query: string,
+  paths: readonly PreparedQuickOpenPath[],
+  limit: number,
+): string[] {
+  const boundedLimit = Math.max(0, Math.floor(limit));
+  if (boundedLimit === 0) return [];
+
+  const lowercaseQuery = query.toLowerCase();
+  const selected: ScoredQuickOpenPath[] = [];
+  for (const path of paths) {
+    const tier = quickOpenMatchTierLowercase(
+      lowercaseQuery,
+      path.lowercasePath,
+      path.lowercaseBasename,
+    );
+    if (tier === null) continue;
+    insertBounded(selected, path, tier, boundedLimit);
+  }
+  return selected.map((path) => path.prepared.path);
 }
 
 // Ranks `paths` for `query`. Non-matching paths are excluded. Sort key, in
@@ -61,26 +164,6 @@ export function rankQuickOpenPaths(
   paths: readonly string[],
   context: QuickOpenContext,
 ): string[] {
-  const pinned = new Set(context.pinned);
-  const recentRank = new Map(context.recent.map((path, index) => [path, index]));
-  const scored: Array<{ path: string; pinned: number; tier: number; recent: number }> = [];
-  for (const path of paths) {
-    const tier = quickOpenMatchTier(query, path);
-    if (tier === null) continue;
-    scored.push({
-      path,
-      pinned: pinned.has(path) ? 0 : 1,
-      tier,
-      recent: recentRank.get(path) ?? Number.MAX_SAFE_INTEGER,
-    });
-  }
-  scored.sort(
-    (a, b) =>
-      a.pinned - b.pinned ||
-      a.tier - b.tier ||
-      a.recent - b.recent ||
-      a.path.length - b.path.length ||
-      (a.path < b.path ? -1 : a.path > b.path ? 1 : 0),
-  );
-  return scored.map((s) => s.path);
+  const prepared = prepareQuickOpenPaths(paths, context);
+  return rankPreparedQuickOpenPaths(query, prepared, prepared.length);
 }

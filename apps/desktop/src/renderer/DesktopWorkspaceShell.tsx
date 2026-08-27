@@ -83,6 +83,7 @@ import { CloudLogin } from "./CloudLogin";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { ExternalLinkConfirm } from "./ExternalLinkConfirm";
 import { CommandPalette, type Command } from "./CommandPalette";
+import { QuickOpenPalette } from "./QuickOpenPalette";
 import {
   classifyForView,
   FileInspector,
@@ -121,7 +122,6 @@ import {
   useOrphanedDraftPaths,
 } from "./orphanedDrafts";
 import { requestGuardedUpdateInstall } from "./RecoveryCloseGuard";
-import { rankQuickOpenPaths } from "./workbench/quick-open-rank";
 // Eager on purpose. Behind lazy(), the search input did not exist until the
 // chunk resolved, and every character typed in that gap went to whatever the
 // user clicked to open the panel — queries arrived with their first letters
@@ -6722,25 +6722,11 @@ export function DesktopWorkspaceShell(props: {
         />
       ) : null}
       {quickOpenOpen ? (
-        <CommandPalette
-          testId="quick-open"
-          placeholder="Go to file…"
-          ariaLabel="File"
-          commands={files.map((file) => ({
-            id: file.path,
-            label: file.path,
-            run: () => openFile(file.path),
-          }))}
-          // Quick-open ranking (E5.0): prefix > word-boundary > substring >
-          // fuzzy; recent files boosted; pinned first. Pure function — the
-          // command ids ARE the paths.
-          rank={(query, commands) => {
-            const byPath = new Map(commands.map((command) => [command.id, command]));
-            return rankQuickOpenPaths(query, [...byPath.keys()], {
-              recent: wb.recentFiles,
-              pinned: wb.pinned,
-            }).map((path) => byPath.get(path)!);
-          }}
+        <QuickOpenPalette
+          files={files}
+          recent={wb.recentFiles}
+          pinned={wb.pinned}
+          onOpenPath={openFile}
           onClose={() => setQuickOpenOpen(false)}
         />
       ) : null}

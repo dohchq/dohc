@@ -9,15 +9,16 @@ export interface Command {
   run: () => void;
 }
 
+export const MAX_COMMAND_PALETTE_MATCHES = 50;
+
 export function CommandPalette(props: {
   commands: Command[];
   onClose: () => void;
   testId?: string;
   placeholder?: string;
   ariaLabel?: string;
-  // Optional ranking seam (Phase E5.0): quick-open passes the pure
-  // rankQuickOpenPaths-backed ranker (prefix > word-boundary > fuzzy, recent
-  // boosted, pinned first). Default stays the simple substring filter.
+  // Optional ranking seam (Phase E5.0): Quick Open passes its prepared path
+  // ranker. Default palettes keep the simple substring filter.
   rank?: (query: string, commands: Command[]) => Command[];
 }) {
   const [query, setQuery] = useState("");
@@ -31,14 +32,13 @@ export function CommandPalette(props: {
 
   // Cap rendered rows: a workspace can have thousands of files (quick-open),
   // and rendering them all per keystroke is wasted work.
-  const MAX_MATCHES = 50;
   const filterStart = performance.now();
   const needle = query.toLowerCase();
   const matches = (
     props.rank
       ? props.rank(query, props.commands)
       : props.commands.filter((command) => command.label.toLowerCase().includes(needle))
-  ).slice(0, MAX_MATCHES);
+  ).slice(0, MAX_COMMAND_PALETTE_MATCHES);
   const filterMs = useRef(0);
   filterMs.current = performance.now() - filterStart;
 
