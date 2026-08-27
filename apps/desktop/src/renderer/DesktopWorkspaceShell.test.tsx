@@ -759,12 +759,35 @@ function renderShell(
     <DesktopWorkspaceShell
       workspace={workspace}
       workspaces={workspaces}
+      {...shellBootstrapProps(bridge)}
       onSwitchWorkspace={() => {}}
     />,
   );
 }
 
+function shellBootstrapProps(bridge: ReturnType<typeof makeBridge>) {
+  return {
+    userSettings: {
+      settings: DEFAULT_USER_SETTINGS,
+      source: "default" as const,
+    },
+    refreshWorkspaceRegistry: async () =>
+      (await bridge.getWorkspaceRegistry()).workspaces as Workspace[],
+  };
+}
+
 describe("workspace switch performance timeline", () => {
+  it("reuses the bootstrap agent-status read for initial history", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    renderShell(bridge);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalled());
+    expect(bridge.getAgentRunStatus).toHaveBeenCalledTimes(1);
+  });
+
   it("records the existing shell readiness commits for a restored file", async () => {
     const previousOrdinal = rendererMarks.readSwitchTimeline().at(-1)?.ordinal ?? 0;
     renderShell(makeBridge(Promise.resolve(STORED_STATE)));
@@ -995,6 +1018,7 @@ describe("plugin panel tabs", () => {
       <DesktopWorkspaceShell
         workspace={otherWorkspace}
         workspaces={[otherWorkspace]}
+        {...shellBootstrapProps(bridge)}
         onSwitchWorkspace={() => {}}
       />,
     );
@@ -1131,6 +1155,7 @@ describe("plugin web app tabs", () => {
       <DesktopWorkspaceShell
         workspace={otherWorkspace}
         workspaces={[otherWorkspace]}
+        {...shellBootstrapProps(bridge)}
         onSwitchWorkspace={() => {}}
       />,
     );
@@ -3870,6 +3895,7 @@ describe("workspace switch admission", () => {
         key={workspace.workspaceId}
         workspace={workspace}
         workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
         onSwitchWorkspace={() => {}}
       />
     );
@@ -3940,6 +3966,7 @@ describe("workspace switch-back file listing", () => {
         key={workspace.workspaceId}
         workspace={workspace}
         workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
         onSwitchWorkspace={() => {}}
       />
     );
@@ -4054,6 +4081,7 @@ describe("ui-state merge-on-load", () => {
       <DesktopWorkspaceShell
         workspace={OTHER_WORKSPACE}
         workspaces={workspaces}
+        {...shellBootstrapProps(bridge)}
         onSwitchWorkspace={() => {}}
       />,
     );
@@ -4672,6 +4700,7 @@ describe("ui-state merge-on-load", () => {
       <DesktopWorkspaceShell
         workspace={secondWorkspace}
         workspaces={[firstWorkspace, secondWorkspace]}
+        {...shellBootstrapProps(bridge)}
         onSwitchWorkspace={() => {}}
       />,
     );
@@ -6601,6 +6630,7 @@ describe("engine store recovery", () => {
       <DesktopWorkspaceShell
         workspace={WORKSPACE}
         workspaces={[WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
         onSwitchWorkspace={() => {}}
       />,
     );
@@ -6612,6 +6642,7 @@ describe("engine store recovery", () => {
       <DesktopWorkspaceShell
         workspace={WORKSPACE}
         workspaces={[WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
         onSwitchWorkspace={() => {}}
       />,
     );
@@ -6714,6 +6745,7 @@ describe("engine store recovery", () => {
       <DesktopWorkspaceShell
         workspace={workspaceB}
         workspaces={[WORKSPACE, workspaceB]}
+        {...shellBootstrapProps(bridge)}
         onSwitchWorkspace={() => {}}
       />,
     );
@@ -6886,6 +6918,7 @@ describe("engine store recovery", () => {
       <DesktopWorkspaceShell
         workspace={workspaceB}
         workspaces={[WORKSPACE, workspaceB]}
+        {...shellBootstrapProps(bridge)}
         onSwitchWorkspace={() => {}}
       />,
     );
@@ -12615,8 +12648,8 @@ describe("history page", () => {
       lastRun: null,
     };
     const heldRead = deferred<AgentRunStatusResult>();
-    // Which read gets what is set by this test, not by a call count: the shell
-    // reads agent state more than once while a workspace opens.
+    // Which read gets what is set by this test, not by a call count: activity
+    // refreshes keep reading after bootstrap has shared its first answer.
     let holdNextRead = false;
     let runIsActive = false;
     const bridge = makeBridge(Promise.resolve(null));
@@ -12629,7 +12662,7 @@ describe("history page", () => {
     });
     renderShell(bridge);
 
-    await waitFor(() => expect(bridge.getAgentRunStatus).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalled());
     expect(screen.queryByTestId("agent-run-indicator")).toBeNull();
 
     // One refresh's agent read is still in flight.
@@ -12935,6 +12968,7 @@ describe("versions surface after a failed capture build", () => {
       <DesktopWorkspaceShell
         workspace={OTHER_WORKSPACE}
         workspaces={workspaces}
+        {...shellBootstrapProps(bridge)}
         onSwitchWorkspace={() => {}}
       />,
     );
@@ -12949,6 +12983,7 @@ describe("versions surface after a failed capture build", () => {
       <DesktopWorkspaceShell
         workspace={WORKSPACE}
         workspaces={workspaces}
+        {...shellBootstrapProps(bridge)}
         onSwitchWorkspace={() => {}}
       />,
     );
@@ -15340,10 +15375,12 @@ describe("workbench render cost", () => {
     // would pass without re-rendering the shell at all.
     const workspaces = [WORKSPACE];
     const onSwitchWorkspace = () => {};
+    const bootstrapProps = shellBootstrapProps(bridge);
     const shellElement = () => (
       <DesktopWorkspaceShell
         workspace={WORKSPACE}
         workspaces={workspaces}
+        {...bootstrapProps}
         onSwitchWorkspace={onSwitchWorkspace}
       />
     );
