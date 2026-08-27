@@ -35,6 +35,7 @@ import {
 } from "./editor/import-export";
 import {
   classifyForView,
+  delimitedTextCodec,
   type DraftFlush,
   FileInspector,
   lineSpanInText,
@@ -5094,6 +5095,99 @@ describe("markdown editor unmount flush", () => {
       text: "date,amount\n2026-06-10,43",
       expectedContentHash: TEST_CONTENT_HASH,
     });
+  });
+
+  it("does not parse a CSV keystroke in raw mode", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "date,amount\n2026-06-10,42",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    const user = userEvent.setup();
+    render(<FileInspector workspaceId="ws-1" path="data/table.csv" />);
+
+    await screen.findByTestId("view-csv");
+    await user.click(screen.getByTestId("csv-raw-toggle"));
+    const parse = vi.spyOn(delimitedTextCodec, "parse");
+    try {
+      fireEvent.change(screen.getByTestId("csv-raw-editor"), {
+        target: { value: "date,amount\n2026-06-10,420" },
+      });
+
+      expect(parse).not.toHaveBeenCalled();
+    } finally {
+      parse.mockRestore();
+    }
+  });
+
+  it("serializes one table-cell edit once without reparsing its output", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "date,amount\n2026-06-10,42",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    render(<FileInspector workspaceId="ws-1" path="data/table.csv" />);
+
+    await screen.findByTestId("view-csv");
+    const parse = vi.spyOn(delimitedTextCodec, "parse");
+    const serialize = vi.spyOn(delimitedTextCodec, "serialize");
+    try {
+      const cells = screen.getAllByTestId("csv-cell") as HTMLInputElement[];
+      fireEvent.change(cells[3]!, { target: { value: "43" } });
+      await act(async () => Promise.resolve());
+
+      expect(serialize).toHaveBeenCalledTimes(1);
+      expect(parse).not.toHaveBeenCalled();
+    } finally {
+      parse.mockRestore();
+      serialize.mockRestore();
+    }
+  });
+
+  it("round-trips quoted CSV cells through the existing codec", () => {
+    const text = [
+      "name,note,quote",
+      'Ada,"one,two","She said ""hi"""',
+      'Grace,"line one\nline two",plain',
+    ].join("\n");
+    const rows = [
+      ["name", "note", "quote"],
+      ["Ada", "one,two", 'She said "hi"'],
+      ["Grace", "line one\nline two", "plain"],
+    ];
+
+    expect(delimitedTextCodec.parse(text, ",")).toEqual(rows);
+    expect(delimitedTextCodec.serialize(rows, ",")).toBe(text);
+    expect(
+      delimitedTextCodec.parse(delimitedTextCodec.serialize(rows, ","), ","),
+    ).toEqual(rows);
+  });
+
+  it("preserves CSV content while switching between raw and table modes", async () => {
+    const initial = 'name,note\nAda,"one,two"';
+    const edited = 'name,note\nGrace,"line one\nline two"';
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: initial,
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    const user = userEvent.setup();
+    render(<FileInspector workspaceId="ws-1" path="data/table.csv" />);
+
+    await screen.findByTestId("view-csv");
+    await user.click(screen.getByTestId("csv-raw-toggle"));
+    const rawEditor = screen.getByTestId("csv-raw-editor") as HTMLTextAreaElement;
+    expect(rawEditor.value).toBe(initial);
+    fireEvent.change(rawEditor, { target: { value: edited } });
+
+    await user.click(screen.getByTestId("csv-raw-toggle"));
+    expect(
+      (screen.getByLabelText("Row 1 column 1") as HTMLInputElement).value,
+    ).toBe("Grace");
+    await user.click(screen.getByTestId("csv-raw-toggle"));
+    expect((screen.getByTestId("csv-raw-editor") as HTMLTextAreaElement).value).toBe(
+      edited,
+    );
   });
 
   // #579 adversarial review F1: the opening gate lived inside MarkdownView, so
