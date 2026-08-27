@@ -146,6 +146,16 @@ function registerChatFlowHandlers(
     },
   );
   ipc.handle(
+    CHANNELS.getChatThreadRevision,
+    async (event, payload) => {
+      deps.assertTrustedSender(event);
+      const revision = await context.store.getThreadRevision(
+        parseWorkspacePayload(payload),
+      );
+      return { revision };
+    },
+  );
+  ipc.handle(
     CHANNELS.markChatThreadRead,
     createWritableChatIpcHandler({
       ...deps,
@@ -331,6 +341,12 @@ describe("main chat IPC live backend", () => {
           threadId: started.thread.id,
           body: "Use the Rust path",
         })) as Awaited<ReturnType<LinkedChatStore["sendMessage"]>>;
+        await expect(
+          ipc.invoke(CHANNELS.getChatThreadRevision, {
+            workspaceId: workspace.workspaceId,
+            threadId: started.thread.id,
+          }),
+        ).resolves.toEqual({ revision: 3 });
         await expect(
           ipc.invoke(CHANNELS.listChatMessages, {
             workspaceId: workspace.workspaceId,

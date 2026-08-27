@@ -44,6 +44,7 @@ interface WorkspaceState {
   attachments: Map<string, ChatAttachment>;
   decisions: Map<string, ChatDecision>;
   reactions: Map<string, ChatReaction>;
+  contentRevisions: Map<string, number>;
   mentions: ChatMention[];
   agentReads: Map<string, ChatAgentReadState>;
   humanReads: Map<string, number>;
@@ -630,6 +631,7 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.threadsListForFile: return ["objectId", "pageLimit", "cursor"];
     case CHATS_METHOD.threadsListForChannel: return ["channelId", "pageLimit", "cursor"];
     case CHATS_METHOD.threadFindChannelId:
+    case CHATS_METHOD.threadRevision:
     case CHATS_METHOD.dispatchIsThreadPaused:
     case CHATS_METHOD.dispatchGetThreadPauseState:
       return ["threadId"];
@@ -910,6 +912,10 @@ export class ChatsLoopbackEngine implements EngineTransport {
         return this.threadsListForChannel(state, workspace, params);
       case CHATS_METHOD.threadFindChannelId:
         return this.threadFindChannelId(state, params);
+      case CHATS_METHOD.threadRevision:
+        return jsonResult({
+          revision: state.contentRevisions.get(requiredString(params, "threadId")) ?? 0,
+        });
       case CHATS_METHOD.threadGetProjection:
         return this.threadProjection(state, workspace, params);
       case CHATS_METHOD.messageSend:
@@ -1362,6 +1368,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     };
     state.threads.set(threadId, thread);
     const message = this.insertMessage(state, workspace, params, threadId, atMs);
+    this.bumpThreadRevision(state, threadId);
     return jsonResult({ thread, message });
   }
 
@@ -1435,6 +1442,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
       this.tick(optionalSafeInteger(params, "nowMs")),
     );
     thread.updatedAtMs = Math.max(thread.updatedAtMs, message.createdAtMs);
+    this.bumpThreadRevision(state, threadId);
     return jsonResult(message);
   }
 
@@ -1583,6 +1591,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
         seen.add(dedup);
         message.attachments.push(attachment);
         state.attachments.set(attachment.attachmentId, attachment);
+        this.bumpThreadRevision(state, threadId);
       }
     }
     state.messages.set(messageId, message);
@@ -1605,6 +1614,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
         state: "open",
         atMs,
       });
+      this.bumpThreadRevision(state, threadId);
     }
     return message;
   }
@@ -1768,6 +1778,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     decision.state = "resolved";
     decision.resolvedByMessageId = resolvedByMessageId;
     decision.atMs = Math.max(this.tick(optionalSafeInteger(params, "nowMs")), decision.atMs + 1);
+    this.bumpThreadRevision(state, threadId);
     return jsonResult(decision);
   }
 
@@ -1833,6 +1844,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
       atMs: Math.max(this.tick(optionalSafeInteger(params, "nowMs")), (prior?.atMs ?? -1) + 1),
     };
     state.reactions.set(key, reaction);
+    this.bumpThreadRevision(state, threadId);
     return jsonResult(reaction);
   }
 
@@ -2955,6 +2967,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
         attachments: new Map(),
         decisions: new Map(),
         reactions: new Map(),
+        contentRevisions: new Map(),
         mentions: [],
         agentReads: new Map(),
         humanReads: new Map(),
@@ -2971,5 +2984,9 @@ export class ChatsLoopbackEngine implements EngineTransport {
       this.workspaces.set(id, state);
     }
     return state;
+  }
+
+  private bumpThreadRevision(state: WorkspaceState, threadId: string): void {
+    state.contentRevisions.set(threadId, (state.contentRevisions.get(threadId) ?? 0) + 1);
   }
 }

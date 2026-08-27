@@ -811,6 +811,7 @@ describe("main-process chat authorization", () => {
     const shareReachable = [
       "listFileChats",
       "listChatMessages",
+      "getChatThreadRevision",
       // The panel loads messages and reactions TOGETHER, so this one is part
       // of opening a thread at all, not a separate nicety.
       "listChatReactions",

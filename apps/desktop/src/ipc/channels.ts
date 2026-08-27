@@ -736,6 +736,7 @@ export const CHANNELS = {
   listFileChats: "desktop:list-file-chats",
   createFileChat: "desktop:create-file-chat",
   listChatMessages: "desktop:list-chat-messages",
+  getChatThreadRevision: "desktop:get-chat-thread-revision",
   sendChatMessage: "desktop:send-chat-message",
   listChatThreadDecisions: "desktop:list-chat-thread-decisions",
   resolveChatDecision: "desktop:resolve-chat-decision",

@@ -196,6 +196,10 @@ export function createLiveLinkedChatStore(
       await invoke(async (adapter) => await adapter.sendMessage(input)),
     listMessages: async (input) =>
       await invokeRead(async (adapter) => await adapter.listMessages(input)),
+    getThreadRevision: async (input) =>
+      await invokeRead(
+        async (adapter) => await adapter.getThreadRevision(input),
+      ),
     resolveChatDecision: async (input) =>
       await invoke(
         async (adapter) => await adapter.resolveChatDecision(input),

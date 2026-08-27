@@ -2881,6 +2881,20 @@ CREATE INDEX idx_secret_moments_history_time
 pub(crate) const SECRET_MOMENT_HISTORY_TIME_INDEX_MIGRATION_ID: &str =
     "v1-secret-moment-history-time-index";
 
+/// Ordinal 40. A receiver-local content revision for each chat conversation.
+/// Rows are created lazily: an absent row is revision zero and the first
+/// visible mutation inserts revision one.
+const V1_CHAT_CONVERSATION_REVISIONS_DDL: &str = "\
+CREATE TABLE chat_conversation_revisions (
+    workspace_id     TEXT    NOT NULL,
+    thread_id        TEXT    NOT NULL,
+    content_revision INTEGER NOT NULL CHECK (content_revision > 0),
+    PRIMARY KEY (workspace_id, thread_id)
+) STRICT;
+";
+
+pub(crate) const CHAT_CONVERSATION_REVISIONS_MIGRATION_ID: &str = "v1-chat-conversation-revisions";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -3166,6 +3180,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: SECRET_MOMENT_HISTORY_TIME_INDEX_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_SECRET_MOMENT_HISTORY_TIME_INDEX_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 40,
+        id: CHAT_CONVERSATION_REVISIONS_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_CHAT_CONVERSATION_REVISIONS_DDL,
         sets_user_version: None,
     },
 ];

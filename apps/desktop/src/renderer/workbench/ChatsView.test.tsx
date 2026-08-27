@@ -156,6 +156,7 @@ const bridgeMock = {
   listChannelThreads: vi.fn(),
   startChannelThread: vi.fn(),
   listChatMessages: vi.fn(),
+  getChatThreadRevision: vi.fn(),
   listChatThreadDecisions: vi.fn(),
   resolveChatDecision: vi.fn(),
   listChatThreadAttachments: vi.fn(),
@@ -288,6 +289,7 @@ beforeEach(() => {
   bridgeMock.listJoinedSharedChannels.mockResolvedValue({ joined: [] });
   bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
   bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
+  bridgeMock.getChatThreadRevision.mockResolvedValue({ revision: 0 });
   bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [] });
   bridgeMock.listChatThreadAttachments.mockResolvedValue({ attachments: [] });
   bridgeMock.chatRunRecordsForThread.mockResolvedValue({ runs: {} });
@@ -7687,10 +7689,7 @@ describe("chat render cost", () => {
     expect(vi.mocked(extractChatFileReferenceTokens).mock.calls.length).toBe(scans);
   });
 
-  // The open-DM poll answers with FRESH structured-clone arrays every 4s tick.
-  // When nothing changed, the commits must keep the current state's identity
-  // so the memoized conversation does not repaint on every tick.
-  it("a no-change DM poll tick does not re-render the conversation", async () => {
+  it("a quiet DM tick syncs and reads one revision without loading content", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
@@ -7714,15 +7713,117 @@ describe("chat render cost", () => {
       await screen.findAllByTestId("chats-dm-message");
 
       const scans = vi.mocked(extractChatFileReferenceTokens).mock.calls.length;
-      // Two full poll rounds (refreshOpenDm every 4s), each landing fresh
-      // equal arrays for dms, requests, messages, and reactions.
+      bridgeMock.syncDms.mockClear();
+      bridgeMock.getChatThreadRevision.mockClear();
+      bridgeMock.listChatMessages.mockClear();
+      bridgeMock.listChatReactions.mockClear();
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(8_500);
+        await vi.advanceTimersByTimeAsync(4_000);
       });
+
+      expect(bridgeMock.syncDms).toHaveBeenCalledTimes(1);
+      expect(bridgeMock.getChatThreadRevision).toHaveBeenCalledTimes(1);
+      expect(bridgeMock.getChatThreadRevision).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        threadId: "thread-dm-1",
+      });
+      expect(bridgeMock.listChatMessages).not.toHaveBeenCalled();
+      expect(bridgeMock.listChatReactions).not.toHaveBeenCalled();
       expect(vi.mocked(extractChatFileReferenceTokens).mock.calls.length).toBe(scans);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("a changed DM revision triggers the full conversation load", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      let revision = 1;
+      bridgeMock.syncDms.mockResolvedValue({
+        available: true,
+        dms: [dm()],
+        pending: [],
+        declined: [],
+      });
+      bridgeMock.getChatThreadRevision.mockImplementation(async () => ({ revision }));
+      bridgeMock.listChatMessages.mockImplementation(async () => ({
+        messages: [
+          message({
+            id: "m-1",
+            threadId: "thread-dm-1",
+            body: revision === 1 ? "before" : "after",
+          }),
+        ],
+      }));
+      bridgeMock.listChatReactions.mockResolvedValue({
+        reactions: [],
+        viewerAuthorId: "you@example.com",
+      });
+
+      renderView();
+      await user.click(await screen.findByTestId("chats-dm-item"));
+      expect(await screen.findByText("before")).toBeTruthy();
+
+      bridgeMock.syncDms.mockClear();
+      bridgeMock.getChatThreadRevision.mockClear();
+      bridgeMock.listChatMessages.mockClear();
+      bridgeMock.listChatReactions.mockClear();
+      revision = 2;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4_000);
+      });
+
+      expect(bridgeMock.syncDms).toHaveBeenCalledTimes(1);
+      expect(bridgeMock.getChatThreadRevision).toHaveBeenCalledTimes(1);
+      expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(1);
+      expect(bridgeMock.listChatReactions).toHaveBeenCalledTimes(1);
+      expect(await screen.findByText("after")).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("resets the revision gate when switching DMs", async () => {
+    const user = userEvent.setup();
+    const first = dm();
+    const second = dm({
+      channelId: "channel-dm-2",
+      channelWireId: "wire-dm-2",
+      peerLabel: "carol@example.com",
+      threadId: "thread-dm-2",
+    });
+    bridgeMock.syncDms.mockResolvedValue({
+      available: true,
+      dms: [first, second],
+      pending: [],
+      declined: [],
+    });
+    bridgeMock.getChatThreadRevision.mockResolvedValue({ revision: 7 });
+    bridgeMock.listChatMessages.mockImplementation(async ({ threadId }) => ({
+      messages: [message({ id: `message-${threadId}`, threadId, body: threadId })],
+    }));
+
+    renderView();
+    let items = await screen.findAllByTestId("chats-dm-item");
+    await user.click(
+      items.find((item) => item.getAttribute("data-channel-id") === first.channelId)!,
+    );
+    expect(await screen.findByText("thread-dm-1")).toBeTruthy();
+
+    await user.click(screen.getByTestId("chats-dm-back"));
+    items = await screen.findAllByTestId("chats-dm-item");
+    bridgeMock.getChatThreadRevision.mockClear();
+    bridgeMock.listChatMessages.mockClear();
+    bridgeMock.listChatReactions.mockClear();
+    await user.click(
+      items.find((item) => item.getAttribute("data-channel-id") === second.channelId)!,
+    );
+
+    expect(await screen.findByText("thread-dm-2")).toBeTruthy();
+    expect(bridgeMock.getChatThreadRevision).toHaveBeenCalledTimes(1);
+    expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(1);
+    expect(bridgeMock.listChatReactions).toHaveBeenCalledTimes(1);
   });
 });
 
