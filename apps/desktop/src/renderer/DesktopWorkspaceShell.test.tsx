@@ -97,6 +97,7 @@ import {
   shareRefreshSummary,
   shareUnmountProjection,
   versionCompareOffCopy,
+  WORKBENCH_PERSIST_DELAY_MS,
   WORKSPACE_ACTIVITY_REFRESH_DELAY_MS,
   WORKSPACE_ACTIVITY_REFRESH_MAX_WAIT_MS,
   type Workspace,
@@ -5473,11 +5474,10 @@ describe("ui-state merge-on-load", () => {
     expect(await screen.findByTestId(`tab-${CHATS_TAB_PATH}`)).toBeTruthy();
   }, 20_000);
 
-  // Cancelling on EVERY workbench write would make this seam hostile: a width
-  // drag streams one mutation per pointermove, so a user who clicks a DM and
-  // then adjusts the sidebar loses the click — and the syncDms failure branch
-  // is isCurrent-gated too, so nothing would surface. Only a destination
-  // change cancels.
+  // Cancelling on EVERY workbench write would make this seam hostile: a user
+  // who clicks a DM and then adjusts the sidebar would lose the click when the
+  // final width commits — and the syncDms failure branch is isCurrent-gated
+  // too, so nothing would surface. Only a destination change cancels.
   it("keeps an in-flight DM navigation through a sidebar width drag", async () => {
     Object.defineProperty(HTMLElement.prototype, "setPointerCapture", {
       configurable: true,
@@ -5503,14 +5503,14 @@ describe("ui-state merge-on-load", () => {
     await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
     await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
 
-    // Drag the sidebar edge: a workbench write per pointermove, and not one
-    // that moves the active tab.
+    // Drag the sidebar edge. Its one release commit does not move the active
+    // tab.
     const panel = screen.getByTestId("side-panel");
     expect(panel.style.width).toBe("240px");
     const handle = screen.getByTestId("sidebar-resize");
     fireEvent.pointerDown(handle, { button: 0, buttons: 1, pointerId: 1 });
-    fireEvent.pointerMove(handle, { buttons: 1, clientX: 300 });
-    fireEvent.pointerMove(handle, { buttons: 1, clientX: 420 });
+    fireEvent.pointerMove(handle, { buttons: 1, clientX: 300, pointerId: 1 });
+    fireEvent.pointerMove(handle, { buttons: 1, clientX: 420, pointerId: 1 });
     fireEvent.pointerUp(handle, { button: 0, pointerId: 1 });
     await waitFor(() => expect(panel.style.width).toBe("420px"));
 
@@ -13902,6 +13902,131 @@ describe("moment-diff tab after a failed capture build", () => {
   });
 });
 
+describe("workbench resize commits", () => {
+  it("keeps four pointer-rate previews local and arms persistence once per drag", async () => {
+    Object.defineProperty(HTMLElement.prototype, "setPointerCapture", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    const bridge = makeEngineBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          { id: "left", tabs: ["a.md"], activeTab: "a.md", size: 0.5 },
+          { id: "right", tabs: ["b.md"], activeTab: "b.md", size: 0.5 },
+        ],
+        activeEditorGroup: "left",
+      }),
+    );
+    renderShell(bridge);
+
+    const sidebar = await screen.findByTestId("side-panel");
+    const chats = await screen.findByTestId("chats-panel");
+    const openEditors = await screen.findByTestId("open-editors-list");
+    const editorLayout = await screen.findByTestId("editor-group-layout");
+    await screen.findByTestId("editor-group-left");
+    Object.defineProperty(chats, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ right: 1_000 }),
+    });
+    Object.defineProperty(editorLayout, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ width: 1_000 }),
+    });
+
+    const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const persistenceArms = () =>
+      timeoutSpy.mock.calls.filter(
+        ([, delay]) => delay === WORKBENCH_PERSIST_DELAY_MS,
+      ).length;
+    try {
+      const sidebarHandle = screen.getByTestId("sidebar-resize");
+      timeoutSpy.mockClear();
+      fireEvent.pointerDown(sidebarHandle, {
+        button: 0,
+        buttons: 1,
+        pointerId: 1,
+      });
+      for (const clientX of [360, 400, 440]) {
+        fireEvent.pointerMove(sidebarHandle, {
+          buttons: 1,
+          clientX,
+          pointerId: 1,
+        });
+      }
+      expect(sidebar.style.width).toBe("440px");
+      expect(persistenceArms()).toBe(0);
+      fireEvent.pointerUp(sidebarHandle, { pointerId: 1 });
+      expect(sidebar.style.width).toBe("440px");
+      expect(persistenceArms()).toBe(1);
+
+      const chatsHandle = screen.getByTestId("chats-panel-resize");
+      timeoutSpy.mockClear();
+      fireEvent.pointerDown(chatsHandle, {
+        button: 0,
+        buttons: 1,
+        pointerId: 2,
+      });
+      for (const clientX of [620, 560, 500]) {
+        fireEvent.pointerMove(chatsHandle, {
+          buttons: 1,
+          clientX,
+          pointerId: 2,
+        });
+      }
+      expect(chats.style.width).toBe("500px");
+      expect(persistenceArms()).toBe(0);
+      fireEvent.pointerCancel(chatsHandle, { pointerId: 2 });
+      expect(chats.style.width).toBe("500px");
+      expect(persistenceArms()).toBe(1);
+
+      const openEditorsHandle = screen.getByTestId("open-editors-resize");
+      timeoutSpy.mockClear();
+      fireEvent.pointerDown(openEditorsHandle, {
+        button: 0,
+        buttons: 1,
+        clientY: OPEN_EDITORS_DEFAULT_HEIGHT,
+        pointerId: 3,
+      });
+      for (const clientY of [150, 180, 200]) {
+        fireEvent.pointerMove(openEditorsHandle, {
+          buttons: 1,
+          clientY,
+          pointerId: 3,
+        });
+      }
+      expect(openEditors.style.maxHeight).toBe("200px");
+      expect(persistenceArms()).toBe(0);
+      fireEvent(window, new Event("blur"));
+      expect(openEditors.style.maxHeight).toBe("200px");
+      expect(persistenceArms()).toBe(1);
+
+      const groupHandle = screen.getByTestId("editor-group-resize-left-right");
+      timeoutSpy.mockClear();
+      fireEvent.pointerDown(groupHandle, {
+        button: 0,
+        buttons: 1,
+        clientX: 500,
+        pointerId: 4,
+      });
+      for (const clientX of [550, 600, 650]) {
+        fireEvent.pointerMove(groupHandle, {
+          buttons: 1,
+          clientX,
+          pointerId: 4,
+        });
+      }
+      expect(screen.getByTestId("editor-group-left").style.flexGrow).toBe("0.65");
+      expect(persistenceArms()).toBe(0);
+      fireEvent.lostPointerCapture(groupHandle, { pointerId: 4 });
+      expect(screen.getByTestId("editor-group-left").style.flexGrow).toBe("0.65");
+      expect(persistenceArms()).toBe(1);
+    } finally {
+      timeoutSpy.mockRestore();
+    }
+  });
+});
+
 describe("open editors", () => {
   it("highlights the full open editors and files header bars on hover", async () => {
     const bridge = makeBridge(Promise.resolve(null));
@@ -14125,7 +14250,7 @@ describe("open editors", () => {
       clientY: 200,
       pointerId: 1,
     });
-    fireEvent.pointerMove(handle, { buttons: 2, clientY: 500 });
+    fireEvent.pointerMove(handle, { buttons: 2, clientY: 500, pointerId: 1 });
     expect(list.style.maxHeight).toBe(`${OPEN_EDITORS_DEFAULT_HEIGHT}px`);
 
     fireEvent.pointerDown(handle, {
@@ -14136,16 +14261,16 @@ describe("open editors", () => {
     });
     // The one-item list is shorter than its cap; a zero-delta move must
     // preserve the saved cap.
-    fireEvent.pointerMove(handle, { buttons: 1, clientY: 200 });
+    fireEvent.pointerMove(handle, { buttons: 1, clientY: 200, pointerId: 1 });
     expect(list.style.maxHeight).toBe(`${OPEN_EDITORS_DEFAULT_HEIGHT}px`);
 
-    fireEvent.pointerMove(handle, { buttons: 1, clientY: 374 });
+    fireEvent.pointerMove(handle, { buttons: 1, clientY: 374, pointerId: 1 });
     await waitFor(() => {
       expect(list.style.maxHeight).toBe("300px");
     });
 
     // Dragging far above the list clamps at the minimum height.
-    fireEvent.pointerMove(handle, { buttons: 1, clientY: 0 });
+    fireEvent.pointerMove(handle, { buttons: 1, clientY: 0, pointerId: 1 });
     await waitFor(() => {
       expect(list.style.maxHeight).toBe(`${OPEN_EDITORS_MIN_HEIGHT}px`);
     });
@@ -14182,7 +14307,7 @@ describe("open editors", () => {
         clientY: 100,
         pointerId: 1,
       });
-      fireEvent.pointerMove(handle, { buttons: 1, clientY: 200 });
+      fireEvent.pointerMove(handle, { buttons: 1, clientY: 200, pointerId: 1 });
       expect(list.style.maxHeight).toBe("90px");
 
       Object.defineProperty(window, "innerHeight", {
@@ -14321,7 +14446,7 @@ describe("chats panel (right side)", () => {
 
     const handle = screen.getByTestId("chats-panel-resize");
     fireEvent.pointerDown(handle, { button: 0, buttons: 1, pointerId: 1 });
-    fireEvent.pointerMove(handle, { buttons: 1, clientX: 100 });
+    fireEvent.pointerMove(handle, { buttons: 1, clientX: 100, pointerId: 1 });
 
     await waitFor(() => {
       expect(panel.style.width).toBe("900px");
