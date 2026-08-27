@@ -1,4 +1,12 @@
 {
   "extends": "../../tsconfig.base.json",
-  "include": ["src/**/*.ts", "viewer/src/**/*.ts", "viewer/src/**/*.tsx", "viewer/vite.config.ts"]
+  "include": [
+    "e2e/**/*.ts",
+    "playwright.config.ts",
+    "src/**/*.ts",
+    "viewer/src/**/*.ts",
+    "viewer/src/**/*.tsx",
+    "viewer/vite.config.ts",
+    "vitest.config.ts"
+  ]
 }
