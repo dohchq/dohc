@@ -21,13 +21,7 @@ import type {
 import type * as Y from "yjs";
 import type { ExcalidrawDocument } from "./excalidrawDocument";
 import { openLinkExternally } from "./linkActivation";
-import {
-  applyCanvasSceneChange,
-  createSceneRemoteEchoes,
-  rememberRemoteScene,
-  sceneForCanvas,
-  type SceneRemoteEchoes,
-} from "./collab/excalidrawSceneAdapter";
+import { ExcalidrawSceneBinding } from "./collab/excalidrawSceneAdapter";
 import {
   bindExcalidrawPresence,
   type ExcalidrawPointerUpdate,
@@ -48,15 +42,20 @@ export type ExcalidrawCanvasProps = {
 };
 
 export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
+  const sceneBinding = useMemo(
+    () => (props.sceneDoc ? new ExcalidrawSceneBinding(props.sceneDoc) : null),
+    [props.sceneDoc],
+  );
   // Restore once here so our first serialized snapshot matches the normalized
   // scene Excalidraw mounts. Opening an old but valid file must not rewrite it
   // until the scene actually changes.
   const initial = useMemo(() => {
-    if (props.sceneDoc) {
-      const scene = sceneForCanvas(props.sceneDoc);
+    if (sceneBinding) {
+      const scene = sceneBinding.canvas();
       return {
         scene: {
-          ...scene,
+          elements: scene.elements,
+          appState: scene.appState,
           files: {},
           scrollToContent: scene.elements.length > 0,
         } as unknown as ExcalidrawInitialDataState,
@@ -81,7 +80,7 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
         "local",
       ),
     };
-  }, [props.document, props.sceneDoc]);
+  }, [props.document, sceneBinding]);
   const lastSerialized = useRef(initial.serialized);
   const readOnlyRef = useRef(props.readOnly);
   readOnlyRef.current = props.readOnly;
@@ -89,19 +88,26 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
   const mountedRef = useRef(false);
   const [readyApi, setReadyApi] = useState<ExcalidrawImperativeAPI | null>(null);
   const [presenceBound, setPresenceBound] = useState(false);
-  const remoteEchoes = useRef<SceneRemoteEchoes>(createSceneRemoteEchoes());
   // Per-canvas, not module-global: two panes of one document share one
   // Y.Doc, and each pane must treat only ITS OWN transactions as local — the
   // other pane's edits are remote to this one and must render here.
   const localOrigin = useRef<symbol>(Symbol("dohc.localExcalidrawChange"));
   const hydratedFileIds = useRef<Set<string>>(new Set());
+  const activeSceneBinding = useRef(sceneBinding);
+  activeSceneBinding.current = sceneBinding;
+  const pendingSceneChange = useRef<{
+    binding: ExcalidrawSceneBinding;
+    elements: readonly unknown[];
+    appState: Record<string, unknown>;
+    files: Record<string, unknown>;
+  } | null>(null);
+  const sceneChangeFrame = useRef<number | null>(null);
   const presenceBinding = useRef<ExcalidrawPresenceBinding | null>(null);
   const presenceHandoff = useRef<Promise<void>>(Promise.resolve());
   const boundSceneDoc = useRef(props.sceneDoc);
   const sceneDocGeneration = useRef(0);
   if (boundSceneDoc.current !== props.sceneDoc) {
     boundSceneDoc.current = props.sceneDoc;
-    remoteEchoes.current = createSceneRemoteEchoes();
     hydratedFileIds.current.clear();
     // Remount the canvas below. Excalidraw's imperative API can add files but
     // never remove them, so a replacement document that reuses a fileId would
@@ -118,32 +124,54 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
     };
   }, []);
 
-  const renderSceneDoc = useCallback(() => {
-    if (!props.sceneDoc || !readyApi) return;
-    const scene = sceneForCanvas(props.sceneDoc);
-    rememberRemoteScene(scene, remoteEchoes.current);
-    readyApi.updateScene({
-      elements: scene.elements as unknown as Parameters<
-        ExcalidrawImperativeAPI["updateScene"]
-      >[0]["elements"],
-      appState: scene.appState as unknown as Parameters<
-        ExcalidrawImperativeAPI["updateScene"]
-      >[0]["appState"],
-      captureUpdate: CaptureUpdateAction.NEVER,
-    });
-  }, [props.sceneDoc, readyApi]);
+  useLayoutEffect(() => {
+    if (props.readOnly && sceneChangeFrame.current !== null) {
+      cancelAnimationFrame(sceneChangeFrame.current);
+      sceneChangeFrame.current = null;
+      pendingSceneChange.current = null;
+    }
+    return () => {
+      if (sceneChangeFrame.current !== null) {
+        cancelAnimationFrame(sceneChangeFrame.current);
+        sceneChangeFrame.current = null;
+      }
+      pendingSceneChange.current = null;
+    };
+  }, [props.readOnly, sceneBinding]);
+
+  const renderSceneDoc = useCallback(
+    (transaction?: Y.Transaction) => {
+      if (!sceneBinding || !readyApi) return;
+      const scene = sceneBinding.remote(transaction);
+      readyApi.updateScene({
+        elements: scene.elements as unknown as Parameters<
+          ExcalidrawImperativeAPI["updateScene"]
+        >[0]["elements"],
+        appState: scene.appState as unknown as Parameters<
+          ExcalidrawImperativeAPI["updateScene"]
+        >[0]["appState"],
+        captureUpdate: CaptureUpdateAction.NEVER,
+      });
+    },
+    [sceneBinding, readyApi],
+  );
+  const renderSceneDocRef = useRef(renderSceneDoc);
+  renderSceneDocRef.current = renderSceneDoc;
+  const onAssetRefusedChangeRef = useRef(props.onAssetRefusedChange);
+  onAssetRefusedChangeRef.current = props.onAssetRefusedChange;
 
   useEffect(() => {
     const doc = props.sceneDoc;
-    if (!doc) return;
+    if (!doc || !sceneBinding || !readyApi) return;
     const onTransaction = (transaction: Y.Transaction) => {
       if (transaction.origin === localOrigin.current) return;
-      renderSceneDoc();
+      renderSceneDoc(transaction);
     };
     doc.on("afterTransaction", onTransaction);
+    sceneBinding.refresh();
     renderSceneDoc();
     return () => doc.off("afterTransaction", onTransaction);
-  }, [props.sceneDoc, renderSceneDoc]);
+  }, [props.sceneDoc, readyApi, renderSceneDoc, sceneBinding]);
 
   useAsyncResponseEffect(
     () => {
@@ -270,21 +298,39 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
                 presenceBinding.current?.updateSelection(
                   appState.selectedElementIds,
                 );
-                if (props.sceneDoc) {
-                  const result = applyCanvasSceneChange({
-                    doc: props.sceneDoc,
+                if (sceneBinding) {
+                  pendingSceneChange.current = {
+                    binding: sceneBinding,
                     elements,
                     appState: appState as unknown as Record<string, unknown>,
                     files: files as unknown as Record<string, unknown>,
-                    remoteEchoes: remoteEchoes.current,
-                    hydratedFileIds: hydratedFileIds.current,
-                    origin: localOrigin.current,
-                  });
-                  if (result.assetsRefused) {
-                    props.onAssetRefusedChange?.(true);
-                    renderSceneDoc();
-                  } else if (result.changed) {
-                    props.onAssetRefusedChange?.(false);
+                  };
+                  if (sceneChangeFrame.current === null) {
+                    sceneChangeFrame.current = requestAnimationFrame(() => {
+                      sceneChangeFrame.current = null;
+                      const pending = pendingSceneChange.current;
+                      pendingSceneChange.current = null;
+                      if (
+                        !pending ||
+                        readOnlyRef.current ||
+                        activeSceneBinding.current !== pending.binding
+                      ) {
+                        return;
+                      }
+                      const result = pending.binding.apply({
+                        elements: pending.elements,
+                        appState: pending.appState,
+                        files: pending.files,
+                        hydratedFileIds: hydratedFileIds.current,
+                        origin: localOrigin.current,
+                      });
+                      if (result.assetsRefused) {
+                        onAssetRefusedChangeRef.current?.(true);
+                        renderSceneDocRef.current();
+                      } else if (result.changed) {
+                        onAssetRefusedChangeRef.current?.(false);
+                      }
+                    });
                   }
                   return;
                 }

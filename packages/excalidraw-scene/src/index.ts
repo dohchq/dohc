@@ -35,6 +35,13 @@ export interface FoldedScene {
   assets: Record<string, SceneAsset>;
 }
 
+export interface IncrementalSceneFold {
+  current(): FoldedScene;
+  element(id: string): ElementSnapshot | undefined;
+  refresh(): FoldedScene;
+  update(transaction: Y.Transaction): FoldedScene;
+}
+
 export const EXCALIDRAW_EXPORTABLE_APP_STATE = [
   "gridSize",
   "gridStep",
@@ -51,6 +58,7 @@ const ASSET_FIELDS = new Set([
   "lastRetrieved",
   "version",
 ]);
+const INVALID_SCENE_ENTRY: unique symbol = Symbol("invalidSceneEntry");
 
 export class SceneCodecError extends Error {
   constructor(message: string) {
@@ -134,47 +142,262 @@ export function foldScene(doc: Y.Doc): FoldedScene {
   const roots = declareSceneRoots(doc);
   const winners = new Map<string, ElementSnapshot>();
   for (const [key, encoded] of roots.revisions) {
-    try {
-      const tuple = parseRevisionKey(key);
-      const parsed = parseStored(encoded, "element revision");
-      if (stableJson(parsed) !== encoded) continue;
-      const element = validateElement(parsed);
-      if (revisionKey(element.id, element.version, element.versionNonce) !== key) {
-        continue;
-      }
-      const previous = winners.get(tuple[0]);
-      if (!previous || compareRevision(element, previous) > 0) {
-        winners.set(element.id, element);
-      }
-    } catch {
-      // A malformed remote record is not part of the scene. Other records in
-      // the same Y.Map remain usable and converge independently.
+    const element = readElementRevision(key, encoded);
+    if (!element) continue;
+    const previous = winners.get(element.id);
+    if (!previous || compareRevision(element, previous) > 0) {
+      winners.set(element.id, element);
     }
   }
 
   const elements = [...winners.values()].sort(compareElementOrder);
   const appState: JsonObject = {};
   for (const [key, encoded] of roots.appState) {
-    try {
-      const parsed = parseStored(encoded, "app-state value");
-      validateAppStateProperty(key, parsed);
-      if (stableJson(parsed) === encoded) appState[key] = parsed;
-    } catch {
-      // Ignore only this invalid property.
-    }
+    const value = readAppStateProperty(key, encoded);
+    if (value !== INVALID_SCENE_ENTRY) appState[key] = value;
   }
   const assets: Record<string, SceneAsset> = {};
   for (const [id, encoded] of roots.assets) {
-    try {
-      const parsed = parseStored(encoded, "asset");
-      if (stableJson(parsed) !== encoded) continue;
-      const asset = validateAsset(parsed);
-      if (asset.id === id) assets[id] = asset;
-    } catch {
-      // Ignore only this invalid asset record.
-    }
+    const asset = readSceneAsset(id, encoded);
+    if (asset) assets[id] = asset;
   }
   return { elements, appState, assets };
+}
+
+export function createIncrementalSceneFold(doc: Y.Doc): IncrementalSceneFold {
+  return new RetainedSceneFold(doc);
+}
+
+class RetainedSceneFold implements IncrementalSceneFold {
+  private readonly roots: ReturnType<typeof declareSceneRoots>;
+  private readonly revisionKeysByElement = new Map<string, Set<string>>();
+  private readonly elementsById = new Map<string, ElementSnapshot>();
+  private elements: ElementSnapshot[] = [];
+  private appState: JsonObject = {};
+  private assets: Record<string, SceneAsset> = {};
+
+  constructor(private readonly doc: Y.Doc) {
+    this.roots = declareSceneRoots(doc);
+    this.refresh();
+  }
+
+  current(): FoldedScene {
+    return {
+      elements: this.elements,
+      appState: this.appState,
+      assets: this.assets,
+    };
+  }
+
+  element(id: string): ElementSnapshot | undefined {
+    return this.elementsById.get(id);
+  }
+
+  refresh(): FoldedScene {
+    const scene = foldScene(this.doc);
+    this.elements = scene.elements;
+    this.appState = scene.appState;
+    this.assets = scene.assets;
+    this.elementsById.clear();
+    for (const element of scene.elements) {
+      this.elementsById.set(element.id, element);
+    }
+    this.revisionKeysByElement.clear();
+    for (const key of this.roots.revisions.keys()) {
+      try {
+        const [id] = parseRevisionKey(key);
+        mapSet(this.revisionKeysByElement, id).add(key);
+      } catch {
+        // Malformed remote keys never participate in the fold.
+      }
+    }
+    return this.current();
+  }
+
+  update(transaction: Y.Transaction): FoldedScene {
+    if (transaction.doc !== this.doc) {
+      throw new SceneCodecError(
+        "The scene transaction belongs to another document.",
+      );
+    }
+
+    const changedRevisionKeys = transactionChangedKeys(
+      transaction,
+      this.roots.revisions,
+    );
+    if (changedRevisionKeys) {
+      const affectedIds = new Set<string>();
+      for (const key of changedRevisionKeys) {
+        if (key === null) continue;
+        try {
+          const [id] = parseRevisionKey(key);
+          affectedIds.add(id);
+          const indexedKeys = mapSet(this.revisionKeysByElement, id);
+          if (this.roots.revisions.has(key)) indexedKeys.add(key);
+          else indexedKeys.delete(key);
+          if (indexedKeys.size === 0) this.revisionKeysByElement.delete(id);
+        } catch {
+          // A malformed remote key cannot affect a valid element winner.
+        }
+      }
+      if (affectedIds.size > 0) this.updateElements(affectedIds);
+    }
+
+    const changedAppStateKeys = transactionChangedKeys(
+      transaction,
+      this.roots.appState,
+    );
+    if (changedAppStateKeys) {
+      const appState = { ...this.appState };
+      for (const key of changedAppStateKeys) {
+        if (key === null) continue;
+        const encoded = this.roots.appState.get(key);
+        const value = readAppStateProperty(key, encoded);
+        if (value === INVALID_SCENE_ENTRY) delete appState[key];
+        else appState[key] = value;
+      }
+      this.appState = appState;
+    }
+
+    const changedAssetIds = transactionChangedKeys(
+      transaction,
+      this.roots.assets,
+    );
+    if (changedAssetIds) {
+      const assets = { ...this.assets };
+      for (const id of changedAssetIds) {
+        if (id === null) continue;
+        const asset = readSceneAsset(id, this.roots.assets.get(id));
+        if (asset) assets[id] = asset;
+        else delete assets[id];
+      }
+      this.assets = assets;
+    }
+
+    return this.current();
+  }
+
+  private updateElements(affectedIds: ReadonlySet<string>): void {
+    const replacements: ElementSnapshot[] = [];
+    for (const id of affectedIds) {
+      const winner = this.winnerFor(id);
+      if (winner) {
+        this.elementsById.set(id, winner);
+        replacements.push(winner);
+      } else {
+        this.elementsById.delete(id);
+      }
+    }
+    replacements.sort(compareElementOrder);
+    const retained = this.elements.filter(
+      (element) => !affectedIds.has(element.id),
+    );
+    this.elements = mergeElements(retained, replacements);
+  }
+
+  private winnerFor(id: string): ElementSnapshot | undefined {
+    let winner: ElementSnapshot | undefined;
+    for (const key of this.revisionKeysByElement.get(id) ?? []) {
+      const element = readElementRevision(key, this.roots.revisions.get(key));
+      if (element && (!winner || compareRevision(element, winner) > 0)) {
+        winner = element;
+      }
+    }
+    return winner;
+  }
+}
+
+function readElementRevision(
+  key: string,
+  encoded: unknown,
+): ElementSnapshot | undefined {
+  try {
+    if (typeof encoded !== "string") return undefined;
+    parseRevisionKey(key);
+    const parsed = parseStored(encoded, "element revision");
+    if (stableJson(parsed) !== encoded) return undefined;
+    const element = validateElement(parsed);
+    if (
+      revisionKey(element.id, element.version, element.versionNonce) !== key
+    ) {
+      return undefined;
+    }
+    return element;
+  } catch {
+    // A malformed remote record is not part of the scene. Other records in
+    // the same Y.Map remain usable and converge independently.
+    return undefined;
+  }
+}
+
+function readAppStateProperty(
+  key: string,
+  encoded: unknown,
+): JsonValue | typeof INVALID_SCENE_ENTRY {
+  try {
+    if (typeof encoded !== "string") return INVALID_SCENE_ENTRY;
+    const parsed = parseStored(encoded, "app-state value");
+    validateAppStateProperty(key, parsed);
+    return stableJson(parsed) === encoded ? parsed : INVALID_SCENE_ENTRY;
+  } catch {
+    return INVALID_SCENE_ENTRY;
+  }
+}
+
+function readSceneAsset(id: string, encoded: unknown): SceneAsset | undefined {
+  try {
+    if (typeof encoded !== "string") return undefined;
+    const parsed = parseStored(encoded, "asset");
+    if (stableJson(parsed) !== encoded) return undefined;
+    const asset = validateAsset(parsed);
+    return asset.id === id ? asset : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function mapSet<Key, Value>(map: Map<Key, Set<Value>>, key: Key): Set<Value> {
+  let values = map.get(key);
+  if (!values) {
+    values = new Set<Value>();
+    map.set(key, values);
+  }
+  return values;
+}
+
+function transactionChangedKeys(
+  transaction: Y.Transaction,
+  type: unknown,
+): ReadonlySet<string | null> | undefined {
+  // Yjs stores the exact changed type as the key. Its generic declaration is
+  // invariant in the event subtype, so a Y.Map cannot be passed to Map.get.
+  const changed = transaction.changed as unknown as ReadonlyMap<
+    unknown,
+    ReadonlySet<string | null>
+  >;
+  return changed.get(type);
+}
+
+function mergeElements(
+  left: readonly ElementSnapshot[],
+  right: readonly ElementSnapshot[],
+): ElementSnapshot[] {
+  const merged: ElementSnapshot[] = [];
+  let leftIndex = 0;
+  let rightIndex = 0;
+  while (leftIndex < left.length && rightIndex < right.length) {
+    const leftElement = left[leftIndex]!;
+    const rightElement = right[rightIndex]!;
+    if (compareElementOrder(leftElement, rightElement) <= 0) {
+      merged.push(leftElement);
+      leftIndex += 1;
+    } else {
+      merged.push(rightElement);
+      rightIndex += 1;
+    }
+  }
+  merged.push(...left.slice(leftIndex), ...right.slice(rightIndex));
+  return merged;
 }
 
 export function exportPortableScene(doc: Y.Doc): string {

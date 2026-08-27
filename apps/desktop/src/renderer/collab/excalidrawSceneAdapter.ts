@@ -1,12 +1,14 @@
 import {
   EXCALIDRAW_EXPORTABLE_APP_STATE,
-  foldScene,
+  createIncrementalSceneFold,
   insertElementRevision,
   revisionDominates,
   revisionKey,
   setAppStateProperty,
   stableJson,
   type ElementSnapshot,
+  type FoldedScene,
+  type IncrementalSceneFold,
   type JsonObject,
   type JsonValue,
 } from "@dohc/excalidraw-scene";
@@ -16,12 +18,7 @@ export const LOCAL_EXCALIDRAW_ORIGIN: unique symbol = Symbol(
   "dohc.localExcalidrawChange",
 );
 
-// Excalidraw restores legacy/sparse elements before it calls `onChange`.
-// Consequently, the callback for a remote revision can contain normalized
-// JSON even though it still carries the same immutable revision identity.
-// Consume that identity once; a real local edit always bumps the version and
-// nonce, so it cannot be mistaken for the remote callback.
-export type SceneRemoteEchoes = {
+type SceneRemoteEchoes = {
   // Revision tuples of the elements the LAST remote render handed the canvas.
   elements: Set<string>;
   // Durable app-state values remote renders handed the canvas, per key.
@@ -33,19 +30,181 @@ export type SceneRemoteEchoes = {
   appState: Map<string, Set<string>>;
 };
 
-export function createSceneRemoteEchoes(): SceneRemoteEchoes {
-  return { elements: new Set(), appState: new Map() };
-}
-
-export function sceneForCanvas(doc: Y.Doc): {
+type CanvasScene = {
   elements: ElementSnapshot[];
   appState: JsonObject;
-} {
-  const scene = foldScene(doc);
-  return { elements: scene.elements, appState: scene.appState };
+};
+
+type CanvasSceneChange = {
+  elements: readonly unknown[];
+  appState: Record<string, unknown>;
+  files: Record<string, unknown>;
+  hydratedFileIds?: ReadonlySet<string>;
+  // The transaction origin of THIS canvas. Two panes of one document share
+  // one Y.Doc; each pane must recognize only its own transactions as local,
+  // so the other pane's edits still render into it.
+  origin?: unknown;
+};
+
+export class ExcalidrawSceneBinding {
+  private readonly fold: IncrementalSceneFold;
+  private readonly canvasElements = new Map<
+    string,
+    { source: ElementSnapshot; canvas: ElementSnapshot }
+  >();
+  private readonly remoteEchoes: SceneRemoteEchoes = {
+    elements: new Set(),
+    appState: new Map(),
+  };
+
+  constructor(private readonly doc: Y.Doc) {
+    this.fold = createIncrementalSceneFold(doc);
+  }
+
+  current(): FoldedScene {
+    return this.fold.current();
+  }
+
+  canvas(): CanvasScene {
+    return this.canvasScene(this.fold.current());
+  }
+
+  refresh(): FoldedScene {
+    this.fold.refresh();
+    return this.current();
+  }
+
+  remote(transaction?: Y.Transaction): CanvasScene {
+    if (transaction) this.fold.update(transaction);
+    const scene = this.fold.current();
+    rememberRemoteScene(scene, this.remoteEchoes);
+    return this.canvasScene(scene);
+  }
+
+  apply(input: CanvasSceneChange): {
+    changed: boolean;
+    assetsRefused: boolean;
+  } {
+    const current = this.fold.current();
+    let changed = false;
+    let assetsRefused = false;
+    const origin = input.origin ?? LOCAL_EXCALIDRAW_ORIGIN;
+    let appliedTransaction: Y.Transaction | undefined;
+    const captureTransaction = (transaction: Y.Transaction) => {
+      if (transaction.origin === origin) appliedTransaction = transaction;
+    };
+    this.doc.on("afterTransaction", captureTransaction);
+    try {
+      this.doc.transact(() => {
+        for (const raw of input.elements) {
+          const identity = elementIdentity(raw);
+          if (
+            hasUnsupportedFileBytes(
+              identity.raw,
+              input.files,
+              current.assets,
+              input.hydratedFileIds,
+            )
+          ) {
+            assetsRefused = true;
+            continue;
+          }
+          if (this.remoteEchoes.elements.has(identity.key)) {
+            this.remoteEchoes.elements.delete(identity.key);
+            continue;
+          }
+          const winner = this.fold.element(identity.id);
+          if (
+            winner &&
+            revisionKey(winner.id, winner.version, winner.versionNonce) ===
+              identity.key
+          ) {
+            continue;
+          }
+          if (
+            winner &&
+            revisionDominates(winner, identity.version, identity.versionNonce)
+          ) {
+            // A delayed Excalidraw callback can replay a render whose echo
+            // identity a newer remote render already replaced. The fold would
+            // discard this revision; writing it would journal and transmit a
+            // record every reader drops.
+            continue;
+          }
+          const element = jsonObject(raw) as ElementSnapshot;
+          if (
+            element.type === "text" &&
+            element.isDeleted !== true &&
+            (typeof element.text !== "string" || element.text.length === 0)
+          ) {
+            // Excalidraw streams a text element while it is being typed. Both
+            // folds drop live text without content, so the revision is only
+            // written once it carries text.
+            continue;
+          }
+          if (insertElementRevision(this.doc, element)) changed = true;
+        }
+
+        for (const key of EXCALIDRAW_EXPORTABLE_APP_STATE) {
+          const value = input.appState[key];
+          if (value === undefined) continue;
+          const jsonValue = jsonValueOf(value);
+          const encoded = stableJson(jsonValue);
+          const rememberedRemote = this.remoteEchoes.appState.get(key);
+          const isRememberedRemote = rememberedRemote?.has(encoded) ?? false;
+          const currentValue = current.appState[key];
+          if (
+            currentValue !== undefined &&
+            stableJson(currentValue) === encoded
+          ) {
+            // The callback confirms the value the fold already holds. If that
+            // value came from a remote render, this IS its echo — consume it
+            // now so a later intentional local reversion to the same value
+            // cannot be mistaken for a replay.
+            if (isRememberedRemote) rememberedRemote?.delete(encoded);
+            continue;
+          }
+          // A delayed callback can replay a superseded remote render's app
+          // state (elements are guarded by revision dominance; app state has
+          // no revision identity). A remembered remote value that no longer
+          // matches the fold is such a replay — consume it instead of writing
+          // an old gridSize or background over the newer value.
+          if (isRememberedRemote) {
+            rememberedRemote?.delete(encoded);
+            continue;
+          }
+          setAppStateProperty(this.doc, key, jsonValue);
+          changed = true;
+        }
+      }, origin);
+    } finally {
+      this.doc.off("afterTransaction", captureTransaction);
+      if (appliedTransaction) this.fold.update(appliedTransaction);
+    }
+    return { changed, assetsRefused };
+  }
+
+  private canvasScene(scene: FoldedScene): CanvasScene {
+    const currentIds = new Set<string>();
+    const elements = scene.elements.map((source) => {
+      currentIds.add(source.id);
+      const cached = this.canvasElements.get(source.id);
+      if (cached?.source === source) return cached.canvas;
+      const canvas = jsonObject(source) as ElementSnapshot;
+      this.canvasElements.set(source.id, { source, canvas });
+      return canvas;
+    });
+    for (const id of this.canvasElements.keys()) {
+      if (!currentIds.has(id)) this.canvasElements.delete(id);
+    }
+    return {
+      elements,
+      appState: jsonObject(scene.appState),
+    };
+  }
 }
 
-export function rememberRemoteScene(
+function rememberRemoteScene(
   scene: {
     elements: readonly ElementSnapshot[];
     appState: Readonly<Record<string, unknown>>;
@@ -70,111 +229,31 @@ export function rememberRemoteScene(
   }
 }
 
-export function applyCanvasSceneChange(input: {
-  doc: Y.Doc;
-  elements: readonly unknown[];
-  appState: Record<string, unknown>;
-  files: Record<string, unknown>;
-  remoteEchoes: SceneRemoteEchoes;
-  hydratedFileIds?: ReadonlySet<string>;
-  // The transaction origin of THIS canvas. Two panes of one document share
-  // one Y.Doc; each pane must recognize only its own transactions as local,
-  // so the other pane's edits still render into it.
-  origin?: unknown;
-}): { changed: boolean; assetsRefused: boolean } {
-  const current = foldScene(input.doc);
-  const currentElements = new Map(
-    current.elements.map((element) => [element.id, element]),
-  );
-  let changed = false;
-  let assetsRefused = false;
-  input.doc.transact(() => {
-    for (const raw of input.elements) {
-      const element = jsonObject(raw) as ElementSnapshot;
-      if (
-        hasUnsupportedFileBytes(
-          element,
-          input.files,
-          current.assets,
-          input.hydratedFileIds,
-        )
-      ) {
-        assetsRefused = true;
-        continue;
-      }
-      const key = revisionKey(
-        element.id,
-        element.version,
-        element.versionNonce,
-      );
-      if (input.remoteEchoes.elements.has(key)) {
-        input.remoteEchoes.elements.delete(key);
-        continue;
-      }
-      const winner = currentElements.get(element.id);
-      if (
-        winner &&
-        revisionKey(winner.id, winner.version, winner.versionNonce) === key
-      ) {
-        continue;
-      }
-      if (
-        winner &&
-        revisionDominates(winner, element.version, element.versionNonce)
-      ) {
-        // A delayed Excalidraw callback can replay a render whose echo
-        // identity a newer remote render already replaced. The fold would
-        // discard this revision; writing it would journal and transmit a
-        // record every reader drops.
-        continue;
-      }
-      if (
-        element.type === "text" &&
-        element.isDeleted !== true &&
-        (typeof element.text !== "string" || element.text.length === 0)
-      ) {
-        // Excalidraw streams a text element while it is being typed. Both
-        // folds drop live text without content, so the revision is only
-        // written once it carries text.
-        continue;
-      }
-      if (insertElementRevision(input.doc, element)) changed = true;
-    }
-
-    for (const key of EXCALIDRAW_EXPORTABLE_APP_STATE) {
-      const value = input.appState[key];
-      if (value === undefined) continue;
-      const jsonValue = jsonValueOf(value);
-      const encoded = stableJson(jsonValue);
-      const rememberedRemote = input.remoteEchoes.appState.get(key);
-      const isRememberedRemote = rememberedRemote?.has(encoded) ?? false;
-      const currentValue = current.appState[key];
-      if (currentValue !== undefined && stableJson(currentValue) === encoded) {
-        // The callback confirms the value the fold already holds. If that
-        // value came from a remote render, this IS its echo — consume it now
-        // so a later intentional local reversion to the same value cannot be
-        // mistaken for a replay.
-        if (isRememberedRemote) rememberedRemote?.delete(encoded);
-        continue;
-      }
-      // A delayed callback can replay a superseded remote render's app state
-      // (elements are guarded by revision dominance; app state has no
-      // revision identity). A remembered remote value that no longer matches
-      // the fold is such a replay — consume it instead of writing an old
-      // gridSize or background over the newer value.
-      if (isRememberedRemote) {
-        rememberedRemote?.delete(encoded);
-        continue;
-      }
-      setAppStateProperty(input.doc, key, jsonValue);
-      changed = true;
-    }
-  }, input.origin ?? LOCAL_EXCALIDRAW_ORIGIN);
-  return { changed, assetsRefused };
+function elementIdentity(value: unknown): {
+  raw: Readonly<Record<string, unknown>>;
+  id: string;
+  version: number;
+  versionNonce: number;
+  key: string;
+} {
+  if (value === null || Array.isArray(value) || typeof value !== "object") {
+    throw new Error("The drawing element is not valid JSON.");
+  }
+  const raw = value as Record<string, unknown>;
+  const id = raw.id as string;
+  const version = raw.version as number;
+  const versionNonce = raw.versionNonce as number;
+  return {
+    raw,
+    id,
+    version,
+    versionNonce,
+    key: revisionKey(id, version, versionNonce),
+  };
 }
 
 function hasUnsupportedFileBytes(
-  element: ElementSnapshot,
+  element: Readonly<Record<string, unknown>>,
   files: Record<string, unknown>,
   assets: Record<string, unknown>,
   hydratedFileIds?: ReadonlySet<string>,
@@ -194,7 +273,11 @@ function hasUnsupportedFileBytes(
 
 function jsonObject(value: unknown): JsonObject {
   const normalized = jsonValueOf(value);
-  if (normalized === null || Array.isArray(normalized) || typeof normalized !== "object") {
+  if (
+    normalized === null ||
+    Array.isArray(normalized) ||
+    typeof normalized !== "object"
+  ) {
     throw new Error("The drawing element is not valid JSON.");
   }
   return normalized;
@@ -202,6 +285,8 @@ function jsonObject(value: unknown): JsonObject {
 
 function jsonValueOf(value: unknown): JsonValue {
   const encoded = JSON.stringify(value);
-  if (encoded === undefined) throw new Error("The drawing change is not valid JSON.");
+  if (encoded === undefined) {
+    throw new Error("The drawing change is not valid JSON.");
+  }
   return JSON.parse(encoded) as JsonValue;
 }

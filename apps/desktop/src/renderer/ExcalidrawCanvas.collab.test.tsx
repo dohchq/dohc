@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, waitFor } from "@testing-library/react";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { declareSceneRoots, foldScene, insertElementRevision } from "@dohc/excalidraw-scene";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
@@ -81,6 +81,17 @@ vi.mock("@excalidraw/excalidraw", () => ({
 import ExcalidrawCanvas from "./ExcalidrawCanvas";
 import { EMPTY_EXCALIDRAW_DOCUMENT, parseExcalidrawDocument } from "./excalidrawDocument";
 
+const animationFrames = new Map<number, FrameRequestCallback>();
+let nextAnimationFrame = 1;
+
+function flushAnimationFrame(): void {
+  const callbacks = [...animationFrames.values()];
+  animationFrames.clear();
+  act(() => {
+    for (const callback of callbacks) callback(performance.now());
+  });
+}
+
 function rectangle(version: number, nonce: number, x: number) {
   return {
     id: "shape",
@@ -126,6 +137,26 @@ function trackedPresenceTransport() {
     leaveCalls: () => leaveCalls,
   };
 }
+
+beforeEach(() => {
+  animationFrames.clear();
+  nextAnimationFrame = 1;
+  vi.stubGlobal(
+    "requestAnimationFrame",
+    vi.fn((callback: FrameRequestCallback) => {
+      const frame = nextAnimationFrame;
+      nextAnimationFrame += 1;
+      animationFrames.set(frame, callback);
+      return frame;
+    }),
+  );
+  vi.stubGlobal(
+    "cancelAnimationFrame",
+    vi.fn((frame: number) => {
+      animationFrames.delete(frame);
+    }),
+  );
+});
 
 afterEach(() => {
   cleanup();
@@ -498,6 +529,7 @@ it("renders remote scene updates without echoing them", async () => {
       ) => void
     )([rectangle(1, 10, 20)], {}, {});
   });
+  flushAnimationFrame();
   expect(Y.encodeStateAsUpdate(doc, beforeEcho)).toHaveLength(2);
 });
 
@@ -542,6 +574,8 @@ it("blocks a stale canvas callback as soon as the scene becomes read-only", asyn
     files: Record<string, unknown>,
   ) => void;
   const before = Y.encodeStateVector(doc);
+  act(() => staleOnChange([rectangle(1, 10, 20)], {}, {}));
+  expect(animationFrames.size).toBe(1);
 
   view.rerender(
     <ExcalidrawCanvas
@@ -554,7 +588,9 @@ it("blocks a stale canvas callback as soon as the scene becomes read-only", asyn
 
   expect(excalidraw.props?.viewModeEnabled).toBe(true);
   expect(excalidraw.props?.onChange).toBeUndefined();
+  expect(animationFrames.size).toBe(0);
   act(() => staleOnChange([rectangle(1, 10, 20)], {}, {}));
+  flushAnimationFrame();
   expect(Y.encodeStateAsUpdate(doc, before)).toHaveLength(2);
   await waitFor(() => {
     expect(excalidraw.props?.isCollaborating).toBe(false);
@@ -597,6 +633,37 @@ it("reports collaboration only after presence binds", async () => {
   expect(excalidraw.props?.onPointerUpdate).toBeTypeOf("function");
 });
 
+it("applies only the latest scene change in an animation frame", () => {
+  const doc = new Y.Doc();
+  declareSceneRoots(doc);
+  render(
+    <ExcalidrawCanvas
+      document={parseExcalidrawDocument(EMPTY_EXCALIDRAW_DOCUMENT)}
+      readOnly={false}
+      sceneDoc={doc}
+    />,
+  );
+  const onChange = excalidraw.props?.onChange as (
+    elements: readonly unknown[],
+    appState: Record<string, unknown>,
+    files: Record<string, unknown>,
+  ) => void;
+  const transactions = vi.fn();
+  doc.on("afterTransaction", transactions);
+
+  act(() => onChange([rectangle(1, 10, 10)], {}, {}));
+  act(() => onChange([rectangle(2, 20, 20)], {}, {}));
+  act(() => onChange([rectangle(3, 30, 30)], {}, {}));
+
+  expect(foldScene(doc).elements).toEqual([]);
+  expect(animationFrames.size).toBe(1);
+  expect(requestAnimationFrame).toHaveBeenCalledOnce();
+  flushAnimationFrame();
+  expect(foldScene(doc).elements).toEqual([rectangle(3, 30, 30)]);
+  expect(transactions).toHaveBeenCalledOnce();
+  doc.off("afterTransaction", transactions);
+});
+
 it("records native undo output as a new higher revision", () => {
   const doc = new Y.Doc();
   declareSceneRoots(doc);
@@ -615,6 +682,7 @@ it("records native undo output as a new higher revision", () => {
 
   act(() => onChange([rectangle(2, 20, 40)], {}, {}));
   act(() => onChange([rectangle(3, 30, 0)], {}, {}));
+  flushAnimationFrame();
   expect(foldScene(doc).elements[0]).toMatchObject({ version: 3, x: 0 });
   expect(declareSceneRoots(doc).revisions.size).toBe(1);
 });
@@ -655,6 +723,7 @@ it("removes a refused image while keeping an ordinary scene change", async () =>
       { image: { dataURL: "data:image/png;base64,SECRET" } },
     ),
   );
+  flushAnimationFrame();
 
   expect(foldScene(doc).elements).toEqual([rectangle(1, 10, 20)]);
   expect(onAssetRefusedChange).toHaveBeenCalledWith(true);
@@ -667,6 +736,7 @@ it("removes a refused image while keeping an ordinary scene change", async () =>
   expect(excalidraw.props?.UIOptions).toMatchObject({ tools: { image: false } });
 
   act(() => onChange([rectangle(2, 30, 40)], {}, {}));
+  flushAnimationFrame();
   expect(onAssetRefusedChange).toHaveBeenLastCalledWith(false);
 });
 
