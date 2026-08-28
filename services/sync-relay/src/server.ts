@@ -883,7 +883,7 @@ export function createSyncRelayHandler({
     );
   };
 
-  const matchRefusedOutwardMove = (
+  const matchRefusedBoundaryMove = (
     selector: AnyShareSelector,
     projection: ReturnType<typeof createAccountlessPathProjection>,
     row: Pick<SyncRelayLogRow, "opKind" | "payloadJson">,
@@ -913,30 +913,51 @@ export function createSyncRelayHandler({
     ) {
       return null;
     }
-    if (
-      projection.projectPath(beforePath) === null ||
-      projection.projectPath(afterPath) !== null
-    ) {
-      return null;
+    const projectedBeforePath = projection.projectPath(beforePath);
+    const projectedAfterPath = projection.projectPath(afterPath);
+
+    if (projectedBeforePath !== null && projectedAfterPath === null) {
+      // Re-run the visible half as a delete so the existing filter validates
+      // its version and before-path, then emits the standard minimal payload.
+      const deletion = filterOpForShare(
+        selector,
+        row.opKind,
+        JSON.stringify({
+          operation: "delete",
+          versionId: record.versionId,
+          path: beforePath,
+          payloadBeforeBlobSha256: record.payloadBeforeBlobSha256,
+          payloadBeforePath: beforePath,
+          ...(record.beforePath === beforePath ? { beforePath } : {}),
+        }),
+        chatResolver,
+      );
+      return deletion.allowed ? projection.projectPayload(deletion.payload) : null;
     }
 
-    // Re-run the visible half as a delete so the existing filter validates
-    // its version and before-path, then emits the standard minimal payload.
-    // An inward move remains absent until its next in-boundary write.
-    const deletion = filterOpForShare(
-      selector,
-      row.opKind,
-      JSON.stringify({
-        operation: "delete",
-         versionId: record.versionId,
-         path: beforePath,
-         payloadBeforeBlobSha256: record.payloadBeforeBlobSha256,
-         payloadBeforePath: beforePath,
-        ...(record.beforePath === beforePath ? { beforePath } : {}),
-      }),
-      chatResolver,
-    );
-    return deletion.allowed ? projection.projectPayload(deletion.payload) : null;
+    if (projectedBeforePath === null && projectedAfterPath !== null) {
+      // The accountless replica never held the private predecessor, so expose
+      // only the visible half as a create. The normal filter validates the
+      // version and after-path and rebuilds the minimal replay payload.
+      const arrival = filterOpForShare(
+        selector,
+        row.opKind,
+        JSON.stringify({
+          operation: "write",
+          versionId: record.versionId,
+          path: afterPath,
+          payloadAfterBlobSha256: record.payloadAfterBlobSha256,
+          payloadAfterPath: afterPath,
+          ...(record.payloadAfterContentKind === "binary"
+            ? { payloadAfterContentKind: "binary" }
+            : {}),
+        }),
+        chatResolver,
+      );
+      return arrival.allowed ? projection.projectPayload(arrival.payload) : null;
+    }
+
+    return null;
   };
 
   const filteredLogPage = (
@@ -993,7 +1014,7 @@ export function createSyncRelayHandler({
             ? accountlessProjection.projectPayload(decision.payload)
             : decision.payload
           : accountlessProjection
-            ? matchRefusedOutwardMove(
+            ? matchRefusedBoundaryMove(
                 selector,
                 accountlessProjection,
                 row,
@@ -1069,7 +1090,7 @@ export function createSyncRelayHandler({
         }
         if (
           accountlessProjection !== null &&
-          matchRefusedOutwardMove(
+          matchRefusedBoundaryMove(
             selector,
             accountlessProjection,
             row,

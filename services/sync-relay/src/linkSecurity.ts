@@ -171,7 +171,12 @@ export class LinkEgressRateLimiter {
     }
     let bucket = this.buckets.get(grantId);
     if (!bucket) {
-      if (this.buckets.size >= this.maxGrants) this.evictOldest();
+      if (
+        this.buckets.size >= this.maxGrants &&
+        !this.evictRefilled(nowMs)
+      ) {
+        return false;
+      }
       bucket = { tokens: this.capacityBytes, updatedAtMs: nowMs };
       this.buckets.set(grantId, bucket);
     }
@@ -187,16 +192,18 @@ export class LinkEgressRateLimiter {
     return true;
   }
 
-  private evictOldest(): void {
-    let oldestKey: string | null = null;
-    let oldestMs = Number.POSITIVE_INFINITY;
+  private evictRefilled(nowMs: number): boolean {
     for (const [key, bucket] of this.buckets) {
-      if (bucket.updatedAtMs < oldestMs) {
-        oldestKey = key;
-        oldestMs = bucket.updatedAtMs;
+      const elapsedSeconds = Math.max(0, nowMs - bucket.updatedAtMs) / 1_000;
+      if (
+        bucket.tokens + elapsedSeconds * this.refillBytesPerSecond >=
+        this.capacityBytes
+      ) {
+        this.buckets.delete(key);
+        return true;
       }
     }
-    if (oldestKey !== null) this.buckets.delete(oldestKey);
+    return false;
   }
 }
 

@@ -487,6 +487,31 @@ async function readRemainingBytes(
   return bytes;
 }
 
+describe("LinkEgressRateLimiter", () => {
+  it("evicts a fully refilled bucket without resetting active grant debt", () => {
+    const limiter = new LinkEgressRateLimiter(10, 1, 2);
+
+    expect(limiter.charge("target", 10, 0)).toBe(true);
+    expect(limiter.charge("refilled", 1, 1_000)).toBe(true);
+    expect(limiter.charge("newcomer", 1, 2_000)).toBe(true);
+
+    expect(limiter.charge("target", 10, 2_000)).toBe(false);
+    expect(limiter.charge("target", 2, 2_000)).toBe(true);
+  });
+
+  it("refuses a new grant while every tracked bucket carries debt", () => {
+    const limiter = new LinkEgressRateLimiter(10, 1, 2);
+
+    expect(limiter.charge("target", 10, 0)).toBe(true);
+    expect(limiter.charge("other", 10, 1_000)).toBe(true);
+
+    expect(limiter.charge("newcomer", 1, 2_000)).toBe(false);
+    expect(limiter.charge("target", 10, 2_000)).toBe(false);
+    expect(limiter.charge("target", 2, 2_000)).toBe(true);
+    expect(limiter.charge("other", 1, 2_000)).toBe(true);
+  });
+});
+
 describe("relay capability reads", () => {
   it("projects only the selected current files from a fresh view capability", async () => {
     const storage = await newStorage();
@@ -1600,7 +1625,7 @@ describe("relay capability reads", () => {
     expect(metadata.lastSettledKnown).toBe(true);
   });
 
-  it("keeps an inward move hidden until the next in-boundary write", async () => {
+  it("projects an inward move as an accountless arrival so current and replay converge", async () => {
     const storage = await newStorage();
     const h = handler(storage);
     const seeded = await seed(h);
@@ -1615,22 +1640,16 @@ describe("relay capability reads", () => {
     const initialOps = initialLog.ops as RelayOp[];
     const initialFiles: FileAccumulator = new Map();
     foldLogOps(initialFiles, initialOps);
-    const updated = "arrived and updated\n";
-    await putBlob(h, updated);
+    const arrived = "arrived\n";
+    const arrivedSha = await putBlob(h, arrived);
     const inwardMove = moment(3, "docs/arrived.md", "hidden\n", 1_300, {
       objectId: "object-2",
       operation: "rename",
       beforePath: "private/hidden.md",
       beforeContent: "hidden\n",
+      afterContent: arrived,
     });
-    await appendMoments(h, [
-      inwardMove,
-      moment(4, "docs/arrived.md", updated, 1_400, {
-        objectId: "object-2",
-        beforePath: "docs/arrived.md",
-        beforeContent: "hidden\n",
-      }),
-    ]);
+    await appendMoments(h, [inwardMove]);
 
     expect(
       filterOpForShare(
@@ -1639,7 +1658,7 @@ describe("relay capability reads", () => {
         JSON.stringify(inwardMove.payload),
       ).allowed,
     ).toBe(false);
-    const accountlessInward = await json(
+    const accountlessDelta = await json(
       await h(
         linkRequest(
           seeded.capability,
@@ -1647,16 +1666,68 @@ describe("relay capability reads", () => {
         ),
       ),
     );
-    const accountlessWriteOps = accountlessInward.ops as RelayOp[];
-    expect(accountlessInward).toMatchObject({ nextCursor: 5, hasMore: false });
-    expect(accountlessWriteOps).toHaveLength(1);
-    expect(accountlessWriteOps[0]).toMatchObject({ originSeq: 4 });
-    const accountlessFiles = new Map(initialFiles);
-    foldLogOps(accountlessFiles, accountlessWriteOps);
-    expect(filesFromAccumulator(accountlessFiles).map(({ path }) => path)).toEqual([
-      "docs/arrived.md",
-      "docs/shared.md",
+    const accountlessOps = accountlessDelta.ops as RelayOp[];
+    expect(accountlessDelta).toMatchObject({ nextCursor: 4, hasMore: false });
+    expect(accountlessOps).toEqual([
+      {
+        relaySeq: 4,
+        originSeq: 3,
+        opKind: "moment.append",
+        payload: {
+          operation: "write",
+          versionId: "main",
+          metadata: { origin: "sync" },
+          path: "docs/arrived.md",
+          payloadBeforeBlobSha256: null,
+          payloadAfterBlobSha256: arrivedSha,
+          payloadAfterPath: "docs/arrived.md",
+        },
+        recordedAtMs: 1_300,
+      },
     ]);
+
+    const current = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/current")),
+    );
+    const expectedFiles = [
+      {
+        path: "docs/arrived.md",
+        blobSha256: arrivedSha,
+        contentKind: "text",
+      },
+      {
+        path: "docs/shared.md",
+        blobSha256: seeded.sharedSha,
+        contentKind: "text",
+      },
+    ];
+    expect(current).toMatchObject({ files: expectedFiles, nextCursor: 4 });
+
+    const alreadyOpenFiles = new Map(initialFiles);
+    foldLogOps(alreadyOpenFiles, accountlessOps);
+    expect(filesFromAccumulator(alreadyOpenFiles)).toEqual(expectedFiles);
+
+    const fullReplay = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100")),
+    );
+    const freshFiles: FileAccumulator = new Map();
+    foldLogOps(freshFiles, fullReplay.ops as RelayOp[]);
+    expect(filesFromAccumulator(freshFiles)).toEqual(expectedFiles);
+
+    const serializedAccountless = JSON.stringify({
+      current,
+      delta: accountlessDelta,
+      fullReplay,
+    });
+    for (const privateValue of [
+      "private/hidden.md",
+      seeded.hiddenSha,
+      "object-2",
+      "moment-3",
+      "origin-a",
+    ]) {
+      expect(serializedAccountless).not.toContain(privateValue);
+    }
 
     const authenticatedInward = await json(
       await h(
@@ -1667,21 +1738,6 @@ describe("relay capability reads", () => {
       ),
     );
     expect(authenticatedInward.ops).toEqual([]);
-    const authenticatedWrite = await json(
-      await h(
-        request(
-          RECIPIENT,
-          `/sync/shares/share-0/log?since=${String(authenticatedInward.nextCursor)}&limit=1`,
-        ),
-      ),
-    );
-    const authenticatedWriteOps = authenticatedWrite.ops as RelayOp[];
-    const authenticatedFiles = new Map(initialFiles);
-    foldLogOps(authenticatedFiles, authenticatedWriteOps);
-    expect(filesFromAccumulator(authenticatedFiles).map(({ path }) => path)).toEqual([
-      "docs/arrived.md",
-      "docs/shared.md",
-    ]);
   });
 
   it("keeps a nested folder's visible name as its accountless root", async () => {

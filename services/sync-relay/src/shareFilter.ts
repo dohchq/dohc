@@ -849,9 +849,9 @@ export function filterOpForShare(
     if (claimedVersionId !== targetVersionId(selector)) return { allowed: false };
     if (referencedPaths.length === 0) return { allowed: false };
     // ALL referenced paths must be visible. A rename across the share boundary
-    // is excluded rather than leaking the outside path. Existing replicas keep
-    // their prior view, but accountless current-state blob reads do not
-    // hydrate it after the move.
+    // is excluded rather than leaking the outside path. The accountless server
+    // may reconstruct only its visible half as a create or delete; authenticated
+    // recipients keep this raw filter behavior.
     if (!referencedPaths.every((path) => pathVisibleThroughShare(selector, path))) {
       return { allowed: false };
     }
