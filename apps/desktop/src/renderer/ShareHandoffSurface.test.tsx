@@ -17,6 +17,7 @@ const WRONG_SERVER_COPY =
 
 const bridgeMock = {
   cloudStatus: vi.fn(),
+  getRelayReceivedShare: vi.fn(),
   listRelayShares: vi.fn(),
   acceptShareHandoff: vi.fn(),
   retryShareHandoff: vi.fn(),
@@ -70,21 +71,9 @@ function receivedShare(shareId: string, shareCode: string, grantId = `grant-${sh
   };
 }
 
-function grantedShare(shareId: string, shareCode: string, grantId: string) {
-  return {
-    shareId,
-    workspaceId: "ws-granter",
-    recipientUserId: "recipient-user",
-    recipientEmail: "recipient@dohc.test",
-    grantId,
-    generation: 1,
-    createdAtMs: 1,
-    revokedAtMs: null,
-    shareCode,
-    selector: { paths: ["notes"], versionId: null },
-    access: "view" as const,
-  };
-}
+type ExactReceivedShareResult =
+  | { found: false }
+  | { found: true; share: ReturnType<typeof receivedShare> };
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -303,6 +292,7 @@ describe("ShareHandoffSurface", () => {
     expect(
       screen.getByText("Sign in to open the share from your browser."),
     ).toBeTruthy();
+    expect(bridgeMock.getRelayReceivedShare).not.toHaveBeenCalled();
     expect(bridgeMock.listRelayShares).not.toHaveBeenCalled();
     expect(bridgeMock.retryShareHandoff).not.toHaveBeenCalled();
     expect(bridgeMock.dismissShareHandoff).not.toHaveBeenCalled();
@@ -310,21 +300,47 @@ describe("ShareHandoffSurface", () => {
     expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
   });
 
-  it("selects only the exact ordinary received row and waits for first-run confirmation", async () => {
+  it("opens the exact redeemed share independently of the capped inventory", async () => {
+    const target = receivedShare("share-exact", "ordinary-exact-share-code");
+    bridgeMock.getRelayReceivedShare.mockResolvedValue({
+      found: true,
+      share: target,
+    });
+    bridgeMock.listRelayShares.mockResolvedValue({
+      granted: [],
+      received: Array.from({ length: 1_000 }, (_, index) =>
+        receivedShare(`share-unrelated-${index}`, `unrelated-code-${index}`),
+      ),
+    });
+
+    render(
+      <ShareHandoffSurface
+        status={{
+          status: "done",
+          statusId: "status-test",
+          shareId: "share-exact",
+        }}
+        onWorkspaceReady={() => {}}
+        onBack={() => {}}
+        onOpened={() => {}}
+      />,
+    );
+
+    await vi.waitFor(() =>
+      expect(bridgeMock.getRelayReceivedShare).toHaveBeenCalledWith({
+        shareId: "share-exact",
+      }),
+    );
+    expect(bridgeMock.listRelayShares).not.toHaveBeenCalled();
+    expect(await screen.findByTestId("open-share-start")).toBeTruthy();
+  });
+
+  it("uses the exact ordinary received result and waits for first-run confirmation", async () => {
     const user = userEvent.setup();
     const onOpened = vi.fn();
-    bridgeMock.listRelayShares.mockResolvedValue({
-      granted: [
-        grantedShare(
-          "share-exact",
-          "forbidden-granted-row-code",
-          "forbidden-grant-id",
-        ),
-      ],
-      received: [
-        receivedShare("share-other", "wrong-received-row-code"),
-        receivedShare("share-exact", "ordinary-exact-share-code"),
-      ],
+    bridgeMock.getRelayReceivedShare.mockResolvedValue({
+      found: true,
+      share: receivedShare("share-exact", "ordinary-exact-share-code"),
     });
 
     render(
@@ -352,6 +368,9 @@ describe("ShareHandoffSurface", () => {
     expect(bridgeMock.importWorkspaceFiles).not.toHaveBeenCalled();
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
     expect(bridgeMock.writeWorkspaceAsset).not.toHaveBeenCalled();
+    expect(bridgeMock.getRelayReceivedShare).toHaveBeenCalledWith({
+      shareId: "share-exact",
+    });
 
     await user.click(screen.getByTestId("open-share-choose-folder"));
     expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
@@ -371,9 +390,9 @@ describe("ShareHandoffSurface", () => {
     const user = userEvent.setup();
     const onMounted = vi.fn();
     const onOpened = vi.fn();
-    bridgeMock.listRelayShares.mockResolvedValue({
-      granted: [],
-      received: [receivedShare("share-exact", "ordinary-exact-share-code")],
+    bridgeMock.getRelayReceivedShare.mockResolvedValue({
+      found: true,
+      share: receivedShare("share-exact", "ordinary-exact-share-code"),
     });
 
     render(
@@ -413,22 +432,13 @@ describe("ShareHandoffSurface", () => {
     expect(onOpened).toHaveBeenCalledOnce();
   });
 
-  it("re-reads inventory without retrying redemption when the exact row is missing", async () => {
+  it("checks the exact share again without retrying redemption when it is missing", async () => {
     const user = userEvent.setup();
-    bridgeMock.listRelayShares
+    bridgeMock.getRelayReceivedShare
+      .mockResolvedValueOnce({ found: false })
       .mockResolvedValueOnce({
-        granted: [
-          grantedShare(
-            "share-exact",
-            "forbidden-granted-row-code",
-            "forbidden-grant-id",
-          ),
-        ],
-        received: [receivedShare("share-other", "wrong-received-row-code")],
-      })
-      .mockResolvedValueOnce({
-        granted: [],
-        received: [receivedShare("share-exact", "ordinary-exact-share-code")],
+        found: true,
+        share: receivedShare("share-exact", "ordinary-exact-share-code"),
       });
 
     render(
@@ -449,7 +459,7 @@ describe("ShareHandoffSurface", () => {
     expect(screen.queryByText(NETWORK_COPY)).toBeNull();
     expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
     expect(screen.queryByTestId("open-shared-view")).toBeNull();
-    expect(bridgeMock.listRelayShares).toHaveBeenCalledOnce();
+    expect(bridgeMock.getRelayReceivedShare).toHaveBeenCalledOnce();
     expect(bridgeMock.retryShareHandoff).not.toHaveBeenCalled();
     expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
     expect(bridgeMock.mountShare).not.toHaveBeenCalled();
@@ -457,19 +467,19 @@ describe("ShareHandoffSurface", () => {
     await user.click(screen.getByRole("button", { name: "Check again" }));
 
     expect(await screen.findByTestId("open-shared-view")).toBeTruthy();
-    expect(bridgeMock.listRelayShares).toHaveBeenCalledTimes(2);
+    expect(bridgeMock.getRelayReceivedShare).toHaveBeenCalledTimes(2);
     expect(bridgeMock.retryShareHandoff).not.toHaveBeenCalled();
     expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
     expect(bridgeMock.mountShare).not.toHaveBeenCalled();
   });
 
-  it("keeps network copy and Try again when received-share inventory fails", async () => {
+  it("keeps network copy and Try again when exact received-share lookup fails", async () => {
     const user = userEvent.setup();
-    bridgeMock.listRelayShares
-      .mockRejectedValueOnce(new Error("inventory unavailable"))
+    bridgeMock.getRelayReceivedShare
+      .mockRejectedValueOnce(new Error("lookup unavailable"))
       .mockResolvedValueOnce({
-        granted: [],
-        received: [receivedShare("share-exact", "ordinary-exact-share-code")],
+        found: true,
+        share: receivedShare("share-exact", "ordinary-exact-share-code"),
       });
 
     render(
@@ -493,22 +503,16 @@ describe("ShareHandoffSurface", () => {
     await user.click(screen.getByRole("button", { name: "Try again" }));
 
     expect(await screen.findByTestId("open-shared-view")).toBeTruthy();
-    expect(bridgeMock.listRelayShares).toHaveBeenCalledTimes(2);
+    expect(bridgeMock.getRelayReceivedShare).toHaveBeenCalledTimes(2);
     expect(bridgeMock.retryShareHandoff).not.toHaveBeenCalled();
     expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
     expect(bridgeMock.mountShare).not.toHaveBeenCalled();
   });
 
-  it("does not let stale inventory repaint a newer share id or a settled failure", async () => {
-    const first = deferred<{
-      granted: ReturnType<typeof grantedShare>[];
-      received: ReturnType<typeof receivedShare>[];
-    }>();
-    const second = deferred<{
-      granted: ReturnType<typeof grantedShare>[];
-      received: ReturnType<typeof receivedShare>[];
-    }>();
-    bridgeMock.listRelayShares
+  it("does not let a stale exact lookup repaint a newer share id or a settled failure", async () => {
+    const first = deferred<ExactReceivedShareResult>();
+    const second = deferred<ExactReceivedShareResult>();
+    bridgeMock.getRelayReceivedShare
       .mockReturnValueOnce(first.promise)
       .mockReturnValueOnce(second.promise);
     const onMounted = vi.fn();
@@ -541,16 +545,16 @@ describe("ShareHandoffSurface", () => {
     );
     await act(async () => {
       second.resolve({
-        granted: [],
-        received: [receivedShare("share-second", "second-share-code")],
+        found: true,
+        share: receivedShare("share-second", "second-share-code"),
       });
     });
     expect(await screen.findByTestId("open-share-start")).toBeTruthy();
 
     await act(async () => {
       first.resolve({
-        granted: [],
-        received: [receivedShare("share-first", "first-share-code")],
+        found: true,
+        share: receivedShare("share-first", "first-share-code"),
       });
     });
     await userEvent.setup().click(screen.getByTestId("open-share-start"));
@@ -561,11 +565,8 @@ describe("ShareHandoffSurface", () => {
       }),
     );
 
-    const third = deferred<{
-      granted: ReturnType<typeof grantedShare>[];
-      received: ReturnType<typeof receivedShare>[];
-    }>();
-    bridgeMock.listRelayShares.mockReturnValueOnce(third.promise);
+    const third = deferred<ExactReceivedShareResult>();
+    bridgeMock.getRelayReceivedShare.mockReturnValueOnce(third.promise);
     rerender(
       <ShareHandoffSurface
         status={{
@@ -588,20 +589,17 @@ describe("ShareHandoffSurface", () => {
     );
     await act(async () => {
       third.resolve({
-        granted: [],
-        received: [receivedShare("share-third", "third-share-code")],
+        found: true,
+        share: receivedShare("share-third", "third-share-code"),
       });
     });
     expect(screen.getByText(REFUSED_COPY)).toBeTruthy();
     expect(screen.queryByTestId("open-shared-view")).toBeNull();
   });
 
-  it("ignores inventory completion after unmount", async () => {
-    const inventory = deferred<{
-      granted: ReturnType<typeof grantedShare>[];
-      received: ReturnType<typeof receivedShare>[];
-    }>();
-    bridgeMock.listRelayShares.mockReturnValue(inventory.promise);
+  it("ignores exact lookup completion after unmount", async () => {
+    const lookup = deferred<ExactReceivedShareResult>();
+    bridgeMock.getRelayReceivedShare.mockReturnValue(lookup.promise);
     const { unmount } = render(
       <ShareHandoffSurface
         status={{
@@ -617,9 +615,9 @@ describe("ShareHandoffSurface", () => {
 
     unmount();
     await act(async () => {
-      inventory.resolve({
-        granted: [],
-        received: [receivedShare("share-exact", "ordinary-exact-share-code")],
+      lookup.resolve({
+        found: true,
+        share: receivedShare("share-exact", "ordinary-exact-share-code"),
       });
     });
 
@@ -656,9 +654,9 @@ describe("ShareHandoffSurface", () => {
       .spyOn(console, "log")
       .mockImplementation(() => undefined);
     try {
-      bridgeMock.listRelayShares.mockResolvedValue({
-        granted: [],
-        received: [receivedShare("share-exact", receivedShareCode)],
+      bridgeMock.getRelayReceivedShare.mockResolvedValue({
+        found: true,
+        share: receivedShare("share-exact", receivedShareCode),
       });
 
       const { container } = render(

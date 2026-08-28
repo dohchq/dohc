@@ -60,7 +60,10 @@ import {
   CloudJoinWorkspacePayload,
   CreateRelaySharePayload,
   CreateRelayShareResult,
+  GetRelayReceivedSharePayload,
+  GetRelayReceivedShareResult,
   ListRelaySharesResult,
+  RelayShareReceivedRow,
   RevokeRelaySharePayload,
   CreateRelayShareLinkPayload,
   CreateRelayShareLinkResult,
@@ -1747,6 +1750,14 @@ type RelayShareRetainedDependentSetResult<T> =
   | { kind: "success"; body: T }
   | { kind: "dependents-changed"; body: unknown; status: number };
 
+type RelayShareRetainedNotFoundResult<T> =
+  | { kind: "success"; body: T }
+  | { kind: "missing" };
+
+type RelayShareJsonOptions =
+  | { retainDependentSetConflict: true }
+  | { retainNotFound: true };
+
 const RELAY_SHARE_FETCH_TIMEOUT_MS = 15_000;
 const relayShareFetch = relayFetchWithTimeout(RELAY_SHARE_FETCH_TIMEOUT_MS);
 
@@ -1764,9 +1775,19 @@ async function relayShareJsonWithCredentials<T>(
 async function relayShareJsonWithCredentials<T>(
   credentials: CloudSessionCredentials,
   path: string,
+  init: RequestInit | undefined,
+  options: { retainNotFound: true },
+): Promise<RelayShareRetainedNotFoundResult<T>>;
+async function relayShareJsonWithCredentials<T>(
+  credentials: CloudSessionCredentials,
+  path: string,
   init?: RequestInit,
-  options?: { retainDependentSetConflict: true },
-): Promise<T | RelayShareRetainedDependentSetResult<T>> {
+  options?: RelayShareJsonOptions,
+): Promise<
+  | T
+  | RelayShareRetainedDependentSetResult<T>
+  | RelayShareRetainedNotFoundResult<T>
+> {
   if (!credentials.relayUrl) {
     throw new Error("Reconnect dohc Cloud with a sync relay URL, then try again.");
   }
@@ -1804,16 +1825,26 @@ async function relayShareJsonWithCredentials<T>(
     | null;
   if (!response.ok || data?.ok === false) {
     if (
-      options?.retainDependentSetConflict &&
+      options &&
+      "retainDependentSetConflict" in options &&
       response.status === 409 &&
       data?.ok === false &&
       data.code === "dependents_changed"
     ) {
       return { kind: "dependents-changed", body: data, status: response.status };
     }
+    if (
+      options &&
+      "retainNotFound" in options &&
+      response.status === 404 &&
+      data?.ok === false &&
+      data.code === "not_found"
+    ) {
+      return { kind: "missing" };
+    }
     throw new Error(relayShareErrorCopy(response.status, data));
   }
-  if (options?.retainDependentSetConflict) {
+  if (options) {
     return { kind: "success", body: data as T };
   }
   return data as T;
@@ -7640,6 +7671,43 @@ function registerIpcHandlers(
     const granted = lanes.granted.map(withCode);
     const received = lanes.received.map(withCode);
     return ListRelaySharesResult.parse({ granted, received });
+  });
+
+  ipcMain.handle(CHANNELS.getRelayReceivedShare, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = GetRelayReceivedSharePayload.parse(payload);
+    await warmCredentialCache();
+    const credentials = cachedCredentials;
+    const credentialGeneration = credentialCacheGeneration;
+    if (!credentials) throw new RelaySessionError("Sign in to dohc Cloud first.");
+    const result = await awaitCredentialGeneration({
+      capturedGeneration: credentialGeneration,
+      currentGeneration: () => credentialCacheGeneration,
+      run: () =>
+        relayShareJsonWithCredentials<unknown>(
+          credentials,
+          `/sync/shares/${encodeURIComponent(input.shareId)}`,
+          undefined,
+          { retainNotFound: true },
+        ),
+    });
+    if (result.kind === "missing") {
+      return GetRelayReceivedShareResult.parse({ found: false });
+    }
+    const body = result.body;
+    const received = RelayShareReceivedRow.parse({
+      ...(body !== null && typeof body === "object" && !Array.isArray(body)
+        ? body
+        : {}),
+      shareCode: buildShareCode({
+        shareId: input.shareId,
+        relayUrl: credentials.relayUrl!,
+      }),
+    });
+    if (received.shareId !== input.shareId) {
+      throw new Error("Invalid exact received share response.");
+    }
+    return GetRelayReceivedShareResult.parse({ found: true, share: received });
   });
 
   ipcMain.handle(CHANNELS.revokeRelayShare, async (event, payload) => {

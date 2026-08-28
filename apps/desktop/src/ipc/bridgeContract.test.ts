@@ -114,6 +114,8 @@ import {
   ListShareProposalsResult,
   ListMyShareChangesPayload,
   ListMyShareChangesResult,
+  GetRelayReceivedSharePayload,
+  GetRelayReceivedShareResult,
   ListRelaySharesResult,
   RelayShareGrantedRow,
   RelayShareReceivedRow,
@@ -374,6 +376,44 @@ describe("relay share listing IPC contract", () => {
     });
   });
 
+  it("keeps the 1,000-row inventory caps", () => {
+    const received = Array.from({ length: 1_000 }, (_, index) => ({
+      shareId: `share-received-${index}`,
+      granterEmail: "owner@example.test",
+      selector,
+      ...grant,
+      createdAtMs: 1,
+      shareCode: `dohc-share:share-received-${index}:https://relay.test`,
+    }));
+    const granted = Array.from({ length: 1_000 }, (_, index) => ({
+      shareId: `share-granted-${index}`,
+      workspaceId: "remote-1",
+      recipientUserId: "recipient-1",
+      recipientEmail: "recipient@example.test",
+      selector,
+      ...grant,
+      createdAtMs: 1,
+      revokedAtMs: null,
+      shareCode: `dohc-share:share-granted-${index}:https://relay.test`,
+    }));
+
+    expect(ListRelaySharesResult.safeParse({ granted, received }).success).toBe(
+      true,
+    );
+    expect(
+      ListRelaySharesResult.safeParse({
+        granted: [...granted, granted[0]],
+        received,
+      }).success,
+    ).toBe(false);
+    expect(
+      ListRelaySharesResult.safeParse({
+        granted,
+        received: [...received, received[0]],
+      }).success,
+    ).toBe(false);
+  });
+
   it("keeps a damaged row listable when its raw access belongs to another selector kind", () => {
     expect(
       ListRelaySharesResult.parse({
@@ -483,6 +523,65 @@ describe("relay share listing IPC contract", () => {
     expect(RelayShareGrantedRow.safeParse({ ...granted, ...grant, generation: 0 }).success).toBe(
       false,
     );
+  });
+});
+
+describe("exact received relay share IPC contract", () => {
+  const received = {
+    shareId: "share-exact",
+    granterEmail: "owner@example.test",
+    grantId: "grant-exact",
+    generation: 1,
+    createdAtMs: 1,
+    shareCode: "dohc-share:share-exact:https://relay.test",
+    selector: { paths: ["docs"], versionId: null },
+    access: "view" as const,
+  };
+
+  it("accepts one strict share id and an explicit missing result", () => {
+    expect(
+      GetRelayReceivedSharePayload.parse({ shareId: "share-exact" }),
+    ).toEqual({ shareId: "share-exact" });
+    expect(GetRelayReceivedShareResult.parse({ found: false })).toEqual({
+      found: false,
+    });
+
+    for (const payload of [
+      undefined,
+      {},
+      { shareId: "" },
+      { shareId: "x".repeat(201) },
+      { shareId: "share-exact", relayUrl: "https://attacker.test" },
+    ]) {
+      expect(GetRelayReceivedSharePayload.safeParse(payload).success).toBe(false);
+    }
+    expect(
+      GetRelayReceivedShareResult.safeParse({
+        found: false,
+        share: received,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("returns only the existing received-share schema", () => {
+    const parsed = GetRelayReceivedShareResult.parse({
+      found: true,
+      share: {
+        ...received,
+        workspaceId: "forbidden-owner-workspace",
+        recipientUserId: "forbidden-recipient-user",
+        recipientEmail: "forbidden-recipient@example.test",
+        url: "https://share.example.test/s/#forbidden-link",
+      },
+    });
+
+    expect(parsed).toEqual({ found: true, share: received });
+    expect(
+      GetRelayReceivedShareResult.safeParse({
+        found: true,
+        share: { ...received, shareCode: undefined },
+      }).success,
+    ).toBe(false);
   });
 });
 

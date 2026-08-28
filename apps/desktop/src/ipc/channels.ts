@@ -804,6 +804,7 @@ export const CHANNELS = {
   cloudJoinWorkspace: "desktop:cloud-join-workspace",
   createRelayShare: "desktop:create-relay-share",
   listRelayShares: "desktop:list-relay-shares",
+  getRelayReceivedShare: "desktop:get-relay-received-share",
   revokeRelayShare: "desktop:revoke-relay-share",
   createRelayShareLink: "desktop:create-relay-share-link",
   listRelayShareLinks: "desktop:list-relay-share-links",

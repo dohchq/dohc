@@ -342,6 +342,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.cloudJoinWorkspace, payload),
   createRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.createRelayShare, payload),
   listRelayShares: () => ipcRenderer.invoke(CHANNELS.listRelayShares),
+  getRelayReceivedShare: (payload) =>
+    ipcRenderer.invoke(CHANNELS.getRelayReceivedShare, payload),
   revokeRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.revokeRelayShare, payload),
   createRelayShareLink: (payload) =>
     ipcRenderer.invoke(CHANNELS.createRelayShareLink, payload),

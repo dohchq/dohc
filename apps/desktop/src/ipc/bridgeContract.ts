@@ -3545,6 +3545,28 @@ export const RelayShareReceivedRow = z.union([
 ]);
 export type RelayShareReceivedRow = z.infer<typeof RelayShareReceivedRow>;
 
+export const GetRelayReceivedSharePayload = z
+  .object({
+    shareId: SHARE_ID,
+  })
+  .strict();
+export type GetRelayReceivedSharePayload = z.infer<
+  typeof GetRelayReceivedSharePayload
+>;
+
+export const GetRelayReceivedShareResult = z.discriminatedUnion("found", [
+  z.object({ found: z.literal(false) }).strict(),
+  z
+    .object({
+      found: z.literal(true),
+      share: RelayShareReceivedRow,
+    })
+    .strict(),
+]);
+export type GetRelayReceivedShareResult = z.infer<
+  typeof GetRelayReceivedShareResult
+>;
+
 export const ListRelaySharesResult = z.object({
   granted: z.array(RelayShareGrantedRow).max(1000),
   // Path/version shares addressed to this account (chat-channel grants are
@@ -5194,6 +5216,9 @@ export interface DohcDesktopBridge {
   // Relay shares (PR 18): grant side.
   createRelayShare(payload: CreateRelaySharePayload): Promise<CreateRelayShareResult>;
   listRelayShares(): Promise<ListRelaySharesResult>;
+  getRelayReceivedShare(
+    payload: GetRelayReceivedSharePayload,
+  ): Promise<GetRelayReceivedShareResult>;
   revokeRelayShare(payload: RevokeRelaySharePayload): Promise<void>;
   createRelayShareLink(
     payload: CreateRelayShareLinkPayload,

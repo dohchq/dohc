@@ -16,7 +16,7 @@ const BUSY_COPY =
 const MISSING_COPY =
   "dohc couldn't find this share in your account. The person who shared it may have ended it.";
 
-type InventoryState =
+type ReceivedShareState =
   | { kind: "idle" }
   | { kind: "loading"; shareId: string }
   | { kind: "missing"; shareId: string }
@@ -57,43 +57,44 @@ export function ShareHandoffSurface(props: {
   };
 }) {
   const shareId = props.status.status === "done" ? props.status.shareId : null;
-  const [inventoryAttempt, setInventoryAttempt] = useState(0);
-  const [inventory, setInventory] = useState<InventoryState>({ kind: "idle" });
-  const inventoryRequest = useRef(0);
+  const [lookupAttempt, setLookupAttempt] = useState(0);
+  const [receivedShare, setReceivedShare] = useState<ReceivedShareState>({
+    kind: "idle",
+  });
+  const lookupRequest = useRef(0);
 
   useEffect(() => {
-    const request = ++inventoryRequest.current;
+    const request = ++lookupRequest.current;
     let active = true;
     if (shareId === null) {
-      setInventory({ kind: "idle" });
+      setReceivedShare({ kind: "idle" });
       return () => {
         active = false;
-        inventoryRequest.current += 1;
+        lookupRequest.current += 1;
       };
     }
 
-    setInventory({ kind: "loading", shareId });
+    setReceivedShare({ kind: "loading", shareId });
     void bridge()
-      .listRelayShares()
+      .getRelayReceivedShare({ shareId })
       .then((result) => {
-        if (!active || request !== inventoryRequest.current) return;
-        const received = result.received.find((row) => row.shareId === shareId);
-        setInventory(
-          received
-            ? { kind: "ready", shareId, shareCode: received.shareCode }
+        if (!active || request !== lookupRequest.current) return;
+        setReceivedShare(
+          result.found
+            ? { kind: "ready", shareId, shareCode: result.share.shareCode }
             : { kind: "missing", shareId },
         );
       })
       .catch(() => {
-        if (!active || request !== inventoryRequest.current) return;
-        setInventory({ kind: "failed", shareId });
+        if (!active || request !== lookupRequest.current) return;
+        setReceivedShare({ kind: "failed", shareId });
       });
 
     return () => {
       active = false;
-      inventoryRequest.current += 1;
+      lookupRequest.current += 1;
     };
-  }, [inventoryAttempt, shareId]);
+  }, [lookupAttempt, shareId]);
 
   if (props.status.status === "idle") return null;
 
@@ -183,15 +184,15 @@ export function ShareHandoffSurface(props: {
   }
 
   if (
-    inventory.kind === "ready" &&
-    inventory.shareId === shareId
+    receivedShare.kind === "ready" &&
+    receivedShare.shareId === shareId
   ) {
     return (
       <OpenSharedView
-        key={inventory.shareId}
+        key={receivedShare.shareId}
         resolvedShare={{
-          shareId: inventory.shareId,
-          shareCode: inventory.shareCode,
+          shareId: receivedShare.shareId,
+          shareCode: receivedShare.shareCode,
         }}
         onWorkspaceReady={props.onWorkspaceReady}
         onBack={props.onBack}
@@ -202,8 +203,8 @@ export function ShareHandoffSurface(props: {
   }
 
   if (
-    inventory.kind === "missing" &&
-    inventory.shareId === shareId
+    receivedShare.kind === "missing" &&
+    receivedShare.shareId === shareId
   ) {
     return (
       <HandoffCard title="Open a share" onBack={props.onBack}>
@@ -212,7 +213,7 @@ export function ShareHandoffSurface(props: {
         </p>
         <SecondaryButton
           type="button"
-          onClick={() => setInventoryAttempt((attempt) => attempt + 1)}
+          onClick={() => setLookupAttempt((attempt) => attempt + 1)}
         >
           Check again
         </SecondaryButton>
@@ -221,8 +222,8 @@ export function ShareHandoffSurface(props: {
   }
 
   if (
-    inventory.kind === "failed" &&
-    inventory.shareId === shareId
+    receivedShare.kind === "failed" &&
+    receivedShare.shareId === shareId
   ) {
     return (
       <HandoffCard title="Open a share" onBack={props.onBack}>
@@ -231,7 +232,7 @@ export function ShareHandoffSurface(props: {
         </p>
         <SecondaryButton
           type="button"
-          onClick={() => setInventoryAttempt((attempt) => attempt + 1)}
+          onClick={() => setLookupAttempt((attempt) => attempt + 1)}
         >
           Try again
         </SecondaryButton>

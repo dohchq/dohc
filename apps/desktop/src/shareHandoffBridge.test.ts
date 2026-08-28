@@ -6,6 +6,7 @@ import {
   ShareHandoffStatus,
 } from "./ipc/bridgeContract";
 import {
+  CHANNELS,
   parseShareHandoffStatus,
   SHARE_HANDOFF_STATUSES,
 } from "./ipc/channels";
@@ -18,6 +19,24 @@ const preloadSource = readFileSync(
   new URL("./preload.ts", import.meta.url),
   "utf8",
 ).replaceAll("\r\n", "\n");
+const sharedByMeSource = readFileSync(
+  new URL("./renderer/settings/SharedByMeList.tsx", import.meta.url),
+  "utf8",
+).replaceAll("\r\n", "\n");
+const sharedWithMeSource = readFileSync(
+  new URL("./renderer/settings/SharedWithMeList.tsx", import.meta.url),
+  "utf8",
+).replaceAll("\r\n", "\n");
+
+function mainHandlerSource(channel: string): string {
+  const marker = `CHANNELS.${channel},`;
+  const markerAt = mainSource.indexOf(marker);
+  if (markerAt < 0) throw new Error(`Missing IPC handler for ${channel}`);
+  const start = mainSource.lastIndexOf("ipcMain.handle(", markerAt);
+  if (start < 0) throw new Error(`Missing IPC handler for ${channel}`);
+  const next = mainSource.indexOf("ipcMain.handle(", markerAt + marker.length);
+  return mainSource.slice(start, next < 0 ? undefined : next);
+}
 
 describe("share handoff status bridge", () => {
   it("accepts only the closed status union with a bounded identity while visible", () => {
@@ -282,5 +301,77 @@ describe("share handoff credential and ingress wiring", () => {
     expect(creation).toContain("notifySessionChanging:");
     expect(creation).toContain("notifyCloudSessionChanged:");
     expect(creation).toContain("invalidatePersistedSessionIf:");
+  });
+});
+
+describe("exact received-share bridge", () => {
+  it("uses one typed channel from preload to a trusted exact route", () => {
+    expect(CHANNELS.getRelayReceivedShare).toBe(
+      "desktop:get-relay-received-share",
+    );
+    expect(preloadSource).toContain(
+      "ipcRenderer.invoke(CHANNELS.getRelayReceivedShare, payload)",
+    );
+
+    const handler = mainHandlerSource("getRelayReceivedShare");
+    expect(handler).toContain("assertTrustedSender(event);");
+    expect(handler).toContain("GetRelayReceivedSharePayload.parse(payload)");
+    expect(handler).toContain("const credentials = cachedCredentials;");
+    expect(handler).toContain("awaitCredentialGeneration({");
+    expect(handler).toContain(
+      "`/sync/shares/${encodeURIComponent(input.shareId)}`",
+    );
+    expect(handler).toContain("relayShareJsonWithCredentials<unknown>(");
+    expect(handler).toContain("{ retainNotFound: true }");
+    expect(handler).not.toContain('relayShareJson("/sync/shares")');
+  });
+
+  it("attaches only the requested id and trusted credential relay to a parsed received row", () => {
+    const handler = mainHandlerSource("getRelayReceivedShare");
+    const bodySpreadAt = handler.indexOf("? body\n        : {}),");
+    const codeAt = handler.indexOf("shareCode: buildShareCode({");
+
+    expect(handler).toContain("RelayShareReceivedRow.parse({");
+    expect(handler).toContain("shareId: input.shareId,");
+    expect(handler).toContain("relayUrl: credentials.relayUrl!,");
+    expect(handler).toContain("received.shareId !== input.shareId");
+    expect(handler).toContain(
+      "GetRelayReceivedShareResult.parse({ found: true, share: received })",
+    );
+    expect(bodySpreadAt).toBeGreaterThan(-1);
+    expect(codeAt).toBeGreaterThan(bodySpreadAt);
+    expect(handler).not.toMatch(/relayUrl:\s*(?:body|result|received)/u);
+  });
+
+  it("classifies only a structured relay not_found response as missing", () => {
+    const helperStart = mainSource.indexOf(
+      "async function relayShareJsonWithCredentials<T>(",
+    );
+    const helperEnd = mainSource.indexOf(
+      "async function relayShareJson<T>",
+      helperStart,
+    );
+    const helper = mainSource.slice(helperStart, helperEnd);
+    const handler = mainHandlerSource("getRelayReceivedShare");
+
+    expect(helper).toContain('"retainNotFound" in options');
+    expect(helper).toContain("response.status === 404");
+    expect(helper).toContain("data?.ok === false");
+    expect(helper).toContain('data.code === "not_found"');
+    expect(helper).toContain('return { kind: "missing" };');
+    expect(handler).toContain('if (result.kind === "missing")');
+    expect(handler).toContain(
+      "GetRelayReceivedShareResult.parse({ found: false })",
+    );
+    expect(handler).not.toContain("error.message");
+    expect(handler).not.toContain("catch (");
+    expect(handler).toContain("RelayShareReceivedRow.parse({");
+  });
+
+  it("leaves Settings on the capped inventory method", () => {
+    for (const source of [sharedByMeSource, sharedWithMeSource]) {
+      expect(source).toContain(".listRelayShares()");
+      expect(source).not.toContain(".getRelayReceivedShare(");
+    }
   });
 });
