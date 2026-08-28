@@ -256,6 +256,9 @@ describe("share-web Node request adapter", () => {
       expect(beforeEnd.value).toMatchObject({ kind: "response", status: 404 });
       if (beforeEnd.value.kind !== "response") return;
       expect(beforeEnd.value.raw).toContain(shareWebRefusalBody);
+      expect(beforeEnd.value.raw).toMatch(
+        /\r\nx-robots-tag: noindex, nofollow, noarchive\r\n/iu,
+      );
       expect(beforeEnd.value.raw).toMatch(/\r\nconnection: close\r\n/iu);
 
       for (

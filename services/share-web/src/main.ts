@@ -6,7 +6,7 @@ import { loadShareWebConfig } from "./config";
 import { pipeResponseBody } from "./responseBody";
 import {
   createShareWebHandler,
-  SHARE_WEB_CSP,
+  SHARE_WEB_SECURITY_HEADERS,
   shareWebRefusalBody,
 } from "./server";
 
@@ -170,10 +170,9 @@ function shutdownGracePeriodMs(): number {
 function refuse(outgoing: ServerResponse): void {
   outgoing.statusCode = 404;
   outgoing.setHeader("content-type", "application/json");
-  outgoing.setHeader("content-security-policy", SHARE_WEB_CSP);
-  outgoing.setHeader("referrer-policy", "no-referrer");
-  outgoing.setHeader("x-content-type-options", "nosniff");
-  outgoing.setHeader("cache-control", "private, no-store");
+  for (const [key, value] of Object.entries(SHARE_WEB_SECURITY_HEADERS)) {
+    outgoing.setHeader(key, value);
+  }
   outgoing.end(shareWebRefusalBody);
 }
 
