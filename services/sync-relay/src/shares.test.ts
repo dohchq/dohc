@@ -148,6 +148,103 @@ async function denialBytes(response: Response): Promise<string> {
   return `${response.status}:${await response.text()}`;
 }
 
+function directShareInput(
+  shareId: string,
+  grantId = `grant-${shareId}`,
+): Parameters<SyncRelayStorage["createShare"]>[0] {
+  return {
+    share: {
+      shareId,
+      workspaceId: WORKSPACE,
+      granterUserId: GRANTER,
+      selectorJson: JSON.stringify({ paths: ["docs"], versionId: null }),
+      createdAtMs: 1_000,
+    },
+    grant: {
+      grantId,
+      shareId,
+      principalKind: "user",
+      principalUserId: RECIPIENT,
+      principalEmail: null,
+      access: "view",
+      generation: 1,
+      status: "active",
+      createdAtMs: 1_000,
+      revokedAtMs: null,
+      parentGrantId: null,
+    },
+  };
+}
+
+function claimStorageWorkspace(storage: SyncRelayStorage): void {
+  expect(
+    storage.claimWorkspace({
+      workspaceId: WORKSPACE,
+      ownerUserId: GRANTER,
+      createdAtMs: 1_000,
+    }),
+  ).toBe("created");
+}
+
+describe("createShare storage boundary", () => {
+  it("refuses mismatched share and grant ids without persisting either row", async () => {
+    const storage = await testStorage();
+    claimStorageWorkspace(storage);
+    const input = directShareInput("share-mismatch", "grant-mismatch");
+    input.grant.shareId = "share-other";
+
+    expect(() => storage.createShare(input)).toThrow("share and grant ids do not match");
+    expect(storage.getShare("share-mismatch")).toBeNull();
+    expect(storage.getShareGrant("grant-mismatch")).toBeNull();
+  });
+
+  it("refuses a link grant without persisting either row", async () => {
+    const storage = await testStorage();
+    claimStorageWorkspace(storage);
+    const input = directShareInput("share-link", "grant-link");
+    input.grant.principalKind = "link";
+    input.grant.principalUserId = null;
+
+    expect(() => storage.createShare(input)).toThrow(
+      "a link grant requires an existing share and a credential",
+    );
+    expect(storage.getShare("share-link")).toBeNull();
+    expect(storage.getShareGrant("grant-link")).toBeNull();
+  });
+
+  it("persists the share and grant for valid input", async () => {
+    const storage = await testStorage();
+    claimStorageWorkspace(storage);
+    storage.createShare(directShareInput("share-valid", "grant-valid"));
+
+    expect(storage.getShare("share-valid")).toMatchObject({
+      shareId: "share-valid",
+      workspaceId: WORKSPACE,
+      granterUserId: GRANTER,
+    });
+    expect(storage.getShareGrant("grant-valid")).toMatchObject({
+      grantId: "grant-valid",
+      shareId: "share-valid",
+      principalKind: "user",
+      principalUserId: RECIPIENT,
+    });
+  });
+
+  it("rolls the share insert back when the grant insert fails", async () => {
+    const storage = await testStorage();
+    claimStorageWorkspace(storage);
+    storage.createShare(directShareInput("share-seed", "grant-duplicate"));
+
+    expect(() =>
+      storage.createShare(directShareInput("share-rolled-back", "grant-duplicate")),
+    ).toThrow();
+    expect(storage.getShare("share-rolled-back")).toBeNull();
+    expect(storage.getShareGrant("grant-duplicate")).toMatchObject({
+      shareId: "share-seed",
+    });
+  });
+});
+
 describe("share grants", () => {
   beforeEach(() => {
     opSeq = 0;

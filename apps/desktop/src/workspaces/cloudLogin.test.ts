@@ -149,6 +149,54 @@ describe("cloud device-flow login", () => {
     expect(store.saved?.userId).not.toBe(store.saved?.email);
   });
 
+  it.each([
+    ["a missing", undefined],
+    ["an empty", ""],
+    ["a 321-character", "e".repeat(321)],
+  ])("rejects %s credential email through the identity failure", async (_case, email) => {
+    const store = memoryStore();
+    const user =
+      email === undefined
+        ? { id: "usr_email_boundary" }
+        : { email, id: "usr_email_boundary" };
+    const { impl } = fakeFetch({
+      "/api/auth/device/code": () => ({ body: DEVICE }),
+      "/api/auth/device/token": () => ({ body: { access_token: "session-token-xyz" } }),
+      "/api/auth/get-session": () => ({ body: { user } }),
+    });
+    const login = createCloudLogin({
+      store,
+      defaultServerUrl: "http://cloud.test",
+      fetch: impl,
+    });
+
+    await login.start();
+    await expect(login.poll()).rejects.toThrow(/server could not confirm your identity/i);
+    expect(store.saved).toBeNull();
+    await expect(login.poll()).rejects.toThrow(/no cloud login in progress/i);
+  });
+
+  it("accepts a 320-character credential email", async () => {
+    const email = "e".repeat(320);
+    const store = memoryStore();
+    const { impl } = fakeFetch({
+      "/api/auth/device/code": () => ({ body: DEVICE }),
+      "/api/auth/device/token": () => ({ body: { access_token: "session-token-xyz" } }),
+      "/api/auth/get-session": () => ({
+        body: { user: { email, id: "usr_email_boundary" } },
+      }),
+    });
+    const login = createCloudLogin({
+      store,
+      defaultServerUrl: "http://cloud.test",
+      fetch: impl,
+    });
+
+    await login.start();
+    await expect(login.poll()).resolves.toEqual({ status: "complete", email });
+    expect(store.saved?.email).toBe(email);
+  });
+
   it("does not create a signed-in session without a Better Auth user id", async () => {
     const store = memoryStore();
     const { impl } = fakeFetch({

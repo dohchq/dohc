@@ -60,6 +60,7 @@ import {
   parseEngineYDocLineageReplacementEvent,
   parseEngineYDocSaveStateEvent,
   parseSearchResultsEvent,
+  parseShareHandoffStatus,
   parseUpdateStateEvent,
   parseWorkspaceActivatedEvent,
 } from "./ipc/channels";
@@ -313,13 +314,45 @@ const bridge: DohcDesktopBridge = {
   cloudLoginPoll: () => ipcRenderer.invoke(CHANNELS.cloudLoginPoll),
   cloudStatus: (payload) => ipcRenderer.invoke(CHANNELS.cloudStatus, payload),
   cloudLogout: () => ipcRenderer.invoke(CHANNELS.cloudLogout),
+  getShareHandoffStatus: async () => {
+    const result: unknown = await ipcRenderer.invoke(
+      CHANNELS.getShareHandoffStatus,
+    );
+    const status = parseShareHandoffStatus(result);
+    if (!status) throw new Error("Invalid share handoff status from main");
+    return status;
+  },
+  acceptShareHandoff: (payload) =>
+    ipcRenderer.invoke(CHANNELS.acceptShareHandoff, payload),
+  retryShareHandoff: () => ipcRenderer.invoke(CHANNELS.retryShareHandoff),
+  dismissShareHandoff: (payload) =>
+    ipcRenderer.invoke(CHANNELS.dismissShareHandoff, payload),
+  onShareHandoffStatus: (listener) => {
+    const handler = (_event: unknown, raw: unknown) => {
+      const status = parseShareHandoffStatus(raw);
+      if (status) listener(status);
+    };
+    ipcRenderer.on(CHANNELS.shareHandoffStatus, handler);
+    return () =>
+      ipcRenderer.removeListener(CHANNELS.shareHandoffStatus, handler);
+  },
   cloudEnableSync: (payload) =>
     ipcRenderer.invoke(CHANNELS.cloudEnableSync, payload),
   cloudJoinWorkspace: (payload) =>
     ipcRenderer.invoke(CHANNELS.cloudJoinWorkspace, payload),
   createRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.createRelayShare, payload),
   listRelayShares: () => ipcRenderer.invoke(CHANNELS.listRelayShares),
+  getRelayReceivedShare: (payload) =>
+    ipcRenderer.invoke(CHANNELS.getRelayReceivedShare, payload),
   revokeRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.revokeRelayShare, payload),
+  createRelayShareLink: (payload) =>
+    ipcRenderer.invoke(CHANNELS.createRelayShareLink, payload),
+  listRelayShareLinks: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listRelayShareLinks, payload),
+  rotateRelayShareLink: (payload) =>
+    ipcRenderer.invoke(CHANNELS.rotateRelayShareLink, payload),
+  revokeRelayShareLink: (payload) =>
+    ipcRenderer.invoke(CHANNELS.revokeRelayShareLink, payload),
   shareChatChannel: (payload) => ipcRenderer.invoke(CHANNELS.shareChatChannel, payload),
   listChatChannelShares: (payload) =>
     ipcRenderer.invoke(CHANNELS.listChatChannelShares, payload),

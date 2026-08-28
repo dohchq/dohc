@@ -100,12 +100,22 @@ import {
   parsePluginPanelInvalidatedEventForIpc,
   parsePluginPanelSdkEventForIpc,
   CloudJoinWorkspacePayload,
+  CreateRelayShareLinkPayload,
+  CreateRelayShareLinkResult,
+  ListRelayShareLinksPayload,
+  ListRelayShareLinksResult,
+  RotateRelayShareLinkPayload,
+  RotateRelayShareLinkResult,
+  RevokeRelayShareLinkPayload,
+  RevokeRelayShareLinkResult,
   ReadShareProposalFileContentPayload,
   ReadShareProposalFileContentResult,
   ListShareProposalsPayload,
   ListShareProposalsResult,
   ListMyShareChangesPayload,
   ListMyShareChangesResult,
+  GetRelayReceivedSharePayload,
+  GetRelayReceivedShareResult,
   ListRelaySharesResult,
   RelayShareGrantedRow,
   RelayShareReceivedRow,
@@ -129,6 +139,204 @@ import {
 } from "../renderer/workbench/workbenchState";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "../workspaces/workspaceTextLimits";
+
+describe("owner relay share link IPC contract", () => {
+  const readable = {
+    shareId: "share-1",
+    grantId: "grant-1",
+    selector: { paths: ["docs"], versionId: null },
+    access: "view" as const,
+    generation: 2,
+    status: "active" as const,
+    createdAtMs: 10,
+    revokedAtMs: null,
+    lastUsedAtMs: 20,
+    urlIssuedAtMs: 15,
+    dependents: [
+      {
+        grantId: "dependent-1",
+        recipientUserId: "user-1",
+        recipientEmail: "reader@example.test",
+        access: "view" as const,
+        generation: 1,
+        createdAtMs: 12,
+      },
+    ],
+  };
+  const damaged = {
+    ...readable,
+    shareId: "share-2",
+    grantId: "grant-2",
+    selector: null,
+    access: "damaged-access",
+    damaged: true as const,
+    status: "revoked" as const,
+    revokedAtMs: 30,
+    lastUsedAtMs: null,
+    urlIssuedAtMs: null,
+    dependents: [],
+  };
+
+  it("parses readable and damaged inventory rows while stripping bearer fields", () => {
+    const parsed = ListRelayShareLinksResult.parse({
+      ok: true,
+      nextCursor: "next-page",
+      links: [
+        {
+          ...readable,
+          url: "https://share.example.test/s/#must-not-cross",
+          secret: "must-not-cross",
+          credential: { token: "must-not-cross" },
+        },
+        {
+          ...damaged,
+          selectorKind: "chat-channel",
+          url: "https://share.example.test/s/#must-not-cross",
+          secret: "must-not-cross",
+          credentialId: "must-not-cross",
+        },
+      ],
+    });
+
+    expect(parsed).toEqual({ links: [readable, damaged], nextCursor: "next-page" });
+    for (const row of parsed.links) {
+      expect(row).not.toHaveProperty("url");
+      expect(row).not.toHaveProperty("secret");
+      expect(row).not.toHaveProperty("credential");
+      expect(row).not.toHaveProperty("credentialId");
+    }
+    expect(
+      ListRelayShareLinksPayload.parse({
+        workspaceId: "workspace-1",
+        cursor: "next-page",
+      }),
+    ).toEqual({ workspaceId: "workspace-1", cursor: "next-page" });
+    expect(
+      ListRelayShareLinksPayload.safeParse({
+        workspaceId: "workspace-1",
+        cursor: "x".repeat(1_025),
+      }).success,
+    ).toBe(false);
+    expect(
+      ListRelayShareLinksResult.safeParse({
+        links: Array.from({ length: 1_001 }, () => readable),
+      }).success,
+    ).toBe(false);
+    expect(
+      ListRelayShareLinksResult.safeParse({
+        links: [],
+        nextCursor: "x".repeat(1_025),
+      }).success,
+    ).toBe(false);
+  });
+
+  it("accepts exactly one file selector and no access choice on create", () => {
+    expect(
+      CreateRelayShareLinkPayload.safeParse({
+        workspaceId: "workspace-1",
+        paths: ["docs"],
+      }).success,
+    ).toBe(true);
+    expect(
+      CreateRelayShareLinkPayload.safeParse({
+        workspaceId: "workspace-1",
+        versionId: "version-1",
+      }).success,
+    ).toBe(true);
+    for (const payload of [
+      { workspaceId: "workspace-1" },
+      { workspaceId: "workspace-1", paths: ["docs"], versionId: "version-1" },
+      { workspaceId: "workspace-1", paths: ["docs"], access: "view" },
+    ]) {
+      expect(CreateRelayShareLinkPayload.safeParse(payload).success).toBe(false);
+    }
+  });
+
+  it("requires the exact expected-dependent array for reset and end", () => {
+    const payload = {
+      workspaceId: "workspace-1",
+      shareId: "share-1",
+      grantId: "grant-1",
+      expectedDependentGrantIds: [],
+    };
+    expect(RotateRelayShareLinkPayload.parse(payload)).toEqual(payload);
+    expect(RevokeRelayShareLinkPayload.parse(payload)).toEqual(payload);
+    for (const schema of [RotateRelayShareLinkPayload, RevokeRelayShareLinkPayload]) {
+      expect(
+        schema.safeParse({
+          workspaceId: "workspace-1",
+          shareId: "share-1",
+          grantId: "grant-1",
+        }).success,
+      ).toBe(false);
+      expect(
+        schema.safeParse({ ...payload, expectedDependentGrantIds: "grant-2" })
+          .success,
+      ).toBe(false);
+      expect(schema.safeParse({ ...payload, access: "view" }).success).toBe(false);
+    }
+  });
+
+  it("discriminates reset and end outcomes and rejects malformed projections", () => {
+    expect(
+      RotateRelayShareLinkResult.parse({
+        outcome: "rotated",
+        url: "https://share.example.test/s/#new-bearer",
+      }),
+    ).toEqual({
+      outcome: "rotated",
+      url: "https://share.example.test/s/#new-bearer",
+    });
+    for (const schema of [RotateRelayShareLinkResult, RevokeRelayShareLinkResult]) {
+      expect(
+        schema.parse({ outcome: "dependents-changed", dependents: readable.dependents }),
+      ).toEqual({ outcome: "dependents-changed", dependents: readable.dependents });
+      expect(
+        schema.safeParse({
+          outcome: "dependents-changed",
+          dependents: [{ ...readable.dependents[0], generation: 0 }],
+        }).success,
+      ).toBe(false);
+      expect(
+        schema.safeParse({
+          outcome: "dependents-changed",
+          dependents: [{ grantId: "dependent-1" }],
+        }).success,
+      ).toBe(false);
+    }
+    expect(RevokeRelayShareLinkResult.parse({ outcome: "ended" })).toEqual({
+      outcome: "ended",
+    });
+  });
+
+  it("allows a URL only on create and successful reset", () => {
+    expect(
+      CreateRelayShareLinkResult.parse({
+        shareId: "share-1",
+        grantId: "grant-1",
+        url: "https://share.example.test/s/#new-bearer",
+        secret: "stripped",
+      }),
+    ).toEqual({
+      shareId: "share-1",
+      grantId: "grant-1",
+      url: "https://share.example.test/s/#new-bearer",
+    });
+    expect(
+      RevokeRelayShareLinkResult.safeParse({
+        outcome: "ended",
+        url: "https://share.example.test/s/#must-not-cross",
+      }).success,
+    ).toBe(false);
+    expect(
+      RotateRelayShareLinkResult.safeParse({
+        outcome: "dependents-changed",
+        dependents: [],
+        url: "https://share.example.test/s/#must-not-cross",
+      }).success,
+    ).toBe(false);
+  });
+});
 
 describe("relay share listing IPC contract", () => {
   const selector = { paths: ["docs"], versionId: null };
@@ -166,6 +374,44 @@ describe("relay share listing IPC contract", () => {
       granted: [{ selector, ...grant }],
       received: [{ selector, ...grant }],
     });
+  });
+
+  it("keeps the 1,000-row inventory caps", () => {
+    const received = Array.from({ length: 1_000 }, (_, index) => ({
+      shareId: `share-received-${index}`,
+      granterEmail: "owner@example.test",
+      selector,
+      ...grant,
+      createdAtMs: 1,
+      shareCode: `dohc-share:share-received-${index}:https://relay.test`,
+    }));
+    const granted = Array.from({ length: 1_000 }, (_, index) => ({
+      shareId: `share-granted-${index}`,
+      workspaceId: "remote-1",
+      recipientUserId: "recipient-1",
+      recipientEmail: "recipient@example.test",
+      selector,
+      ...grant,
+      createdAtMs: 1,
+      revokedAtMs: null,
+      shareCode: `dohc-share:share-granted-${index}:https://relay.test`,
+    }));
+
+    expect(ListRelaySharesResult.safeParse({ granted, received }).success).toBe(
+      true,
+    );
+    expect(
+      ListRelaySharesResult.safeParse({
+        granted: [...granted, granted[0]],
+        received,
+      }).success,
+    ).toBe(false);
+    expect(
+      ListRelaySharesResult.safeParse({
+        granted,
+        received: [...received, received[0]],
+      }).success,
+    ).toBe(false);
   });
 
   it("keeps a damaged row listable when its raw access belongs to another selector kind", () => {
@@ -277,6 +523,65 @@ describe("relay share listing IPC contract", () => {
     expect(RelayShareGrantedRow.safeParse({ ...granted, ...grant, generation: 0 }).success).toBe(
       false,
     );
+  });
+});
+
+describe("exact received relay share IPC contract", () => {
+  const received = {
+    shareId: "share-exact",
+    granterEmail: "owner@example.test",
+    grantId: "grant-exact",
+    generation: 1,
+    createdAtMs: 1,
+    shareCode: "dohc-share:share-exact:https://relay.test",
+    selector: { paths: ["docs"], versionId: null },
+    access: "view" as const,
+  };
+
+  it("accepts one strict share id and an explicit missing result", () => {
+    expect(
+      GetRelayReceivedSharePayload.parse({ shareId: "share-exact" }),
+    ).toEqual({ shareId: "share-exact" });
+    expect(GetRelayReceivedShareResult.parse({ found: false })).toEqual({
+      found: false,
+    });
+
+    for (const payload of [
+      undefined,
+      {},
+      { shareId: "" },
+      { shareId: "x".repeat(201) },
+      { shareId: "share-exact", relayUrl: "https://attacker.test" },
+    ]) {
+      expect(GetRelayReceivedSharePayload.safeParse(payload).success).toBe(false);
+    }
+    expect(
+      GetRelayReceivedShareResult.safeParse({
+        found: false,
+        share: received,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("returns only the existing received-share schema", () => {
+    const parsed = GetRelayReceivedShareResult.parse({
+      found: true,
+      share: {
+        ...received,
+        workspaceId: "forbidden-owner-workspace",
+        recipientUserId: "forbidden-recipient-user",
+        recipientEmail: "forbidden-recipient@example.test",
+        url: "https://share.example.test/s/#forbidden-link",
+      },
+    });
+
+    expect(parsed).toEqual({ found: true, share: received });
+    expect(
+      GetRelayReceivedShareResult.safeParse({
+        found: true,
+        share: { ...received, shareCode: undefined },
+      }).success,
+    ).toBe(false);
   });
 });
 

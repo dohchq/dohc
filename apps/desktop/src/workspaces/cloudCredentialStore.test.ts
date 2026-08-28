@@ -70,6 +70,53 @@ describe("cloud credential store", () => {
     expect((await store.load())?.userId).toBe("usr_opaque-uuid");
   });
 
+  it("reads missing, empty, and 321-character emails as signed out but accepts 320", async () => {
+    const store = createCloudCredentialStore({ dir, cipher: fakeCipher });
+    const valid = {
+      serverUrl: credentials.serverUrl,
+      userId: credentials.userId,
+      version: 1,
+      token: `plain:${credentials.token}`,
+    };
+    for (const email of [undefined, "", "e".repeat(321)]) {
+      await writeFile(
+        credentialFile(),
+        JSON.stringify({
+          ...valid,
+          ...(email === undefined ? {} : { email }),
+        }),
+      );
+      await expect(store.load()).resolves.toBeNull();
+    }
+
+    const email = "e".repeat(320);
+    await writeFile(credentialFile(), JSON.stringify({ ...valid, email }));
+    await expect(store.load()).resolves.toEqual({ ...credentials, email });
+  });
+
+  it("refuses to save missing, empty, and 321-character emails but accepts 320", async () => {
+    const store = createCloudCredentialStore({ dir, cipher: fakeCipher });
+    const invalidCredentials = [
+      {
+        serverUrl: credentials.serverUrl,
+        userId: credentials.userId,
+        token: credentials.token,
+      } as CloudCredentials,
+      { ...credentials, email: "" },
+      { ...credentials, email: "e".repeat(321) },
+    ];
+    for (const invalid of invalidCredentials) {
+      await expect(store.save(invalid)).rejects.toThrow(
+        /serverUrl, email, userId, and token must be non-empty strings/u,
+      );
+    }
+    await expect(store.load()).resolves.toBeNull();
+
+    const email = "e".repeat(320);
+    await store.save({ ...credentials, email });
+    expect((await store.load())?.email).toBe(email);
+  });
+
   it("reads a pre-userId credential as logged-out", async () => {
     await writeFile(
       credentialFile(),

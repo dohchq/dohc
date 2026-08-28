@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { type IncomingMessage, request as httpRequest } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -21,11 +21,16 @@ const USER_ID = "sync-user";
 const TEST_SHUTDOWN_GRACE_PERIOD_MS = 250;
 const WITHIN_SHUTDOWN_GRACE_MS = 100;
 const FORCED_SHUTDOWN_TIMEOUT_MS = 2_000;
+const OUTPUT_BARRIER_MESSAGE_TYPE = "dohc-sync-relay-test-output-barrier";
+const OUTPUT_BARRIER_PREFIX = "SYNC_RELAY_TEST_OUTPUT_BARRIER=";
+const OUTPUT_BARRIER_TIMEOUT_MS = 10_000;
 
 interface RunningRelay {
   baseUrl: string;
   child: ChildProcess;
+  stdout: () => string;
   stderr: () => string;
+  settleOutput: () => Promise<string>;
 }
 
 let roots: string[] = [];
@@ -93,6 +98,16 @@ async function spawnRunningRelay(
         process.emit("SIGTERM");
         process.emit("SIGTERM");
       }
+      if (
+        typeof message === "object" &&
+        message !== null &&
+        message.type === ${JSON.stringify(OUTPUT_BARRIER_MESSAGE_TYPE)} &&
+        typeof message.id === "string"
+      ) {
+        const marker = "\\n" + ${JSON.stringify(OUTPUT_BARRIER_PREFIX)} + message.id + "\\n";
+        process.stdout.write(marker);
+        process.stderr.write(marker);
+      }
     }); await import(${JSON.stringify(mainUrl.href)});`,
   ];
   const child = spawn(process.execPath, childArguments, {
@@ -103,6 +118,7 @@ async function spawnRunningRelay(
       SYNC_RELAY_TEST_AUTH: "1",
       SYNC_RELAY_PORT: "0",
       SYNC_RELAY_DB_PATH: dbPath,
+      DOHC_RELAY_SHARE_WEB_ORIGIN: "http://127.0.0.1:48123",
       FORCE_COLOR: "0",
       ...envOverrides,
     },
@@ -119,6 +135,8 @@ async function spawnRunningRelay(
   return await new Promise((resolve, reject) => {
     let stdout = "";
     let stderr = "";
+    const outputBarrierFailure = (reason: string): Error =>
+      new Error(`${reason}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
     const timeout = setTimeout(() => {
       reject(new Error(`sync relay did not report a port\nstdout:\n${stdout}\nstderr:\n${stderr}`));
     }, 45_000); // tsx startup under load, not a hang — see presence.integration.test.ts (#372)
@@ -130,7 +148,89 @@ async function spawnRunningRelay(
         resolve({
           baseUrl: `http://${match[1]}:${match[2]}`,
           child,
+          stdout: () => stdout,
           stderr: () => stderr,
+          settleOutput: async () => {
+            const barrierId = randomUUID();
+            const marker = `${OUTPUT_BARRIER_PREFIX}${barrierId}`;
+            await new Promise<void>((resolveBarrier, rejectBarrier) => {
+              let settled = false;
+              const cleanup = (): void => {
+                clearTimeout(timeout);
+                childStdout.off("data", checkForMarkers);
+                childStderr.off("data", checkForMarkers);
+                child.off("close", onClose);
+                child.off("disconnect", onDisconnect);
+              };
+              const finish = (error?: Error): void => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                if (error) rejectBarrier(error);
+                else resolveBarrier();
+              };
+              const checkForMarkers = (): void => {
+                if (stdout.includes(marker) && stderr.includes(marker)) finish();
+              };
+              const onClose = (code: number | null, signal: NodeJS.Signals | null): void => {
+                finish(
+                  outputBarrierFailure(
+                    `sync relay closed before settling output barrier: code=${code} signal=${signal}`,
+                  ),
+                );
+              };
+              const onDisconnect = (): void => {
+                finish(
+                  outputBarrierFailure(
+                    "sync relay disconnected before settling output barrier",
+                  ),
+                );
+              };
+              const timeout = setTimeout(() => {
+                finish(
+                  outputBarrierFailure(
+                    `sync relay output barrier timed out: stdout=${stdout.includes(marker)} stderr=${stderr.includes(marker)}`,
+                  ),
+                );
+              }, OUTPUT_BARRIER_TIMEOUT_MS);
+
+              childStdout.on("data", checkForMarkers);
+              childStderr.on("data", checkForMarkers);
+              child.once("close", onClose);
+              child.once("disconnect", onDisconnect);
+              if (!child.connected) {
+                finish(
+                  outputBarrierFailure(
+                    "sync relay IPC was disconnected before settling output",
+                  ),
+                );
+                return;
+              }
+              try {
+                child.send(
+                  { type: OUTPUT_BARRIER_MESSAGE_TYPE, id: barrierId },
+                  (error) => {
+                    if (error) {
+                      finish(
+                        outputBarrierFailure(
+                          `sync relay output barrier send failed: ${error.message}`,
+                        ),
+                      );
+                      return;
+                    }
+                    checkForMarkers();
+                  },
+                );
+              } catch (error) {
+                finish(
+                  outputBarrierFailure(
+                    `sync relay output barrier send failed: ${error instanceof Error ? error.message : String(error)}`,
+                  ),
+                );
+              }
+            });
+            return marker;
+          },
         });
       }
     });
@@ -183,8 +283,8 @@ async function seedExchangeLink(baseUrl: string, workspaceId: string): Promise<s
     { access: "view" },
   );
   expect(linkResponse.status).toBe(200);
-  const link = (await linkResponse.json()) as { secret: string };
-  return link.secret;
+  const link = (await linkResponse.json()) as { url: string };
+  return new URL(link.url).hash.slice(1);
 }
 
 function exchangeLink(
@@ -727,7 +827,8 @@ describe("sync relay main process", () => {
       { access: "view" },
     );
     expect(linkResponse.status).toBe(200);
-    const link = (await linkResponse.json()) as { secret: string };
+    const link = (await linkResponse.json()) as { url: string };
+    const linkSecret = new URL(link.url).hash.slice(1);
 
     const missing = await fetch(`${baseUrl}/sync/link-exchange`, {
       method: "POST",
@@ -740,14 +841,14 @@ describe("sync relay main process", () => {
     const missingWorkloadIdentity = await fetch(`${baseUrl}/sync/link-exchange`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ secret: link.secret }),
+      body: JSON.stringify({ secret: linkSecret }),
     });
     expect(missingWorkloadIdentity.status).toBe(404);
     expect(await missingWorkloadIdentity.text()).toBe(missingBody);
 
-    const emptyPaddingBody = JSON.stringify({ secret: link.secret, padding: "" });
+    const emptyPaddingBody = JSON.stringify({ secret: linkSecret, padding: "" });
     const oversizedBody = JSON.stringify({
-      secret: link.secret,
+      secret: linkSecret,
       padding: "x".repeat(4097 - Buffer.byteLength(emptyPaddingBody)),
     });
     expect(Buffer.byteLength(oversizedBody)).toBe(4097);
@@ -765,7 +866,7 @@ describe("sync relay main process", () => {
         "content-type": "application/json",
         "x-dohc-relay-exchange-key": "integration-relay-exchange-key-at-least-32",
       },
-      body: JSON.stringify({ secret: link.secret }),
+      body: JSON.stringify({ secret: linkSecret }),
     });
     expect(small.status).toBe(200);
   });
@@ -863,6 +964,42 @@ describe("sync relay main process", () => {
       secondClientStatus: 404,
     });
   });
+
+  it("emits a canonical public URL without writing its bearer to process output", async (context) => {
+    const relayRoot = await tempRoot("share-web-origin-url");
+    let relay: RunningRelay;
+    try {
+      relay = await spawnRunningRelay(join(relayRoot, "relay.sqlite"), {
+        DOHC_RELAY_LINK_KEY: "integration-link-key-with-at-least-thirty-two-bytes",
+        DOHC_RELAY_SHARE_WEB_ORIGIN: "http://127.0.0.1:48123/",
+      });
+    } catch (error) {
+      if (error instanceof ListenPermissionError) {
+        context.skip();
+        return;
+      }
+      throw error;
+    }
+
+    const workspaceId = "workspace-canonical-share-url";
+    expect((await postJson(relay.baseUrl, "/sync/workspaces", { workspaceId })).status).toBe(200);
+    const response = await postJson(relay.baseUrl, `/sync/${workspaceId}/shares/links`, {
+      paths: ["docs"],
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body).not.toHaveProperty("secret");
+    expect(body.url).toMatch(/^http:\/\/127\.0\.0\.1:48123\/s\/#[-A-Za-z0-9_]{43}$/u);
+    const completeUrl = String(body.url);
+    const fragment = new URL(completeUrl).hash.slice(1);
+    const outputBarrierMarker = await relay.settleOutput();
+    expect(relay.stdout()).toContain(outputBarrierMarker);
+    expect(relay.stderr()).toContain(outputBarrierMarker);
+    expect(relay.stdout()).not.toContain(completeUrl);
+    expect(relay.stdout()).not.toContain(fragment);
+    expect(relay.stderr()).not.toContain(completeUrl);
+    expect(relay.stderr()).not.toContain(fragment);
+  });
 });
 
 // Spawn main.ts expecting it to refuse to start; resolves with the exit code
@@ -930,6 +1067,149 @@ function sendDoubleTerminationSignal(child: ChildProcess): void {
 }
 
 describe("sync relay startup guards", () => {
+  const absoluteShareWebOriginReason =
+    "FATAL: DOHC_RELAY_SHARE_WEB_ORIGIN must be an absolute HTTP(S) origin.";
+  const invalidShareWebOriginShapeReason =
+    "FATAL: DOHC_RELAY_SHARE_WEB_ORIGIN must be an origin without credentials, a path, a query, or a fragment.";
+  const productionHttpsShareWebOriginReason =
+    "FATAL: DOHC_RELAY_SHARE_WEB_ORIGIN must use HTTPS outside development/test.";
+  const productionEnv = {
+    NODE_ENV: "production",
+    SYNC_RELAY_TEST_AUTH: undefined,
+    POSTGRES_URL: "postgres://unused:unused@127.0.0.1:1/unused",
+    DOHC_RELAY_LINK_KEY: "integration-link-key-with-at-least-thirty-two-bytes",
+    DOHC_RELAY_EXCHANGE_KEY: "integration-relay-exchange-key-at-least-32",
+    DOHC_RELAY_SHARE_WEB_ORIGIN: "https://share.example.test",
+    BETTER_AUTH_SECRET: "x".repeat(32),
+    SYNC_RELAY_PORT: "0",
+    FORCE_COLOR: "0",
+  } as const;
+
+  it("refuses to start in production without a public share-web origin", async () => {
+    const dbPath = join(await tempRoot("no-share-web-origin"), "relay.sqlite");
+    const { code, stderr } = await spawnRelayExpectExit({
+      ...productionEnv,
+      DOHC_RELAY_SHARE_WEB_ORIGIN: undefined,
+      SYNC_RELAY_DB_PATH: dbPath,
+    });
+    expect(code).toBe(1);
+    expect(stderr).toContain("DOHC_RELAY_SHARE_WEB_ORIGIN must be set");
+  });
+
+  it.each([
+    ["relative", "share.example.test", absoluteShareWebOriginReason],
+    [
+      "credentials",
+      "https://user:pass@share.example.test",
+      invalidShareWebOriginShapeReason,
+    ],
+    [
+      "empty credentials",
+      "https://@share.example.test",
+      invalidShareWebOriginShapeReason,
+    ],
+    ["path", "https://share.example.test/public", invalidShareWebOriginShapeReason],
+    [
+      "query",
+      "https://share.example.test/?tenant=one",
+      invalidShareWebOriginShapeReason,
+    ],
+    ["empty query", "https://share.example.test/?", invalidShareWebOriginShapeReason],
+    [
+      "fragment",
+      "https://share.example.test/#fragment",
+      invalidShareWebOriginShapeReason,
+    ],
+    ["empty fragment", "https://share.example.test/#", invalidShareWebOriginShapeReason],
+    ["non-HTTPS", "http://share.example.test", productionHttpsShareWebOriginReason],
+  ])(
+    "refuses a %s public share-web origin in production",
+    async (label, origin, expectedReason) => {
+      const dbPath = join(await tempRoot(`bad-share-web-origin-${label}`), "relay.sqlite");
+      const { code, stderr } = await spawnRelayExpectExit({
+        ...productionEnv,
+        DOHC_RELAY_SHARE_WEB_ORIGIN: origin,
+        SYNC_RELAY_DB_PATH: dbPath,
+      });
+      expect(code).toBe(1);
+      expect(stderr).toBe(`${expectedReason}\n`);
+    },
+  );
+
+  it.each(["test", "development"] as const)(
+    "refuses a non-loopback HTTP DNS public origin in %s",
+    async (nodeEnv) => {
+      const dbPath = join(
+        await tempRoot(`non-loopback-dns-share-web-origin-${nodeEnv}`),
+        "relay.sqlite",
+      );
+      const { code, stderr } = await spawnRelayExpectExit({
+        NODE_ENV: nodeEnv,
+        SYNC_RELAY_TEST_AUTH: "1",
+        SYNC_RELAY_PORT: "0",
+        SYNC_RELAY_DB_PATH: dbPath,
+        DOHC_RELAY_SHARE_WEB_ORIGIN: "http://share.example.test:48123",
+        FORCE_COLOR: "0",
+      });
+      expect(code).toBe(1);
+      expect(stderr).toContain("FATAL: DOHC_RELAY_SHARE_WEB_ORIGIN");
+    },
+  );
+
+  describe.each([
+    ["localhost", "test", "http://localhost:48123"],
+    ["localhost subdomain", "test", "http://viewer.localhost:48123"],
+    ["IPv4 loopback", "test", "http://127.0.0.1:48123"],
+    ["another IPv4 loopback", "test", "http://127.42.0.9:48123"],
+    ["canonicalized IPv4 loopback", "test", "http://127.1:48123"],
+    ["IPv6 loopback", "test", "http://[::1]:48123"],
+    ["IPv4 loopback", "development", "http://127.0.0.1:48123/"],
+  ] as const)(
+    "permits an HTTP %s public origin in %s",
+    (label, nodeEnv, origin) => {
+      it("starts", async (context) => {
+        const relayRoot = await tempRoot(
+          `loopback-share-web-origin-${nodeEnv}-${label.replaceAll(" ", "-")}`,
+        );
+        try {
+          expect(
+            await spawnRelay(join(relayRoot, "relay.sqlite"), {
+              NODE_ENV: nodeEnv,
+              DOHC_RELAY_SHARE_WEB_ORIGIN: origin,
+            }),
+          ).toMatch(/^http:\/\//u);
+        } catch (error) {
+          if (error instanceof ListenPermissionError) {
+            context.skip();
+            return;
+          }
+          throw error;
+        }
+      });
+    },
+  );
+
+  it.each([
+    ["private-network IPv4", "http://192.168.1.10:48123"],
+    ["wildcard IPv4", "http://0.0.0.0:48123"],
+    ["non-loopback IPv6", "http://[2001:db8::1]:48123"],
+  ] as const)("refuses an HTTP %s public origin in test", async (label, origin) => {
+    const dbPath = join(
+      await tempRoot(`non-loopback-share-web-origin-${label.replaceAll(" ", "-")}`),
+      "relay.sqlite",
+    );
+    const { code, stderr } = await spawnRelayExpectExit({
+      NODE_ENV: "test",
+      SYNC_RELAY_TEST_AUTH: "1",
+      SYNC_RELAY_PORT: "0",
+      SYNC_RELAY_DB_PATH: dbPath,
+      DOHC_RELAY_SHARE_WEB_ORIGIN: origin,
+      FORCE_COLOR: "0",
+    });
+    expect(code).toBe(1);
+    expect(stderr).toContain("FATAL: DOHC_RELAY_SHARE_WEB_ORIGIN");
+  });
+
   it("refuses to start when SYNC_RELAY_PORT is not a number", async () => {
     const dbPath = join(await tempRoot("bad-port"), "relay.sqlite");
     const { code, stderr } = await spawnRelayExpectExit({
@@ -963,6 +1243,7 @@ describe("sync relay startup guards", () => {
       NODE_ENV: "production",
       SYNC_RELAY_TEST_AUTH: undefined,
       POSTGRES_URL: undefined,
+      DOHC_RELAY_SHARE_WEB_ORIGIN: "https://share.example.test",
       SYNC_RELAY_PORT: "0",
       // A valid-length secret so the guard under test is the one that fires.
       BETTER_AUTH_SECRET: "x".repeat(32),
@@ -981,6 +1262,7 @@ describe("sync relay startup guards", () => {
       POSTGRES_URL: "postgres://unused:unused@127.0.0.1:1/unused",
       DOHC_RELAY_LINK_KEY: undefined,
       DOHC_RELAY_EXCHANGE_KEY: "integration-relay-exchange-key-at-least-32",
+      DOHC_RELAY_SHARE_WEB_ORIGIN: "https://share.example.test",
       SYNC_RELAY_PORT: "0",
       BETTER_AUTH_SECRET: "x".repeat(32),
       SYNC_RELAY_DB_PATH: dbPath,
@@ -998,6 +1280,7 @@ describe("sync relay startup guards", () => {
       POSTGRES_URL: "postgres://unused:unused@127.0.0.1:1/unused",
       DOHC_RELAY_LINK_KEY: "integration-link-key-with-at-least-thirty-two-bytes",
       DOHC_RELAY_EXCHANGE_KEY: undefined,
+      DOHC_RELAY_SHARE_WEB_ORIGIN: "https://share.example.test",
       SYNC_RELAY_PORT: "0",
       BETTER_AUTH_SECRET: "x".repeat(32),
       SYNC_RELAY_DB_PATH: dbPath,

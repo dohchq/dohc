@@ -13,6 +13,9 @@ import type {
 } from "./storage";
 
 export const LINK_BEARER_BYTES = 32;
+export const LINK_HANDOFF_CODE_BYTES = 32;
+export const LINK_HANDOFF_CODE_TTL_MS = 5 * 60 * 1_000;
+export const LINK_HANDOFF_CODES_PER_GRANT_LIMIT = 32;
 export const LINK_SESSION_TTL_MS = 15 * 60 * 1_000;
 export const LINK_SESSION_RENEWAL_GRACE_MS = 7 * 24 * 60 * 60 * 1_000;
 export const LINK_SESSIONS_PER_GRANT_LIMIT = 10_000;
@@ -37,8 +40,19 @@ export function mintLinkBearer(random: typeof randomBytes = randomBytes): string
   return random(LINK_BEARER_BYTES).toString("base64url");
 }
 
+export function mintLinkHandoffCode(random: typeof randomBytes = randomBytes): string {
+  return random(LINK_HANDOFF_CODE_BYTES).toString("base64url");
+}
+
 export function hashLinkBearer(secret: string, key: BinaryLike): string {
   return createHmac("sha256", key).update(secret).digest("base64url");
+}
+
+export function hashLinkHandoffCode(code: string, key: BinaryLike): string {
+  return createHmac("sha256", key)
+    .update("link-handoff\n")
+    .update(code)
+    .digest("base64url");
 }
 
 export function constantTimeHashEqual(

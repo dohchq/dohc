@@ -5,6 +5,7 @@
   { "code": "blob_missing", "status": 422 },
   { "code": "blob_not_found", "status": 404 },
   { "code": "conflict", "status": 409 },
+  { "code": "dependents_changed", "status": 409 },
   { "code": "empty_selector", "status": 400 },
   { "code": "epoch_superseded", "status": 409 },
   { "code": "identity_not_recognized", "status": 409 },

@@ -526,7 +526,9 @@ function makeBridge(
       shareCode: "dohc-share:relay-share-1:http://relay.test",
       recipientEmail: "friend@dohc.test",
     })),
-    listRelayShares: vi.fn(async () => ({ granted: [] })),
+    listRelayShares: vi.fn(async () => ({ granted: [], received: [] })),
+    retryShareHandoff: vi.fn(async () => undefined),
+    dismissShareHandoff: vi.fn(async () => undefined),
     revokeRelayShare: vi.fn(async () => undefined),
     // Share changes (#646 PR3a). Typed to the contract, not to these empty
     // defaults: the review and submit tests drive real rows through them.
@@ -573,6 +575,10 @@ function makeBridge(
     withdrawShareChanges: vi.fn(
       async (): Promise<WithdrawShareChangesResult> => ({ state: "withdrawn" }),
     ),
+    pickWorkspaceRoot: vi.fn(async () => null),
+    mountShare: vi.fn(async () => {
+      throw new Error("not used in shell tests");
+    }),
     openSharedView: vi.fn(async () => {
       throw new Error("not used in shell tests");
     }),
@@ -785,6 +791,47 @@ function shellBootstrapProps(bridge: ReturnType<typeof makeBridge>) {
       (await bridge.getWorkspaceRegistry()).workspaces as Workspace[],
   };
 }
+
+describe("workspace share handoff placement", () => {
+  it("uses the existing overlay and dismisses it without a payload or mutation", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const onDismissShareHandoff = vi.fn();
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(
+      <DesktopWorkspaceShell
+        workspace={WORKSPACE}
+        workspaces={[WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
+        onSwitchWorkspace={() => {}}
+        handoffStatus={{ status: "failed-network", statusId: "status-test" }}
+        onDismissShareHandoff={onDismissShareHandoff}
+        onShareHandoffOpened={() => {}}
+      />,
+    );
+
+    expect(
+      await screen.findByText(
+        "dohc couldn't reach dohc Cloud. Check your connection, then choose Try again.",
+      ),
+    ).toBeTruthy();
+    await userEvent.setup().click(
+      screen.getByRole("button", { name: "Try again" }),
+    );
+    expect(bridge.retryShareHandoff).toHaveBeenCalledOnce();
+    expect(bridge.retryShareHandoff.mock.calls[0]).toEqual([]);
+    expect(bridge.mountShare).not.toHaveBeenCalled();
+    expect(bridge.openSharedView).not.toHaveBeenCalled();
+    expect(bridge.pickWorkspaceRoot).not.toHaveBeenCalled();
+    expect(bridge.createWorkspaceFile).not.toHaveBeenCalled();
+    expect(bridge.createWorkspaceFolder).not.toHaveBeenCalled();
+    expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onDismissShareHandoff).toHaveBeenCalledOnce();
+    expect(bridge.mountShare).not.toHaveBeenCalled();
+    expect(bridge.openSharedView).not.toHaveBeenCalled();
+  });
+});
 
 describe("workspace switch performance timeline", () => {
   it("reuses the bootstrap agent-status read for initial history", async () => {

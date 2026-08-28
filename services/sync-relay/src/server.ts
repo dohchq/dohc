@@ -2,7 +2,6 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   isChatShareAccessValue,
   isShareAccessValue,
-  shareAccessRank,
   type LinkExchangeResult,
 } from "@dohc/security-contract";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
@@ -12,6 +11,7 @@ import { stableJsonStringify } from "./canonicalJson";
 import {
   constantTimeHashEqual,
   hashLinkBearer,
+  hashLinkHandoffCode,
   hashRelayExchangeKey,
   LinkExchangeRateLimiter,
   LinkReadRateLimiter,
@@ -19,11 +19,13 @@ import {
   LINK_GRANT_LOG_READ_REFILL_PER_SECOND,
   LINK_GRANT_READ_BUCKET_CAPACITY,
   LINK_GRANT_READ_REFILL_PER_SECOND,
+  LINK_HANDOFF_CODE_TTL_MS,
   LINK_LOG_READ_BUCKET_CAPACITY,
   LINK_LOG_READ_REFILL_PER_SECOND,
   LINK_SESSION_RENEWAL_GRACE_MS,
   LINK_SESSION_TTL_MS,
   mintLinkBearer,
+  mintLinkHandoffCode,
   validateLinkCapability,
   verifyRelayExchangeKey,
 } from "./linkSecurity";
@@ -64,6 +66,9 @@ import {
   type ShareProposalOpRow,
   type SyncRelayLogInput,
   type SyncRelayLogRow,
+  type SyncRelayLinkInventoryCursor,
+  type SyncRelayLinkInventoryRow,
+  type SyncRelayShareGrantRow,
   type SyncRelayShareWithGrantRow,
   type SyncRelayStorage,
 } from "./storage";
@@ -82,6 +87,21 @@ export { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 export { validateLinkCapability } from "./linkSecurity";
 
 export type SyncRelayHandler = (request: Request) => Promise<Response>;
+
+function composePublicLinkUrl(shareWebOrigin: string, secret: string): string {
+  return `${shareWebOrigin}/s/#${secret}`;
+}
+
+function validatePhase2LinkAccess(value: unknown): "view" {
+  const validation = validateFileShareAccess(value);
+  if (!validation.ok) {
+    throw relayHttpError(RELAY_ERRORS[validation.code], validation.message);
+  }
+  if (validation.access !== "view") {
+    throw relayHttpError(RELAY_ERRORS.invalid_access, 'access must be "view"');
+  }
+  return validation.access;
+}
 
 export interface CreateSyncRelayHandlerOptions {
   storage: SyncRelayStorage;
@@ -108,19 +128,24 @@ export interface CreateSyncRelayHandlerOptions {
   // Relay-instance HMAC key. When absent, every link route refuses without
   // touching storage. main.ts requires it outside development and test.
   linkKey?: string | Uint8Array;
+  shareWebOrigin?: string;
   relayExchangeKey?: string;
   linkExchangeRateLimiter?: LinkExchangeRateLimiter;
+  linkRedeemRateLimiter?: LinkReadRateLimiter;
   linkReadRateLimiter?: LinkReadRateLimiter;
   linkGrantReadRateLimiter?: LinkReadRateLimiter;
   linkLogReadRateLimiter?: LinkReadRateLimiter;
   linkGrantLogReadRateLimiter?: LinkReadRateLimiter;
   linkCapabilityReadFallbackPageSize?: number;
   newLinkBearer?: () => string;
+  newLinkHandoffCode?: () => string;
 }
 
 type SyncRelayRoute =
   | { route: "link-exchange" }
   | { route: "link-refresh" }
+  | { route: "link-handoff" }
+  | { route: "link-redeem" }
   | { route: "link-share" }
   | { route: "link-log" }
   | { route: "link-blob"; sha256: string }
@@ -134,6 +159,7 @@ type SyncRelayRoute =
   | { route: "log"; workspaceId: string }
   | { route: "log-coordinate"; workspaceId: string; originId: string; originSeq: number }
   | { route: "shares-create"; workspaceId: string }
+  | { route: "share-link-create-atomic"; workspaceId: string }
   | { route: "share-link-create"; workspaceId: string; shareId: string }
   | { route: "shares-list" }
   | { route: "share"; shareId: string }
@@ -220,6 +246,7 @@ const ACCOUNTLESS_FILE_REPLAY_OP_KINDS = new Set([
 const FILE_FRESHNESS_OP_KINDS = new Set(["moment.append", "version.create"]);
 const MAX_EMAIL_CHARS = 320;
 const MAX_SHARE_ID_CHARS = 128;
+const LINK_INVENTORY_CURSOR_MAX_CHARS = 1_024;
 // #646 PR3a. A submit's idempotency key is the client's own string, not a
 // share id; it takes the same length because both are one opaque identifier,
 // and its own name so the bound says what it bounds.
@@ -303,8 +330,10 @@ export function createSyncRelayHandler({
   newId = () => randomUUID(),
   presence = new PresenceHub(),
   linkKey,
+  shareWebOrigin,
   relayExchangeKey,
   linkExchangeRateLimiter = new LinkExchangeRateLimiter(),
+  linkRedeemRateLimiter = new LinkReadRateLimiter(),
   linkReadRateLimiter = new LinkReadRateLimiter(),
   linkGrantReadRateLimiter = new LinkReadRateLimiter(
     LINK_GRANT_READ_BUCKET_CAPACITY,
@@ -320,6 +349,7 @@ export function createSyncRelayHandler({
   ),
   linkCapabilityReadFallbackPageSize = MAX_LOG_PAGE_SIZE,
   newLinkBearer = () => mintLinkBearer(),
+  newLinkHandoffCode = () => mintLinkHandoffCode(),
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler {
   const relayExchangeKeyHash =
     relayExchangeKey === undefined ? undefined : hashRelayExchangeKey(relayExchangeKey);
@@ -673,6 +703,13 @@ export function createSyncRelayHandler({
     return { share, grant };
   }
 
+  function requireShareWorkspace(
+    share: { workspaceId: string },
+    workspaceId: string,
+  ): void {
+    if (share.workspaceId !== workspaceId) throw notFound();
+  }
+
   function shareActionGuard(
     shareId: string,
     actorUserId: string,
@@ -771,6 +808,77 @@ export function createSyncRelayHandler({
     revokedAtMs: grant.revokedAtMs,
     parentGrantId: grant.parentGrantId,
   });
+
+  const dependentGrantSummary = async (grant: {
+    grantId: string;
+    principalUserId: string | null;
+    access: string;
+    generation: number;
+    createdAtMs: number;
+  }): Promise<Record<string, unknown>> => {
+    let recipientEmail: string | null = null;
+    if (lookupUserEmail && grant.principalUserId) {
+      try {
+        recipientEmail = await lookupUserEmail(grant.principalUserId);
+      } catch {
+        recipientEmail = null;
+      }
+    }
+    return {
+      grantId: grant.grantId,
+      recipientUserId: grant.principalUserId,
+      recipientEmail,
+      access: grant.access,
+      generation: grant.generation,
+      createdAtMs: grant.createdAtMs,
+    };
+  };
+
+  const linkInventorySummary = async (row: SyncRelayLinkInventoryRow) => {
+    const { share, grant } = row;
+    const storedSelector = parseStoredAnyShareSelectorJson(share.selectorJson);
+    const selector =
+      storedSelector &&
+      ("kind" in storedSelector
+        ? isChatShareAccessValue(grant.access)
+        : isShareAccessValue(grant.access))
+        ? storedSelector
+        : null;
+    return {
+      shareId: share.shareId,
+      grantId: grant.grantId,
+      selector,
+      ...(selector
+        ? {}
+        : { damaged: true as const, ...storedSelectorKind(share.selectorJson) }),
+      access: grant.access,
+      generation: grant.generation,
+      status: grant.status,
+      createdAtMs: grant.createdAtMs,
+      revokedAtMs: grant.revokedAtMs,
+      lastUsedAtMs: row.lastUsedAtMs,
+      urlIssuedAtMs: row.urlIssuedAtMs,
+      dependents: await Promise.all(row.dependents.map(dependentGrantSummary)),
+    };
+  };
+
+  const dependentSetConflict = async (
+    dependents: SyncRelayShareGrantRow[],
+    workspaceId: string,
+    actorUserId: string,
+  ): Promise<Response> => {
+    const projected = await Promise.all(dependents.map(dependentGrantSummary));
+    if (!storage.workspaceIsOwnedBy(workspaceId, actorUserId)) throw notFound();
+    return jsonResponse(
+      {
+        ok: false,
+        error: "active dependent grants changed",
+        code: RELAY_ERRORS.dependents_changed.code,
+        dependents: projected,
+      },
+      RELAY_ERRORS.dependents_changed.status,
+    );
+  };
 
   const matchRefusedOutwardMove = (
     selector: AnyShareSelector,
@@ -1405,6 +1513,123 @@ export function createSyncRelayHandler({
     return jsonResponse({ ok: true, ...refresh });
   };
 
+  const respondToLinkHandoff = (request: Request): Response => {
+    const refused = (): Response => errorResponse(notFound());
+    if (!linkKey || relayExchangeKeyHash === undefined) return refused();
+    if (!hasValidRelayExchangeKey(request)) return refused();
+    if (request.body !== null) return refused();
+    try {
+      const { capabilityToken, capability } = requireLinkRead(
+        request,
+        linkReadRateLimiter,
+        linkGrantReadRateLimiter,
+      );
+      const code = newLinkHandoffCode();
+      if (!/^[A-Za-z0-9_-]{43}$/u.test(code)) return refused();
+      const mintedAtMs = nowMs();
+      const expiresAtMs = mintedAtMs + LINK_HANDOFF_CODE_TTL_MS;
+      const minted = storage.mintLinkHandoffCode({
+        code: {
+          codeId: newId(),
+          codeHash: hashLinkHandoffCode(code, linkKey),
+          grantId: capability.grantId,
+          generation: capability.generation,
+          mintedAtMs,
+          expiresAtMs,
+        },
+        guard: () => {
+          try {
+            const fresh = validateLinkCapability({
+              storage,
+              capabilityToken,
+              linkKey,
+              nowMs: nowMs(),
+            });
+            return (
+              fresh !== null &&
+              fresh.shareId === capability.shareId &&
+              fresh.grantId === capability.grantId &&
+              fresh.generation === capability.generation &&
+              fresh.access === capability.access &&
+              fresh.access === "view"
+            );
+          } catch {
+            return false;
+          }
+        },
+      });
+      if (!minted) return refused();
+      return jsonResponse({ ok: true, code, expiresAtMs });
+    } catch (error) {
+      if (
+        error instanceof HttpError &&
+        error.code !== RELAY_ERRORS.link_read_rate_limited.code
+      ) {
+        return refused();
+      }
+      throw error;
+    }
+  };
+
+  const respondToLinkRedeem = async (
+    request: Request,
+    principalUserId: string,
+  ): Promise<Response> => {
+    const refused = (): Response => errorResponse(notFound());
+    if (!linkKey) return refused();
+    let code = "";
+    try {
+      const input = await readJsonObject(request);
+      if (
+        Object.keys(input).length !== 1 ||
+        typeof input.code !== "string" ||
+        !/^[A-Za-z0-9_-]{43}$/u.test(input.code)
+      ) {
+        return refused();
+      }
+      code = input.code;
+    } catch {
+      return refused();
+    }
+
+    const admittedAtMs = nowMs();
+    if (!linkRedeemRateLimiter.allow(principalUserId, admittedAtMs)) {
+      throw linkReadRateLimited();
+    }
+    const codeHash = hashLinkHandoffCode(code, linkKey);
+    if (!storage.hasLinkHandoffCode(codeHash)) return refused();
+
+    const result = storage.redeemLinkHandoffCode({
+      codeHash,
+      principalUserId,
+      redeemedAtMs: admittedAtMs,
+      mintGrantId: newGrantId,
+      guard: (storedCode) => {
+        try {
+          const authorized = authorizeLinkShareAction({
+            storage,
+            grantId: storedCode.grantId,
+            action: "read",
+          });
+          return (
+            authorized.ok &&
+            authorized.grant.grantId === storedCode.grantId &&
+            authorized.grant.access === "view"
+          );
+        } catch {
+          return false;
+        }
+      },
+    });
+    if (!result.ok) return refused();
+    return jsonResponse({
+      ok: true,
+      shareId: result.shareId,
+      grantId: result.grant.grantId,
+      access: result.grant.access,
+    });
+  };
+
   return async (request) => {
     try {
       const route = parseRoute(request);
@@ -1415,6 +1640,15 @@ export function createSyncRelayHandler({
       if (route.route === "link-refresh") {
         if (request.method !== "POST") throw methodNotAllowed();
         return respondToLinkRefresh(request);
+      }
+      if (route.route === "link-handoff") {
+        if (request.method !== "POST") throw methodNotAllowed();
+        return respondToLinkHandoff(request);
+      }
+      if (route.route === "link-redeem") {
+        if (request.method !== "POST") throw methodNotAllowed();
+        const actor = await resolveActor(request, "");
+        return await respondToLinkRedeem(request, actor.userId);
       }
       if (
         route.route === "link-share" ||
@@ -1493,6 +1727,15 @@ export function createSyncRelayHandler({
         );
       }
       const actor = await resolveActor(request, "workspaceId" in route ? route.workspaceId : "");
+      if (
+        request.method === "POST" &&
+        (!linkKey || !shareWebOrigin) &&
+        (route.route === "share-link-create-atomic" ||
+          route.route === "share-link-create" ||
+          route.route === "share-link-rotate")
+      ) {
+        throw notFound();
+      }
 
       if (route.route === "workspaces" && request.method === "POST") {
         const input = await readJsonObject(request);
@@ -1576,23 +1819,53 @@ export function createSyncRelayHandler({
       if (route.route === "share") throw methodNotAllowed();
 
       if (route.route === "share-link-rotate" && request.method === "POST") {
+        const input = await readJsonObject(request);
+        const workspaceId = parseWorkspaceId(input.workspaceId);
         const { share, grant } = requireOwnedLinkGrant(
           route.shareId,
           route.grantId,
           actor,
         );
-        const secret = newLinkBearer();
-        if (!linkKey) throw notFound();
+        requireShareWorkspace(share, workspaceId);
+        const expectedDependentGrantIds = parseExpectedDependentGrantIds(input, [
+          "workspaceId",
+          "expectedDependentGrantIds",
+        ]);
+        let secret: string | null = null;
         const result = storage.rotateLinkGrant({
           shareId: share.shareId,
           grantId: grant.grantId,
-          credentialId: newId(),
-          secretHash: hashLinkBearer(secret, linkKey),
           rotatedAtMs: nowMs(),
+          expectedDependentGrantIds,
+          guard: () => {
+            const current = requireOwnedLinkGrant(
+              share.shareId,
+              grant.grantId,
+              actor,
+            );
+            requireShareWorkspace(current.share, workspaceId);
+          },
+          mintCredential: () => {
+            secret = newLinkBearer();
+            return {
+              credentialId: newId(),
+              secretHash: hashLinkBearer(secret, linkKey!),
+            };
+          },
         });
-        if (!result.ok) throw notFound();
+        if (!result.ok) {
+          if ("reason" in result && result.reason === "dependents-changed") {
+            return dependentSetConflict(result.dependents, share.workspaceId, actor.userId);
+          }
+          throw notFound();
+        }
+        if (!secret) throw notFound();
         terminateLinkBlobStreamsForGrant(result.grant.grantId);
-        return jsonResponse({ ok: true, ...linkGrantBody(result.grant), secret });
+        return jsonResponse({
+          ok: true,
+          ...linkGrantBody(result.grant),
+          url: composePublicLinkUrl(shareWebOrigin!, secret),
+        });
       }
       if (route.route === "share-link-rotate") throw methodNotAllowed();
 
@@ -1603,34 +1876,31 @@ export function createSyncRelayHandler({
           actor,
         );
         const input = await readJsonObject(request);
-        const accessValidation = validateFileShareAccess(input.access);
-        if (!accessValidation.ok) {
-          throw relayHttpError(
-            RELAY_ERRORS[accessValidation.code],
-            accessValidation.message,
-          );
-        }
-        const widening = shareAccessRank(accessValidation.access) > shareAccessRank(grant.access);
-        const secret = widening ? newLinkBearer() : null;
-        if (widening && !linkKey) throw notFound();
+        const expectedDependentGrantIds = parseExpectedDependentGrantIds(input, [
+          "access",
+          "expectedDependentGrantIds",
+        ]);
+        const access = validatePhase2LinkAccess(input.access);
         const result = storage.retuneShareGrant({
           shareId: share.shareId,
           grantId: grant.grantId,
-          access: accessValidation.access,
+          access,
           changedAtMs: nowMs(),
-          ...(secret && linkKey
-            ? {
-                credentialId: newId(),
-                secretHash: hashLinkBearer(secret, linkKey),
-              }
-            : {}),
+          expectedDependentGrantIds,
+          guard: () => {
+            requireOwnedLinkGrant(share.shareId, grant.grantId, actor);
+          },
         });
-        if (!result.ok) throw notFound();
+        if (!result.ok) {
+          if ("reason" in result && result.reason === "dependents-changed") {
+            return dependentSetConflict(result.dependents, share.workspaceId, actor.userId);
+          }
+          throw notFound();
+        }
         terminateLinkBlobStreamsForGrant(result.grant.grantId);
         return jsonResponse({
           ok: true,
           ...linkGrantBody(result.grant),
-          ...(secret ? { secret } : {}),
         });
       }
       if (route.route === "share-link-retune") throw methodNotAllowed();
@@ -1642,11 +1912,14 @@ export function createSyncRelayHandler({
         if (!share || share.granterUserId !== actor.userId) {
           throw notFound();
         }
+        if (!storage.workspaceIsOwnedBy(share.workspaceId, actor.userId)) throw notFound();
         const input = await readOptionalJsonObject(request);
         if (input !== null) {
           const grantId = parseShareId(
             typeof input.grantId === "string" ? input.grantId : undefined,
           );
+          const workspaceId = parseWorkspaceId(input.workspaceId);
+          requireShareWorkspace(share, workspaceId);
           const grant = storage.getShareGrant(grantId);
           if (
             !grant ||
@@ -1655,12 +1928,23 @@ export function createSyncRelayHandler({
           ) {
             throw notFound();
           }
+          const expectedDependentGrantIds = parseExpectedDependentGrantIds(input, [
+            "grantId",
+            "workspaceId",
+            "expectedDependentGrantIds",
+          ]);
           const result = storage.revokeShareGrant({
             shareId: share.shareId,
             grantId,
             revokedAtMs: nowMs(),
+            expectedDependentGrantIds,
           });
-          if (!result.ok) throw notFound();
+          if (!result.ok) {
+            if ("reason" in result && result.reason === "dependents-changed") {
+              return dependentSetConflict(result.dependents, share.workspaceId, actor.userId);
+            }
+            throw notFound();
+          }
           terminateLinkBlobStreamsForGrant(result.grant.grantId);
           return jsonResponse({ ok: true, ...linkGrantBody(result.grant) });
         }
@@ -2389,21 +2673,100 @@ export function createSyncRelayHandler({
       }
       if (route.route === "gc") throw methodNotAllowed();
 
+      if (route.route === "share-link-create-atomic" && request.method === "GET") {
+        if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
+        const url = new URL(request.url);
+        if (url.searchParams.getAll("cursor").length > 1) {
+          throw badRequest("cursor is invalid");
+        }
+        const page = storage.listLinkGrantsByWorkspace(
+          route.workspaceId,
+          decodeLinkInventoryCursor(url.searchParams.get("cursor")),
+        );
+        const links = await Promise.all(
+          page.links.map(linkInventorySummary),
+        );
+        if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
+        return jsonResponse({
+          ok: true,
+          links,
+          ...(page.nextCursor
+            ? { nextCursor: encodeLinkInventoryCursor(page.nextCursor) }
+            : {}),
+        });
+      }
+
+      if (route.route === "share-link-create-atomic" && request.method === "POST") {
+        const input = await readJsonObject(request);
+        if (Object.keys(input).some((key) => key !== "paths" && key !== "versionId")) {
+          throw badRequest("A View link accepts only paths and versionId.");
+        }
+        const validation = validateShareSelector({
+          paths: input.paths,
+          versionId: input.versionId,
+        });
+        if (!validation.ok) {
+          throw relayHttpError(RELAY_ERRORS[validation.code], validation.message);
+        }
+        const selector = validation.selector;
+        const shareId = newShareId();
+        const grantId = newGrantId();
+        const createdAtMs = nowMs();
+        const secret = newLinkBearer();
+        const share = {
+          shareId,
+          workspaceId: route.workspaceId,
+          granterUserId: actor.userId,
+          selectorJson: JSON.stringify(selector),
+          createdAtMs,
+        };
+        const grant = {
+          grantId,
+          shareId,
+          principalKind: "link" as const,
+          principalUserId: null,
+          principalEmail: null,
+          access: "view",
+          generation: 1,
+          status: "active" as const,
+          createdAtMs,
+          revokedAtMs: null,
+          parentGrantId: null,
+        };
+        const created = storage.createFileLinkShare({
+          share,
+          grant,
+          credential: {
+            credentialId: newId(),
+            grantId,
+            secretHash: hashLinkBearer(secret, linkKey!),
+            generation: 1,
+            mintedAtMs: createdAtMs,
+            retiredAtMs: null,
+          },
+          guard: () => {
+            if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
+          },
+        });
+        if (!created) throw notFound();
+        return jsonResponse({
+          ok: true,
+          workspaceId: route.workspaceId,
+          selector,
+          ...linkGrantBody(grant),
+          url: composePublicLinkUrl(shareWebOrigin!, secret),
+        });
+      }
+      if (route.route === "share-link-create-atomic") throw methodNotAllowed();
+
       if (route.route === "share-link-create" && request.method === "POST") {
         const input = await readJsonObject(request);
-        const accessValidation = validateFileShareAccess(input.access);
-        if (!accessValidation.ok) {
-          throw relayHttpError(
-            RELAY_ERRORS[accessValidation.code],
-            accessValidation.message,
-          );
-        }
+        const access = validatePhase2LinkAccess(input.access);
         const share = storage.getShare(route.shareId);
         const selector = share
           ? parseStoredAnyShareSelectorJson(share.selectorJson)
           : null;
         if (
-          !linkKey ||
           !share ||
           share.workspaceId !== route.workspaceId ||
           share.granterUserId !== actor.userId ||
@@ -2422,7 +2785,7 @@ export function createSyncRelayHandler({
           principalKind: "link" as const,
           principalUserId: null,
           principalEmail: null,
-          access: accessValidation.access,
+          access,
           generation: 1,
           status: "active" as const,
           createdAtMs,
@@ -2434,14 +2797,18 @@ export function createSyncRelayHandler({
           credential: {
             credentialId: newId(),
             grantId,
-            secretHash: hashLinkBearer(secret, linkKey),
+            secretHash: hashLinkBearer(secret, linkKey!),
             generation: 1,
             mintedAtMs: createdAtMs,
             retiredAtMs: null,
           },
         });
         if (!created) throw notFound();
-        return jsonResponse({ ok: true, ...linkGrantBody(grant), secret });
+        return jsonResponse({
+          ok: true,
+          ...linkGrantBody(grant),
+          url: composePublicLinkUrl(shareWebOrigin!, secret),
+        });
       }
       if (route.route === "share-link-create") throw methodNotAllowed();
 
@@ -2827,6 +3194,12 @@ function parseRoute(request: Request): SyncRelayRoute {
   if (parts.length === 2 && parts[0] === "sync" && parts[1] === "link-refresh") {
     return { route: "link-refresh" };
   }
+  if (parts.length === 2 && parts[0] === "sync" && parts[1] === "link-handoff") {
+    return { route: "link-handoff" };
+  }
+  if (parts.length === 2 && parts[0] === "sync" && parts[1] === "link-redeem") {
+    return { route: "link-redeem" };
+  }
   if (parts.length === 3 && parts[0] === "sync" && parts[1] === "link") {
     if (parts[2] === "share") return { route: "link-share" };
     if (parts[2] === "log") return { route: "link-log" };
@@ -2915,6 +3288,9 @@ function parseRoute(request: Request): SyncRelayRoute {
   if (parts.length === 3 && parts[2] === "shares") {
     return { route: "shares-create", workspaceId };
   }
+  if (parts.length === 4 && parts[2] === "shares" && parts[3] === "links") {
+    return { route: "share-link-create-atomic", workspaceId };
+  }
   if (parts.length === 5 && parts[2] === "shares" && parts[4] === "links") {
     return {
       route: "share-link-create",
@@ -2977,6 +3353,90 @@ function parseShareId(value: string | undefined): string {
     throw notFound();
   }
   return value;
+}
+
+function encodeLinkInventoryCursor(cursor: SyncRelayLinkInventoryCursor): string {
+  return Buffer.from(JSON.stringify({ version: 1, ...cursor }), "utf8").toString(
+    "base64url",
+  );
+}
+
+function decodeLinkInventoryCursor(
+  value: string | null,
+): SyncRelayLinkInventoryCursor | undefined {
+  if (value === null) return undefined;
+  const invalid = () => badRequest("cursor is invalid");
+  if (
+    value.length === 0 ||
+    value.length > LINK_INVENTORY_CURSOR_MAX_CHARS ||
+    !/^[A-Za-z0-9_-]+$/u.test(value)
+  ) {
+    throw invalid();
+  }
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+  } catch {
+    throw invalid();
+  }
+  if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) {
+    throw invalid();
+  }
+  const row = decoded as Record<string, unknown>;
+  const keys = Object.keys(row).sort();
+  if (
+    keys.join("\0") !==
+      ["grantId", "linkCreatedAtMs", "shareCreatedAtMs", "shareId", "version"]
+        .sort()
+        .join("\0") ||
+    row.version !== 1 ||
+    !Number.isSafeInteger(row.shareCreatedAtMs) ||
+    Number(row.shareCreatedAtMs) < 0 ||
+    !Number.isSafeInteger(row.linkCreatedAtMs) ||
+    Number(row.linkCreatedAtMs) < 0 ||
+    typeof row.shareId !== "string" ||
+    row.shareId.length === 0 ||
+    row.shareId.length > MAX_SHARE_ID_CHARS ||
+    !/^[a-z0-9][a-z0-9-]*$/u.test(row.shareId) ||
+    typeof row.grantId !== "string" ||
+    row.grantId.length === 0 ||
+    row.grantId.length > MAX_SHARE_ID_CHARS ||
+    !/^[a-z0-9][a-z0-9-]*$/u.test(row.grantId)
+  ) {
+    throw invalid();
+  }
+  return {
+    shareCreatedAtMs: Number(row.shareCreatedAtMs),
+    shareId: row.shareId,
+    linkCreatedAtMs: Number(row.linkCreatedAtMs),
+    grantId: row.grantId,
+  };
+}
+
+function parseExpectedDependentGrantIds(
+  input: Record<string, unknown>,
+  allowedKeys: readonly string[],
+): string[] {
+  if (Object.keys(input).some((key) => !allowedKeys.includes(key))) {
+    throw badRequest("request body contains an unknown field");
+  }
+  const value = input.expectedDependentGrantIds;
+  if (!Array.isArray(value)) {
+    throw badRequest("expectedDependentGrantIds must be an array of grant ids");
+  }
+  const normalized = new Set<string>();
+  for (const grantId of value) {
+    if (
+      typeof grantId !== "string" ||
+      grantId.length === 0 ||
+      grantId.length > MAX_SHARE_ID_CHARS ||
+      !/^[a-z0-9][a-z0-9-]*$/u.test(grantId)
+    ) {
+      throw badRequest("expectedDependentGrantIds must be an array of grant ids");
+    }
+    normalized.add(grantId);
+  }
+  return [...normalized];
 }
 
 async function readJsonObject(request: Request): Promise<Record<string, unknown>> {

@@ -25,9 +25,18 @@ export interface TokenCipher {
 
 const FILE_NAME = "dohc-cloud.json";
 const INVALID_FILE_NAME = "dohc-cloud-invalid.json";
+const MAX_CLOUD_CREDENTIAL_EMAIL_LENGTH = 320;
 
 function nonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
+}
+
+export function isCloudCredentialEmail(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= MAX_CLOUD_CREDENTIAL_EMAIL_LENGTH
+  );
 }
 
 export function createCloudCredentialStore(options: {
@@ -59,7 +68,7 @@ export function createCloudCredentialStore(options: {
       if (obj.version !== 1) return null;
       if (
         !nonEmptyString(obj.serverUrl) ||
-        !nonEmptyString(obj.email) ||
+        !isCloudCredentialEmail(obj.email) ||
         !nonEmptyString(obj.userId) ||
         !nonEmptyString(obj.token)
       ) {
@@ -94,7 +103,7 @@ export function createCloudCredentialStore(options: {
       if (
         !credentials ||
         !nonEmptyString(credentials.serverUrl) ||
-        !nonEmptyString(credentials.email) ||
+        !isCloudCredentialEmail(credentials.email) ||
         !nonEmptyString(credentials.userId) ||
         !nonEmptyString(credentials.token) ||
         (credentials.relayUrl !== undefined &&

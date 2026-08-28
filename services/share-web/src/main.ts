@@ -28,6 +28,7 @@ try {
 
 const handler = createShareWebHandler({
   relayUrl: config.relayUrl,
+  publicRelayUrl: config.publicRelayUrl,
   relayExchangeKey: config.relayExchangeKey,
   publicHosts: config.publicHosts,
   viewerAssetsDir,
