@@ -1699,6 +1699,79 @@ fn same_field_concurrent_edits_converge_and_keep_both_authored_writes() {
 }
 
 #[test]
+fn later_same_field_edit_wins_on_both_devices_and_keeps_earlier_history() {
+    let (mut a, mut b, key, base) =
+        two_collection_stores("collection-index-later-a", "collection-index-later-b");
+    let peer_a = Ydoc::wire();
+    peer_a.apply(&base).expect("peer A base");
+    let alice = peer_a.frontmatter_set_value("title", &serde_json::json!("Alice title"));
+
+    committed(
+        record_local_update_with_origin(
+            &mut a.store,
+            &key,
+            &alice,
+            Some("alice"),
+            &NoFaults,
+            1_100,
+        )
+        .expect("Alice local edit"),
+    );
+    committed(
+        apply_remote_update(
+            &mut b.store,
+            &key,
+            &RemoteUpdate {
+                origin_id: "alice".to_owned(),
+                origin_seq: 1,
+                bytes: alice.clone(),
+            },
+            &NoFaults,
+            1_200,
+        )
+        .expect("Alice edit reaches device B"),
+    );
+
+    let peer_b = Ydoc::wire();
+    peer_b.apply(&base).expect("peer B base");
+    peer_b.apply(&alice).expect("peer B receives Alice edit");
+    let bob = peer_b.frontmatter_set_value("title", &serde_json::json!("Bob title"));
+    committed(
+        record_local_update_with_origin(&mut b.store, &key, &bob, Some("bob"), &NoFaults, 1_300)
+            .expect("Bob later local edit"),
+    );
+    committed(
+        apply_remote_update(
+            &mut a.store,
+            &key,
+            &RemoteUpdate {
+                origin_id: "bob".to_owned(),
+                origin_seq: 1,
+                bytes: bob,
+            },
+            &NoFaults,
+            1_400,
+        )
+        .expect("Bob edit reaches device A"),
+    );
+
+    let expected = BTreeMap::from([
+        ("status".to_owned(), "\"open\"".to_owned()),
+        ("title".to_owned(), "\"Bob title\"".to_owned()),
+    ]);
+    for store in [&a.store, &b.store] {
+        assert_eq!(indexed_fields(store, &key), expected);
+        assert_eq!(
+            field_history(store, &key, "title"),
+            vec![
+                ("alice".to_owned(), Some("\"Alice title\"".to_owned())),
+                ("bob".to_owned(), Some("\"Bob title\"".to_owned())),
+            ]
+        );
+    }
+}
+
+#[test]
 fn base_is_claimed_exactly_once() {
     let mut ts = fresh_store("base-once");
     let key = test_key();

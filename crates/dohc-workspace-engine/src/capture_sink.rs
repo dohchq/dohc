@@ -1645,30 +1645,105 @@ mod tests {
     }
 
     #[test]
-    fn broken_collection_schema_degrades_without_blocking_record_adoption() {
+    fn broken_collection_schema_degrades_and_recovers_without_data_loss() {
         let scratch = ScratchDir::new().expect("scratch");
         let supervisor = WorkspaceSupervisor::new();
         let (db, mut sink) = sink_for(&scratch, &supervisor);
         write_file(
             scratch.path(),
             "tasks/collection.yaml",
-            b"fields:\n  title: [\n",
+            b"name: Tasks\nfields:\n  estimate:\n    type: number\n",
         );
-        write_file(scratch.path(), "tasks/alpha.md", b"Alpha\n");
-        ingest(&mut sink, "tasks/collection.yaml").expect("capture broken schema");
+        write_file(
+            scratch.path(),
+            "tasks/alpha.md",
+            b"---\nestimate: nope\n---\n\nAlpha\n",
+        );
+        ingest(&mut sink, "tasks/collection.yaml").expect("capture valid schema");
         ingest(&mut sink, "tasks/alpha.md").expect("capture record");
 
         assert_eq!(
             sink.reconcile_collections()
-                .expect("fail-soft collection reconciliation"),
+                .expect("adopt record under valid schema"),
             ["tasks/alpha.md"]
+        );
+        assert_eq!(
+            collection_status(&db, "tasks"),
+            Some(("valid".to_owned(), "[]".to_owned()))
+        );
+        let record_id = adopted_record_id(&db, "tasks/alpha.md");
+        assert_eq!(moment_count(&db, "tasks/alpha.md"), 2);
+        assert_eq!(ydoc_update_count(&db, "tasks/alpha.md"), 2);
+        let indexed =
+            indexed_collection_field(&db, "tasks/alpha.md", "estimate").expect("estimate indexed");
+        assert_eq!(indexed.0, "\"nope\"");
+        assert_eq!(indexed.1, "flagged");
+        assert!(
+            indexed
+                .2
+                .expect("validation reason before schema degradation")
+                .contains("expected-number")
+        );
+        let valid_record = std::fs::read_to_string(scratch.path().join("tasks/alpha.md"))
+            .expect("read adopted record before schema degradation");
+
+        write_file(
+            scratch.path(),
+            "tasks/collection.yaml",
+            b"fields:\n  title: [\n",
+        );
+        ingest(&mut sink, "tasks/collection.yaml").expect("capture broken schema");
+        assert!(
+            sink.reconcile_collections()
+                .expect("fail-soft collection reconciliation")
+                .is_empty()
         );
         let (status, reasons) = collection_status(&db, "tasks").expect("collection detected");
         assert_eq!(status, "degraded");
         assert_ne!(reasons, "[]");
-        adopted_record_id(&db, "tasks/alpha.md");
-        assert_eq!(moment_count(&db, "tasks/alpha.md"), 2);
-        assert_eq!(ydoc_update_count(&db, "tasks/alpha.md"), 2);
+        assert_eq!(adopted_record_id(&db, "tasks/alpha.md"), record_id);
+        assert_eq!(
+            indexed_collection_field(&db, "tasks/alpha.md", "estimate"),
+            Some(("\"nope\"".to_owned(), "untyped".to_owned(), None))
+        );
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("tasks/alpha.md"))
+                .expect("read record while schema is degraded"),
+            valid_record
+        );
+
+        write_file(
+            scratch.path(),
+            "tasks/collection.yaml",
+            b"name: Tasks\nfields:\n  estimate:\n    type: number\n",
+        );
+        ingest(&mut sink, "tasks/collection.yaml").expect("capture repaired schema");
+        assert!(
+            sink.reconcile_collections()
+                .expect("recover collection schema")
+                .is_empty()
+        );
+        assert_eq!(
+            collection_status(&db, "tasks"),
+            Some(("valid".to_owned(), "[]".to_owned()))
+        );
+        assert_eq!(adopted_record_id(&db, "tasks/alpha.md"), record_id);
+        let indexed =
+            indexed_collection_field(&db, "tasks/alpha.md", "estimate").expect("estimate indexed");
+        assert_eq!(indexed.0, "\"nope\"");
+        assert_eq!(indexed.1, "flagged");
+        assert!(
+            indexed
+                .2
+                .expect("validation reason after schema recovery")
+                .contains("expected-number")
+        );
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("tasks/alpha.md"))
+                .expect("read record after schema recovery"),
+            valid_record,
+            "schema recovery must not rewrite or drop record data"
+        );
 
         std::fs::remove_file(scratch.path().join("tasks/collection.yaml")).expect("remove schema");
         sink.retire("tasks/collection.yaml").expect("retire schema");
