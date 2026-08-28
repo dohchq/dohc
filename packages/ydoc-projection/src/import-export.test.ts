@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { JSONContent } from '@tiptap/core'
+import frontmatterFixtureJson from '../../../crates/dohc-engine-domain/tests/fixtures/collection-frontmatter.json'
 import {
   prosemirrorJSONToYXmlFragment,
   yXmlFragmentToProseMirrorRootNode,
@@ -17,6 +18,14 @@ import {
 } from './import-export.js'
 
 type ExpectedMarkdownFragment = string | RegExp
+
+interface FrontmatterVector {
+  name: string
+  markdown: string
+  expected: Record<string, unknown>
+}
+
+const frontmatterVectors = frontmatterFixtureJson.vectors as FrontmatterVector[]
 
 function yDocFromBody(content: JSONContent[]): Y.Doc {
   const doc = new Y.Doc()
@@ -53,6 +62,10 @@ function expectStableMarkdownRoundTrip(
 }
 
 describe('Y.Doc markdown import/export', () => {
+  it.each(frontmatterVectors)('matches the shared frontmatter vector $name', ({ markdown, expected }) => {
+    expect(getDohcYDocFrontmatter(markdownToYDoc(markdown))).toEqual(expected)
+  })
+
   it('round-trips CRLF richdoc frontmatter through the internal line-ending hint', () => {
     const input = [
       '---',

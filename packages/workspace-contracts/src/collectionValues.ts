@@ -30,12 +30,14 @@ const FIELD_TYPES = new Set<CollectionFieldType>([
 ]);
 const VIEW_KINDS = new Set<ViewKind>(["table", "board", "calendar"]);
 
-const EMPTY_COLLECTION_SCHEMA: CollectionSchema = {
-  name: null,
-  description: null,
-  fields: [],
-  views: [],
-};
+function emptyCollectionSchema(): CollectionSchema {
+  return {
+    name: null,
+    description: null,
+    fields: [],
+    views: [],
+  };
+}
 
 function pointerSegment(value: string): string {
   return value.replaceAll("~", "~0").replaceAll("/", "~1");
@@ -394,7 +396,7 @@ function parseViews(
 
 export function parseCollectionSchema(yamlText: string): CollectionSchemaParseResult {
   if (yamlText.trim().length === 0) {
-    return { status: "valid", schema: { ...EMPTY_COLLECTION_SCHEMA }, reasons: [] };
+    return { status: "valid", schema: emptyCollectionSchema(), reasons: [] };
   }
 
   let raw: unknown;
@@ -403,14 +405,14 @@ export function parseCollectionSchema(yamlText: string): CollectionSchemaParseRe
   } catch {
     return {
       status: "degraded",
-      schema: { ...EMPTY_COLLECTION_SCHEMA },
+      schema: emptyCollectionSchema(),
       reasons: [{ code: "invalid-yaml", path: "" }],
     };
   }
   if (!isMapping(raw)) {
     return {
       status: "degraded",
-      schema: { ...EMPTY_COLLECTION_SCHEMA },
+      schema: emptyCollectionSchema(),
       reasons: [{ code: "root-not-mapping", path: "" }],
     };
   }

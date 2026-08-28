@@ -249,6 +249,7 @@ const collectionSummary = {
 const collectionRecord = {
   id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
   path: "projects/roadmap.md",
+  conflicted: true,
   values: [
     {
       field: "status",

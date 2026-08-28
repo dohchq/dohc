@@ -1,3 +1,4 @@
+use dohc_engine_domain::collections::markdown_frontmatter_json;
 use dohc_engine_domain::{
     CollectionFieldValue, CollectionSchemaParseResult, FieldDefinition, FieldValueValidation,
     is_record_id, parse_collection_schema, validate_field_value,
@@ -8,6 +9,7 @@ use serde::Deserialize;
 const SCHEMA_FIXTURE: &str = include_str!("fixtures/collection-schemas.json");
 const FIELD_VALUE_FIXTURE: &str = include_str!("fixtures/collection-field-values.json");
 const RECORD_ID_FIXTURE: &str = include_str!("fixtures/collection-record-ids.json");
+const FRONTMATTER_FIXTURE: &str = include_str!("fixtures/collection-frontmatter.json");
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -37,6 +39,14 @@ struct FieldValueVector {
 struct RecordIdVector {
     value: String,
     valid: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FrontmatterVector {
+    name: String,
+    markdown: String,
+    expected: serde_json::Value,
 }
 
 fn field_value_from_yaml(raw: &str) -> CollectionFieldValue {
@@ -112,6 +122,20 @@ fn record_id_results_match_the_typescript_oracle() {
             vector.valid,
             "Record id {:?} disagrees with the TypeScript oracle",
             vector.value
+        );
+    }
+}
+
+#[test]
+fn frontmatter_delimiters_match_the_typescript_oracle() {
+    let fixture: Fixture<FrontmatterVector> =
+        serde_json::from_str(FRONTMATTER_FIXTURE).expect("frontmatter fixture parses");
+    for vector in fixture.vectors {
+        assert_eq!(
+            markdown_frontmatter_json(&vector.markdown),
+            Some(vector.expected),
+            "frontmatter vector {} disagrees with the TypeScript oracle",
+            vector.name
         );
     }
 }

@@ -41,6 +41,11 @@ const { isRecordId, parseCollectionSchema, validateFieldValue } = await import(
     join(repoRoot, "packages/workspace-contracts/src/collectionValues.ts"),
   ).href
 );
+const { getDohcYDocFrontmatter, markdownToYDoc } = await import(
+  pathToFileURL(
+    join(repoRoot, "packages/ydoc-projection/src/import-export.ts"),
+  ).href
+);
 await unregisterTsx();
 
 const workspaceContractsRequire = createRequire(
@@ -240,6 +245,21 @@ const recordIds = [
   "rec_😀😀😀😀😀😀😀😀😀😀😀😀😀",
 ].map((value) => ({ value, valid: isRecordId(value) }));
 
+const frontmatter = [
+  {
+    name: "space-opener-tab-closer",
+    markdown: "--- \ntitle: Space opener\n---\t\nBody",
+  },
+  {
+    name: "tab-opener-space-closer",
+    markdown: "---\t\ntitle: Tab opener\n--- \nBody",
+  },
+].map(({ name, markdown }) => ({
+  name,
+  markdown,
+  expected: getDohcYDocFrontmatter(markdownToYDoc(markdown)),
+}));
+
 function writeFixture(name, value) {
   writeFileSync(join(outputDir, name), `${JSON.stringify(value, null, 2)}\n`);
 }
@@ -253,3 +273,4 @@ writeFixture("collection-schemas.json", {
 });
 writeFixture("collection-field-values.json", { vectors: fieldValues });
 writeFixture("collection-record-ids.json", { vectors: recordIds });
+writeFixture("collection-frontmatter.json", { vectors: frontmatter });

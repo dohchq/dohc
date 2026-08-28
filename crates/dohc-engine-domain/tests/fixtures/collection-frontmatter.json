@@ -1,0 +1,18 @@
+{
+  "vectors": [
+    {
+      "name": "space-opener-tab-closer",
+      "markdown": "--- \ntitle: Space opener\n---\t\nBody",
+      "expected": {
+        "title": "Space opener"
+      }
+    },
+    {
+      "name": "tab-opener-space-closer",
+      "markdown": "---\t\ntitle: Tab opener\n--- \nBody",
+      "expected": {
+        "title": "Tab opener"
+      }
+    }
+  ]
+}

@@ -151,6 +151,7 @@ export interface CollectionIndexedValue {
 export interface CollectionRecord {
   id: string;
   path: string;
+  conflicted: boolean;
   values: CollectionIndexedValue[];
 }
 

@@ -41,6 +41,23 @@ describe("Collection schema contract vectors", () => {
     expect(() => parseCollectionSchema(yaml)).not.toThrow();
     expect(parseCollectionSchema(yaml)).toEqual(expected);
   });
+
+  it.each(["", "fields: ["])("returns fresh arrays for empty schema result from %j", (yaml) => {
+    const first = parseCollectionSchema(yaml);
+    first.schema.fields.push({ name: "Title", type: "text" });
+    first.schema.views.push({
+      name: "All",
+      kind: "table",
+      groupBy: null,
+      sort: [],
+      visibleFields: null,
+      dateField: null,
+    });
+
+    const second = parseCollectionSchema(yaml);
+    expect(second.schema.fields).toEqual([]);
+    expect(second.schema.views).toEqual([]);
+  });
 });
 
 describe("Field value contract vectors", () => {

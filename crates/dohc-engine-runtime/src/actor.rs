@@ -13545,7 +13545,13 @@ fn reconcile_collections_on_store(
                     changed_paths.push(path);
                 }
             }
-            Ok(None) => {}
+            Ok(None) => {
+                return Err(RuntimeError::Sync(
+                    dohc_engine_sync::SyncError::RetryableState {
+                        reason: "collection-reconciliation-lease-held",
+                    },
+                ));
+            }
             Err(error) if adoption_conflict(&error) => {
                 persist_collection_adoption_state(
                     store,
@@ -13581,7 +13587,13 @@ fn reconcile_collections_on_store(
                     changed_paths.push(path);
                 }
             }
-            Ok(None) => {}
+            Ok(None) => {
+                return Err(RuntimeError::Sync(
+                    dohc_engine_sync::SyncError::RetryableState {
+                        reason: "collection-reconciliation-lease-held",
+                    },
+                ));
+            }
             Err(error) if adoption_conflict(&error) => {}
             Err(error) => return Err(error),
         }

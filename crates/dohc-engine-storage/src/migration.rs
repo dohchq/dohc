@@ -2968,7 +2968,9 @@ CREATE TABLE collection_field_history (
       next_value_json IS NULL OR json_valid(next_value_json)
     ),
     author_origin_id       TEXT,
-    recorded_at_ms         INTEGER NOT NULL
+    recorded_at_ms         INTEGER NOT NULL,
+    FOREIGN KEY (workspace_id, version_id)
+      REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE
 ) STRICT;
 CREATE INDEX collection_field_history_by_record
     ON collection_field_history(
@@ -2985,7 +2987,9 @@ CREATE TABLE collection_relation_edges (
     many                  INTEGER NOT NULL CHECK (many IN (0, 1)),
     PRIMARY KEY (
       workspace_id, version_id, source_record_id, field_name, target_record_id
-    )
+    ),
+    FOREIGN KEY (workspace_id, version_id)
+      REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE
 ) STRICT;
 ";
 
@@ -3678,6 +3682,69 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM engine_ownership", [], |r| r.get(0))
             .expect("own");
         assert_eq!(owns, 1);
+    }
+
+    #[test]
+    fn deleting_a_version_cascades_collection_history_and_relation_edges() {
+        let dir = tempdir();
+        let path = dir.join("collection-index-version-cascade.db");
+        let ctx = MigrationContext::current(1_100);
+        let mut conn = open_bare(&path);
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("enable foreign keys");
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+            .expect("apply collection index migration");
+
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
+                 VALUES ('ws', 'main');
+             INSERT INTO versions (workspace_id, version_id, name, kind, created_at_ms)
+                 VALUES ('ws', 'main', 'Main', 'main', 1),
+                        ('ws', 'feature', 'Feature', 'named', 2);
+             INSERT INTO collection_field_history (
+                 workspace_id, version_id, record_id, field_name,
+                 next_value_json, recorded_at_ms
+             ) VALUES ('ws', 'main', 'main-record', 'title', '\"Main\"', 3),
+                      ('ws', 'feature', 'feature-record', 'title', '\"Feature\"', 4);
+             INSERT INTO collection_relation_edges (
+                 workspace_id, version_id, source_record_id, field_name,
+                 target_record_id, target_collection_path, many
+             ) VALUES ('ws', 'main', 'main-record', 'related',
+                       'main-target', 'people.collection.yaml', 0),
+                      ('ws', 'feature', 'feature-record', 'related',
+                       'feature-target', 'people.collection.yaml', 0);",
+        )
+        .expect("seed version-scoped collection index rows");
+
+        conn.execute(
+            "DELETE FROM versions WHERE workspace_id='ws' AND version_id='feature'",
+            [],
+        )
+        .expect("delete feature version");
+
+        let remaining: (i64, i64) = conn
+            .query_row(
+                "SELECT
+                     (SELECT COUNT(*) FROM collection_field_history),
+                     (SELECT COUNT(*) FROM collection_relation_edges)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("count surviving collection index rows");
+        assert_eq!(remaining, (1, 1));
+        for table in ["collection_field_history", "collection_relation_edges"] {
+            let deleted_version_rows: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE version_id='feature'"),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count deleted version rows");
+            assert_eq!(
+                deleted_version_rows, 0,
+                "{table} must cascade with its version"
+            );
+        }
     }
 
     #[test]

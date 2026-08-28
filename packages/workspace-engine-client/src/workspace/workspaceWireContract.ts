@@ -514,6 +514,7 @@ const CollectionIndexedValueValidationSchema = Schema.Union([
 const CollectionRecordSchema = mutableStruct({
   id: Schema.String,
   path: Schema.String,
+  conflicted: Schema.Boolean,
   values: Schema.mutable(
     Schema.Array(
       mutableStruct({

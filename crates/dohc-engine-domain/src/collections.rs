@@ -379,6 +379,7 @@ pub struct CollectionIndexedValue {
 pub struct CollectionRecord {
     pub id: String,
     pub path: String,
+    pub conflicted: bool,
     pub values: Vec<CollectionIndexedValue>,
 }
 
@@ -1028,17 +1029,27 @@ fn path_basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
+fn is_frontmatter_delimiter(line: &str) -> bool {
+    line.trim_end_matches(['\r', '\n'])
+        .strip_prefix("---")
+        .is_some_and(|suffix| {
+            suffix
+                .chars()
+                .all(|character| matches!(character, ' ' | '\t'))
+        })
+}
+
 fn markdown_record_id(markdown: &str) -> Option<String> {
     let mut lines = markdown.split_inclusive('\n');
     let first = lines.next()?;
-    if first.trim_end_matches(['\r', '\n']) != "---" {
+    if !first.ends_with('\n') || !is_frontmatter_delimiter(first) {
         return None;
     }
     let yaml_start = first.len();
     let mut yaml_end = yaml_start;
     let mut found_end = false;
     for line in lines {
-        if line.trim_end_matches(['\r', '\n']) == "---" {
+        if is_frontmatter_delimiter(line) {
             found_end = true;
             break;
         }
@@ -1090,14 +1101,14 @@ pub fn markdown_frontmatter_json(markdown: &str) -> Option<Value> {
 pub fn markdown_frontmatter_json_with_body(markdown: &str) -> Option<(Value, &str)> {
     let mut lines = markdown.split_inclusive('\n');
     let first = lines.next()?;
-    if first.trim_end_matches(['\r', '\n']) != "---" {
+    if !first.ends_with('\n') || !is_frontmatter_delimiter(first) {
         return Some((Value::Object(serde_json::Map::new()), markdown));
     }
     let yaml_start = first.len();
     let mut yaml_end = yaml_start;
     let mut body_start = None;
     for line in lines {
-        if line.trim_end_matches(['\r', '\n']) == "---" {
+        if is_frontmatter_delimiter(line) {
             body_start = Some(yaml_end + line.len());
             break;
         }
@@ -2112,42 +2123,71 @@ fn indexed_validation(
     }
 }
 
+type CollectionRecordRow = (
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+fn collection_record_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CollectionRecordRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+    ))
+}
+
 fn load_collection_records(
     conn: &Connection,
     workspace_id: &str,
     version_id: &str,
     collection_path: &str,
+    record_id: Option<&str>,
 ) -> Result<Vec<CollectionRecord>, crate::DomainError> {
+    let record_predicate = record_id.map_or("", |_| " AND r.record_id=?4");
     let mut statement = conn
-        .prepare(
-            "SELECT r.record_id,r.file_path,f.field_name,f.value_json,\
+        .prepare(&format!(
+            "SELECT r.record_id,r.file_path,r.adoption_state,f.field_name,f.value_json,\
                     f.validation_status,f.validation_reason_json \
              FROM collection_records r \
              LEFT JOIN collection_record_fields f \
                ON f.workspace_id=r.workspace_id AND f.version_id=r.version_id \
               AND f.record_id=r.record_id \
              WHERE r.workspace_id=?1 AND r.version_id=?2 AND r.collection_path=?3 \
-               AND r.record_id IS NOT NULL \
-             ORDER BY r.file_path,r.record_id,f.field_name",
-        )
+               AND r.record_id IS NOT NULL{record_predicate} \
+             ORDER BY r.file_path,r.record_id,f.field_name"
+        ))
         .map_err(crate::DomainError::sql_corrupt)?;
-    let rows = statement
-        .query_map(params![workspace_id, version_id, collection_path], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-            ))
-        })
-        .map_err(crate::DomainError::sql_corrupt)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(crate::DomainError::sql_corrupt)?;
+    let rows = if let Some(record_id) = record_id {
+        statement
+            .query_map(
+                params![workspace_id, version_id, collection_path, record_id],
+                collection_record_row,
+            )
+            .map_err(crate::DomainError::sql_corrupt)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(crate::DomainError::sql_corrupt)?
+    } else {
+        statement
+            .query_map(
+                params![workspace_id, version_id, collection_path],
+                collection_record_row,
+            )
+            .map_err(crate::DomainError::sql_corrupt)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(crate::DomainError::sql_corrupt)?
+    };
     let mut records = Vec::<CollectionRecord>::new();
     let mut record_indexes = HashMap::<String, usize>::new();
-    for (record_id, file_path, field, value, validation, reason) in rows {
+    for (record_id, file_path, adoption_state, field, value, validation, reason) in rows {
         let index = match record_indexes.get(&record_id).copied() {
             Some(index) => index,
             None => {
@@ -2155,6 +2195,7 @@ fn load_collection_records(
                 records.push(CollectionRecord {
                     id: record_id.clone(),
                     path: file_path,
+                    conflicted: adoption_state == "deferred-conflict",
                     values: Vec::new(),
                 });
                 record_indexes.insert(record_id, index);
@@ -2187,8 +2228,14 @@ fn relation_target_label(file_path: &str, fields: &HashMap<String, String>) -> S
     let mut label_fields: Vec<&str> = Vec::new();
     for preferred in ["title", "name"] {
         if let Some(field) = fields
-            .keys()
-            .find(|field| field.eq_ignore_ascii_case(preferred))
+            .get_key_value(preferred)
+            .map(|(field, _)| field)
+            .or_else(|| {
+                fields
+                    .keys()
+                    .filter(|field| field.eq_ignore_ascii_case(preferred))
+                    .min()
+            })
         {
             label_fields.push(field);
         }
@@ -2420,7 +2467,8 @@ pub fn query_collection_records(
     else {
         return Ok(None);
     };
-    let mut records = load_collection_records(conn, workspace_id, &version_id, collection_path)?;
+    let mut records =
+        load_collection_records(conn, workspace_id, &version_id, collection_path, None)?;
     if query.resolve_relations {
         resolve_record_relations(
             conn,
@@ -2495,9 +2543,15 @@ pub fn get_collection_record(
     else {
         return Ok(None);
     };
-    let record = load_collection_records(conn, workspace_id, &version_id, collection_path)?
-        .into_iter()
-        .find(|record| record.id == record_id);
+    let record = load_collection_records(
+        conn,
+        workspace_id,
+        &version_id,
+        collection_path,
+        Some(record_id),
+    )?
+    .into_iter()
+    .next();
     let Some(record) = record else {
         return Ok(None);
     };

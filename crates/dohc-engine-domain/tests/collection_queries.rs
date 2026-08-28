@@ -60,14 +60,14 @@ fn seeded_store() -> (ScratchDir, EngineStore) {
     write_text(
         &mut store,
         "people/collection.yaml",
-        "fields:\n  Title:\n    type: text\n  Notes:\n    type: text\n",
+        "fields:\n  Title:\n    type: text\n  title:\n    type: text\n  Notes:\n    type: text\n",
         2,
     )
     .expect("people schema");
     write_text(
         &mut store,
         "people/alice.md",
-        &format!("---\nid: {PERSON_ID}\nTitle: Alice\n---\n"),
+        &format!("---\nid: {PERSON_ID}\nTitle: Wrong case\ntitle: Alice\n---\n"),
         3,
     )
     .expect("person record");
@@ -162,6 +162,7 @@ fn query_uses_indexed_values_flags_filter_sort_group_and_relation_labels() {
         .iter()
         .find(|record| record.id == FIRST_TASK_ID)
         .expect("alpha record");
+    assert!(!alpha.conflicted);
     let status = alpha
         .values
         .iter()
@@ -318,7 +319,7 @@ fn over_limit_record_history_request_is_clamped_to_the_maximum() {
 }
 
 #[test]
-fn conflicted_files_contending_for_an_absent_owner_id_leave_one_pending() {
+fn conflicted_files_surface_the_pending_record_in_query_and_get_record() {
     let (_scratch, mut store) = fresh_store();
     write_text(
         &mut store,
@@ -417,6 +418,21 @@ fn conflicted_files_contending_for_an_absent_owner_id_leave_one_pending() {
             .iter()
             .all(|(_, state)| state == "deferred-conflict")
     );
+
+    let queried = store
+        .read_with(|conn| {
+            query_collection_records(conn, WORKSPACE_ID, "contended", &CollectionQuery::default())
+        })
+        .expect("query contended collection")
+        .expect("contended collection exists");
+    assert_eq!(queried.records.len(), 1);
+    assert!(queried.records[0].conflicted);
+
+    let record = store
+        .read_with(|conn| get_collection_record(conn, WORKSPACE_ID, "contended", PERSON_ID, 10))
+        .expect("get contended record")
+        .expect("contended record exists");
+    assert!(record.record.conflicted);
 }
 
 #[test]
