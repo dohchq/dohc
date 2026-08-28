@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { type IncomingMessage, request as httpRequest } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -21,12 +21,16 @@ const USER_ID = "sync-user";
 const TEST_SHUTDOWN_GRACE_PERIOD_MS = 250;
 const WITHIN_SHUTDOWN_GRACE_MS = 100;
 const FORCED_SHUTDOWN_TIMEOUT_MS = 2_000;
+const OUTPUT_BARRIER_MESSAGE_TYPE = "dohc-sync-relay-test-output-barrier";
+const OUTPUT_BARRIER_PREFIX = "SYNC_RELAY_TEST_OUTPUT_BARRIER=";
+const OUTPUT_BARRIER_TIMEOUT_MS = 10_000;
 
 interface RunningRelay {
   baseUrl: string;
   child: ChildProcess;
   stdout: () => string;
   stderr: () => string;
+  settleOutput: () => Promise<string>;
 }
 
 let roots: string[] = [];
@@ -94,6 +98,16 @@ async function spawnRunningRelay(
         process.emit("SIGTERM");
         process.emit("SIGTERM");
       }
+      if (
+        typeof message === "object" &&
+        message !== null &&
+        message.type === ${JSON.stringify(OUTPUT_BARRIER_MESSAGE_TYPE)} &&
+        typeof message.id === "string"
+      ) {
+        const marker = "\\n" + ${JSON.stringify(OUTPUT_BARRIER_PREFIX)} + message.id + "\\n";
+        process.stdout.write(marker);
+        process.stderr.write(marker);
+      }
     }); await import(${JSON.stringify(mainUrl.href)});`,
   ];
   const child = spawn(process.execPath, childArguments, {
@@ -121,6 +135,8 @@ async function spawnRunningRelay(
   return await new Promise((resolve, reject) => {
     let stdout = "";
     let stderr = "";
+    const outputBarrierFailure = (reason: string): Error =>
+      new Error(`${reason}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
     const timeout = setTimeout(() => {
       reject(new Error(`sync relay did not report a port\nstdout:\n${stdout}\nstderr:\n${stderr}`));
     }, 45_000); // tsx startup under load, not a hang — see presence.integration.test.ts (#372)
@@ -134,6 +150,87 @@ async function spawnRunningRelay(
           child,
           stdout: () => stdout,
           stderr: () => stderr,
+          settleOutput: async () => {
+            const barrierId = randomUUID();
+            const marker = `${OUTPUT_BARRIER_PREFIX}${barrierId}`;
+            await new Promise<void>((resolveBarrier, rejectBarrier) => {
+              let settled = false;
+              const cleanup = (): void => {
+                clearTimeout(timeout);
+                childStdout.off("data", checkForMarkers);
+                childStderr.off("data", checkForMarkers);
+                child.off("close", onClose);
+                child.off("disconnect", onDisconnect);
+              };
+              const finish = (error?: Error): void => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                if (error) rejectBarrier(error);
+                else resolveBarrier();
+              };
+              const checkForMarkers = (): void => {
+                if (stdout.includes(marker) && stderr.includes(marker)) finish();
+              };
+              const onClose = (code: number | null, signal: NodeJS.Signals | null): void => {
+                finish(
+                  outputBarrierFailure(
+                    `sync relay closed before settling output barrier: code=${code} signal=${signal}`,
+                  ),
+                );
+              };
+              const onDisconnect = (): void => {
+                finish(
+                  outputBarrierFailure(
+                    "sync relay disconnected before settling output barrier",
+                  ),
+                );
+              };
+              const timeout = setTimeout(() => {
+                finish(
+                  outputBarrierFailure(
+                    `sync relay output barrier timed out: stdout=${stdout.includes(marker)} stderr=${stderr.includes(marker)}`,
+                  ),
+                );
+              }, OUTPUT_BARRIER_TIMEOUT_MS);
+
+              childStdout.on("data", checkForMarkers);
+              childStderr.on("data", checkForMarkers);
+              child.once("close", onClose);
+              child.once("disconnect", onDisconnect);
+              if (!child.connected) {
+                finish(
+                  outputBarrierFailure(
+                    "sync relay IPC was disconnected before settling output",
+                  ),
+                );
+                return;
+              }
+              try {
+                child.send(
+                  { type: OUTPUT_BARRIER_MESSAGE_TYPE, id: barrierId },
+                  (error) => {
+                    if (error) {
+                      finish(
+                        outputBarrierFailure(
+                          `sync relay output barrier send failed: ${error.message}`,
+                        ),
+                      );
+                      return;
+                    }
+                    checkForMarkers();
+                  },
+                );
+              } catch (error) {
+                finish(
+                  outputBarrierFailure(
+                    `sync relay output barrier send failed: ${error instanceof Error ? error.message : String(error)}`,
+                  ),
+                );
+              }
+            });
+            return marker;
+          },
         });
       }
     });
@@ -895,6 +992,9 @@ describe("sync relay main process", () => {
     expect(body.url).toMatch(/^http:\/\/127\.0\.0\.1:48123\/s\/#[-A-Za-z0-9_]{43}$/u);
     const completeUrl = String(body.url);
     const fragment = new URL(completeUrl).hash.slice(1);
+    const outputBarrierMarker = await relay.settleOutput();
+    expect(relay.stdout()).toContain(outputBarrierMarker);
+    expect(relay.stderr()).toContain(outputBarrierMarker);
     expect(relay.stdout()).not.toContain(completeUrl);
     expect(relay.stdout()).not.toContain(fragment);
     expect(relay.stderr()).not.toContain(completeUrl);
