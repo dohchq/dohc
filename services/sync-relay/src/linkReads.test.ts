@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   hashLinkBearer,
   LinkEgressRateLimiter,
+  LinkExchangeRateLimiter,
   LinkReadRateLimiter,
   LINK_GRANT_EGRESS_BUCKET_CAPACITY_BYTES,
   LINK_GRANT_EGRESS_REFILL_BYTES_PER_SECOND,
@@ -92,6 +93,7 @@ function handler(
   storage: SyncRelayStorage,
   options: {
     nowMs?: () => number;
+    linkExchangeRateLimiter?: LinkExchangeRateLimiter;
     linkReadRateLimiter?: LinkReadRateLimiter;
     linkGrantReadRateLimiter?: LinkReadRateLimiter;
     linkLogReadRateLimiter?: LinkReadRateLimiter;
@@ -115,6 +117,7 @@ function handler(
     newId: () => `id-${id++}`,
     linkKey: LINK_KEY,
     shareWebOrigin: "https://share.example.test",
+    linkExchangeRateLimiter: options.linkExchangeRateLimiter,
     linkReadRateLimiter: options.linkReadRateLimiter,
     linkGrantReadRateLimiter: options.linkGrantReadRateLimiter,
     linkLogReadRateLimiter: options.linkLogReadRateLimiter,
@@ -150,6 +153,12 @@ function jsonBody(body: unknown): RequestInit {
 
 async function json(response: Response): Promise<Record<string, unknown>> {
   return (await response.json()) as Record<string, unknown>;
+}
+
+class KeyIgnoringLinkReadRateLimiter extends LinkReadRateLimiter {
+  override allow(_key: string, nowMs: number): boolean {
+    return super.allow("shared-test-bucket", nowMs);
+  }
 }
 
 describe("linkSecret", () => {
@@ -2797,5 +2806,71 @@ describe("relay capability reads", () => {
       [seeded.grantId, Buffer.byteLength(metadataBody), 2_000],
       [seeded.grantId, Buffer.byteLength(logBody), 2_000],
     ]);
+  });
+
+  it("keeps exhausted public link controls off the owner sync path", async () => {
+    const exchangeLimiter = new LinkExchangeRateLimiter(1, 0.000_001, 10);
+    const readLimiter = new LinkReadRateLimiter(1, 0.000_001, 10);
+    const grantReadLimiter = new LinkReadRateLimiter(1, 0.000_001, 10);
+    const logLimiter = new KeyIgnoringLinkReadRateLimiter(1, 0.000_001, 10);
+    const grantLogLimiter = new LinkReadRateLimiter(1, 0.000_001, 10);
+    const egressLimiter = new LinkEgressRateLimiter(9, 0.000_001, 10);
+    const limiterCalls = [
+      vi.spyOn(exchangeLimiter, "allow"),
+      vi.spyOn(readLimiter, "allow"),
+      vi.spyOn(grantReadLimiter, "allow"),
+      vi.spyOn(logLimiter, "allow"),
+      vi.spyOn(grantLogLimiter, "allow"),
+      vi.spyOn(egressLimiter, "charge"),
+    ];
+    const storage = await newStorage();
+    const h = handler(storage, {
+      linkExchangeRateLimiter: exchangeLimiter,
+      linkReadRateLimiter: readLimiter,
+      linkGrantReadRateLimiter: grantReadLimiter,
+      linkLogReadRateLimiter: logLimiter,
+      linkGrantLogReadRateLimiter: grantLogLimiter,
+      linkGrantEgressRateLimiter: egressLimiter,
+    });
+    const seeded = await seed(h);
+    const blobPath = `/sync/link/blobs/${seeded.sharedSha}`;
+
+    const publicBlob = await h(linkRequest(seeded.capability, blobPath));
+    expect(publicBlob.status).toBe(200);
+    expect(await publicBlob.text()).toBe("# shared\n");
+    expect((await h(linkRequest(seeded.capability, blobPath))).status).toBe(429);
+    expect((await h(linkRequest(seeded.capability, "/sync/link/log"))).status).toBe(429);
+    expect(
+      (
+        await h(
+          request(null, "/sync/link-exchange", jsonBody({ secret: seeded.secret })),
+        )
+      ).status,
+    ).toBe(404);
+    const callsAfterPublicExhaustion = limiterCalls.map(
+      (spy) => spy.mock.calls.length,
+    );
+
+    const ownerContent = "# owner still syncing\n";
+    const ownerSha = await putBlob(h, ownerContent);
+    await appendMoments(h, [
+      moment(3, "docs/owner.md", ownerContent, 2_100, {
+        objectId: "object-owner",
+      }),
+    ]);
+    const ownerBlob = await h(
+      request(OWNER, `/sync/${WORKSPACE}/blobs/${ownerSha}`),
+    );
+    expect(ownerBlob.status).toBe(200);
+    expect(await ownerBlob.text()).toBe(ownerContent);
+    const ownerLog = await h(
+      request(OWNER, `/sync/${WORKSPACE}/log?since=0&limit=100`),
+    );
+    expect(ownerLog.status).toBe(200);
+    expect(((await json(ownerLog)).ops as unknown[]).length).toBeGreaterThan(0);
+
+    expect(limiterCalls.map((spy) => spy.mock.calls.length)).toEqual(
+      callsAfterPublicExhaustion,
+    );
   });
 });
