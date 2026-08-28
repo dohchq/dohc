@@ -33,6 +33,11 @@ bodies, `Cookie`, `Set-Cookie`, or the internal client-IP header. Disable body
 capture in traces and error reports. `share-web` already sends
 `private, no-store`; the proxy must not override or cache that response.
 
+If the relay is unavailable or sends an invalid response to an authenticated
+viewer request, `share-web` returns a generic 503 without relay details or
+stale shared content. Restore the relay; the viewer can retry while its
+in-memory session remains valid.
+
 ## Storage and recovery
 
 The Phase 2 Compose deployment runs one `share-web` instance. Its viewer
