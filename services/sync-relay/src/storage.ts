@@ -2353,39 +2353,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       throw new Error("a link grant requires an existing share and a credential");
     }
     this.tx(() => {
-      this.db
-        .prepare(
-          `INSERT INTO sync_relay_shares (
-            share_id, workspace_id, granter_user_id, selector_json, created_at_ms
-          ) VALUES (?, ?, ?, ?, ?)`,
-        )
-        .run(
-          input.share.shareId,
-          input.share.workspaceId,
-          input.share.granterUserId,
-          input.share.selectorJson,
-          Math.trunc(input.share.createdAtMs),
-        );
-      this.db
-        .prepare(
-          `INSERT INTO sync_relay_share_grants (
-            grant_id, share_id, principal_kind, principal_user_id, principal_email,
-            access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
-          input.grant.grantId,
-          input.grant.shareId,
-          input.grant.principalKind,
-          input.grant.principalUserId,
-          input.grant.principalEmail,
-          input.grant.access,
-          input.grant.generation,
-          input.grant.status,
-          Math.trunc(input.grant.createdAtMs),
-          input.grant.revokedAtMs,
-          input.grant.parentGrantId,
-      );
+      this.insertShare(input.share);
+      this.insertShareGrant(input.grant);
     });
   }
 
