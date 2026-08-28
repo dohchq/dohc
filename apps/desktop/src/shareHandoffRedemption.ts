@@ -8,6 +8,7 @@ export type ShareHandoffStatus =
   | { status: "waiting-for-sign-in"; statusId: string }
   | { status: "redeeming"; statusId: string }
   | { status: "failed-refused"; statusId: string }
+  | { status: "failed-busy"; statusId: string }
   | { status: "failed-network"; statusId: string }
   | { status: "done"; statusId: string; shareId: string };
 
@@ -208,6 +209,10 @@ export function createShareHandoffRedemptionCoordinator(
       return;
     }
 
+    if (response.status === 429) {
+      publish({ status: "failed-busy", statusId: input.statusId });
+      return;
+    }
     if (response.status >= 400 && response.status < 500) {
       options.intent.settle(input.code);
       publish({ status: "failed-refused", statusId: input.statusId });
@@ -245,7 +250,12 @@ export function createShareHandoffRedemptionCoordinator(
       beginCurrent({ retry: false });
     },
     retry() {
-      if (publicStatus.status !== "failed-network") return;
+      if (
+        publicStatus.status !== "failed-network" &&
+        publicStatus.status !== "failed-busy"
+      ) {
+        return;
+      }
       beginCurrent({ retry: true });
     },
     dismiss(statusId) {

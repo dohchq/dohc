@@ -3407,6 +3407,12 @@ export const ShareHandoffStatus = z.discriminatedUnion("status", [
     .strict(),
   z
     .object({
+      status: z.literal("failed-busy"),
+      statusId: SHARE_HANDOFF_STATUS_ID,
+    })
+    .strict(),
+  z
+    .object({
       status: z.literal("failed-network"),
       statusId: SHARE_HANDOFF_STATUS_ID,
     })

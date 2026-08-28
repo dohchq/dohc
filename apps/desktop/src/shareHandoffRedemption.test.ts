@@ -227,6 +227,34 @@ describe("share handoff redemption coordinator", () => {
     expect(JSON.stringify(h.statuses)).not.toContain("relay-controlled detail");
   });
 
+  it("retains a throttled code and lets a manual retry succeed", async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(response(429, { detail: CODE_A }))
+      .mockResolvedValueOnce(success());
+    const h = await harness({ credentials: CREDENTIALS_A, fetch: fetchImpl });
+
+    h.offer(CODE_A);
+    await vi.waitFor(() =>
+      expect(h.coordinator.status().status).not.toBe("redeeming"),
+    );
+    expect(h.intent.pending()).toBe(CODE_A);
+    expect(h.coordinator.status()).toEqual({
+      status: "failed-busy",
+      statusId: "status-1",
+    });
+
+    h.coordinator.retry();
+    await vi.waitFor(() => {
+      expect(h.coordinator.status()).toEqual({
+        status: "done",
+        statusId: "status-1",
+        shareId: "share-redeemed",
+      });
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
   it.each([
     ["thrown fetch", () => Promise.reject(new Error("offline"))],
     ["relay 5xx", () => Promise.resolve(response(503, { detail: CODE_A }))],

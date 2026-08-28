@@ -164,6 +164,7 @@ export const SHARE_HANDOFF_STATUSES = [
   "waiting-for-sign-in",
   "redeeming",
   "failed-refused",
+  "failed-busy",
   "failed-network",
   "done",
 ] as const;
