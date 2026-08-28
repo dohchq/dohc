@@ -926,9 +926,14 @@ fn append_local_update_cached(
             emit_outbound: false,
         });
     }
-    match cache.base_for_gate(conn, key, marker)? {
-        Some(base) => {
-            crate::validate_replay_parity(base, update)?;
+    match cache.base_and_frontier_for_local_gate(conn, key, marker)? {
+        Some((base, frontier)) => {
+            let validation = crate::replay_parity::validate_replay_parity_for_cached_local(
+                base,
+                Some(frontier),
+                update,
+            )?;
+            probe.candidate = Some(validation.candidate);
             probe.served = Some(ServedGateBase {
                 source: GateBaseSource::Hit,
                 observed: marker.clone(),
@@ -936,9 +941,16 @@ fn append_local_update_cached(
         }
         None => {
             let base = load_for_replay_gate(conn, key)?;
-            crate::validate_replay_parity(&base, update)?;
+            let validation =
+                crate::replay_parity::validate_replay_parity_for_cached_local(&base, None, update)?;
+            probe.candidate = Some(validation.candidate);
             probe.served = Some(ServedGateBase {
-                source: GateBaseSource::Rebuilt(base),
+                source: GateBaseSource::Rebuilt {
+                    doc: base,
+                    frontier: validation
+                        .rebuilt_frontier
+                        .expect("a cold cached-local gate rebuilds its frontier"),
+                },
                 observed: marker.clone(),
             });
         }

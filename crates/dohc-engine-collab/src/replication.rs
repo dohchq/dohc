@@ -132,11 +132,19 @@ fn apply_remote_update_outer(
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<ReplicationApplyOutcome>, CollabError> {
+    let maintain_frontier = cache.is_some();
+    let mut candidate = None;
     let outcome = store.write_with(faults, |tx| {
-        apply_remote_update_in_transaction(tx, key, remote, now_ms)
+        apply_remote_update_in_transaction_inner(
+            tx,
+            key,
+            remote,
+            now_ms,
+            maintain_frontier.then_some(&mut candidate),
+        )
     })?;
     if let Some(cache) = cache.as_deref_mut() {
-        cache.finish_deferred_remote_append(store, key, &outcome, &remote.bytes);
+        cache.finish_deferred_remote_append(store, key, &outcome, &remote.bytes, candidate);
     }
     // Self-bound the log: a genuinely-applied remote update folds the log once it
     // grows past the threshold (a replicated fold keeps a full-state snapshot,
@@ -178,6 +186,16 @@ pub fn apply_remote_update_in_transaction(
     remote: &RemoteUpdate,
     now_ms: i64,
 ) -> Result<ReplicationApplyOutcome, CollabError> {
+    apply_remote_update_in_transaction_inner(tx, key, remote, now_ms, None)
+}
+
+fn apply_remote_update_in_transaction_inner(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    remote: &RemoteUpdate,
+    now_ms: i64,
+    candidate_probe: Option<&mut Option<crate::replay_parity::IntegratedFrontierDelta>>,
+) -> Result<ReplicationApplyOutcome, CollabError> {
     validate_update_bytes(&remote.bytes)?;
     if remote.origin_id.is_empty()
         || remote.origin_id.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES
@@ -202,7 +220,15 @@ pub fn apply_remote_update_in_transaction(
         return Ok(ReplicationApplyOutcome::Deduped { seq: existing });
     }
     let base = load_for_replay_gate(tx, key)?;
-    crate::validate_replay_parity(&base, &remote.bytes)?;
+    match candidate_probe {
+        Some(probe) => {
+            *probe = Some(crate::replay_parity::validate_replay_parity_with_delta(
+                &base,
+                &remote.bytes,
+            )?);
+        }
+        None => crate::validate_replay_parity(&base, &remote.bytes)?,
+    }
     put_binary_blob_with_sha(tx, &remote.bytes, &sha)?;
     let seq = append_row(tx, key, &sha, origin.actor_id(), now_ms)?;
     Ok(ReplicationApplyOutcome::Applied {
@@ -303,15 +329,30 @@ pub fn apply_remote_update_in_transaction_cached_with_projection(
         });
     }
 
-    let (projection, source) = match cache.base_for_gate(tx, key, &marker)? {
-        Some(base) => (
-            crate::validate_replay_parity_with_scratch(base, &remote.bytes)?,
-            GateBaseSource::Hit,
-        ),
+    let (projection, candidate, source) = match cache.base_for_gate(tx, key, &marker)? {
+        Some(base) => {
+            let (projection, candidate, _cold_frontier) =
+                crate::replay_parity::validate_replay_parity_with_scratch_and_delta(
+                    base,
+                    &remote.bytes,
+                )?;
+            (projection, candidate, GateBaseSource::Hit)
+        }
         None => {
             let base = load_for_replay_gate(tx, key)?;
-            let projection = crate::validate_replay_parity_with_scratch(&base, &remote.bytes)?;
-            (projection, GateBaseSource::Rebuilt(base))
+            let (projection, candidate, frontier) =
+                crate::replay_parity::validate_replay_parity_with_scratch_and_delta(
+                    &base,
+                    &remote.bytes,
+                )?;
+            (
+                projection,
+                candidate,
+                GateBaseSource::Rebuilt {
+                    doc: base,
+                    frontier,
+                },
+            )
         }
     };
     put_binary_blob_with_sha(tx, &remote.bytes, &sha)?;
@@ -321,6 +362,7 @@ pub fn apply_remote_update_in_transaction_cached_with_projection(
         observed: marker.clone(),
     });
     probe.applied_seq = Some(seq);
+    probe.candidate = Some(candidate);
     Ok(RemoteApplyProjection {
         outcome: ReplicationApplyOutcome::Applied {
             seq,

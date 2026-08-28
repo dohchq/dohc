@@ -177,6 +177,179 @@ fn local_appends_install_then_hit_and_advance_the_cache() {
     assert_eq!(ts.cache.stats(), before);
 }
 
+#[test]
+fn frontier_fold_retires_a_live_identity_covered_by_delete() {
+    // MUTATION: drop identity retirement from the fold and the frontier no
+    // longer equals the store re-encode after the delete.
+    let (mut ts, key) = setup("frontier-retire-identity", Regime::LocalOnly);
+    let producer = Ydoc::wire();
+    let insert = producer.plaintext_insert(0, "ab");
+    committed(
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &insert,
+            &NoFaults,
+            1_001,
+        )
+        .expect("insert"),
+    );
+    assert_eq!(
+        ts.cache.frontier_fact_counts_for_test(&key),
+        Some((2, 0, 0))
+    );
+
+    let delete = producer.plaintext_delete(0, 1);
+    committed(
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &delete,
+            &NoFaults,
+            1_002,
+        )
+        .expect("delete"),
+    );
+    assert_eq!(
+        ts.cache.frontier_fact_counts_for_test(&key),
+        Some((1, 0, 2))
+    );
+    assert_eq!(
+        ts.cache
+            .frontier_matches_doc_for_test(&key)
+            .expect("frontier comparison"),
+        Some(true)
+    );
+}
+
+#[test]
+fn frontier_fold_retires_a_deleted_scalar_interior() {
+    // MUTATION: drop unsafe-interior retirement and the retained interior clock
+    // survives after the scalar itself is deleted.
+    let (mut ts, key) = setup("frontier-retire-interior", Regime::LocalOnly);
+    let producer = Ydoc::wire();
+    let insert = producer.plaintext_insert(0, "😀");
+    committed(
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &insert,
+            &NoFaults,
+            1_001,
+        )
+        .expect("insert"),
+    );
+    assert_eq!(
+        ts.cache.frontier_fact_counts_for_test(&key),
+        Some((2, 1, 0))
+    );
+
+    let delete = producer.plaintext_delete(0, 2);
+    committed(
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &delete,
+            &NoFaults,
+            1_002,
+        )
+        .expect("delete"),
+    );
+    assert_eq!(
+        ts.cache.frontier_fact_counts_for_test(&key),
+        Some((0, 0, 2))
+    );
+    assert_eq!(
+        ts.cache
+            .frontier_matches_doc_for_test(&key)
+            .expect("frontier comparison"),
+        Some(true)
+    );
+}
+
+#[test]
+fn frontier_delete_endpoints_canonicalize_across_pending_integration() {
+    // Two adjacent deletes arrive before their target insert. A raw endpoint
+    // append would retain four endpoints; yrs IdSet and the fresh store encode
+    // both emit the one canonical [0, 2) range before and after integration.
+    let (mut ts, key) = setup("frontier-pending-delete-coverage", Regime::LocalOnly);
+    let producer = Ydoc::wire();
+    let dependency = producer.plaintext_insert(0, "abc");
+    let delete_first = producer.plaintext_delete(0, 1);
+    let delete_second = producer.plaintext_delete(0, 1);
+
+    for (now_ms, update) in [(1_001, &delete_second), (1_002, &delete_first)] {
+        committed(
+            record_local_update(
+                &mut ts.store,
+                &mut ts.cache,
+                &key,
+                update,
+                &NoFaults,
+                now_ms,
+            )
+            .expect("parked delete"),
+        );
+        assert_eq!(
+            ts.cache
+                .frontier_matches_doc_for_test(&key)
+                .expect("parked frontier comparison"),
+            Some(true)
+        );
+        assert_eq!(
+            ts.cache
+                .frontier_fact_counts_for_test(&key)
+                .map(|facts| facts.2),
+            Some(2),
+            "adjacent coverage must emit one canonical endpoint pair"
+        );
+    }
+    assert_eq!(
+        load_persisted(&ts.store, &key)
+            .expect("parked load")
+            .expect("parked doc")
+            .doc
+            .plaintext_string(),
+        "",
+        "the dependency-free base cannot yet expose the deleted content"
+    );
+
+    committed(
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &dependency,
+            &NoFaults,
+            1_003,
+        )
+        .expect("dependency"),
+    );
+    assert_eq!(
+        load_persisted(&ts.store, &key)
+            .expect("integrated load")
+            .expect("integrated doc")
+            .doc
+            .plaintext_string(),
+        "c",
+        "the target insert releases both adjacent pending deletes"
+    );
+    assert_eq!(
+        ts.cache.frontier_fact_counts_for_test(&key),
+        Some((1, 0, 2))
+    );
+    assert_eq!(
+        ts.cache
+            .frontier_matches_doc_for_test(&key)
+            .expect("integrated frontier comparison"),
+        Some(true)
+    );
+}
+
 // ---- T1: mutation-style stale-cache injection -------------------------------
 
 #[test]
@@ -339,6 +512,21 @@ fn differential_check_catches_a_poisoned_entry() {
     );
 
     ts.cache.poison_doc_for_test(&key, Ydoc::wire());
+
+    let u2 = independent_insert("b");
+    let _ = record_local_update(&mut ts.store, &mut ts.cache, &key, &u2, &NoFaults, 1_002);
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "FR1-VALID")]
+fn frontier_oracle_catches_a_poisoned_identity() {
+    let (mut ts, key) = setup("frontier-oracle-poison", Regime::LocalOnly);
+    let u1 = independent_insert("a");
+    committed(
+        record_local_update(&mut ts.store, &mut ts.cache, &key, &u1, &NoFaults, 1_001).expect("u1"),
+    );
+    ts.cache.poison_frontier_for_test(&key);
 
     let u2 = independent_insert("b");
     let _ = record_local_update(&mut ts.store, &mut ts.cache, &key, &u2, &NoFaults, 1_002);
@@ -613,6 +801,13 @@ fn compaction_rebases_the_entry_to_the_snapshot_byte_for_byte() {
         ts.cache.doc_full_state_for_test(&key),
         Some(cold.doc.encode_full_state()),
         "the re-based entry equals the cold reconstruction byte-for-byte"
+    );
+    assert_eq!(
+        ts.cache
+            .frontier_matches_doc_for_test(&key)
+            .expect("compacted frontier comparison"),
+        Some(true),
+        "compaction rebuilds the frontier from the exact snapshot bytes"
     );
 
     // The re-based entry serves the next append as a hit.
