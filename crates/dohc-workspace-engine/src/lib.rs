@@ -3748,10 +3748,7 @@ impl EngineService {
         })
     }
 
-    /// The capture driver's observable health: whether the files layer is
-    /// up (`running`), whether anything since the last fully clean tick went
-    /// wrong (`degraded`), and whether the restart streak has escalated past
-    /// recovery-on-its-own-timescale (`terminal`).
+    /// Returns every collection in the workspace's active version, ordered by path.
     async fn collections_list(
         &self,
         ctx: &RequestContext,

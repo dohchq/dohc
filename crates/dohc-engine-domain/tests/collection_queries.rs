@@ -3,7 +3,8 @@ use dohc_engine_domain::{
     CollectionSchemaReasonCode, CollectionSchemaStatus, CollectionSort, DomainError,
     MAX_COLLECTION_HISTORY_LIMIT, NoFaults, TxnOutcome, VersionedTextStore, ViewSortDirection,
     WriteText, get_collection, get_collection_record, list_collections, parse_collection_schema,
-    query_collection_records, reconcile_collections_in_tx,
+    query_collection_records, reconcile_collections_in_tx, set_collection_adoption_state_in_tx,
+    synchronize_collection_frontmatter_index_in_tx,
 };
 use dohc_engine_storage::{EngineStore, StorageError};
 use dohc_engine_testkit::ScratchDir;
@@ -24,19 +25,37 @@ fn write_text(
     text: &str,
     sequence: i64,
 ) -> Result<(), DomainError> {
+    write_text_for_object(
+        store,
+        path,
+        text,
+        &format!("object-{sequence}"),
+        &format!("moment-{sequence}"),
+        sequence,
+    )
+}
+
+fn write_text_for_object(
+    store: &mut EngineStore,
+    path: &str,
+    text: &str,
+    object_id: &str,
+    moment_id: &str,
+    now_ms: i64,
+) -> Result<(), DomainError> {
     VersionedTextStore::new(store).write_text(
         &WriteText {
             workspace_id: WORKSPACE_ID.to_owned(),
             version_id: VERSION_ID.to_owned(),
-            object_id: format!("object-{sequence}"),
+            object_id: object_id.to_owned(),
             path: path.to_owned(),
             text: text.to_owned(),
-            moment_id: format!("moment-{sequence}"),
+            moment_id: moment_id.to_owned(),
             metadata_origin: "test".to_owned(),
             metadata_summary: None,
             metadata_correlation_id: None,
             author_json: None,
-            now_ms: sequence,
+            now_ms,
             request_id: None,
         },
         &NoFaults,
@@ -119,6 +138,116 @@ fn seeded_store() -> (ScratchDir, EngineStore) {
         .expect("reconcile collections");
     assert!(matches!(reconciled, TxnOutcome::Committed(_)));
     (scratch, store)
+}
+
+#[test]
+fn reconcile_indexes_fields_added_after_frontmatterless_record_adoption() {
+    let (_scratch, mut store) = fresh_store();
+    write_text(
+        &mut store,
+        "tasks/collection.yaml",
+        "fields:\n  done:\n    type: checkbox\n  priority:\n    type: number\n  status:\n    type: text\n",
+        2,
+    )
+    .expect("task schema");
+    write_text_for_object(
+        &mut store,
+        "tasks/alpha.md",
+        "Alpha task\n",
+        "repaired-record-object",
+        "frontmatterless-record",
+        3,
+    )
+    .expect("frontmatterless record");
+
+    let first_reconcile = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile frontmatterless record");
+    let TxnOutcome::Committed(first_reconcile) = first_reconcile else {
+        panic!("frontmatterless reconciliation did not commit");
+    };
+    let adoption = first_reconcile
+        .adoptions
+        .first()
+        .expect("frontmatterless record adoption");
+    let record_id = adoption.record_id.clone();
+
+    write_text_for_object(
+        &mut store,
+        "tasks/alpha.md",
+        &format!("---\nid: {record_id}\n---\n\nAlpha task\n"),
+        "repaired-record-object",
+        "adopted-record",
+        4,
+    )
+    .expect("adopted record artifact");
+    let adoption_applied = store
+        .write_with(&NoFaults, |tx| {
+            synchronize_collection_frontmatter_index_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                "repaired-record-object",
+                &json!({ "id": record_id }),
+            )?;
+            set_collection_adoption_state_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                "tasks/alpha.md",
+                &record_id,
+                "adopted",
+            )
+        })
+        .expect("apply record adoption");
+    assert!(matches!(adoption_applied, TxnOutcome::Committed(())));
+
+    write_text_for_object(
+        &mut store,
+        "tasks/alpha.md",
+        &format!(
+            "---\nid: {record_id}\ndone: true\npriority: 8\nstatus: repaired\n---\n\nAlpha task\n"
+        ),
+        "repaired-record-object",
+        "repaired-record",
+        5,
+    )
+    .expect("repaired record artifact");
+    let repaired = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile repaired record");
+    assert!(matches!(repaired, TxnOutcome::Committed(_)));
+
+    let query = store
+        .read_with(|conn| {
+            query_collection_records(conn, WORKSPACE_ID, "tasks", &CollectionQuery::default())
+        })
+        .expect("query repaired record")
+        .expect("tasks collection");
+    assert_eq!(query.records.len(), 1);
+    let record = &query.records[0];
+    assert_eq!(record.id, record_id);
+    for (field, expected) in [
+        ("done", json!(true)),
+        ("priority", json!(8)),
+        ("status", json!("repaired")),
+    ] {
+        let value = record
+            .values
+            .iter()
+            .find(|value| value.field == field)
+            .unwrap_or_else(|| panic!("missing indexed field {field}"));
+        assert_eq!(value.value, expected, "typed value for {field}");
+        assert_eq!(
+            value.validation,
+            CollectionIndexedValueValidation::Valid,
+            "validation for {field}"
+        );
+    }
 }
 
 #[test]

@@ -1237,6 +1237,11 @@ fn replace_index_for_record(
     schema: &CollectionSchema,
     frontmatter: &Value,
 ) -> Result<(), crate::DomainError> {
+    let index_initialized = frontmatter.as_object().is_some_and(|values| {
+        values
+            .keys()
+            .any(|field_name| field_name != RECORD_ID_FRONTMATTER_KEY)
+    });
     conn.execute(
         "DELETE FROM collection_record_fields \
          WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3",
@@ -1283,9 +1288,9 @@ fn replace_index_for_record(
         }
     }
     conn.execute(
-        "UPDATE collection_records SET index_initialized=1 \
+        "UPDATE collection_records SET index_initialized=?4 \
          WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3",
-        params![workspace_id, version_id, record_id],
+        params![workspace_id, version_id, record_id, index_initialized],
     )
     .map_err(crate::DomainError::sql_persist)?;
     Ok(())
