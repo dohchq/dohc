@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 
 const SHARE_HANDOFF_SCHEME = "dohc";
 const SHARE_HANDOFF_URL_PATTERN =
-  /^dohc:\/\/open\/([A-Za-z0-9_-]{43})$/;
+  /^dohc:\/\/open\/([A-Za-z0-9_-]{43})$/i;
 const SHARE_HANDOFF_PROTOCOL_PATTERN = /^dohc:/iu;
 
 declare const shareHandoffCodeBrand: unique symbol;

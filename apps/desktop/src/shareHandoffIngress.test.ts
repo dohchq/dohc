@@ -12,6 +12,11 @@ import {
 const CODE_A = "A".repeat(43);
 const CODE_B = `${"b".repeat(42)}_`;
 const VALID_URL = `dohc://open/${CODE_A}`;
+const CASE_VARIANT_URLS = [
+  ["upper-case scheme", `DOHC://open/${CODE_A}`],
+  ["upper-case host", `dohc://OPEN/${CODE_A}`],
+  ["mixed-case scheme and host", `DoHc://OpEn/${CODE_A}`],
+] as const;
 
 const INVALID_URLS = [
   ["query", `${VALID_URL}?source=browser`],
@@ -27,8 +32,6 @@ const INVALID_URLS = [
   ["trailing whitespace", `${VALID_URL} `],
   ["trailing line feed", `${VALID_URL}\n`],
   ["trailing carriage return", `${VALID_URL}\r`],
-  ["uppercase scheme", `DOHC://open/${CODE_A}`],
-  ["uppercase host", `dohc://Open/${CODE_A}`],
   ["wrong scheme", `https://open/${CODE_A}`],
   ["wrong host", `dohc://handoff/${CODE_A}`],
   ["single-slash lookalike", `dohc:/open/${CODE_A}`],
@@ -37,6 +40,7 @@ const INVALID_URLS = [
   ["short code", `dohc://open/${"A".repeat(42)}`],
   ["long code", `dohc://open/${"A".repeat(44)}`],
   ["forbidden code character", `dohc://open/${"A".repeat(42)}.`],
+  ["Unicode case-folding code character", `dohc://open/${"A".repeat(42)}K`],
 ] as const;
 
 afterEach(() => {
@@ -46,6 +50,10 @@ afterEach(() => {
 describe("share handoff URL parser", () => {
   it("accepts the one exact raw grammar", () => {
     expect(parseShareHandoffUrl(VALID_URL)).toBe(CODE_A);
+  });
+
+  it.each(CASE_VARIANT_URLS)("accepts %s", (_label, rawArgument) => {
+    expect(parseShareHandoffUrl(rawArgument)).toBe(CODE_A);
   });
 
   it.each(INVALID_URLS)("rejects %s", (_label, rawArgument) => {
@@ -58,11 +66,25 @@ describe("share handoff argument classifier", () => {
     ["plain launch", ["dohc.exe"], "plain"],
     ["exact accepted handoff", ["dohc.exe", VALID_URL], "accepted"],
     [
+      "accepted upper-case scheme",
+      ["dohc.exe", CASE_VARIANT_URLS[0][1]],
+      "accepted",
+    ],
+    [
+      "accepted upper-case host",
+      ["dohc.exe", CASE_VARIANT_URLS[1][1]],
+      "accepted",
+    ],
+    [
+      "accepted mixed-case scheme and host",
+      ["dohc.exe", CASE_VARIANT_URLS[2][1]],
+      "accepted",
+    ],
+    [
       "rejected lower-case lookalike",
       ["dohc.exe", `${VALID_URL}?source=browser`],
       "rejected",
     ],
-    ["rejected case variant", ["dohc.exe", `DOHC://open/${CODE_A}`], "rejected"],
     [
       "workspace path plus rejected lookalike",
       ["dohc.exe", "C:\\workspaces\\trip", `${VALID_URL}#handoff`],
@@ -118,6 +140,15 @@ describe("share handoff delivery", () => {
 
     expect(receiveShareHandoffArguments([VALID_URL], slot)).toBe(true);
     expect(slot.pending()).toBe(CODE_A);
+  });
+
+  it("delivers a casing variant as only the unchanged code", () => {
+    const slot = createShareHandoffIntentSlot();
+    const rawArgument = CASE_VARIANT_URLS[2][1];
+
+    expect(receiveShareHandoffArguments([rawArgument], slot)).toBe(true);
+    expect(slot.pending()).toBe(CODE_A);
+    expect(slot.pending()).not.toBe(rawArgument);
   });
 
   it("restores, shows, and focuses once for a valid warm delivery", () => {
