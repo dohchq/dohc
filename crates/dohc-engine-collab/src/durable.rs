@@ -493,7 +493,14 @@ pub fn record_local_update_with_origin(
         }
         probe.capture_commit(tx, key);
         Ok(outcome)
-    })?;
+    });
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            cache.finish_local_gate_error(key, &probe);
+            return Err(error);
+        }
+    };
     finalize_local_append(
         store,
         cache,
@@ -863,7 +870,14 @@ where
             probe.capture_commit(tx, key);
             Ok(outcome)
         }
-    })?;
+    });
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            cache.finish_local_gate_error(key, &probe);
+            return Err(error);
+        }
+    };
     finalize_local_append(
         store,
         cache,
@@ -896,7 +910,7 @@ pub(crate) fn append_and_index_update(
         key,
         content_kind,
         base,
-        &projection,
+        Some(&projection),
         update,
         sha,
         index_frontmatter,
@@ -912,7 +926,7 @@ pub(crate) fn append_validated_and_index_update(
     key: &DocKey,
     content_kind: ContentKind,
     base: &Ydoc,
-    projection: &Ydoc,
+    projection: Option<&Ydoc>,
     update: &[u8],
     sha: &str,
     index_frontmatter: bool,
@@ -921,7 +935,26 @@ pub(crate) fn append_validated_and_index_update(
 ) -> Result<i64, CollabError> {
     put_binary_blob_with_sha(conn, update, sha)?;
     let seq = append_row(conn, key, sha, actor_origin_id, now_ms)?;
-    if index_frontmatter {
+    let is_bound_collection_record = index_frontmatter
+        && content_kind == ContentKind::Richdoc
+        && dohc_engine_domain::is_collection_record_bound_in_tx(
+            conn,
+            &key.workspace_id,
+            &key.version_id,
+            &key.object_id,
+        )
+        .map_err(|error| CollabError::Corrupt {
+            reason: format!("collection record binding check failed: {error}"),
+        })?;
+    if is_bound_collection_record {
+        let owned_projection;
+        let projection = match projection {
+            Some(projection) => projection,
+            None => {
+                owned_projection = project_applied_update(base, update)?;
+                &owned_projection
+            }
+        };
         index_applied_frontmatter(
             conn,
             key,
@@ -934,6 +967,19 @@ pub(crate) fn append_validated_and_index_update(
         )?;
     }
     Ok(seq)
+}
+
+/// Build a content-readable post-update fork after the parity gate accepts.
+/// The writer cache's persistent scratch is check-4-only and cannot serve
+/// collection indexing.
+fn project_applied_update(base: &Ydoc, update: &[u8]) -> Result<Ydoc, CollabError> {
+    let projection = Ydoc::wire();
+    projection.apply(&base.encode_full_state())?;
+    if let Some(pending) = base.pending_update_v1() {
+        projection.apply(&pending)?;
+    }
+    projection.apply(update)?;
+    Ok(projection)
 }
 
 fn append_local_update(
@@ -974,11 +1020,12 @@ fn append_local_update(
 }
 
 /// [`append_local_update`] with the writer's doc cache serving the gate base.
-/// A cache hit gates against the cached doc and its integrated frontier
-/// (validated against the in-tx tuple); a miss reconstructs exactly as before
-/// and hands the rebuilt PRE-APPEND base and frontier out through `probe` so
-/// the caller can warm the cache after the transaction commits. The cache is
-/// only READ here — it is never mutated inside a transaction.
+/// A cache hit gates against the cached doc (validated against the in-tx
+/// tuple); a miss reconstructs exactly as before and hands the rebuilt
+/// PRE-APPEND artifacts out through `probe` so the caller can warm the cache
+/// after commit. The writer doc and frontier stay read-only here. Check 4 can
+/// apply to its separate persistent scratch; `probe` decides whether that
+/// mutation is retained or evicted after the transaction outcome is known.
 #[allow(clippy::too_many_arguments)]
 fn append_local_update_cached(
     conn: &Connection,
@@ -1001,11 +1048,13 @@ fn append_local_update_cached(
             emit_outbound: false,
         });
     }
-    let seq = match cache.base_and_frontier_for_local_gate(conn, key, marker)? {
-        Some((base, frontier)) => {
+    let seq = match cache.base_frontier_and_scratch_for_local_gate(conn, key, marker)? {
+        Some((base, frontier, scratch)) => {
             let validation = crate::replay_parity::validate_replay_parity_for_cached_local(
                 base,
                 Some(frontier),
+                scratch,
+                &mut probe.scratch_mutated,
                 update,
             )?;
             let seq = append_validated_and_index_update(
@@ -1013,7 +1062,7 @@ fn append_local_update_cached(
                 key,
                 marker.content_kind,
                 base,
-                &validation.scratch,
+                None,
                 update,
                 sha,
                 index_frontmatter,
@@ -1021,6 +1070,7 @@ fn append_local_update_cached(
                 now_ms,
             )?;
             probe.candidate = Some(validation.candidate);
+            probe.rebuilt_scratch = validation.rebuilt_scratch;
             probe.served = Some(ServedGateBase {
                 source: GateBaseSource::Hit,
                 observed: marker.clone(),
@@ -1029,14 +1079,19 @@ fn append_local_update_cached(
         }
         None => {
             let base = load_for_replay_gate(conn, key)?;
-            let validation =
-                crate::replay_parity::validate_replay_parity_for_cached_local(&base, None, update)?;
+            let validation = crate::replay_parity::validate_replay_parity_for_cached_local(
+                &base,
+                None,
+                None,
+                &mut probe.scratch_mutated,
+                update,
+            )?;
             let seq = append_validated_and_index_update(
                 conn,
                 key,
                 marker.content_kind,
                 &base,
-                &validation.scratch,
+                None,
                 update,
                 sha,
                 index_frontmatter,
@@ -1044,6 +1099,7 @@ fn append_local_update_cached(
                 now_ms,
             )?;
             probe.candidate = Some(validation.candidate);
+            probe.rebuilt_scratch = validation.rebuilt_scratch;
             probe.served = Some(ServedGateBase {
                 source: GateBaseSource::Rebuilt {
                     doc: base,

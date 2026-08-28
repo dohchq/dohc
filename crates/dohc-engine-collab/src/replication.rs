@@ -223,19 +223,22 @@ fn apply_remote_update_in_transaction_inner(
     let base = load_for_replay_gate(tx, key)?;
     let projection = match candidate_probe {
         Some(probe) => {
-            let (projection, candidate) =
+            let candidate =
                 crate::replay_parity::validate_replay_parity_with_delta(&base, &remote.bytes)?;
             *probe = Some(candidate);
-            projection
+            None
         }
-        None => crate::validate_replay_parity_with_scratch(&base, &remote.bytes)?,
+        None => Some(crate::validate_replay_parity_with_scratch(
+            &base,
+            &remote.bytes,
+        )?),
     };
     let seq = append_validated_and_index_update(
         tx,
         key,
         marker.content_kind,
         &base,
-        &projection,
+        projection.as_ref(),
         &remote.bytes,
         &sha,
         true,
@@ -360,7 +363,7 @@ pub fn apply_remote_update_in_transaction_cached_with_projection(
                 key,
                 marker.content_kind,
                 base,
-                &projection,
+                Some(&projection),
                 &remote.bytes,
                 &sha,
                 true,
@@ -381,7 +384,7 @@ pub fn apply_remote_update_in_transaction_cached_with_projection(
                 key,
                 marker.content_kind,
                 &base,
-                &projection,
+                Some(&projection),
                 &remote.bytes,
                 &sha,
                 true,

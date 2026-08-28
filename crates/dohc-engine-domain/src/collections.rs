@@ -1295,6 +1295,16 @@ fn bound_record(
     .map_err(crate::DomainError::sql_corrupt)
 }
 
+/// Whether an object is the bound file for a collection record.
+pub fn is_collection_record_bound_in_tx(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+) -> Result<bool, crate::DomainError> {
+    Ok(bound_record(conn, workspace_id, version_id, object_id)?.is_some())
+}
+
 /// Replace one bound record's local projection with its applied Y.Map state.
 pub fn synchronize_collection_frontmatter_index_in_tx(
     conn: &Connection,
