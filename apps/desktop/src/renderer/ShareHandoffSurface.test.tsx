@@ -8,6 +8,8 @@ const REFUSED_COPY =
   "dohc couldn't open this share link. It may have expired or already been used. Go back to the share page in your browser and choose Open in dohc again.";
 const NETWORK_COPY =
   "dohc couldn't reach dohc Cloud. Check your connection, then choose Try again.";
+const MISSING_COPY =
+  "dohc couldn't find this share in your account. The person who shared it may have ended it.";
 
 const bridgeMock = {
   cloudStatus: vi.fn(),
@@ -341,8 +343,52 @@ describe("ShareHandoffSurface", () => {
       />,
     );
 
-    expect(await screen.findByText(NETWORK_COPY)).toBeTruthy();
+    expect(await screen.findByText(MISSING_COPY)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Check again" })).toBeTruthy();
+    expect(screen.queryByText(NETWORK_COPY)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
     expect(screen.queryByTestId("open-shared-view")).toBeNull();
+    expect(bridgeMock.listRelayShares).toHaveBeenCalledOnce();
+    expect(bridgeMock.retryShareHandoff).not.toHaveBeenCalled();
+    expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
+    expect(bridgeMock.mountShare).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Check again" }));
+
+    expect(await screen.findByTestId("open-shared-view")).toBeTruthy();
+    expect(bridgeMock.listRelayShares).toHaveBeenCalledTimes(2);
+    expect(bridgeMock.retryShareHandoff).not.toHaveBeenCalled();
+    expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
+    expect(bridgeMock.mountShare).not.toHaveBeenCalled();
+  });
+
+  it("keeps network copy and Try again when received-share inventory fails", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listRelayShares
+      .mockRejectedValueOnce(new Error("inventory unavailable"))
+      .mockResolvedValueOnce({
+        granted: [],
+        received: [receivedShare("share-exact", "ordinary-exact-share-code")],
+      });
+
+    render(
+      <ShareHandoffSurface
+        status={{
+          status: "done",
+          statusId: "status-test",
+          shareId: "share-exact",
+        }}
+        onWorkspaceReady={() => {}}
+        onBack={() => {}}
+        onOpened={() => {}}
+      />,
+    );
+
+    expect(await screen.findByText(NETWORK_COPY)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(screen.queryByText(MISSING_COPY)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Check again" })).toBeNull();
+
     await user.click(screen.getByRole("button", { name: "Try again" }));
 
     expect(await screen.findByTestId("open-shared-view")).toBeTruthy();

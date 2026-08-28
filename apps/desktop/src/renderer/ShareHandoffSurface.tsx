@@ -11,10 +11,13 @@ const REFUSED_COPY =
   "dohc couldn't open this share link. It may have expired or already been used. Go back to the share page in your browser and choose Open in dohc again.";
 const NETWORK_COPY =
   "dohc couldn't reach dohc Cloud. Check your connection, then choose Try again.";
+const MISSING_COPY =
+  "dohc couldn't find this share in your account. The person who shared it may have ended it.";
 
 type InventoryState =
   | { kind: "idle" }
   | { kind: "loading"; shareId: string }
+  | { kind: "missing"; shareId: string }
   | { kind: "failed"; shareId: string }
   | { kind: "ready"; shareId: string; shareCode: string };
 
@@ -74,7 +77,7 @@ export function ShareHandoffSurface(props: {
         setInventory(
           received
             ? { kind: "ready", shareId, shareCode: received.shareCode }
-            : { kind: "failed", shareId },
+            : { kind: "missing", shareId },
         );
       })
       .catch(() => {
@@ -147,6 +150,25 @@ export function ShareHandoffSurface(props: {
         onOpened={props.onOpened}
         {...(props.mountInto ? { mountInto: props.mountInto } : {})}
       />
+    );
+  }
+
+  if (
+    inventory.kind === "missing" &&
+    inventory.shareId === shareId
+  ) {
+    return (
+      <HandoffCard title="Open a share" onBack={props.onBack}>
+        <p role="alert" className="m-0 text-xs leading-relaxed text-danger">
+          {MISSING_COPY}
+        </p>
+        <SecondaryButton
+          type="button"
+          onClick={() => setInventoryAttempt((attempt) => attempt + 1)}
+        >
+          Check again
+        </SecondaryButton>
+      </HandoffCard>
     );
   }
 
