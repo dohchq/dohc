@@ -683,6 +683,12 @@ function OpenInDohc(props: { session: string }) {
     dohcNavigation.openCode(handoff.code);
   }, [props.session]);
 
+  const cancelOpening = useCallback(() => {
+    requestRef.current?.abort();
+    requestRef.current = null;
+    setHandoffState("idle");
+  }, []);
+
   if (handoffState === "idle") {
     return (
       <button
@@ -726,6 +732,13 @@ function OpenInDohc(props: { session: string }) {
       <div className="handoff-panel" aria-live="polite">
         <p className="handoff-title">Opening in dohc…</p>
         <p>Your browser may ask for permission to open dohc.</p>
+        <button
+          className="handoff-button secondary"
+          type="button"
+          onClick={cancelOpening}
+        >
+          Cancel
+        </button>
       </div>
     );
   }

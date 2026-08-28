@@ -482,6 +482,86 @@ describe("App", () => {
     expect(container.textContent).toBe("");
   });
 
+  it("cancels an in-flight handoff and requires fresh consent to try again", async () => {
+    let resolveFirstHandoff: ((response: Response) => void) | undefined;
+    let resolveSecondHandoff: ((response: Response) => void) | undefined;
+    const firstHandoff = new Promise<Response>((resolve) => {
+      resolveFirstHandoff = resolve;
+    });
+    const secondHandoff = new Promise<Response>((resolve) => {
+      resolveSecondHandoff = resolve;
+    });
+    const handoffSignals: AbortSignal[] = [];
+    const fetchMock = viewerFetch((init) => {
+      const signal = init?.signal;
+      expect(signal).toBeInstanceOf(AbortSignal);
+      handoffSignals.push(signal as AbortSignal);
+      return handoffSignals.length === 1 ? firstHandoff : secondHandoff;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const navigate = vi.spyOn(dohcNavigation(), "openCode")
+      .mockImplementation(() => undefined);
+
+    await renderApp();
+    clickButton("Open in dohc");
+    clickButton("Agree and open");
+    await settle(() => handoffSignals.length === 1);
+
+    expect(container.textContent).toContain("Opening in dohc…");
+    expect(container.textContent).toContain(
+      "Your browser may ask for permission to open dohc.",
+    );
+    expect(buttonNamed("Cancel")).toBeDefined();
+
+    clickButton("Cancel");
+
+    expect(handoffSignals[0]?.aborted).toBe(true);
+    expect(
+      [...container.querySelectorAll(".handoff-button")]
+        .map((button) => button.textContent),
+    ).toEqual(["Open in dohc"]);
+    expect(container.textContent).not.toContain("Opening in dohc…");
+    expect(buttonNamed("Agree and open")).toBeUndefined();
+    expect(buttonNamed("Cancel")).toBeUndefined();
+
+    await act(async () => {
+      resolveFirstHandoff?.(jsonResponse({
+        ok: true,
+        code: FIRST_HANDOFF_CODE,
+        expiresAtMs: Date.now() + 60_000,
+      }));
+      await firstHandoff;
+    });
+
+    expect(navigate).not.toHaveBeenCalled();
+    expect(
+      [...container.querySelectorAll(".handoff-button")]
+        .map((button) => button.textContent),
+    ).toEqual(["Open in dohc"]);
+
+    clickButton("Open in dohc");
+
+    expect(buttonNamed("Agree and open")).toBeDefined();
+    expect(buttonNamed("Cancel")).toBeDefined();
+    expect(handoffCalls(fetchMock)).toHaveLength(1);
+
+    clickButton("Agree and open");
+    await settle(() => handoffSignals.length === 2);
+
+    expect(handoffSignals[1]).not.toBe(handoffSignals[0]);
+    expect(handoffSignals[1]?.aborted).toBe(false);
+
+    resolveSecondHandoff?.(jsonResponse({
+      ok: true,
+      code: SECOND_HANDOFF_CODE,
+      expiresAtMs: Date.now() + 60_000,
+    }));
+    await settle(() => navigate.mock.calls.length === 1);
+
+    expect(handoffCalls(fetchMock)).toHaveLength(2);
+    expect(navigate.mock.calls).toEqual([[SECOND_HANDOFF_CODE]]);
+  });
+
   it("does not navigate or repaint a replacement ready session", async () => {
     let resolveFirstHandoff: ((response: Response) => void) | undefined;
     let firstHandoffSignal: AbortSignal | undefined;
