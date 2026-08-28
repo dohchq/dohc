@@ -62,6 +62,11 @@ export interface SeededShare {
   workspaceId: string;
 }
 
+export interface SeededLink {
+  grantId: string;
+  secret: string;
+}
+
 export interface ProbeRequest {
   headers: Record<string, string>;
   method: string;
@@ -503,6 +508,68 @@ export async function seedShare(options: SeedShareOptions): Promise<SeededShare>
     shareId,
     workspaceId,
   };
+}
+
+export async function createSeededLink(
+  relayUrl: string,
+  seeded: SeededShare,
+): Promise<SeededLink> {
+  const link = await responseObject(
+    await fetch(
+      `${relayUrl}/sync/${encodedSegment(seeded.workspaceId)}/shares/${encodedSegment(seeded.shareId)}/links`,
+      {
+        method: "POST",
+        headers: ownerHeaders(seeded.ownerUserId, true),
+        body: JSON.stringify({ access: "view" }),
+      },
+    ),
+    "create another link grant",
+  );
+  const publicUrl = new URL(requiredString(link.url, "url", "create another link grant"));
+  return {
+    grantId: requiredString(link.grantId, "grantId", "create another link grant"),
+    secret: publicUrl.hash.slice(1),
+  };
+}
+
+export async function rotateSeededLink(
+  relayUrl: string,
+  seeded: SeededShare,
+  grantId: string,
+): Promise<void> {
+  await expectHttpOk(
+    await fetch(
+      `${relayUrl}/sync/shares/${encodedSegment(seeded.shareId)}/links/${encodedSegment(grantId)}/rotate`,
+      {
+        method: "POST",
+        headers: ownerHeaders(seeded.ownerUserId, true),
+        body: JSON.stringify({
+          workspaceId: seeded.workspaceId,
+          expectedDependentGrantIds: [],
+        }),
+      },
+    ),
+    "rotate seeded link",
+  );
+}
+
+export async function revokeSeededLink(
+  relayUrl: string,
+  seeded: SeededShare,
+  grantId: string,
+): Promise<void> {
+  await expectHttpOk(
+    await fetch(`${relayUrl}/sync/shares/${encodedSegment(seeded.shareId)}/revoke`, {
+      method: "POST",
+      headers: ownerHeaders(seeded.ownerUserId, true),
+      body: JSON.stringify({
+        workspaceId: seeded.workspaceId,
+        grantId,
+        expectedDependentGrantIds: [],
+      }),
+    }),
+    "revoke seeded link",
+  );
 }
 
 function recordedHeaders(headers: IncomingHttpHeaders): Record<string, string> {
