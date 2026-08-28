@@ -16,6 +16,7 @@ const DEFAULT_MAX_SESSIONS = 10_000;
 export const MAX_SESSIONS_PER_GRANT = 512;
 const MAX_BLOB_PROXIES_PER_SESSION = 8;
 const MAX_BLOB_PROXIES_PER_GRANT = 24;
+const DEFAULT_HANDOFF_RELAY_TIMEOUT_MS = 10_000;
 const LINK_REFRESH_WINDOW_MS = 5 * 60 * 1_000;
 export const LINK_SESSION_RENEWAL_GRACE_MS = 7 * 24 * 60 * 60 * 1_000;
 const RASTER_SIGNATURE_BYTES = 12;
@@ -52,6 +53,7 @@ export interface CreateShareWebHandlerOptions {
   newSessionToken?: () => string;
   maxSessions?: number;
   viewerAssetsDir?: string;
+  handoffRelayTimeoutMs?: number;
 }
 
 class ShareWebSessionStore {
@@ -303,6 +305,32 @@ function relayRequest(relayUrl: string, path: string, init: RequestInit = {}): R
   return new Request(new URL(path, `${relayUrl.replace(/\/+$/u, "")}/`), init);
 }
 
+function boundedHandoffRelayRequest(
+  clientRequest: Request,
+  relayUrl: string,
+  init: RequestInit,
+  timeoutMs: number,
+): { request: Request; dispose: () => void } {
+  const relayAbort = new AbortController();
+  const abortFromClient = (): void => relayAbort.abort(clientRequest.signal.reason);
+  if (clientRequest.signal.aborted) {
+    abortFromClient();
+  } else {
+    clientRequest.signal.addEventListener("abort", abortFromClient, { once: true });
+  }
+  const deadline = setTimeout(() => relayAbort.abort(), timeoutMs);
+  return {
+    request: relayRequest(relayUrl, "/sync/link-handoff", {
+      ...init,
+      signal: relayAbort.signal,
+    }),
+    dispose: () => {
+      clearTimeout(deadline);
+      clientRequest.signal.removeEventListener("abort", abortFromClient);
+    },
+  };
+}
+
 function sessionCookie(
   discriminator: string,
   token: string,
@@ -513,6 +541,7 @@ export function createShareWebHandler({
   newSessionToken = () => randomBytes(32).toString("base64url"),
   maxSessions = DEFAULT_MAX_SESSIONS,
   viewerAssetsDir,
+  handoffRelayTimeoutMs = DEFAULT_HANDOFF_RELAY_TIMEOUT_MS,
 }: CreateShareWebHandlerOptions): (request: Request) => Promise<Response> {
   const sessions = new ShareWebSessionStore(maxSessions);
   const exchangeRateLimiter = new ShareWebExchangeRateLimiter();
@@ -715,18 +744,22 @@ export function createShareWebHandler({
         ? { "set-cookie": refreshed.setCookie }
         : {};
       const capabilityToken = authenticated.session.capabilityToken;
+      const boundedRelayRequest = boundedHandoffRelayRequest(
+        request,
+        relayUrl,
+        {
+          method: "POST",
+          headers: {
+            authorization: `LinkCapability ${capabilityToken}`,
+            ...(relayExchangeKey
+              ? { "x-dohc-relay-exchange-key": relayExchangeKey }
+              : {}),
+          },
+        },
+        handoffRelayTimeoutMs,
+      );
       try {
-        const relayResponse = await fetchRelay(
-          relayRequest(relayUrl, "/sync/link-handoff", {
-            method: "POST",
-            headers: {
-              authorization: `LinkCapability ${capabilityToken}`,
-              ...(relayExchangeKey
-                ? { "x-dohc-relay-exchange-key": relayExchangeKey }
-                : {}),
-            },
-          }),
-        );
+        const relayResponse = await fetchRelay(boundedRelayRequest.request);
         if (relayResponse.status === 429) {
           return refused(429, refreshedCookieHeaders);
         }
@@ -751,6 +784,8 @@ export function createShareWebHandler({
         );
       } catch {
         return refused(503, refreshedCookieHeaders);
+      } finally {
+        boundedRelayRequest.dispose();
       }
     }
 

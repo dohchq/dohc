@@ -1364,6 +1364,7 @@ describe("share-web handoff adapter", () => {
     nowMs?: () => number;
     capabilityExpiresAtMs?: number;
     sessionTokenByte?: number;
+    handoffRelayTimeoutMs?: number;
   }): Promise<{
     handler: ReturnType<typeof createShareWebHandler>;
     discriminator: string;
@@ -1388,6 +1389,7 @@ describe("share-web handoff adapter", () => {
       nowMs: options.nowMs ?? (() => 1_000),
       newSessionToken: () =>
         Buffer.alloc(32, options.sessionTokenByte ?? 41).toString("base64url"),
+      handoffRelayTimeoutMs: options.handoffRelayTimeoutMs,
     });
     const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
     expect(exchanged.status).toBe(200);
@@ -1412,6 +1414,130 @@ describe("share-web handoff adapter", () => {
       "x-dohc-link-session": discriminator,
     };
   }
+
+  it("aborts a handoff mint when the browser request closes without exposing relay secrets", async () => {
+    const relayUrl = `https://${HOST}/s#${SECRET_ALPHA}`;
+    let startedRelayRequest: Request | undefined;
+    let markRelayStarted: (() => void) | undefined;
+    const relayStarted = new Promise<void>((resolve) => {
+      markRelayStarted = resolve;
+    });
+    const state = await exchangedSession({
+      fetchRelay: async (relayRequest) => {
+        startedRelayRequest = relayRequest;
+        markRelayStarted?.();
+        return await new Promise<Response>((_resolve, reject) => {
+          const rejectWithSecrets = (): void => {
+            reject(
+              new Error(
+                `aborted ${HANDOFF_CODE} ${CAP_ALPHA_2} ${relayUrl}`,
+              ),
+            );
+          };
+          if (relayRequest.signal.aborted) {
+            rejectWithSecrets();
+          } else {
+            relayRequest.signal.addEventListener("abort", rejectWithSecrets, {
+              once: true,
+            });
+          }
+        });
+      },
+    });
+    const browserAbort = new AbortController();
+    const pendingResponse = state.handler(
+      request("/api/handoff", {
+        method: "POST",
+        headers: handoffHeaders(state.discriminator, state.cookie),
+        signal: browserAbort.signal,
+      }),
+    );
+    await relayStarted;
+
+    browserAbort.abort();
+
+    expect(startedRelayRequest?.signal.aborted).toBe(true);
+    const response = await pendingResponse;
+    const body = await response.clone().text();
+    expect(body).not.toContain(HANDOFF_CODE);
+    expect(body).not.toContain(CAP_ALPHA_2);
+    expect(body).not.toContain(SECRET_ALPHA);
+    expect(body).not.toContain(relayUrl);
+    await generic(response, 503);
+  });
+
+  it("times out a stalled handoff mint generically and leaves the session retryable", async () => {
+    vi.useFakeTimers();
+    try {
+      const relayUrl = `https://${HOST}/s#${SECRET_ALPHA}`;
+      let mintCalls = 0;
+      let startedRelayRequest: Request | undefined;
+      let markRelayStarted: (() => void) | undefined;
+      const relayStarted = new Promise<void>((resolve) => {
+        markRelayStarted = resolve;
+      });
+      const state = await exchangedSession({
+        handoffRelayTimeoutMs: 25,
+        fetchRelay: async (relayRequest) => {
+          mintCalls += 1;
+          if (mintCalls > 1) {
+            return Response.json({
+              ok: true,
+              code: HANDOFF_CODE,
+              expiresAtMs: 301_000,
+            });
+          }
+          startedRelayRequest = relayRequest;
+          markRelayStarted?.();
+          return await new Promise<Response>((_resolve, reject) => {
+            const rejectWithSecrets = (): void => {
+              reject(
+                new Error(
+                  `timed out ${HANDOFF_CODE} ${CAP_ALPHA_2} ${relayUrl}`,
+                ),
+              );
+            };
+            if (relayRequest.signal.aborted) {
+              rejectWithSecrets();
+            } else {
+              relayRequest.signal.addEventListener("abort", rejectWithSecrets, {
+                once: true,
+              });
+            }
+          });
+        },
+      });
+      const headers = handoffHeaders(state.discriminator, state.cookie);
+      const pendingResponse = state.handler(
+        request("/api/handoff", { method: "POST", headers }),
+      );
+      await relayStarted;
+
+      await vi.advanceTimersByTimeAsync(25);
+
+      expect(startedRelayRequest?.signal.aborted).toBe(true);
+      const response = await pendingResponse;
+      const body = await response.clone().text();
+      expect(body).not.toContain(HANDOFF_CODE);
+      expect(body).not.toContain(CAP_ALPHA_2);
+      expect(body).not.toContain(SECRET_ALPHA);
+      expect(body).not.toContain(relayUrl);
+      await generic(response, 503);
+
+      const retry = await state.handler(
+        request("/api/handoff", { method: "POST", headers }),
+      );
+      expect(retry.status).toBe(200);
+      expect(await retry.json()).toEqual({
+        ok: true,
+        code: HANDOFF_CODE,
+        expiresAtMs: 301_000,
+      });
+      expect(mintCalls).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it("requires an allowed Host, viewer cookie, and explicit handoff session header", async () => {
     let now = 1_000;
