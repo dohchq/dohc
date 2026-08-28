@@ -3289,7 +3289,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
                 g.revoked_at_ms, g.parent_grant_id
          FROM sync_relay_shares s
          JOIN sync_relay_share_grants g ON g.share_id = s.share_id
-         WHERE s.granter_user_id = ?
+         WHERE s.granter_user_id = ? AND g.parent_grant_id IS NULL
          ORDER BY s.created_at_ms DESC, s.share_id, g.created_at_ms, g.grant_id`,
       )
       .all(granterUserId)

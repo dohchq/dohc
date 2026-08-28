@@ -2539,6 +2539,46 @@ describe("relay link grants", () => {
     });
   });
 
+  it("keeps link dependents out of ordinary granted shares", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    await seedFileShare(h);
+    const link = await createLink(h);
+    const linkGrantId = String(link.grantId);
+    const dependentGrantId = "grant-link-recipient";
+    const linkRecipient = "link-recipient";
+    expect(
+      storage.convertLinkGrant({
+        shareId: "share-existing",
+        parentGrantId: linkGrantId,
+        grantId: dependentGrantId,
+        principalUserId: linkRecipient,
+        createdAtMs: 2_001,
+      }),
+    ).toMatchObject({
+      ok: true,
+      grant: { parentGrantId: linkGrantId },
+    });
+
+    const ownerList = await json(await h(request(OWNER, "/sync/shares")));
+    expect(
+      (ownerList.granted as Array<Record<string, unknown>>).map((row) => row.grantId),
+    ).toEqual(["grant-0"]);
+
+    const recipientList = await json(await h(request(linkRecipient, "/sync/shares")));
+    expect(recipientList.received).toEqual([
+      expect.objectContaining({
+        shareId: "share-existing",
+        grantId: dependentGrantId,
+        access: "view",
+      }),
+    ]);
+
+    expect(projectedDependentIds(await ownerLinkInventoryRow(h, linkGrantId))).toEqual([
+      dependentGrantId,
+    ]);
+  });
+
   it("requires current workspace ownership to create a link", async () => {
     const storage = await newStorage();
     let ownershipAnswers = [true];
