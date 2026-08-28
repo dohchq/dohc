@@ -147,8 +147,7 @@ struct ReplayRun {
 }
 
 /// Replay one scenario through the real daemon Y.Doc surface. `force_cold`
-/// clears only the actor cache after the identical update stream, leaving the
-/// durable state and session identity unchanged for the paired consumer run.
+/// clears the actor cache before each gate and before the consumer pair.
 async fn replay_through_engine(scenario: &Scenario, ordinal: usize, force_cold: bool) -> ReplayRun {
     assert!(
         !scenario.dimensions.is_empty(),
@@ -216,6 +215,12 @@ async fn replay_through_engine(scenario: &Scenario, ordinal: usize, force_cold: 
 
     let mut request_id = 3_u64;
     for update_id in &scenario.replay_order {
+        if force_cold {
+            service
+                .ydoc_cache_clear_for_harness(&handle)
+                .await
+                .expect("clear actor cache before cold gate");
+        }
         let update = updates
             .get(update_id.as_str())
             .unwrap_or_else(|| panic!("{} references unknown update {update_id}", scenario.name));
@@ -252,23 +257,43 @@ async fn replay_through_engine(scenario: &Scenario, ordinal: usize, force_cold: 
         .ydoc_cache_stats_for_harness(&handle)
         .await
         .expect("cache stats after fixture replay");
-    let expected_hits = u64::try_from(scenario.replay_order.len() - 1).expect("hit count");
-    assert_eq!(
-        after_records.hits, expected_hits,
-        "{} must prove every post-install recordUpdate used the cache",
-        scenario.name
-    );
-    assert_eq!(
-        after_records.misses, 1,
-        "{} first append miss",
-        scenario.name
-    );
-    assert_eq!(after_records.installs, 1, "{} cache install", scenario.name);
-    assert_eq!(
-        after_records.advances, expected_hits,
-        "{} committed cache advances",
-        scenario.name
-    );
+    let update_count = u64::try_from(scenario.replay_order.len()).expect("update count");
+    if force_cold {
+        assert_eq!(after_records.hits, 0, "{} cold gate hits", scenario.name);
+        assert_eq!(
+            after_records.misses, update_count,
+            "{} every cold append reconstructs",
+            scenario.name
+        );
+        assert_eq!(
+            after_records.installs, update_count,
+            "{} every cold append installs only after its verdict",
+            scenario.name
+        );
+        assert_eq!(
+            after_records.advances, 0,
+            "{} no cold append starts from a resident entry",
+            scenario.name
+        );
+    } else {
+        let expected_hits = update_count - 1;
+        assert_eq!(
+            after_records.hits, expected_hits,
+            "{} must prove every post-install recordUpdate used the frontier",
+            scenario.name
+        );
+        assert_eq!(
+            after_records.misses, 1,
+            "{} first append miss",
+            scenario.name
+        );
+        assert_eq!(after_records.installs, 1, "{} cache install", scenario.name);
+        assert_eq!(
+            after_records.advances, expected_hits,
+            "{} committed frontier advances",
+            scenario.name
+        );
+    }
     if force_cold {
         service
             .ydoc_cache_clear_for_harness(&handle)
@@ -327,7 +352,6 @@ async fn replay_warm_and_cold(scenario: &Scenario, ordinal: usize) -> ReplayRun 
     let warm = replay_through_engine(scenario, ordinal, false).await;
     let cold = replay_through_engine(scenario, ordinal, true).await;
 
-    assert_eq!(warm.after_records, cold.after_records);
     assert_eq!(
         warm.after_consumers.hits,
         warm.after_records.hits + 2,

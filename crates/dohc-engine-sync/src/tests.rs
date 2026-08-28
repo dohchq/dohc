@@ -9359,6 +9359,13 @@ fn cached_defer_and_drain_match_the_cold_path() {
             .expect("warm cache remains resident"),
         cold_doc.doc.encode_full_state()
     );
+    assert_eq!(
+        warm_cache
+            .frontier_matches_doc_for_test(&key)
+            .expect("deferred frontier comparison"),
+        Some(true),
+        "deferred commits keep the companion frontier aligned"
+    );
     let warm_head = VersionedTextStore::new(&mut warm_store)
         .read_text("ws", "main", "notes/cache-pair.md")
         .expect("warm head")
@@ -9597,6 +9604,14 @@ fn cross_engine_replay_fixtures_match_cold_through_a_warmed_remote_cache() {
             dohc_engine_collab::replay_parity::structurally_equal_v2_for_test(&cached, &cold.doc)
                 .expect("cache/cold scan_v2"),
             "{} final cache/cold replay structure",
+            scenario.name
+        );
+        assert_eq!(
+            warm_cache
+                .frontier_matches_doc_for_test(&key)
+                .expect("remote frontier comparison"),
+            Some(true),
+            "{} remote commits keep the companion frontier aligned",
             scenario.name
         );
         let warm_head = VersionedTextStore::new(&mut warm_store)
