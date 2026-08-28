@@ -19,11 +19,18 @@ export interface SyncRelayHandle {
   stop(): Promise<void>;
 }
 
+export interface SyncRelayLinkBoundary {
+  linkKey: string;
+  relayExchangeKey: string;
+  publicViewerOrigin: string;
+}
+
 export async function spawnSyncRelay(input: {
   dbPath: string;
   // Restarts (the offline-rejoin spec) must come back on the SAME port the
   // desktop app already has in its credential file.
   port?: number;
+  linkBoundary?: SyncRelayLinkBoundary;
 }): Promise<SyncRelayHandle> {
   const child: ChildProcess = spawn(
     process.execPath,
@@ -36,6 +43,13 @@ export async function spawnSyncRelay(input: {
         SYNC_RELAY_TEST_AUTH: "1",
         SYNC_RELAY_PORT: String(input.port ?? 0),
         SYNC_RELAY_DB_PATH: input.dbPath,
+        ...(input.linkBoundary
+          ? {
+              DOHC_RELAY_LINK_KEY: input.linkBoundary.linkKey,
+              DOHC_RELAY_EXCHANGE_KEY: input.linkBoundary.relayExchangeKey,
+              DOHC_RELAY_SHARE_WEB_ORIGIN: input.linkBoundary.publicViewerOrigin,
+            }
+          : {}),
         FORCE_COLOR: "0",
       },
       stdio: ["ignore", "pipe", "pipe"],
