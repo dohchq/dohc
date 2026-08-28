@@ -967,6 +967,12 @@ function sendDoubleTerminationSignal(child: ChildProcess): void {
 }
 
 describe("sync relay startup guards", () => {
+  const absoluteShareWebOriginReason =
+    "FATAL: DOHC_RELAY_SHARE_WEB_ORIGIN must be an absolute HTTP(S) origin.";
+  const invalidShareWebOriginShapeReason =
+    "FATAL: DOHC_RELAY_SHARE_WEB_ORIGIN must be an origin without credentials, a path, a query, or a fragment.";
+  const productionHttpsShareWebOriginReason =
+    "FATAL: DOHC_RELAY_SHARE_WEB_ORIGIN must use HTTPS outside development/test.";
   const productionEnv = {
     NODE_ENV: "production",
     SYNC_RELAY_TEST_AUTH: undefined,
@@ -991,25 +997,44 @@ describe("sync relay startup guards", () => {
   });
 
   it.each([
-    ["relative", "share.example.test"],
-    ["credentials", "https://user:pass@share.example.test"],
-    ["empty credentials", "https://@share.example.test"],
-    ["path", "https://share.example.test/public"],
-    ["query", "https://share.example.test/?tenant=one"],
-    ["empty query", "https://share.example.test/?"],
-    ["fragment", "https://share.example.test/#fragment"],
-    ["empty fragment", "https://share.example.test/#"],
-    ["non-HTTPS", "http://share.example.test"],
-  ])("refuses a %s public share-web origin in production", async (label, origin) => {
-    const dbPath = join(await tempRoot(`bad-share-web-origin-${label}`), "relay.sqlite");
-    const { code, stderr } = await spawnRelayExpectExit({
-      ...productionEnv,
-      DOHC_RELAY_SHARE_WEB_ORIGIN: origin,
-      SYNC_RELAY_DB_PATH: dbPath,
-    });
-    expect(code).toBe(1);
-    expect(stderr).toContain("DOHC_RELAY_SHARE_WEB_ORIGIN");
-  });
+    ["relative", "share.example.test", absoluteShareWebOriginReason],
+    [
+      "credentials",
+      "https://user:pass@share.example.test",
+      invalidShareWebOriginShapeReason,
+    ],
+    [
+      "empty credentials",
+      "https://@share.example.test",
+      invalidShareWebOriginShapeReason,
+    ],
+    ["path", "https://share.example.test/public", invalidShareWebOriginShapeReason],
+    [
+      "query",
+      "https://share.example.test/?tenant=one",
+      invalidShareWebOriginShapeReason,
+    ],
+    ["empty query", "https://share.example.test/?", invalidShareWebOriginShapeReason],
+    [
+      "fragment",
+      "https://share.example.test/#fragment",
+      invalidShareWebOriginShapeReason,
+    ],
+    ["empty fragment", "https://share.example.test/#", invalidShareWebOriginShapeReason],
+    ["non-HTTPS", "http://share.example.test", productionHttpsShareWebOriginReason],
+  ])(
+    "refuses a %s public share-web origin in production",
+    async (label, origin, expectedReason) => {
+      const dbPath = join(await tempRoot(`bad-share-web-origin-${label}`), "relay.sqlite");
+      const { code, stderr } = await spawnRelayExpectExit({
+        ...productionEnv,
+        DOHC_RELAY_SHARE_WEB_ORIGIN: origin,
+        SYNC_RELAY_DB_PATH: dbPath,
+      });
+      expect(code).toBe(1);
+      expect(stderr).toBe(`${expectedReason}\n`);
+    },
+  );
 
   it.each(["test", "development"] as const)(
     "refuses a non-loopback HTTP DNS public origin in %s",
