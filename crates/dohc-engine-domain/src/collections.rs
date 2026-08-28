@@ -1084,29 +1084,31 @@ fn yaml_to_json(value: &YamlOwned) -> Value {
 }
 
 pub fn markdown_frontmatter_json(markdown: &str) -> Option<Value> {
+    markdown_frontmatter_json_with_body(markdown).map(|(frontmatter, _)| frontmatter)
+}
+
+pub fn markdown_frontmatter_json_with_body(markdown: &str) -> Option<(Value, &str)> {
     let mut lines = markdown.split_inclusive('\n');
     let first = lines.next()?;
     if first.trim_end_matches(['\r', '\n']) != "---" {
-        return Some(Value::Object(serde_json::Map::new()));
+        return Some((Value::Object(serde_json::Map::new()), markdown));
     }
     let yaml_start = first.len();
     let mut yaml_end = yaml_start;
-    let mut found_end = false;
+    let mut body_start = None;
     for line in lines {
         if line.trim_end_matches(['\r', '\n']) == "---" {
-            found_end = true;
+            body_start = Some(yaml_end + line.len());
             break;
         }
         yaml_end += line.len();
     }
-    if !found_end {
-        return None;
-    }
+    let body_start = body_start?;
     let documents = YamlOwned::load_from_str(&markdown[yaml_start..yaml_end]).ok()?;
     if documents.len() != 1 || documents.first()?.as_mapping().is_none() {
         return None;
     }
-    Some(yaml_to_json(documents.first()?))
+    Some((yaml_to_json(documents.first()?), &markdown[body_start..]))
 }
 
 fn json_field_value(value: &Value) -> CollectionFieldValue {
@@ -1653,11 +1655,6 @@ pub fn reconcile_collections_in_tx(
             (snapshot, collection_path, parsed)
         })
         .collect();
-    let collection_paths: HashSet<String> = parsed_schemas
-        .iter()
-        .filter(|(_, collection_path, _)| !collection_path.is_empty())
-        .map(|(_, collection_path, _)| collection_path.clone())
-        .collect();
     let collection_schemas: HashMap<&str, &CollectionSchema> = parsed_schemas
         .iter()
         .filter(|(_, collection_path, _)| !collection_path.is_empty())
@@ -1666,7 +1663,8 @@ pub fn reconcile_collections_in_tx(
     let records: Vec<&CollectionSnapshot> = snapshots
         .iter()
         .filter(|snapshot| {
-            snapshot.path.ends_with(".md") && collection_paths.contains(parent_path(&snapshot.path))
+            snapshot.path.ends_with(".md")
+                && collection_schemas.contains_key(parent_path(&snapshot.path))
         })
         .collect();
     let current_paths: HashSet<&str> = records.iter().map(|record| record.path.as_str()).collect();
@@ -1999,6 +1997,9 @@ fn collection_summary_for_version(
     version_id: &str,
     collection_path: &str,
 ) -> Result<Option<CollectionSummary>, crate::DomainError> {
+    if !is_workspace_relative_collection_path(collection_path) {
+        return Ok(None);
+    }
     let stored = conn
         .query_row(
             "SELECT schema_status,degradation_reasons_json FROM collections \
@@ -2059,9 +2060,6 @@ pub fn get_collection(
     workspace_id: &str,
     collection_path: &str,
 ) -> Result<Option<CollectionDetails>, crate::DomainError> {
-    if !is_workspace_relative_collection_path(collection_path) {
-        return Ok(None);
-    }
     let version_id = active_version_id(conn, workspace_id)?;
     let Some(summary) =
         collection_summary_for_version(conn, workspace_id, &version_id, collection_path)?
@@ -2416,9 +2414,6 @@ pub fn query_collection_records(
     collection_path: &str,
     query: &CollectionQuery,
 ) -> Result<Option<CollectionQueryResult>, crate::DomainError> {
-    if !is_workspace_relative_collection_path(collection_path) {
-        return Ok(None);
-    }
     let version_id = active_version_id(conn, workspace_id)?;
     let Some(collection) =
         collection_summary_for_version(conn, workspace_id, &version_id, collection_path)?
@@ -2494,9 +2489,6 @@ pub fn get_collection_record(
     record_id: &str,
     history_limit: usize,
 ) -> Result<Option<CollectionRecordDetails>, crate::DomainError> {
-    if !is_workspace_relative_collection_path(collection_path) {
-        return Ok(None);
-    }
     let version_id = active_version_id(conn, workspace_id)?;
     let Some(collection) =
         collection_summary_for_version(conn, workspace_id, &version_id, collection_path)?
@@ -2518,9 +2510,7 @@ pub fn get_collection_record(
              ORDER BY recorded_at_ms DESC,history_id DESC LIMIT ?4",
         )
         .map_err(crate::DomainError::sql_corrupt)?;
-    let history_limit = i64::try_from(history_limit)
-        .unwrap_or(i64::MAX)
-        .min(i64::try_from(MAX_COLLECTION_HISTORY_LIMIT).unwrap_or(i64::MAX));
+    let history_limit = history_limit.min(MAX_COLLECTION_HISTORY_LIMIT) as i64;
     let rows = statement
         .query_map(
             params![workspace_id, version_id, record_id, history_limit],

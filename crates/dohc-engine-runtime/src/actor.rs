@@ -13170,6 +13170,51 @@ struct CollectionAdoptionExecution {
 }
 
 #[allow(clippy::too_many_arguments)]
+fn ensure_collection_record_id_on_store(
+    store: &mut EngineStore,
+    doc_cache: &mut WriterDocCache,
+    doc: &Ydoc,
+    key: &DocKey,
+    file_path: &str,
+    regime: Regime,
+    record_id: &str,
+    lineage_claim_id: Option<String>,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<(Option<String>, bool), RuntimeError> {
+    if doc
+        .frontmatter_json()
+        .get(RECORD_ID_FRONTMATTER_KEY)
+        .and_then(serde_json::Value::as_str)
+        == Some(record_id)
+    {
+        return Ok((lineage_claim_id, false));
+    }
+
+    let update = doc.frontmatter_set(RECORD_ID_FRONTMATTER_KEY, record_id);
+    let lineage_claim_id = ydoc_record_update_on_store(
+        store,
+        doc_cache,
+        key,
+        file_path,
+        ContentKind::Richdoc,
+        regime,
+        &update,
+        Some("engine".to_owned()),
+        lineage_claim_id,
+        false,
+        None,
+        None,
+        now_ms,
+        faults,
+        token,
+    )?
+    .lineage_claim_id;
+    Ok((lineage_claim_id, true))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn adopt_collection_record_on_store(
     store: &mut EngineStore,
     doc_cache: &mut WriterDocCache,
@@ -13230,35 +13275,7 @@ fn adopt_collection_record_on_store(
     let doc = Ydoc::wire();
     doc.apply(&state.initial_update)?;
     let (lineage_claim_id, should_settle) = if state.lineage_existing {
-        let id_already_present = doc
-            .frontmatter_json()
-            .get(RECORD_ID_FRONTMATTER_KEY)
-            .and_then(serde_json::Value::as_str)
-            == Some(candidate.record_id.as_str());
-        let lineage_claim_id = if id_already_present {
-            state.lineage_claim_id.clone()
-        } else {
-            let update = doc.frontmatter_set(RECORD_ID_FRONTMATTER_KEY, &candidate.record_id);
-            ydoc_record_update_on_store(
-                store,
-                doc_cache,
-                &state.key,
-                &candidate.file_path,
-                ContentKind::Richdoc,
-                state.regime,
-                &update,
-                Some("engine".to_owned()),
-                state.lineage_claim_id,
-                false,
-                None,
-                None,
-                now_ms,
-                faults,
-                token,
-            )?
-            .lineage_claim_id
-        };
-        (lineage_claim_id, true)
+        (state.lineage_claim_id, true)
     } else {
         let seed = state
             .seed_content
@@ -13267,11 +13284,6 @@ fn adopt_collection_record_on_store(
                 reason: "collection record adoption has no Markdown artifact seed",
             })?;
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, seed)?;
-        let id_already_present = doc
-            .frontmatter_json()
-            .get(RECORD_ID_FRONTMATTER_KEY)
-            .and_then(serde_json::Value::as_str)
-            == Some(candidate.record_id.as_str());
         let seed_update = doc.encode_full_state();
         let seed_append = ydoc_record_update_on_store(
             store,
@@ -13290,31 +13302,22 @@ fn adopt_collection_record_on_store(
             faults,
             token,
         )?;
-        let lineage_claim_id = if id_already_present {
-            seed_append.lineage_claim_id
-        } else {
-            let id_update = doc.frontmatter_set(RECORD_ID_FRONTMATTER_KEY, &candidate.record_id);
-            ydoc_record_update_on_store(
-                store,
-                doc_cache,
-                &state.key,
-                &candidate.file_path,
-                ContentKind::Richdoc,
-                state.regime,
-                &id_update,
-                Some("engine".to_owned()),
-                seed_append.lineage_claim_id,
-                false,
-                None,
-                None,
-                now_ms,
-                faults,
-                token,
-            )?
-            .lineage_claim_id
-        };
-        (lineage_claim_id, !id_already_present)
+        (seed_append.lineage_claim_id, false)
     };
+    let (lineage_claim_id, id_added) = ensure_collection_record_id_on_store(
+        store,
+        doc_cache,
+        &doc,
+        &state.key,
+        &candidate.file_path,
+        state.regime,
+        &candidate.record_id,
+        lineage_claim_id,
+        now_ms,
+        faults,
+        token,
+    )?;
+    let should_settle = should_settle || id_added;
     let changed_path = if should_settle {
         Some(
             ydoc_settle_on_store(

@@ -61,34 +61,13 @@ fn seed_collection_state(scratch: &ScratchDir) {
     std::fs::write(collection_dir.join("record.md"), record).expect("record file");
 }
 
-fn seed_valid_collection_schema(scratch: &ScratchDir) {
+fn seed_schema(scratch: &ScratchDir, schema: &str) {
     let db = scratch.engine_db_path().expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
     store.bind_shadow_clone_token(TOKEN).expect("bind token");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");
-    let schema = "name: Tasks\nfields:\n  status:\n    type: text\n";
-    seed_text(&mut store, "tasks/collection.yaml", schema, 2);
-    let reconciled = store
-        .write_with(&NoFaults, |tx| {
-            reconcile_collections_in_tx(tx, WORKSPACE_ID, "main")
-        })
-        .expect("reconcile collection state");
-    assert!(matches!(reconciled, TxnOutcome::Committed(_)));
-    let collection_dir = scratch.path().join("tasks");
-    std::fs::create_dir_all(&collection_dir).expect("collection directory");
-    std::fs::write(collection_dir.join("collection.yaml"), schema).expect("schema file");
-}
-
-fn seed_crlf_collection_schema(scratch: &ScratchDir) {
-    let db = scratch.engine_db_path().expect("engine db path");
-    let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_shadow_clone_token(TOKEN).expect("bind token");
-    VersionedTextStore::new(&mut store)
-        .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
-        .expect("main version");
-    let schema = "name: Tasks\nfields:\n  done:\n    type: checkbox\n  priority:\n    type: number\n  status:\n    type: text\n";
     seed_text(&mut store, "tasks/collection.yaml", schema, 2);
     let reconciled = store
         .write_with(&NoFaults, |tx| {
@@ -266,7 +245,10 @@ async fn every_collection_request_answers_for_a_degraded_schema() {
 async fn capture_authored_record_edit_keeps_the_agent_in_field_history() {
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
-    seed_valid_collection_schema(&scratch);
+    seed_schema(
+        &scratch,
+        "name: Tasks\nfields:\n  status:\n    type: text\n",
+    );
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
         .call(
@@ -357,7 +339,10 @@ async fn capture_authored_record_edit_keeps_the_agent_in_field_history() {
 async fn capture_adopts_crlf_record_without_rewriting_its_frontmatter_shape() {
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
-    seed_crlf_collection_schema(&scratch);
+    seed_schema(
+        &scratch,
+        "name: Tasks\nfields:\n  done:\n    type: checkbox\n  priority:\n    type: number\n  status:\n    type: text\n",
+    );
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
         .call(

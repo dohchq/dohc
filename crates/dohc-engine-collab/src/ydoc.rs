@@ -936,31 +936,14 @@ enum MdBlock {
 /// Values use the collection indexer's YAML parser so a richdoc seed and its
 /// index agree on scalar, sequence, and mapping types.
 fn split_markdown_frontmatter(markdown: &str) -> (serde_json::Map<String, Value>, &str) {
-    let mut lines = markdown.split_inclusive('\n');
-    let Some(opener) = lines.next() else {
-        return (serde_json::Map::new(), markdown);
-    };
-    if opener.trim_end_matches(['\r', '\n']) != "---" {
-        return (serde_json::Map::new(), markdown);
-    }
-    let mut offset = opener.len();
-    let mut after = None;
-    for line in lines {
-        offset += line.len();
-        if line.trim_end_matches(['\r', '\n']) == "---" {
-            after = Some(&markdown[offset..]);
-            break;
+    match dohc_engine_domain::collections::markdown_frontmatter_json_with_body(markdown) {
+        Some((Value::Object(frontmatter), body)) => {
+            let body = body
+                .strip_prefix("\r\n")
+                .or_else(|| body.strip_prefix('\n'))
+                .unwrap_or(body);
+            (frontmatter, body)
         }
-    }
-    let Some(after) = after else {
-        return (serde_json::Map::new(), markdown);
-    };
-    let body = after
-        .strip_prefix("\r\n")
-        .or_else(|| after.strip_prefix('\n'))
-        .unwrap_or(after);
-    match dohc_engine_domain::collections::markdown_frontmatter_json(markdown) {
-        Some(Value::Object(frontmatter)) => (frontmatter, body),
         _ => (serde_json::Map::new(), markdown),
     }
 }

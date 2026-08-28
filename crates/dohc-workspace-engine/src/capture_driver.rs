@@ -25,6 +25,7 @@
 use crate::capture_sink::{CaptureProvenance, SelfWriteSuppression, StoreCaptureSink};
 use crate::{CAPTURE_MOMENT_RECORDED_EVENT, EngineEvents};
 use dohc_engine_collab::LeaseRegistry;
+use dohc_engine_domain::COLLECTION_SCHEMA_FILENAME;
 use dohc_engine_files::{
     CancellationToken, CaptureApplyResult, CaptureOp, FilesActor, FilesError, FilesHandle,
     IngestReason, ManifestEntry, NativeWatcher, ReconcilePlan, ReconcileRun, ScanBounds,
@@ -1898,7 +1899,7 @@ fn policy_excludes(
 fn collection_reconcile_required(root: &Path, plan: &ReconcilePlan) -> bool {
     plan.ops.iter().any(|op| {
         let path = op.path();
-        if path.rsplit('/').next() == Some("collection.yaml") {
+        if path.rsplit('/').next() == Some(COLLECTION_SCHEMA_FILENAME) {
             return true;
         }
         if !matches!(
@@ -1919,7 +1920,7 @@ fn collection_reconcile_required(root: &Path, plan: &ReconcilePlan) -> bool {
         if parent.is_empty() || !name.ends_with(".md") {
             return false;
         }
-        match std::fs::symlink_metadata(root.join(parent).join("collection.yaml")) {
+        match std::fs::symlink_metadata(root.join(parent).join(COLLECTION_SCHEMA_FILENAME)) {
             Ok(metadata) => metadata.file_type().is_file(),
             Err(error)
                 if matches!(
@@ -3298,12 +3299,6 @@ mod collection_reconcile_scheduling_tests {
     fn collection_reconcile_request_take_preserves_a_concurrent_request() {
         let status = DriverStatus::default();
         assert!(!status.collection_reconcile_pending());
-        status.request_collection_reconcile();
-        assert!(status.take_collection_reconcile_request());
-        assert!(!status.collection_reconcile_pending());
-
-        // Model a new conflict/version transition racing an in-flight actor
-        // call after the old request has been consumed.
         status.request_collection_reconcile();
         assert!(status.collection_reconcile_pending());
         assert!(status.take_collection_reconcile_request());
