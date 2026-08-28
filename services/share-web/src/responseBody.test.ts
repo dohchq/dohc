@@ -6,9 +6,9 @@ import { pipeResponseBody } from "./responseBody";
 class ControlledResponse extends EventEmitter {
   destroyed = false;
   writableFinished = false;
-  readonly writes: Buffer[] = [];
+  readonly writes: Uint8Array[] = [];
 
-  write(chunk: Buffer): boolean {
+  write(chunk: Uint8Array): boolean {
     this.writes.push(chunk);
     return false;
   }
@@ -31,11 +31,13 @@ describe("share-web response body pipe", () => {
   it("waits for drain before pulling more and cancels the upstream body on close", async () => {
     let cancelled = false;
     let pulls = 0;
+    const chunks = [Uint8Array.of(1), Uint8Array.of(2)] as const;
     const body = new ReadableStream<Uint8Array>(
       {
         pull(controller) {
           pulls += 1;
-          if (pulls <= 2) controller.enqueue(Uint8Array.of(pulls));
+          const chunk = chunks[pulls - 1];
+          if (chunk) controller.enqueue(chunk);
         },
         cancel() {
           cancelled = true;
@@ -49,10 +51,12 @@ describe("share-web response body pipe", () => {
     await vi.waitFor(() => expect(outgoing.writes).toHaveLength(1));
     await Promise.resolve();
     expect(pulls).toBe(1);
+    expect(outgoing.writes[0]).toBe(chunks[0]);
 
     outgoing.emit("drain");
     await vi.waitFor(() => expect(outgoing.writes).toHaveLength(2));
     expect(pulls).toBe(2);
+    expect(outgoing.writes[1]).toBe(chunks[1]);
 
     outgoing.emit("close");
     await piping;

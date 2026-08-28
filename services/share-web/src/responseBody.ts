@@ -21,7 +21,7 @@ export async function pipeResponseBody(
         outgoing.end();
         return;
       }
-      const needsDrain = !outgoing.write(Buffer.from(read.value));
+      const needsDrain = !outgoing.write(read.value);
       if (emitResponseErrorDuringPipeTestSeam) {
         emitResponseErrorDuringPipeTestSeam = false;
         queueMicrotask(() => {
