@@ -830,7 +830,7 @@ impl IntegratedFrontier {
     }
 
     /// FR1-VALID: fail loudly outside the gate's unwind containment on every
-    /// cached-local serve in test/debug builds.
+    /// cached serve in test/debug builds.
     #[cfg(any(test, debug_assertions))]
     pub(crate) fn assert_matches_doc(&self, doc: &Ydoc) -> Result<(), CollabError> {
         let fresh = scan_v1(&doc.encode_full_state())?;
@@ -970,6 +970,13 @@ thread_local! {
     static PANIC_INJECT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+#[cfg(any(test, debug_assertions))]
+thread_local! {
+    /// Debug/test seam for the scratch-apply error lifecycle. The mutation
+    /// probe is set before this fires, matching a real `Ydoc::apply` failure.
+    static SCRATCH_APPLY_ERROR_INJECT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Run `f` with the replay gate armed: while armed, ANY gate invocation fails
 /// closed, so an outcome other than that failure proves the path never reached
 /// the gate (the dedupe-hoist tests in [`crate::replication`] rely on this).
@@ -988,6 +995,23 @@ pub(crate) fn with_armed_gate<T>(f: impl FnOnce() -> T) -> T {
     f()
 }
 
+/// Run `f` with resident gate-scratch applies forced to return an error after
+/// setting the mutation probe. Debug tests use this to prove that callers
+/// evict a scratch whose in-place apply did not complete.
+#[cfg(any(test, debug_assertions))]
+#[doc(hidden)]
+pub fn with_armed_scratch_apply_error_for_test<T>(f: impl FnOnce() -> T) -> T {
+    struct Disarm;
+    impl Drop for Disarm {
+        fn drop(&mut self) {
+            SCRATCH_APPLY_ERROR_INJECT.with(|cell| cell.set(false));
+        }
+    }
+    SCRATCH_APPLY_ERROR_INJECT.with(|cell| cell.set(true));
+    let _disarm = Disarm;
+    f()
+}
+
 /// Reject a valid v1 update whose structural edit boundaries cannot replay
 /// identically between Yjs' UTF-16 strings and yrs' Rust strings, or whose
 /// content redefines a clock the base/pending lineage already claims.
@@ -996,7 +1020,7 @@ pub(crate) fn with_armed_gate<T>(f: impl FnOnce() -> T) -> T {
 /// malformed inputs, and this gate runs inside `store.write_with`, so an escaping
 /// unwind would poison the caller's transaction/mutex and take the workspace
 /// actor down. A contained unwind is mapped to a fail-closed rejection. Cold
-/// scratches are dropped on failure. A cached-local persistent scratch is
+/// scratches are dropped on failure. A cached persistent scratch is
 /// marked before mutation so its caller can evict it after the transaction
 /// rolls back. The writer base and durable store remain untouched.
 pub fn validate_replay_parity(base: &Ydoc, candidate: &[u8]) -> Result<(), CollabError> {
@@ -1019,7 +1043,7 @@ pub fn validate_replay_parity_with_scratch(
     })
 }
 
-pub(crate) struct CachedLocalValidation {
+pub(crate) struct CachedGateValidation {
     pub(crate) candidate: IntegratedFrontierDelta,
     pub(crate) rebuilt_frontier: Option<IntegratedFrontier>,
     /// A fresh post-candidate scratch when the entry had no resident scratch.
@@ -1027,17 +1051,17 @@ pub(crate) struct CachedLocalValidation {
     pub(crate) rebuilt_scratch: Option<Ydoc>,
 }
 
-/// Cached-local gate form. `Some(frontier)` substitutes checks 1-3's base
+/// Cached append gate form. `Some(frontier)` substitutes checks 1-3's base
 /// contribution. `Some(scratch)` serves only check 4's merge-insensitive
 /// state-vector and pending-maxima facts. The scratch is never returned as
 /// content or used for durable bytes.
-pub(crate) fn validate_replay_parity_for_cached_local(
+pub(crate) fn validate_replay_parity_for_cached_gate(
     base: &Ydoc,
     frontier: Option<&IntegratedFrontier>,
     scratch: Option<&Ydoc>,
     scratch_mutated: &mut bool,
     candidate: &[u8],
-) -> Result<CachedLocalValidation, CollabError> {
+) -> Result<CachedGateValidation, CollabError> {
     let validation = validate_replay_parity_contained(
         base,
         candidate,
@@ -1045,7 +1069,7 @@ pub(crate) fn validate_replay_parity_for_cached_local(
         scratch,
         scratch.is_some().then_some(scratch_mutated),
     )?;
-    Ok(CachedLocalValidation {
+    Ok(CachedGateValidation {
         candidate: IntegratedFrontierDelta::from_structure(validation.candidate_structure),
         rebuilt_frontier: validation
             .base_structure
@@ -1062,26 +1086,6 @@ pub(crate) fn validate_replay_parity_with_delta(
 ) -> Result<IntegratedFrontierDelta, CollabError> {
     validate_replay_parity_contained(base, candidate, None, None, None)
         .map(|validation| IntegratedFrontierDelta::from_structure(validation.candidate_structure))
-}
-
-/// Cold with-scratch counterpart for ordinary remote projection. The scratch
-/// remains the projection document and is never promoted into the writer cache.
-pub(crate) fn validate_replay_parity_with_scratch_and_delta(
-    base: &Ydoc,
-    candidate: &[u8],
-) -> Result<(Ydoc, IntegratedFrontierDelta, IntegratedFrontier), CollabError> {
-    let validation = validate_replay_parity_contained(base, candidate, None, None, None)?;
-    Ok((
-        validation
-            .scratch
-            .expect("a cold gate always builds a fresh scratch"),
-        IntegratedFrontierDelta::from_structure(validation.candidate_structure),
-        IntegratedFrontier::from_structure(
-            validation
-                .base_structure
-                .expect("a cold gate always scans its base"),
-        ),
-    ))
 }
 
 struct GateValidation {
@@ -1267,7 +1271,7 @@ fn validate_replay_parity_inner(
 
     // (4) Union-coverage (discard) check: only a real integration can tell
     // whether a claimed clock was silently discarded (e.g. an overlap-slice).
-    // A cached-local hit applies the candidate to the tuple-keyed persistent
+    // A cached append hit applies the candidate to the tuple-keyed persistent
     // scratch. All cold callers replay base + pending + candidate as before.
     // The verdict reads ONLY merge-insensitive state-vector and pending-maxima
     // facts. It never reads content or structural boundaries from the scratch.
@@ -1278,6 +1282,12 @@ fn validate_replay_parity_inner(
             // apply error, check-4 refusal, or later transaction rollback must
             // evict the mutated resident scratch because yrs has no rollback.
             *persistent_scratch_mutated.expect("a resident scratch has a mutation probe") = true;
+            #[cfg(any(test, debug_assertions))]
+            if SCRATCH_APPLY_ERROR_INJECT.with(std::cell::Cell::get) {
+                return Err(CollabError::MalformedUpdate {
+                    reason: "injected persistent gate scratch apply failure".to_owned(),
+                });
+            }
             scratch.apply(candidate)?;
             scratch
         }
@@ -1356,6 +1366,15 @@ fn replay_gate_scratch(
 ) -> Result<Ydoc, CollabError> {
     let base_full = base.encode_full_state();
     replay_gate_scratch_from_bytes(&base_full, pending, candidate)
+}
+
+/// Build the ordinary-remote consumer's full-content projection document.
+/// This deliberately remains separate from the persistent check-4 scratch:
+/// callers may read this document's content, but may never install it in the
+/// writer cache or use it for durable lineage bytes.
+pub(crate) fn build_remote_projection(base: &Ydoc, candidate: &[u8]) -> Result<Ydoc, CollabError> {
+    let pending = base.pending_update_v1();
+    replay_gate_scratch(base, pending.as_deref(), candidate)
 }
 
 fn replay_gate_scratch_from_bytes(

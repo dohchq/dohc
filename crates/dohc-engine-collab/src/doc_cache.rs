@@ -1,6 +1,6 @@
 //! The writer thread's cache of live Y.Docs, serving the replay-parity gate's
-//! base on the LOCAL append path so a keystroke batch stops paying a full
-//! `load_for_replay_gate` reconstruction per append.
+//! base on cached local and ordinary-remote append paths so they stop paying a
+//! full `load_for_replay_gate` reconstruction per append.
 //!
 //! ## The CACHE-VALID invariant
 //!
@@ -129,7 +129,7 @@ struct CacheEntry {
     last_used: Cell<u64>,
 }
 
-type LocalGateArtifacts<'a> = (&'a Ydoc, &'a IntegratedFrontier, Option<&'a Ydoc>);
+type CachedGateArtifacts<'a> = (&'a Ydoc, &'a IntegratedFrontier, Option<&'a Ydoc>);
 
 struct CacheInstall {
     doc: Ydoc,
@@ -216,6 +216,10 @@ pub struct RemoteAppendProbe {
     pub(crate) served: Option<ServedGateBase>,
     pub(crate) applied_seq: Option<i64>,
     pub(crate) candidate: Option<IntegratedFrontierDelta>,
+    /// Fresh post-candidate scratch when the entry had none at gate time.
+    pub(crate) rebuilt_scratch: Option<Ydoc>,
+    /// Set immediately before a resident scratch applies the candidate.
+    pub(crate) scratch_mutated: bool,
     commit: Option<CacheCommitToken>,
 }
 
@@ -236,11 +240,11 @@ impl RemoteAppendProbe {
 struct CacheCommitToken(Option<CacheTuple>);
 
 enum GateScratchAdvance {
-    /// The cached-local gate already applied this candidate in-transaction.
+    /// The cached append gate already applied this candidate in-transaction.
     AlreadyApplied,
     /// A cold check-4 replay produced the exact post-candidate scratch.
     Replace(Ydoc),
-    /// A non-local gate stayed cold; advance any resident companion now.
+    /// A deferred gate stayed cold; advance any resident companion now.
     ApplyAfterCommit,
 }
 
@@ -284,33 +288,14 @@ impl WriterDocCache {
         entry.last_used.set(self.tick.get());
     }
 
-    /// Serve the replay-parity gate base for a LOCAL append, or `None` when
-    /// the entry is absent or its tuple does not match the durable state
-    /// inside the caller's WRITE transaction (the caller then falls back to
-    /// `load_for_replay_gate`, unchanged).
-    ///
-    /// `marker` is the marker the caller already queried inside this same
-    /// transaction. Takes `&self`: the cache is never mutated inside a
-    /// transaction.
-    pub(crate) fn base_for_gate(
+    /// Tuple-validated base plus both parity companions for cached local and
+    /// ordinary-remote appends. Deferred remote paths remain cold.
+    pub(crate) fn base_frontier_and_scratch_for_gate(
         &self,
         conn: &Connection,
         key: &DocKey,
         marker: &Marker,
-    ) -> Result<Option<&Ydoc>, CollabError> {
-        Ok(self
-            .validated_entry(conn, key, marker)?
-            .map(|entry| &entry.doc))
-    }
-
-    /// Tuple-validated base plus both parity companions for the cached LOCAL
-    /// append path. No other gate caller may serve checks 1-4 from them.
-    pub(crate) fn base_frontier_and_scratch_for_local_gate(
-        &self,
-        conn: &Connection,
-        key: &DocKey,
-        marker: &Marker,
-    ) -> Result<Option<LocalGateArtifacts<'_>>, CollabError> {
+    ) -> Result<Option<CachedGateArtifacts<'_>>, CollabError> {
         let Some(entry) = self.validated_entry(conn, key, marker)? else {
             return Ok(None);
         };
@@ -330,6 +315,16 @@ impl WriterDocCache {
     /// scratch. The database transaction rolls back, but yrs cannot, so drop
     /// only that companion and rebuild it cold on the next gate.
     pub(crate) fn finish_local_gate_error(&mut self, key: &DocKey, probe: &GateBaseProbe) {
+        if probe.scratch_mutated {
+            self.evict_gate_scratch(key);
+        }
+    }
+
+    /// An ordinary-remote transaction failed or rolled back after its gate
+    /// mutated the resident check-4 scratch. Keep the writer doc and frontier,
+    /// but discard the companion that yrs cannot roll back.
+    #[doc(hidden)]
+    pub fn finish_remote_gate_error(&mut self, key: &DocKey, probe: &RemoteAppendProbe) {
         if probe.scratch_mutated {
             self.evict_gate_scratch(key);
         }
@@ -396,11 +391,11 @@ impl WriterDocCache {
 
     /// Advance a resident entry after a deferred remote delta committed.
     ///
-    /// This does not serve the remote replay gate (that remains PR4 scope).
-    /// It only keeps the already-validated cached document aligned so the
-    /// drain's final read-only projection can reuse it. The post-commit marker
-    /// tuple must prove that exactly this one row advanced the lineage; a fold,
-    /// reset, crash-after-commit, or any surprising side effect evicts.
+    /// This does not serve the deferred replay gate, which remains cold under
+    /// #943. It only keeps the already-validated cached document aligned so
+    /// the drain's final read-only projection can reuse it. The post-commit
+    /// marker tuple must prove that exactly this one row advanced the lineage;
+    /// a fold, reset, crash-after-commit, or any surprising side effect evicts.
     pub(crate) fn finish_deferred_remote_append(
         &mut self,
         store: &EngineStore,
@@ -456,9 +451,14 @@ impl WriterDocCache {
             served,
             applied_seq,
             candidate,
+            rebuilt_scratch,
+            scratch_mutated,
             commit,
         } = probe;
         let Some(served) = served else {
+            if scratch_mutated {
+                self.evict_gate_scratch(key);
+            }
             return;
         };
         let (Some(seq), Some(candidate), Some(CacheCommitToken(Some(fresh)))) =
@@ -473,23 +473,29 @@ impl WriterDocCache {
             self.remove(key);
             return;
         }
+        let scratch_advance = match (scratch_mutated, rebuilt_scratch) {
+            (true, None) => GateScratchAdvance::AlreadyApplied,
+            (false, Some(scratch)) => GateScratchAdvance::Replace(scratch),
+            _ => {
+                self.remove(key);
+                return;
+            }
+        };
         match served.source {
-            GateBaseSource::Hit => self.advance_committed(
-                key,
-                update,
-                candidate,
-                fresh,
-                GateScratchAdvance::ApplyAfterCommit,
-            ),
+            GateBaseSource::Hit => {
+                self.advance_committed(key, update, candidate, fresh, scratch_advance)
+            }
             GateBaseSource::Rebuilt { doc, frontier } => {
-                // The remote projection scratch remains content-facing and is
-                // never promoted into this check-4 companion.
+                let GateScratchAdvance::Replace(scratch) = scratch_advance else {
+                    self.remove(key);
+                    return;
+                };
                 self.install_committed(
                     key,
                     CacheInstall {
                         doc,
                         frontier,
-                        gate_scratch: None,
+                        gate_scratch: Some(scratch),
                         candidate,
                     },
                     update,
@@ -843,7 +849,7 @@ impl WriterDocCache {
     }
 
     /// Corrupt one retained live identity without changing the doc or tuple.
-    /// The next cached-local serve must trip the FR1-VALID oracle.
+    /// The next cached serve must trip the FR1-VALID oracle.
     #[cfg(any(test, debug_assertions))]
     #[doc(hidden)]
     pub fn poison_frontier_for_test(&mut self, key: &DocKey) {
@@ -853,7 +859,7 @@ impl WriterDocCache {
     }
 
     /// Replace the check-4 scratch with an empty document without changing its
-    /// tuple. The next cached-local gate must trip FR2-VALID.
+    /// tuple. The next cached gate must trip FR2-VALID.
     #[cfg(any(test, debug_assertions))]
     #[doc(hidden)]
     pub fn poison_gate_scratch_for_test(&mut self, key: &DocKey) {

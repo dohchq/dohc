@@ -134,15 +134,20 @@ it("reports a failed projection instead of copying the readable half", async () 
   expect(writeText).not.toHaveBeenCalled();
 
   release();
-  await waitFor(async () => {
-    const copied = await navigator.clipboard.readText();
-    expect(copied).toContain("# My Heading");
-    expect(copied).toContain("[linked](https://example.test)");
-    expect(copied).toMatch(/\| Cell\s*\|/u);
-  });
-  await waitFor(() =>
-    expect(screen.getByTestId("recovery-list-copy").textContent).toBe("Copied"),
+  // The label settles only after the lazy import, projection and clipboard
+  // write have all finished. Reading first can observe the still-empty stub
+  // while that chain is delayed by the full suite.
+  await waitFor(
+    () =>
+      expect(screen.getByTestId("recovery-list-copy").textContent).toBe(
+        "Copied",
+      ),
+    { timeout: 5_000 },
   );
+  const copied = await navigator.clipboard.readText();
+  expect(copied).toContain("# My Heading");
+  expect(copied).toContain("[linked](https://example.test)");
+  expect(copied).toMatch(/\| Cell\s*\|/u);
 });
 
 it("copies the projected document, not the encoded recovery snapshot", async () => {

@@ -1048,9 +1048,9 @@ fn append_local_update_cached(
             emit_outbound: false,
         });
     }
-    let seq = match cache.base_frontier_and_scratch_for_local_gate(conn, key, marker)? {
+    let seq = match cache.base_frontier_and_scratch_for_gate(conn, key, marker)? {
         Some((base, frontier, scratch)) => {
-            let validation = crate::replay_parity::validate_replay_parity_for_cached_local(
+            let validation = crate::replay_parity::validate_replay_parity_for_cached_gate(
                 base,
                 Some(frontier),
                 scratch,
@@ -1079,7 +1079,7 @@ fn append_local_update_cached(
         }
         None => {
             let base = load_for_replay_gate(conn, key)?;
-            let validation = crate::replay_parity::validate_replay_parity_for_cached_local(
+            let validation = crate::replay_parity::validate_replay_parity_for_cached_gate(
                 &base,
                 None,
                 None,
