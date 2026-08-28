@@ -790,9 +790,15 @@ describe("Phase 2 owner link contract", () => {
     });
   });
 
-  it("returns URLs for attach and rotate, invalidates the old URL, and preserves a narrowed URL", async () => {
+  it("mints on rotate but retunes View without minting or exposing credentials", async () => {
     const storage = await newStorage();
-    const h = handler(storage);
+    let bearerByte = 1;
+    let credentialId = 0;
+    const newLinkBearer = vi.fn(() =>
+      Buffer.alloc(32, bearerByte++).toString("base64url"),
+    );
+    const newId = vi.fn(() => `handler-credential-${credentialId++}`);
+    const h = handler(storage, { newId, newLinkBearer });
     await seedFileShare(h);
 
     const attached = await createLink(h);
@@ -800,6 +806,8 @@ describe("Phase 2 owner link contract", () => {
     const attachedSecret = linkSecret(attached.url);
     const grantId = String(attached.grantId);
     expect(JSON.stringify(attached).split(attachedSecret)).toHaveLength(2);
+    newLinkBearer.mockClear();
+    newId.mockClear();
 
     const rotateResponse = await h(
       request(
@@ -811,6 +819,8 @@ describe("Phase 2 owner link contract", () => {
     expect(rotateResponse.status).toBe(200);
     const rotated = await json(rotateResponse);
     expect(rotated).not.toHaveProperty("secret");
+    expect(newLinkBearer).toHaveBeenCalledTimes(1);
+    expect(newId).toHaveBeenCalledTimes(1);
     const rotatedSecret = linkSecret(rotated.url);
     expect(rotatedSecret).not.toBe(attachedSecret);
     expect(
@@ -846,18 +856,74 @@ describe("Phase 2 owner link contract", () => {
         },
       }),
     ).toBe(true);
+    const dependentGrantId = "storage-seeded-comment-dependent";
+    expect(
+      storage.convertLinkGrant({
+        shareId: "share-existing",
+        parentGrantId: "storage-seeded-comment-link",
+        grantId: dependentGrantId,
+        principalUserId: "retune-dependent-user",
+        createdAtMs: 2_002,
+      }),
+    ).toMatchObject({
+      ok: true,
+      grant: {
+        access: "comment",
+        generation: 1,
+        parentGrantId: "storage-seeded-comment-link",
+      },
+    });
+    const beforeRetuneCredential = storage.getCurrentLinkCredential(
+      "storage-seeded-comment-link",
+    )!;
+    const retuneShareGrant = vi.spyOn(storage, "retuneShareGrant");
+    newLinkBearer.mockClear();
+    newId.mockClear();
     const narrowResponse = await h(
       request(
         OWNER,
         "/sync/shares/share-existing/links/storage-seeded-comment-link/retune",
-        jsonBody({ access: "view", expectedDependentGrantIds: [] }),
+        jsonBody({ access: "view", expectedDependentGrantIds: [dependentGrantId] }),
       ),
     );
     expect(narrowResponse.status).toBe(200);
     const narrowed = await json(narrowResponse);
-    expect(narrowed).not.toHaveProperty("url");
-    expect(narrowed).not.toHaveProperty("secret");
-    expect(narrowed).toMatchObject({ access: "view", generation: 2 });
+    expect(narrowed).toEqual({
+      ok: true,
+      shareId: "share-existing",
+      grantId: "storage-seeded-comment-link",
+      principalKind: "link",
+      access: "view",
+      generation: 2,
+      status: "active",
+      createdAtMs: 2_001,
+      revokedAtMs: null,
+      parentGrantId: null,
+    });
+    expect(retuneShareGrant).toHaveBeenCalledTimes(1);
+    const [retuneInput] = retuneShareGrant.mock.calls[0]!;
+    expect(retuneInput).toMatchObject({
+      shareId: "share-existing",
+      grantId: "storage-seeded-comment-link",
+      access: "view",
+      expectedDependentGrantIds: [dependentGrantId],
+    });
+    expect(retuneInput).not.toHaveProperty("mintCredential");
+    expect(newLinkBearer).not.toHaveBeenCalled();
+    expect(newId).not.toHaveBeenCalled();
+    expect(storage.getShareGrant("storage-seeded-comment-link")).toMatchObject({
+      access: "view",
+      generation: 2,
+    });
+    expect(storage.getShareGrant(dependentGrantId)).toMatchObject({
+      access: "view",
+      generation: 2,
+      parentGrantId: "storage-seeded-comment-link",
+    });
+    expect(storage.getCurrentLinkCredential("storage-seeded-comment-link")).toEqual({
+      ...beforeRetuneCredential,
+      generation: 2,
+    });
     expect(
       (await h(request(null, "/sync/link-exchange", jsonBody({ secret: higherSecret })))).status,
     ).toBe(200);
