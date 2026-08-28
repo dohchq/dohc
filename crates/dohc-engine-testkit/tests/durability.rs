@@ -365,7 +365,7 @@ fn close_reopen_mutate_cycle_stays_writable() {
     // time-window index (ordinal 39), per-conversation chat content revisions
     // (ordinal 40), collection adoption (ordinal 41), and the collection
     // index (ordinal 42).
-    assert_eq!(store.migration_ledger_len().expect("ledger"), 41);
+    assert_eq!(store.migration_ledger_len().expect("ledger"), 43);
     let conflict_objects = store
         .read_with(|conn| {
             conn.query_row(

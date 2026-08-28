@@ -453,7 +453,7 @@ pub fn record_local_update(
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<AppendOutcome>, CollabError> {
-    record_local_update_with_origin(store, cache, key, update, None, faults, now_ms)
+    record_local_update_with_origin_cached(store, cache, key, update, None, faults, now_ms)
 }
 
 /// [`record_local_update`] with the requesting client's actor origin id
@@ -461,6 +461,25 @@ pub fn record_local_update(
 /// provenance/echo-filter parity with the TS driver, which stores the
 /// caller-supplied origin rather than dropping it.
 pub fn record_local_update_with_origin(
+    store: &mut EngineStore,
+    key: &DocKey,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+) -> Result<TxnOutcome<AppendOutcome>, CollabError> {
+    record_local_update_with_origin_cached(
+        store,
+        &mut WriterDocCache::new(),
+        key,
+        update,
+        actor_origin_id,
+        faults,
+        now_ms,
+    )
+}
+
+fn record_local_update_with_origin_cached(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
     key: &DocKey,
@@ -888,7 +907,7 @@ fn append_local_update(
         });
     }
     let base = load_for_replay_gate(conn, key)?;
-    crate::validate_replay_parity(&base, update)?;
+    let projection = crate::validate_replay_parity_with_scratch(&base, update)?;
     put_binary_blob_with_sha(conn, update, sha)?;
     let seq = append_row(conn, key, sha, actor_origin_id, now_ms)?;
     index_applied_frontmatter(
@@ -896,6 +915,7 @@ fn append_local_update(
         key,
         marker.content_kind,
         &base,
+        &projection,
         update,
         actor_origin_id,
         now_ms,
@@ -935,25 +955,49 @@ fn append_local_update_cached(
             emit_outbound: false,
         });
     }
-    match cache.base_for_gate(conn, key, marker)? {
+    let seq = match cache.base_for_gate(conn, key, marker)? {
         Some(base) => {
-            crate::validate_replay_parity(base, update)?;
+            let projection = crate::validate_replay_parity_with_scratch(base, update)?;
+            put_binary_blob_with_sha(conn, update, sha)?;
+            let seq = append_row(conn, key, sha, actor_origin_id, now_ms)?;
+            index_applied_frontmatter(
+                conn,
+                key,
+                marker.content_kind,
+                base,
+                &projection,
+                update,
+                actor_origin_id,
+                now_ms,
+            )?;
             probe.served = Some(ServedGateBase {
                 source: GateBaseSource::Hit,
                 observed: marker.clone(),
             });
+            seq
         }
         None => {
             let base = load_for_replay_gate(conn, key)?;
-            crate::validate_replay_parity(&base, update)?;
+            let projection = crate::validate_replay_parity_with_scratch(&base, update)?;
+            put_binary_blob_with_sha(conn, update, sha)?;
+            let seq = append_row(conn, key, sha, actor_origin_id, now_ms)?;
+            index_applied_frontmatter(
+                conn,
+                key,
+                marker.content_kind,
+                &base,
+                &projection,
+                update,
+                actor_origin_id,
+                now_ms,
+            )?;
             probe.served = Some(ServedGateBase {
                 source: GateBaseSource::Rebuilt(base),
                 observed: marker.clone(),
             });
+            seq
         }
-    }
-    put_binary_blob_with_sha(conn, update, sha)?;
-    let seq = append_row(conn, key, sha, actor_origin_id, now_ms)?;
+    };
     Ok(AppendOutcome {
         seq,
         deduped: false,
@@ -988,12 +1032,15 @@ fn finalize_local_append(
         now_ms,
     )?;
     Ok(outcome)
+}
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn index_applied_frontmatter(
     conn: &Connection,
     key: &DocKey,
     content_kind: ContentKind,
     before_doc: &Ydoc,
+    after_doc: &Ydoc,
     update: &[u8],
     author_origin_id: Option<&str>,
     recorded_at_ms: i64,
@@ -1002,8 +1049,7 @@ pub(crate) fn index_applied_frontmatter(
         return Ok(());
     }
     let before = before_doc.frontmatter_json();
-    before_doc.apply(update)?;
-    let after = before_doc.frontmatter_json();
+    let after = after_doc.frontmatter_json();
     let authored_doc = lineage_base_doc(conn, key)?;
     let authored_before = authored_doc.frontmatter_json();
     authored_doc.apply(update)?;

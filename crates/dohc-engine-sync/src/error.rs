@@ -301,6 +301,7 @@ impl RelayError {
             | RelayError::ShareReadOnly
             | RelayError::ShareOperationRejected
             | RelayError::PayloadTooLarge
+            | RelayError::LinkReadRateLimited
             | RelayError::PresenceCapacity
             | RelayError::QuotaExceeded
             | RelayError::SelfShare
@@ -405,6 +406,8 @@ pub enum RelayError {
     ShareOperationRejected,
     #[error("relay payload is too large")]
     PayloadTooLarge,
+    #[error("relay link read rate limit was exceeded")]
+    LinkReadRateLimited,
     #[error("relay presence capacity was exceeded")]
     PresenceCapacity,
     #[error("relay quota was exceeded")]

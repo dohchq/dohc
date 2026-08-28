@@ -202,7 +202,7 @@ pub fn apply_remote_update_in_transaction(
         return Ok(ReplicationApplyOutcome::Deduped { seq: existing });
     }
     let base = load_for_replay_gate(tx, key)?;
-    crate::validate_replay_parity(&base, &remote.bytes)?;
+    let projection = crate::validate_replay_parity_with_scratch(&base, &remote.bytes)?;
     put_binary_blob_with_sha(tx, &remote.bytes, &sha)?;
     let seq = append_row(tx, key, &sha, origin.actor_id(), now_ms)?;
     index_applied_frontmatter(
@@ -210,6 +210,7 @@ pub fn apply_remote_update_in_transaction(
         key,
         marker.content_kind,
         &base,
+        &projection,
         &remote.bytes,
         origin.actor_id(),
         now_ms,
@@ -261,6 +262,16 @@ pub fn apply_remote_update_in_transaction_with_projection(
     let projection = crate::validate_replay_parity_with_scratch(&base, &remote.bytes)?;
     put_binary_blob_with_sha(tx, &remote.bytes, &sha)?;
     let seq = append_row(tx, key, &sha, origin.actor_id(), now_ms)?;
+    index_applied_frontmatter(
+        tx,
+        key,
+        marker.content_kind,
+        &base,
+        &projection,
+        &remote.bytes,
+        origin.actor_id(),
+        now_ms,
+    )?;
     Ok(RemoteApplyProjection {
         outcome: ReplicationApplyOutcome::Applied {
             seq,
@@ -312,19 +323,41 @@ pub fn apply_remote_update_in_transaction_cached_with_projection(
         });
     }
 
-    let (projection, source) = match cache.base_for_gate(tx, key, &marker)? {
-        Some(base) => (
-            crate::validate_replay_parity_with_scratch(base, &remote.bytes)?,
-            GateBaseSource::Hit,
-        ),
+    let (projection, source, seq) = match cache.base_for_gate(tx, key, &marker)? {
+        Some(base) => {
+            let projection = crate::validate_replay_parity_with_scratch(base, &remote.bytes)?;
+            put_binary_blob_with_sha(tx, &remote.bytes, &sha)?;
+            let seq = append_row(tx, key, &sha, origin.actor_id(), now_ms)?;
+            index_applied_frontmatter(
+                tx,
+                key,
+                marker.content_kind,
+                base,
+                &projection,
+                &remote.bytes,
+                origin.actor_id(),
+                now_ms,
+            )?;
+            (projection, GateBaseSource::Hit, seq)
+        }
         None => {
             let base = load_for_replay_gate(tx, key)?;
             let projection = crate::validate_replay_parity_with_scratch(&base, &remote.bytes)?;
-            (projection, GateBaseSource::Rebuilt(base))
+            put_binary_blob_with_sha(tx, &remote.bytes, &sha)?;
+            let seq = append_row(tx, key, &sha, origin.actor_id(), now_ms)?;
+            index_applied_frontmatter(
+                tx,
+                key,
+                marker.content_kind,
+                &base,
+                &projection,
+                &remote.bytes,
+                origin.actor_id(),
+                now_ms,
+            )?;
+            (projection, GateBaseSource::Rebuilt(base), seq)
         }
     };
-    put_binary_blob_with_sha(tx, &remote.bytes, &sha)?;
-    let seq = append_row(tx, key, &sha, origin.actor_id(), now_ms)?;
     probe.served = Some(ServedGateBase {
         source,
         observed: marker.clone(),

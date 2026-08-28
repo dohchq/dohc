@@ -55,16 +55,15 @@ use dohc_engine_domain::{
     DispatchClaim, DispatchRecovery, DomainError, InbandBinary, InbandSecret, InbandText,
     LinkedChatStore, ListMomentsQuery, MentionCursor, MergeTextFileFromVersion,
     MergeTextFileResult, MomentPage, MomentRecord, PendingBookmarkRow, ProjectedWriteText,
-    RECORD_ID_FRONTMATTER_KEY,
-    RenameResult, RenameTextFile, ResolveDecision, ResolveTextConflict, ResolveTextConflictResult,
-    RollbackTextFileMutation, RunRecordLink, SaveBookmark, SecretComparePage, SecretDelete,
-    SecretFileStat, SecretFileStore, SecretMomentPage, SecretMomentRecord, SecretOp,
-    SecretRestoreResult, SecretWrite, SecretWriteResult, SendMessage, SetFollow, SetReaction,
-    SnapshotContent, SnapshotMetadata, SnapshotView, StartChannelThread, TextConflict,
-    TextSnapshot, ThreadDispatchPause, UnreadFileThread, VersionFileChangePage, VersionRecord,
-    VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult, WriteText,
-    apply_secret_file_from_version_with, binary_delete_job_id, binary_rename_delete_job_id,
-    binary_rename_write_job_id, binary_rollback_job_identity,
+    RECORD_ID_FRONTMATTER_KEY, RenameResult, RenameTextFile, ResolveDecision, ResolveTextConflict,
+    ResolveTextConflictResult, RollbackTextFileMutation, RunRecordLink, SaveBookmark,
+    SecretComparePage, SecretDelete, SecretFileStat, SecretFileStore, SecretMomentPage,
+    SecretMomentRecord, SecretOp, SecretRestoreResult, SecretWrite, SecretWriteResult, SendMessage,
+    SetFollow, SetReaction, SnapshotContent, SnapshotMetadata, SnapshotView, StartChannelThread,
+    TextConflict, TextSnapshot, ThreadDispatchPause, UnreadFileThread, VersionFileChangePage,
+    VersionRecord, VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult,
+    WriteText, apply_secret_file_from_version_with, binary_delete_job_id,
+    binary_rename_delete_job_id, binary_rename_write_job_id, binary_rollback_job_identity,
     capture_ingest_binary_with_admission_in_tx, capture_ingest_with_admission_in_tx,
     capture_manifest_seed, capture_retire_in_tx, capture_secret_retire_with,
     compare_secret_files_page_keyless, decode_binary_rollback_job_identity,
@@ -76,9 +75,9 @@ use dohc_engine_domain::{
     list_secret_moments_page_keyless, query_collection_records, reconcile_collections_in_tx,
     restore_secret_file_verbatim_with_metadata_and_after, rollback_compensating_moment_id,
     secret_file_len_keyless, select_snapshot_by_path_in_tx, set_collection_adoption_state_in_tx,
-    synchronize_collection_frontmatter_index_in_tx,
-    validate_addressable_plaintext_path, validate_plaintext_storable_path, write_binary_in_tx,
-    write_projected_text_in_tx, write_text_in_tx,
+    synchronize_collection_frontmatter_index_in_tx, validate_addressable_plaintext_path,
+    validate_plaintext_storable_path, write_binary_in_tx, write_projected_text_in_tx,
+    write_text_in_tx,
 };
 use dohc_engine_files::{
     DurabilityPolicy, JobOutcome, MaterializeError, ProjectionTargetKind, ProjectionTargetState,
@@ -7453,6 +7452,7 @@ fn worker_main(
             } => {
                 let outcome = reconcile_collections_on_store(
                     &mut store,
+                    &mut doc_cache,
                     &workspace_id,
                     &version_id,
                     &root_dir,
@@ -8363,9 +8363,12 @@ fn worker_main(
                     )
                     .map_err(RuntimeError::from)
                 };
-                // Recovery repair rewrites lineage state (probe-covered; reset
-                // hooks stay unconditional).
-                doc_cache.clear();
+                // A proven-empty scan performed no lineage transaction, so it
+                // must not invalidate an unrelated active writer session. Any
+                // materialization or error can have changed lineage state.
+                if !matches!(&outcome, Ok(recoveries) if recoveries.is_empty()) {
+                    doc_cache.clear();
+                }
                 let _ = reply.send(outcome);
             }
             Command::MaterializeReplayPending {
@@ -13154,6 +13157,7 @@ fn adoption_conflict(error: &RuntimeError) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn adopt_collection_record_on_store(
     store: &mut EngineStore,
+    doc_cache: &mut WriterDocCache,
     candidate: &CollectionAdoptionCandidate,
     workspace_id: &str,
     version_id: &str,
@@ -13166,6 +13170,7 @@ fn adopt_collection_record_on_store(
 ) -> Result<Option<String>, RuntimeError> {
     let probe = ydoc_open_state_on_store(
         store,
+        doc_cache,
         workspace_id,
         now_ms,
         false,
@@ -13189,6 +13194,7 @@ fn adopt_collection_record_on_store(
     };
     let state = ydoc_open_state_on_store(
         store,
+        doc_cache,
         workspace_id,
         now_ms,
         true,
@@ -13212,6 +13218,7 @@ fn adopt_collection_record_on_store(
         let update = doc.frontmatter_set(RECORD_ID_FRONTMATTER_KEY, &candidate.record_id);
         ydoc_record_update_on_store(
             store,
+            doc_cache,
             &state.key,
             &candidate.file_path,
             ContentKind::Richdoc,
@@ -13237,6 +13244,7 @@ fn adopt_collection_record_on_store(
         let seed_update = doc.encode_full_state();
         let seed_append = ydoc_record_update_on_store(
             store,
+            doc_cache,
             &state.key,
             &candidate.file_path,
             ContentKind::Richdoc,
@@ -13254,6 +13262,7 @@ fn adopt_collection_record_on_store(
         let id_update = doc.frontmatter_set(RECORD_ID_FRONTMATTER_KEY, &candidate.record_id);
         ydoc_record_update_on_store(
             store,
+            doc_cache,
             &state.key,
             &candidate.file_path,
             ContentKind::Richdoc,
@@ -13271,6 +13280,7 @@ fn adopt_collection_record_on_store(
     };
     let settlement = ydoc_settle_on_store(
         store,
+        doc_cache,
         root_dir,
         &state.key,
         &candidate.file_path,
@@ -13289,6 +13299,7 @@ fn adopt_collection_record_on_store(
 #[allow(clippy::too_many_arguments)]
 fn cleanup_collection_relation_on_store(
     store: &mut EngineStore,
+    doc_cache: &mut WriterDocCache,
     candidate: &CollectionRelationCleanupCandidate,
     workspace_id: &str,
     version_id: &str,
@@ -13301,6 +13312,7 @@ fn cleanup_collection_relation_on_store(
 ) -> Result<Option<String>, RuntimeError> {
     let probe = ydoc_open_state_on_store(
         store,
+        doc_cache,
         workspace_id,
         now_ms,
         false,
@@ -13324,6 +13336,7 @@ fn cleanup_collection_relation_on_store(
     };
     let state = ydoc_open_state_on_store(
         store,
+        doc_cache,
         workspace_id,
         now_ms,
         true,
@@ -13355,6 +13368,7 @@ fn cleanup_collection_relation_on_store(
         let seed_update = doc.encode_full_state();
         lineage_claim_id = ydoc_record_update_on_store(
             store,
+            doc_cache,
             &state.key,
             &candidate.source_file_path,
             ContentKind::Richdoc,
@@ -13392,6 +13406,7 @@ fn cleanup_collection_relation_on_store(
     };
     let append = ydoc_record_update_on_store(
         store,
+        doc_cache,
         &state.key,
         &candidate.source_file_path,
         ContentKind::Richdoc,
@@ -13408,6 +13423,7 @@ fn cleanup_collection_relation_on_store(
     )?;
     let settlement = ydoc_settle_on_store(
         store,
+        doc_cache,
         root_dir,
         &state.key,
         &candidate.source_file_path,
@@ -13429,6 +13445,7 @@ fn cleanup_collection_relation_on_store(
 #[allow(clippy::too_many_arguments)]
 fn reconcile_collections_on_store(
     store: &mut EngineStore,
+    doc_cache: &mut WriterDocCache,
     workspace_id: &str,
     version_id: &str,
     root_dir: &std::path::Path,
@@ -13455,6 +13472,7 @@ fn reconcile_collections_on_store(
         }
         match adopt_collection_record_on_store(
             store,
+            doc_cache,
             &candidate,
             workspace_id,
             version_id,
@@ -13498,6 +13516,7 @@ fn reconcile_collections_on_store(
         }
         match cleanup_collection_relation_on_store(
             store,
+            doc_cache,
             &candidate,
             workspace_id,
             version_id,
