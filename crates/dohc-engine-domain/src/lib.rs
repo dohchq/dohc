@@ -76,9 +76,10 @@ pub use collections::{
     MAX_COLLECTION_HISTORY_LIMIT, RECORD_ID_FRONTMATTER_KEY, RECORD_ID_PREFIX,
     RECORD_ID_RANDOM_BASE32_LENGTH, ViewDefinition, ViewKind, ViewSort, ViewSortDirection,
     collection_record_id_mismatch_in_tx, collection_record_markdown_with_id,
-    delete_collection_adoption_binding_in_tx, get_collection, get_collection_record,
-    index_collection_frontmatter_apply_in_tx, is_collection_record_bound_in_tx, is_record_id,
-    list_collections, list_pending_collection_adoptions, mint_record_id, parse_collection_schema,
+    decline_oversized_collection_adoption_in_tx, delete_collection_adoption_binding_in_tx,
+    get_collection, get_collection_record, index_collection_frontmatter_apply_in_tx,
+    is_collection_record_bound_in_tx, is_record_id, list_collections,
+    list_pending_collection_adoptions, mint_record_id, parse_collection_schema,
     query_collection_records, reconcile_collections_in_tx, set_collection_adoption_state_in_tx,
     synchronize_collection_frontmatter_index_in_tx, validate_field_value,
 };

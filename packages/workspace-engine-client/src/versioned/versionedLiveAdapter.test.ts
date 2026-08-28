@@ -324,6 +324,7 @@ const WORKSPACE_DECODER_CASES: Array<{
       record: collectionRecord,
       history: [
         {
+          historyId: 1,
           field: "status",
           previous: { present: false, value: null },
           next: { present: true, value: "active" },
@@ -1462,6 +1463,7 @@ describe("VersionedLiveAdapter", () => {
         collectionPath: "projects",
         recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
         historyLimit: 25,
+        beforeHistoryId: 17,
       }),
     ).rejects.toBe(SENTINEL);
 
@@ -1504,6 +1506,7 @@ describe("VersionedLiveAdapter", () => {
           collectionPath: "projects",
           recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
           historyLimit: 25,
+          beforeHistoryId: 17,
         },
         idempotencyKey: undefined,
         deadlineMs: undefined,

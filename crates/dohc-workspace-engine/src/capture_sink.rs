@@ -1156,9 +1156,9 @@ mod tests {
     use super::*;
     use dohc_engine_collab::{ContentKind, Ydoc};
     use dohc_engine_domain::{
-        CollectionQuery, CollectionQueryResult, CollectionRecordDetails, RECORD_ID_FRONTMATTER_KEY,
-        SecretDiskIntent, SecretFileStore, SecretWrite, VersionedTextStore, get_collection_record,
-        is_record_id, query_collection_records,
+        CollectionQuery, CollectionQueryResult, CollectionRecordDetails, MAX_TEXT_BYTES,
+        RECORD_ID_FRONTMATTER_KEY, SecretDiskIntent, SecretFileStore, SecretWrite,
+        VersionedTextStore, get_collection_record, is_record_id, query_collection_records,
     };
     use dohc_engine_files::{
         CancellationToken, CaptureOp, ReconcilePlan, ScanGeneration, apply_reconcile_plan,
@@ -1207,6 +1207,14 @@ mod tests {
     fn seed_captured_richdoc_lineage(sink: &StoreCaptureSink, path: &str) {
         let markdown = std::fs::read_to_string(sink.shadow_root.join(path))
             .unwrap_or_else(|_| panic!("read captured rich-document fixture {path}"));
+        seed_captured_richdoc_lineage_from_markdown(sink, path, markdown);
+    }
+
+    fn seed_captured_richdoc_lineage_from_markdown(
+        sink: &StoreCaptureSink,
+        path: &str,
+        markdown: String,
+    ) {
         let actor = sink.actor.clone();
         let path = path.to_owned();
         tokio::runtime::Builder::new_current_thread()
@@ -1401,7 +1409,7 @@ mod tests {
         let store = EngineStore::open(db, 100).expect("reopen store");
         store
             .read_with(|conn| {
-                get_collection_record(conn, WORKSPACE_ID, collection_path, record_id, 100)
+                get_collection_record(conn, WORKSPACE_ID, collection_path, record_id, 100, None)
             })
             .expect("get collection record")
             .expect("record exists")
@@ -1517,6 +1525,21 @@ mod tests {
                 )
             })
             .expect("Y.Doc update count")
+    }
+
+    fn ydoc_update_count_for_object(db: &Path, path: &str) -> i64 {
+        let object_id = snapshot(db, path).expect("Y.Doc object snapshot").object_id;
+        let store = EngineStore::open(db, 100).expect("reopen store");
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_updates \
+                     WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                    [WORKSPACE_ID, VERSION_ID, object_id.as_str()],
+                    |row| row.get(0),
+                )
+            })
+            .expect("Y.Doc object update count")
     }
 
     fn engine_ydoc_update_count(db: &Path, path: &str) -> i64 {
@@ -1773,6 +1796,75 @@ mod tests {
                 .expect("adopted snapshot")
                 .text,
             expected
+        );
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+    }
+
+    #[test]
+    fn oversized_lossless_collection_adoption_declines_visibly_without_retrying() {
+        const RECORD_ID_BYTES: usize = "rec_".len() + 26;
+        const INSERTED_FRONTMATTER_BYTES: usize = "---\nid: \n---\n\n".len() + RECORD_ID_BYTES;
+
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        let markdown = "x".repeat(MAX_TEXT_BYTES - INSERTED_FRONTMATTER_BYTES);
+        write_file(scratch.path(), "tasks/collection.yaml", b"name: Tasks\n");
+        write_file(scratch.path(), "tasks/oversized.md", markdown.as_bytes());
+        ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
+        ingest(&mut sink, "tasks/oversized.md").expect("capture oversized record");
+        sink.reconcile_collections().expect("first adoption pass");
+        let canonical_padding = "x".repeat(MAX_TEXT_BYTES - 64);
+        seed_captured_richdoc_lineage_from_markdown(
+            &sink,
+            "tasks/oversized.md",
+            format!("---\npadding: {canonical_padding}\n---"),
+        );
+        let moments_before = moment_count(&db, "tasks/oversized.md");
+        let updates_before = ydoc_update_count_for_object(&db, "tasks/oversized.md");
+
+        assert!(
+            sink.reconcile_collections()
+                .expect("decline oversized adoption")
+                .is_empty()
+        );
+        assert_eq!(collection_record(&db, "tasks/oversized.md"), None);
+        assert_eq!(
+            collection_status(&db, "tasks"),
+            Some((
+                "degraded".to_owned(),
+                "[{\"code\":\"record-too-large-for-adoption\",\"path\":\"tasks/oversized.md\"}]"
+                    .to_owned(),
+            ))
+        );
+        assert_eq!(
+            std::fs::read(scratch.path().join("tasks/oversized.md")).expect("read declined record"),
+            markdown.as_bytes()
+        );
+        assert_eq!(
+            snapshot(&db, "tasks/oversized.md")
+                .expect("declined record snapshot")
+                .text,
+            markdown
+        );
+        assert_eq!(moment_count(&db, "tasks/oversized.md"), moments_before);
+        assert_eq!(
+            ydoc_update_count_for_object(&db, "tasks/oversized.md"),
+            updates_before
+        );
+
+        assert!(
+            sink.reconcile_collections()
+                .expect("repeat declined adoption reconciliation")
+                .is_empty()
+        );
+        assert_eq!(collection_record(&db, "tasks/oversized.md"), None);
+        assert_eq!(moment_count(&db, "tasks/oversized.md"), moments_before);
+        assert_eq!(
+            ydoc_update_count_for_object(&db, "tasks/oversized.md"),
+            updates_before
         );
 
         drop(sink);

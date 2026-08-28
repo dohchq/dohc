@@ -67,12 +67,13 @@ use dohc_engine_domain::{
     capture_ingest_binary_with_admission_in_tx, capture_ingest_with_admission_in_tx,
     capture_manifest_seed, capture_retire_in_tx, capture_secret_retire_with,
     collection_record_id_mismatch_in_tx, collection_record_markdown_with_id,
-    compare_secret_files_page_keyless, decode_binary_rollback_job_identity,
-    delete_collection_adoption_binding_in_tx, delete_secret_file_keyless_with,
-    derive_capture_object_id, enqueue_binary_delete, enqueue_binary_rename, enqueue_write,
-    fork_version_keyless_with, get_collection, get_collection_record, get_secret_moment_keyless,
-    has_secret_state, insert_text_conflict_if_absent, list_collections,
-    list_pending_collection_adoptions, list_secret_files_keyless, list_secret_files_keyless_page,
+    compare_secret_files_page_keyless, decline_oversized_collection_adoption_in_tx,
+    decode_binary_rollback_job_identity, delete_collection_adoption_binding_in_tx,
+    delete_secret_file_keyless_with, derive_capture_object_id, enqueue_binary_delete,
+    enqueue_binary_rename, enqueue_write, fork_version_keyless_with, get_collection,
+    get_collection_record, get_secret_moment_keyless, has_secret_state,
+    insert_text_conflict_if_absent, list_collections, list_pending_collection_adoptions,
+    list_secret_files_keyless, list_secret_files_keyless_page,
     list_secret_moments_in_time_window_keyless, list_secret_moments_page_keyless,
     query_collection_records, reconcile_collections_in_tx,
     restore_secret_file_verbatim_with_metadata_and_after, rollback_compensating_moment_id,
@@ -1079,6 +1080,7 @@ enum Command {
         collection_path: String,
         record_id: String,
         history_limit: usize,
+        before_history_id: Option<i64>,
         reply: oneshot::Sender<Result<Option<CollectionRecordDetails>, RuntimeError>>,
     },
     CaptureSecret {
@@ -2883,6 +2885,7 @@ impl ActorHandle {
         collection_path: String,
         record_id: String,
         history_limit: usize,
+        before_history_id: Option<i64>,
     ) -> Result<Option<CollectionRecordDetails>, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
@@ -2891,6 +2894,7 @@ impl ActorHandle {
                 collection_path,
                 record_id,
                 history_limit,
+                before_history_id,
                 reply,
             })
             .await
@@ -7578,6 +7582,7 @@ fn worker_main(
                 collection_path,
                 record_id,
                 history_limit,
+                before_history_id,
                 reply,
             } => {
                 let outcome = store
@@ -7588,6 +7593,7 @@ fn worker_main(
                             &collection_path,
                             &record_id,
                             history_limit,
+                            before_history_id,
                         )
                     })
                     .map_err(RuntimeError::from);
@@ -13241,6 +13247,29 @@ fn persist_collection_adoption_state(
     }
 }
 
+fn decline_oversized_collection_adoption(
+    store: &mut EngineStore,
+    candidate: &CollectionAdoptionCandidate,
+    workspace_id: &str,
+    version_id: &str,
+    faults: &dyn FaultInjector,
+) -> Result<(), RuntimeError> {
+    match store.write_with(faults, |tx| {
+        decline_oversized_collection_adoption_in_tx(
+            tx,
+            workspace_id,
+            version_id,
+            &candidate.collection_path,
+            &candidate.file_path,
+            &candidate.record_id,
+        )
+        .map_err(RuntimeError::from)
+    })? {
+        TxnOutcome::Committed(()) => Ok(()),
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
+}
+
 fn delete_collection_adoption_binding(
     store: &mut EngineStore,
     candidate: &CollectionAdoptionCandidate,
@@ -13275,6 +13304,7 @@ fn adoption_conflict(error: &RuntimeError) -> bool {
 enum CollectionAdoptionExecution {
     Applied { changed_path: Option<String> },
     Declined,
+    DeclinedOversized,
     NeedsRichdocSeed,
 }
 
@@ -13430,7 +13460,7 @@ fn adopt_collection_record_on_store(
             Some(preserved) if preserved.len() <= dohc_engine_domain::MAX_TEXT_BYTES => {
                 Some(preserved)
             }
-            Some(_) => return Ok(Some(CollectionAdoptionExecution::Declined)),
+            Some(_) => return Ok(Some(CollectionAdoptionExecution::DeclinedOversized)),
             None if doc.markdown_source_reference().is_some_and(|reference| {
                 doc.project(ContentKind::Richdoc).is_ok_and(|projection| {
                     reference.projection_sha256 == hex_sha256(projection.content.as_bytes())
@@ -13460,7 +13490,7 @@ fn adopt_collection_record_on_store(
         token,
     )?
     else {
-        return Ok(Some(CollectionAdoptionExecution::Declined));
+        return Ok(Some(CollectionAdoptionExecution::DeclinedOversized));
     };
     let changed_path = Some(
         ydoc_settle_on_store(
@@ -13690,6 +13720,15 @@ fn reconcile_collections_on_store(
             }
             Ok(Some(CollectionAdoptionExecution::Declined)) => {
                 delete_collection_adoption_binding(
+                    store,
+                    &candidate,
+                    workspace_id,
+                    version_id,
+                    faults,
+                )?;
+            }
+            Ok(Some(CollectionAdoptionExecution::DeclinedOversized)) => {
+                decline_oversized_collection_adoption(
                     store,
                     &candidate,
                     workspace_id,

@@ -251,6 +251,91 @@ fn reconcile_indexes_fields_added_after_frontmatterless_record_adoption() {
 }
 
 #[test]
+fn reconcile_indexes_non_finite_yaml_numbers_without_dropping_them() {
+    let (_scratch, mut store) = fresh_store();
+    let field_value_fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/collection-field-values.json"))
+            .expect("field-value fixture parses");
+    let nan_yaml = field_value_fixture["vectors"]
+        .as_array()
+        .expect("field-value vectors")
+        .iter()
+        .find(|vector| vector["name"].as_str() == Some("number-flagged-non-finite"))
+        .and_then(|vector| vector["valueYaml"].as_str())
+        .expect("non-finite number vector");
+    write_text(
+        &mut store,
+        "measurements/collection.yaml",
+        "fields:\n  NotANumber:\n    type: number\n  PositiveInfinity:\n    type: number\n  NegativeInfinity:\n    type: number\n  QuotedNan:\n    type: number\n",
+        2,
+    )
+    .expect("measurement schema");
+    write_text(
+        &mut store,
+        "measurements/sample.md",
+        &format!(
+            "---\nid: {FIRST_TASK_ID}\nNotANumber: {nan_yaml}\nPositiveInfinity: .inf\nNegativeInfinity: -.INF\nQuotedNan: \".nan\"\n---\n"
+        ),
+        3,
+    )
+    .expect("measurement record");
+
+    let reconciled = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile measurements");
+    assert!(matches!(reconciled, TxnOutcome::Committed(_)));
+
+    let query = store
+        .read_with(|conn| {
+            query_collection_records(
+                conn,
+                WORKSPACE_ID,
+                "measurements",
+                &CollectionQuery::default(),
+            )
+        })
+        .expect("query measurements")
+        .expect("measurement collection");
+    let record = query.records.first().expect("measurement record");
+    for (field, expected) in [
+        ("NotANumber", json!(".nan")),
+        ("PositiveInfinity", json!(".inf")),
+        ("NegativeInfinity", json!("-.inf")),
+    ] {
+        let value = record
+            .values
+            .iter()
+            .find(|value| value.field == field)
+            .unwrap_or_else(|| panic!("missing indexed field {field}"));
+        assert_eq!(value.value, expected, "preserved value for {field}");
+        assert_eq!(
+            serde_json::to_value(&value.validation).expect("serialize validation"),
+            json!({
+                "status": "flagged",
+                "reason": { "code": "number-not-finite", "path": "" }
+            }),
+            "validation for {field}"
+        );
+    }
+
+    let quoted = record
+        .values
+        .iter()
+        .find(|value| value.field == "QuotedNan")
+        .expect("quoted NaN field");
+    assert_eq!(quoted.value, json!(".nan"));
+    assert_eq!(
+        serde_json::to_value(&quoted.validation).expect("serialize validation"),
+        json!({
+            "status": "flagged",
+            "reason": { "code": "expected-number", "path": "" }
+        })
+    );
+}
+
+#[test]
 fn collection_reconcile_keeps_fresh_lossless_mode_distinct_from_established_repair() {
     let (_scratch, mut store) = fresh_store();
     write_text(&mut store, "tasks/collection.yaml", "name: Tasks\n", 2).expect("task schema");
@@ -580,23 +665,32 @@ fn get_record_history_is_bounded_and_newest_first() {
         })
         .expect("seed history");
     assert!(matches!(seeded, TxnOutcome::Committed(())));
-    let record = store
-        .read_with(|conn| get_collection_record(conn, WORKSPACE_ID, "tasks", FIRST_TASK_ID, 2))
-        .expect("get record")
-        .expect("record exists");
-    assert_eq!(
-        record
-            .history
-            .iter()
-            .map(|entry| entry.recorded_at_ms)
-            .collect::<Vec<_>>(),
-        vec![300, 200]
-    );
-    assert_eq!(record.history[0].next.value, Some(json!("three")));
+    let mut before_history_id = None;
+    let mut recorded_at_ms = Vec::new();
+    for _ in 0..3 {
+        let record = store
+            .read_with(|conn| {
+                get_collection_record(
+                    conn,
+                    WORKSPACE_ID,
+                    "tasks",
+                    FIRST_TASK_ID,
+                    1,
+                    before_history_id,
+                )
+            })
+            .expect("get history page")
+            .expect("record exists");
+        assert_eq!(record.history.len(), 1);
+        let entry = &record.history[0];
+        before_history_id = Some(entry.history_id);
+        recorded_at_ms.push(entry.recorded_at_ms);
+    }
+    assert_eq!(recorded_at_ms, vec![300, 200, 100]);
 }
 
 #[test]
-fn over_limit_record_history_request_is_clamped_to_the_maximum() {
+fn over_limit_record_history_is_clamped_and_pages_without_gaps() {
     let (_scratch, mut store) = seeded_store();
     let seeded = store
         .write_with(&NoFaults, |tx| -> Result<(), StorageError> {
@@ -615,17 +709,55 @@ fn over_limit_record_history_request_is_clamped_to_the_maximum() {
         .expect("seed over-limit history");
     assert!(matches!(seeded, TxnOutcome::Committed(())));
 
-    let record = store
+    let expected_count = store
         .read_with(|conn| {
-            get_collection_record(conn, WORKSPACE_ID, "tasks", FIRST_TASK_ID, usize::MAX)
+            conn.query_row(
+                "SELECT COUNT(*) FROM collection_field_history \
+                 WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3",
+                params![WORKSPACE_ID, VERSION_ID, FIRST_TASK_ID],
+                |row| row.get::<_, i64>(0),
+            )
         })
-        .expect("get record")
-        .expect("record exists");
-    assert_eq!(record.history.len(), MAX_COLLECTION_HISTORY_LIMIT);
-    assert_eq!(
-        record.history.first().map(|entry| entry.recorded_at_ms),
-        Some(MAX_COLLECTION_HISTORY_LIMIT as i64)
-    );
+        .expect("count history");
+    let expected_count = usize::try_from(expected_count).expect("non-negative history count");
+    assert!(expected_count > MAX_COLLECTION_HISTORY_LIMIT);
+
+    let mut before_history_id = None;
+    let mut history = Vec::new();
+    for _ in 0..=(expected_count / MAX_COLLECTION_HISTORY_LIMIT) + 1 {
+        let record = store
+            .read_with(|conn| {
+                get_collection_record(
+                    conn,
+                    WORKSPACE_ID,
+                    "tasks",
+                    FIRST_TASK_ID,
+                    usize::MAX,
+                    before_history_id,
+                )
+            })
+            .expect("get history page")
+            .expect("record exists");
+        assert!(record.history.len() <= MAX_COLLECTION_HISTORY_LIMIT);
+        let Some(last) = record.history.last() else {
+            break;
+        };
+        before_history_id = Some(last.history_id);
+        history.extend(record.history);
+    }
+
+    assert_eq!(history.len(), expected_count);
+    assert!(history.windows(2).all(|entries| {
+        (entries[0].recorded_at_ms, entries[0].history_id)
+            > (entries[1].recorded_at_ms, entries[1].history_id)
+    }));
+    let mut history_ids = history
+        .iter()
+        .map(|entry| entry.history_id)
+        .collect::<Vec<_>>();
+    history_ids.sort_unstable();
+    history_ids.dedup();
+    assert_eq!(history_ids.len(), expected_count);
 }
 
 #[test]
@@ -739,7 +871,9 @@ fn conflicted_files_surface_the_pending_record_in_query_and_get_record() {
     assert!(queried.records[0].conflicted);
 
     let record = store
-        .read_with(|conn| get_collection_record(conn, WORKSPACE_ID, "contended", PERSON_ID, 10))
+        .read_with(|conn| {
+            get_collection_record(conn, WORKSPACE_ID, "contended", PERSON_ID, 10, None)
+        })
         .expect("get contended record")
         .expect("contended record exists");
     assert!(record.record.conflicted);
@@ -852,7 +986,7 @@ fn every_read_answers_for_a_degraded_collection() {
 
     let record = store
         .read_with(|conn| {
-            get_collection_record(conn, WORKSPACE_ID, "broken", DEGRADED_RECORD_ID, 10)
+            get_collection_record(conn, WORKSPACE_ID, "broken", DEGRADED_RECORD_ID, 10, None)
         })
         .expect("get degraded record")
         .expect("degraded record exists");

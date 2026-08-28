@@ -194,6 +194,7 @@ pub enum CollectionSchemaReasonCode {
     ReservedFieldName,
     InvalidRelationTarget,
     UnknownFieldReference,
+    RecordTooLargeForAdoption,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -420,6 +421,7 @@ pub struct CollectionHistoryValue {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CollectionFieldHistoryEntry {
+    pub history_id: i64,
     pub field: String,
     pub previous: CollectionHistoryValue,
     pub next: CollectionHistoryValue,
@@ -1082,13 +1084,41 @@ fn markdown_record_id(markdown: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn non_finite_yaml_number(value: f64) -> Option<&'static str> {
+    if value.is_nan() {
+        Some(".nan")
+    } else if value == f64::INFINITY {
+        Some(".inf")
+    } else if value == f64::NEG_INFINITY {
+        Some("-.inf")
+    } else {
+        None
+    }
+}
+
+fn yaml_value_is_non_finite_number(value: &YamlOwned) -> bool {
+    match value {
+        YamlOwned::Value(ScalarOwned::FloatingPoint(value)) => !value.into_inner().is_finite(),
+        YamlOwned::Tagged(_, value) => yaml_value_is_non_finite_number(value),
+        _ => false,
+    }
+}
+
 fn yaml_to_json(value: &YamlOwned) -> Value {
     match value {
         YamlOwned::Value(ScalarOwned::Null) => Value::Null,
         YamlOwned::Value(ScalarOwned::Boolean(value)) => Value::Bool(*value),
         YamlOwned::Value(ScalarOwned::Integer(value)) => Value::from(*value),
         YamlOwned::Value(ScalarOwned::FloatingPoint(value)) => {
-            serde_json::Number::from_f64(value.into_inner()).map_or(Value::Null, Value::Number)
+            non_finite_yaml_number(value.into_inner()).map_or_else(
+                || {
+                    Value::Number(
+                        serde_json::Number::from_f64(value.into_inner())
+                            .expect("finite YAML float is a JSON number"),
+                    )
+                },
+                |value| Value::String(value.to_owned()),
+            )
         }
         YamlOwned::Value(ScalarOwned::String(value)) | YamlOwned::Representation(value, _, _) => {
             Value::String(value.clone())
@@ -1108,15 +1138,21 @@ fn yaml_to_json(value: &YamlOwned) -> Value {
     }
 }
 
-pub fn markdown_frontmatter_json(markdown: &str) -> Option<Value> {
-    markdown_frontmatter_json_with_body(markdown).map(|(frontmatter, _)| frontmatter)
+struct ParsedMarkdownFrontmatter<'a> {
+    value: Value,
+    body: &'a str,
+    non_finite_fields: HashSet<String>,
 }
 
-pub fn markdown_frontmatter_json_with_body(markdown: &str) -> Option<(Value, &str)> {
+fn parse_markdown_frontmatter(markdown: &str) -> Option<ParsedMarkdownFrontmatter<'_>> {
     let mut lines = markdown.split_inclusive('\n');
     let first = lines.next()?;
     if !first.ends_with('\n') || !is_frontmatter_delimiter(first) {
-        return Some((Value::Object(serde_json::Map::new()), markdown));
+        return Some(ParsedMarkdownFrontmatter {
+            value: Value::Object(serde_json::Map::new()),
+            body: markdown,
+            non_finite_fields: HashSet::new(),
+        });
     }
     let yaml_start = first.len();
     let mut yaml_end = yaml_start;
@@ -1130,10 +1166,32 @@ pub fn markdown_frontmatter_json_with_body(markdown: &str) -> Option<(Value, &st
     }
     let body_start = body_start?;
     let documents = YamlOwned::load_from_str(&markdown[yaml_start..yaml_end]).ok()?;
-    if documents.len() != 1 || documents.first()?.as_mapping().is_none() {
+    if documents.len() != 1 {
         return None;
     }
-    Some((yaml_to_json(documents.first()?), &markdown[body_start..]))
+    let document = documents.first()?;
+    let mapping = document.as_mapping()?;
+    let non_finite_fields = mapping
+        .iter()
+        .filter_map(|(key, value)| {
+            yaml_value_is_non_finite_number(value)
+                .then(|| yaml_key_text(key))
+                .flatten()
+        })
+        .collect();
+    Some(ParsedMarkdownFrontmatter {
+        value: yaml_to_json(document),
+        body: &markdown[body_start..],
+        non_finite_fields,
+    })
+}
+
+pub fn markdown_frontmatter_json(markdown: &str) -> Option<Value> {
+    parse_markdown_frontmatter(markdown).map(|frontmatter| frontmatter.value)
+}
+
+pub fn markdown_frontmatter_json_with_body(markdown: &str) -> Option<(Value, &str)> {
+    parse_markdown_frontmatter(markdown).map(|frontmatter| (frontmatter.value, frontmatter.body))
 }
 
 /// Insert a collection record id without reserializing the user's Markdown.
@@ -1246,11 +1304,17 @@ fn load_collection_schema(
 fn validation_columns(
     field: Option<&FieldDefinition>,
     value: &Value,
+    non_finite_number: bool,
 ) -> Result<(&'static str, Option<String>), crate::DomainError> {
     let Some(field) = field else {
         return Ok(("untyped", None));
     };
-    match validate_field_value(field, &json_field_value(value)) {
+    let value = if non_finite_number {
+        CollectionFieldValue::Number(f64::NAN)
+    } else {
+        json_field_value(value)
+    };
+    match validate_field_value(field, &value) {
         FieldValueValidation::Valid => Ok(("valid", None)),
         FieldValueValidation::Flagged { reason } => Ok((
             "flagged",
@@ -1312,6 +1376,12 @@ fn insert_relation_edges(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum NonFiniteFieldProvenance<'a> {
+    Parsed(&'a HashSet<String>),
+    PreserveStored,
+}
+
 fn replace_index_for_record(
     conn: &Connection,
     workspace_id: &str,
@@ -1319,12 +1389,59 @@ fn replace_index_for_record(
     record_id: &str,
     schema: &CollectionSchema,
     frontmatter: &Value,
+    non_finite_provenance: NonFiniteFieldProvenance<'_>,
 ) -> Result<(), crate::DomainError> {
     let index_initialized = frontmatter.as_object().is_some_and(|values| {
         values
             .keys()
             .any(|field_name| field_name != RECORD_ID_FRONTMATTER_KEY)
     });
+    let mut non_finite_fields = match non_finite_provenance {
+        NonFiniteFieldProvenance::Parsed(fields) => fields.clone(),
+        NonFiniteFieldProvenance::PreserveStored => HashSet::new(),
+    };
+    if matches!(
+        non_finite_provenance,
+        NonFiniteFieldProvenance::PreserveStored
+    ) {
+        let mut statement = conn
+            .prepare(
+                "SELECT field_name,value_json,validation_reason_json \
+                 FROM collection_record_fields \
+                 WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3 \
+                   AND validation_status='flagged'",
+            )
+            .map_err(crate::DomainError::sql_corrupt)?;
+        let previous_fields = statement
+            .query_map(params![workspace_id, version_id, record_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .map_err(crate::DomainError::sql_corrupt)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(crate::DomainError::sql_corrupt)?;
+        drop(statement);
+        for (field_name, previous_value_json, reason_json) in previous_fields {
+            let Some(value) = frontmatter.get(field_name.as_str()) else {
+                continue;
+            };
+            if json_text(value)? != previous_value_json {
+                continue;
+            }
+            let Some(reason_json) = reason_json else {
+                continue;
+            };
+            let reason: FieldValueReason = serde_json::from_str(&reason_json).map_err(|error| {
+                crate::DomainError::Storage(StorageError::corrupt_public(error))
+            })?;
+            if reason.code == FieldValueReasonCode::NumberNotFinite {
+                non_finite_fields.insert(field_name);
+            }
+        }
+    }
     conn.execute(
         "DELETE FROM collection_record_fields \
          WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3",
@@ -1348,7 +1465,8 @@ fn replace_index_for_record(
                 continue;
             }
             let field = fields.get(field_name.as_str()).copied();
-            let (validation_status, validation_reason_json) = validation_columns(field, value)?;
+            let (validation_status, validation_reason_json) =
+                validation_columns(field, value, non_finite_fields.contains(field_name))?;
             conn.execute(
                 "INSERT INTO collection_record_fields \
                  (workspace_id,version_id,record_id,field_name,value_json, \
@@ -1466,6 +1584,7 @@ pub fn synchronize_collection_frontmatter_index_in_tx(
         &record_id,
         &schema,
         frontmatter,
+        NonFiniteFieldProvenance::PreserveStored,
     )
 }
 
@@ -1589,7 +1708,15 @@ pub fn index_collection_frontmatter_apply_in_tx(
         }
     }
     let schema = load_collection_schema(conn, workspace_id, version_id, &collection_path)?;
-    replace_index_for_record(conn, workspace_id, version_id, &record_id, &schema, after)
+    replace_index_for_record(
+        conn,
+        workspace_id,
+        version_id,
+        &record_id,
+        &schema,
+        after,
+        NonFiniteFieldProvenance::PreserveStored,
+    )
 }
 
 fn revalidate_collection_index_in_tx(
@@ -1643,6 +1770,7 @@ fn revalidate_collection_index_in_tx(
             &record_id,
             schema,
             &Value::Object(values),
+            NonFiniteFieldProvenance::PreserveStored,
         )?;
     }
     Ok(())
@@ -1775,24 +1903,80 @@ pub fn reconcile_collections_in_tx(
 ) -> Result<CollectionReconcileResult, crate::DomainError> {
     let snapshots = load_collection_snapshots(tx, workspace_id, version_id)?;
     let existing = load_record_bindings(tx, workspace_id, version_id)?;
+    let mut declined_adoption_paths = Vec::new();
+    {
+        let mut statement = tx
+            .prepare(
+                "SELECT degradation_reasons_json FROM collections \
+                 WHERE workspace_id=?1 AND version_id=?2",
+            )
+            .map_err(crate::DomainError::sql_corrupt)?;
+        let stored = statement
+            .query_map(params![workspace_id, version_id], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(crate::DomainError::sql_corrupt)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(crate::DomainError::sql_corrupt)?;
+        for reasons in stored {
+            let reasons: Vec<CollectionSchemaReason> =
+                serde_json::from_str(&reasons).map_err(|error| {
+                    crate::DomainError::Storage(StorageError::corrupt_public(error))
+                })?;
+            declined_adoption_paths.extend(reasons.into_iter().filter_map(|reason| {
+                (reason.code == CollectionSchemaReasonCode::RecordTooLargeForAdoption)
+                    .then_some(reason.path)
+            }));
+        }
+    }
+    declined_adoption_paths.sort();
+    declined_adoption_paths.dedup();
 
     let snapshots_by_path: HashMap<&str, &CollectionSnapshot> = snapshots
         .iter()
         .map(|snapshot| (snapshot.path.as_str(), snapshot))
         .collect();
-    let parsed_schemas: Vec<(&CollectionSnapshot, String, CollectionSchemaParseResult)> = snapshots
-        .iter()
-        .filter(|snapshot| path_basename(&snapshot.path) == COLLECTION_SCHEMA_FILENAME)
-        .map(|snapshot| {
-            let collection_path = parent_path(&snapshot.path).to_owned();
-            let parsed = if collection_path.is_empty() {
-                degraded_document(CollectionSchemaReasonCode::RootCollectionUnsupported)
-            } else {
-                parse_collection_schema(&snapshot.text)
-            };
-            (snapshot, collection_path, parsed)
-        })
-        .collect();
+    let mut parsed_schemas: Vec<(&CollectionSnapshot, String, CollectionSchemaParseResult)> =
+        snapshots
+            .iter()
+            .filter(|snapshot| path_basename(&snapshot.path) == COLLECTION_SCHEMA_FILENAME)
+            .map(|snapshot| {
+                let collection_path = parent_path(&snapshot.path).to_owned();
+                let parsed = if collection_path.is_empty() {
+                    degraded_document(CollectionSchemaReasonCode::RootCollectionUnsupported)
+                } else {
+                    parse_collection_schema(&snapshot.text)
+                };
+                (snapshot, collection_path, parsed)
+            })
+            .collect();
+    declined_adoption_paths.retain(|path| {
+        let Some(record) = snapshots_by_path.get(path.as_str()) else {
+            return false;
+        };
+        if !record.path.ends_with(".md")
+            || (!record.text.is_empty()
+                && markdown_frontmatter_json_with_body(&record.text).is_none())
+            || markdown_record_id(&record.text).is_some_and(|record_id| is_record_id(&record_id))
+        {
+            return false;
+        }
+        let collection_path = parent_path(path);
+        let Some((_, _, parsed)) = parsed_schemas
+            .iter_mut()
+            .find(|(_, candidate_path, _)| candidate_path == collection_path)
+        else {
+            return false;
+        };
+        parsed.status = CollectionSchemaStatus::Degraded;
+        parsed.reasons.push(CollectionSchemaReason {
+            code: CollectionSchemaReasonCode::RecordTooLargeForAdoption,
+            path: path.clone(),
+        });
+        true
+    });
+    let declined_adoption_paths: HashSet<&str> =
+        declined_adoption_paths.iter().map(String::as_str).collect();
     let collection_schemas: HashMap<&str, &CollectionSchema> = parsed_schemas
         .iter()
         .filter(|(_, collection_path, _)| !collection_path.is_empty())
@@ -1857,6 +2041,9 @@ pub fn reconcile_collections_in_tx(
     for record in records {
         let collection_path = parent_path(&record.path).to_owned();
         let parsed_id = current_ids.get(record.path.as_str()).cloned();
+        if parsed_id.is_none() && declined_adoption_paths.contains(record.path.as_str()) {
+            continue;
+        }
         let existing_at_path = existing_by_path.get(record.path.as_str()).copied();
         let existing_same_object =
             existing_at_path.filter(|binding| binding.object_id == record.object_id);
@@ -2052,7 +2239,7 @@ pub fn reconcile_collections_in_tx(
         let Some(snapshot) = snapshots_by_path.get(binding.file_path.as_str()).copied() else {
             continue;
         };
-        let Some(frontmatter) = markdown_frontmatter_json(&snapshot.text) else {
+        let Some(frontmatter) = parse_markdown_frontmatter(&snapshot.text) else {
             continue;
         };
         let Some(schema) = collection_schemas
@@ -2067,7 +2254,8 @@ pub fn reconcile_collections_in_tx(
             version_id,
             record_id,
             schema,
-            &frontmatter,
+            &frontmatter.value,
+            NonFiniteFieldProvenance::Parsed(&frontmatter.non_finite_fields),
         )?;
     }
     tx.execute(
@@ -2142,6 +2330,47 @@ pub fn delete_collection_adoption_binding_in_tx(
             reason: "pending collection adoption binding disappeared",
         });
     }
+    Ok(())
+}
+
+pub fn decline_oversized_collection_adoption_in_tx(
+    tx: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    collection_path: &str,
+    file_path: &str,
+    record_id: &str,
+) -> Result<(), crate::DomainError> {
+    delete_collection_adoption_binding_in_tx(tx, workspace_id, version_id, file_path, record_id)?;
+    let reasons = tx
+        .query_row(
+            "SELECT degradation_reasons_json FROM collections \
+             WHERE workspace_id=?1 AND version_id=?2 AND collection_path=?3",
+            params![workspace_id, version_id, collection_path],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(crate::DomainError::sql_corrupt)?
+        .ok_or(crate::DomainError::StateCorrupt {
+            reason: "collection disappeared during adoption decline",
+        })?;
+    let mut reasons: Vec<CollectionSchemaReason> = serde_json::from_str(&reasons)
+        .map_err(|error| crate::DomainError::Storage(StorageError::corrupt_public(error)))?;
+    let reason = CollectionSchemaReason {
+        code: CollectionSchemaReasonCode::RecordTooLargeForAdoption,
+        path: file_path.to_owned(),
+    };
+    if !reasons.contains(&reason) {
+        reasons.push(reason);
+    }
+    let reasons = serde_json::to_string(&reasons)
+        .map_err(|error| crate::DomainError::Storage(StorageError::persist_public(error)))?;
+    tx.execute(
+        "UPDATE collections SET schema_status='degraded', degradation_reasons_json=?4 \
+         WHERE workspace_id=?1 AND version_id=?2 AND collection_path=?3",
+        params![workspace_id, version_id, collection_path, reasons],
+    )
+    .map_err(crate::DomainError::sql_persist)?;
     Ok(())
 }
 
@@ -2751,6 +2980,7 @@ pub fn get_collection_record(
     collection_path: &str,
     record_id: &str,
     history_limit: usize,
+    before_history_id: Option<i64>,
 ) -> Result<Option<CollectionRecordDetails>, crate::DomainError> {
     let version_id = active_version_id(conn, workspace_id)?;
     let Some(collection) =
@@ -2770,37 +3000,71 @@ pub fn get_collection_record(
     let Some(record) = record else {
         return Ok(None);
     };
+    let before = before_history_id
+        .map(|history_id| {
+            conn.query_row(
+                "SELECT recorded_at_ms,history_id FROM collection_field_history \
+                 WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3 AND history_id=?4",
+                params![workspace_id, version_id, record_id, history_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()
+            .map_err(crate::DomainError::sql_corrupt)?
+            .ok_or(crate::DomainError::InvalidInput {
+                reason: "collection history cursor is invalid",
+            })
+        })
+        .transpose()?;
+    let mut sql = String::from(
+        "SELECT history_id,field_name,previous_value_json,next_value_json,author_origin_id,\
+                recorded_at_ms \
+         FROM collection_field_history \
+         WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3",
+    );
+    let mut values = vec![
+        rusqlite::types::Value::Text(workspace_id.to_owned()),
+        rusqlite::types::Value::Text(version_id.clone()),
+        rusqlite::types::Value::Text(record_id.to_owned()),
+    ];
+    if let Some((recorded_at_ms, history_id)) = before {
+        values.push(rusqlite::types::Value::Integer(recorded_at_ms));
+        let recorded_at_parameter = values.len();
+        values.push(rusqlite::types::Value::Integer(history_id));
+        let history_id_parameter = values.len();
+        sql.push_str(&format!(
+            " AND (recorded_at_ms,history_id) < (?{recorded_at_parameter},?{history_id_parameter})"
+        ));
+    }
+    values.push(rusqlite::types::Value::Integer(
+        history_limit.min(MAX_COLLECTION_HISTORY_LIMIT) as i64,
+    ));
+    let limit_parameter = values.len();
+    sql.push_str(&format!(
+        " ORDER BY recorded_at_ms DESC,history_id DESC LIMIT ?{limit_parameter}"
+    ));
     let mut statement = conn
-        .prepare(
-            "SELECT field_name,previous_value_json,next_value_json,author_origin_id,\
-                    recorded_at_ms \
-             FROM collection_field_history \
-             WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3 \
-             ORDER BY recorded_at_ms DESC,history_id DESC LIMIT ?4",
-        )
+        .prepare(&sql)
         .map_err(crate::DomainError::sql_corrupt)?;
-    let history_limit = history_limit.min(MAX_COLLECTION_HISTORY_LIMIT) as i64;
     let rows = statement
-        .query_map(
-            params![workspace_id, version_id, record_id, history_limit],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, i64>(4)?,
-                ))
-            },
-        )
+        .query_map(rusqlite::params_from_iter(values), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })
         .map_err(crate::DomainError::sql_corrupt)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(crate::DomainError::sql_corrupt)?;
     let history = rows
         .into_iter()
         .map(
-            |(field, previous, next, author_origin_id, recorded_at_ms)| {
+            |(history_id, field, previous, next, author_origin_id, recorded_at_ms)| {
                 Ok(CollectionFieldHistoryEntry {
+                    history_id,
                     field,
                     previous: history_value_from_json(previous)?,
                     next: history_value_from_json(next)?,

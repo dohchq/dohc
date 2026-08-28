@@ -76,7 +76,8 @@ export type CollectionSchemaReasonCode =
   | "duplicate-value"
   | "reserved-field-name"
   | "invalid-relation-target"
-  | "unknown-field-reference";
+  | "unknown-field-reference"
+  | "record-too-large-for-adoption";
 
 export interface CollectionSchemaReason {
   code: CollectionSchemaReasonCode;
@@ -201,6 +202,7 @@ export interface CollectionGetRecordParams {
   collectionPath: string;
   recordId: string;
   historyLimit: number;
+  beforeHistoryId?: number;
 }
 
 export interface CollectionHistoryValue {
@@ -209,6 +211,7 @@ export interface CollectionHistoryValue {
 }
 
 export interface CollectionFieldHistoryEntry {
+  historyId: number;
   field: string;
   previous: CollectionHistoryValue;
   next: CollectionHistoryValue;

@@ -3186,6 +3186,47 @@ mod tests {
     }
 
     #[test]
+    fn stale_preserved_markdown_source_settles_from_the_current_projection() {
+        const ORIGINAL: &str =
+            "\n\n| Key | Value |\n| --- | --- |\n| generated |  |\n\n**bold** _italic_ `code`";
+        const RECORD_ID: &str = "01j00000000000000000000000";
+
+        let remote = dohc_engine_collab::Ydoc::wire();
+        remote
+            .rewrite_content_to_markdown(ContentKind::Richdoc, ORIGINAL)
+            .expect("seed remote");
+        let injected_source = format!("---\nid: {RECORD_ID}\n---\n\n{ORIGINAL}");
+        remote
+            .frontmatter_set_preserving_markdown_source("id", RECORD_ID, &injected_source)
+            .expect("plant source metadata");
+        remote.frontmatter_set("status", "current canonical value");
+
+        let receiver = dohc_engine_collab::Ydoc::wire();
+        receiver
+            .apply(&remote.encode_full_state())
+            .expect("apply remote state with stale source metadata");
+        let canonical = receiver
+            .project(ContentKind::Richdoc)
+            .expect("current canonical projection");
+        let reference = receiver
+            .markdown_source_reference()
+            .expect("remote source reference");
+        assert_ne!(
+            reference.projection_sha256,
+            hex_sha256(canonical.content.as_bytes()),
+            "the regression requires a projection witness stale against the document it rides in"
+        );
+
+        let connection = Connection::open_in_memory().expect("open empty receiver database");
+        let key = DocKey::new("workspace", "main", "record").expect("receiver key");
+        let settled = project_ydoc_with_store(&connection, &key, &receiver, ContentKind::Richdoc)
+            .expect("settle receiver");
+
+        assert_eq!(settled.content, canonical.content);
+        assert_ne!(settled.content, injected_source);
+    }
+
+    #[test]
     fn preserved_markdown_source_cannot_exceed_the_text_store_cap() {
         let doc = dohc_engine_collab::Ydoc::wire();
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, "body")

@@ -3863,6 +3863,7 @@ impl EngineService {
                 params.collection_path,
                 params.record_id,
                 params.history_limit,
+                params.before_history_id,
             ),
         )
         .await?
@@ -10105,6 +10106,7 @@ struct CollectionsGetRecordParams {
     collection_path: String,
     record_id: String,
     history_limit: usize,
+    before_history_id: Option<i64>,
 }
 
 #[derive(Deserialize)]

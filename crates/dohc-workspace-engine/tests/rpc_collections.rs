@@ -243,6 +243,99 @@ async fn every_collection_request_answers_for_a_degraded_schema() {
     assert_eq!(switched_query["records"][0]["id"], json!(RECORD_ID));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_record_pages_all_history_past_the_per_request_limit() {
+    const SEEDED_HISTORY: usize = 501;
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    seed_collection_state(&scratch);
+
+    let db = scratch.engine_db_path().expect("engine db path");
+    let mut connection = rusqlite::Connection::open(&db).expect("open history database");
+    let tx = connection.transaction().expect("begin history seed");
+    for recorded_at_ms in 0..SEEDED_HISTORY as i64 {
+        tx.execute(
+            "INSERT INTO collection_field_history \
+             (workspace_id,version_id,record_id,field_name,previous_value_json,\
+              next_value_json,author_origin_id,recorded_at_ms) \
+             VALUES (?1,'main',?2,'Raw',NULL,'\"next\"','origin',?3)",
+            rusqlite::params![WORKSPACE_ID, RECORD_ID, recorded_at_ms],
+        )
+        .expect("seed history row");
+    }
+    tx.commit().expect("commit history seed");
+    let expected_count = connection
+        .query_row(
+            "SELECT COUNT(*) FROM collection_field_history \
+             WHERE workspace_id=?1 AND version_id='main' AND record_id=?2",
+            rusqlite::params![WORKSPACE_ID, RECORD_ID],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("count seeded history");
+    let expected_count = usize::try_from(expected_count).expect("non-negative history count");
+    assert!(expected_count > 500);
+    drop(connection);
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+
+    let mut before_history_id = None;
+    let mut history = Vec::new();
+    for request_id in 100..104 {
+        let mut params = json!({
+            "collectionPath": "broken",
+            "recordId": RECORD_ID,
+            "historyLimit": 500,
+        });
+        if let Some(history_id) = before_history_id {
+            params["beforeHistoryId"] = json!(history_id);
+        }
+        let page = call(
+            &transport,
+            &handle,
+            request_id,
+            "collections.getRecord",
+            params,
+        )
+        .await;
+        let page = page["history"].as_array().expect("history page");
+        let Some(last) = page.last() else {
+            break;
+        };
+        before_history_id = Some(last["historyId"].as_i64().expect("history cursor"));
+        history.extend(page.iter().cloned());
+    }
+
+    assert_eq!(history.len(), expected_count);
+    assert!(history.windows(2).all(|entries| {
+        let left = (
+            entries[0]["recordedAtMs"].as_i64().expect("left time"),
+            entries[0]["historyId"].as_i64().expect("left id"),
+        );
+        let right = (
+            entries[1]["recordedAtMs"].as_i64().expect("right time"),
+            entries[1]["historyId"].as_i64().expect("right id"),
+        );
+        left > right
+    }));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn capture_authored_record_edit_keeps_the_agent_in_field_history() {
     let scratch = ScratchDir::new().expect("scratch");

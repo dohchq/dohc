@@ -428,6 +428,7 @@ const CollectionSchemaReasonSchema = mutableStruct({
     "reserved-field-name",
     "invalid-relation-target",
     "unknown-field-reference",
+    "record-too-large-for-adoption",
   ]),
   path: Schema.String,
 });
@@ -586,6 +587,7 @@ const CollectionGetRecordResultSchema = mutableStruct({
   history: Schema.mutable(
     Schema.Array(
       mutableStruct({
+        historyId: Schema.Int,
         field: Schema.String,
         previous: mutableStruct({
           present: Schema.Boolean,
