@@ -13,6 +13,27 @@
       "expected": {
         "title": "Tab opener"
       }
+    },
+    {
+      "name": "closing-delimiter-at-eof-with-newline",
+      "markdown": "---\ntitle: EOF newline\n---\n",
+      "expected": {
+        "title": "EOF newline"
+      }
+    },
+    {
+      "name": "closing-delimiter-at-eof-without-newline",
+      "markdown": "---\ntitle: EOF no newline\n---",
+      "expected": {
+        "title": "EOF no newline"
+      }
+    },
+    {
+      "name": "closing-delimiter-at-eof-without-newline-and-trailing-whitespace",
+      "markdown": "---\ntitle: EOF trailing whitespace\n--- \t",
+      "expected": {
+        "title": "EOF trailing whitespace"
+      }
     }
   ]
 }

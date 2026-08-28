@@ -254,6 +254,18 @@ const frontmatter = [
     name: "tab-opener-space-closer",
     markdown: "---\t\ntitle: Tab opener\n--- \nBody",
   },
+  {
+    name: "closing-delimiter-at-eof-with-newline",
+    markdown: "---\ntitle: EOF newline\n---\n",
+  },
+  {
+    name: "closing-delimiter-at-eof-without-newline",
+    markdown: "---\ntitle: EOF no newline\n---",
+  },
+  {
+    name: "closing-delimiter-at-eof-without-newline-and-trailing-whitespace",
+    markdown: "---\ntitle: EOF trailing whitespace\n--- \t",
+  },
 ].map(({ name, markdown }) => ({
   name,
   markdown,

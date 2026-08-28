@@ -392,3 +392,66 @@ async fn capture_adopts_whitespace_delimited_frontmatter_without_losing_fields()
         assert_eq!(value["validation"]["status"], json!("valid"), "{field}");
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn capture_adopts_eof_frontmatter_without_rewriting_structure() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    seed_schema(
+        &scratch,
+        "name: Tasks\nfields:\n  done:\n    type: checkbox\n  priority:\n    type: number\n  status:\n    type: text\n",
+    );
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+
+    let record_path = scratch.path().join("tasks/eof.md");
+    let original = format!("---\nid: {RECORD_ID}\ndone: false\npriority: 3\nstatus: open\n---");
+    std::fs::write(&record_path, original.as_bytes()).expect("EOF record file");
+    reconcile_capture(&transport, &handle, 10).await;
+
+    let query = call(
+        &transport,
+        &handle,
+        40,
+        "collections.query",
+        json!({ "collectionPath": "tasks" }),
+    )
+    .await;
+    let record = &query["records"][0];
+    assert_eq!(record["id"], json!(RECORD_ID));
+    for (field, expected) in [
+        ("done", json!(false)),
+        ("priority", json!(3)),
+        ("status", json!("open")),
+    ] {
+        let value = record["values"]
+            .as_array()
+            .expect("indexed values")
+            .iter()
+            .find(|value| value["field"] == field)
+            .unwrap_or_else(|| panic!("missing indexed field {field}"));
+        assert_eq!(value["value"], expected, "typed value for {field}");
+        assert_eq!(value["validation"]["status"], json!("valid"), "{field}");
+    }
+    assert_eq!(
+        std::fs::read(&record_path).expect("read adopted record"),
+        original.as_bytes(),
+        "adoption must preserve the delimiter at EOF without a trailing newline"
+    );
+}
