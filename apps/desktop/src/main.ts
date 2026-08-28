@@ -757,6 +757,7 @@ import {
   classifyShareHandoffArguments,
   createShareHandoffIntentSlot,
   focusShareHandoffWindow,
+  focusShareHandoffWindowWhenReady,
   receiveShareHandoffArguments,
   registerShareHandoffProtocol,
 } from "./shareHandoffIngress";
@@ -5001,7 +5002,7 @@ async function showOrCreateMainWindow(): Promise<BrowserWindow> {
   const window = trackWorkspaceWindow(
     createMainWindow({ beforeRendererReload: prepareAfterRendererCrash }),
   );
-  focusShareHandoffWindow(window);
+  focusShareHandoffWindowWhenReady(window);
   return window;
 }
 

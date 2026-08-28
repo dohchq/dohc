@@ -18,6 +18,15 @@ function handlerSource(event: string): string {
   return mainSource.slice(start, next < 0 ? undefined : next);
 }
 
+function showOrCreateMainWindowSource(): string {
+  const start = mainSource.indexOf("async function showOrCreateMainWindow()");
+  const end = mainSource.indexOf("function rebuildDispatchTrayMenu()", start);
+  if (start < 0 || end < 0) {
+    throw new Error("Missing showOrCreateMainWindow composition");
+  }
+  return mainSource.slice(start, end);
+}
+
 describe("share handoff main-process wiring", () => {
   it("captures cold argv before renderer bootstrap or credential work", () => {
     const coldCaptureAt = mainSource.indexOf(
@@ -79,6 +88,19 @@ describe("share handoff main-process wiring", () => {
     );
     expect(handler).toContain(
       'if (handoffIntent === "rejected" && workspacePaths.length === 0) return;',
+    );
+  });
+
+  it("focuses an existing window immediately and gates only a created window", () => {
+    const composition = showOrCreateMainWindowSource();
+
+    expect(composition).toContain(
+      "if (existing) {\n    focusShareHandoffWindow(existing);",
+    );
+    expect(composition).toContain("focusShareHandoffWindowWhenReady(window);");
+    expect(composition.match(/focusShareHandoffWindow\(/g)).toHaveLength(1);
+    expect(composition.match(/focusShareHandoffWindowWhenReady\(/g)).toHaveLength(
+      1,
     );
   });
 

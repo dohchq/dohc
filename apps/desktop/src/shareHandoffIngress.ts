@@ -31,6 +31,10 @@ export interface ShareHandoffWindow {
   focus(): void;
 }
 
+export interface NewShareHandoffWindow extends ShareHandoffWindow {
+  once(event: "ready-to-show", listener: () => void): void;
+}
+
 export interface ProtocolClientRegistrar {
   setAsDefaultProtocolClient(
     scheme: string,
@@ -108,6 +112,12 @@ export function focusShareHandoffWindow(window: ShareHandoffWindow): void {
   if (window.isMinimized()) window.restore();
   window.show();
   window.focus();
+}
+
+export function focusShareHandoffWindowWhenReady(
+  window: NewShareHandoffWindow,
+): void {
+  window.once("ready-to-show", () => focusShareHandoffWindow(window));
 }
 
 export function registerShareHandoffProtocol(

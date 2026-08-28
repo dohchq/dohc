@@ -4,6 +4,7 @@ import {
   classifyShareHandoffArguments,
   createShareHandoffIntentSlot,
   focusShareHandoffWindow,
+  focusShareHandoffWindowWhenReady,
   parseShareHandoffUrl,
   receiveShareHandoffArguments,
   registerShareHandoffProtocol,
@@ -167,6 +168,28 @@ describe("share handoff delivery", () => {
     expect(accepted).toBe(true);
     expect(calls).toEqual(["restore", "show", "focus"]);
     expect(slot.pending()).toBe(CODE_A);
+  });
+
+  it("waits for ready-to-show before focusing a newly created window", () => {
+    const calls: string[] = [];
+    let readyToShow: (() => void) | undefined;
+    const window = {
+      isMinimized: () => true,
+      restore: () => calls.push("restore"),
+      show: () => calls.push("show"),
+      focus: () => calls.push("focus"),
+      once: (event: "ready-to-show", listener: () => void) => {
+        expect(event).toBe("ready-to-show");
+        readyToShow = listener;
+      },
+    };
+
+    focusShareHandoffWindowWhenReady(window);
+
+    expect(calls).toEqual([]);
+    expect(readyToShow).toBeTypeOf("function");
+    readyToShow?.();
+    expect(calls).toEqual(["restore", "show", "focus"]);
   });
 
   it("ignores an invalid lookalike without changing focus or pending intent", () => {
