@@ -21,6 +21,7 @@ export const WORKSPACE_METHOD = {
   conflictsOpen: "conflicts.open",
   conflictsResolve: "conflicts.resolve",
   collectionsList: "collections.list",
+  collectionsListPendingAdoptions: "collections.listPendingAdoptions",
   collectionsGet: "collections.get",
   collectionsQuery: "collections.query",
   collectionsGetRecord: "collections.getRecord",
@@ -195,6 +196,16 @@ export type ConflictResolveResult =
   | ReplicatedConflictResult;
 
 export type CollectionListResult = CollectionListContractResult;
+export type CollectionPendingAdoption = WorkspaceJsonObject & {
+  versionId: string;
+  recordId: string;
+  collectionPath: string;
+  filePath: string;
+  objectId: string;
+};
+export type CollectionPendingAdoptionsResult = WorkspaceJsonObject & {
+  adoptions: CollectionPendingAdoption[];
+};
 export type CollectionGetResult = CollectionGetContractResult;
 export type CollectionQueryResult = CollectionQueryContractResult;
 export type CollectionGetRecordResult = CollectionGetRecordContractResult;
@@ -257,6 +268,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.conflictsOpen]: ConflictOpenParams;
   [WORKSPACE_METHOD.conflictsResolve]: ConflictResolveParams;
   [WORKSPACE_METHOD.collectionsList]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.collectionsListPendingAdoptions]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.collectionsGet]: CollectionGetParams;
   [WORKSPACE_METHOD.collectionsQuery]: CollectionQueryParams;
   [WORKSPACE_METHOD.collectionsGetRecord]: CollectionGetRecordParams;
@@ -276,6 +288,7 @@ export type WorkspaceMethodResultMap = {
   [WORKSPACE_METHOD.conflictsOpen]: ConflictOpenResult;
   [WORKSPACE_METHOD.conflictsResolve]: ConflictResolveResult;
   [WORKSPACE_METHOD.collectionsList]: CollectionListResult;
+  [WORKSPACE_METHOD.collectionsListPendingAdoptions]: CollectionPendingAdoptionsResult;
   [WORKSPACE_METHOD.collectionsGet]: CollectionGetResult;
   [WORKSPACE_METHOD.collectionsQuery]: CollectionQueryResult;
   [WORKSPACE_METHOD.collectionsGetRecord]: CollectionGetRecordResult;
@@ -538,6 +551,20 @@ const CollectionListResultSchema = mutableStruct({
   collections: Schema.mutable(Schema.Array(CollectionSummarySchema)),
 });
 
+const CollectionPendingAdoptionsResultSchema = mutableStruct({
+  adoptions: Schema.mutable(
+    Schema.Array(
+      mutableStruct({
+        versionId: Schema.String,
+        recordId: Schema.String,
+        collectionPath: Schema.String,
+        filePath: Schema.String,
+        objectId: Schema.String,
+      }),
+    ),
+  ),
+});
+
 const CollectionQueryResultSchema = mutableStruct({
   collection: CollectionSummarySchema,
   records: Schema.mutable(Schema.Array(CollectionRecordSchema)),
@@ -633,6 +660,8 @@ const WorkspaceResultSchemas = {
     ReplicatedConflictResultSchema,
   ]),
   [WORKSPACE_METHOD.collectionsList]: CollectionListResultSchema,
+  [WORKSPACE_METHOD.collectionsListPendingAdoptions]:
+    CollectionPendingAdoptionsResultSchema,
   [WORKSPACE_METHOD.collectionsGet]: CollectionDetailsSchema,
   [WORKSPACE_METHOD.collectionsQuery]: CollectionQueryResultSchema,
   [WORKSPACE_METHOD.collectionsGetRecord]: CollectionGetRecordResultSchema,

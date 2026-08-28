@@ -89,6 +89,9 @@ export function mockLiveSessions(
           result: { running: true, degraded: false, terminal: false },
         };
       }
+      if (request.method === "collections.listPendingAdoptions") {
+        return { id: request.id, result: { adoptions: [] } };
+      }
       const response = await loopback.sendRequest(request);
       if (request.method === VERSIONED_METHOD.textReadBlob) {
         deliverWithheldBlob(loopback, request, response, blobHandlers);

@@ -1,5 +1,7 @@
 //! Collection reads through the real in-process daemon request path.
 
+use base64::Engine as _;
+use dohc_engine_collab::{ContentKind, Ydoc};
 use dohc_engine_domain::{
     CaptureIngest, NoFaults, TxnOutcome, VersionedTextStore, reconcile_collections_in_tx,
 };
@@ -291,6 +293,69 @@ async fn capture_authored_record_edit_keeps_the_agent_in_field_history() {
         .expect("adopted record id")
         .to_owned();
 
+    let pending = call(
+        &transport,
+        &handle,
+        61,
+        "collections.listPendingAdoptions",
+        json!({}),
+    )
+    .await;
+    let object_id = pending["adoptions"][0]["objectId"]
+        .as_str()
+        .expect("pending object id");
+    let seed_markdown =
+        std::fs::read_to_string(collection_dir.join("alpha.md")).expect("pending record Markdown");
+    let opened = call(
+        &transport,
+        &handle,
+        62,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": "tasks/alpha.md",
+            "contentKind": "richdoc",
+            "expectedObjectId": object_id,
+        }),
+    )
+    .await;
+    assert_eq!(opened["lineage"], json!("absent"));
+    assert_eq!(opened["seedContent"], json!(seed_markdown));
+    let seed_doc = Ydoc::wire();
+    // This Rust-only history test uses the limited helper for its plain fixture.
+    // Production adoption seeds through @dohc/ydoc-projection in the desktop.
+    seed_doc
+        .rewrite_content_to_markdown(ContentKind::Richdoc, &seed_markdown)
+        .expect("seed simple rich-document fixture");
+    call(
+        &transport,
+        &handle,
+        63,
+        "ydoc.recordUpdate",
+        json!({
+            "sessionId": opened["sessionId"],
+            "updateBase64": base64::engine::general_purpose::STANDARD
+                .encode(seed_doc.encode_full_state()),
+            "seed": true,
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        64,
+        "ydoc.evict",
+        json!({ "sessionId": opened["sessionId"] }),
+    )
+    .await;
+    reconcile_capture(&transport, &handle, 65).await;
+    assert!(
+        std::fs::read_to_string(collection_dir.join("alpha.md"))
+            .expect("adopted record")
+            .contains(&record_id),
+        "shared-imported lineage must finish the pending adoption"
+    );
+
     let agent_id = "agent-collection-capture";
     call(
         &transport,
@@ -453,5 +518,75 @@ async fn capture_adopts_eof_frontmatter_without_rewriting_structure() {
         std::fs::read(&record_path).expect("read adopted record"),
         original.as_bytes(),
         "adoption must preserve the delimiter at EOF without a trailing newline"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn capture_adoption_leaves_rich_markdown_unmodified_until_shared_import() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    seed_schema(
+        &scratch,
+        "name: Tasks\nfields:\n  status:\n    type: text\n",
+    );
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+
+    const BODY: &str = concat!(
+        "| Metric | Value |\n",
+        "| ------ | ----- |\n",
+        "| apples | 10    |\n",
+        "\n",
+        "- parent\n",
+        "  - nested with **bold** and [details](https://example.com)",
+    );
+    let original = format!("---\nstatus: open\n---\n\n{BODY}");
+    let record_path = scratch.path().join("tasks/rich.md");
+    std::fs::write(&record_path, &original).expect("rich Markdown record");
+
+    reconcile_capture(&transport, &handle, 10).await;
+
+    let query = call(
+        &transport,
+        &handle,
+        40,
+        "collections.query",
+        json!({ "collectionPath": "tasks" }),
+    )
+    .await;
+    let record_id = query["records"][0]["id"]
+        .as_str()
+        .expect("pending record id");
+    let pending = call(
+        &transport,
+        &handle,
+        41,
+        "collections.listPendingAdoptions",
+        json!({}),
+    )
+    .await;
+    assert_eq!(pending["adoptions"][0]["recordId"], record_id);
+    assert_eq!(pending["adoptions"][0]["filePath"], "tasks/rich.md");
+    let settled = std::fs::read_to_string(&record_path).expect("pending rich Markdown record");
+
+    assert_eq!(
+        settled, original,
+        "Rust capture must not run its limited Markdown grammar while the shared importer is pending"
     );
 }

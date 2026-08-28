@@ -70,11 +70,14 @@ const MarkdownTable = Table.extend({
       renderChildren: (nodes, separator) =>
         prepareRenderedTableCell(helpers.renderChildren(nodes, separator)),
     }
+    // Tiptap's table renderer includes its own trailing newline, while the
+    // document renderer also joins sibling blocks with `\n\n`. Returning both
+    // would put two blank lines between a table and its next sibling.
     return renderTableToMarkdown(
       node,
       tableHelpers,
       { cellLineSeparator: GFM_TABLE_CELL_BLOCK_SEPARATOR },
-    )
+    ).replace(/\n$/u, '')
   },
 })
 

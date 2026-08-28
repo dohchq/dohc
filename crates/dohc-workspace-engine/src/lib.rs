@@ -1094,6 +1094,10 @@ impl EngineService {
                 self.collections_list(&ctx, request.workspace, request.params)
                     .await?
             }
+            "collections.listPendingAdoptions" => {
+                self.collections_list_pending_adoptions(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "collections.get" => {
                 self.collections_get(&ctx, request.workspace, request.params)
                     .await?
@@ -3765,6 +3769,27 @@ impl EngineService {
         )
         .await?;
         collection_response_json(json!({ "collections": collections }))
+    }
+
+    /// Returns active-version collection bindings waiting for the shared
+    /// rich-document importer to establish canonical Y.Doc lineage.
+    async fn collections_list_pending_adoptions(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let _: CollectionsListParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let adoptions = Self::read_under_ctx(
+            &cancellation,
+            "collections.listPendingAdoptions",
+            open.actor
+                .collections_list_pending_adoptions(open.workspace_id),
+        )
+        .await?;
+        collection_response_json(json!({ "adoptions": adoptions }))
     }
 
     async fn collections_get(
@@ -7604,6 +7629,13 @@ impl EngineService {
             )
             .await
             .map_err(map_ydoc_open_runtime)?;
+        if params
+            .expected_object_id
+            .as_deref()
+            .is_some_and(|expected| expected != probe.key.object_id.as_str())
+        {
+            return Err(wire(ErrorCode::InvalidParams, "ydoc-object-changed"));
+        }
         let lease =
             self.leases
                 .scoped(&open.root)
@@ -9809,6 +9841,8 @@ struct MomentsGetParams {
 struct YdocOpenParams {
     version_id: String,
     path: String,
+    #[serde(default)]
+    expected_object_id: Option<String>,
     #[serde(default)]
     content_kind: Option<String>,
     #[serde(default)]

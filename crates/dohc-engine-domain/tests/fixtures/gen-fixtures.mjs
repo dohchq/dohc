@@ -154,6 +154,19 @@ views:
     visibleFields: [status, missing, status]
 `,
   },
+  {
+    name: "invalid-view-kind-does-not-reserve-view-name",
+    yaml: `fields:
+  title:
+    type: text
+views:
+  - name: Primary
+    kind: timeline
+  - name: Primary
+    kind: table
+    visibleFields: [title]
+`,
+  },
 ];
 
 const relationSingle = {

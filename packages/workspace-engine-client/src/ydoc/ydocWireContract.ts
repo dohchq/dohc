@@ -40,6 +40,7 @@ export interface ArtifactAssetDescriptor extends JsonObject {
 export type YdocOpenParams = JsonObject & {
   versionId: string;
   path: string;
+  expectedObjectId?: string;
   contentKind?: YdocContentKind;
   seedFromArtifact?: boolean;
 };

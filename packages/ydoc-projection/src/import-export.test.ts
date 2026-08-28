@@ -1017,6 +1017,28 @@ describe('Y.Doc markdown import/export', () => {
     )
   })
 
+  it('keeps one blank separator between a table and a following nested list', () => {
+    const input = [
+      '---',
+      'status: open',
+      '---',
+      '',
+      '| Metric | Value |',
+      '| ------ | ----- |',
+      '| apples | 10    |',
+      '',
+      '- parent',
+      '  - nested with **bold** and [details](https://example.com)',
+    ].join('\n')
+
+    const doc = markdownToYDoc(input)
+    expect(yDocBodyJSON(doc).content?.map(node => node.type)).toEqual([
+      'table',
+      'bulletList',
+    ])
+    expect(yDocToMarkdown(doc)).toBe(input)
+  })
+
   it('escapes literal table-cell pipes before computing column widths', () => {
     const doc = yDocFromBody([
       {

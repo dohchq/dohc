@@ -1895,45 +1895,59 @@ fn policy_excludes(
         .tracked
 }
 
+fn is_collection_record_path(root: &Path, path: &str) -> bool {
+    let Some((parent, name)) = path.rsplit_once('/') else {
+        // v1 does not admit the workspace root as a collection.
+        return false;
+    };
+    if parent.is_empty() || !name.ends_with(".md") {
+        return false;
+    }
+    match std::fs::symlink_metadata(root.join(parent).join(COLLECTION_SCHEMA_FILENAME)) {
+        Ok(metadata) => metadata.file_type().is_file(),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            false
+        }
+        // Permission/lock/other uncertainty fails toward reconciliation.
+        Err(_) => true,
+    }
+}
+
 /// Whether a settled file plan can change collection detection or membership.
 fn collection_reconcile_required(root: &Path, plan: &ReconcilePlan) -> bool {
     plan.ops.iter().any(|op| {
         let path = op.path();
-        if path.rsplit('/').next() == Some(COLLECTION_SCHEMA_FILENAME) {
-            return true;
-        }
-        if !matches!(
-            op,
-            CaptureOp::Ingest {
-                reason: IngestReason::Added,
-                ..
-            } | CaptureOp::Retire { .. }
-        ) {
-            // Changed record content is already indexed by capture/Y.Doc;
-            // only added or retired Markdown can change membership.
-            return false;
-        }
-        let Some((parent, name)) = path.rsplit_once('/') else {
-            // v1 does not admit the workspace root as a collection.
-            return false;
-        };
-        if parent.is_empty() || !name.ends_with(".md") {
-            return false;
-        }
-        match std::fs::symlink_metadata(root.join(parent).join(COLLECTION_SCHEMA_FILENAME)) {
-            Ok(metadata) => metadata.file_type().is_file(),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) =>
-            {
-                false
-            }
-            // Permission/lock/other uncertainty fails toward reconciliation.
-            Err(_) => true,
-        }
+        path.rsplit('/').next() == Some(COLLECTION_SCHEMA_FILENAME)
+            || matches!(
+                op,
+                CaptureOp::Ingest {
+                    reason: IngestReason::Added,
+                    ..
+                } | CaptureOp::Retire { .. }
+            ) && is_collection_record_path(root, path)
     })
+}
+
+/// Changed collection records whose canonical id needs comparison with the
+/// durable binding after capture. Body and ordinary field edits do not by
+/// themselves schedule the more expensive collection reconciliation.
+fn changed_collection_record_paths(root: &Path, plan: &ReconcilePlan) -> Vec<String> {
+    plan.ops
+        .iter()
+        .filter_map(|op| match op {
+            CaptureOp::Ingest {
+                path,
+                reason: IngestReason::Changed,
+                ..
+            } if is_collection_record_path(root, path) => Some(path.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 fn wall_now_ms() -> i64 {
@@ -2925,6 +2939,7 @@ async fn apply_run_with_handle(
     let apply_leases = leases.clone();
     let apply_self_writes = self_writes.clone();
     let version_for_retire = version_id.clone();
+    let changed_collection_paths = changed_collection_record_paths(root, &plan);
     // A DEDICATED plain thread, not spawn_blocking: the sink's blocking actor
     // calls assert they run OUTSIDE any tokio runtime context, and
     // spawn_blocking threads carry the runtime handle. Awaiting the oneshot
@@ -2956,15 +2971,23 @@ async fn apply_run_with_handle(
                 apply_provenance,
             );
             let result = apply_reconcile_plan(&apply_plan, &mut sink, &NoFaults);
-            let collections = if collection_reconcile_requested
-                && result.failed_applies.is_empty()
-                && !result.degraded
-                && result.completed()
-            {
-                Some(sink.reconcile_collections())
-            } else {
-                None
-            };
+            let collections =
+                if result.failed_applies.is_empty() && !result.degraded && result.completed() {
+                    let reconcile = if collection_reconcile_requested {
+                        Ok(true)
+                    } else if changed_collection_paths.is_empty() {
+                        Ok(false)
+                    } else {
+                        sink.collection_record_id_mismatch(changed_collection_paths)
+                    };
+                    match reconcile {
+                        Ok(true) => Some(sink.reconcile_collections()),
+                        Ok(false) => None,
+                        Err(error) => Some(Err(error)),
+                    }
+                } else {
+                    None
+                };
             let _ = done_tx.send(CaptureThreadOutcome {
                 plan: apply_plan,
                 result,
@@ -3224,8 +3247,8 @@ async fn ack_all_failed(files: &FilesHandle, plan: ReconcilePlan, status: &Arc<D
 #[cfg(test)]
 mod collection_reconcile_scheduling_tests {
     use super::*;
-    use dohc_engine_collab::DocKey;
-    use dohc_engine_files::CaptureSink;
+    use dohc_engine_collab::{ContentKind, DocKey, Ydoc};
+    use dohc_engine_files::{CaptureApplyResult, CaptureSink, CapturedIngest};
     use dohc_engine_runtime::WorkspaceSupervisor;
     use dohc_engine_testkit::ScratchDir;
 
@@ -3254,6 +3277,66 @@ mod collection_reconcile_scheduling_tests {
             media_type: "text/markdown",
             reason,
         }
+    }
+
+    async fn wait_for_watcher_dirty(files: &FilesHandle) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if files.stats().await.expect("watcher stats").dirty {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "native watcher did not mark the collection edit dirty"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        }
+    }
+
+    async fn seed_plain_richdoc_lineage(actor: &ActorHandle, path: &str, markdown: &str) {
+        let state = actor
+            .ydoc_open_state(
+                WORKSPACE_ID.to_owned(),
+                wall_now_ms(),
+                false,
+                None,
+                "main".to_owned(),
+                path.to_owned(),
+                Some(ContentKind::Richdoc),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("open absent rich-document lineage");
+        assert!(
+            !state.lineage_existing,
+            "test fixture starts without lineage"
+        );
+
+        // These scheduling tests use a plain paragraph fixture. Production
+        // adoption seeds through the desktop's shared Markdown importer.
+        let doc = Ydoc::wire();
+        doc.apply(&state.initial_update)
+            .expect("apply initial rich-document state");
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, markdown)
+            .expect("seed plain rich-document fixture");
+        actor
+            .ydoc_record_update(
+                state.key,
+                path.to_owned(),
+                ContentKind::Richdoc,
+                state.regime,
+                doc.encode_full_state(),
+                None,
+                state.lineage_claim_id,
+                true,
+                state.head_blob_sha256,
+                None,
+                wall_now_ms(),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("record rich-document seed");
     }
 
     #[test]
@@ -3348,6 +3431,7 @@ mod collection_reconcile_scheduling_tests {
                 |row| row.get::<_, String>(0),
             )
             .expect("captured record object id");
+        seed_plain_richdoc_lineage(&actor, "tasks/alpha.md", "Alpha task\n").await;
         let leases = LeaseRegistry::new();
         let key = DocKey::new(WORKSPACE_ID, "main", &object_id).expect("record key");
         let lease = leases.acquire(&key).expect("hold record lease");
@@ -3427,6 +3511,197 @@ mod collection_reconcile_scheduling_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn watcher_edit_stripping_adopted_record_id_reasserts_the_binding() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let collection_dir = scratch.path().join("tasks");
+        let record_path = collection_dir.join("alpha.md");
+        std::fs::create_dir_all(&collection_dir).expect("collection directory");
+
+        let db = scratch.engine_db_path().expect("engine database path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        let leases = LeaseRegistry::new();
+        let self_writes = SelfWriteSuppression::default();
+        std::fs::write(collection_dir.join("collection.yaml"), b"name: Tasks\n")
+            .expect("collection schema");
+        std::fs::write(&record_path, b"Alpha task").expect("collection record");
+        let seed_actor = actor.clone();
+        let seed_root = scratch.path().to_path_buf();
+        let seed_leases = leases.clone();
+        let seed_self_writes = self_writes.clone();
+        std::thread::spawn(move || {
+            let mut sink = StoreCaptureSink::new_with_self_writes(
+                seed_actor,
+                WORKSPACE_ID,
+                "main",
+                seed_root,
+                2,
+                None,
+                seed_leases,
+                seed_self_writes,
+                CaptureProvenance::default(),
+            );
+            for path in ["tasks/collection.yaml", "tasks/alpha.md"] {
+                sink.ingest(
+                    path,
+                    0,
+                    "advisory-sha",
+                    "text/markdown",
+                    IngestReason::Added,
+                )
+                .unwrap_or_else(|_| panic!("capture {path}"));
+            }
+            assert!(
+                sink.reconcile_collections()
+                    .expect("bind pending collection record")
+                    .is_empty()
+            );
+        })
+        .join()
+        .expect("collection capture setup thread");
+        seed_plain_richdoc_lineage(&actor, "tasks/alpha.md", "Alpha task").await;
+        let adopt_actor = actor.clone();
+        let adopt_root = scratch.path().to_path_buf();
+        let adopt_leases = leases.clone();
+        let adopt_self_writes = self_writes.clone();
+        std::thread::spawn(move || {
+            assert_eq!(
+                StoreCaptureSink::new_with_self_writes(
+                    adopt_actor,
+                    WORKSPACE_ID,
+                    "main",
+                    adopt_root,
+                    3,
+                    None,
+                    adopt_leases,
+                    adopt_self_writes,
+                    CaptureProvenance::default(),
+                )
+                .reconcile_collections()
+                .expect("adopt shared-imported record"),
+                ["tasks/alpha.md"]
+            );
+        })
+        .join()
+        .expect("collection adoption setup thread");
+        let record_id = rusqlite::Connection::open(&db)
+            .expect("open binding observer")
+            .query_row(
+                "SELECT record_id FROM collection_records \
+                 WHERE workspace_id = ?1 AND version_id = 'main' \
+                   AND file_path = 'tasks/alpha.md'",
+                [WORKSPACE_ID],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("adopted record binding");
+        let adopted = std::fs::read_to_string(&record_path).expect("read adopted record");
+        assert!(adopted.contains(&format!("id: {record_id}")));
+
+        let files = FilesActor::spawn_async(scratch.path().to_path_buf(), ScanBounds::default())
+            .await
+            .expect("files actor");
+        let files = FilesActorCloseGuard::new(files);
+        let handle = files.handle();
+        let ready = NativeWatcher::start(
+            scratch.path().to_path_buf(),
+            handle.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("watcher start");
+        let mut watcher = ready.watcher;
+        let status = Arc::new(DriverStatus::default());
+
+        let ReconcileRun::Completed(baseline_plan) = ready.initial_reconcile else {
+            panic!("the watcher must prepare its adopted-file baseline");
+        };
+        assert!(!baseline_plan.degraded);
+        let captured = baseline_plan
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                CaptureOp::Ingest {
+                    path, size, sha256, ..
+                } => Some(CapturedIngest {
+                    path: path.clone(),
+                    size: *size,
+                    sha256: sha256.clone(),
+                }),
+                CaptureOp::Retire { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(captured.len(), baseline_plan.ops.len());
+        handle
+            .acknowledge_capture(
+                baseline_plan.clone(),
+                CaptureApplyResult {
+                    applied_paths: baseline_plan
+                        .ops
+                        .iter()
+                        .map(|op| op.path().to_owned())
+                        .collect(),
+                    captured,
+                    not_owned_paths: Vec::new(),
+                    failed_applies: Vec::new(),
+                    crashed_after_apply: None,
+                    degraded: false,
+                },
+            )
+            .await
+            .expect("acknowledge the already-captured adopted-file baseline");
+
+        std::fs::write(&record_path, b"Alpha task").expect("strip adopted record id");
+        wait_for_watcher_dirty(&handle).await;
+        let changed = handle
+            .reconcile_if_dirty(CancellationToken::new())
+            .await
+            .expect("reconcile stripped id");
+        let ReconcileRun::Completed(changed_plan) = changed else {
+            panic!("the watcher edit must produce a completed capture plan");
+        };
+        assert!(
+            changed_plan.ops.iter().any(|op| matches!(
+                op,
+                CaptureOp::Ingest {
+                    path,
+                    reason: IngestReason::Changed,
+                    ..
+                } if path == "tasks/alpha.md"
+            )),
+            "stripping the id must travel through the ordinary Changed path"
+        );
+        assert!(
+            apply_run_with_handle(
+                ApplyRunContext {
+                    root: scratch.path(),
+                    actor: &actor,
+                    workspace_id: WORKSPACE_ID,
+                    leases: &leases,
+                    status: &status,
+                    self_writes: &self_writes,
+                    author_json: None,
+                    provenance: CaptureProvenance::default(),
+                    events: EngineEvents::default(),
+                },
+                &handle,
+                ReconcileRun::Completed(changed_plan),
+            )
+            .await,
+            "the changed record capture settles cleanly"
+        );
+        let restored = std::fs::read_to_string(&record_path).expect("read restored record");
+
+        watcher.stop().expect("stop watcher");
+        files.close().await;
+        supervisor.close(&db).expect("close actor");
+
+        assert_eq!(
+            restored, adopted,
+            "the established binding must reassert its id after an ordinary edit strips it"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_converged_watcher_scan_does_not_rewrite_collection_state() {
         let scratch = ScratchDir::new().expect("scratch");
         let collection_dir = scratch.path().join("tasks");
@@ -3454,12 +3729,32 @@ mod collection_reconcile_scheduling_tests {
                 )
                 .unwrap_or_else(|_| panic!("capture {path}"));
             }
-            sink.reconcile_collections().expect("adopt record");
+            sink.reconcile_collections().expect("bind pending record");
         })
         .join()
         .expect("collection seed thread");
+        seed_plain_richdoc_lineage(&actor, "tasks/alpha.md", "Alpha task\n").await;
+        let adopt_actor = actor.clone();
+        let adopt_root = scratch.path().to_path_buf();
+        std::thread::spawn(move || {
+            StoreCaptureSink::new(adopt_actor, WORKSPACE_ID, "main", adopt_root, 3, None)
+                .reconcile_collections()
+                .expect("adopt seeded record");
+        })
+        .join()
+        .expect("collection adoption thread");
 
         let observer = rusqlite::Connection::open(&db).expect("open database observer");
+        let adoption_state = observer
+            .query_row(
+                "SELECT adoption_state FROM collection_records \
+                 WHERE workspace_id = ?1 AND version_id = 'main' \
+                   AND file_path = 'tasks/alpha.md'",
+                [WORKSPACE_ID],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("collection adoption state");
+        assert_eq!(adoption_state, "adopted");
         let data_version = |connection: &rusqlite::Connection| {
             connection
                 .query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))

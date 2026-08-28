@@ -16,6 +16,7 @@ import {
   type CollectionGetRecordResult,
   type CollectionGetResult,
   type CollectionListResult,
+  type CollectionPendingAdoptionsResult,
   type CollectionQueryParams,
   type CollectionQueryResult,
   type ConflictFileState,
@@ -911,6 +912,13 @@ export class VersionedLiveAdapter {
 
   async listCollections(): Promise<CollectionListResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.collectionsList, {});
+  }
+
+  async listPendingCollectionAdoptions(): Promise<CollectionPendingAdoptionsResult> {
+    return this.workspaceRequest(
+      WORKSPACE_METHOD.collectionsListPendingAdoptions,
+      {},
+    );
   }
 
   async getCollection(input: CollectionGetParams): Promise<CollectionGetResult> {

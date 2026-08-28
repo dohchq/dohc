@@ -218,6 +218,18 @@ pub struct CollectionAdoptionCandidate {
     pub object_id: String,
 }
 
+/// One active-version collection binding waiting for the rich-document
+/// importer to establish its canonical Y.Doc lineage.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionPendingAdoption {
+    pub version_id: String,
+    pub record_id: String,
+    pub collection_path: String,
+    pub file_path: String,
+    pub object_id: String,
+}
+
 /// The local collection projection after one active-version reconciliation.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CollectionReconcileResult {
@@ -923,7 +935,7 @@ fn parse_views(
         let Some(name) = name else {
             continue;
         };
-        if !view_names.insert(name.clone()) {
+        if view_names.contains(&name) {
             push_reason(
                 reasons,
                 CollectionSchemaReasonCode::DuplicateValue,
@@ -934,6 +946,7 @@ fn parse_views(
         let Some(kind) = kind else {
             continue;
         };
+        view_names.insert(name.clone());
         views.push(ViewDefinition {
             name,
             kind,
@@ -1321,6 +1334,45 @@ pub fn is_collection_record_bound_in_tx(
     object_id: &str,
 ) -> Result<bool, crate::DomainError> {
     Ok(bound_record(conn, workspace_id, version_id, object_id)?.is_some())
+}
+
+/// Whether any changed collection record's canonical `id` key differs from
+/// the record id already bound to that path. Capture calls this after the
+/// changed bytes are durable and before deciding whether reconciliation is
+/// necessary, so ordinary field/body edits stay on the indexing fast path.
+pub fn collection_record_id_mismatch_in_tx(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    paths: &[String],
+) -> Result<bool, crate::DomainError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT r.record_id,b.text FROM collection_records r \
+             LEFT JOIN snapshots s ON s.workspace_id=r.workspace_id \
+               AND s.version_id=r.version_id AND s.path=r.file_path \
+               AND s.object_id=r.object_id \
+             LEFT JOIN blobs b ON b.sha256=s.blob_sha256 \
+             WHERE r.workspace_id=?1 AND r.version_id=?2 AND r.file_path=?3 \
+               AND r.record_id IS NOT NULL",
+        )
+        .map_err(crate::DomainError::sql_corrupt)?;
+    for path in paths {
+        let binding = statement
+            .query_row(params![workspace_id, version_id, path], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .optional()
+            .map_err(crate::DomainError::sql_corrupt)?;
+        let Some((record_id, text)) = binding else {
+            continue;
+        };
+        let canonical_id = text.as_deref().and_then(markdown_record_id);
+        if canonical_id.as_deref() != Some(record_id.as_str()) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Replace one bound record's local projection with its applied Y.Map state.
@@ -1992,6 +2044,40 @@ fn active_version_id(conn: &Connection, workspace_id: &str) -> Result<String, cr
     .ok_or(crate::DomainError::WorkspaceNotFound)
 }
 
+/// Active-version collection bindings whose artifact still needs the shared
+/// rich-document importer to establish canonical Y.Doc state.
+pub fn list_pending_collection_adoptions(
+    conn: &Connection,
+    workspace_id: &str,
+) -> Result<Vec<CollectionPendingAdoption>, crate::DomainError> {
+    let version_id = active_version_id(conn, workspace_id)?;
+    let mut statement = conn
+        .prepare(
+            "SELECT r.record_id,r.collection_path,r.file_path,r.object_id \
+             FROM collection_records r \
+             JOIN snapshots s ON s.workspace_id=r.workspace_id \
+               AND s.version_id=r.version_id AND s.path=r.file_path \
+               AND s.object_id=r.object_id \
+             WHERE r.workspace_id=?1 AND r.version_id=?2 \
+               AND r.adoption_state='pending' AND r.record_id IS NOT NULL \
+             ORDER BY r.file_path,r.record_id",
+        )
+        .map_err(crate::DomainError::sql_corrupt)?;
+    statement
+        .query_map(params![workspace_id, version_id], |row| {
+            Ok(CollectionPendingAdoption {
+                version_id: version_id.clone(),
+                record_id: row.get(0)?,
+                collection_path: row.get(1)?,
+                file_path: row.get(2)?,
+                object_id: row.get(3)?,
+            })
+        })
+        .map_err(crate::DomainError::sql_corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(crate::DomainError::sql_corrupt)
+}
+
 fn stored_schema_status(value: &str) -> Result<CollectionSchemaStatus, crate::DomainError> {
     match value {
         "valid" => Ok(CollectionSchemaStatus::Valid),
@@ -2410,10 +2496,17 @@ fn compare_json(left: &Value, right: &Value) -> Ordering {
     match (left, right) {
         (Value::Null, Value::Null) => Ordering::Equal,
         (Value::Bool(left), Value::Bool(right)) => left.cmp(right),
-        (Value::Number(left), Value::Number(right)) => left
-            .as_f64()
-            .partial_cmp(&right.as_f64())
-            .unwrap_or(Ordering::Equal),
+        (Value::Number(left), Value::Number(right)) => {
+            if let (Some(left), Some(right)) = (left.as_i64(), right.as_i64()) {
+                left.cmp(&right)
+            } else if let (Some(left), Some(right)) = (left.as_u64(), right.as_u64()) {
+                left.cmp(&right)
+            } else {
+                left.as_f64()
+                    .partial_cmp(&right.as_f64())
+                    .unwrap_or(Ordering::Equal)
+            }
+        }
         (Value::String(left), Value::String(right)) => left.cmp(right),
         _ => left.to_string().cmp(&right.to_string()),
     }
@@ -2791,7 +2884,22 @@ fn record_id_from_random(random: [u8; 16]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_record_id, mint_record_id, record_id_from_random};
+    use std::cmp::Ordering;
+
+    use serde_json::json;
+
+    use super::{compare_json, is_record_id, mint_record_id, record_id_from_random};
+
+    #[test]
+    fn integer_json_comparison_preserves_precision_beyond_f64() {
+        assert_eq!(
+            compare_json(
+                &json!(9_007_199_254_740_992_u64),
+                &json!(9_007_199_254_740_993_u64)
+            ),
+            Ordering::Less
+        );
+    }
 
     #[test]
     fn record_id_encoding_uses_all_sixteen_random_bytes() {

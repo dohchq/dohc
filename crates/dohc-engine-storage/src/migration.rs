@@ -2952,7 +2952,9 @@ CREATE TABLE collection_record_fields (
     validation_reason_json TEXT CHECK (
       validation_reason_json IS NULL OR json_valid(validation_reason_json)
     ),
-    PRIMARY KEY (workspace_id, version_id, record_id, field_name)
+    PRIMARY KEY (workspace_id, version_id, record_id, field_name),
+    FOREIGN KEY (workspace_id, version_id)
+      REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE
 ) STRICT;
 
 CREATE TABLE collection_field_history (
@@ -2974,7 +2976,7 @@ CREATE TABLE collection_field_history (
 ) STRICT;
 CREATE INDEX collection_field_history_by_record
     ON collection_field_history(
-      workspace_id, version_id, record_id, field_name, history_id
+      workspace_id, version_id, record_id, recorded_at_ms DESC, history_id DESC
     );
 
 CREATE TABLE collection_relation_edges (
@@ -3685,7 +3687,7 @@ mod tests {
     }
 
     #[test]
-    fn deleting_a_version_cascades_collection_history_and_relation_edges() {
+    fn deleting_a_version_cascades_collection_index_rows() {
         let dir = tempdir();
         let path = dir.join("collection-index-version-cascade.db");
         let ctx = MigrationContext::current(1_100);
@@ -3701,6 +3703,11 @@ mod tests {
              INSERT INTO versions (workspace_id, version_id, name, kind, created_at_ms)
                  VALUES ('ws', 'main', 'Main', 'main', 1),
                         ('ws', 'feature', 'Feature', 'named', 2);
+             INSERT INTO collection_record_fields (
+                 workspace_id, version_id, record_id, field_name,
+                 value_json, validation_status
+             ) VALUES ('ws', 'main', 'main-record', 'title', 'null', 'valid'),
+                      ('ws', 'feature', 'feature-record', 'title', 'null', 'valid');
              INSERT INTO collection_field_history (
                  workspace_id, version_id, record_id, field_name,
                  next_value_json, recorded_at_ms
@@ -3722,17 +3729,22 @@ mod tests {
         )
         .expect("delete feature version");
 
-        let remaining: (i64, i64) = conn
+        let remaining: (i64, i64, i64) = conn
             .query_row(
                 "SELECT
+                     (SELECT COUNT(*) FROM collection_record_fields),
                      (SELECT COUNT(*) FROM collection_field_history),
                      (SELECT COUNT(*) FROM collection_relation_edges)",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .expect("count surviving collection index rows");
-        assert_eq!(remaining, (1, 1));
-        for table in ["collection_field_history", "collection_relation_edges"] {
+        assert_eq!(remaining, (1, 1, 1));
+        for table in [
+            "collection_record_fields",
+            "collection_field_history",
+            "collection_relation_edges",
+        ] {
             let deleted_version_rows: i64 = conn
                 .query_row(
                     &format!("SELECT COUNT(*) FROM {table} WHERE version_id='feature'"),
@@ -3745,6 +3757,44 @@ mod tests {
                 "{table} must cascade with its version"
             );
         }
+    }
+
+    #[test]
+    fn collection_history_index_serves_newest_first_record_reads() {
+        let dir = tempdir();
+        let path = dir.join("collection-history-index.db");
+        let ctx = MigrationContext::current(1_100);
+        let mut conn = open_bare(&path);
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+            .expect("apply collection index migration");
+
+        let plan: Vec<String> = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN
+                 SELECT field_name, previous_value_json, next_value_json,
+                        author_origin_id, recorded_at_ms
+                   FROM collection_field_history
+                  WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3
+                  ORDER BY recorded_at_ms DESC, history_id DESC LIMIT ?4",
+            )
+            .expect("prepare newest-first history plan")
+            .query_map(rusqlite::params!["ws", "main", "record", 100], |row| {
+                row.get(3)
+            })
+            .expect("query newest-first history plan")
+            .collect::<rusqlite::Result<_>>()
+            .expect("collect newest-first history plan");
+
+        assert!(
+            plan.iter()
+                .any(|detail| detail.contains("collection_field_history_by_record")),
+            "record history must use its record index: {plan:?}"
+        );
+        assert!(
+            plan.iter()
+                .all(|detail| !detail.contains("TEMP B-TREE FOR ORDER BY")),
+            "record history index must serve newest-first ordering: {plan:?}"
+        );
     }
 
     #[test]

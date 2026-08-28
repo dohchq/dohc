@@ -2889,9 +2889,9 @@ fn render_table(children: &[MarkdownNode]) -> ProjectionResult<String> {
             Some(TableAlign::Left) | None => {}
         }
     }
-    output.push_str(" |\n")?;
+    output.push_str(" |")?;
     for row in &rows[1..] {
-        output.push_str("| ")?;
+        output.push_str("\n| ")?;
         for (index, width) in widths.iter().enumerate() {
             if index != 0 {
                 output.push_str(" | ")?;
@@ -2899,7 +2899,7 @@ fn render_table(children: &[MarkdownNode]) -> ProjectionResult<String> {
             let value = row.get(index).map(|cell| cell.text.as_str()).unwrap_or("");
             pad_utf16_into(&mut output, value, *width)?;
         }
-        output.push_str(" |\n")?;
+        output.push_str(" |")?;
     }
     Ok(output.into_string())
 }
@@ -4354,6 +4354,57 @@ mod projection_tests {
         assert_eq!(
             markdown,
             "\n| H               |\n| --------------- |\n| first<br>second |"
+        );
+    }
+
+    #[test]
+    fn table_followed_by_nested_list_has_one_markdown_block_separator() {
+        let doc = remote_doc_with_body([
+            xml_element(
+                "table",
+                &[],
+                [
+                    xml_element(
+                        "tableRow",
+                        &[],
+                        [
+                            xml_element("tableHeader", &[], [paragraph("Metric")]),
+                            xml_element("tableHeader", &[], [paragraph("Value")]),
+                        ],
+                    ),
+                    xml_element(
+                        "tableRow",
+                        &[],
+                        [
+                            xml_element("tableCell", &[], [paragraph("apples")]),
+                            xml_element("tableCell", &[], [paragraph("10")]),
+                        ],
+                    ),
+                ],
+            ),
+            xml_element(
+                "bulletList",
+                &[],
+                [xml_element(
+                    "listItem",
+                    &[],
+                    [
+                        paragraph("parent"),
+                        xml_element(
+                            "bulletList",
+                            &[],
+                            [xml_element("listItem", &[], [paragraph("nested")])],
+                        ),
+                    ],
+                )],
+            ),
+        ]);
+
+        assert_eq!(
+            doc.project(ContentKind::Richdoc)
+                .expect("small projection")
+                .content,
+            "\n| Metric | Value |\n| ------ | ----- |\n| apples | 10    |\n\n- parent\n  - nested"
         );
     }
 

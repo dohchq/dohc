@@ -76,6 +76,7 @@ export interface EngineYdocProviderSessionOptions {
   workspace: string;
   versionId: string;
   path: string;
+  expectedObjectId?: string;
   contentKind?: YdocContentKind;
   // Forwarded to the adapter: false when the caller already holds the
   // document's canonical state and will replay it into this generation.
@@ -162,6 +163,9 @@ export async function openEngineYdocProviderSession(
       workspace: options.workspace,
       versionId: options.versionId,
       path: options.path,
+      ...(options.expectedObjectId
+        ? { expectedObjectId: options.expectedObjectId }
+        : {}),
       ...(options.contentKind ? { contentKind: options.contentKind } : {}),
       ...(options.seedAbsentLineage !== undefined
         ? { seedAbsentLineage: options.seedAbsentLineage }

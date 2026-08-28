@@ -2,7 +2,7 @@
 
 use dohc_engine_collab::LeaseRegistry;
 use dohc_engine_crypto::{SecretDataKey, create_key_file, load_key_file};
-use dohc_engine_domain::DomainError;
+use dohc_engine_domain::{COLLECTION_SCHEMA_FILENAME, DomainError};
 use dohc_engine_files::media::is_text_media_type;
 use dohc_engine_files::policy::{PathClassification, classify_engine_file_path_normalized};
 use dohc_engine_files::{
@@ -357,6 +357,20 @@ impl StoreCaptureSink {
         )
     }
 
+    /// Check only the changed collection records offered by this capture
+    /// pass. The actor compares their now-durable canonical Markdown against
+    /// the existing id binding before the driver schedules reconciliation.
+    pub(crate) fn collection_record_id_mismatch(
+        &self,
+        paths: Vec<String>,
+    ) -> Result<bool, RuntimeError> {
+        self.actor.collection_record_id_mismatch_blocking(
+            self.workspace_id.clone(),
+            self.version_id.clone(),
+            paths,
+        )
+    }
+
     fn policy_tracks(&self, path: &str) -> Result<bool, CaptureError> {
         match &self.files_policy {
             PolicyState::Known(None) => Ok(true),
@@ -424,7 +438,11 @@ impl StoreCaptureSink {
         // sink is never called — deliberately NOT a retire: the ratified CAL-3
         // delta (BEHAVIOR_DELTA.md §7.1) keeps last-known-good rather than
         // false-deleting live user data behind an operational scan bound.
-        let text_media = is_text_media_type(media_type, path);
+        // Collection schemas are a reserved engine control file. The generic
+        // scanner deliberately classifies unknown extensions as binary, but
+        // collection discovery reads this YAML from the plaintext store.
+        let text_media = path.rsplit('/').next() == Some(COLLECTION_SCHEMA_FILENAME)
+            || is_text_media_type(media_type, path);
         let content_cap = if text_media {
             MAX_CAPTURE_TEXT_BYTES
         } else {
@@ -1136,12 +1154,15 @@ fn open_no_follow(absolute: &Path) -> NoFollowOpen {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dohc_engine_collab::{ContentKind, Ydoc};
     use dohc_engine_domain::{
         CollectionQuery, CollectionQueryResult, CollectionRecordDetails, SecretDiskIntent,
         SecretFileStore, SecretWrite, VersionedTextStore, get_collection_record, is_record_id,
         query_collection_records,
     };
-    use dohc_engine_files::{CaptureOp, ReconcilePlan, ScanGeneration, apply_reconcile_plan};
+    use dohc_engine_files::{
+        CancellationToken, CaptureOp, ReconcilePlan, ScanGeneration, apply_reconcile_plan,
+    };
     use dohc_engine_runtime::WorkspaceSupervisor;
     use dohc_engine_storage::{EngineStore, NoFaults as FilesNoFaults};
     use dohc_engine_testkit::ScratchDir;
@@ -1180,6 +1201,63 @@ mod tests {
         media_type: &str,
     ) -> Result<IngestOutcome, CaptureError> {
         sink.ingest(path, 0, "advisory-sha", media_type, IngestReason::Changed)
+    }
+
+    fn seed_captured_richdoc_lineage(sink: &StoreCaptureSink, path: &str) {
+        let markdown = std::fs::read_to_string(sink.shadow_root.join(path))
+            .unwrap_or_else(|_| panic!("read captured rich-document fixture {path}"));
+        let actor = sink.actor.clone();
+        let path = path.to_owned();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test rich-document runtime")
+            .block_on(async move {
+                let state = actor
+                    .ydoc_open_state(
+                        WORKSPACE_ID.to_owned(),
+                        11,
+                        false,
+                        None,
+                        VERSION_ID.to_owned(),
+                        path.clone(),
+                        Some(ContentKind::Richdoc),
+                        CancellationToken::new(),
+                    )
+                    .await
+                    .expect("open captured rich-document fixture");
+                assert!(
+                    !state.lineage_existing,
+                    "fixture must start without canonical Y.Doc lineage"
+                );
+
+                // These engine tests use the limited helper only to establish
+                // simple fixture lineage. Production adoption imports through
+                // the desktop's shared @dohc/ydoc-projection path.
+                let doc = Ydoc::wire();
+                doc.apply(&state.initial_update)
+                    .expect("apply initial rich-document fixture state");
+                doc.rewrite_content_to_markdown(ContentKind::Richdoc, &markdown)
+                    .expect("seed simple rich-document fixture");
+                actor
+                    .ydoc_record_update(
+                        state.key,
+                        path,
+                        ContentKind::Richdoc,
+                        state.regime,
+                        doc.encode_full_state(),
+                        None,
+                        state.lineage_claim_id,
+                        true,
+                        state.head_blob_sha256,
+                        None,
+                        12,
+                        Arc::new(FilesNoFaults),
+                        CancellationToken::new(),
+                    )
+                    .await
+                    .expect("record simple rich-document fixture seed");
+            });
     }
 
     fn snapshot(db: &Path, path: &str) -> Option<dohc_engine_domain::TextSnapshot> {
@@ -1449,6 +1527,7 @@ mod tests {
         ingest(&mut sink, "tasks/alpha.md").expect("capture record");
         assert_eq!(moment_count(&db, "tasks/alpha.md"), 1);
         assert_eq!(ydoc_update_count(&db, "tasks/alpha.md"), 0);
+        seed_captured_richdoc_lineage(&sink, "tasks/alpha.md");
 
         assert_eq!(
             sink.reconcile_collections().expect("adopt record"),
@@ -1506,6 +1585,34 @@ mod tests {
     }
 
     #[test]
+    fn reserved_collection_schema_is_text_under_the_scanners_unknown_media_type() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        write_file(scratch.path(), "tasks/collection.yaml", b"name: Tasks\n");
+
+        assert!(matches!(
+            ingest_as(
+                &mut sink,
+                "tasks/collection.yaml",
+                "application/octet-stream"
+            )
+            .expect("capture reserved collection schema"),
+            IngestOutcome::Captured { .. }
+        ));
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        assert_eq!(
+            snapshot(&db, "tasks/collection.yaml")
+                .expect("collection schema text snapshot")
+                .text,
+            "name: Tasks\n"
+        );
+        assert!(binary_head(&db, "tasks/collection.yaml").is_none());
+    }
+
+    #[test]
     fn collection_adoption_seeds_typed_frontmatter_and_multi_relation_edges() {
         const FIRST_TARGET_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
         const SECOND_TARGET_ID: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -1542,6 +1649,9 @@ mod tests {
             "tasks/second.md",
         ] {
             ingest(&mut sink, path).unwrap_or_else(|_| panic!("capture {path}"));
+        }
+        for path in ["tasks/alpha.md", "tasks/first.md", "tasks/second.md"] {
+            seed_captured_richdoc_lineage(&sink, path);
         }
 
         sink.reconcile_collections().expect("adopt typed record");
@@ -1591,6 +1701,7 @@ mod tests {
         );
         ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
         ingest(&mut sink, "tasks/imported.md").expect("capture imported record");
+        seed_captured_richdoc_lineage(&sink, "tasks/imported.md");
         sink.reconcile_collections().expect("adopt imported record");
         assert_eq!(adopted_record_id(&db, "tasks/imported.md"), RECORD_ID);
 
@@ -1709,10 +1820,13 @@ mod tests {
         ingest(&mut sink, "tasks/collection.yaml").expect("capture relation schema");
         ingest(&mut sink, "tasks/source.md").expect("capture referrer");
         ingest(&mut sink, "tasks/target.md").expect("capture target");
-        assert!(
+        for path in ["tasks/source.md", "tasks/target.md"] {
+            seed_captured_richdoc_lineage(&sink, path);
+        }
+        assert_eq!(
             sink.reconcile_collections()
-                .expect("index relation")
-                .is_empty()
+                .expect("adopt indexed relation"),
+            ["tasks/source.md", "tasks/target.md"]
         );
         assert_eq!(
             relation_edge_count(&db, "tasks/source.md", "related", TARGET_ID),
@@ -1765,6 +1879,7 @@ mod tests {
         write_file(scratch.path(), "tasks/original.md", b"Original\n");
         ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
         ingest(&mut sink, "tasks/original.md").expect("capture original");
+        seed_captured_richdoc_lineage(&sink, "tasks/original.md");
         sink.reconcile_collections().expect("adopt original");
         let original_id = adopted_record_id(&db, "tasks/original.md");
 
@@ -1774,6 +1889,7 @@ mod tests {
         )
         .expect("copy record");
         ingest(&mut sink, "tasks/copy.md").expect("capture copy");
+        seed_captured_richdoc_lineage(&sink, "tasks/copy.md");
         assert_eq!(
             sink.reconcile_collections().expect("adopt copy"),
             ["tasks/copy.md"]
@@ -1807,6 +1923,9 @@ mod tests {
             "tasks/target.md",
         ] {
             ingest(&mut sink, path).unwrap_or_else(|_| panic!("capture {path}"));
+        }
+        for path in ["tasks/source.md", "tasks/target.md"] {
+            seed_captured_richdoc_lineage(&sink, path);
         }
         sink.reconcile_collections().expect("adopt records");
         let source_id = adopted_record_id(&db, "tasks/source.md");
@@ -1927,6 +2046,7 @@ mod tests {
         );
         ingest(&mut sink, "tasks/collection.yaml").expect("capture valid schema");
         ingest(&mut sink, "tasks/alpha.md").expect("capture record");
+        seed_captured_richdoc_lineage(&sink, "tasks/alpha.md");
 
         assert_eq!(
             sink.reconcile_collections()
@@ -2034,6 +2154,7 @@ mod tests {
         write_file(scratch.path(), "tasks/before.md", b"Before\n");
         ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
         ingest(&mut sink, "tasks/before.md").expect("capture record");
+        seed_captured_richdoc_lineage(&sink, "tasks/before.md");
         sink.reconcile_collections().expect("adopt record");
         let record_id = adopted_record_id(&db, "tasks/before.md");
 
@@ -2044,11 +2165,19 @@ mod tests {
         .expect("rename record");
         sink.retire("tasks/before.md").expect("retire old path");
         ingest(&mut sink, "tasks/after.md").expect("capture new path");
-        assert!(
-            sink.reconcile_collections()
-                .expect("reconcile rename")
-                .is_empty(),
-            "a rename with a valid id needs no write-back"
+        seed_captured_richdoc_lineage(&sink, "tasks/after.md");
+        let renamed_record = std::fs::read_to_string(scratch.path().join("tasks/after.md"))
+            .expect("read renamed record before adoption");
+        assert_eq!(
+            sink.reconcile_collections().expect("reconcile rename"),
+            ["tasks/after.md"],
+            "the renamed object settles after the shared rich-document import"
+        );
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("tasks/after.md"))
+                .expect("read adopted renamed record"),
+            renamed_record,
+            "a rename with a valid id must preserve the artifact byte-for-byte"
         );
         assert_eq!(adopted_record_id(&db, "tasks/after.md"), record_id);
         assert!(collection_record(&db, "tasks/before.md").is_none());
@@ -2122,9 +2251,20 @@ mod tests {
             )
             .expect("resolve conflict");
         drop(connection);
+        assert!(
+            sink.reconcile_collections()
+                .expect("bind record after conflict resolution")
+                .is_empty(),
+            "the engine must wait for the shared rich-document importer"
+        );
+        assert_eq!(
+            collection_record(&db, "tasks/blocked.md").map(|(_, state)| state),
+            Some("pending".to_owned())
+        );
+        seed_captured_richdoc_lineage(&sink, "tasks/blocked.md");
         assert_eq!(
             sink.reconcile_collections()
-                .expect("adopt after conflict resolution"),
+                .expect("adopt shared-imported record after conflict resolution"),
             ["tasks/blocked.md"]
         );
         adopted_record_id(&db, "tasks/blocked.md");

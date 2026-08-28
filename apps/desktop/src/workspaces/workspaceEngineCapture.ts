@@ -3334,12 +3334,46 @@ export function createWorkspaceEngineCapture(
     }
   }
 
+  async function drainPendingCollectionAdoptions(
+    engine: CaptureVersionedTextStore,
+  ): Promise<void> {
+    const pending = await engine.listPendingCollectionAdoptions?.();
+    if (!pending || pending.adoptions.length === 0) return;
+    const workspace = { workspaceId, rootPath, attachmentId };
+    for (const adoption of pending.adoptions) {
+      await options.rustEngineSessions.run(
+        workspace,
+        async (binding) => {
+          const provider = await openEngineYdocProviderSession({
+            transport: binding.client as EngineTransport,
+            workspace: binding.workspace,
+            versionId: adoption.versionId,
+            path: adoption.filePath,
+            expectedObjectId: adoption.objectId,
+            contentKind: "richdoc",
+            seedAbsentLineage: true,
+            onRemoteUpdate: () => undefined,
+          });
+          // Keep the imported lineage durable until reconciliation applies the
+          // record id. A seed-only settling close can prove the artifact already
+          // covers the document and prune the lineage before adoption uses it.
+          await provider.evict();
+        },
+        { retryTransportErrors: true },
+      );
+    }
+    await engine.reconcileCapture?.();
+  }
+
   function pollDaemonCaptureHealth(): void {
     if (stopped || daemonCaptureHealthTimer !== null) return;
     enqueue("daemon capture health", () =>
       reportCaptureOutcome(async () => {
         const engine = await engineStore();
         const status = await engine.watcherStatus?.();
+        if (status === undefined || (status.running && !status.terminal)) {
+          await drainPendingCollectionAdoptions(engine);
+        }
         return status === undefined
           ? true
           : status.running && !status.degraded && !status.terminal;
@@ -6451,7 +6485,9 @@ export function createWorkspaceEngineCapture(
     async flush() {
       await chain;
       if (options.daemonOwnsCapture) {
-        await (await engineStore()).flushCapture?.();
+        const engine = await engineStore();
+        await engine.flushCapture?.();
+        await drainPendingCollectionAdoptions(engine);
       }
     },
 
@@ -6467,6 +6503,7 @@ export function createWorkspaceEngineCapture(
       try {
         if (options.daemonOwnsCapture && store) {
           await store.flushCapture?.();
+          await drainPendingCollectionAdoptions(store);
         }
       } finally {
         // App quit may abandon a dead generation's retained release obligation:

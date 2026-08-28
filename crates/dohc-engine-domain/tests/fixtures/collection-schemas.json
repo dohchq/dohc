@@ -275,6 +275,41 @@
           }
         ]
       }
+    },
+    {
+      "name": "invalid-view-kind-does-not-reserve-view-name",
+      "yaml": "fields:\n  title:\n    type: text\nviews:\n  - name: Primary\n    kind: timeline\n  - name: Primary\n    kind: table\n    visibleFields: [title]\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [
+            {
+              "name": "title",
+              "type": "text"
+            }
+          ],
+          "views": [
+            {
+              "name": "Primary",
+              "kind": "table",
+              "groupBy": null,
+              "sort": [],
+              "visibleFields": [
+                "title"
+              ],
+              "dateField": null
+            }
+          ]
+        },
+        "reasons": [
+          {
+            "code": "unknown-view-kind",
+            "path": "/views/0/kind"
+          }
+        ]
+      }
     }
   ]
 }

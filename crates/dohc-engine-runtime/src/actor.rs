@@ -49,11 +49,11 @@ use dohc_engine_domain::{
     ChatChannelKind, ChatChannelSummary, ChatDecision, ChatFeedPage, ChatFeedReadState,
     ChatFileMention, ChatFollow, ChatMention, ChatMessage, ChatMessagePage,
     ChatProjectionFileAccess, ChatReaction, ChatThread, ChatThreadProjection, ChatThreadReadState,
-    CollectionAdoptionCandidate, CollectionDetails, CollectionQuery, CollectionQueryResult,
-    CollectionRecordDetails, CollectionRelationCleanupCandidate, CollectionSummary,
-    CompareTextFileVersions, CreateFileThread, CreateNamedVersion, DeleteResult, DeleteTextFile,
-    DispatchClaim, DispatchRecovery, DomainError, InbandBinary, InbandSecret, InbandText,
-    LinkedChatStore, ListMomentsQuery, MentionCursor, MergeTextFileFromVersion,
+    CollectionAdoptionCandidate, CollectionDetails, CollectionPendingAdoption, CollectionQuery,
+    CollectionQueryResult, CollectionRecordDetails, CollectionRelationCleanupCandidate,
+    CollectionSummary, CompareTextFileVersions, CreateFileThread, CreateNamedVersion, DeleteResult,
+    DeleteTextFile, DispatchClaim, DispatchRecovery, DomainError, InbandBinary, InbandSecret,
+    InbandText, LinkedChatStore, ListMomentsQuery, MentionCursor, MergeTextFileFromVersion,
     MergeTextFileResult, MomentPage, MomentRecord, PendingBookmarkRow, ProjectedWriteText,
     RECORD_ID_FRONTMATTER_KEY, RenameResult, RenameTextFile, ResolveDecision, ResolveTextConflict,
     ResolveTextConflictResult, RollbackTextFileMutation, RunRecordLink, SaveBookmark,
@@ -66,13 +66,14 @@ use dohc_engine_domain::{
     binary_rename_delete_job_id, binary_rename_write_job_id, binary_rollback_job_identity,
     capture_ingest_binary_with_admission_in_tx, capture_ingest_with_admission_in_tx,
     capture_manifest_seed, capture_retire_in_tx, capture_secret_retire_with,
-    compare_secret_files_page_keyless, decode_binary_rollback_job_identity,
-    delete_secret_file_keyless_with, derive_capture_object_id, enqueue_binary_delete,
-    enqueue_binary_rename, enqueue_write, fork_version_keyless_with, get_collection,
-    get_collection_record, get_secret_moment_keyless, has_secret_state,
-    insert_text_conflict_if_absent, list_collections, list_secret_files_keyless,
-    list_secret_files_keyless_page, list_secret_moments_in_time_window_keyless,
-    list_secret_moments_page_keyless, query_collection_records, reconcile_collections_in_tx,
+    collection_record_id_mismatch_in_tx, compare_secret_files_page_keyless,
+    decode_binary_rollback_job_identity, delete_secret_file_keyless_with, derive_capture_object_id,
+    enqueue_binary_delete, enqueue_binary_rename, enqueue_write, fork_version_keyless_with,
+    get_collection, get_collection_record, get_secret_moment_keyless, has_secret_state,
+    insert_text_conflict_if_absent, list_collections, list_pending_collection_adoptions,
+    list_secret_files_keyless, list_secret_files_keyless_page,
+    list_secret_moments_in_time_window_keyless, list_secret_moments_page_keyless,
+    query_collection_records, reconcile_collections_in_tx,
     restore_secret_file_verbatim_with_metadata_and_after, rollback_compensating_moment_id,
     secret_file_len_keyless, select_snapshot_by_path_in_tx, set_collection_adoption_state_in_tx,
     synchronize_collection_frontmatter_index_in_tx, validate_addressable_plaintext_path,
@@ -1036,6 +1037,12 @@ enum Command {
         token: CancellationToken,
         reply: oneshot::Sender<Result<CaptureIngestBinaryResult, RuntimeError>>,
     },
+    CollectionRecordIdMismatch {
+        workspace_id: String,
+        version_id: String,
+        paths: Vec<String>,
+        reply: oneshot::Sender<Result<bool, RuntimeError>>,
+    },
     ReconcileCollections {
         workspace_id: String,
         version_id: String,
@@ -1050,6 +1057,10 @@ enum Command {
     CollectionsList {
         workspace_id: String,
         reply: oneshot::Sender<Result<Vec<CollectionSummary>, RuntimeError>>,
+    },
+    CollectionsListPendingAdoptions {
+        workspace_id: String,
+        reply: oneshot::Sender<Result<Vec<CollectionPendingAdoption>, RuntimeError>>,
     },
     CollectionsGet {
         workspace_id: String,
@@ -2263,6 +2274,29 @@ impl ActorHandle {
             .map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    /// Check changed collection records against their durable id bindings,
+    /// blocking the calling capture worker thread.
+    pub fn collection_record_id_mismatch_blocking(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        paths: Vec<String>,
+    ) -> Result<bool, RuntimeError> {
+        debug_assert_sync_context();
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::CollectionRecordIdMismatch {
+                workspace_id,
+                version_id,
+                paths,
+                reply,
+            })
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx
+            .blocking_recv()
+            .map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn reconcile_collections_blocking(
         &self,
@@ -2783,6 +2817,21 @@ impl ActorHandle {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::CollectionsList {
+                workspace_id,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn collections_list_pending_adoptions(
+        &self,
+        workspace_id: String,
+    ) -> Result<Vec<CollectionPendingAdoption>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::CollectionsListPendingAdoptions {
                 workspace_id,
                 reply,
             })
@@ -7439,6 +7488,24 @@ fn worker_main(
                 });
                 let _ = reply.send(outcome);
             }
+            Command::CollectionRecordIdMismatch {
+                workspace_id,
+                version_id,
+                paths,
+                reply,
+            } => {
+                let outcome = store
+                    .read_with(|conn| {
+                        collection_record_id_mismatch_in_tx(
+                            conn,
+                            &workspace_id,
+                            &version_id,
+                            &paths,
+                        )
+                    })
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
             Command::ReconcileCollections {
                 workspace_id,
                 version_id,
@@ -7470,6 +7537,15 @@ fn worker_main(
             } => {
                 let outcome = store
                     .read_with(|conn| list_collections(conn, &workspace_id))
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::CollectionsListPendingAdoptions {
+                workspace_id,
+                reply,
+            } => {
+                let outcome = store
+                    .read_with(|conn| list_pending_collection_adoptions(conn, &workspace_id))
                     .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
@@ -13165,8 +13241,9 @@ fn adoption_conflict(error: &RuntimeError) -> bool {
     )
 }
 
-struct CollectionAdoptionExecution {
-    changed_path: Option<String>,
+enum CollectionAdoptionExecution {
+    Applied { changed_path: Option<String> },
+    NeedsRichdocSeed,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -13247,6 +13324,9 @@ fn adopt_collection_record_on_store(
         }
         .into());
     }
+    if !probe.lineage_existing {
+        return Ok(Some(CollectionAdoptionExecution::NeedsRichdocSeed));
+    }
     let _lease = match leases.acquire(&probe.key) {
         Ok(lease) => lease,
         Err(CollabError::LeaseHeld) => return Ok(None),
@@ -13272,39 +13352,16 @@ fn adopt_collection_record_on_store(
         .into());
     }
 
+    if !state.lineage_existing {
+        return Err(DomainError::StateCorrupt {
+            reason: "collection record lineage disappeared during adoption",
+        }
+        .into());
+    }
     let doc = Ydoc::wire();
     doc.apply(&state.initial_update)?;
-    let (lineage_claim_id, should_settle) = if state.lineage_existing {
-        (state.lineage_claim_id, true)
-    } else {
-        let seed = state
-            .seed_content
-            .as_deref()
-            .ok_or(DomainError::StateCorrupt {
-                reason: "collection record adoption has no Markdown artifact seed",
-            })?;
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, seed)?;
-        let seed_update = doc.encode_full_state();
-        let seed_append = ydoc_record_update_on_store(
-            store,
-            doc_cache,
-            &state.key,
-            &candidate.file_path,
-            ContentKind::Richdoc,
-            state.regime,
-            &seed_update,
-            None,
-            state.lineage_claim_id,
-            true,
-            state.head_blob_sha256.clone(),
-            None,
-            now_ms,
-            faults,
-            token,
-        )?;
-        (seed_append.lineage_claim_id, false)
-    };
-    let (lineage_claim_id, id_added) = ensure_collection_record_id_on_store(
+    let lineage_claim_id = state.lineage_claim_id;
+    let (lineage_claim_id, _id_added) = ensure_collection_record_id_on_store(
         store,
         doc_cache,
         &doc,
@@ -13317,30 +13374,25 @@ fn adopt_collection_record_on_store(
         faults,
         token,
     )?;
-    let should_settle = should_settle || id_added;
-    let changed_path = if should_settle {
-        Some(
-            ydoc_settle_on_store(
-                store,
-                doc_cache,
-                root_dir,
-                &state.key,
-                &candidate.file_path,
-                ContentKind::Richdoc,
-                lineage_claim_id.as_deref(),
-                state.head_blob_sha256,
-                &format!("collection-adoption:{}", candidate.record_id),
-                self_writes,
-                now_ms,
-                faults,
-                token,
-            )?
-            .path,
-        )
-    } else {
-        None
-    };
-    Ok(Some(CollectionAdoptionExecution { changed_path }))
+    let changed_path = Some(
+        ydoc_settle_on_store(
+            store,
+            doc_cache,
+            root_dir,
+            &state.key,
+            &candidate.file_path,
+            ContentKind::Richdoc,
+            lineage_claim_id.as_deref(),
+            state.head_blob_sha256,
+            &format!("collection-adoption:{}", candidate.record_id),
+            self_writes,
+            now_ms,
+            faults,
+            token,
+        )?
+        .path,
+    );
+    Ok(Some(CollectionAdoptionExecution::Applied { changed_path }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -13513,6 +13565,7 @@ fn reconcile_collections_on_store(
     };
 
     let mut changed_paths = Vec::new();
+    let mut pending_seed_objects = HashSet::new();
     for candidate in reconciliation.adoptions {
         if token.is_cancelled() {
             return Err(RuntimeError::Cancelled);
@@ -13530,7 +13583,7 @@ fn reconcile_collections_on_store(
             faults,
             token,
         ) {
-            Ok(Some(execution)) => {
+            Ok(Some(CollectionAdoptionExecution::Applied { changed_path })) => {
                 persist_collection_adoption_state(
                     store,
                     &candidate,
@@ -13539,11 +13592,14 @@ fn reconcile_collections_on_store(
                     "adopted",
                     faults,
                 )?;
-                if let Some(path) = execution.changed_path
+                if let Some(path) = changed_path
                     && !changed_paths.contains(&path)
                 {
                     changed_paths.push(path);
                 }
+            }
+            Ok(Some(CollectionAdoptionExecution::NeedsRichdocSeed)) => {
+                pending_seed_objects.insert(candidate.object_id.clone());
             }
             Ok(None) => {
                 return Err(RuntimeError::Sync(
@@ -13568,6 +13624,9 @@ fn reconcile_collections_on_store(
     for candidate in reconciliation.relation_cleanups {
         if token.is_cancelled() {
             return Err(RuntimeError::Cancelled);
+        }
+        if pending_seed_objects.contains(&candidate.source_object_id) {
+            continue;
         }
         match cleanup_collection_relation_on_store(
             store,

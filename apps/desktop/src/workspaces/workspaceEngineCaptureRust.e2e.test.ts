@@ -77,6 +77,72 @@ async function listDaemonPathMoments(
 }
 
 it.skipIf(engine.missing)(
+  "adopts rich collection Markdown through the shared Y.Doc importer without flattening it",
+  async () => {
+    const root = await createTestScratch("dohc-capture-rich-adoption-");
+    const lifecycle = new EngineDaemonLifecycle({
+      command: engine.require(),
+      maxRestarts: 0,
+    });
+    await mkdir(join(root, "tasks"), { recursive: true });
+    await writeFile(
+      join(root, "tasks", "collection.yaml"),
+      "name: Tasks\nfields:\n  status:\n    type: text\n",
+      "utf8",
+    );
+    const body = [
+      "| Metric | Value |",
+      "| ------ | ----- |",
+      "| apples | 10    |",
+      "",
+      "- parent",
+      "  - nested with **bold** and [details](https://example.com)",
+    ].join("\n");
+    const original = `---\nstatus: open\n---\n\n${body}`;
+    await writeFile(join(root, "tasks", "rich.md"), original, "utf8");
+    await lifecycle.start();
+    const sessions = createRealDaemonWorkspaceSessions(lifecycle);
+    const workspace = {
+      workspaceId: "capture-rich-adoption",
+      rootPath: root,
+      attachmentId: Symbol("test-workspace-attachment:capture-rich-adoption"),
+    };
+    const capture = createAttachedWorkspaceEngineCapture({
+      ...workspace,
+      rustEngineSessions: sessions,
+      daemonOwnsCapture: true,
+    });
+    try {
+      // `capture.flush()` drains changes the OS watcher has already observed;
+      // it deliberately cannot promise that the watcher's startup debounce
+      // has seen these pre-existing files. Wait on the record's durable
+      // capture moment, then flush the pending rich-document adoption.
+      await waitForPathMoments(capture, "tasks/collection.yaml", 1);
+      await waitForPathMoments(capture, "tasks/rich.md", 1);
+      await capture.flush();
+      const query = await sessions.run(
+        workspace,
+        async ({ client, workspace: handle }) =>
+          await new VersionedLiveAdapter(client, handle, {
+            workspaceId: workspace.workspaceId,
+          }).queryCollectionRecords({ collectionPath: "tasks" }),
+      );
+      const recordId = query.records[0]?.id;
+      expect(recordId).toBeTruthy();
+      const settled = await readFile(join(root, "tasks", "rich.md"), "utf8");
+      const prefix = `---\nid: ${recordId}\nstatus: open\n---\n\n`;
+      expect(settled).toBe(`${prefix}${body}`);
+      expect(settled.slice(prefix.length)).toBe(body);
+    } finally {
+      await capture.stop().catch(() => undefined);
+      await sessions.closeAll().catch(() => undefined);
+      await lifecycle.stop().catch(() => undefined);
+    }
+  },
+  60_000,
+);
+
+it.skipIf(engine.missing)(
   "drives watcher-batch capture, readback, and version-switch materialization through the real daemon",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-e2e-");
