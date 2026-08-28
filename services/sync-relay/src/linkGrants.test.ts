@@ -242,6 +242,10 @@ async function createLink(
   return json(response);
 }
 
+function defaultStorageLinkSecret(grantId: string): string {
+  return hmac(grantId);
+}
+
 function seedStorageLink(
   storage: SyncRelayStorage,
   input: {
@@ -270,7 +274,7 @@ function seedStorageLink(
       credential: {
         credentialId: `${input.grantId}-credential`,
         grantId: input.grantId,
-        secretHash: hmac(input.secret ?? "l".repeat(43)),
+        secretHash: hmac(input.secret ?? defaultStorageLinkSecret(input.grantId)),
         generation: 1,
         mintedAtMs: createdAtMs,
         retiredAtMs: null,
@@ -353,6 +357,31 @@ function linkSecret(url: unknown): string {
   expect(parsed.hash).toMatch(/^#[A-Za-z0-9_-]{43}$/u);
   return parsed.hash.slice(1);
 }
+
+describe("link grant test fixtures", () => {
+  it("gives default-seeded grants distinct credentials and lookup targets", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    await seedFileShare(h);
+    const firstGrantId = "fixture-link-first";
+    const secondGrantId = "fixture-link-second";
+
+    seedStorageLink(storage, { grantId: firstGrantId, access: "view" });
+    seedStorageLink(storage, { grantId: secondGrantId, access: "view" });
+
+    const firstHash = hmac(defaultStorageLinkSecret(firstGrantId));
+    const secondHash = hmac(defaultStorageLinkSecret(secondGrantId));
+    expect(firstHash).not.toBe(secondHash);
+    expect(storage.findLinkGrantByCredentialHash(firstHash)).toMatchObject({
+      credential: { grantId: firstGrantId, secretHash: firstHash },
+      grant: { grantId: firstGrantId },
+    });
+    expect(storage.findLinkGrantByCredentialHash(secondHash)).toMatchObject({
+      credential: { grantId: secondGrantId, secretHash: secondHash },
+      grant: { grantId: secondGrantId },
+    });
+  });
+});
 
 describe("atomic View link mint", () => {
   it("creates one file share, one link grant, and one hashed credential", async () => {
@@ -546,6 +575,7 @@ describe("atomic View link mint", () => {
       request(OWNER, `/sync/${WORKSPACE}/shares/links`, jsonBody({ paths: ["docs"] })),
     );
     expect(response.status).toBe(404);
+    expect(ownershipAnswers).toEqual([]);
     expect(storage.getShare("share-existing")).toBeNull();
     expect(storage.listSharesGrantedBy(OWNER)).toEqual([]);
   });
