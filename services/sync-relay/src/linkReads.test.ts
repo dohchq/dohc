@@ -1792,6 +1792,50 @@ describe("relay capability reads", () => {
     expect(await untouchedResponse.text()).toBe(untouched);
   });
 
+  it("serves only the different object recreated at a selected path", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h);
+    const replacement = "# recreated object\n";
+    const replacementSha = await putBlob(h, replacement);
+    await appendMoments(h, [
+      moment(3, "docs/shared.md", "# shared\n", 1_300, {
+        objectId: "object-shared",
+        operation: "delete",
+        beforePath: "docs/shared.md",
+        beforeContent: "# shared\n",
+      }),
+      moment(4, "docs/shared.md", replacement, 1_400, {
+        objectId: "object-recreated",
+      }),
+    ]);
+
+    const missing = await denialBytes(
+      await h(
+        linkRequest(
+          seeded.capability,
+          `/sync/link/blobs/${sha256("missing")}`,
+        ),
+      ),
+    );
+    expect(
+      await denialBytes(
+        await h(
+          linkRequest(
+            seeded.capability,
+            `/sync/link/blobs/${seeded.sharedSha}`,
+          ),
+        ),
+      ),
+    ).toBe(missing);
+
+    const current = await h(
+      linkRequest(seeded.capability, `/sync/link/blobs/${replacementSha}`),
+    );
+    expect(current.status).toBe(200);
+    expect(await current.text()).toBe(replacement);
+  });
+
   it("refuses a blob after its file moves outside a path selector", async () => {
     const storage = await newStorage();
     const h = handler(storage);
