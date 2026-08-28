@@ -2920,7 +2920,9 @@ CREATE TABLE collection_records (
     file_path       TEXT NOT NULL,
     object_id       TEXT NOT NULL,
     adoption_state  TEXT NOT NULL
-      CHECK (adoption_state IN ('pending', 'deferred-conflict', 'adopted')),
+      CHECK (adoption_state IN (
+        'pending', 'pending-lossless', 'deferred-conflict', 'deferred-conflict-lossless', 'adopted'
+      )),
     PRIMARY KEY (workspace_id, version_id, file_path),
     UNIQUE (workspace_id, version_id, record_id),
     FOREIGN KEY (workspace_id, version_id, collection_path)

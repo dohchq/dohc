@@ -216,6 +216,7 @@ pub struct CollectionAdoptionCandidate {
     pub collection_path: String,
     pub file_path: String,
     pub object_id: String,
+    pub lossless_insertion_required: bool,
 }
 
 /// One active-version collection binding waiting for the rich-document
@@ -1135,6 +1136,75 @@ pub fn markdown_frontmatter_json_with_body(markdown: &str) -> Option<(Value, &st
     Some((yaml_to_json(documents.first()?), &markdown[body_start..]))
 }
 
+/// Insert a collection record id without reserializing the user's Markdown.
+///
+/// A malformed frontmatter block is not adoptable. Valid frontmatter keeps
+/// every existing byte; a document without frontmatter receives the smallest
+/// id-only block while its body remains byte-identical.
+pub fn collection_record_markdown_with_id(markdown: &str, record_id: &str) -> Option<String> {
+    if !is_record_id(record_id) {
+        return None;
+    }
+
+    let (frontmatter, _) = if markdown.is_empty() {
+        (Value::Object(serde_json::Map::new()), markdown)
+    } else {
+        markdown_frontmatter_json_with_body(markdown)?
+    };
+    if let Some(existing_id) = frontmatter.get(RECORD_ID_FRONTMATTER_KEY) {
+        return (existing_id.as_str() == Some(record_id)).then(|| markdown.to_owned());
+    }
+
+    let first_line = markdown.split_inclusive('\n').next();
+    if let Some(first_line) = first_line
+        && first_line.ends_with('\n')
+        && is_frontmatter_delimiter(first_line)
+    {
+        let line_ending = if first_line.ends_with("\r\n") {
+            "\r\n"
+        } else {
+            "\n"
+        };
+        let mut adopted = String::with_capacity(
+            markdown.len() + RECORD_ID_FRONTMATTER_KEY.len() + record_id.len() + 3,
+        );
+        adopted.push_str(first_line);
+        adopted.push_str(RECORD_ID_FRONTMATTER_KEY);
+        adopted.push_str(": ");
+        adopted.push_str(record_id);
+        adopted.push_str(line_ending);
+        adopted.push_str(&markdown[first_line.len()..]);
+        return Some(adopted);
+    }
+
+    let line_ending = markdown
+        .find('\n')
+        .map(|index| {
+            if markdown.as_bytes().get(index.wrapping_sub(1)) == Some(&b'\r') {
+                "\r\n"
+            } else {
+                "\n"
+            }
+        })
+        .unwrap_or("\n");
+    let mut adopted = String::with_capacity(
+        markdown.len() + RECORD_ID_FRONTMATTER_KEY.len() + record_id.len() + 12,
+    );
+    adopted.push_str("---");
+    adopted.push_str(line_ending);
+    adopted.push_str(RECORD_ID_FRONTMATTER_KEY);
+    adopted.push_str(": ");
+    adopted.push_str(record_id);
+    adopted.push_str(line_ending);
+    adopted.push_str("---");
+    if !markdown.is_empty() {
+        adopted.push_str(line_ending);
+        adopted.push_str(line_ending);
+        adopted.push_str(markdown);
+    }
+    Some(adopted)
+}
+
 fn json_field_value(value: &Value) -> CollectionFieldValue {
     match value {
         Value::Null => CollectionFieldValue::Null,
@@ -1733,6 +1803,8 @@ pub fn reconcile_collections_in_tx(
         .filter(|snapshot| {
             snapshot.path.ends_with(".md")
                 && collection_schemas.contains_key(parent_path(&snapshot.path))
+                && (snapshot.text.is_empty()
+                    || markdown_frontmatter_json_with_body(&snapshot.text).is_some())
         })
         .collect();
     let current_paths: HashSet<&str> = records.iter().map(|record| record.path.as_str()).collect();
@@ -1788,6 +1860,13 @@ pub fn reconcile_collections_in_tx(
         let existing_at_path = existing_by_path.get(record.path.as_str()).copied();
         let existing_same_object =
             existing_at_path.filter(|binding| binding.object_id == record.object_id);
+        let lossless_insertion_required = parsed_id.is_none()
+            && existing_same_object.is_none_or(|binding| {
+                matches!(
+                    binding.adoption_state.as_str(),
+                    "pending-lossless" | "deferred-conflict-lossless"
+                )
+            });
         let conflicted = has_open_file_conflict(
             tx,
             workspace_id,
@@ -1816,7 +1895,11 @@ pub fn reconcile_collections_in_tx(
                 collection_path,
                 file_path: record.path.clone(),
                 object_id: record.object_id.clone(),
-                adoption_state: "deferred-conflict",
+                adoption_state: if lossless_insertion_required {
+                    "deferred-conflict-lossless"
+                } else {
+                    "deferred-conflict"
+                },
                 index_initialized: existing_at_path
                     .is_some_and(|binding| binding.index_initialized),
             });
@@ -1846,6 +1929,7 @@ pub fn reconcile_collections_in_tx(
                     collection_path,
                     file_path: record.path.clone(),
                     object_id: record.object_id.clone(),
+                    lossless_insertion_required: false,
                 });
             } else {
                 used_ids.insert(record_id.clone());
@@ -1869,6 +1953,7 @@ pub fn reconcile_collections_in_tx(
                         collection_path,
                         file_path: record.path.clone(),
                         object_id: record.object_id.clone(),
+                        lossless_insertion_required: false,
                     });
                 }
             }
@@ -1886,7 +1971,11 @@ pub fn reconcile_collections_in_tx(
             collection_path: collection_path.clone(),
             file_path: record.path.clone(),
             object_id: record.object_id.clone(),
-            adoption_state: "pending",
+            adoption_state: if lossless_insertion_required {
+                "pending-lossless"
+            } else {
+                "pending"
+            },
             index_initialized: existing_same_object
                 .is_some_and(|binding| binding.index_initialized),
         });
@@ -1895,6 +1984,7 @@ pub fn reconcile_collections_in_tx(
             collection_path,
             file_path: record.path.clone(),
             object_id: record.object_id.clone(),
+            lossless_insertion_required,
         });
     }
 
@@ -2032,6 +2122,29 @@ pub fn set_collection_adoption_state_in_tx(
     Ok(())
 }
 
+pub fn delete_collection_adoption_binding_in_tx(
+    tx: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    file_path: &str,
+    record_id: &str,
+) -> Result<(), crate::DomainError> {
+    let changed = tx
+        .execute(
+            "DELETE FROM collection_records \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND file_path = ?3 \
+               AND record_id = ?4 AND adoption_state IN ('pending', 'pending-lossless')",
+            params![workspace_id, version_id, file_path, record_id],
+        )
+        .map_err(crate::DomainError::sql_persist)?;
+    if changed != 1 {
+        return Err(crate::DomainError::StateCorrupt {
+            reason: "pending collection adoption binding disappeared",
+        });
+    }
+    Ok(())
+}
+
 fn active_version_id(conn: &Connection, workspace_id: &str) -> Result<String, crate::DomainError> {
     conn.query_row(
         "SELECT COALESCE(\
@@ -2059,7 +2172,8 @@ pub fn list_pending_collection_adoptions(
                AND s.version_id=r.version_id AND s.path=r.file_path \
                AND s.object_id=r.object_id \
              WHERE r.workspace_id=?1 AND r.version_id=?2 \
-               AND r.adoption_state='pending' AND r.record_id IS NOT NULL \
+               AND r.adoption_state IN ('pending', 'pending-lossless') \
+               AND r.record_id IS NOT NULL \
              ORDER BY r.file_path,r.record_id",
         )
         .map_err(crate::DomainError::sql_corrupt)?;
@@ -2286,7 +2400,10 @@ fn load_collection_records(
                 records.push(CollectionRecord {
                     id: record_id.clone(),
                     path: file_path,
-                    conflicted: adoption_state == "deferred-conflict",
+                    conflicted: matches!(
+                        adoption_state.as_str(),
+                        "deferred-conflict" | "deferred-conflict-lossless"
+                    ),
                     values: Vec::new(),
                 });
                 record_indexes.insert(record_id, index);

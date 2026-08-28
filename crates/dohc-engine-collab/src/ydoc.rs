@@ -55,6 +55,9 @@ pub const ROOT_META: &str = "meta";
 pub const LINEAGE_EPOCH_META_KEY: &str = "dohcLineageEpoch";
 /// Reserved engine metadata that preserves a CRLF Markdown artifact's line endings.
 const MARKDOWN_CRLF_META_KEY: &str = "dohcMarkdownCrlf";
+const MARKDOWN_SOURCE_META_KEY: &str = "dohcMarkdownSource";
+const MARKDOWN_SOURCE_SHA_META_KEY: &str = "dohcMarkdownSourceSha256";
+const MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY: &str = "dohcMarkdownSourceProjectionSha256";
 /// The rich-document body: a ProseMirror `XmlFragment`.
 pub const ROOT_BODY: &str = "body";
 /// The plaintext-document body: a single `Y.Text`.
@@ -287,6 +290,15 @@ pub struct Projection {
     pub destructive: bool,
 }
 
+/// Digests for exact Markdown source held in the Y.Doc's reserved engine
+/// metadata. The source is canonical artifact state, not a pointer into local
+/// history; the projection digest invalidates it when the semantic roots move.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkdownSourceReference {
+    pub source_sha256: String,
+    pub projection_sha256: String,
+}
+
 /// A wire-facing durable Y.Doc.
 pub struct Ydoc {
     doc: Doc,
@@ -427,6 +439,41 @@ impl Ydoc {
             Some(Out::Any(Any::String(value))) => Some(value.to_string()),
             _ => None,
         }
+    }
+
+    /// Read a well-formed exact-source reference from the replicated metadata.
+    pub fn markdown_source_reference(&self) -> Option<MarkdownSourceReference> {
+        let meta = self.doc.get_or_insert_map(ROOT_META);
+        let txn = self.doc.transact();
+        let source_sha256 = match meta.get(&txn, MARKDOWN_SOURCE_SHA_META_KEY) {
+            Some(Out::Any(Any::String(value))) if valid_sha256(&value) => value.to_string(),
+            _ => return None,
+        };
+        let projection_sha256 = match meta.get(&txn, MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY) {
+            Some(Out::Any(Any::String(value))) if valid_sha256(&value) => value.to_string(),
+            _ => return None,
+        };
+        Some(MarkdownSourceReference {
+            source_sha256,
+            projection_sha256,
+        })
+    }
+
+    /// Resolve exact Markdown only after its lightweight projection witness
+    /// matches. This avoids cloning and hashing stale source after a document
+    /// edit, and never returns bytes the versioned text store cannot hold.
+    pub fn markdown_source(&self, reference: &MarkdownSourceReference) -> Option<String> {
+        let meta = self.doc.get_or_insert_map(ROOT_META);
+        let txn = self.doc.transact();
+        let source = match meta.get(&txn, MARKDOWN_SOURCE_META_KEY) {
+            Some(Out::Any(Any::String(value)))
+                if value.len() <= dohc_engine_domain::MAX_TEXT_BYTES =>
+            {
+                value.to_string()
+            }
+            _ => return None,
+        };
+        (crate::hex_sha256(source.as_bytes()) == reference.source_sha256).then_some(source)
     }
 
     pub(crate) fn has_missing_updates(&self) -> bool {
@@ -838,6 +885,35 @@ impl Ydoc {
         })
     }
 
+    /// Set one frontmatter scalar and bind the resulting semantic projection
+    /// to exact source bytes already destined for the versioned text store.
+    pub fn frontmatter_set_preserving_markdown_source(
+        &self,
+        key: &str,
+        value: &str,
+        markdown: &str,
+    ) -> Result<Vec<u8>, CollabError> {
+        let before = self.doc.transact().state_vector();
+        let _ = self.frontmatter_set(key, value);
+        self.record_markdown_source_reference(markdown)?;
+        Ok(self.doc.transact().encode_state_as_update_v1(&before))
+    }
+
+    /// Rewrite a source-preserving rich document and advance its exact-source
+    /// reference in the same CRDT delta.
+    pub fn rewrite_content_to_markdown_preserving_source(
+        &self,
+        content_kind: ContentKind,
+        markdown: &str,
+    ) -> Result<Vec<u8>, CollabError> {
+        let before = self.doc.transact().state_vector();
+        let _ = self.rewrite_content_to_markdown(content_kind, markdown)?;
+        if content_kind == ContentKind::Richdoc {
+            self.record_markdown_source_reference(markdown)?;
+        }
+        Ok(self.doc.transact().encode_state_as_update_v1(&before))
+    }
+
     /// Set a top-level [`ROOT_FRONTMATTER`] nested map and return the encoded
     /// delta. Used to exercise constraint 2 (nested key-order nondeterminism).
     pub fn frontmatter_set_nested(&self, key: &str, entries: &[(&str, &str)]) -> Vec<u8> {
@@ -898,6 +974,38 @@ impl Ydoc {
         }
         self.doc.transact().encode_state_as_update_v1(&before)
     }
+
+    fn record_markdown_source_reference(&self, markdown: &str) -> Result<(), CollabError> {
+        if markdown.len() > dohc_engine_domain::MAX_TEXT_BYTES {
+            return Err(CollabError::ProjectionTooLarge {
+                actual: markdown.len(),
+                max: dohc_engine_domain::MAX_TEXT_BYTES,
+            });
+        }
+        let projection_sha256 = crate::hex_sha256(self.project_richdoc()?.as_bytes());
+        let source_sha256 = crate::hex_sha256(markdown.as_bytes());
+        let meta = self.doc.get_or_insert_map(ROOT_META);
+        let mut txn = self.doc.transact_mut();
+        meta.insert(&mut txn, MARKDOWN_SOURCE_META_KEY, markdown);
+        meta.insert(
+            &mut txn,
+            MARKDOWN_SOURCE_SHA_META_KEY,
+            source_sha256.as_str(),
+        );
+        meta.insert(
+            &mut txn,
+            MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
+            projection_sha256.as_str(),
+        );
+        Ok(())
+    }
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn encode_state_vector_canonical(state_vector: &StateVector) -> Vec<u8> {

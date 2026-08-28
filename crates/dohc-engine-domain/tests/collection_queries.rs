@@ -251,6 +251,187 @@ fn reconcile_indexes_fields_added_after_frontmatterless_record_adoption() {
 }
 
 #[test]
+fn collection_reconcile_keeps_fresh_lossless_mode_distinct_from_established_repair() {
+    let (_scratch, mut store) = fresh_store();
+    write_text(&mut store, "tasks/collection.yaml", "name: Tasks\n", 2).expect("task schema");
+    write_text_for_object(
+        &mut store,
+        "tasks/fresh.md",
+        "Fresh body\n",
+        "fresh-object",
+        "fresh-record",
+        3,
+    )
+    .expect("fresh record");
+
+    for attempt in 0..2 {
+        let reconciled = store
+            .write_with(&NoFaults, |tx| {
+                reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+            })
+            .expect("reconcile fresh record");
+        let TxnOutcome::Committed(reconciled) = reconciled else {
+            panic!("fresh reconciliation crashed");
+        };
+        let fresh = reconciled
+            .adoptions
+            .iter()
+            .find(|candidate| candidate.file_path == "tasks/fresh.md")
+            .expect("fresh adoption candidate");
+        assert!(
+            fresh.lossless_insertion_required,
+            "fresh retry {attempt} must stay lossless"
+        );
+    }
+    let (fresh_id, fresh_state) = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT record_id,adoption_state FROM collection_records \
+                 WHERE workspace_id=?1 AND version_id=?2 AND file_path='tasks/fresh.md'",
+                params![WORKSPACE_ID, VERSION_ID],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+        })
+        .expect("fresh adoption state");
+    assert_eq!(fresh_state, "pending-lossless");
+    let deferred_fresh = store
+        .write_with(&NoFaults, |tx| {
+            set_collection_adoption_state_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                "tasks/fresh.md",
+                &fresh_id,
+                "deferred-conflict-lossless",
+            )
+        })
+        .expect("defer fresh lossless adoption");
+    assert!(matches!(deferred_fresh, TxnOutcome::Committed(())));
+    let retried_fresh = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("retry deferred fresh record");
+    let TxnOutcome::Committed(retried_fresh) = retried_fresh else {
+        panic!("deferred fresh reconciliation crashed");
+    };
+    assert!(
+        retried_fresh
+            .adoptions
+            .iter()
+            .find(|candidate| candidate.file_path == "tasks/fresh.md")
+            .expect("retried fresh adoption candidate")
+            .lossless_insertion_required
+    );
+
+    write_text_for_object(
+        &mut store,
+        "tasks/established.md",
+        &format!("---\nid: {PERSON_ID}\n---\n\nEstablished body\n"),
+        "established-object",
+        "established-record",
+        4,
+    )
+    .expect("established record");
+    let parsed = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile parsed record");
+    let TxnOutcome::Committed(parsed) = parsed else {
+        panic!("parsed reconciliation crashed");
+    };
+    let parsed = parsed
+        .adoptions
+        .iter()
+        .find(|candidate| candidate.file_path == "tasks/established.md")
+        .expect("parsed adoption candidate");
+    assert!(!parsed.lossless_insertion_required);
+    let adopted = store
+        .write_with(&NoFaults, |tx| {
+            set_collection_adoption_state_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                "tasks/established.md",
+                PERSON_ID,
+                "adopted",
+            )
+        })
+        .expect("mark parsed record adopted");
+    assert!(matches!(adopted, TxnOutcome::Committed(())));
+
+    write_text_for_object(
+        &mut store,
+        "tasks/established.md",
+        "Established body without id\n",
+        "established-object",
+        "established-id-removed",
+        5,
+    )
+    .expect("remove established id");
+    for attempt in 0..2 {
+        let reconciled = store
+            .write_with(&NoFaults, |tx| {
+                reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+            })
+            .expect("reconcile established repair");
+        let TxnOutcome::Committed(reconciled) = reconciled else {
+            panic!("established repair reconciliation crashed");
+        };
+        let established = reconciled
+            .adoptions
+            .iter()
+            .find(|candidate| candidate.file_path == "tasks/established.md")
+            .expect("established repair candidate");
+        assert!(
+            !established.lossless_insertion_required,
+            "established retry {attempt} must remain a semantic repair"
+        );
+    }
+    let deferred_established = store
+        .write_with(&NoFaults, |tx| {
+            set_collection_adoption_state_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                "tasks/established.md",
+                PERSON_ID,
+                "deferred-conflict",
+            )
+        })
+        .expect("defer established repair");
+    assert!(matches!(deferred_established, TxnOutcome::Committed(())));
+    let retried_established = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("retry deferred established repair");
+    let TxnOutcome::Committed(retried_established) = retried_established else {
+        panic!("deferred established repair reconciliation crashed");
+    };
+    assert!(
+        !retried_established
+            .adoptions
+            .iter()
+            .find(|candidate| candidate.file_path == "tasks/established.md")
+            .expect("retried established repair candidate")
+            .lossless_insertion_required
+    );
+    let established_state = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT adoption_state FROM collection_records \
+                 WHERE workspace_id=?1 AND version_id=?2 AND file_path='tasks/established.md'",
+                params![WORKSPACE_ID, VERSION_ID],
+                |row| row.get::<_, String>(0),
+            )
+        })
+        .expect("established repair state");
+    assert_eq!(established_state, "pending");
+}
+
+#[test]
 fn query_uses_indexed_values_flags_filter_sort_group_and_relation_labels() {
     let (_scratch, store) = seeded_store();
     let sorted = store

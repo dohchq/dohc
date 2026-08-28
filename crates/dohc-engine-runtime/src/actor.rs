@@ -66,12 +66,13 @@ use dohc_engine_domain::{
     binary_rename_delete_job_id, binary_rename_write_job_id, binary_rollback_job_identity,
     capture_ingest_binary_with_admission_in_tx, capture_ingest_with_admission_in_tx,
     capture_manifest_seed, capture_retire_in_tx, capture_secret_retire_with,
-    collection_record_id_mismatch_in_tx, compare_secret_files_page_keyless,
-    decode_binary_rollback_job_identity, delete_secret_file_keyless_with, derive_capture_object_id,
-    enqueue_binary_delete, enqueue_binary_rename, enqueue_write, fork_version_keyless_with,
-    get_collection, get_collection_record, get_secret_moment_keyless, has_secret_state,
-    insert_text_conflict_if_absent, list_collections, list_pending_collection_adoptions,
-    list_secret_files_keyless, list_secret_files_keyless_page,
+    collection_record_id_mismatch_in_tx, collection_record_markdown_with_id,
+    compare_secret_files_page_keyless, decode_binary_rollback_job_identity,
+    delete_collection_adoption_binding_in_tx, delete_secret_file_keyless_with,
+    derive_capture_object_id, enqueue_binary_delete, enqueue_binary_rename, enqueue_write,
+    fork_version_keyless_with, get_collection, get_collection_record, get_secret_moment_keyless,
+    has_secret_state, insert_text_conflict_if_absent, list_collections,
+    list_pending_collection_adoptions, list_secret_files_keyless, list_secret_files_keyless_page,
     list_secret_moments_in_time_window_keyless, list_secret_moments_page_keyless,
     query_collection_records, reconcile_collections_in_tx,
     restore_secret_file_verbatim_with_metadata_and_after, rollback_compensating_moment_id,
@@ -8374,6 +8375,7 @@ fn worker_main(
                     content_kind,
                     expected_lineage_claim_id.as_deref(),
                     expected_head_sha,
+                    None,
                     &session_id,
                     self_writes.as_ref(),
                     now_ms,
@@ -10738,6 +10740,7 @@ fn ydoc_settle_on_store(
     content_kind: ContentKind,
     expected_lineage_claim_id: Option<&str>,
     expected_head_sha: Option<String>,
+    settled_content_override: Option<String>,
     session_id: &str,
     self_writes: &dyn SelfWriteRecorder,
     now_ms: i64,
@@ -10972,7 +10975,12 @@ fn ydoc_settle_on_store(
             }
         }
     }
-    let projected_sha = dohc_engine_storage::hex_sha256(projection.content.as_bytes());
+    let projected_sha = dohc_engine_storage::hex_sha256(
+        settled_content_override
+            .as_deref()
+            .unwrap_or(&projection.content)
+            .as_bytes(),
+    );
     // Classify the exact disk preimage through the same contained projection
     // probe that materialization uses. This must precede the settle transaction:
     // compensating only the marker after a rival is found would leave the new
@@ -11029,11 +11037,12 @@ fn ydoc_settle_on_store(
         });
     }
     let Projection {
-        content: projected_text,
+        content: ydoc_projected_text,
         content_kind: projected_content_kind,
         source_state_vector_sha256,
         destructive: projection_destructive,
     } = projection;
+    let projected_text = settled_content_override.unwrap_or(ydoc_projected_text);
     let outcome = store.write_with(faults, |tx| {
         let current = select_snapshot_by_path_in_tx(tx, &key.workspace_id, &key.version_id, path)?;
         if current.binary_sha256.is_some() {
@@ -13232,6 +13241,28 @@ fn persist_collection_adoption_state(
     }
 }
 
+fn delete_collection_adoption_binding(
+    store: &mut EngineStore,
+    candidate: &CollectionAdoptionCandidate,
+    workspace_id: &str,
+    version_id: &str,
+    faults: &dyn FaultInjector,
+) -> Result<(), RuntimeError> {
+    match store.write_with(faults, |tx| {
+        delete_collection_adoption_binding_in_tx(
+            tx,
+            workspace_id,
+            version_id,
+            &candidate.file_path,
+            &candidate.record_id,
+        )
+        .map_err(RuntimeError::from)
+    })? {
+        TxnOutcome::Committed(()) => Ok(()),
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
+}
+
 fn adoption_conflict(error: &RuntimeError) -> bool {
     matches!(
         error,
@@ -13243,6 +13274,7 @@ fn adoption_conflict(error: &RuntimeError) -> bool {
 
 enum CollectionAdoptionExecution {
     Applied { changed_path: Option<String> },
+    Declined,
     NeedsRichdocSeed,
 }
 
@@ -13255,21 +13287,36 @@ fn ensure_collection_record_id_on_store(
     file_path: &str,
     regime: Regime,
     record_id: &str,
+    preserved_markdown: Option<&str>,
     lineage_claim_id: Option<String>,
     now_ms: i64,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
-) -> Result<(Option<String>, bool), RuntimeError> {
+) -> Result<Option<(Option<String>, bool)>, RuntimeError> {
     if doc
         .frontmatter_json()
         .get(RECORD_ID_FRONTMATTER_KEY)
         .and_then(serde_json::Value::as_str)
         == Some(record_id)
+        && preserved_markdown.is_none()
     {
-        return Ok((lineage_claim_id, false));
+        return Ok(Some((lineage_claim_id, false)));
     }
 
-    let update = doc.frontmatter_set(RECORD_ID_FRONTMATTER_KEY, record_id);
+    let update = match preserved_markdown {
+        Some(markdown) => doc.frontmatter_set_preserving_markdown_source(
+            RECORD_ID_FRONTMATTER_KEY,
+            record_id,
+            markdown,
+        )?,
+        None => doc.frontmatter_set(RECORD_ID_FRONTMATTER_KEY, record_id),
+    };
+    if preserved_markdown.is_some()
+        && (update.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES
+            || doc.encode_full_state().len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES)
+    {
+        return Ok(None);
+    }
     let lineage_claim_id = ydoc_record_update_on_store(
         store,
         doc_cache,
@@ -13288,7 +13335,7 @@ fn ensure_collection_record_id_on_store(
         token,
     )?
     .lineage_claim_id;
-    Ok((lineage_claim_id, true))
+    Ok(Some((lineage_claim_id, true)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -13361,7 +13408,44 @@ fn adopt_collection_record_on_store(
     let doc = Ydoc::wire();
     doc.apply(&state.initial_update)?;
     let lineage_claim_id = state.lineage_claim_id;
-    let (lineage_claim_id, _id_added) = ensure_collection_record_id_on_store(
+    let settled_content_override = if candidate.lossless_insertion_required {
+        let preserved =
+            match dohc_engine_collab::read_pristine_seed_lineage_source(store, &state.key)? {
+                Some(seed_source_sha)
+                    if Some(&seed_source_sha) == state.head_blob_sha256.as_ref() =>
+                {
+                    VersionedTextStore::new(store)
+                        .read_text(workspace_id, version_id, &candidate.file_path)?
+                        .filter(|snapshot| {
+                            snapshot.object_id == candidate.object_id
+                                && snapshot.blob_sha256 == seed_source_sha
+                        })
+                        .and_then(|snapshot| {
+                            collection_record_markdown_with_id(&snapshot.text, &candidate.record_id)
+                        })
+                }
+                _ => None,
+            };
+        match preserved {
+            Some(preserved) if preserved.len() <= dohc_engine_domain::MAX_TEXT_BYTES => {
+                Some(preserved)
+            }
+            Some(_) => return Ok(Some(CollectionAdoptionExecution::Declined)),
+            None if doc.markdown_source_reference().is_some_and(|reference| {
+                doc.project(ContentKind::Richdoc).is_ok_and(|projection| {
+                    reference.projection_sha256 == hex_sha256(projection.content.as_bytes())
+                        && doc.markdown_source(&reference).is_some()
+                })
+            }) =>
+            {
+                None
+            }
+            None => return Ok(Some(CollectionAdoptionExecution::Declined)),
+        }
+    } else {
+        None
+    };
+    let Some((lineage_claim_id, _id_added)) = ensure_collection_record_id_on_store(
         store,
         doc_cache,
         &doc,
@@ -13369,11 +13453,15 @@ fn adopt_collection_record_on_store(
         &candidate.file_path,
         state.regime,
         &candidate.record_id,
+        settled_content_override.as_deref(),
         lineage_claim_id,
         now_ms,
         faults,
         token,
-    )?;
+    )?
+    else {
+        return Ok(Some(CollectionAdoptionExecution::Declined));
+    };
     let changed_path = Some(
         ydoc_settle_on_store(
             store,
@@ -13384,6 +13472,7 @@ fn adopt_collection_record_on_store(
             ContentKind::Richdoc,
             lineage_claim_id.as_deref(),
             state.head_blob_sha256,
+            settled_content_override,
             &format!("collection-adoption:{}", candidate.record_id),
             self_writes,
             now_ms,
@@ -13529,6 +13618,7 @@ fn cleanup_collection_relation_on_store(
         ContentKind::Richdoc,
         append.lineage_claim_id.as_deref(),
         state.head_blob_sha256,
+        None,
         &format!(
             "collection-relation-cleanup:{}:{}:{}",
             candidate.source_record_id, candidate.field_name, candidate.target_record_id
@@ -13598,6 +13688,15 @@ fn reconcile_collections_on_store(
                     changed_paths.push(path);
                 }
             }
+            Ok(Some(CollectionAdoptionExecution::Declined)) => {
+                delete_collection_adoption_binding(
+                    store,
+                    &candidate,
+                    workspace_id,
+                    version_id,
+                    faults,
+                )?;
+            }
             Ok(Some(CollectionAdoptionExecution::NeedsRichdocSeed)) => {
                 pending_seed_objects.insert(candidate.object_id.clone());
             }
@@ -13609,12 +13708,17 @@ fn reconcile_collections_on_store(
                 ));
             }
             Err(error) if adoption_conflict(&error) => {
+                let state = if candidate.lossless_insertion_required {
+                    "deferred-conflict-lossless"
+                } else {
+                    "deferred-conflict"
+                };
                 persist_collection_adoption_state(
                     store,
                     &candidate,
                     workspace_id,
                     version_id,
-                    "deferred-conflict",
+                    state,
                     faults,
                 )?;
             }

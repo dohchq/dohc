@@ -2802,6 +2802,54 @@ pub fn read_seed_only_lineage_source(
     store.read_with(|conn| seed_only_lineage_source(conn, key))
 }
 
+/// The captured head sha for a pristine seed lineage that collection adoption
+/// may amend without replacing any intervening document edit.
+///
+/// Unlike [`read_seed_only_lineage_source`], this also recognizes the exact
+/// shape produced when sync promotion claims that seed as the replicated base:
+/// the original seed update remains at sequence 1 and the claimed full-state
+/// base is the sole sequence-0 snapshot. Any later update, compaction, settle,
+/// replacement, or incomplete claim makes the witness unavailable.
+pub fn read_pristine_seed_lineage_source(
+    store: &EngineStore,
+    key: &DocKey,
+) -> Result<Option<String>, CollabError> {
+    store.read_with(|conn| {
+        conn.query_row(
+            "SELECT d.seed_source_sha256 FROM ydoc_docs d \
+                 WHERE d.workspace_id = ?1 AND d.version_id = ?2 AND d.object_id = ?3 \
+                   AND d.head_update_seq = 1 AND d.head_snapshot_seq = 0 \
+                   AND d.last_settled_sha IS NULL \
+                   AND d.seed_source_sha256 IS NOT NULL \
+                   AND (SELECT COUNT(*) FROM ydoc_updates u \
+                         WHERE u.workspace_id = ?1 AND u.version_id = ?2 \
+                           AND u.object_id = ?3) = 1 \
+                   AND ( \
+                     (d.regime = 'local-only' \
+                       AND d.lineage_claim_status = 'unclaimed' \
+                       AND NOT EXISTS (SELECT 1 FROM ydoc_snapshots s \
+                         WHERE s.workspace_id = ?1 AND s.version_id = ?2 \
+                           AND s.object_id = ?3)) \
+                     OR \
+                     (d.regime = 'replicated' \
+                       AND d.lineage_claim_status = 'exact' \
+                       AND d.lineage_claim_id IS NOT NULL \
+                       AND (SELECT COUNT(*) FROM ydoc_snapshots s \
+                         WHERE s.workspace_id = ?1 AND s.version_id = ?2 \
+                           AND s.object_id = ?3) = 1 \
+                       AND EXISTS (SELECT 1 FROM ydoc_snapshots s \
+                         WHERE s.workspace_id = ?1 AND s.version_id = ?2 \
+                           AND s.object_id = ?3 AND s.up_to_seq = 0)) \
+                   )",
+            rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(map_sql)
+        .map(Option::flatten)
+    })
+}
+
 fn last_settled_sha(conn: &Connection, key: &DocKey) -> Result<Option<String>, CollabError> {
     conn.query_row(
         "SELECT last_settled_sha FROM ydoc_docs \

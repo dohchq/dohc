@@ -557,6 +557,7 @@ dependencies = [
  "fs4",
  "getrandom 0.4.3",
  "libc",
+ "proptest",
  "rusqlite",
  "serde",
  "serde_json",

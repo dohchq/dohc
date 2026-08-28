@@ -1450,11 +1450,24 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
             // exactly like a first open.
             return retire_complete_ydoc_lineage_in_tx(tx, complete);
         }
-        let update = doc
-            .rewrite_content_to_markdown(marker.content_kind, chosen_text)
-            .map_err(|_| SyncError::InvalidInput {
-                reason: "the content kind does not support Markdown conflict resolution",
-            })?;
+        let canonical_projection = doc
+            .project(marker.content_kind)
+            .map_err(|error| map_projection_error(error, "ydoc projection is invalid"))?;
+        let source_preserved = marker.content_kind == ContentKind::Richdoc
+            && projection.content != canonical_projection.content
+            && doc.markdown_source_reference().is_some_and(|reference| {
+                reference.source_sha256 == hex_sha256(projection.content.as_bytes())
+                    && reference.projection_sha256
+                        == hex_sha256(canonical_projection.content.as_bytes())
+            });
+        let update = if source_preserved {
+            doc.rewrite_content_to_markdown_preserving_source(marker.content_kind, chosen_text)
+        } else {
+            doc.rewrite_content_to_markdown(marker.content_kind, chosen_text)
+        }
+        .map_err(|_| SyncError::InvalidInput {
+            reason: "the content kind does not support Markdown conflict resolution",
+        })?;
         // VERIFY THE FOLD'S OWN OUTPUT. The markdown parser behind the
         // rewrite is asserted to be the projector's inverse, and nothing
         // makes that true: a construct it does not model round-trips through
@@ -1657,9 +1670,17 @@ pub fn project_ydoc_with_store(
     content_kind: dohc_engine_collab::ContentKind,
 ) -> Result<dohc_engine_collab::Projection, SyncError> {
     if content_kind != dohc_engine_collab::ContentKind::Scene {
-        return doc
+        let mut projection = doc
             .project(content_kind)
-            .map_err(|error| map_projection_error(error, "ydoc projection is invalid"));
+            .map_err(|error| map_projection_error(error, "ydoc projection is invalid"))?;
+        if content_kind == dohc_engine_collab::ContentKind::Richdoc
+            && let Some(reference) = doc.markdown_source_reference()
+            && reference.projection_sha256 == hex_sha256(projection.content.as_bytes())
+            && let Some(source) = doc.markdown_source(&reference)
+        {
+            projection.content = source;
+        }
+        return Ok(projection);
     }
     let folded = doc.fold_scene();
     // The unhydrated portable form bounds the scene-owned JSON before any
@@ -3126,6 +3147,58 @@ fn map_domain_hard_error(error: DomainError) -> SyncError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preserved_markdown_source_crosses_the_ydoc_update_without_a_local_blob() {
+        const ORIGINAL: &str =
+            "\n\n| Key | Value |\n| --- | --- |\n| generated |  |\n\n**bold** _italic_ `code`";
+        const RECORD_ID: &str = "01j00000000000000000000000";
+
+        let sender = dohc_engine_collab::Ydoc::wire();
+        let seed = sender
+            .rewrite_content_to_markdown(ContentKind::Richdoc, ORIGINAL)
+            .expect("seed sender");
+        let adopted = format!("---\nid: {RECORD_ID}\n---\n\n{ORIGINAL}");
+        let adoption = sender
+            .frontmatter_set_preserving_markdown_source("id", RECORD_ID, &adopted)
+            .expect("adopt sender");
+        assert_ne!(
+            sender
+                .project(ContentKind::Richdoc)
+                .expect("canonical sender projection")
+                .content,
+            adopted,
+            "the regression requires lexical bytes the canonical projector changes"
+        );
+
+        let receiver = dohc_engine_collab::Ydoc::wire();
+        receiver.apply(&seed).expect("apply seed on receiver");
+        receiver
+            .apply(&adoption)
+            .expect("apply adoption on receiver");
+        let connection = Connection::open_in_memory().expect("open empty receiver database");
+        let key = DocKey::new("workspace", "main", "record").expect("receiver key");
+        let projection =
+            project_ydoc_with_store(&connection, &key, &receiver, ContentKind::Richdoc)
+                .expect("project receiver without source blob");
+
+        assert_eq!(projection.content, adopted);
+    }
+
+    #[test]
+    fn preserved_markdown_source_cannot_exceed_the_text_store_cap() {
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, "body")
+            .expect("seed document");
+        let oversized = " ".repeat(dohc_engine_domain::MAX_TEXT_BYTES + 1);
+
+        assert!(matches!(
+            doc.frontmatter_set_preserving_markdown_source("id", "record", &oversized),
+            Err(CollabError::ProjectionTooLarge { actual, max })
+                if actual == dohc_engine_domain::MAX_TEXT_BYTES + 1
+                    && max == dohc_engine_domain::MAX_TEXT_BYTES
+        ));
+    }
 
     #[test]
     fn projection_limit_reason_names_each_content_kind() {
