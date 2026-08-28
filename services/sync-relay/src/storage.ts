@@ -3009,6 +3009,16 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           )
           .run(code.codeId, code.codeHash);
       };
+      const recordResultGrant = (grantId: string): boolean => {
+        const recorded = this.db
+          .prepare(
+            `UPDATE sync_relay_link_handoff_codes
+             SET result_grant_id = ?
+             WHERE code_id = ? AND code_hash = ? AND result_grant_id IS NULL`,
+          )
+          .run(grantId, code.codeId, code.codeHash);
+        return Number(recorded.changes ?? 0) === 1;
+      };
       if (code.expiresAtMs <= input.redeemedAtMs) {
         deleteCode();
         return { ok: false };
@@ -3078,14 +3088,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         (dependent) => dependent.status === "active",
       );
       if (existing) {
-        const recorded = this.db
-          .prepare(
-            `UPDATE sync_relay_link_handoff_codes
-             SET result_grant_id = ?
-             WHERE code_id = ? AND code_hash = ? AND result_grant_id IS NULL`,
-          )
-          .run(existing.grantId, code.codeId, code.codeHash);
-        if (Number(recorded.changes ?? 0) !== 1) return { ok: false };
+        if (!recordResultGrant(existing.grantId)) return { ok: false };
         return { ok: true, shareId: share.shareId, grant: existing };
       }
 
@@ -3115,14 +3118,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         revokedAtMs: null,
         parentGrantId: parent.grantId,
       };
-      const recorded = this.db
-        .prepare(
-          `UPDATE sync_relay_link_handoff_codes
-           SET result_grant_id = ?
-           WHERE code_id = ? AND code_hash = ? AND result_grant_id IS NULL`,
-        )
-        .run(grant.grantId, code.codeId, code.codeHash);
-      if (Number(recorded.changes ?? 0) !== 1) return { ok: false };
+      if (!recordResultGrant(grant.grantId)) return { ok: false };
       this.insertShareGrant(grant);
       return { ok: true, shareId: share.shareId, grant };
     });
