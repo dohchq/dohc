@@ -38,6 +38,7 @@ import {
   type SyncRelayHandler,
 } from "./server";
 import {
+  currentFileBlobByteLengthQuery,
   currentFileStateQuery,
   openSyncRelayStorage,
   SHARED_BLOB_CANDIDATE_LIMIT,
@@ -660,6 +661,22 @@ describe("relay capability reads", () => {
       );
       expect(details).not.toContain("sync_relay_log");
       expect(details).not.toContain("sync_relay_object_moments");
+
+      const blobQuery = currentFileBlobByteLengthQuery(["docs"]);
+      const blobPlan = inspection.prepare(`EXPLAIN QUERY PLAN ${blobQuery.sql}`).all(
+        WORKSPACE,
+        "main",
+        acceptedSha,
+        0,
+        ...blobQuery.selectorParams,
+      );
+      const blobDetails = blobPlan.map((row) => String(row.detail)).join("\n");
+      expect(blobDetails).toMatch(
+        /SEARCH sync_relay_current_files USING COVERING INDEX idx_sync_relay_current_files_blob/u,
+      );
+      expect(blobDetails).toMatch(
+        /SEARCH blob USING INDEX sqlite_autoindex_sync_relay_blobs_1/u,
+      );
     } finally {
       inspection.close();
     }
@@ -1738,6 +1755,7 @@ describe("relay capability reads", () => {
 
   it("bounds retained link blob bytes per grant and releases every stream charge", async () => {
     const storage = await newStorage();
+    const getBlob = vi.spyOn(storage, "getBlob");
     const h = handler(storage);
     const largeContent = "l".repeat(MAX_BLOB_BYTES);
     const smallContent = "s".repeat(4 * 1024 * 1024);
@@ -1764,6 +1782,7 @@ describe("relay capability reads", () => {
         linkRequest(link.capability, `/sync/link/blobs/${largeSha}`),
       );
       opened.push(overBudget);
+      expect(getBlob).toHaveBeenCalledTimes(3);
       const small = await h(
         linkRequest(link.capability, `/sync/link/blobs/${smallSha}`),
       );
@@ -1807,6 +1826,144 @@ describe("relay capability reads", () => {
       );
     }
   });
+
+  it("releases pre-stream blob admissions on every load failure", async () => {
+    const cases = ["missing", "throwing", "length-mismatch", "rotation"] as const;
+    for (const failure of cases) {
+      const storage = await newStorage();
+      const targetContent = "t".repeat(4 * 1024 * 1024);
+      const targetSha = sha256(targetContent);
+      const rotatedSecret = "r".repeat(43);
+      let failTargetLoad = false;
+      let grantId = "";
+      const racedStorage = new Proxy(storage, {
+        get(target, property, receiver) {
+          const value = Reflect.get(target, property, receiver) as unknown;
+          if (property !== "getBlob" || typeof value !== "function") {
+            return typeof value === "function" ? value.bind(target) : value;
+          }
+          return (workspaceId: string, blobSha256: string) => {
+            if (!failTargetLoad || blobSha256 !== targetSha) {
+              return target.getBlob(workspaceId, blobSha256);
+            }
+            failTargetLoad = false;
+            if (failure === "missing") return null;
+            if (failure === "throwing") throw new Error("injected blob load failure");
+            if (failure === "length-mismatch") {
+              return new Uint8Array(targetContent.length - 1);
+            }
+            const blob = target.getBlob(workspaceId, blobSha256);
+            const rotation = target.rotateLinkGrant({
+              shareId: "share-0",
+              grantId,
+              rotatedAtMs: 2_001,
+              expectedDependentGrantIds: [],
+              guard: () => undefined,
+              mintCredential: () => ({
+                credentialId: `raced-${failure}`,
+                secretHash: hashLinkBearer(rotatedSecret, LINK_KEY),
+              }),
+            });
+            expect(rotation.ok).toBe(true);
+            return blob;
+          };
+        },
+      });
+      const h = handler(racedStorage, {
+        linkGrantEgressRateLimiter: new LinkEgressRateLimiter(
+          3 * MAX_BLOB_BYTES + targetContent.length,
+          0.000_001,
+          10,
+        ),
+      });
+      const seeded = await seed(h);
+      grantId = seeded.grantId;
+      const largeContent = "l".repeat(MAX_BLOB_BYTES);
+      const largeSha = await putBlob(h, largeContent);
+      await putBlob(h, targetContent);
+      const probeContent = "p";
+      const probeSha = await putBlob(h, probeContent);
+      await appendMoments(h, [
+        moment(3, "docs/held.bin", largeContent, 1_300),
+        moment(4, "docs/failure.bin", targetContent, 1_400),
+        moment(5, "docs/probe.bin", probeContent, 1_500),
+      ]);
+      const held = await Promise.all(
+        Array.from({ length: 3 }, () =>
+          h(linkRequest(seeded.capability, `/sync/link/blobs/${largeSha}`)),
+        ),
+      );
+      expect(held.map((response) => response.status)).toEqual([200, 200, 200]);
+
+      let consoleError: ReturnType<typeof vi.spyOn> | undefined;
+      if (failure === "throwing") {
+        consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      }
+      failTargetLoad = true;
+      const failed = await h(
+        linkRequest(seeded.capability, `/sync/link/blobs/${targetSha}`),
+      );
+      consoleError?.mockRestore();
+
+      let capability = seeded.capability;
+      if (failure === "rotation") {
+        expect(await capabilityRefusalBody(failed)).toBe(LINK_REFUSAL_BODY);
+        const exchange = await json(
+          await h(
+            request(null, "/sync/link-exchange", jsonBody({ secret: rotatedSecret })),
+          ),
+        );
+        expect(exchange.grantId).toBe(seeded.grantId);
+        capability = String(exchange.capabilityToken);
+      } else if (failure === "throwing") {
+        expect(failed.status).toBe(500);
+        expect(await json(failed)).toEqual({
+          ok: false,
+          error: "internal error",
+          code: "internal_error",
+        });
+      } else {
+        expect(failed.status).toBe(404);
+        expect(await failed.text()).toBe(LINK_REFUSAL_BODY);
+      }
+
+      const probe = await h(
+        linkRequest(capability, `/sync/link/blobs/${probeSha}`),
+      );
+      expect(probe.status, failure).toBe(200);
+      expect(await probe.text()).toBe(probeContent);
+      await Promise.all(held.map(async (response) => await response.body?.cancel()));
+    }
+  });
+
+  it.each([-1, MAX_BLOB_BYTES + 1, Number.MAX_SAFE_INTEGER + 1])(
+    "refuses corrupt current blob byte length %s without loading content",
+    async (byteLength) => {
+      const storage = await newStorage();
+      const h = handler(storage);
+      const seeded = await seed(h);
+      const dbPath = storagePaths.get(storage);
+      if (!dbPath) throw new Error("missing inspection path");
+      const inspection = new InspectionDatabaseSync(dbPath);
+      try {
+        inspection.prepare(
+          `UPDATE sync_relay_blobs SET byte_length = ?
+           WHERE workspace_id = ? AND sha256 = ?`,
+        ).run(byteLength, WORKSPACE, seeded.sharedSha);
+      } finally {
+        inspection.close();
+      }
+      const getBlob = vi.spyOn(storage, "getBlob");
+
+      const response = await h(
+        linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`),
+      );
+
+      expect(response.status).toBe(404);
+      expect(await response.text()).toBe(LINK_REFUSAL_BODY);
+      expect(getBlob).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(["cancel", "rotate"] as const)(
     "charges only emitted blob bytes after stream %s",
@@ -2022,6 +2179,145 @@ describe("relay capability reads", () => {
       expect(egress.reserve(seeded.grantId, 1, 2_000)).toBeNull();
     },
   );
+
+  it("terminates same-grant JSON and blob streams together", async () => {
+    const chunkBytes = 64 * 1024;
+    const storage = await newStorage();
+    const setupHandler = handler(storage);
+    const seeded = await seed(setupHandler);
+    const jsonContent = "mixed stream 界\n";
+    await putBlob(setupHandler, jsonContent);
+    const largeContent = "m".repeat(MAX_BLOB_BYTES);
+    const largeSha = await putBlob(setupHandler, largeContent);
+    await appendMoments(setupHandler, [
+      moment(3, "docs/mixed-large.bin", largeContent, 1_300),
+      ...Array.from({ length: 450 }, (_, index) =>
+        moment(
+          index + 4,
+          `docs/${String(index).padStart(3, "0")}-${"界".repeat(64)}.md`,
+          jsonContent,
+          1_400 + index,
+          { objectId: `object-mixed-stream-${index}` },
+        ),
+      ),
+    ]);
+
+    const egress = new LinkEgressRateLimiter(
+      LINK_GRANT_EGRESS_BUCKET_CAPACITY_BYTES,
+      0.000_001,
+      10,
+    );
+    const originalReserve = egress.reserve.bind(egress);
+    const settlements: Array<{
+      reservedByteLength: number;
+      emittedByteLength: number;
+    }> = [];
+    const reserve = vi.spyOn(egress, "reserve").mockImplementation(
+      (grantId, byteLength, reservedAtMs) => {
+        const settle = originalReserve(grantId, byteLength, reservedAtMs);
+        if (!settle) return null;
+        return (emittedByteLength, settledAtMs) => {
+          settlements.push({ reservedByteLength: byteLength, emittedByteLength });
+          settle(emittedByteLength, settledAtMs);
+        };
+      },
+    );
+    const h = handler(storage, { linkGrantEgressRateLimiter: egress });
+    const current = await h(
+      linkRequest(seeded.capability, "/sync/link/current"),
+    );
+    const blob = await h(
+      linkRequest(seeded.capability, `/sync/link/blobs/${largeSha}`),
+    );
+    expect([current.status, blob.status]).toEqual([200, 200]);
+    expect(reserve.mock.calls).toHaveLength(2);
+    const currentReservedByteLength = reserve.mock.calls[0]![1];
+    expect(currentReservedByteLength).toBeGreaterThan(2 * chunkBytes);
+    expect(reserve.mock.calls[1]![1]).toBe(MAX_BLOB_BYTES);
+    const currentReader = current.body!.getReader();
+    const blobReader = blob.body!.getReader();
+    const [currentFirst, blobFirst] = await Promise.all([
+      currentReader.read(),
+      blobReader.read(),
+    ]);
+    expect(currentFirst.done).toBe(false);
+    expect(blobFirst.done).toBe(false);
+    if (currentFirst.done || blobFirst.done) return;
+    expect(currentFirst.value.byteLength).toBe(chunkBytes);
+    expect(blobFirst.value.byteLength).toBe(chunkBytes);
+
+    const rotation = await json(
+      await h(
+        request(
+          OWNER,
+          `/sync/shares/share-0/links/${seeded.grantId}/rotate`,
+          jsonBody({ workspaceId: WORKSPACE, expectedDependentGrantIds: [] }),
+        ),
+      ),
+    );
+    const outcomes = await Promise.all(
+      [currentReader, blobReader].map(async (reader) =>
+        await reader.read().then(
+          () => ({ kind: "delivered" as const }),
+          (error: unknown) => ({
+            kind: "terminated" as const,
+            message: error instanceof Error ? error.message : String(error),
+          }),
+        ),
+      ),
+    );
+    expect(outcomes).toEqual([
+      { kind: "terminated", message: "link grant changed during stream" },
+      { kind: "terminated", message: "link grant changed during stream" },
+    ]);
+    expect(settlements).toEqual(expect.arrayContaining([
+      {
+        reservedByteLength: currentReservedByteLength,
+        emittedByteLength: chunkBytes,
+      },
+      {
+        reservedByteLength: MAX_BLOB_BYTES,
+        emittedByteLength: chunkBytes,
+      },
+    ]));
+    expect(settlements).toHaveLength(2);
+
+    const unavailable = egress.reserve(
+      seeded.grantId,
+      LINK_GRANT_EGRESS_BUCKET_CAPACITY_BYTES - 2 * chunkBytes + 1,
+      2_000,
+    );
+    expect(unavailable).toBeNull();
+    const exactAvailable = egress.reserve(
+      seeded.grantId,
+      LINK_GRANT_EGRESS_BUCKET_CAPACITY_BYTES - 2 * chunkBytes,
+      2_000,
+    );
+    expect(exactAvailable).not.toBeNull();
+    exactAvailable?.(0, 2_000);
+
+    const exchange = await json(
+      await h(
+        request(
+          null,
+          "/sync/link-exchange",
+          jsonBody({ secret: linkSecret(rotation.url) }),
+        ),
+      ),
+    );
+    expect(exchange.grantId).toBe(seeded.grantId);
+    const rotatedCapability = String(exchange.capabilityToken);
+    const held = await Promise.all(
+      Array.from({ length: 3 }, () =>
+        h(linkRequest(rotatedCapability, `/sync/link/blobs/${largeSha}`)),
+      ),
+    );
+    try {
+      expect(held.map((response) => response.status)).toEqual([200, 200, 200]);
+    } finally {
+      await Promise.all(held.map(async (response) => await response.body?.cancel()));
+    }
+  });
 
   it.each([
     [
@@ -4202,6 +4498,7 @@ describe("relay capability reads", () => {
     );
     let now = 2_000;
     const storage = await newStorage();
+    const getBlob = vi.spyOn(storage, "getBlob");
     const h = handler(storage, {
       nowMs: () => now,
       linkGrantEgressRateLimiter: new LinkEgressRateLimiter(18, 9, 10),
@@ -4217,6 +4514,7 @@ describe("relay capability reads", () => {
     const exhausted = await h(linkRequest(seeded.capability, blobPath));
     expect(exhausted.status).toBe(429);
     expect(await json(exhausted)).toMatchObject({ code: "link_read_rate_limited" });
+    expect(getBlob).toHaveBeenCalledTimes(2);
 
     const rotation = await json(
       await h(
@@ -4243,11 +4541,13 @@ describe("relay capability reads", () => {
     expect(await json(stillExhausted)).toMatchObject({
       code: "link_read_rate_limited",
     });
+    expect(getBlob).toHaveBeenCalledTimes(2);
 
     now += 1_000;
     const refilled = await h(linkRequest(rotatedCapability, blobPath));
     expect(refilled.status).toBe(200);
     expect(await refilled.text()).toBe("# shared\n");
+    expect(getBlob).toHaveBeenCalledTimes(3);
   });
 
   it("reserves exact metadata and log response bytes on the same grant", async () => {

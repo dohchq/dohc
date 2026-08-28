@@ -1654,42 +1654,59 @@ export function createSyncRelayHandler({
         }
 
         assertSha256(route.sha256);
-        const blob = storage.currentFileBlobIsVisible({
+        const byteLength = storage.currentFileBlobByteLength({
           workspaceId: share.workspaceId,
           versionId: targetVersionId(capability.effectiveSelector),
           selectorPaths: capability.effectiveSelector.paths,
           sha256: route.sha256,
           epochLogFloor,
-        })
-          ? storage.getBlob(share.workspaceId, route.sha256)
-          : null;
-        if (!blob) throw notFound();
-        requireFreshLinkRead(capabilityToken, capability);
+        });
+        if (
+          byteLength === null ||
+          !Number.isSafeInteger(byteLength) ||
+          byteLength < 0 ||
+          byteLength > MAX_BLOB_BYTES
+        ) {
+          throw notFound();
+        }
         const releaseBytes = admitLinkBlobBytes(
           capability.grantId,
-          blob.byteLength,
+          byteLength,
         );
         if (!releaseBytes) throw linkReadRateLimited();
         const settleEgress = linkGrantEgressRateLimiter.reserve(
           capability.grantId,
-          blob.byteLength,
+          byteLength,
           nowMs(),
         );
         if (!settleEgress) {
           releaseBytes();
           throw linkReadRateLimited();
         }
-        return respondWithLinkBytes(
-          blob,
-          capability.shareId,
-          capability.grantId,
-          releaseBytes,
-          settleEgress,
-          {
-            "content-length": String(blob.byteLength),
-            "content-type": "application/octet-stream",
-          },
-        );
+        let streamOwnsAdmission = false;
+        try {
+          const blob = storage.getBlob(share.workspaceId, route.sha256);
+          if (!blob || blob.byteLength !== byteLength) throw notFound();
+          requireFreshLinkRead(capabilityToken, capability);
+          const response = respondWithLinkBytes(
+            blob,
+            capability.shareId,
+            capability.grantId,
+            releaseBytes,
+            settleEgress,
+            {
+              "content-length": String(byteLength),
+              "content-type": "application/octet-stream",
+            },
+          );
+          streamOwnsAdmission = true;
+          return response;
+        } finally {
+          if (!streamOwnsAdmission) {
+            releaseBytes();
+            settleEgress(0, nowMs());
+          }
+        }
       }
       const actor = await resolveActor(request, "workspaceId" in route ? route.workspaceId : "");
       if (

@@ -370,13 +370,13 @@ export interface SyncRelayStorage {
     selectorPaths: readonly string[];
     limit: number;
   }): CurrentFileStateSnapshot;
-  currentFileBlobIsVisible(input: {
+  currentFileBlobByteLength(input: {
     workspaceId: string;
     versionId: string;
     selectorPaths: readonly string[];
     sha256: string;
     epochLogFloor: number;
-  }): boolean;
+  }): number | null;
   createShare(input: {
     share: SyncRelayShareRow;
     grant: SyncRelayShareGrantRow;
@@ -1647,6 +1647,27 @@ export function currentFileStateQuery(selectorPaths: readonly string[]): {
          AND state_relay_seq > ? AND state_relay_seq <= ?${selector.sql}
        ORDER BY path
        LIMIT ?`,
+    selectorParams: selector.params,
+  };
+}
+
+export function currentFileBlobByteLengthQuery(selectorPaths: readonly string[]): {
+  sql: string;
+  selectorParams: string[];
+} {
+  const selector = currentFileSelectorClause(selectorPaths);
+  return {
+    sql:
+      `SELECT CAST(blob.byte_length AS TEXT) AS byte_length
+       FROM sync_relay_current_files INDEXED BY idx_sync_relay_current_files_blob
+       JOIN sync_relay_blobs AS blob
+         ON blob.workspace_id = sync_relay_current_files.workspace_id
+        AND blob.sha256 = sync_relay_current_files.blob_sha256
+       WHERE sync_relay_current_files.workspace_id = ?
+         AND sync_relay_current_files.version_id = ?
+         AND sync_relay_current_files.blob_sha256 = ?
+         AND sync_relay_current_files.state_relay_seq > ?${selector.sql}
+       LIMIT 1`,
     selectorParams: selector.params,
   };
 }
@@ -4418,29 +4439,26 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     }
   }
 
-  currentFileBlobIsVisible(input: {
+  currentFileBlobByteLength(input: {
     workspaceId: string;
     versionId: string;
     selectorPaths: readonly string[];
     sha256: string;
     epochLogFloor: number;
-  }): boolean {
-    const selector = currentFileSelectorClause(input.selectorPaths);
-    return this.db
-      .prepare(
-        `SELECT 1 AS ok
-         FROM sync_relay_current_files INDEXED BY idx_sync_relay_current_files_blob
-         WHERE workspace_id = ? AND version_id = ? AND blob_sha256 = ?
-           AND state_relay_seq > ?${selector.sql}
-         LIMIT 1`,
-      )
+  }): number | null {
+    const query = currentFileBlobByteLengthQuery(input.selectorPaths);
+    const row = this.db
+      .prepare(query.sql)
       .get(
         input.workspaceId,
         input.versionId,
         input.sha256,
         input.epochLogFloor,
-        ...selector.params,
-      ) !== undefined;
+        ...query.selectorParams,
+      );
+    return row && typeof row.byte_length === "string"
+      ? Number(row.byte_length)
+      : null;
   }
 
   fetchLogPageDescending(input: {
