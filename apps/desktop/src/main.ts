@@ -1626,6 +1626,7 @@ const credentialSessionCache =
   new CredentialSessionCache<CloudSessionCredentials>((snapshot) => {
     cachedCredentials = snapshot.credentials;
     credentialCacheGeneration = snapshot.generation;
+    shareHandoffRedemption.credentialsChanged();
   });
 function refreshCredentialCache(): Promise<void> {
   return credentialSessionCache.refresh(() => cloudLogin().credentials());
@@ -7245,7 +7246,6 @@ function registerIpcHandlers(
           notifyCloudSessionChangedWithKey(incomingKey, "changing"),
         notifyCloudSessionChanged: () => notifyCloudSessionChanged("ready"),
       });
-      shareHandoffRedemption.credentialsChanged();
     }
     return CloudLoginPollResult.parse(result);
   });
@@ -7290,21 +7290,17 @@ function registerIpcHandlers(
 
   ipcMain.handle(CHANNELS.cloudLogout, async (event) => {
     assertTrustedSender(event);
-    try {
-      await runCloudLogoutTransition({
-        clearCachedCredentials: () => clearCachedCredentials(),
-        logout: () => cloudLogin().logout(),
-        stopEngines: () => activity.stopEngines(),
-        closeRelayTransportWorkspaces: () => closeAllRelayTransportWorkspaces(),
-        // Scope-free: logout changes every workspace's sync state at once.
-        notifyWorkspaceActivity: () => notifyRenderer(),
-        // Logout is a one-event transition to a known state: signed out. The
-        // key change is what makes every view clear and refresh.
-        notifyCloudSessionChanged: () => notifyCloudSessionChanged("ready"),
-      });
-    } finally {
-      shareHandoffRedemption.credentialsChanged();
-    }
+    await runCloudLogoutTransition({
+      clearCachedCredentials: () => clearCachedCredentials(),
+      logout: () => cloudLogin().logout(),
+      stopEngines: () => activity.stopEngines(),
+      closeRelayTransportWorkspaces: () => closeAllRelayTransportWorkspaces(),
+      // Scope-free: logout changes every workspace's sync state at once.
+      notifyWorkspaceActivity: () => notifyRenderer(),
+      // Logout is a one-event transition to a known state: signed out. The
+      // key change is what makes every view clear and refresh.
+      notifyCloudSessionChanged: () => notifyCloudSessionChanged("ready"),
+    });
   });
 
   // Enabling sync claims the workspace id. The first claimant owns it. The
@@ -12749,7 +12745,6 @@ if (!app.requestSingleInstanceLock()) {
     // Load persisted cloud credentials after the first window exists so local
     // workspaces do not pay credential-store I/O on the visible-launch path.
     void warmCredentialCache().then(() => {
-      shareHandoffRedemption.credentialsChanged();
       activity.reconcileCloud(engineForWorkspace);
     });
 

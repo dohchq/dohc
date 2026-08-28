@@ -196,26 +196,19 @@ describe("share handoff credential and ingress wiring", () => {
     );
   });
 
-  it("triggers after startup warm and completed login adoption, not inside the clear seam", () => {
-    const startupWarm = mainSource.indexOf("void warmCredentialCache().then(() => {");
-    expect(startupWarm).toBeGreaterThanOrEqual(0);
-    expect(mainSource.slice(startupWarm, startupWarm + 250)).toContain(
+  it("notifies once from the credential-cache change seam", () => {
+    const callbackStart = mainSource.indexOf(
+      "new CredentialSessionCache<CloudSessionCredentials>((snapshot) => {",
+    );
+    const callbackEnd = mainSource.indexOf("\n  });", callbackStart);
+    expect(callbackStart).toBeGreaterThanOrEqual(0);
+    expect(callbackEnd).toBeGreaterThan(callbackStart);
+    expect(mainSource.slice(callbackStart, callbackEnd)).toContain(
       "shareHandoffRedemption.credentialsChanged();",
     );
-
-    const pollStart = mainSource.indexOf("ipcMain.handle(CHANNELS.cloudLoginPoll");
-    const pollEnd = mainSource.indexOf("ipcMain.handle(CHANNELS.cloudStatus", pollStart);
-    const poll = mainSource.slice(pollStart, pollEnd);
-    const adoptionStart = poll.indexOf("await adoptCompletedCloudLoginSession({");
-    const adoptionEnd = poll.indexOf("\n      });", adoptionStart);
-    expect(adoptionStart).toBeGreaterThanOrEqual(0);
-    expect(adoptionEnd).toBeGreaterThan(adoptionStart);
-    expect(poll.slice(adoptionStart, adoptionEnd)).not.toContain(
-      "shareHandoffRedemption.credentialsChanged()",
-    );
-    expect(poll.slice(adoptionEnd)).toContain(
-      "shareHandoffRedemption.credentialsChanged();",
-    );
+    expect(
+      mainSource.match(/shareHandoffRedemption\.credentialsChanged\(\);/gu),
+    ).toHaveLength(1);
   });
 
   it("routes 401 through the existing current-session-aware full invalidation", () => {
