@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { configure } from "@testing-library/dom";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OpenSharedView } from "./OpenSharedView";
@@ -42,6 +42,14 @@ const SHARED_VIEW = {
   shareView: { shareId: "share-1", granterEmail: "granter@dohc.test" },
 };
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
 beforeEach(() => {
   vi.resetAllMocks();
   bridgeMock.cloudStatus.mockResolvedValue({
@@ -61,6 +69,117 @@ afterEach(() => {
 });
 
 describe("OpenSharedView", () => {
+  it("keeps Back available while adding a share and ignores the late result after leaving", async () => {
+    const pending = deferred<{
+      workspace: typeof SHARED_VIEW;
+      mount: {
+        shareId: string;
+        label: string;
+        status: string;
+        changedPaths: number;
+      };
+    }>();
+    bridgeMock.mountShare.mockReturnValue(pending.promise);
+    const user = userEvent.setup();
+    const onBack = vi.fn();
+    const onOpened = vi.fn();
+    const onWorkspaceReady = vi.fn();
+    const onMounted = vi.fn();
+    const { unmount } = render(
+      <OpenSharedView
+        onWorkspaceReady={onWorkspaceReady}
+        onBack={onBack}
+        onOpened={onOpened}
+        resolvedShare={{
+          shareId: "share-1",
+          shareCode: "ordinary-received-share-code",
+        }}
+        mountInto={{ workspaceId: "ws-host", onMounted }}
+      />,
+    );
+
+    await user.click(screen.getByTestId("open-share-start"));
+
+    expect(screen.getByTestId("open-share-start").textContent).toBe(
+      "Adding the share…",
+    );
+    const back = screen.getByRole("button", { name: "Back" }) as HTMLButtonElement;
+    expect(back.disabled).toBe(false);
+    expect(
+      screen.getByText(
+        "If you go back, dohc keeps adding the share to shared-with-me/.",
+      ),
+    ).toBeTruthy();
+
+    await user.click(back);
+    expect(onBack).toHaveBeenCalledOnce();
+
+    unmount();
+    await act(async () => {
+      pending.resolve({
+        workspace: SHARED_VIEW,
+        mount: {
+          shareId: "share-1",
+          label: "granter",
+          status: "updated",
+          changedPaths: 3,
+        },
+      });
+    });
+    expect(onOpened).not.toHaveBeenCalled();
+    expect(onWorkspaceReady).not.toHaveBeenCalled();
+    expect(onMounted).not.toHaveBeenCalled();
+  });
+
+  it("keeps Back available while opening separately and ignores the late result after leaving", async () => {
+    const pending = deferred<{ workspace: typeof SHARED_VIEW }>();
+    bridgeMock.openSharedView.mockReturnValue(pending.promise);
+    const user = userEvent.setup();
+    const onBack = vi.fn();
+    const onOpened = vi.fn();
+    const onWorkspaceReady = vi.fn();
+    const onMounted = vi.fn();
+    const { unmount } = render(
+      <OpenSharedView
+        onWorkspaceReady={onWorkspaceReady}
+        onBack={onBack}
+        onOpened={onOpened}
+        resolvedShare={{
+          shareId: "share-1",
+          shareCode: "ordinary-received-share-code",
+        }}
+        mountInto={{ workspaceId: "ws-host", onMounted }}
+      />,
+    );
+
+    await user.click(screen.getByTestId("open-share-mode-separate"));
+    await user.click(screen.getByTestId("open-share-choose-folder"));
+    await screen.findByText("/home/ice/dohc/shared");
+    await user.click(screen.getByTestId("open-share-start"));
+
+    expect(screen.getByTestId("open-share-start").textContent).toBe(
+      "Opening the share…",
+    );
+    const back = screen.getByRole("button", { name: "Back" }) as HTMLButtonElement;
+    expect(back.disabled).toBe(false);
+    expect(
+      screen.getByText(
+        "If you go back, dohc keeps opening the share into the folder you chose.",
+      ),
+    ).toBeTruthy();
+
+    await user.click(back);
+    expect(onBack).toHaveBeenCalledOnce();
+
+    unmount();
+    await act(async () => {
+      pending.resolve({ workspace: SHARED_VIEW });
+    });
+    expect(onOpened).not.toHaveBeenCalled();
+    expect(onWorkspaceReady).not.toHaveBeenCalled();
+    expect(onMounted).not.toHaveBeenCalled();
+  });
+
   it("opens a pre-resolved received share only after the first-run destination is confirmed", async () => {
     const user = userEvent.setup();
     const onReady = vi.fn();

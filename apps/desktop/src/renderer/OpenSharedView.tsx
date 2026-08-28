@@ -145,7 +145,6 @@ export function OpenSharedView(props: {
       <div className="flex items-center gap-2">
         <IconButton
           aria-label="Back"
-          disabled={opening}
           onClick={props.onBack}
           className="shrink-0"
         >
@@ -268,6 +267,13 @@ export function OpenSharedView(props: {
                 ? "Add share"
                 : "Open share"}
           </PrimaryButton>
+          {opening ? (
+            <p className="m-0 text-[12px] leading-relaxed text-muted">
+              {mounting
+                ? "If you go back, dohc keeps adding the share to shared-with-me/."
+                : "If you go back, dohc keeps opening the share into the folder you chose."}
+            </p>
+          ) : null}
           {error ? (
             <p data-testid="open-share-error" role="alert" className="m-0 text-xs text-danger">
               {error}
