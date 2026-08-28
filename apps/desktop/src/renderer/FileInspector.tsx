@@ -13,6 +13,7 @@ import {
 import {
   Suspense,
   lazy,
+  memo,
   useCallback,
   useEffect,
   useId,
@@ -28,8 +29,6 @@ import {
 import type * as Y from "yjs";
 import type { ChatFileMentionRecord } from "../ipc/bridgeContract";
 import { rendererMarks } from "../performance/rendererMarks";
-import { IncrementalMarkdownDocument } from "./markdown/IncrementalMarkdownDocument";
-import { MARKDOWN_COMPONENTS } from "./markdown/markdownComponents";
 import { bridge } from "./bridge";
 import { binaryFileDataFromArtifact } from "./excalidrawAssets";
 import {
@@ -49,7 +48,7 @@ import type {
   MarkdownEditorHandle,
   MarkdownEditorProps,
 } from "./editor/MarkdownEditor";
-import type { WorkspaceLinkTarget } from "./editor/linkMenu";
+import type { WorkspaceLinkTarget } from "./linkActivation";
 import { blockTargetForLine } from "./editor/intraBlock";
 import type { HeadingNavigationTarget } from "./editor/OutlinePanel";
 import type { PropertiesPanelProps } from "./PropertiesPanel";
@@ -62,7 +61,7 @@ import {
 import { DismissDraftControls } from "./RecoveryList";
 import { BacklinksPanel } from "./BacklinksPanel";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
-import { IconButton, SectionLabel } from "./ui/controls";
+import { IconButton, SecondaryButton, SectionLabel } from "./ui/controls";
 import { DocumentMenu } from "./DocumentMenu";
 import { EditorErrorBoundary } from "./editor/EditorErrorBoundary";
 import {
@@ -84,6 +83,7 @@ import {
   type SharedLocalDocument,
 } from "./sharedLocalDocument";
 import { documentVersionKey } from "./documentVersionKey";
+import { LazyMarkdownReadView } from "./markdown/LazyMarkdownReadView";
 
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
 
@@ -367,6 +367,10 @@ const TEXT_EXT = new Set([
 // The markdown autosave debounce. Named because the rearm on unblock has to
 // use the SAME window the keystroke armed — two literals would drift.
 const AUTOSAVE_DEBOUNCE_MS = 800;
+// Source is a read-only projection of the live Y.Doc. Coalesce update bursts
+// without starving a source view that stays visible during sustained edits.
+const SOURCE_VIEW_UPDATE_DELAY_MS = 150;
+const SOURCE_VIEW_UPDATE_MAX_WAIT_MS = 500;
 
 const WYSIWYG_MARKDOWN_THRESHOLD_BYTES = 64 * 1024;
 const RAW_FRONTMATTER_RE =
@@ -404,7 +408,6 @@ const LazySourceCodeEditor = lazy(() =>
 );
 const LazyExcalidrawCanvas = lazy(() => import("./ExcalidrawCanvas")) as
   LazyExoticComponent<(props: ExcalidrawCanvasProps) => React.ReactElement>;
-
 // The source view needs editor/import-export only on demand. Cache the module
 // after the first toggle so later toggles reuse it.
 let importExportPromise: Promise<typeof import("./editor/import-export")> | null = null;
@@ -1555,6 +1558,11 @@ const READ_ONLY_TRANSITION_CHIP = {
     "This document became read-only. Your edit was set aside in the notice below.",
 };
 
+function MarkdownRenderCommitted(props: { onRendered: () => void }) {
+  useEffect(() => props.onRendered(), [props.onRendered]);
+  return null;
+}
+
 function MarkdownView(props: {
   body: string;
   contentHash: string | null;
@@ -1564,6 +1572,7 @@ function MarkdownView(props: {
   refreshAfterConflict: () => void;
   workspaceId: string;
   path: string;
+  documentKey: string;
   fileOpenStartMark: string;
   truncated?: boolean;
   truncatedNotice?: React.ReactNode;
@@ -2141,15 +2150,28 @@ function MarkdownView(props: {
     );
     props.onOpenPath?.(navigation.path, navigation.headingTarget);
   };
+  const markdownOpenMarkedRef = useRef(false);
+  // Complete the open from the first real Markdown surface that commits. The
+  // read view reports after its lazy chunk parses the visible window; small
+  // files report from the editor after its own lazy chunk resolves.
+  const onMarkdownRendered = useCallback(() => {
+    if (markdownOpenMarkedRef.current) return;
+    markdownOpenMarkedRef.current = true;
+    rendererMarks.measureSince("markdown-open", props.fileOpenStartMark);
+    // Last-wins: readers poll this epoch to know the measure above belongs to
+    // the open they triggered (never a stale value from the previous file).
+    rendererMarks.mark("markdown-opened");
+  }, [props.fileOpenStartMark, props.path]);
   const renderedDocument = useMemo(
     () => (
-      <IncrementalMarkdownDocument
+      <LazyMarkdownReadView
         body={markdownEditorBody(savedBody)}
-        components={MARKDOWN_COMPONENTS}
+        resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}`}
         onOpenWorkspaceLink={(target) => openWorkspaceLinkRef.current(target)}
+        onRendered={onMarkdownRendered}
       />
     ),
-    [savedBody],
+    [onMarkdownRendered, props.path, props.reopenKey, props.workspaceId, savedBody],
   );
   const onShareCurrentPath = props.onSharePath
     ? () => props.onSharePath?.(props.path)
@@ -2184,6 +2206,7 @@ function MarkdownView(props: {
   const readOnly =
     !!props.forceReadOnly ||
     engine.notInVersion ||
+    engine.documentUnavailable ||
     engine.deletedWhileEditing ||
     engine.readOnlyWhileEditing ||
     engine.permanentFailureWhileEditing ||
@@ -2218,7 +2241,19 @@ function MarkdownView(props: {
   // an editable raw surface would have to round-trip through full-body
   // markdown patching (the invariant this must never become).
   const [showSource, setShowSource] = useState(false);
-  const [sourceMarkdown, setSourceMarkdown] = useState<string | null>(null);
+  const [sourceProjection, setSourceProjection] = useState<{
+    documentKey: string;
+    doc: Y.Doc;
+    markdown: string;
+  } | null>(null);
+  // Derive currentness during render, before passive-effect cleanup can run.
+  // The key is FileInspector's existing workspace/path/version generation;
+  // doc identity also covers a same-version engine retry.
+  const sourceMarkdown =
+    sourceProjection?.documentKey === props.documentKey &&
+    sourceProjection.doc === engine.doc
+      ? sourceProjection.markdown
+      : null;
   const readDocumentRef = useRef<HTMLDivElement | null>(null);
   const localDocPaneRef = useRef<HTMLDivElement | null>(null);
   // The engine branch's scroller. It holds the top-matter (title, properties)
@@ -2516,39 +2551,58 @@ function MarkdownView(props: {
   }, [jump, showSource]);
   useEffect(() => {
     if (!showSource || !engine.doc) {
-      setSourceMarkdown(null);
+      setSourceProjection(null);
       return;
     }
     const doc = engine.doc;
+    const documentKey = props.documentKey;
     let cancelled = false;
     let serialize: ((doc: Y.Doc) => string) | null = null;
-    let frame: number | null = null;
+    let updateTimer: ReturnType<typeof setTimeout> | null = null;
+    let updateDeadline: number | null = null;
     const recompute = () => {
       if (cancelled || !serialize) return;
-      setSourceMarkdown(serialize(doc));
+      const markdown = serialize(doc);
+      if (cancelled) return;
+      setSourceProjection({ documentKey, doc, markdown });
+    };
+    const runScheduledRecompute = () => {
+      updateTimer = null;
+      updateDeadline = null;
+      recompute();
     };
     void loadImportExport().then((mod) => {
       serialize = mod.yDocToMarkdown;
+      if (updateTimer !== null) {
+        clearTimeout(updateTimer);
+        updateTimer = null;
+        updateDeadline = null;
+      }
       recompute();
     });
     // Live: agent edits / co-editors keep flowing into the mirror doc while
-    // the source view is up — re-project on updates. A co-editor's keystroke
-    // burst forwards one delta per keystroke, so coalesce to one full-document
-    // serialize per frame instead of one per delta.
+    // the source view is up. A co-editor's keystroke burst forwards one delta
+    // per keystroke, so wait for a short trailing edge while the maximum wait
+    // keeps a sustained burst repainting twice per second.
     const scheduleRecompute = () => {
-      if (frame !== null) return;
-      frame = requestAnimationFrame(() => {
-        frame = null;
-        recompute();
-      });
+      const now = Date.now();
+      updateDeadline ??= now + SOURCE_VIEW_UPDATE_MAX_WAIT_MS;
+      if (updateTimer !== null) clearTimeout(updateTimer);
+      updateTimer = setTimeout(
+        runScheduledRecompute,
+        Math.max(
+          0,
+          Math.min(SOURCE_VIEW_UPDATE_DELAY_MS, updateDeadline - now),
+        ),
+      );
     };
     doc.on("update", scheduleRecompute);
     return () => {
       cancelled = true;
-      if (frame !== null) cancelAnimationFrame(frame);
+      if (updateTimer !== null) clearTimeout(updateTimer);
       doc.off("update", scheduleRecompute);
     };
-  }, [showSource, engine.doc]);
+  }, [showSource, engine.doc, props.documentKey]);
 
   // One toggle for both branches (the shell's palette command and Ctrl/Cmd+/
   // route through it): engine mode flips the read-only source projection; the
@@ -2616,16 +2670,6 @@ function MarkdownView(props: {
     if (!readOnly) return;
     setMode("read");
   }, [readOnly]);
-
-  // Performance measure: MarkdownView only mounts once the document body is
-  // loaded, so this post-commit effect brackets click → IPC read → markdown
-  // parse → rendered document.
-  useEffect(() => {
-    rendererMarks.measureSince("markdown-open", props.fileOpenStartMark);
-    // Last-wins: readers poll this epoch to know the measure above belongs to
-    // the open they triggered (never a stale value from the previous file).
-    rendererMarks.mark("markdown-opened");
-  }, [props.fileOpenStartMark, props.path]);
 
   async function writeDraftNow(
     options: {
@@ -3328,6 +3372,7 @@ function MarkdownView(props: {
                   synced: true,
                 }}
               />
+              <MarkdownRenderCommitted onRendered={onMarkdownRendered} />
             </Suspense>
           </EditorErrorBoundary>
           {backlinks}
@@ -3464,24 +3509,27 @@ function MarkdownView(props: {
       ) : null}
       {documentNotices}
       {surfaceMode === "source" ? (
-        <textarea
-          data-testid="markdown-editor"
-          ref={editorRef}
-          autoFocus={props.autoFocus ?? true}
-          value={draft}
-          readOnly={readOnly}
-          onFocus={onLocalEditorFocus}
-          onChange={(e) => onDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if ((e.metaKey || e.ctrlKey) && e.key === "s") {
-              e.preventDefault();
-              if (saveTimer.current) clearTimeout(saveTimer.current);
-              void saveNow();
-            }
-          }}
-          spellCheck={false}
-          className="min-h-0 flex-1 resize-none bg-bg p-6 font-mono text-[14px] leading-relaxed text-ink outline-none"
-        />
+        <>
+          <textarea
+            data-testid="markdown-editor"
+            ref={editorRef}
+            autoFocus={props.autoFocus ?? true}
+            value={draft}
+            readOnly={readOnly}
+            onFocus={onLocalEditorFocus}
+            onChange={(e) => onDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+                e.preventDefault();
+                if (saveTimer.current) clearTimeout(saveTimer.current);
+                void saveNow();
+              }
+            }}
+            spellCheck={false}
+            className="min-h-0 flex-1 resize-none bg-bg p-6 font-mono text-[14px] leading-relaxed text-ink outline-none"
+          />
+          <MarkdownRenderCommitted onRendered={onMarkdownRendered} />
+        </>
       ) : surfaceMode === "wysiwyg" ? (
         // data-dohc-doc-pane: see the note on the engine pane above.
         <div
@@ -3533,6 +3581,7 @@ function MarkdownView(props: {
                 readOnly={readOnly}
                 collab={null}
               />
+              <MarkdownRenderCommitted onRendered={onMarkdownRendered} />
             </Suspense>
           </EditorErrorBoundary>
           {backlinks}
@@ -3580,6 +3629,117 @@ function deriveImportTarget(sourcePath: string): { dbPath: string; tableName: st
   const tableName = base.replace(/[^a-zA-Z0-9_]/g, "_") || "imported";
   return { dbPath: `${dir}${base}.sqlite`, tableName };
 }
+
+const MAX_CSV_PREVIEW_ROWS = 500;
+
+const CsvTableHeader = memo(function CsvTableHeader({
+  header,
+  columnCount,
+  truncated,
+  onUpdateCell,
+  onDeleteColumn,
+}: {
+  header: string[];
+  columnCount: number;
+  truncated?: boolean;
+  onUpdateCell: (rowIndex: number, cellIndex: number, value: string) => void;
+  onDeleteColumn: (cellIndex: number) => void;
+}) {
+  return (
+    <thead>
+      <tr>
+        {!truncated ? (
+          <th aria-label="Row actions" className="w-9 bg-panel px-1 py-1.5" />
+        ) : null}
+        {Array.from({ length: columnCount }, (_, index) => (
+          <th
+            key={index}
+            className={`bg-panel px-2.5 py-1.5 text-left text-[12px] font-semibold text-muted ${
+              index > 0 || !truncated ? "border-l border-line" : ""
+            }`}
+          >
+            <div className="flex items-center gap-1">
+              <input
+                data-testid="csv-cell"
+                aria-label={`Header column ${index + 1}`}
+                value={header[index] ?? ""}
+                readOnly={truncated}
+                onChange={(event) => onUpdateCell(0, index, event.target.value)}
+                className="dohc-csv-cell min-w-24 flex-1 bg-transparent text-ink outline-none read-only:text-muted"
+              />
+              {!truncated ? (
+                <button
+                  type="button"
+                  data-testid="csv-delete-column"
+                  aria-label={`Delete column ${index + 1}`}
+                  title="Delete column"
+                  onClick={() => onDeleteColumn(index)}
+                  className="grid size-5 shrink-0 place-items-center rounded text-subtle transition-colors hover:bg-line/60 hover:text-danger"
+                >
+                  <Trash2 size={11} aria-hidden />
+                </button>
+              ) : null}
+            </div>
+          </th>
+        ))}
+      </tr>
+    </thead>
+  );
+});
+
+const CsvTableRow = memo(function CsvTableRow({
+  row,
+  rowIndex,
+  columnCount,
+  truncated,
+  onUpdateCell,
+  onDeleteRow,
+}: {
+  row: string[];
+  rowIndex: number;
+  columnCount: number;
+  truncated?: boolean;
+  onUpdateCell: (rowIndex: number, cellIndex: number, value: string) => void;
+  onDeleteRow: (rowIndex: number) => void;
+}) {
+  return (
+    <tr className="group transition-colors hover:bg-panel-2/60">
+      {!truncated ? (
+        <td className="border-t border-line px-1 py-1 text-center">
+          <button
+            type="button"
+            data-testid="csv-delete-row"
+            aria-label={`Delete row ${rowIndex}`}
+            title="Delete row"
+            onClick={() => onDeleteRow(rowIndex)}
+            className="grid size-5 place-items-center rounded text-subtle opacity-0 transition-colors hover:bg-line/60 hover:text-danger focus:opacity-100 group-hover:opacity-100"
+          >
+            <Trash2 size={11} aria-hidden />
+          </button>
+        </td>
+      ) : null}
+      {Array.from({ length: columnCount }, (_, cellIndex) => (
+        <td
+          key={cellIndex}
+          className={`border-t border-line px-2.5 py-1.5 ${
+            cellIndex > 0 || !truncated ? "border-l" : ""
+          }`}
+        >
+          <input
+            data-testid="csv-cell"
+            aria-label={`Row ${rowIndex} column ${cellIndex + 1}`}
+            value={row[cellIndex] ?? ""}
+            readOnly={truncated}
+            onChange={(event) =>
+              onUpdateCell(rowIndex, cellIndex, event.target.value)
+            }
+            className="dohc-csv-cell w-full min-w-24 bg-transparent text-ink outline-none read-only:text-muted"
+          />
+        </td>
+      ))}
+    </tr>
+  );
+});
 
 function CsvView({
   body,
@@ -3637,62 +3797,93 @@ function CsvView({
     localBuffer,
   });
   const delimiter = delimiterForPath(path);
-  const rows = useMemo(
-    () => parseDelimitedRows(draft.draft, delimiter),
-    [draft.draft, delimiter],
+  // Source-of-truth rule: raw mode owns the draft string and never parses its
+  // edits; table mode owns the row model, serializes only for persistence, and
+  // recognizes that serialized draft identity instead of parsing its own output.
+  const [rows, setRowsState] = useState(() =>
+    delimitedTextCodec.parse(draft.draft, delimiter),
   );
+  const rowsRef = useRef(rows);
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const tableDraftIdentity = useRef({ text: draft.draft, delimiter });
+
+  useEffect(() => {
+    if (raw) return;
+    const identity = tableDraftIdentity.current;
+    if (identity.text === draft.draft && identity.delimiter === delimiter) return;
+    const nextRows = delimitedTextCodec.parse(draft.draft, delimiter);
+    tableDraftIdentity.current = { text: draft.draft, delimiter };
+    rowsRef.current = nextRows;
+    setRowsState(nextRows);
+  }, [delimiter, draft.draft, raw]);
+
   const [header, ...data] = rows;
   // Bounded preview (Phase 16): an unbounded <table> over 10,000+ rows
   // freezes the renderer for tens of seconds. The first rows are enough to
   // inspect and edit common CSVs; working with all of them is what Import to
   // SQLite or raw mode is for.
-  const MAX_PREVIEW_ROWS = 500;
-  const previewRows = data.length > MAX_PREVIEW_ROWS ? data.slice(0, MAX_PREVIEW_ROWS) : data;
+  const previewRows =
+    data.length > MAX_CSV_PREVIEW_ROWS
+      ? data.slice(0, MAX_CSV_PREVIEW_ROWS)
+      : data;
   const columnCount = Math.max(
     header?.length ?? 0,
     ...previewRows.map((row) => row.length),
   );
 
-  function currentRows() {
-    return parseDelimitedRows(draft.getDraft(), delimiter);
-  }
-
-  function setRows(next: string[][]) {
-    draft.setDraft(stringifyDelimitedRows(next, delimiter));
-  }
-
-  function columnName(index: number): string {
+  const columnName = useCallback(function columnName(index: number): string {
     return index === 0 ? "column" : `column_${index + 1}`;
-  }
+  }, []);
 
-  function columnCountFor(nextRows: string[][]): number {
+  const columnCountFor = useCallback(function columnCountFor(
+    nextRows: string[][],
+  ): number {
     return Math.max(
       nextRows[0]?.length ?? 0,
-      ...nextRows.slice(1, MAX_PREVIEW_ROWS + 1).map((row) => row.length),
+      ...nextRows
+        .slice(1, MAX_CSV_PREVIEW_ROWS + 1)
+        .map((row) => row.length),
       0,
     );
-  }
+  }, []);
 
-  function updateCell(rowIndex: number, cellIndex: number, value: string) {
-    const next = currentRows().map((row) => [...row]);
-    while (next.length <= rowIndex) next.push([]);
-    while (next[rowIndex]!.length <= cellIndex) next[rowIndex]!.push("");
-    next[rowIndex]![cellIndex] = value;
-    setRows(next);
-  }
+  const setRows = useCallback(
+    (nextRows: string[][]) => {
+      const nextDraft = delimitedTextCodec.serialize(nextRows, delimiter);
+      tableDraftIdentity.current = { text: nextDraft, delimiter };
+      rowsRef.current = nextRows;
+      setRowsState(nextRows);
+      draftRef.current.setDraft(nextDraft);
+    },
+    [delimiter],
+  );
 
-  function addRow() {
-    const nextRows = currentRows();
+  const updateCell = useCallback(
+    (rowIndex: number, cellIndex: number, value: string) => {
+      const nextRows = [...rowsRef.current];
+      while (nextRows.length <= rowIndex) nextRows.push([]);
+      const nextRow = [...nextRows[rowIndex]!];
+      while (nextRow.length <= cellIndex) nextRow.push("");
+      nextRow[cellIndex] = value;
+      nextRows[rowIndex] = nextRow;
+      setRows(nextRows);
+    },
+    [setRows],
+  );
+
+  const addRow = useCallback(() => {
+    const nextRows = rowsRef.current;
     if (nextRows.length === 0) {
       setRows([["column"], [""]]);
       return;
     }
     const width = Math.max(1, columnCountFor(nextRows));
     setRows([...nextRows, Array.from({ length: width }, () => "")]);
-  }
+  }, [columnCountFor, setRows]);
 
-  function addColumn() {
-    const nextRows = currentRows();
+  const addColumn = useCallback(() => {
+    const nextRows = rowsRef.current;
     if (nextRows.length === 0) {
       setRows([["column"]]);
       return;
@@ -3705,21 +3896,36 @@ function CsvView({
       return cells;
     });
     setRows(next);
-  }
+  }, [columnCountFor, columnName, setRows]);
 
-  function deleteRow(rowIndex: number) {
-    const next = currentRows().filter((_, index) => index !== rowIndex);
+  const deleteRow = useCallback((rowIndex: number) => {
+    const next = rowsRef.current.filter((_, index) => index !== rowIndex);
     setRows(next);
-  }
+  }, [setRows]);
 
-  function deleteColumn(cellIndex: number) {
-    const next = currentRows().map((row) => row.filter((_, index) => index !== cellIndex));
+  const deleteColumn = useCallback((cellIndex: number) => {
+    const next = rowsRef.current.map((row) =>
+      row.filter((_, index) => index !== cellIndex),
+    );
     if (next.every((row) => row.length === 0)) {
-      draft.setDraft("");
+      setRows([]);
       return;
     }
     setRows(next);
-  }
+  }, [setRows]);
+
+  const toggleRaw = useCallback(() => {
+    if (!raw) {
+      setRaw(true);
+      return;
+    }
+    const text = draftRef.current.getDraft();
+    const nextRows = delimitedTextCodec.parse(text, delimiter);
+    tableDraftIdentity.current = { text, delimiter };
+    rowsRef.current = nextRows;
+    setRowsState(nextRows);
+    setRaw(false);
+  }, [delimiter, raw]);
 
   async function importToSqlite() {
     if (importing || truncated) return;
@@ -3800,7 +4006,7 @@ function CsvView({
         ) : null}
         <button
           type="button"
-          onClick={() => setRaw((r) => !r)}
+          onClick={toggleRaw}
           className="rounded px-2 py-0.5 text-[11px] text-subtle hover:text-ink"
           data-testid="csv-raw-toggle"
         >
@@ -3860,82 +4066,24 @@ function CsvView({
           {/* Same table voice as the document editor: rounded frame, tinted
               header band, quiet inner hairlines, whisper row hover. */}
           <table className="w-full border-separate border-spacing-0 overflow-hidden rounded-lg border border-line text-[13px]">
-            <thead>
-              <tr>
-                {!truncated ? (
-                  <th
-                    aria-label="Row actions"
-                    className="w-9 bg-panel px-1 py-1.5"
-                  />
-                ) : null}
-                {Array.from({ length: columnCount }, (_, i) => (
-                  <th
-                    key={i}
-                    className={`bg-panel px-2.5 py-1.5 text-left text-[12px] font-semibold text-muted ${
-                      i > 0 || !truncated ? "border-l border-line" : ""
-                    }`}
-                  >
-                    <div className="flex items-center gap-1">
-                      <input
-                        data-testid="csv-cell"
-                        aria-label={`Header column ${i + 1}`}
-                        value={header[i] ?? ""}
-                        readOnly={truncated}
-                        onChange={(event) => updateCell(0, i, event.target.value)}
-                        className="dohc-csv-cell min-w-24 flex-1 bg-transparent text-ink outline-none read-only:text-muted"
-                      />
-                      {!truncated ? (
-                        <button
-                          type="button"
-                          data-testid="csv-delete-column"
-                          aria-label={`Delete column ${i + 1}`}
-                          title="Delete column"
-                          onClick={() => deleteColumn(i)}
-                          className="grid size-5 shrink-0 place-items-center rounded text-subtle transition-colors hover:bg-line/60 hover:text-danger"
-                        >
-                          <Trash2 size={11} aria-hidden />
-                        </button>
-                      ) : null}
-                    </div>
-                  </th>
-                ))}
-              </tr>
-            </thead>
+            <CsvTableHeader
+              header={header}
+              columnCount={columnCount}
+              truncated={truncated}
+              onUpdateCell={updateCell}
+              onDeleteColumn={deleteColumn}
+            />
             <tbody>
               {previewRows.map((row, r) => (
-                <tr key={r} className="group transition-colors hover:bg-panel-2/60">
-                  {!truncated ? (
-                    <td className="border-t border-line px-1 py-1 text-center">
-                      <button
-                        type="button"
-                        data-testid="csv-delete-row"
-                        aria-label={`Delete row ${r + 1}`}
-                        title="Delete row"
-                        onClick={() => deleteRow(r + 1)}
-                        className="grid size-5 place-items-center rounded text-subtle opacity-0 transition-colors hover:bg-line/60 hover:text-danger focus:opacity-100 group-hover:opacity-100"
-                      >
-                        <Trash2 size={11} aria-hidden />
-                      </button>
-                    </td>
-                  ) : null}
-                  {Array.from({ length: columnCount }, (_, c) => (
-                    <td
-                      key={c}
-                      className={`border-t border-line px-2.5 py-1.5 ${
-                        c > 0 || !truncated ? "border-l" : ""
-                      }`}
-                    >
-                      <input
-                        data-testid="csv-cell"
-                        aria-label={`Row ${r + 1} column ${c + 1}`}
-                        value={row[c] ?? ""}
-                        readOnly={truncated}
-                        onChange={(event) => updateCell(r + 1, c, event.target.value)}
-                        className="dohc-csv-cell w-full min-w-24 bg-transparent text-ink outline-none read-only:text-muted"
-                      />
-                    </td>
-                  ))}
-                </tr>
+                <CsvTableRow
+                  key={r}
+                  row={row}
+                  rowIndex={r + 1}
+                  columnCount={columnCount}
+                  truncated={truncated}
+                  onUpdateCell={updateCell}
+                  onDeleteRow={deleteRow}
+                />
               ))}
             </tbody>
           </table>
@@ -3944,8 +4092,8 @@ function CsvView({
               data-testid="csv-preview-bound"
               className="mb-0 mt-2 text-[11px] text-subtle"
             >
-              Showing the first {MAX_PREVIEW_ROWS} of {data.length} rows — import
-              to SQLite to work with all of them.
+              Showing the first {MAX_CSV_PREVIEW_ROWS} of {data.length} rows —
+              import to SQLite to work with all of them.
             </p>
           ) : null}
         </div>
@@ -4023,6 +4171,11 @@ function stringifyDelimitedRows(rows: string[][], delimiter: "," | "\t"): string
     )
     .join("\n");
 }
+
+export const delimitedTextCodec = {
+  parse: parseDelimitedRows,
+  serialize: stringifyDelimitedRows,
+};
 
 function ImageView({ url, path }: { url: string; path: string }) {
   const [dims, setDims] = useState<{ w: number; h: number } | null>(null);
@@ -4731,6 +4884,10 @@ type FileInspectorProps = {
   // Editor groups keep inactive inspectors mounted. They pass false so a
   // source textarea mounting there cannot steal focus from the active group.
   autoFocus?: boolean;
+  // Workspace-switch instrumentation waits for the restored active file to
+  // finish its read and, when applicable, bind its live document session.
+  surfaceKey?: string;
+  onSurfaceReady?: (path: string, surfaceKey: string) => void;
 };
 
 function useRetainedLocalDocument(key: string): SharedLocalDocument {
@@ -4750,7 +4907,13 @@ function useRetainedLocalDocument(key: string): SharedLocalDocument {
   return buffer;
 }
 
-export function FileInspector(props: FileInspectorProps) {
+// Memoized: the workspace shell re-renders on every lane commit (status,
+// history, agent state), and this component's render alone re-runs classify,
+// engine-open, and markdown wiring for the open document. The shell keeps
+// every prop identity-stable, so an unrelated shell render bails here.
+export const FileInspector = memo(function FileInspector(
+  props: FileInspectorProps,
+) {
   const key = documentVersionKey(
     props.workspaceId,
     props.path,
@@ -4921,6 +5084,7 @@ export function FileInspector(props: FileInspectorProps) {
   const writesRefusedRef = useRef(false);
   writesRefusedRef.current =
     notInVersion ||
+    engine.documentUnavailable ||
     engine.opening ||
     engine.engineMayHoldDocument ||
     engine.artifactAssetsInvalid ||
@@ -4956,6 +5120,11 @@ export function FileInspector(props: FileInspectorProps) {
   const { scrollTarget, onScrollConsumed } = props;
   const textReady =
     !isText || engineDocBound || (text !== null && loadedPath === props.path);
+  const activeSurfaceReady = textReady && !engine.opening;
+  useEffect(() => {
+    if (!activeSurfaceReady || !props.surfaceKey) return;
+    props.onSurfaceReady?.(props.path, props.surfaceKey);
+  }, [activeSurfaceReady, props.onSurfaceReady, props.path, props.surfaceKey]);
   useEffect(() => {
     if (scrollTarget && scrollTarget.path === props.path && textReady) {
       onScrollConsumed?.(scrollTarget.nonce);
@@ -5024,6 +5193,29 @@ export function FileInspector(props: FileInspectorProps) {
     );
   }
 
+  if (engine.documentUnavailable) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
+        <ViewHeader
+          icon={<FileText size={13} aria-hidden />}
+          path={props.path}
+          label="file"
+          onShare={onShareCurrentPath}
+        />
+        {recoveryNotices}
+        <div
+          data-testid="file-unavailable"
+          className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center text-sm text-muted"
+        >
+          <span>This file is no longer available at this path.</span>
+          <SecondaryButton className="mt-1" onClick={retryEngineOpen}>
+            Try again
+          </SecondaryButton>
+        </div>
+      </div>
+    );
+  }
+
   if (isText && !engineDocBound && (text === null || loadedPath !== props.path)) {
     // Keep the inspector frame mounted while loading/erroring so the surface
     // is stable (and testable) rather than flickering between containers.
@@ -5078,6 +5270,7 @@ export function FileInspector(props: FileInspectorProps) {
             refreshAfterConflict={refreshAfterConflict}
             workspaceId={props.workspaceId}
             path={props.path}
+            documentKey={key}
             fileOpenStartMark={props.fileOpenStartMark ?? "file-open-start"}
             truncated={truncated}
             truncatedNotice={truncatedNotice}
@@ -5299,4 +5492,4 @@ export function FileInspector(props: FileInspectorProps) {
         </div>
       );
   }
-}
+});

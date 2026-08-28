@@ -35,6 +35,7 @@ import {
 } from "./editor/import-export";
 import {
   classifyForView,
+  delimitedTextCodec,
   type DraftFlush,
   FileInspector,
   lineSpanInText,
@@ -5096,6 +5097,99 @@ describe("markdown editor unmount flush", () => {
     });
   });
 
+  it("does not parse a CSV keystroke in raw mode", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "date,amount\n2026-06-10,42",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    const user = userEvent.setup();
+    render(<FileInspector workspaceId="ws-1" path="data/table.csv" />);
+
+    await screen.findByTestId("view-csv");
+    await user.click(screen.getByTestId("csv-raw-toggle"));
+    const parse = vi.spyOn(delimitedTextCodec, "parse");
+    try {
+      fireEvent.change(screen.getByTestId("csv-raw-editor"), {
+        target: { value: "date,amount\n2026-06-10,420" },
+      });
+
+      expect(parse).not.toHaveBeenCalled();
+    } finally {
+      parse.mockRestore();
+    }
+  });
+
+  it("serializes one table-cell edit once without reparsing its output", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "date,amount\n2026-06-10,42",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    render(<FileInspector workspaceId="ws-1" path="data/table.csv" />);
+
+    await screen.findByTestId("view-csv");
+    const parse = vi.spyOn(delimitedTextCodec, "parse");
+    const serialize = vi.spyOn(delimitedTextCodec, "serialize");
+    try {
+      const cells = screen.getAllByTestId("csv-cell") as HTMLInputElement[];
+      fireEvent.change(cells[3]!, { target: { value: "43" } });
+      await act(async () => Promise.resolve());
+
+      expect(serialize).toHaveBeenCalledTimes(1);
+      expect(parse).not.toHaveBeenCalled();
+    } finally {
+      parse.mockRestore();
+      serialize.mockRestore();
+    }
+  });
+
+  it("round-trips quoted CSV cells through the existing codec", () => {
+    const text = [
+      "name,note,quote",
+      'Ada,"one,two","She said ""hi"""',
+      'Grace,"line one\nline two",plain',
+    ].join("\n");
+    const rows = [
+      ["name", "note", "quote"],
+      ["Ada", "one,two", 'She said "hi"'],
+      ["Grace", "line one\nline two", "plain"],
+    ];
+
+    expect(delimitedTextCodec.parse(text, ",")).toEqual(rows);
+    expect(delimitedTextCodec.serialize(rows, ",")).toBe(text);
+    expect(
+      delimitedTextCodec.parse(delimitedTextCodec.serialize(rows, ","), ","),
+    ).toEqual(rows);
+  });
+
+  it("preserves CSV content while switching between raw and table modes", async () => {
+    const initial = 'name,note\nAda,"one,two"';
+    const edited = 'name,note\nGrace,"line one\nline two"';
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: initial,
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    const user = userEvent.setup();
+    render(<FileInspector workspaceId="ws-1" path="data/table.csv" />);
+
+    await screen.findByTestId("view-csv");
+    await user.click(screen.getByTestId("csv-raw-toggle"));
+    const rawEditor = screen.getByTestId("csv-raw-editor") as HTMLTextAreaElement;
+    expect(rawEditor.value).toBe(initial);
+    fireEvent.change(rawEditor, { target: { value: edited } });
+
+    await user.click(screen.getByTestId("csv-raw-toggle"));
+    expect(
+      (screen.getByLabelText("Row 1 column 1") as HTMLInputElement).value,
+    ).toBe("Grace");
+    await user.click(screen.getByTestId("csv-raw-toggle"));
+    expect((screen.getByTestId("csv-raw-editor") as HTMLTextAreaElement).value).toBe(
+      edited,
+    );
+  });
+
   // #579 adversarial review F1: the opening gate lived inside MarkdownView, so
   // every NON-markdown editable view carried #567's exact mechanism unfixed —
   // three write seams, none of them gated, reached by the same version switch.
@@ -6675,6 +6769,34 @@ describe("engine markdown source view", () => {
     // No edit was pending, so the surface must not claim one was thrown away.
     expect(screen.queryByTestId("file-not-in-version-discarded")).toBeNull();
     // The editor is gone, not merely read-only.
+    expect(screen.queryByTestId("markdown-editor")).toBeNull();
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
+  it("does not recreate a live file that disappeared after the renderer read it", async () => {
+    const user = userEvent.setup();
+    const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
+    const openEngineYDocSession = vi.fn(async () => ({
+      available: false,
+      documentUnavailable: true,
+    }));
+    vi.stubGlobal("dohcDesktop", {
+      ...bridgeMock,
+      openEngineYDocSession,
+    });
+
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    const notice = await screen.findByTestId(
+      "file-unavailable",
+      {},
+      { timeout: 5_000 },
+    );
+    expect(notice.textContent).toContain(
+      "This file is no longer available at this path.",
+    );
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(2));
     expect(screen.queryByTestId("markdown-editor")).toBeNull();
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
   });

@@ -7,7 +7,10 @@ import type {
   WorkspaceCaptureDecision,
   WorkspaceCaptureHooks,
 } from "./workspaceActivity";
-import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
+import type {
+  AttachedEngineWorkspace,
+  EngineWorkspaceSessions,
+} from "@dohc/workspace-engine-client/daemon";
 
 // THE captureFor gate (single owner). Workspace-engine alpha (PR 0M-3/0M-5):
 // when the per-workspace flag is on, the engine store under .dohc/engine/ is
@@ -29,7 +32,9 @@ import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daem
 // reach here without one. Accepting a null would mean silently recording history
 // through the legacy TypeScript engine instead.
 export async function captureForFlaggedWorkspace(
-  workspace: { workspaceId: string; rootPath: string; shareView: boolean },
+  workspace: AttachedEngineWorkspace & {
+    shareView: boolean;
+  },
   hooks: WorkspaceCaptureHooks,
   rustEngineSessions: EngineWorkspaceSessions,
 ): Promise<WorkspaceCaptureDecision> {
@@ -58,6 +63,7 @@ export async function captureForFlaggedWorkspace(
     capture: createWorkspaceEngineCapture({
       workspaceId: workspace.workspaceId,
       rootPath: workspace.rootPath,
+      attachmentId: workspace.attachmentId,
       // Feeds the persistent history-capture notice (PR 0M-7): with legacy
       // recording off for flagged workspaces, a failing engine store must be
       // user-visible, not console-only.

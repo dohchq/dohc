@@ -2,14 +2,18 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ChatChannelRecord, ChannelThreadRecord, DmRecord } from "../../ipc/bridgeContract";
+import type {
+  ChatChannelRecord,
+  ChannelThreadRecord,
+  DmRecord,
+  PresenceScopeInput,
+} from "../../ipc/bridgeContract";
 import {
   ChatsView as ProductionChatsView,
   type ChatPresenceCollaboration,
 } from "./ChatsView";
 import type {
   PresencePeer,
-  PresenceScope,
   PresenceSnapshot,
   PresenceTransport,
 } from "../collab/presenceChannel";
@@ -444,9 +448,9 @@ describe("ChatsView presence (MU-C1)", () => {
 // leave() is invoked — used to pin ordering against another async call (e.g.
 // #742 P2-E: presence must leave before the leaveDm IPC ends the row).
 function recordingCollab(onLeave?: (topic: string) => void) {
-  const calls: PresenceScope[] = [];
-  const publishes: { scope: PresenceScope; topic: string }[] = [];
-  const leaves: { scope: PresenceScope; topic: string }[] = [];
+  const calls: PresenceScopeInput[] = [];
+  const publishes: { scope: PresenceScopeInput; topic: string }[] = [];
+  const leaves: { scope: PresenceScopeInput; topic: string }[] = [];
   const collaboration: ChatPresenceCollaboration = {
     transportForScope: (scope) => {
       calls.push(scope);
@@ -474,7 +478,7 @@ function recordingCollab(onLeave?: (topic: string) => void) {
   return { collaboration, calls, publishes, leaves };
 }
 
-function scopeKey(scope: PresenceScope): string {
+function scopeKey(scope: PresenceScopeInput): string {
   return scope.kind === "share" ? `share:${scope.shareId}` : `ws:${scope.workspaceId}`;
 }
 
@@ -555,6 +559,7 @@ describe("ChatsView presence scope selection (participant vs owner)", () => {
     await waitFor(() => expect(rec.publishes.some((p) => p.topic === "wire-joined")).toBe(true));
     expect(rec.publishes.find((p) => p.topic === "wire-joined")?.scope).toEqual({
       kind: "share",
+      workspaceId: "workspace-a",
       shareId: "share-1",
     });
 
@@ -631,6 +636,7 @@ describe("ChatsView presence scope selection (participant vs owner)", () => {
     );
     expect(rec.publishes.find((p) => p.topic === "chat:thread:thread-j")?.scope).toEqual({
       kind: "share",
+      workspaceId: "workspace-a",
       shareId: "share-1",
     });
   });
@@ -689,6 +695,7 @@ describe("ChatsView presence scope selection (DM)", () => {
     await waitFor(() => expect(rec.publishes.some((p) => p.topic === "wire-dm")).toBe(true));
     expect(rec.publishes.find((p) => p.topic === "wire-dm")?.scope).toEqual({
       kind: "share",
+      workspaceId: "workspace-a",
       shareId: "dm-share-1",
     });
   });
@@ -735,6 +742,7 @@ describe("ChatsView presence scope selection (DM)", () => {
     await waitFor(() => expect(rec.publishes.some((p) => p.topic === "wire-dm")).toBe(true));
     expect(rec.publishes.find((p) => p.topic === "wire-dm")?.scope).toEqual({
       kind: "share",
+      workspaceId: "workspace-a",
       shareId: "dm-share-1",
     });
     // Back out and open the plain channel: WORKSPACE scope on the channel topic
@@ -769,7 +777,7 @@ describe("ChatsView presence scope selection (DM)", () => {
     bridgeMock.listChatChannels.mockResolvedValue({ channels: [], fileThreads: [] });
     bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [participantDm] });
     const order: string[] = [];
-    const leaves: { scope: PresenceScope; topic: string }[] = [];
+    const leaves: { scope: PresenceScopeInput; topic: string }[] = [];
     let releaseLeave!: () => void;
     const leaveGate = new Promise<void>((resolve) => {
       releaseLeave = resolve;
@@ -821,7 +829,16 @@ describe("ChatsView presence scope selection (DM)", () => {
 
     releaseLeave();
     await waitFor(() => expect(bridgeMock.leaveDm).toHaveBeenCalled());
-    expect(leaves).toEqual([{ scope: { kind: "share", shareId: "dm-share-1" }, topic: "wire-dm" }]);
+    expect(leaves).toEqual([
+      {
+        scope: {
+          kind: "share",
+          workspaceId: "workspace-a",
+          shareId: "dm-share-1",
+        },
+        topic: "wire-dm",
+      },
+    ]);
     expect(order).toEqual(["presence-leave-settled", "leave-dm"]);
   });
 
@@ -858,7 +875,11 @@ describe("ChatsView presence scope selection (DM)", () => {
       expect(rec.publishes.length).toBeGreaterThan(publishesBeforeLeave),
     );
     expect(rec.publishes.at(-1)).toEqual({
-      scope: { kind: "share", shareId: "dm-share-1" },
+      scope: {
+        kind: "share",
+        workspaceId: "workspace-a",
+        shareId: "dm-share-1",
+      },
       topic: "wire-dm",
     });
   });
@@ -951,6 +972,7 @@ describe("ChatsView presence scope gating (loaded share state)", () => {
     await waitFor(() => expect(rec.publishes.some((p) => p.topic === "wire-joined")).toBe(true));
     expect(rec.publishes.find((p) => p.topic === "wire-joined")?.scope).toEqual({
       kind: "share",
+      workspaceId: "workspace-a",
       shareId: "share-1",
     });
   });

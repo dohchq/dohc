@@ -10,7 +10,7 @@
 //!                    BlobChunk: bit0 = FIN (final chunk); rest must be 0.
 //! [6..8)   reserved  must be 0
 //! [8..12)  len       payload byte length
-//! [12..)   payload   Control: encoded envelope (JSON in protocol v1).
+//! [12..)   payload   Control: encoded envelope (JSON in protocol v2).
 //!                    BlobChunk: stream_id u64 LE, then raw bytes.
 //! ```
 //!
@@ -98,17 +98,21 @@ pub fn encode_blob_chunk_frame(
     Ok(frame)
 }
 
-/// Plan ordered chunks for one non-empty blob, marking exactly the final
-/// chunk with FIN. Callers encode/write each item incrementally.
+/// Plan ordered chunks for one blob, marking exactly the final chunk with FIN.
+/// An empty blob is one zero-byte final chunk so receivers always observe
+/// completion after `BlobStart`.
 pub fn blob_chunks(bytes: &[u8], max_chunk_bytes: usize) -> impl Iterator<Item = (bool, &[u8])> {
     assert!(max_chunk_bytes > 0, "blob chunk limit must be positive");
-    bytes
-        .chunks(max_chunk_bytes)
-        .enumerate()
-        .map(move |(index, chunk)| {
-            let fin = (index + 1) * max_chunk_bytes >= bytes.len();
-            (fin, chunk)
-        })
+    let empty = bytes.is_empty().then_some((true, bytes)).into_iter();
+    empty.chain(
+        bytes
+            .chunks(max_chunk_bytes)
+            .enumerate()
+            .map(move |(index, chunk)| {
+                let fin = (index + 1) * max_chunk_bytes >= bytes.len();
+                (fin, chunk)
+            }),
+    )
 }
 
 fn push_header(out: &mut Vec<u8>, frame_type: u8, flags: u8, payload_len: u32) {

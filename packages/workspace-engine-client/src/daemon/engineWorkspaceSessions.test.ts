@@ -29,6 +29,7 @@ import {
   EngineWorkspaceSessions,
   EngineWorkspaceShuttingDownError,
   isEngineWorkspaceOpenRefusedError,
+  type EngineWorkspace,
   WORKSPACE_OPEN_DEADLINE_MS,
 } from "./engineWorkspaceSessions";
 
@@ -119,6 +120,26 @@ function daemonRefusal(
 }
 
 describe("EngineWorkspaceSessions", () => {
+  it("requires an exact policy identity while preserving explicit synthetic shares", () => {
+    const sessions = {} as EngineWorkspaceSessions;
+    const bare: EngineWorkspace = {
+      workspaceId: "bare-policy-workspace",
+      rootPath: "/unused",
+    };
+    if (false) {
+      // @ts-expect-error Capture policy belongs to one physical attachment.
+      sessions.rememberCaptureAuthor(bare, null);
+      // @ts-expect-error Rebuild policy belongs to one physical attachment.
+      sessions.beginRebuild(bare);
+      // @ts-expect-error Rebuild policy belongs to one physical attachment.
+      sessions.endRebuild(bare);
+      // @ts-expect-error Share policy requires an explicit share-mount descriptor.
+      sessions.rememberShareMount(bare);
+      sessions.rememberShareMount({ ...bare, shareMount: true });
+    }
+    expect(true).toBe(true);
+  });
+
   it("keeps a committed scene read-only while asset materialization is pending", () => {
     const refusal = daemonRefusal(
       "OVERLOADED",
@@ -518,15 +539,20 @@ describe("EngineWorkspaceSessions", () => {
       onBehalfOf: "local",
       agentRunId: "run",
     };
-    sessions.rememberCaptureAuthor("workspace", author);
+    const workspace = {
+      workspaceId: "workspace",
+      rootPath,
+      attachmentId: Symbol("capture-author"),
+    };
+    sessions.rememberCaptureAuthor(workspace, author);
 
     await sessions.run(
-      { workspaceId: "workspace", rootPath },
+      workspace,
       async (binding) => binding.workspace,
     );
     generation = 1;
     await sessions.run(
-      { workspaceId: "workspace", rootPath },
+      workspace,
       async (binding) => binding.workspace,
     );
 
@@ -619,6 +645,497 @@ describe("EngineWorkspaceSessions", () => {
     expect(secondOperation).toHaveBeenCalledOnce();
   });
 
+  it("rebinds after active runs drain without retiring capture policy", async () => {
+    const workspace = {
+      ...(await tempWorkspace("workspace-capture-rebind")),
+      attachmentId: Symbol("capture-rebind"),
+    };
+    const author = {
+      kind: "agent" as const,
+      agentId: "agent",
+      onBehalfOf: "local",
+      agentRunId: "run",
+    };
+    const operationStarted = deferred<void>();
+    const finishOperation = deferred<void>();
+    const closeStarted = deferred<void>();
+    const order: string[] = [];
+    const requests: Request[] = [];
+    let openCount = 0;
+    const client: EngineDaemonClient = {
+      close() {},
+      async sendRequest(request) {
+        requests.push(request);
+        if (request.method === "workspace.open") {
+          openCount += 1;
+          return {
+            id: request.id,
+            result: { workspace: `handle-${openCount}` },
+          };
+        }
+        if (request.method === "workspace.close") {
+          order.push("close-started");
+          closeStarted.resolve();
+          return { id: request.id, result: { closed: true } };
+        }
+        throw new Error(`Unexpected request: ${request.method}`);
+      },
+    };
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+    sessions.rememberCaptureAuthor(workspace, author);
+    const activeRun = sessions.run(workspace, async () => {
+      operationStarted.resolve();
+      await finishOperation.promise;
+      order.push("run-finished");
+      return "finished";
+    });
+    await operationStarted.promise;
+
+    const rebinding = sessions.closeWorkspaceBinding(workspace);
+    await expect(
+      sessions.run(
+        { workspaceId: workspace.workspaceId, rootPath: workspace.rootPath },
+        async () => "unexpected",
+      ),
+    ).rejects.toThrow("different session key");
+    expect(order).toEqual([]);
+    finishOperation.resolve();
+    await expect(activeRun).resolves.toBe("finished");
+    await closeStarted.promise;
+    await rebinding;
+    expect(order).toEqual(["run-finished", "close-started"]);
+
+    await sessions.run(workspace, async () => undefined);
+    const firstTwoOpens = requests.filter(
+      (request) => request.method === "workspace.open",
+    );
+    expect(firstTwoOpens).toHaveLength(2);
+    expect(firstTwoOpens.map((request) => request.params)).toEqual([
+      expect.objectContaining({ captureAuthor: author }),
+      expect.objectContaining({ captureAuthor: author }),
+    ]);
+
+    await sessions.closeWorkspace(workspace);
+    await sessions.run(workspace, async () => undefined);
+    const finalOpen = requests.filter(
+      (request) => request.method === "workspace.open",
+    ).at(-1);
+    expect(finalOpen?.params).not.toHaveProperty("captureAuthor");
+    await sessions.closeAll();
+  });
+
+  it("keeps capture policy through a retry that is already draining", async () => {
+    const workspace = {
+      ...(await tempWorkspace("workspace-capture-retire-drain")),
+      attachmentId: Symbol("capture-retire-drain"),
+    };
+    const author = {
+      kind: "agent" as const,
+      agentId: "agent",
+      onBehalfOf: "local",
+      agentRunId: "run",
+    };
+    const firstAttemptStarted = deferred<void>();
+    const failFirstAttempt = deferred<void>();
+    const requests: Request[] = [];
+    let openCount = 0;
+    const client: EngineDaemonClient = {
+      close() {},
+      async sendRequest(request) {
+        requests.push(request);
+        if (request.method === "workspace.open") {
+          openCount += 1;
+          return {
+            id: request.id,
+            result: { workspace: `handle-${openCount}` },
+          };
+        }
+        if (request.method === "workspace.close") {
+          return { id: request.id, result: { closed: true } };
+        }
+        throw new Error(`Unexpected request: ${request.method}`);
+      },
+    };
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+    sessions.rememberCaptureAuthor(workspace, author);
+    let attempts = 0;
+    const activeRun = sessions.run(
+      workspace,
+      async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          firstAttemptStarted.resolve();
+          await failFirstAttempt.promise;
+          throw transportFailure();
+        }
+        return "finished";
+      },
+      { retryTransportErrors: true },
+    );
+    await firstAttemptStarted.promise;
+
+    const retiring = sessions.closeWorkspace(workspace);
+    failFirstAttempt.resolve();
+
+    await expect(activeRun).resolves.toBe("finished");
+    await retiring;
+    const opens = requests.filter(
+      (request) => request.method === "workspace.open",
+    );
+    expect(opens).toHaveLength(2);
+    expect(opens.map((request) => request.params)).toEqual([
+      expect.objectContaining({ captureAuthor: author }),
+      expect.objectContaining({ captureAuthor: author }),
+    ]);
+  });
+
+  it("preserves a remembered share mount across rebind but not physical close", async () => {
+    const workspace = {
+      ...(await tempWorkspace("workspace-share-rebind")),
+      attachmentId: Symbol("share-rebind"),
+    };
+    const client = new MockClient("share-rebind-handle");
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+    sessions.rememberShareMount({ ...workspace, shareMount: true });
+
+    await sessions.run(workspace, async () => undefined);
+    await sessions.closeWorkspaceBinding(workspace);
+    await sessions.run(workspace, async () => undefined);
+    const firstTwoOpens = client.requests.filter(
+      (request) => request.method === "workspace.open",
+    );
+    expect(firstTwoOpens).toHaveLength(2);
+    expect(firstTwoOpens.map((request) => request.params)).toEqual([
+      expect.objectContaining({ captureMode: "none" }),
+      expect.objectContaining({ captureMode: "none" }),
+    ]);
+
+    await sessions.closeWorkspace(workspace);
+    await sessions.run(workspace, async () => undefined);
+    const finalOpen = client.requests.filter(
+      (request) => request.method === "workspace.open",
+    ).at(-1);
+    expect(finalOpen?.params).not.toHaveProperty("captureMode");
+    await sessions.closeAll();
+  });
+
+  it("isolates engine policy between attachments that reuse one workspace id", async () => {
+    const base = await tempWorkspace("workspace-policy-attachments");
+    const workspaceA = { ...base, attachmentId: Symbol("attachment-a") };
+    const workspaceB = { ...base, attachmentId: Symbol("attachment-b") };
+    const authorA = {
+      kind: "agent" as const,
+      agentId: "agent-a",
+      onBehalfOf: "local",
+      agentRunId: "run-a",
+    };
+    const authorB = {
+      kind: "agent" as const,
+      agentId: "agent-b",
+      onBehalfOf: "local",
+      agentRunId: "run-b",
+    };
+    const client = new MockClient("policy-handle");
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+    sessions.rememberCaptureAuthor(workspaceA, authorA);
+    sessions.rememberCaptureAuthor(workspaceB, authorB);
+    sessions.rememberShareMount({ ...workspaceA, shareMount: true });
+    sessions.beginRebuild(workspaceA);
+
+    await expect(
+      sessions.run(workspaceA, async () => "unexpected"),
+    ).rejects.toEqual(new EngineWorkspaceRebuildingError(base.workspaceId));
+    await expect(
+      sessions.run(workspaceB, async () => "attachment-b"),
+    ).resolves.toBe("attachment-b");
+    expect(client.requests.at(-1)?.params).toEqual(
+      expect.objectContaining({ captureAuthor: authorB }),
+    );
+    expect(client.requests.at(-1)?.params).not.toHaveProperty("captureMode");
+
+    await sessions.closeWorkspace(workspaceB);
+    sessions.endRebuild(workspaceA);
+    await sessions.run(workspaceA, async () => undefined);
+    expect(client.requests.at(-1)?.params).toEqual(
+      expect.objectContaining({ captureMode: "none" }),
+    );
+    expect(client.requests.at(-1)?.params).not.toHaveProperty("captureAuthor");
+    await sessions.closeAll();
+  });
+
+  it("preserves explicit share policy for an unattached synthetic session", async () => {
+    const workspace = {
+      ...(await tempWorkspace("synthetic-share-policy")),
+      shareMount: true as const,
+    };
+    const client = new MockClient("synthetic-share-handle");
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+    sessions.rememberShareMount(workspace);
+
+    await sessions.run(
+      { workspaceId: workspace.workspaceId, rootPath: workspace.rootPath },
+      async () => undefined,
+    );
+
+    expect(client.requests.at(-1)?.params).toEqual(
+      expect.objectContaining({ captureMode: "none" }),
+    );
+    await sessions.closeAll();
+  });
+
+  it("rejects a bare session after an attachment claims the workspace", async () => {
+    const workspace = {
+      ...(await tempWorkspace()),
+      attachmentId: Symbol("attachment"),
+    };
+    const client = new MockClient("attachment-handle");
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+
+    await expect(
+      sessions.run(workspace, async ({ workspace: handle }) => handle),
+    ).resolves.toBe("attachment-handle");
+    const bareOperation = vi.fn(async () => "bare");
+    await expect(
+      sessions.run(
+        { workspaceId: workspace.workspaceId, rootPath: workspace.rootPath },
+        bareOperation,
+      ),
+    ).rejects.toThrow("different session key");
+    await expect(
+      sessions.run(workspace, async ({ workspace: handle }) => handle),
+    ).resolves.toBe("attachment-handle");
+
+    expect(bareOperation).not.toHaveBeenCalled();
+    expect(
+      client.requests.filter((request) => request.method === "workspace.open"),
+    ).toHaveLength(1);
+    expect(
+      client.requests.filter((request) => request.method === "workspace.close"),
+    ).toHaveLength(0);
+  });
+
+  it("rejects an attachment session after a bare key claims the workspace", async () => {
+    const bareWorkspace = await tempWorkspace();
+    const attachmentWorkspace = {
+      ...bareWorkspace,
+      attachmentId: Symbol("attachment"),
+    };
+    const client = new MockClient("bare-handle");
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+
+    await expect(
+      sessions.run(bareWorkspace, async ({ workspace: handle }) => handle),
+    ).resolves.toBe("bare-handle");
+    const attachmentOperation = vi.fn(async () => "attachment");
+    await expect(
+      sessions.run(attachmentWorkspace, attachmentOperation),
+    ).rejects.toThrow("different session key");
+    await expect(
+      sessions.run(bareWorkspace, async ({ workspace: handle }) => handle),
+    ).resolves.toBe("bare-handle");
+
+    expect(attachmentOperation).not.toHaveBeenCalled();
+    expect(
+      client.requests.filter((request) => request.method === "workspace.open"),
+    ).toHaveLength(1);
+    expect(
+      client.requests.filter((request) => request.method === "workspace.close"),
+    ).toHaveLength(0);
+  });
+
+  it("keeps the attachment claim while an active run and its close drain", async () => {
+    const workspace = {
+      ...(await tempWorkspace()),
+      attachmentId: Symbol("attachment"),
+    };
+    const bareWorkspace = {
+      workspaceId: workspace.workspaceId,
+      rootPath: workspace.rootPath,
+    };
+    const operationStarted = deferred<void>();
+    const finishOperation = deferred<void>();
+    const closeStarted = deferred<void>();
+    const finishClose = deferred<void>();
+    const requests: Request[] = [];
+    let openCount = 0;
+    const client: EngineDaemonClient = {
+      close() {},
+      async sendRequest(request) {
+        requests.push(request);
+        if (request.method === "workspace.open") {
+          openCount += 1;
+          return {
+            id: request.id,
+            result: { workspace: `handle-${openCount}` },
+          };
+        }
+        if (request.method === "workspace.close") {
+          closeStarted.resolve();
+          await finishClose.promise;
+          return { id: request.id, result: { closed: true } };
+        }
+        throw new Error(`Unexpected request: ${request.method}`);
+      },
+    };
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+    const activeRun = sessions.run(workspace, async () => {
+      operationStarted.resolve();
+      await finishOperation.promise;
+      return "finished";
+    });
+    await operationStarted.promise;
+
+    const closing = sessions.closeWorkspace(workspace);
+    const whileActive = await sessions
+      .run(bareWorkspace, async () => "unexpected")
+      .catch((error: unknown) => error);
+    finishOperation.resolve();
+    await expect(activeRun).resolves.toBe("finished");
+    await closeStarted.promise;
+    const whileDaemonClose = await sessions
+      .run(bareWorkspace, async () => "unexpected")
+      .catch((error: unknown) => error);
+    finishClose.resolve();
+    await closing;
+
+    expect(whileActive).toEqual(expect.any(Error));
+    expect((whileActive as Error).message).toContain("different session key");
+    expect(whileDaemonClose).toEqual(expect.any(Error));
+    expect((whileDaemonClose as Error).message).toContain(
+      "different session key",
+    );
+    expect(openCount).toBe(1);
+    expect(
+      requests.filter((request) => request.method === "workspace.close"),
+    ).toHaveLength(1);
+  });
+
+  it("hands the workspace to a bare key after the attachment closes", async () => {
+    const workspace = {
+      ...(await tempWorkspace()),
+      attachmentId: Symbol("attachment"),
+    };
+    let openCount = 0;
+    const client: EngineDaemonClient = {
+      close() {},
+      async sendRequest(request) {
+        if (request.method === "workspace.open") {
+          openCount += 1;
+          return {
+            id: request.id,
+            result: { workspace: `handle-${openCount}` },
+          };
+        }
+        if (request.method === "workspace.close") {
+          return { id: request.id, result: { closed: true } };
+        }
+        throw new Error(`Unexpected request: ${request.method}`);
+      },
+    };
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+
+    await expect(
+      sessions.run(workspace, async ({ workspace: handle }) => handle),
+    ).resolves.toBe("handle-1");
+    await sessions.closeWorkspace(workspace);
+    await expect(
+      sessions.run(
+        { workspaceId: workspace.workspaceId, rootPath: workspace.rootPath },
+        async ({ workspace: handle }) => handle,
+      ),
+    ).resolves.toBe("handle-2");
+
+    expect(openCount).toBe(2);
+  });
+
+  it("keeps claims for different workspaces independent", async () => {
+    const attachmentWorkspace = {
+      ...(await tempWorkspace("workspace-attachment")),
+      attachmentId: Symbol("attachment"),
+    };
+    const bareWorkspace = await tempWorkspace("workspace-bare");
+    const client = new MockClient("workspace-handle");
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+
+    await expect(
+      Promise.all([
+        sessions.run(attachmentWorkspace, async () => "attachment"),
+        sessions.run(bareWorkspace, async () => "bare"),
+      ]),
+    ).resolves.toEqual(["attachment", "bare"]);
+    expect(
+      client.requests.filter((request) => request.method === "workspace.open"),
+    ).toHaveLength(2);
+  });
+
+  it("does not let a workspace-id close discover a token-bound attachment", async () => {
+    const workspace = {
+      ...(await tempWorkspace()),
+      attachmentId: Symbol("attachment"),
+    };
+    const client = new MockClient("exact-handle");
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+
+    await expect(
+      sessions.run(workspace, async ({ workspace: handle }) => handle),
+    ).resolves.toBe("exact-handle");
+    await sessions.closeWorkspace(workspace.workspaceId);
+    await expect(
+      sessions.run(workspace, async ({ workspace: handle }) => handle),
+    ).resolves.toBe("exact-handle");
+
+    expect(
+      client.requests.filter((request) => request.method === "workspace.open"),
+    ).toHaveLength(1);
+    expect(
+      client.requests.filter((request) => request.method === "workspace.close"),
+    ).toHaveLength(0);
+  });
+
+  it("rejects a changed root presented with the same attachment token", async () => {
+    const workspace = {
+      ...(await tempWorkspace()),
+      attachmentId: Symbol("attachment"),
+    };
+    const client = new MockClient("exact-handle");
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+    await sessions.run(workspace, async () => undefined);
+
+    await expect(
+      sessions.run(
+        { ...workspace, rootPath: await tempRoot() },
+        async () => undefined,
+      ),
+    ).rejects.toThrow("Rust engine workspace authority changed");
+    expect(
+      client.requests.filter((request) => request.method === "workspace.open"),
+    ).toHaveLength(1);
+  });
+
   it("makes closeAll terminal so teardown cannot be repopulated", async () => {
     const workspace = await tempWorkspace();
     const closeGate = deferred<void>();
@@ -664,7 +1181,10 @@ describe("EngineWorkspaceSessions", () => {
   });
 
   it("refuses one workspace while its store is rebuilding", async () => {
-    const workspace = await tempWorkspace();
+    const workspace = {
+      ...(await tempWorkspace()),
+      attachmentId: Symbol("rebuild-workspace"),
+    };
     const otherWorkspace = await tempWorkspace("other-workspace");
     const requests: Request[] = [];
     const client: EngineDaemonClient = {
@@ -686,7 +1206,7 @@ describe("EngineWorkspaceSessions", () => {
     await sessions.run(workspace, async () => undefined);
     const operation = vi.fn(async () => "unexpected");
 
-    sessions.beginRebuild(workspace.workspaceId);
+    sessions.beginRebuild(workspace);
     try {
       await expect(sessions.run(workspace, operation)).rejects.toEqual(
         new EngineWorkspaceRebuildingError(workspace.workspaceId),
@@ -698,7 +1218,7 @@ describe("EngineWorkspaceSessions", () => {
       ).resolves.toBe("other-opened");
       expect(requests).toHaveLength(2);
     } finally {
-      sessions.endRebuild(workspace.workspaceId);
+      sessions.endRebuild(workspace);
     }
 
     await expect(
@@ -708,7 +1228,10 @@ describe("EngineWorkspaceSessions", () => {
   });
 
   it("refuses a run that was waiting for close when rebuilding starts", async () => {
-    const workspace = await tempWorkspace();
+    const workspace = {
+      ...(await tempWorkspace()),
+      attachmentId: Symbol("queued-rebuild-workspace"),
+    };
     const closeStarted = deferred<void>();
     const finishClose = deferred<void>();
     let openCount = 0;
@@ -735,11 +1258,11 @@ describe("EngineWorkspaceSessions", () => {
     });
     await sessions.run(workspace, async () => undefined);
 
-    const closing = sessions.closeWorkspace(workspace.workspaceId);
+    const closing = sessions.closeWorkspace(workspace);
     await closeStarted.promise;
     const operation = vi.fn(async () => "unexpected");
     const queuedRun = sessions.run(workspace, operation);
-    sessions.beginRebuild(workspace.workspaceId);
+    sessions.beginRebuild(workspace);
     finishClose.resolve();
     await closing;
 
@@ -750,7 +1273,7 @@ describe("EngineWorkspaceSessions", () => {
       expect(operation).not.toHaveBeenCalled();
       expect(openCount).toBe(1);
     } finally {
-      sessions.endRebuild(workspace.workspaceId);
+      sessions.endRebuild(workspace);
     }
 
     await expect(

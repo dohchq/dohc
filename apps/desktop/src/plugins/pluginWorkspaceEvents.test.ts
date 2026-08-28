@@ -4,7 +4,10 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { JsonRpcTransport } from "../agents/JsonRpcTransport";
-import { localWorkspaceSdkReads } from "../testing/localWorkspaceSdkReads";
+import {
+  localWorkspaceSdkDatabaseEditor,
+  localWorkspaceSdkReads,
+} from "../testing/localWorkspaceSdkReads";
 import type { CreatedWorkspace } from "../workspaces/createWorkspaceFolder";
 import { createTestScratch } from "../workspaces/testTemp";
 import {
@@ -64,6 +67,7 @@ describe("PluginWorkspaceEvents", () => {
           workspaceId: "ws-plugins",
           pluginId: "sites",
           panelId: "main",
+          surfaceId: 1,
         },
         emitEvent: sink.emitEvent,
       },
@@ -177,6 +181,7 @@ describe("PluginWorkspaceEvents", () => {
         workspaceId: "ws-plugins",
         pluginId: "sites",
         panelId: "main",
+        surfaceId: 1,
       },
       emitEvent: sink.emitEvent,
     };
@@ -267,6 +272,7 @@ describe("PluginWorkspaceEvents", () => {
           workspaceId: "ws-plugins",
           pluginId: "sites",
           panelId: "main",
+          surfaceId: 1,
         },
         emitEvent: panel.emitEvent,
       },
@@ -284,8 +290,8 @@ describe("PluginWorkspaceEvents", () => {
   it("disposes only the exact panel owner", () => {
     const events = new PluginWorkspaceEvents();
     const process = collector();
-    const panelA = collector();
-    const panelB = collector();
+    const replaced = collector();
+    const successor = collector();
     events.subscribe(
       {
         owner: { kind: "process", pluginId: "p", spawnId: "s" },
@@ -299,9 +305,10 @@ describe("PluginWorkspaceEvents", () => {
           kind: "panel",
           workspaceId: "ws-plugins",
           pluginId: "p",
-          panelId: "a",
+          panelId: "main",
+          surfaceId: 1,
         },
-        emitEvent: panelA.emitEvent,
+        emitEvent: replaced.emitEvent,
       },
       { path: "docs" },
     );
@@ -311,9 +318,10 @@ describe("PluginWorkspaceEvents", () => {
           kind: "panel",
           workspaceId: "ws-plugins",
           pluginId: "p",
-          panelId: "b",
+          panelId: "main",
+          surfaceId: 2,
         },
-        emitEvent: panelB.emitEvent,
+        emitEvent: successor.emitEvent,
       },
       { path: "docs" },
     );
@@ -322,13 +330,14 @@ describe("PluginWorkspaceEvents", () => {
       kind: "panel",
       workspaceId: "ws-plugins",
       pluginId: "p",
-      panelId: "a",
+      panelId: "main",
+      surfaceId: 1,
     });
     events.handleWatcherEvents([update("docs/after.md")]);
 
-    expect(panelA.emitted).toEqual([]);
+    expect(replaced.emitted).toEqual([]);
     expect(paths(process.emitted)).toEqual(["docs/after.md"]);
-    expect(paths(panelB.emitted)).toEqual(["docs/after.md"]);
+    expect(paths(successor.emitted)).toEqual(["docs/after.md"]);
   });
 
   it("delivers nothing to another workspace's plugins", () => {
@@ -429,6 +438,7 @@ describe("the plugin SDK host's files.watch route", () => {
       pluginId: "sites",
       workspaceRoot: "C:/workspace",
       reads: localWorkspaceSdkReads("C:/workspace"),
+      editDatabase: localWorkspaceSdkDatabaseEditor("C:/workspace"),
       spawnId: "spawn-1",
       requestPath: "plugin-process",
       isWritable: () => true,
@@ -473,6 +483,7 @@ describe("the plugin SDK host's files.watch route", () => {
       workspaceId: "ws-plugins",
       pluginId: "sites",
       panelId: "main",
+      surfaceId: 1,
     };
     const panel = hostContext({
       requestPath: "panel",
@@ -655,6 +666,7 @@ async function startWatchingPlugin(prefix: string): Promise<WatchingPlugin> {
           pluginId,
           workspaceRoot: root,
           reads: localWorkspaceSdkReads(root),
+          editDatabase: localWorkspaceSdkDatabaseEditor(root),
           spawnId,
           requestPath: "plugin-process",
           isWritable: () => true,

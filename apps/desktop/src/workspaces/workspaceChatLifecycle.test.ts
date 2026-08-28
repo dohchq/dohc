@@ -49,7 +49,55 @@ describe("workspace chat lifecycle", () => {
     expect(maintain).toHaveBeenCalledTimes(1);
   });
 
-  it("makes maintenance part of first open and runs it after join hydration", async () => {
+  it("does not make the open wait for the AGENTS.md maintenance", async () => {
+    let releaseMaintenance: () => void = () => {
+      throw new Error("Maintenance did not start.");
+    };
+    const lifecycle = createWorkspaceChatLifecycle({
+      isReadOnly: () => false,
+      maintain: () =>
+        new Promise<void>((resolve) => {
+          releaseMaintenance = resolve;
+        }),
+      onError: vi.fn(),
+    });
+
+    // The read-modify-write is still pending; the open (the renderer's file
+    // tree) must not be waiting on it.
+    await expect(
+      lifecycle.open(
+        { workspaceId: "personal", rootPath: "/workspace" },
+        async () => "opened",
+      ),
+    ).resolves.toBe("opened");
+    releaseMaintenance();
+  });
+
+  it("lets attachment teardown drain background maintenance", async () => {
+    const maintenance = Promise.withResolvers<void>();
+    const lifecycle = createWorkspaceChatLifecycle({
+      isReadOnly: () => false,
+      maintain: () => maintenance.promise,
+      onError: vi.fn(),
+    });
+
+    await lifecycle.open(
+      { workspaceId: "personal", rootPath: "/workspace" },
+      async () => undefined,
+    );
+    let drained = false;
+    const settling = lifecycle.settled().then(() => {
+      drained = true;
+    });
+    await Promise.resolve();
+    expect(drained).toBe(false);
+
+    maintenance.resolve();
+    await settling;
+    expect(drained).toBe(true);
+  });
+
+  it("starts maintenance on first open, after join hydration", async () => {
     const order: string[] = [];
     const lifecycle = createWorkspaceChatLifecycle({
       isReadOnly: () => false,
@@ -121,6 +169,8 @@ describe("workspace chat lifecycle", () => {
       { workspaceId: "personal", rootPath: "/workspace" },
       async () => "opened",
     )).resolves.toBe("opened");
-    expect(onError).toHaveBeenCalledWith(error);
+    // The open resolved without waiting for maintenance, so the failure
+    // reports on its own settled promise.
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledWith(error));
   });
 });

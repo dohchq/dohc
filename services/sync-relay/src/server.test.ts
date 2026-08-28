@@ -951,6 +951,66 @@ describe("sync relay handler", () => {
     // MUTATION: omitting the durable marker makes every reopen rescan the full log.
   });
 
+  it("replaces the pre-launch combined share table without carrying rows forward", async () => {
+    const root = await tempRoot("share-grant-cutover");
+    const dbPath = join(root, "relay.sqlite");
+    const initial = openSyncRelayStorage(dbPath);
+    initial.claimWorkspace({
+      workspaceId: "workspace-a",
+      ownerUserId: "owner-a",
+      createdAtMs: 1,
+    });
+    initial.close();
+
+    const legacy = new InspectionDatabaseSync(dbPath, { readOnly: false });
+    legacy.exec(`
+      PRAGMA foreign_keys = OFF;
+      DROP TABLE sync_relay_share_grants;
+      DROP TABLE sync_relay_shares;
+      CREATE TABLE sync_relay_shares (
+        share_id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        granter_user_id TEXT NOT NULL,
+        recipient_user_id TEXT,
+        recipient_email TEXT,
+        selector_json TEXT NOT NULL,
+        created_at_ms INTEGER NOT NULL,
+        revoked_at_ms INTEGER
+      );
+      INSERT INTO sync_relay_shares (
+        share_id, workspace_id, granter_user_id, recipient_user_id,
+        recipient_email, selector_json, created_at_ms, revoked_at_ms
+      ) VALUES (
+        'legacy-share', 'workspace-a', 'owner-a', 'recipient-a', NULL,
+        '{"paths":["docs"],"versionId":null,"access":"view"}', 1, NULL
+      );
+    `);
+    legacy.close();
+
+    const normalized = openSyncRelayStorage(dbPath);
+    expect(normalized.getShare("legacy-share")).toBeNull();
+    normalized.close();
+
+    const inspected = new InspectionDatabaseSync(dbPath, { readOnly: true });
+    const legacyColumns = inspected
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM pragma_table_info('sync_relay_shares')
+         WHERE name IN ('recipient_user_id', 'recipient_email', 'revoked_at_ms')`,
+      )
+      .get();
+    const grantTable = inspected
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM sqlite_master
+         WHERE type = 'table' AND name = 'sync_relay_share_grants'`,
+      )
+      .get();
+    inspected.close();
+    expect(Number(legacyColumns?.count)).toBe(0);
+    expect(Number(grantTable?.count)).toBe(1);
+  });
+
   // Gate finding: a missing blob in an OWNED workspace must be
   // distinguishable from a missing/foreign workspace so clients can degrade
   // honestly instead of reporting the whole workspace unavailable. The

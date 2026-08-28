@@ -1,6 +1,6 @@
 import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // No widened deadline here, on purpose (#568). The long path — the
 // budget-bound scan — is dominated by synchronous work the runner cannot
@@ -14,6 +14,7 @@ import {
   extractMarkdownGraphLinks,
   readWorkspaceBacklinks,
   readWorkspaceGraph,
+  WorkspaceGraphIndex,
 } from "./workspaceGraph";
 import { createTestScratch } from "./testTemp";
 
@@ -262,6 +263,316 @@ describe("buildMarkdownGraph", () => {
 });
 
 describe("readWorkspaceGraph", () => {
+  it("reparses only the changed Markdown file while matching a fresh rebuild", async () => {
+    const files = new Map([
+      ["alpha.md", { identity: "alpha-1", text: "# Alpha\n[[Beta]]\n" }],
+      ["beta.md", { identity: "beta-1", text: "# Beta\n" }],
+    ]);
+    const listing = () => ({
+      files: [...files.entries()]
+        .map(([path, file]) => ({ path, contentIdentity: file.identity }))
+        .sort((left, right) => left.path.localeCompare(right.path)),
+    });
+    const incrementalRead = vi.fn(async (path: string) => ({
+      text: files.get(path)!.text,
+      truncated: false,
+    }));
+    const incrementalSource = { list: async () => listing(), readText: incrementalRead };
+    const freshSource = {
+      list: async () => listing(),
+      readText: async (path: string) => ({
+        text: files.get(path)!.text,
+        truncated: false,
+      }),
+    };
+    const index = new WorkspaceGraphIndex();
+
+    await expect(index.readGraph(root, incrementalSource)).resolves.toEqual(
+      await readWorkspaceGraph(root, freshSource),
+    );
+    await expect(
+      index.readBacklinks(root, "beta.md", incrementalSource),
+    ).resolves.toEqual(
+      await readWorkspaceBacklinks(root, "beta.md", freshSource),
+    );
+    incrementalRead.mockClear();
+
+    files.set("alpha.md", {
+      identity: "alpha-2",
+      text: "# Alpha edited\n",
+    });
+    index.invalidate(["alpha.md"]);
+
+    await expect(index.readGraph(root, incrementalSource)).resolves.toEqual(
+      await readWorkspaceGraph(root, freshSource),
+    );
+    await expect(
+      index.readBacklinks(root, "beta.md", incrementalSource),
+    ).resolves.toEqual(
+      await readWorkspaceBacklinks(root, "beta.md", freshSource),
+    );
+    expect(incrementalRead).toHaveBeenCalledTimes(1);
+    expect(incrementalRead).toHaveBeenCalledWith("alpha.md");
+  });
+
+  it("matches fresh graph and backlink rebuilds across generated mutations", async () => {
+    const WORKSPACES = 32;
+    const MUTATIONS_PER_WORKSPACE = 24;
+
+    for (let seed = 0; seed < WORKSPACES; seed += 1) {
+      let revision = 0;
+      let nextName = 0;
+      const files = new Map<
+        string,
+        { identity: string; text: string; truncated?: boolean }
+      >([
+        ["target.md", { identity: `target-${seed}`, text: "# Target\n" }],
+      ]);
+      const identity = () => `${seed}-${++revision}`;
+      const textFor = (path: string, step: number) =>
+        [
+          `# ${path} ${step}`,
+          step % 2 === 0 ? "[[Target]]" : "[Target](target.md)",
+          step % 3 === 0 ? `[[note-${(step + seed) % 7}]]` : "[[Missing]]",
+        ].join("\n");
+      for (let index = 0; index < 6; index += 1) {
+        const path = `note-${index}.md`;
+        files.set(path, { identity: identity(), text: textFor(path, index) });
+      }
+      files.set("asset.txt", { identity: identity(), text: "not parsed" });
+
+      const listing = () => ({
+        files: [...files.entries()]
+          .map(([path, file]) => ({ path, contentIdentity: file.identity }))
+          .sort((left, right) => left.path.localeCompare(right.path)),
+      });
+      const source = {
+        list: async () => listing(),
+        readText: async (path: string) => ({
+          text: files.get(path)!.text,
+          truncated: files.get(path)!.truncated ?? false,
+        }),
+      };
+      const freshSource = { ...source };
+      const index = new WorkspaceGraphIndex();
+
+      const assertDifferential = async () => {
+        expect(await index.readGraph(root, source)).toEqual(
+          await readWorkspaceGraph(root, freshSource),
+        );
+        expect(await index.readBacklinks(root, "target.md", source)).toEqual(
+          await readWorkspaceBacklinks(root, "target.md", freshSource),
+        );
+      };
+
+      await assertDifferential();
+      for (let step = 0; step < MUTATIONS_PER_WORKSPACE; step += 1) {
+        const mutablePaths = [...files.keys()]
+          .filter((path) => path.endsWith(".md") && path !== "target.md")
+          .sort((left, right) => left.localeCompare(right));
+        const selected = mutablePaths[(step * 7 + seed) % mutablePaths.length]!;
+
+        switch (step % 4) {
+          case 0: {
+            let path: string;
+            do path = `generated-${seed}-${nextName++}.md`;
+            while (files.has(path));
+            files.set(path, {
+              identity: identity(),
+              text: textFor(path, step + seed),
+            });
+            index.invalidate([path]);
+            break;
+          }
+          case 1:
+            files.set(selected, {
+              identity: identity(),
+              text: textFor(selected, step + seed + 100),
+            });
+            index.invalidate([selected]);
+            break;
+          case 2: {
+            let renamed: string;
+            do renamed = `renamed-${seed}-${nextName++}.md`;
+            while (files.has(renamed));
+            const file = files.get(selected)!;
+            files.delete(selected);
+            files.set(renamed, file);
+            index.invalidate([selected, renamed]);
+            break;
+          }
+          case 3:
+            files.delete(selected);
+            index.invalidate([selected]);
+            break;
+        }
+        await assertDifferential();
+      }
+    }
+  });
+
+  it("never reuses parsed files outside the current share authority", async () => {
+    const files = new Map([
+      [
+        "allowed.md",
+        { identity: "allowed", text: "# Allowed\n[[Private]]\n[[Public]]\n" },
+      ],
+      ["private.md", { identity: "private", text: "# Private\n[[Public]]\n" }],
+      ["public.md", { identity: "public", text: "# Public\n" }],
+    ]);
+    let visible = new Set(files.keys());
+    const listing = () => ({
+      files: [...visible]
+        .map((path) => ({ path, contentIdentity: files.get(path)!.identity }))
+        .sort((left, right) => left.path.localeCompare(right.path)),
+    });
+    const source = {
+      list: async () => listing(),
+      readText: async (path: string) => ({
+        text: files.get(path)!.text,
+        truncated: false,
+      }),
+    };
+    const index = new WorkspaceGraphIndex();
+
+    expect((await index.readGraph(root, source)).nodes.map((node) => node.path)).toContain(
+      "private.md",
+    );
+    visible = new Set(["allowed.md", "public.md"]);
+
+    const graph = await index.readGraph(root, source);
+    expect(graph).toEqual(await readWorkspaceGraph(root, source));
+    expect(graph.nodes.map((node) => node.path)).toEqual([
+      "allowed.md",
+      "public.md",
+    ]);
+    expect(graph.edges).toEqual([
+      { source: "allowed.md", target: "public.md", kind: "wikilink" },
+    ]);
+    expect(graph.unresolvedLinks).toBe(1);
+
+    const backlinks = await index.readBacklinks(root, "public.md", source);
+    expect(backlinks).toEqual(
+      await readWorkspaceBacklinks(root, "public.md", source),
+    );
+    expect(backlinks.map((entry) => entry.sourcePath)).toEqual(["allowed.md"]);
+  });
+
+  it("preserves the cold file and byte budgets", async () => {
+    const large = `# Large\n${"x".repeat(600 * 1024)}`;
+    let activeReads = 0;
+    let peakReads = 0;
+    const readText = vi.fn(async () => {
+      activeReads += 1;
+      peakReads = Math.max(peakReads, activeReads);
+      await Promise.resolve();
+      activeReads -= 1;
+      return { text: large, truncated: false };
+    });
+    const source = {
+      list: async () => ({
+        files: Array.from({ length: 70 }, (_, index) => ({
+          path: `large-${String(index).padStart(2, "0")}.md`,
+          contentIdentity: `large-${index}`,
+        })),
+      }),
+      readText,
+    };
+
+    await expect(new WorkspaceGraphIndex().readGraph(root, source)).resolves.toMatchObject({
+      scannedFileCount: 70,
+      omittedFileCount: 6,
+      truncatedFileCount: 64,
+    });
+    expect(readText).toHaveBeenCalledTimes(70);
+    expect(peakReads).toBe(8);
+  });
+
+  it("applies the cold byte budget in listing order across out-of-order reads and retries failures", async () => {
+    const files = Array.from({ length: 66 }, (_, index) => ({
+      path: `large-${String(index).padStart(2, "0")}.md`,
+      contentIdentity: `large-${index}`,
+    }));
+    const largeBody = "x".repeat(600 * 1024);
+    const indexFor = (path: string) => Number(path.slice(6, 8));
+    const textFor = (path: string) =>
+      `# Loaded ${String(indexFor(path)).padStart(2, "0")}\n${largeBody}`;
+    const failedPath = "large-32.md";
+    let failIncrementalRead = true;
+    let activeReads = 0;
+    let peakReads = 0;
+    const completionOrder: string[] = [];
+    const attempts = new Map<string, number>();
+    const source = {
+      list: async () => ({ files }),
+      readText: async (path: string) => {
+        attempts.set(path, (attempts.get(path) ?? 0) + 1);
+        activeReads += 1;
+        peakReads = Math.max(peakReads, activeReads);
+        try {
+          const index = indexFor(path);
+          for (let turn = index % 8; turn < 7; turn += 1) {
+            await Promise.resolve();
+          }
+          completionOrder.push(path);
+          if (path === failedPath && failIncrementalRead) {
+            failIncrementalRead = false;
+            throw new Error("transient read failure");
+          }
+          return { text: textFor(path), truncated: false };
+        } finally {
+          activeReads -= 1;
+        }
+      },
+    };
+    const freshSource = (failOnce: boolean) => {
+      let shouldFail = failOnce;
+      return {
+        list: async () => ({ files }),
+        readText: async (path: string) => {
+          if (path === failedPath && shouldFail) {
+            shouldFail = false;
+            throw new Error("transient read failure");
+          }
+          return { text: textFor(path), truncated: false };
+        },
+      };
+    };
+    const title = (
+      graph: Awaited<ReturnType<WorkspaceGraphIndex["readGraph"]>>,
+      path: string,
+    ) => graph.nodes.find((node) => node.path === path)!.title;
+    const index = new WorkspaceGraphIndex();
+
+    const first = await index.readGraph(root, source);
+    expect(first).toEqual(await readWorkspaceGraph(root, freshSource(true)));
+    expect(first).toMatchObject({
+      scannedFileCount: 66,
+      omittedFileCount: 1,
+      truncatedFileCount: 64,
+    });
+    expect(title(first, failedPath)).toBe(failedPath);
+    expect(title(first, "large-64.md")).toBe("Loaded 64");
+    expect(title(first, "large-65.md")).toBe("large-65.md");
+    expect(completionOrder[0]).toBe("large-07.md");
+    expect(completionOrder.slice(0, 8)).not.toEqual(
+      files.slice(0, 8).map((file) => file.path),
+    );
+    expect(peakReads).toBe(8);
+
+    const second = await index.readGraph(root, source);
+    expect(second).toEqual(await readWorkspaceGraph(root, freshSource(false)));
+    expect(second).toMatchObject({
+      scannedFileCount: 66,
+      omittedFileCount: 2,
+      truncatedFileCount: 64,
+    });
+    expect(attempts.get(failedPath)).toBe(2);
+    expect(title(second, failedPath)).toBe("Loaded 32");
+    expect(title(second, "large-64.md")).toBe("large-64.md");
+    expect(title(second, "large-65.md")).toBe("large-65.md");
+  });
+
   it("uses a supplied file source instead of a stale disk projection", async () => {
     await writeFile(join(root, "index.md"), "# Stale source\n[[Ghost]]\n");
     await writeFile(join(root, "target.md"), "# Stale target\n");

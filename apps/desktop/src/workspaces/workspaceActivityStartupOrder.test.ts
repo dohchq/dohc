@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import { createTestScratch } from "./testTemp";
-import { createWorkspaceActivity } from "./workspaceActivity";
+import { createInMemoryWorkspaceActivity as createWorkspaceActivity } from "./workspaceActivity.testSupport";
 import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 import { startWorkspaceWatch } from "./workspaceWatcher";
@@ -44,15 +44,20 @@ describe("workspaceActivity startup ordering", () => {
 
     const order: string[] = [];
     const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const attachmentId = Symbol("test-workspace-attachment");
     const liveStore = createCaptureLiveStores(
-      { workspaceId: WORKSPACE_ID, rootPath: root },
+      {
+        workspaceId: WORKSPACE_ID,
+        rootPath: root,
+        attachmentId,
+      },
       sessions,
     ).store;
     const trackedStore = new Proxy(liveStore, {
       get(target, property) {
         if (property === "listTextFileMetadata") {
           return async (
-            input: Parameters<NonNullable<typeof liveStore.listTextFileMetadata>>[0],
+            input: Parameters<typeof liveStore.listTextFileMetadata>[0],
           ) => {
             // Reconciliation's final phase, so its disk scan has already run.
             // The batch's file lands HERE: a scan that saw live.md would
@@ -65,7 +70,7 @@ describe("workspaceActivity startup ordering", () => {
             // push below instead of racing it.
             await new Promise((resolve) => setTimeout(resolve, 50));
             order.push("reconcile:listTextFileMetadata");
-            return await liveStore.listTextFileMetadata!(input);
+            return await liveStore.listTextFileMetadata(input);
           };
         }
         if (property === "writeTextFile") {
@@ -103,6 +108,7 @@ describe("workspaceActivity startup ordering", () => {
         capture: createWorkspaceEngineCapture({
           workspaceId: WORKSPACE_ID,
           rootPath: root,
+          attachmentId,
           store: trackedStore,
           rustEngineSessions: sessions,
         }),

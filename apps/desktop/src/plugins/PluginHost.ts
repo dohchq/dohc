@@ -43,10 +43,23 @@ export interface PluginHostRecordToken {
   readonly [pluginHostRecordBrand]: true;
 }
 
+export interface PluginHostRecoveryDisposition {
+  readonly kind: "will-respawn" | "terminal";
+  readonly record: PluginHostRecordToken;
+}
+
 export interface PluginHostStartEvidence {
   readonly [pluginHostStartBrand]: true;
   readonly pluginId: string;
   readonly record: PluginHostRecordToken;
+}
+
+export interface PluginHostPanelDeclaration {
+  readonly id: string;
+  readonly title: string;
+  readonly placement: "editor" | "view";
+  readonly entry: string;
+  readonly icon?: string;
 }
 
 class HostRecordToken implements PluginHostRecordToken {
@@ -114,6 +127,11 @@ export interface PluginHostOptions {
   /** Releases router resources that are not attached to a live host record. */
   onDispose?: () => Promise<void>;
   onStatusChange?: (pluginId: string, status: PluginRuntimeStatus) => void;
+  onRecoveryDisposition?: (
+    pluginId: string,
+    disposition: PluginHostRecoveryDisposition,
+  ) => void;
+  mutatePluginRecord?: typeof mutatePluginRecord;
   now?: () => number;
   activationTimeoutMs?: number;
   webAppStartTimeoutMs?: number;
@@ -144,6 +162,7 @@ interface PluginSpawn {
   transport?: PluginTransport;
   shutdown?: Promise<void>;
   resourceDisposal?: Promise<void>;
+  settlements: Set<Promise<void>>;
 }
 
 interface PluginRecord {
@@ -259,9 +278,10 @@ export class PluginHost {
     directoryName: string,
     manifest: DohcPluginManifest,
   ): Promise<PluginHostStartEvidence> {
+    const admittedManifest = structuredClone(manifest);
     // The manifest name is the plugin's identity — one identity, so state
     // and attribution can never drift from what the manifest declares.
-    const pluginId = manifest.name;
+    const pluginId = admittedManifest.name;
     if (this.plugins.has(pluginId) || this.pendingStarts.has(pluginId)) {
       throw new Error(`Plugin "${pluginId}" is already running.`);
     }
@@ -293,7 +313,9 @@ export class PluginHost {
         pluginId,
         pluginRoot,
         directoryName,
-        manifest,
+        // The host record owns the declaration it admitted. Discovery and
+        // pipeline state can move on while this exact record keeps running.
+        manifest: admittedManifest,
         status: "starting",
         stderr: [],
       };
@@ -327,20 +349,19 @@ export class PluginHost {
 
   private async stopPluginRecord(record: PluginRecord): Promise<void> {
     const spawn = record.current;
-    if (!spawn?.transport) {
-      if (spawn) await this.endSpawn(record, spawn);
-      if (this.plugins.get(record.pluginId) === record) {
-        this.plugins.delete(record.pluginId);
+    try {
+      if (!spawn?.transport) {
+        if (spawn) await this.endSpawn(record, spawn);
+        if (this.plugins.get(record.pluginId) === record) {
+          this.plugins.delete(record.pluginId);
+        }
+      } else {
+        spawn.shutdown ??= this.shutdown(record, spawn, spawn.transport);
+        await spawn.shutdown;
       }
-      return;
+    } finally {
+      if (spawn) await this.waitForSettlements(spawn);
     }
-    if (spawn.shutdown) {
-      await spawn.shutdown;
-      return;
-    }
-
-    spawn.shutdown = this.shutdown(record, spawn, spawn.transport);
-    await spawn.shutdown;
   }
 
   async stopAll(): Promise<void> {
@@ -543,6 +564,12 @@ export class PluginHost {
     return this.plugins.get(pluginId)?.ownershipToken;
   }
 
+  hasLiveSpawn(pluginId: string): boolean {
+    const record = this.plugins.get(pluginId);
+    const spawn = record?.current;
+    return Boolean(record && spawn && this.isLive(record, spawn));
+  }
+
   getStderrLog(pluginId: string): string[] {
     return [...(this.plugins.get(pluginId)?.stderr ?? [])];
   }
@@ -594,6 +621,38 @@ export class PluginHost {
 
   getSpawnId(pluginId: string): string | undefined {
     return this.plugins.get(pluginId)?.current?.spawnId;
+  }
+
+  readyPanelsForSpawn(
+    pluginId: string,
+    expectedSpawnId: string,
+  ): {
+    readonly record: PluginHostRecordToken;
+    readonly panels: readonly PluginHostPanelDeclaration[];
+  } | undefined {
+    const record = this.plugins.get(pluginId);
+    const spawn = record?.current;
+    if (
+      !record ||
+      !spawn ||
+      record.status !== "ready" ||
+      spawn.spawnId !== expectedSpawnId ||
+      !this.isLive(record, spawn)
+    ) {
+      return undefined;
+    }
+    return {
+      record: record.ownershipToken,
+      panels: (record.manifest.panels ?? []).map(
+        ({ id, title, placement, entry, icon }) => ({
+          id,
+          title,
+          placement,
+          entry,
+          ...(icon === undefined ? {} : { icon }),
+        }),
+      ),
+    };
   }
 
   /**
@@ -653,6 +712,7 @@ export class PluginHost {
       resolveActivated,
       rejectActivated,
       abortController: new AbortController(),
+      settlements: new Set(),
     };
     record.current = spawn;
     record.commands = undefined;
@@ -688,39 +748,44 @@ export class PluginHost {
           } satisfies PluginActivateParams,
         );
       })();
-      void raceWithTimeout(
-        activation,
-        this.activationTimeoutMs,
-        `Plugin "${record.pluginId}" activation exceeded ${this.activationTimeoutMs} ms.`,
-      ).then(
-        (result) => this.handleActivationSuccess(record, spawn, result),
-        (error: unknown) => this.handleActivationFailure(record, spawn, error),
+      this.trackSettlement(
+        record,
+        spawn,
+        raceWithTimeout(
+          activation,
+          this.activationTimeoutMs,
+          `Plugin "${record.pluginId}" activation exceeded ${this.activationTimeoutMs} ms.`,
+        ).then(
+          (result) => this.handleActivationSuccess(record, spawn, result),
+          (error: unknown) => this.handleActivationFailure(record, spawn, error),
+        ),
       );
     } catch (error) {
-      void this.handleActivationFailure(record, spawn, error);
+      this.trackSettlement(
+        record,
+        spawn,
+        this.handleActivationFailure(record, spawn, error),
+      );
     }
   }
 
-  private handleActivationSuccess(
+  private async handleActivationSuccess(
     record: PluginRecord,
     spawn: PluginSpawn,
     result: unknown,
-  ): void {
+  ): Promise<void> {
     if (!this.isLive(record, spawn)) {
-      // .finally() re-throws the original rejection, so this needs its own
-      // .catch() too — see bumpGeneration's comment.
-      void this.endSpawn(record, spawn)
-        .finally(() => spawn.transport?.dispose().catch(() => undefined))
-        .catch((error: unknown) => {
-          console.error(
-            `[desktop] plugin "${record.pluginId}" spawn teardown failed:`,
-            error,
-          );
-        });
+      await this.endSpawn(record, spawn).catch((error: unknown) => {
+        console.error(
+          `[desktop] plugin "${record.pluginId}" spawn teardown failed:`,
+          error,
+        );
+      });
+      await spawn.transport?.dispose().catch(() => undefined);
       return;
     }
     if (!isPluginActivateResult(result)) {
-      void this.handleActivationFailure(
+      await this.handleActivationFailure(
         record,
         spawn,
         new Error(
@@ -731,7 +796,7 @@ export class PluginHost {
     }
     const duplicateCommandId = findDuplicateId(result.commands);
     if (duplicateCommandId !== undefined) {
-      void this.handleActivationFailure(
+      await this.handleActivationFailure(
         record,
         spawn,
         new Error(
@@ -742,7 +807,7 @@ export class PluginHost {
     }
     const duplicateDriverId = findDuplicateId(result.drivers);
     if (duplicateDriverId !== undefined) {
-      void this.handleActivationFailure(
+      await this.handleActivationFailure(
         record,
         spawn,
         new Error(
@@ -758,7 +823,7 @@ export class PluginHost {
       result.commands,
     );
     if (commandMismatch !== undefined) {
-      void this.handleActivationFailure(record, spawn, new Error(commandMismatch));
+      await this.handleActivationFailure(record, spawn, new Error(commandMismatch));
       return;
     }
     const declaredDrivers = record.manifest.drivers ?? [];
@@ -769,7 +834,7 @@ export class PluginHost {
       result.drivers,
     );
     if (mismatch !== undefined) {
-      void this.handleActivationFailure(record, spawn, new Error(mismatch));
+      await this.handleActivationFailure(record, spawn, new Error(mismatch));
       return;
     }
     try {
@@ -778,7 +843,7 @@ export class PluginHost {
       // starting, rather than after it is listed as ready.
       this.options.onDriversRegistered?.(record.pluginId, spawn.spawnId, declaredDrivers);
     } catch (error) {
-      void this.handleActivationFailure(record, spawn, error);
+      await this.handleActivationFailure(record, spawn, error);
       return;
     }
     record.commands = [...result.commands];
@@ -796,7 +861,7 @@ export class PluginHost {
       error instanceof Error ? error : new Error(this.errorMessage(error)),
     );
     if (!this.isLive(record, spawn)) {
-      void spawn.transport?.dispose().catch(() => undefined);
+      await spawn.transport?.dispose().catch(() => undefined);
       return;
     }
     spawn.failureHandled = true;
@@ -820,24 +885,53 @@ export class PluginHost {
     }
     spawn.failureHandled = true;
     const resourceDisposal = this.endSpawn(record, spawn);
-    void resourceDisposal.catch((error: unknown) => {
-      this.appendLog(
-        record,
-        `Spawn resource disposal failed: ${this.errorMessage(error)}`,
-      );
-    });
-    void resourceDisposal.then(
-      () => this.accountForFailure(record, spawn),
-      () => this.accountForFailure(record, spawn),
+    this.trackSettlement(
+      record,
+      spawn,
+      resourceDisposal.then(
+        () => this.accountForFailure(record, spawn),
+        (error: unknown) => {
+          this.appendLog(
+            record,
+            `Spawn resource disposal failed: ${this.errorMessage(error)}`,
+          );
+          return this.accountForFailure(record, spawn);
+        },
+      ),
     );
     this.setStatus(record, "crashed");
+  }
+
+  private trackSettlement(
+    record: PluginRecord,
+    spawn: PluginSpawn,
+    settlement: Promise<void>,
+  ): void {
+    const tracked = settlement
+      .catch((error: unknown) => {
+        this.appendLog(
+          record,
+          `Spawn settlement failed: ${this.errorMessage(error)}`,
+        );
+      })
+      .finally(() => spawn.settlements.delete(tracked));
+    spawn.settlements.add(tracked);
+  }
+
+  private async waitForSettlements(spawn: PluginSpawn): Promise<void> {
+    while (spawn.settlements.size > 0) {
+      await Promise.all(spawn.settlements);
+    }
   }
 
   private async accountForFailure(
     record: PluginRecord,
     spawn: PluginSpawn,
   ): Promise<void> {
-    if (!this.isCurrent(record, spawn)) return;
+    if (!this.isCurrent(record, spawn)) {
+      this.emitRecoveryDisposition(record, "terminal");
+      return;
+    }
 
     const age = this.now() - spawn.spawnedAt;
     let failures = 0;
@@ -850,7 +944,7 @@ export class PluginHost {
 
     if (failures >= PLUGIN_CRASH_LOOP_THRESHOLD) {
       try {
-        await mutatePluginRecord(
+        await (this.options.mutatePluginRecord ?? mutatePluginRecord)(
           this.options.stateDir,
           this.options.workspaceRoot,
           record.pluginId,
@@ -861,12 +955,21 @@ export class PluginHost {
           record,
           `Could not save disabled state: ${this.errorMessage(error)}`,
         );
+        if (this.isCurrent(record, spawn)) {
+          record.current = undefined;
+          record.commands = undefined;
+        }
+        this.emitRecoveryDisposition(record, "terminal");
         return;
       }
-      if (!this.isCurrent(record, spawn)) return;
+      if (!this.isCurrent(record, spawn)) {
+        this.emitRecoveryDisposition(record, "terminal");
+        return;
+      }
       record.current = undefined;
       record.commands = undefined;
       this.setStatus(record, "disabled");
+      this.emitRecoveryDisposition(record, "terminal");
       return;
     }
 
@@ -874,7 +977,12 @@ export class PluginHost {
     // onStatusChange listener can call stop() from inside handleExit's own
     // setStatus call, in the same tick. A stop that arrived mid-accounting
     // must win over a respawn.
-    if (this.isCurrent(record, spawn) && !spawn.stopping) this.spawn(record);
+    if (this.isCurrent(record, spawn) && !spawn.stopping) {
+      this.emitRecoveryDisposition(record, "will-respawn");
+      this.spawn(record);
+      return;
+    }
+    this.emitRecoveryDisposition(record, "terminal");
   }
 
   private isCurrent(record: PluginRecord, spawn: PluginSpawn): boolean {
@@ -991,6 +1099,20 @@ export class PluginHost {
     // synchronous callback could. This is what makes that whole class of
     // race impossible, not a fix for one more instance of it.
     queueMicrotask(() => onStatusChange(pluginId, status));
+  }
+
+  private emitRecoveryDisposition(
+    record: PluginRecord,
+    kind: PluginHostRecoveryDisposition["kind"],
+  ): void {
+    const onRecoveryDisposition = this.options.onRecoveryDisposition;
+    if (!onRecoveryDisposition) return;
+    const pluginId = record.pluginId;
+    const disposition = {
+      kind,
+      record: record.ownershipToken,
+    } satisfies PluginHostRecoveryDisposition;
+    queueMicrotask(() => onRecoveryDisposition(pluginId, disposition));
   }
 
   private now(): number {

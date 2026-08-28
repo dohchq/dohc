@@ -7,7 +7,8 @@ import * as Y from "yjs";
 import { defaultWorkspaceMode, type WatcherEvent } from "@dohc/workspace-core";
 import {
   EngineDaemonLifecycle,
-  EngineWorkspaceSessions,
+  type AttachedEngineWorkspace,
+  type EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import {
   VersionedLiveAdapter,
@@ -15,15 +16,26 @@ import {
 } from "@dohc/workspace-engine-client";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import {
-  createWorkspaceEngineCapture,
+  createWorkspaceEngineCapture as createAttachedWorkspaceEngineCapture,
   isYDocPathNotInVersionError,
+  type WorkspaceEngineCaptureOptions,
   YDocUncapturedArtifactError,
 } from "./workspaceEngineCapture";
-import { createWorkspaceActivity } from "./workspaceActivity";
+import { createInMemoryWorkspaceActivity as createWorkspaceActivity } from "./workspaceActivity.testSupport";
 import { startWorkspaceWatch } from "./workspaceWatcher";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
+import { createRealDaemonWorkspaceSessions } from "../testing/realDaemonWorkspaceSessions";
 import { createTestScratch } from "./testTemp";
 import { waitForPathMoments } from "./waitForPathMoments";
+
+function createWorkspaceEngineCapture(
+  options: Omit<WorkspaceEngineCaptureOptions, "attachmentId">,
+) {
+  return createAttachedWorkspaceEngineCapture({
+    ...options,
+    attachmentId: Symbol(`test-workspace-attachment:${options.workspaceId}`),
+  });
+}
 
 // This suite looked only under the repo root, so it SKIPPED everywhere from the
 // day it was written and its coverage came and went with whoever last ran
@@ -33,15 +45,14 @@ const engine = requireEngineBinaryOrSkip();
 
 async function waitForDaemonCaptureDeferral(
   sessions: EngineWorkspaceSessions,
-  workspaceId: string,
-  rootPath: string,
+  workspace: AttachedEngineWorkspace,
 ): Promise<void> {
   for (let attempt = 0; attempt < 40; attempt += 1) {
     const outcome = await sessions.run(
-      { workspaceId, rootPath },
-      async ({ client, workspace }) =>
-        await new VersionedLiveAdapter(client, workspace, {
-          workspaceId,
+      workspace,
+      async ({ client, workspace: handle }) =>
+        await new VersionedLiveAdapter(client, handle, {
+          workspaceId: workspace.workspaceId,
         }).flushCapture(),
     );
     if (!outcome.settled) return;
@@ -52,16 +63,15 @@ async function waitForDaemonCaptureDeferral(
 
 async function listDaemonPathMoments(
   sessions: EngineWorkspaceSessions,
-  workspaceId: string,
-  rootPath: string,
+  workspace: AttachedEngineWorkspace,
   path: string,
 ) {
   const page = await sessions.run(
-    { workspaceId, rootPath },
-    async ({ client, workspace }) =>
-      await new VersionedLiveAdapter(client, workspace, {
-        workspaceId,
-      }).listMoments({ workspaceId, limit: 100 }),
+    workspace,
+    async ({ client, workspace: handle }) =>
+      await new VersionedLiveAdapter(client, handle, {
+        workspaceId: workspace.workspaceId,
+      }).listMoments({ workspaceId: workspace.workspaceId, limit: 100 }),
   );
   return page.moments.filter((moment) => moment.path === path);
 }
@@ -82,7 +92,7 @@ it.skipIf(engine.missing)(
       maxRestarts: 0,
     });
     await lifecycle.start();
-    const sessions = new EngineWorkspaceSessions(lifecycle);
+    const sessions = createRealDaemonWorkspaceSessions(lifecycle);
     const capture = createWorkspaceEngineCapture({
       workspaceId: "capture-rust-e2e",
       rootPath: root,
@@ -174,7 +184,7 @@ it.skipIf(engine.missing)(
       maxRestarts: 0,
     });
     await lifecycle.start();
-    const sessions = new EngineWorkspaceSessions(lifecycle);
+    const sessions = createRealDaemonWorkspaceSessions(lifecycle);
     const capture = createWorkspaceEngineCapture({
       workspaceId: "capture-rust-drift",
       rootPath: root,
@@ -248,7 +258,7 @@ it.skipIf(engine.missing)(
       maxRestarts: 0,
     });
     await firstLifecycle.start();
-    const firstSessions = new EngineWorkspaceSessions(firstLifecycle);
+    const firstSessions = createRealDaemonWorkspaceSessions(firstLifecycle);
     const openedState: {
       capture: ReturnType<typeof createWorkspaceEngineCapture> | null;
     } = { capture: null };
@@ -297,7 +307,7 @@ it.skipIf(engine.missing)(
         maxRestarts: 0,
       });
       await secondLifecycle.start();
-      const secondSessions = new EngineWorkspaceSessions(secondLifecycle);
+      const secondSessions = createRealDaemonWorkspaceSessions(secondLifecycle);
       const reopened = createWorkspaceEngineCapture({
         workspaceId: workspace.workspaceId,
         rootPath: workspace.rootPath,
@@ -341,7 +351,7 @@ it.skipIf(engine.missing)(
       maxRestarts: 0,
     });
     await lifecycle.start();
-    const sessions = new EngineWorkspaceSessions(lifecycle);
+    const sessions = createRealDaemonWorkspaceSessions(lifecycle);
     const capture = createWorkspaceEngineCapture({
       workspaceId: "capture-rust-codes",
       rootPath: root,
@@ -385,17 +395,20 @@ it.skipIf(engine.missing)(
       maxRestarts: 0,
     });
     await lifecycle.start();
-    const sessions = new EngineWorkspaceSessions(lifecycle);
+    const sessions = createRealDaemonWorkspaceSessions(lifecycle);
     const errors: string[] = [];
-    const capture = createWorkspaceEngineCapture({
+    const workspace = {
       workspaceId: "capture-rust-race",
       rootPath: root,
+      attachmentId: Symbol("test-workspace-attachment:capture-rust-race"),
+    };
+    const capture = createAttachedWorkspaceEngineCapture({
+      ...workspace,
       rustEngineSessions: sessions,
       daemonOwnsCapture: true,
       onError: (context) => errors.push(context),
     });
     const outside = "written outside dohc\n";
-    const workspaceId = "capture-rust-race";
     try {
       await writeFile(join(root, "note.md"), "base\n", "utf8");
       await waitForPathMoments(capture, "note.md", 1);
@@ -414,8 +427,7 @@ it.skipIf(engine.missing)(
       await session.settleNow();
       const settledMoments = await listDaemonPathMoments(
         sessions,
-        workspaceId,
-        root,
+        workspace,
         "note.md",
       );
       expect(settledMoments).toHaveLength(2);
@@ -428,9 +440,9 @@ it.skipIf(engine.missing)(
       // The outside writer replaces the file. Capture observes it, but the
       // live Y.Doc lease keeps the head at the last settled projection.
       await writeFile(join(root, "note.md"), outside, "utf8");
-      await waitForDaemonCaptureDeferral(sessions, workspaceId, root);
+      await waitForDaemonCaptureDeferral(sessions, workspace);
       expect(
-        await listDaemonPathMoments(sessions, workspaceId, root, "note.md"),
+        await listDaemonPathMoments(sessions, workspace, "note.md"),
       ).toHaveLength(2);
       states.length = 0;
       errors.length = 0;
@@ -449,7 +461,7 @@ it.skipIf(engine.missing)(
       // Reopening the workspace rebuilds the capture layer from its durable
       // manifest. That is the deterministic retry seam for the path the
       // live-lease refusal parked.
-      await sessions.closeWorkspace(workspaceId);
+      await sessions.closeWorkspace(workspace);
       const capturedMoments = await waitForPathMoments(
         capture,
         "note.md",
@@ -519,7 +531,7 @@ it.skipIf(engine.missing || process.platform !== "win32")(
       maxRestarts: 0,
     });
     await lifecycle.start();
-    const sessions = new EngineWorkspaceSessions(lifecycle);
+    const sessions = createRealDaemonWorkspaceSessions(lifecycle);
     const errors: string[] = [];
     const capture = createWorkspaceEngineCapture({
       workspaceId: "capture-rust-lock",
@@ -631,17 +643,20 @@ it.skipIf(engine.missing)(
       maxRestarts: 0,
     });
     await lifecycle.start();
-    const sessions = new EngineWorkspaceSessions(lifecycle);
+    const sessions = createRealDaemonWorkspaceSessions(lifecycle);
     const errors: string[] = [];
-    const capture = createWorkspaceEngineCapture({
+    const workspace = {
       workspaceId: "capture-rust-loud",
       rootPath: root,
+      attachmentId: Symbol("test-workspace-attachment:capture-rust-loud"),
+    };
+    const capture = createAttachedWorkspaceEngineCapture({
+      ...workspace,
       rustEngineSessions: sessions,
       daemonOwnsCapture: true,
       onError: (context) => errors.push(context),
     });
     const outside = "written outside dohc\n";
-    const workspaceId = "capture-rust-loud";
     try {
       await writeFile(join(root, "note.md"), "base\n", "utf8");
       await waitForPathMoments(capture, "note.md", 1);
@@ -663,16 +678,15 @@ it.skipIf(engine.missing)(
       await session.settleNow();
       const settledMoments = await listDaemonPathMoments(
         sessions,
-        workspaceId,
-        root,
+        workspace,
         "note.md",
       );
       expect(settledMoments).toHaveLength(2);
 
       await writeFile(join(root, "note.md"), outside, "utf8");
-      await waitForDaemonCaptureDeferral(sessions, workspaceId, root);
+      await waitForDaemonCaptureDeferral(sessions, workspace);
       expect(
-        await listDaemonPathMoments(sessions, workspaceId, root, "note.md"),
+        await listDaemonPathMoments(sessions, workspace, "note.md"),
       ).toHaveLength(2);
 
       // The difference from the clean case: text the engine has journaled but
@@ -704,7 +718,7 @@ it.skipIf(engine.missing)(
       // can appear over that still-unsaved Y.Doc state.
       await expect(session.settleNow()).rejects.toThrow("conflict-stale-target");
       expect(
-        await listDaemonPathMoments(sessions, workspaceId, root, "note.md"),
+        await listDaemonPathMoments(sessions, workspace, "note.md"),
       ).toHaveLength(2);
 
       // The outside author still owns the file, and the unsettled text is not
@@ -715,7 +729,7 @@ it.skipIf(engine.missing)(
       // has observed the loud refusal. Reopening rebuilds capture and ingests
       // the queued disk edit without letting the failed Y.Doc close overwrite
       // it.
-      await sessions.closeWorkspace(workspaceId);
+      await sessions.closeWorkspace(workspace);
       const capturedMoments = await waitForPathMoments(capture, "note.md", 3);
       expect(capturedMoments).toHaveLength(3);
       expect(await readFile(join(root, "note.md"), "utf8")).toBe(outside);
@@ -741,7 +755,7 @@ it.skipIf(engine.missing)(
       maxRestarts: 0,
     });
     await lifecycle.start();
-    const sessions = new EngineWorkspaceSessions(lifecycle);
+    const sessions = createRealDaemonWorkspaceSessions(lifecycle);
     const capture = createWorkspaceEngineCapture({
       workspaceId: "capture-rust-absent-head",
       rootPath: root,
@@ -832,7 +846,7 @@ it.skipIf(engine.missing)(
       maxRestarts: 0,
     });
     await lifecycle.start();
-    const sessions = new EngineWorkspaceSessions(lifecycle);
+    const sessions = createRealDaemonWorkspaceSessions(lifecycle);
     const capture = createWorkspaceEngineCapture({
       workspaceId: "capture-rust-815",
       rootPath: root,

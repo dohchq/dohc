@@ -47,6 +47,7 @@ export function PluginPanelPage(props: {
 }) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
+  const [restart, setRestart] = useState(0);
   const panelRef = useRef<
     Extract<StartPluginPanelResult, { status: "ok" }> | null
   >(null);
@@ -54,8 +55,26 @@ export function PluginPanelPage(props: {
   const sdkGenerationRef = useRef(0);
   const sdkContextRef = useRef("");
   const stoppingRef = useRef(false);
+  const invalidatedSurfaceIdsRef = useRef(new Set<number>());
   const sdkContext = `${props.workspaceId}\0${props.pluginId}\0${props.panelId}`;
   sdkContextRef.current = sdkContext;
+
+  useEffect(() => {
+    return () => {
+      startRequestRef.current += 1;
+      sdkGenerationRef.current += 1;
+      stoppingRef.current = true;
+      panelRef.current = null;
+      invalidatedSurfaceIdsRef.current.clear();
+      void bridge()
+        .stopPluginPanel({
+          workspaceId: props.workspaceId,
+          pluginId: props.pluginId,
+          panelId: props.panelId,
+        })
+        .catch(() => undefined);
+    };
+  }, [props.panelId, props.placement, props.pluginId, props.workspaceId]);
 
   useEffect(() => {
     const request = ++startRequestRef.current;
@@ -84,6 +103,10 @@ export function PluginPanelPage(props: {
           setLoad({ status: "unavailable" });
           return;
         }
+        if (invalidatedSurfaceIdsRef.current.delete(result.surfaceId)) {
+          setRestart((value) => value + 1);
+          return;
+        }
         sdkGenerationRef.current += 1;
         panelRef.current = result;
         setLoad({ status: "ready", panel: result });
@@ -108,17 +131,39 @@ export function PluginPanelPage(props: {
     return () => {
       startRequestRef.current += 1;
       sdkGenerationRef.current += 1;
-      stoppingRef.current = true;
       panelRef.current = null;
-      void bridge()
-        .stopPluginPanel({
-          workspaceId: props.workspaceId,
-          pluginId: props.pluginId,
-          panelId: props.panelId,
-        })
-        .catch(() => undefined);
     };
-  }, [props.panelId, props.placement, props.pluginId, props.workspaceId, sdkContext]);
+  }, [
+    props.panelId,
+    props.placement,
+    props.pluginId,
+    props.workspaceId,
+    restart,
+    sdkContext,
+  ]);
+
+  useEffect(() => {
+    return bridge().onPluginPanelInvalidated((event) => {
+      const panel = panelRef.current;
+      if (
+        event.workspaceId !== props.workspaceId ||
+        event.pluginId !== props.pluginId ||
+        event.panelId !== props.panelId
+      ) {
+        return;
+      }
+      if (!panel) {
+        invalidatedSurfaceIdsRef.current.add(event.surfaceId);
+        return;
+      }
+      if (event.surfaceId !== panel.surfaceId) return;
+      startRequestRef.current += 1;
+      sdkGenerationRef.current += 1;
+      panelRef.current = null;
+      setLoad({ status: "loading" });
+      setRestart((value) => value + 1);
+    });
+  }, [props.panelId, props.pluginId, props.workspaceId]);
 
   useEffect(() => {
     async function handleSdkRequest(event: MessageEvent) {

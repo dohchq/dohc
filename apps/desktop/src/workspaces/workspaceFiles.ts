@@ -7,6 +7,7 @@ import {
   nameUnitFor,
   sameFsEntry,
   entryCharBudget,
+  hasEngineIgnoredSegment,
   trashEntryPlan,
   WINDOWS_MAX_PATH_CHARS,
   validateUserMaterializePath,
@@ -61,11 +62,15 @@ export async function existingAncestor(path: string): Promise<string> {
 }
 import type { WorkspaceFileEntry } from "../ipc/bridgeContract";
 
+// Main-only listing metadata. Zod strips `contentIdentity` at the IPC boundary,
+// while main-process indexes can use it to avoid rereading unchanged Markdown.
+export interface WorkspaceFileListingEntry extends WorkspaceFileEntry {
+  contentIdentity?: string;
+}
+
 // `shared-with-me` is intentionally visible: accepted shares materialize there
 // for read/preview by local sites. Publishing or re-sharing those files remains
 // gated by the explicit publish/share flow, not by local file preview.
-const IGNORED_DIRS = new Set([".dohc", "node_modules", ".git"]);
-
 // Head bytes read to find a markdown page's `icon` frontmatter. The icon is a
 // short scalar near the top (id, title, icon priority order), so a small
 // bounded read covers it without ever loading a whole document.
@@ -119,8 +124,7 @@ async function readMarkdownIcon(absolutePath: string): Promise<string | undefine
   }
 }
 
-// Icon cache: readMarkdownIcon does an open+read+close per markdown file, and
-// listFiles' walk awaits it serially for every .md/.markdown file it visits.
+// Icon cache: readMarkdownIcon does an open+read+close per markdown file.
 // Without a cache, a full re-listing (e.g. after every save, via the
 // fs-watch -> refreshFiles path) re-pays that IO for the ENTIRE tree even
 // when nothing changed. Keyed by absolute path + (mtimeMs, size) — a plain
@@ -144,7 +148,10 @@ function rememberIcon(absolutePath: string, entry: IconCacheEntry): void {
 // Cache-checked wrapper around readMarkdownIcon. Never throws — a stat
 // failure (e.g. a TOCTOU delete mid-walk) is treated as "no icon", matching
 // readMarkdownIcon's own failure-tolerant contract.
-async function getCachedMarkdownIcon(absolutePath: string): Promise<string | undefined> {
+async function getMarkdownListingMetadata(
+  absolutePath: string,
+  includeIcon: boolean,
+): Promise<IconCacheEntry | undefined> {
   let mtimeMs: number;
   let size: number;
   try {
@@ -161,43 +168,112 @@ async function getCachedMarkdownIcon(absolutePath: string): Promise<string | und
   const cached = iconCache.get(absolutePath);
   if (cached && cached.mtimeMs === mtimeMs && cached.size === size) {
     rememberIcon(absolutePath, cached); // refresh LRU recency
-    return cached.icon;
+    return cached;
   }
-  const icon = await readMarkdownIcon(absolutePath);
-  rememberIcon(absolutePath, { mtimeMs, size, icon });
-  return icon;
+  const entry = {
+    mtimeMs,
+    size,
+    icon: includeIcon ? await readMarkdownIcon(absolutePath) : undefined,
+  };
+  if (includeIcon) rememberIcon(absolutePath, entry);
+  return entry;
 }
+
+// Both queues are process-wide: overlapping forced listings still stay at a
+// small, predictable IO width instead of multiplying the limit per request.
+// Directories and icons use separate lanes so a flat markdown-heavy directory
+// cannot put every descendant readdir behind thousands of icon reads.
+const LISTING_DIRECTORY_CONCURRENCY = 8;
+const LISTING_MARKDOWN_ICON_CONCURRENCY = 8;
+
+export function createBoundedTaskQueue(concurrency: number) {
+  let active = 0;
+  const waiting = new Set<() => void>();
+
+  function startWaitingTasks(): void {
+    while (active < concurrency) {
+      const start = waiting.values().next().value;
+      if (!start) return;
+      waiting.delete(start);
+      active += 1;
+      start();
+    }
+  }
+
+  return function run<T>(task: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      waiting.add(() => {
+        void Promise.resolve()
+          .then(task)
+          .then(resolve, reject)
+          .finally(() => {
+            active -= 1;
+            startWaitingTasks();
+          });
+      });
+      startWaitingTasks();
+    });
+  };
+}
+
+const runDirectoryRead = createBoundedTaskQueue(LISTING_DIRECTORY_CONCURRENCY);
+const runMarkdownIconRead = createBoundedTaskQueue(
+  LISTING_MARKDOWN_ICON_CONCURRENCY,
+);
 
 export async function listFiles(
   rootPath: string,
+  options: {
+    platform?: NodeJS.Platform;
+    includeContentIdentity?: boolean;
+  } = {},
 ): Promise<{ files: WorkspaceFileEntry[]; folders: string[] }> {
-  const entries: WorkspaceFileEntry[] = [];
+  const platform = options.platform ?? process.platform;
+  const entries: WorkspaceFileListingEntry[] = [];
   // Directories ride along so EMPTY folders stay visible in the explorer
   // tree (the walk already visits every dir — this is purely additive).
   const folders: string[] = [];
 
   async function walk(dir: string, prefix: string): Promise<void> {
-    const dirents = await readdir(dir, { withFileTypes: true });
+    const dirents = await runDirectoryRead(() =>
+      readdir(dir, { withFileTypes: true }),
+    );
+    const pending: Promise<void>[] = [];
     for (const dirent of dirents) {
       const rel = prefix ? `${prefix}/${dirent.name}` : dirent.name;
       // Never follow symlinks: a dir/file symlink could point outside the
       // workspace and leak names or recurse into foreign trees.
-      if (dirent.isSymbolicLink()) continue;
+      if (hasEngineIgnoredSegment(rel, platform) || dirent.isSymbolicLink()) continue;
       if (dirent.isDirectory()) {
-        if (!IGNORED_DIRS.has(dirent.name)) {
-          folders.push(rel);
-          await walk(join(dir, dirent.name), rel);
-        }
+        folders.push(rel);
+        pending.push(walk(join(dir, dirent.name), rel));
       } else if (dirent.isFile()) {
         const kind = classifyPath(rel).kind;
-        const entry: WorkspaceFileEntry = { path: rel, kind };
-        if (kind === "file" && /\.(md|markdown)$/i.test(rel)) {
-          const icon = await getCachedMarkdownIcon(join(dir, dirent.name));
-          if (icon) entry.icon = icon;
+        const entry: WorkspaceFileListingEntry = { path: rel, kind };
+        if (
+          kind === "file" &&
+          (/\.(md|markdown)$/i.test(rel) ||
+            (options.includeContentIdentity === true && /\.mdx$/i.test(rel)))
+        ) {
+          pending.push(
+            runMarkdownIconRead(() =>
+              getMarkdownListingMetadata(
+                join(dir, dirent.name),
+                /\.(md|markdown)$/i.test(rel),
+              ),
+            ).then((metadata) => {
+              if (!metadata) return;
+              if (options.includeContentIdentity === true) {
+                entry.contentIdentity = `disk:${metadata.mtimeMs}:${metadata.size}`;
+              }
+              if (metadata.icon) entry.icon = metadata.icon;
+            }),
+          );
         }
         entries.push(entry);
       }
     }
+    await Promise.all(pending);
   }
 
   await walk(rootPath, "");
@@ -755,11 +831,24 @@ export async function createFolder(
 //      clobbers, so step 5 is the only overwrite guard; the check→rename
 //      TOCTOU window is accepted — main is the single writer on this path
 //      and the watcher records whatever actually happened.
-export async function movePath(
-  rootPath: string,
+export interface WorkspaceMovePaths {
+  fromPath: string;
+  toPath: string;
+}
+
+export interface PreparedWorkspaceMove {
+  // Engine coordination and the filesystem commit use canonical physical
+  // spellings. The IPC result keeps the normalized spelling the user asked
+  // for, even when an alias led to a differently spelled source or parent.
+  physicalFromPath: string;
+  physicalToPath: string;
+  visibleResultPath: string;
+}
+
+export function normalizeWorkspaceMovePaths(
   fromPath: string,
   toPath: string,
-): Promise<string> {
+): WorkspaceMovePaths {
   const fromValidated = validateUserWritePath(fromPath);
   if (!fromValidated.ok) {
     throw new Error(`Invalid move source (${fromValidated.reason}): ${fromPath}`);
@@ -774,9 +863,28 @@ export async function movePath(
   ) {
     throw new Error(`Cannot move a path into itself: ${fromPath}`);
   }
+  return {
+    fromPath: fromValidated.normalized,
+    toPath: toValidated.normalized,
+  };
+}
+
+interface InspectedWorkspaceMove extends PreparedWorkspaceMove {
+  realRoot: string;
+  from: string;
+  to: string;
+  realFrom: string;
+}
+
+async function inspectWorkspaceMove(
+  rootPath: string,
+  fromPath: string,
+  toPath: string,
+): Promise<InspectedWorkspaceMove> {
+  const normalized = normalizeWorkspaceMovePaths(fromPath, toPath);
   const realRoot = await realpath(rootPath);
-  const absFrom = join(rootPath, fromValidated.normalized);
-  const absTo = join(rootPath, toValidated.normalized);
+  const absFrom = join(rootPath, normalized.fromPath);
+  const absTo = join(rootPath, normalized.toPath);
   // A move leaks BOTH ways through an alias: `meta/manifest.json -> leak.json`
   // (meta -> .dohc) lifts workspace state into the visible tree, and
   // `notes.md -> meta/notes.md` buries a user file in it.
@@ -788,8 +896,6 @@ export async function movePath(
   // which a rename needs: resolving the destination would answer with the
   // existing file's casing on a case-insensitive filesystem and turn a
   // case-only rename into a no-op.
-  //
-  // Every check and the rename itself then run on those two resolutions.
   const { resolvedAbsolute: from } = await assertResolvedWorkspacePath({
     rootPath,
     absolutePath: absFrom,
@@ -797,7 +903,10 @@ export async function movePath(
     label: "Move source",
     access: "entry",
   });
-  const { resolvedAbsolute: to } = await assertResolvedWorkspacePath({
+  const {
+    relative: resolvedToPath,
+    resolvedAbsolute: to,
+  } = await assertResolvedWorkspacePath({
     rootPath,
     absolutePath: absTo,
     spelled: toPath,
@@ -812,13 +921,91 @@ export async function movePath(
   if (sourceStat.isSymbolicLink()) {
     throw new Error(`Refusing to move a symlink: ${fromPath}`);
   }
-  // Canonical source — used both for the descendant guard below and the
-  // case-only-rename carve-out. The symlink refusal above means realpath here
-  // resolves only ancestor links, never the source itself.
+  // The source is not a symlink, so realpath resolves ancestor links only.
   const realFrom = await realpath(from);
-  if (!isInside(realRoot, await existingAncestor(dirname(to)))) {
+  const realDestAncestor = await existingAncestor(dirname(to));
+  if (!isInside(realRoot, realDestAncestor)) {
     throw new Error(`Invalid move destination (escapes workspace): ${toPath}`);
   }
+  if (isInside(realFrom, realDestAncestor)) {
+    throw new Error(`Cannot move a path into itself: ${fromPath}`);
+  }
+  const destExists = await lstat(to).then(
+    () => true,
+    () => false,
+  );
+  if (destExists && realFrom !== (await realpath(to))) {
+    throw new Error(`Destination already exists: ${toPath}`);
+  }
+  return {
+    // The source already exists, so give engine coordination its physical
+    // spelling. On Windows, an IPC case alias still reaches the same entry,
+    // but the engine keys stable objects by their canonical workspace path.
+    physicalFromPath: relative(realRoot, realFrom).replaceAll("\\", "/"),
+    physicalToPath: resolvedToPath.replaceAll("\\", "/"),
+    visibleResultPath: normalized.toPath,
+    realRoot,
+    from,
+    to,
+    realFrom,
+  };
+}
+
+/** Prove and canonicalize both endpoints before engine rename preparation. */
+export async function prepareWorkspaceMove(
+  rootPath: string,
+  fromPath: string,
+  toPath: string,
+): Promise<PreparedWorkspaceMove> {
+  const inspected = await inspectWorkspaceMove(rootPath, fromPath, toPath);
+  return {
+    physicalFromPath: inspected.physicalFromPath,
+    physicalToPath: inspected.physicalToPath,
+    visibleResultPath: inspected.visibleResultPath,
+  };
+}
+
+/** Prove and canonicalize a delete target before engine settlement. */
+export async function prepareWorkspaceDelete(
+  rootPath: string,
+  relativePath: string,
+): Promise<string> {
+  const validated = validateUserWritePath(relativePath);
+  if (!validated.ok) {
+    throw new Error(
+      `Invalid delete path (${validated.reason}): ${relativePath}`,
+    );
+  }
+  const { relative: resolvedPath, resolvedAbsolute } =
+    await assertResolvedWorkspacePath({
+    rootPath,
+    absolutePath: join(rootPath, validated.normalized),
+    spelled: relativePath,
+    label: "Delete path",
+    access: "entry",
+  });
+  // A symlink delete removes the alias itself, so its spelled leaf remains the
+  // engine boundary. Every other existing entry can be resolved to its
+  // physical spelling. On a case-insensitive directory that collapses case
+  // aliases; on a case-sensitive Windows directory distinct names stay
+  // distinct.
+  if ((await lstat(resolvedAbsolute)).isSymbolicLink()) {
+    return resolvedPath.replaceAll("\\", "/");
+  }
+  const realRoot = await realpath(rootPath);
+  const realEntry = await realpath(resolvedAbsolute);
+  return relative(realRoot, realEntry).replaceAll("\\", "/");
+}
+
+export async function movePath(
+  rootPath: string,
+  fromPath: string,
+  toPath: string,
+): Promise<string> {
+  // Repeat the inspection after engine preparation so its await cannot turn
+  // the earlier proof into a commit-time TOCTOU gap.
+  const { visibleResultPath, realRoot, from, to, realFrom } =
+    await inspectWorkspaceMove(rootPath, fromPath, toPath);
   await mkdir(dirname(to), { recursive: true });
   const realDestParent = await realpath(dirname(to));
   if (!isInside(realRoot, realDestParent)) {
@@ -853,7 +1040,7 @@ export async function movePath(
   // main is the single writer on this path and Node exposes no renameat2
   // RENAME_NOREPLACE. The watcher records whatever actually landed.
   await rename(from, to);
-  return toValidated.normalized;
+  return visibleResultPath;
 }
 
 // Deletes are always RECOVERABLE — never a hard delete:
@@ -1036,8 +1223,10 @@ export async function collectZipEntries(
   relativePath?: string,
   options?: {
     includeArchivePath?(path: string): boolean;
+    platform?: NodeJS.Platform;
   },
 ): Promise<{ entries: ZipEntry[]; baseName: string }> {
+  const platform = options?.platform ?? process.platform;
   const realRoot = await realpath(rootPath);
   let startAbsolute = realRoot;
   let prefix = "";
@@ -1131,11 +1320,10 @@ export async function collectZipEntries(
       if (dirent.isSymbolicLink()) continue;
       const relPath = relDir ? `${relDir}/${dirent.name}` : dirent.name;
       const archivePath = archiveDir ? `${archiveDir}/${dirent.name}` : dirent.name;
+      if (hasEngineIgnoredSegment(relPath, platform)) continue;
       if (options?.includeArchivePath?.(archivePath) === false) continue;
       if (dirent.isDirectory()) {
-        if (!IGNORED_DIRS.has(dirent.name)) {
-          await walk(join(dir, dirent.name), relPath, archivePath);
-        }
+        await walk(join(dir, dirent.name), relPath, archivePath);
       } else if (dirent.isFile()) {
         // Secret-classified files (.env family) stay out of archives —
         // including inside mounted shares (read-aware classification).

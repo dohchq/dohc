@@ -1,6 +1,6 @@
 import type { ChatPresenceCollaboration } from "../workbench/ChatsView";
+import type { PresenceScopeInput } from "../../ipc/bridgeContract";
 import { createIpcPresenceTransport } from "./ipcPresenceTransport";
-import type { PresenceScope } from "./presenceChannel";
 
 // MU-C5 — build the ephemeral presence collaboration for the ACTIVE workspace's
 // Chats, or null when there is no signed-in relay session (solo/offline →
@@ -38,7 +38,8 @@ export function buildChatCollaboration(
   if (!input.connected || !input.relayUrl) return null;
   const displayName = input.email && input.email.trim() ? input.email.trim() : "You";
   return {
-    transportForScope: (scope: PresenceScope) => createIpcPresenceTransport(scope),
+    transportForScope: (scope: PresenceScopeInput) =>
+      createIpcPresenceTransport(scope),
     clientId: input.clientId,
     displayName,
   };

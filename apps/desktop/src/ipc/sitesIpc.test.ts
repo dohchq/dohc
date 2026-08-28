@@ -53,7 +53,7 @@ function harness() {
         if (!event.trusted) throw new Error("Untrusted renderer.");
         return { senderId: event.senderId };
       },
-      requireActiveWorkspace(sender, workspaceId, subject) {
+      withActiveWorkspace(sender, workspaceId, subject, work) {
         trace.push(`authorize:${sender.senderId}:${workspaceId}`);
         subjects.push(subject);
         if (workspaceId !== workspace.workspaceId) {
@@ -64,7 +64,7 @@ function harness() {
             "The sites request does not target the active workspace.",
           );
         }
-        return workspace;
+        return work(workspace);
       },
     },
     catalog: { list, get },

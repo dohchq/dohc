@@ -4928,8 +4928,15 @@ mod tests {
         .expect("path-derived marker");
         let doc = dohc_engine_collab::Ydoc::wire();
         let update = doc.plaintext_insert(0, "unsettled local draft");
-        dohc_engine_collab::record_local_update(&mut store, &derived_key, &update, &NoFaults, 13)
-            .expect("path-derived local draft");
+        dohc_engine_collab::record_local_update(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &derived_key,
+            &update,
+            &NoFaults,
+            13,
+        )
+        .expect("path-derived local draft");
 
         let mut payload = built.validated.payload;
         payload.chosen_from = ResolveChoiceV1::Current;
@@ -4987,8 +4994,15 @@ mod tests {
         .expect("unclaimed marker");
         let doc = dohc_engine_collab::Ydoc::wire();
         let update = doc.plaintext_insert(0, "current text");
-        dohc_engine_collab::record_local_update(&mut store, &key, &update, &NoFaults, 13)
-            .expect("unclaimed receiver content");
+        dohc_engine_collab::record_local_update(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &update,
+            &NoFaults,
+            13,
+        )
+        .expect("unclaimed receiver content");
         let derived_key = DocKey::new(
             "ws",
             "main",
@@ -5018,6 +5032,7 @@ mod tests {
         let orphan_update = orphan.plaintext_insert(0, "orphan edit");
         dohc_engine_collab::record_local_update(
             &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &derived_key,
             &orphan_update,
             &NoFaults,

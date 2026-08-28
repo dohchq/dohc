@@ -12,6 +12,7 @@
 //! structural/resource bounds remain fail-closed.
 
 use crate::bounds::{OverCapPolicy, ScanBounds};
+use crate::diff::ScanManifest;
 use crate::error::FilesError;
 use crate::floor;
 use crate::hash::{HashInput, HashOutcome, HashPool, HashRun};
@@ -22,10 +23,18 @@ use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 use tokio_util::sync::CancellationToken;
 
-/// One tracked file in a normalized listing. `mtime_ms` is captured for the
-/// listing but is NEVER used for change detection or differential comparison
-/// (hashes are the source of truth; `TEST_ORACLE.md` N8: mtimes never
-/// compared).
+/// One tracked file in a normalized listing.
+///
+/// N8, amended (formerly `TEST_ORACLE.md` "N8: mtimes never compared"; the
+/// oracle doc was retired from main, so the rule lives here): the content hash
+/// stays the source of truth — the diff classifies added/changed/removed by
+/// size and sha256, never by mtime. `mtime_ms` has exactly one job: when a
+/// file's size AND mtime both equal a prior manifest entry's recorded pairing
+/// (both non-zero), [`Scanner::scan_with_prior`] reuses that entry's hash
+/// without reading the file. Any size or mtime difference, and any entry
+/// without a recorded mtime, re-hashes the bytes. This is the standard git
+/// tradeoff: a same-size edit that forges its mtime back to the recorded value
+/// goes unseen until the next event changes the file's size or mtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileEntry {
     pub path: String,
@@ -147,8 +156,24 @@ impl Scanner {
         &self.pool
     }
 
-    /// Scan `root` into a normalized listing.
+    /// Scan `root` into a normalized listing, hashing every tracked file.
     pub fn scan(&self, root: &Path, token: &CancellationToken) -> Result<ScanOutcome, FilesError> {
+        self.scan_with_prior(root, &ScanManifest::empty(), token)
+    }
+
+    /// Scan `root`, short-circuiting the hash for any file whose size AND
+    /// mtime both match its `prior` manifest entry: the entry's recorded hash
+    /// is reused and the file is never read. A zero mtime on either side
+    /// always hashes (no recorded pairing exists — see the amended N8 rule on
+    /// [`FileEntry`]). A reused file cannot surface a read failure, so a file
+    /// that became unreadable WITHOUT changing size or mtime stays tracked at
+    /// its last-known-good content instead of degrading the scan.
+    pub fn scan_with_prior(
+        &self,
+        root: &Path,
+        prior: &ScanManifest,
+        token: &CancellationToken,
+    ) -> Result<ScanOutcome, FilesError> {
         let root = canonical_dir(root)?;
         let candidates = match self.enumerate(&root, token)? {
             EnumOutcome::Cancelled => return Ok(ScanOutcome::Cancelled),
@@ -172,15 +197,28 @@ impl Scanner {
             }
         };
 
-        let inputs: Vec<HashInput> = candidates
-            .files
-            .iter()
-            .enumerate()
-            .map(|(index, c)| HashInput {
-                index,
-                abs: c.abs.clone(),
-            })
-            .collect();
+        // The hash-reuse short-circuit (amended N8): a candidate whose size
+        // AND mtime both match its prior entry keeps the recorded hash; every
+        // other candidate becomes a hash input. Inputs stay in candidate
+        // order, so `outcomes` (indexed by input) can be consumed sequentially
+        // against the non-reused candidates below.
+        let mut reused: Vec<Option<String>> = Vec::with_capacity(candidates.files.len());
+        let mut inputs: Vec<HashInput> = Vec::new();
+        for candidate in &candidates.files {
+            let hash = prior.get(&candidate.rel).and_then(|entry| {
+                (candidate.mtime_ms != 0
+                    && entry.mtime_ms == candidate.mtime_ms
+                    && entry.size == candidate.size)
+                    .then(|| entry.sha256.clone())
+            });
+            if hash.is_none() {
+                inputs.push(HashInput {
+                    index: inputs.len(),
+                    abs: candidate.abs.clone(),
+                });
+            }
+            reused.push(hash);
+        }
 
         let outcomes = match self.pool.hash_batched(&inputs, token)? {
             HashRun::Cancelled => return Ok(ScanOutcome::Cancelled),
@@ -193,7 +231,25 @@ impl Scanner {
             mut failed,
         } = candidates;
         let mut files = Vec::with_capacity(candidate_files.len());
-        for (candidate, outcome) in candidate_files.into_iter().zip(outcomes) {
+        let mut outcomes = outcomes.into_iter();
+        for (index, candidate) in candidate_files.into_iter().enumerate() {
+            if let Some(sha256) = reused[index].take() {
+                files.push(FileEntry {
+                    media_type: media_type_for_path(&candidate.rel),
+                    path: candidate.rel,
+                    size: candidate.size,
+                    mtime_ms: candidate.mtime_ms,
+                    sha256,
+                });
+                continue;
+            }
+            let Some(outcome) = outcomes.next() else {
+                // One outcome per non-reused candidate; a shortfall is an
+                // internal accounting bug, surfaced rather than panicking.
+                return Err(FilesError::PoolUnavailable {
+                    reason: "hash pool dropped a result",
+                });
+            };
             if let Some(kind) = self.injected(&candidate.rel, ScanIoOperation::Hash) {
                 failed.push(FailedPath {
                     path: candidate.rel,
@@ -202,16 +258,40 @@ impl Scanner {
                 continue;
             }
             match outcome {
-                HashOutcome::Hashed { sha256, bytes } => files.push(FileEntry {
-                    media_type: media_type_for_path(&candidate.rel),
-                    path: candidate.rel,
-                    // The metadata size and the streamed byte count agree in
-                    // the absence of a concurrent truncation; trust the streamed
-                    // count (what was actually hashed).
-                    size: bytes,
-                    mtime_ms: candidate.mtime_ms,
-                    sha256,
-                }),
+                HashOutcome::Hashed { sha256, bytes } => {
+                    // The candidate mtime comes from the enumerate-time stat,
+                    // but the hashed bytes come from a later read. A same-size
+                    // write inside that gap would pair the STALE mtime with the
+                    // new bytes' hash, and an mtime-preserving restore of the
+                    // original bytes would then reuse the wrong hash forever.
+                    // Re-stat after hashing: the entry carries the enumerate
+                    // mtime only when the post-hash (size, mtime) equals the
+                    // enumerate observation — the file provably sat still
+                    // across the whole stat→read→stat window. Any drift, or a
+                    // failed re-stat, records 0 (no pairing) and the next scan
+                    // re-hashes. One extra stat per hashed file; reused files
+                    // never reach this arm.
+                    let mtime_ms = match std::fs::metadata(&candidate.abs) {
+                        Ok(metadata)
+                            if metadata.is_file()
+                                && metadata.len() == candidate.size
+                                && mtime_ms(&metadata) == candidate.mtime_ms =>
+                        {
+                            candidate.mtime_ms
+                        }
+                        _ => 0,
+                    };
+                    files.push(FileEntry {
+                        media_type: media_type_for_path(&candidate.rel),
+                        path: candidate.rel,
+                        // The metadata size and the streamed byte count agree in
+                        // the absence of a concurrent truncation; trust the streamed
+                        // count (what was actually hashed).
+                        size: bytes,
+                        mtime_ms,
+                        sha256,
+                    })
+                }
                 // Vanished between enumeration and hashing: benign race, skip.
                 HashOutcome::Vanished => {}
                 // Grew past the cap after enumeration measured it under: move it
@@ -242,6 +322,14 @@ impl Scanner {
                     });
                 }
             }
+        }
+
+        // Two-sided accounting: one outcome per non-reused candidate means the
+        // iterator must be exactly exhausted here, not merely never short.
+        if outcomes.next().is_some() {
+            return Err(FilesError::PoolUnavailable {
+                reason: "hash pool produced an extra result",
+            });
         }
 
         // A stream-detected over-cap may have appended to `skipped` out of
@@ -417,6 +505,7 @@ impl Scanner {
                 files.push(Candidate {
                     rel,
                     abs: path,
+                    size,
                     mtime_ms: mtime_ms(&metadata),
                 });
                 // Fail closed on the max-files bound — never truncate.
@@ -455,6 +544,7 @@ impl Scanner {
 struct Candidate {
     rel: String,
     abs: PathBuf,
+    size: u64,
     mtime_ms: i64,
 }
 
@@ -503,8 +593,9 @@ fn display(path: &Path) -> String {
 }
 
 /// Milliseconds since the Unix epoch for a file's mtime, or `0` when the
-/// platform cannot supply it or the time predates the epoch. Never compared, so
-/// the fallback is harmless.
+/// platform cannot supply it or the time predates the epoch. A zero mtime is
+/// "no observation": it never authorizes hash reuse, so the fallback fails
+/// safe toward hashing.
 fn mtime_ms(metadata: &std::fs::Metadata) -> i64 {
     let Ok(modified) = metadata.modified() else {
         return 0;

@@ -37,7 +37,7 @@ import {
   pendingTreeMoveSettled,
   type PendingTreeChange,
 } from "./file-tree-optimistic";
-import { buildTree, type TreeNode } from "./path-tree";
+import { buildTree, leafOf, type TreeNode } from "./path-tree";
 import {
   type EditorGroup,
   clampOpenEditorsHeight,
@@ -56,6 +56,7 @@ import {
   parsePluginWebAppTabPath,
   parseSiteTabPath,
 } from "./workbenchState";
+import { useCommitOnRelease } from "./useCommitOnRelease";
 
 // The explorer: a real nested tree over the flat (files, folders) lists with
 // inline create/rename editboxes, optimistic pending ops (rollback on error),
@@ -78,7 +79,7 @@ export interface ExplorerProps {
   pinned: string[];
   // Max height of the Open Editors list (workbench state, persisted): the
   // list caps here and scrolls internally; the section's bottom-edge drag
-  // handle streams clamped heights up (SidePanel width precedent).
+  // handle previews locally and commits the final clamped height on release.
   openEditorsHeight: number;
   onOpenEditorsHeightChange: (height: number) => void;
   // Incrementing request to begin an inline create at the root (palette /
@@ -153,11 +154,6 @@ type RowDropPreview = {
   kind: DropPreview["kind"];
   role: "target" | "contained";
 };
-
-function leafOf(path: string): string {
-  const slash = path.lastIndexOf("/");
-  return slash < 0 ? path : path.slice(slash + 1);
-}
 
 function ancestorsOf(path: string): string[] {
   const segments = path.split("/");
@@ -377,7 +373,10 @@ function nextChangeId(): string {
   return `pending-${editIdCounter}`;
 }
 
-export function Explorer(props: ExplorerProps) {
+// Memoized like TreeRow and for the same reason: the workspace shell re-renders
+// on every lane commit, and with a stabilized prop set (the shell's side of the
+// contract) the whole tree bails instead of reconciling per row.
+export const Explorer = memo(function Explorer(props: ExplorerProps) {
   const {
     workspaceId,
     onRefresh,
@@ -404,6 +403,15 @@ export function Explorer(props: ExplorerProps) {
   const [selection, setSelection] = useState<ReadonlySet<string>>(new Set());
   const [anchorPath, setAnchorPath] = useState<string | null>(null);
   const [focusedPath, setFocusedPath] = useState<string | null>(null);
+  // Row-callback mirrors, synced during render (idempotent, so a repeated
+  // render commits the same value). The row callbacks read these instead of
+  // depending on the state: a selection or anchor change re-renders only the
+  // rows whose flags changed, not every row via new callback identities —
+  // TreeRow's memo is only as good as the stability of what it is passed.
+  const selectionRef = useRef(selection);
+  selectionRef.current = selection;
+  const anchorPathRef = useRef(anchorPath);
+  anchorPathRef.current = anchorPath;
   const [dropPreview, setDropPreview] = useState<DropPreview | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string[] | null>(null);
   const [opError, setOpError] = useState<string | null>(null);
@@ -415,6 +423,13 @@ export function Explorer(props: ExplorerProps) {
   // collapse the saved cap to the content height on the first move.
   const openEditorsDrag = useRef<{ startY: number; startHeight: number } | null>(
     null,
+  );
+  const openEditorsResize = useCommitOnRelease(
+    props.onOpenEditorsHeightChange,
+  );
+  const openEditorsHeight = Math.min(
+    openEditorsResize.previewValue ?? props.openEditorsHeight,
+    viewportCap,
   );
   const editInputRef = useRef<HTMLInputElement>(null);
   // One commit per edit session: Enter/Escape unmount the input, whose blur
@@ -434,11 +449,12 @@ export function Explorer(props: ExplorerProps) {
 
   // Prune pending changes the authoritative refresh has confirmed.
   useEffect(() => {
-    setPending((current) =>
-      current.filter(
+    setPending((current) => {
+      const next = current.filter(
         (change) => !pendingTreeMoveSettled(change, props.files, props.folders),
-      ),
-    );
+      );
+      return next.length === current.length ? current : next;
+    });
   }, [props.files, props.folders]);
 
   // The open-editors list caps its height and scrolls internally, so the
@@ -531,6 +547,11 @@ export function Explorer(props: ExplorerProps) {
     walk(tree, 0, null);
     return out;
   }, [tree, expandedSet]);
+  // Same mirror as selectionRef: rows already re-render when the tree changes
+  // (their row objects are rebuilt), so nothing is lost by keeping them out of
+  // the click callback's identity.
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
 
   const folderPathSet = useMemo(() => new Set(projected.folders), [projected]);
 
@@ -777,7 +798,9 @@ export function Explorer(props: ExplorerProps) {
 
   const onRowClick = useCallback(
     (path: string, event: MouseEvent) => {
-      const isFolder = rows.find((row) => row.fullPath === path)?.isFolder ?? false;
+      const rowList = rowsRef.current;
+      const isFolder =
+        rowList.find((row) => row.fullPath === path)?.isFolder ?? false;
       if (event.ctrlKey || event.metaKey) {
         setSelection((current) => {
           const next = new Set(current);
@@ -789,9 +812,10 @@ export function Explorer(props: ExplorerProps) {
         setFocusedPath(path);
         return;
       }
-      if (event.shiftKey && anchorPath) {
-        const order = rows.map((row) => row.fullPath);
-        const from = order.indexOf(anchorPath);
+      const anchor = anchorPathRef.current;
+      if (event.shiftKey && anchor) {
+        const order = rowList.map((row) => row.fullPath);
+        const from = order.indexOf(anchor);
         const to = order.indexOf(path);
         if (from !== -1 && to !== -1) {
           const [lo, hi] = from < to ? [from, to] : [to, from];
@@ -804,7 +828,7 @@ export function Explorer(props: ExplorerProps) {
       if (isFolder) onToggleFolder(path);
       else onOpenFile(path);
     },
-    [rows, anchorPath, selectSingle, onToggleFolder, onOpenFile],
+    [selectSingle, onToggleFolder, onOpenFile],
   );
 
   // ---- context menu (native, main-owned over the closed tuple) ----
@@ -836,7 +860,8 @@ export function Explorer(props: ExplorerProps) {
           break;
         case "delete":
           if (path) {
-            setConfirmDelete(selection.has(path) ? [...selection] : [path]);
+            const selected = selectionRef.current;
+            setConfirmDelete(selected.has(path) ? [...selected] : [path]);
           }
           break;
         case "pin":
@@ -865,7 +890,6 @@ export function Explorer(props: ExplorerProps) {
     },
     [
       workspaceId,
-      selection,
       beginCreate,
       beginRename,
       onTogglePin,
@@ -881,11 +905,11 @@ export function Explorer(props: ExplorerProps) {
     (path: string, event: MouseEvent) => {
       event.preventDefault();
       event.stopPropagation();
-      if (!selection.has(path)) selectSingle(path);
+      if (!selectionRef.current.has(path)) selectSingle(path);
       const isFolder = isFolderPath(path);
       void dispatchMenu(isFolder ? "folder" : "file", path, props.pinned.includes(path));
     },
-    [selection, selectSingle, isFolderPath, dispatchMenu, props.pinned],
+    [selectSingle, isFolderPath, dispatchMenu, props.pinned],
   );
 
   const onContainerContextMenu = useCallback(
@@ -900,7 +924,8 @@ export function Explorer(props: ExplorerProps) {
 
   const onRowDragStart = useCallback(
     (path: string, event: DragEvent) => {
-      const paths = selection.has(path) ? [...selection] : [path];
+      const selected = selectionRef.current;
+      const paths = selected.has(path) ? [...selected] : [path];
       dragSources.current = paths.map((p) => ({
         path: p,
         kind: isFolderPath(p) ? "folder" : "file",
@@ -909,7 +934,7 @@ export function Explorer(props: ExplorerProps) {
       // Some platforms require data for a drag to start.
       event.dataTransfer.setData("text/plain", paths.join("\n"));
     },
-    [selection, isFolderPath],
+    [isFolderPath],
   );
 
   const clearDragPreview = useCallback(() => {
@@ -1329,7 +1354,7 @@ export function Explorer(props: ExplorerProps) {
                 // Editors pane). The cap is workbench state: the section's
                 // bottom-edge handle resizes it and the value persists — the
                 // render additionally bounds it to the viewport cap.
-                style={{ maxHeight: Math.min(props.openEditorsHeight, viewportCap) }}
+                style={{ maxHeight: openEditorsHeight }}
                 className="m-0 list-none overflow-y-auto overscroll-contain p-0"
               >
                 {props.editorGroups.map((group, groupIndex) => (
@@ -1438,35 +1463,31 @@ export function Explorer(props: ExplorerProps) {
                 // before anything visibly moves.
                 openEditorsDrag.current = {
                   startY: event.clientY,
-                  startHeight: Math.min(props.openEditorsHeight, viewportCap),
+                  startHeight: openEditorsHeight,
                 };
+                openEditorsResize.begin(event.pointerId, openEditorsHeight);
                 event.currentTarget.setPointerCapture(event.pointerId);
               }}
               onPointerMove={(event) => {
                 const drag = openEditorsDrag.current;
-                if (drag === null) return;
-                // If the release was missed (capture lost outside the
-                // window), a buttons-up move must end the drag — or plain
-                // hovering would keep resizing and persist bogus heights.
-                if ((event.buttons & 1) === 0) {
-                  openEditorsDrag.current = null;
+                if (drag === null || !openEditorsResize.isActive(event.pointerId)) {
                   return;
                 }
-                props.onOpenEditorsHeightChange(
+                openEditorsResize.update(
+                  event.pointerId,
                   clampOpenEditorsHeight(
                     drag.startHeight + event.clientY - drag.startY,
                   ),
+                  event.buttons,
                 );
               }}
-              onPointerUp={() => {
-                openEditorsDrag.current = null;
-              }}
-              onPointerCancel={() => {
-                openEditorsDrag.current = null;
-              }}
-              onLostPointerCapture={() => {
-                openEditorsDrag.current = null;
-              }}
+              onPointerUp={(event) => openEditorsResize.commit(event.pointerId)}
+              onPointerCancel={(event) =>
+                openEditorsResize.commit(event.pointerId)
+              }
+              onLostPointerCapture={(event) =>
+                openEditorsResize.commit(event.pointerId)
+              }
               className="absolute -bottom-1 left-0 z-10 h-2 w-full cursor-row-resize bg-transparent transition-colors hover:bg-line/80"
             />
           ) : null}
@@ -1653,4 +1674,4 @@ export function Explorer(props: ExplorerProps) {
       ) : null}
     </>
   );
-}
+});

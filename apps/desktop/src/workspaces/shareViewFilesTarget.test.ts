@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { mountRootFor, mountStoreWorkspaceIdFor } from "./shareMounts";
 import {
@@ -39,18 +39,20 @@ describe("resolveRegisteredShareViewFilesTarget", () => {
 
   it("resolves a valid mount to its own store and projected root", () => {
     const record = mount("owner");
-    expect(
-      resolveRegisteredShareViewFilesTarget(
-        { workspaceId, rootPath, shareMounts: [record] },
-        { kind: "mount", workspaceId, shareId: record.shareId },
-      ),
-    ).toMatchObject({
+    const resolved = resolveRegisteredShareViewFilesTarget(
+      { workspaceId, rootPath, shareMounts: [record] },
+      { kind: "mount", workspaceId, shareId: record.shareId },
+    );
+    expect(resolved).toMatchObject({
       kind: "mount",
       workspaceId,
       storeWorkspaceId: mountStoreWorkspaceIdFor(workspaceId, record.shareId),
       rootPath: mountRootFor(rootPath, "owner"),
       mountLabel: "owner",
     });
+    expect(resolve(resolved!.rootPath)).not.toBe(
+      resolve(resolved!.schedulingRootPath),
+    );
   });
 
   it("refuses an invalid mount label instead of falling back to the host root", () => {

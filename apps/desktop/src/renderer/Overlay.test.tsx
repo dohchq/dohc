@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { useLayoutEffect, useRef } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Overlay } from "./Overlay";
 
@@ -8,6 +9,41 @@ afterEach(() => {
 });
 
 describe("Overlay", () => {
+  it("claims focus when its child has no initial focus target", () => {
+    render(
+      <Overlay onClose={() => undefined}>
+        <div>Loading settings...</div>
+      </Overlay>,
+    );
+
+    const panel = document.querySelector<HTMLElement>(
+      '[data-dohc-modal="true"] > div',
+    );
+    expect(document.activeElement).toBe(panel);
+  });
+
+  it("keeps focus claimed by a mounted dialog child", () => {
+    function FocusedChild() {
+      const buttonRef = useRef<HTMLButtonElement>(null);
+      useLayoutEffect(() => buttonRef.current?.focus(), []);
+      return (
+        <button ref={buttonRef} type="button">
+          Close dialog
+        </button>
+      );
+    }
+
+    render(
+      <Overlay onClose={() => undefined}>
+        <FocusedChild />
+      </Overlay>,
+    );
+
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Close dialog" }),
+    );
+  });
+
   it("closes on Escape (CodeRabbit #779 R32)", () => {
     const onClose = vi.fn();
     render(

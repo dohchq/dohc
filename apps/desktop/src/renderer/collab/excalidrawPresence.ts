@@ -4,9 +4,12 @@ import type {
   SocketId,
 } from "@excalidraw/excalidraw/types";
 import type * as Y from "yjs";
-import { PRESENCE_STATE_MAX_BYTES } from "../../ipc/bridgeContract";
+import {
+  PRESENCE_STATE_MAX_BYTES,
+  type PresenceScopeInput,
+} from "../../ipc/bridgeContract";
 import { bindDocPresence, type DocPresenceBinding } from "./docPresence";
-import type { PresenceScope, PresenceTransport } from "./presenceChannel";
+import type { PresenceTransport } from "./presenceChannel";
 
 const CURSOR_PUBLISH_MS = 33;
 const MAX_POINTER_COORDINATE = 10_000_000;
@@ -56,7 +59,7 @@ export type ExcalidrawPresenceCollaboration = {
 };
 
 export type ExcalidrawPresenceFactory = {
-  transportForScope: (scope: PresenceScope) => PresenceTransport;
+  transportForScope: (scope: PresenceScopeInput) => PresenceTransport;
   clientId: string;
   displayName: string;
 };

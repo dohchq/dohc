@@ -15,9 +15,13 @@ import { JsonRpcTransport } from "../agents/JsonRpcTransport";
 import { stopProcessTreePosix } from "../process/posixSpawn";
 import { createTestScratch } from "../workspaces/testTemp";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
-import { localWorkspaceSdkReads } from "../testing/localWorkspaceSdkReads";
+import {
+  localWorkspaceSdkDatabaseEditor,
+  localWorkspaceSdkReads,
+} from "../testing/localWorkspaceSdkReads";
 import { createWorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 import { PluginHost, type PluginHostOptions } from "./PluginHost";
+import { PluginHostOwnership } from "./pluginHostOwnership";
 import {
   mutatePluginRecord,
   pluginDataDir,
@@ -28,12 +32,6 @@ import { pluginStateRoot } from "./pluginSourceSnapshot";
 import { readPluginManifestFile } from "./pluginManifest";
 import { invokePluginSdkHost } from "./pluginSdkHost";
 import { createPluginPanelSdkAuthorityRegistry } from "./pluginPanelSdkAuthority";
-import {
-  revokePluginPanelAuthorities,
-  revokePluginPanelAuthoritiesForStatus,
-  startPluginPanelWithLock,
-  stopPluginPanelWithLock,
-} from "./pluginPanelStartLifecycle";
 import {
   PLUGIN_ACTIVATION_TIMEOUT_MS,
   PLUGIN_HOST_METHODS,
@@ -306,6 +304,7 @@ function workspaceFileRouter(
         pluginId,
         workspaceRoot,
         reads: localWorkspaceSdkReads(workspaceRoot),
+        editDatabase: localWorkspaceSdkDatabaseEditor(workspaceRoot),
         spawnId,
         requestPath: "plugin-process",
         isWritable: () => true,
@@ -377,6 +376,7 @@ describe("PluginHost", () => {
             pluginId,
             workspaceRoot: root,
             reads: localWorkspaceSdkReads(root),
+            editDatabase: localWorkspaceSdkDatabaseEditor(root),
             spawnId,
             requestPath: "plugin-process",
             isWritable: () => true,
@@ -431,6 +431,7 @@ describe("PluginHost", () => {
             pluginId,
             workspaceRoot: root,
             reads: localWorkspaceSdkReads(root),
+            editDatabase: localWorkspaceSdkDatabaseEditor(root),
             spawnId,
             requestPath: "plugin-process",
             isWritable: () => true,
@@ -755,9 +756,11 @@ describe("PluginHost", () => {
     const first = await host.start(helloPluginRoot, "hello-plugin", manifest);
     expect(first.pluginId).toBe("hello-plugin");
     expect(host.currentRecord("hello-plugin")).toBe(first.record);
+    expect(host.hasLiveSpawn("hello-plugin")).toBe(true);
 
     await host.stop("hello-plugin");
     expect(host.currentRecord("hello-plugin")).toBeUndefined();
+    expect(host.hasLiveSpawn("hello-plugin")).toBe(false);
 
     const second = await host.start(helloPluginRoot, "hello-plugin", manifest);
     expect(host.currentRecord("hello-plugin")).toBe(second.record);
@@ -765,6 +768,58 @@ describe("PluginHost", () => {
 
     await host.stopRecord("hello-plugin", first.record);
     expect(host.currentRecord("hello-plugin")).toBe(second.record);
+  });
+
+  it("returns panel declarations only for the exact live ready spawn", async () => {
+    const root = await workspaceRoot();
+    const harness = createProcessHarness();
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: defaultRouter,
+    });
+    const manifest = await fixtureManifest();
+
+    const starting = host.start(
+      helloPluginRoot,
+      "hello-plugin",
+      manifest,
+    );
+    manifest.panels![0]!.title = "Mutated after admission";
+    const started = await starting;
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "ready",
+      "The plugin did not become ready.",
+    );
+    const spawnId = host.getSpawnId("hello-plugin");
+    expect(spawnId).toBeDefined();
+    expect(
+      host.readyPanelsForSpawn("hello-plugin", "stale-spawn"),
+    ).toBeUndefined();
+    expect(host.readyPanelsForSpawn("hello-plugin", spawnId!)).toEqual({
+      record: started.record,
+      panels: [
+        {
+          id: "main",
+          title: "Hello",
+          entry: "panel/index.html",
+          placement: "editor",
+        },
+        {
+          id: "hello-view",
+          title: "Hello view",
+          entry: "view/index.html",
+          placement: "view",
+          icon: "icon.svg",
+        },
+      ],
+    });
+
+    await host.stop("hello-plugin");
+    expect(
+      host.readyPanelsForSpawn("hello-plugin", spawnId!),
+    ).toBeUndefined();
   });
 
   it("rejects a pending start that stop aborts before spawn", async () => {
@@ -942,6 +997,58 @@ describe("PluginHost", () => {
     } finally {
       process.off("unhandledRejection", onUnhandledRejection);
     }
+  });
+
+  it("waits for crash-loop state persistence before stopAll settles when shutdown rejects", async () => {
+    const root = await workspaceRoot();
+    const localStateDir = await stateDir();
+    const mutationStarted = deferredVoid();
+    const releaseMutation = deferredVoid();
+    const mutationFinished = deferredVoid();
+    const spawnTransport = vi.fn<PluginHostOptions["spawnTransport"]>(() => ({
+      request<T = unknown>(): Promise<T> {
+        return Promise.resolve({} as T);
+      },
+      notify: () => undefined,
+      dispose: () => Promise.reject(new Error("transport disposal failed")),
+    }));
+    const host = trackHost({
+      stateDir: localStateDir,
+      workspaceRoot: root,
+      spawnTransport,
+      routeSdkRequest: defaultRouter,
+      mutatePluginRecord: async (stateDir, workspaceRoot, pluginId, updater) => {
+        mutationStarted.resolve();
+        await releaseMutation.promise;
+        try {
+          await mutatePluginRecord(stateDir, workspaceRoot, pluginId, updater);
+        } finally {
+          mutationFinished.resolve();
+        }
+      },
+    });
+
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
+    await mutationStarted.promise;
+
+    let stopSettled = false;
+    const stop = host.stopAll().then(() => {
+      stopSettled = true;
+    });
+    await waitFor(
+      () => host.getStatus("hello-plugin") === undefined,
+      "Plugin shutdown did not cross the transport-disposal boundary.",
+    );
+    const settledBeforeMutation = stopSettled;
+
+    releaseMutation.resolve();
+    await mutationFinished.promise;
+    await stop;
+
+    expect(settledBeforeMutation).toBe(false);
+    expect(host.getStatus("hello-plugin")).toBeUndefined();
+    const state = await readPluginLocalState(localStateDir, root);
+    expect(state.ok && state.state.plugins["hello-plugin"]?.disabled).toBe(true);
   });
 
   it("rejects duplicate command ids returned by activation", async () => {
@@ -1652,6 +1759,7 @@ describe("PluginHost", () => {
         pluginId: "hello-plugin",
         workspaceRoot: root,
         reads: localWorkspaceSdkReads(root),
+        editDatabase: localWorkspaceSdkDatabaseEditor(root),
         spawnId: authority.spawnId,
         requestPath: "panel",
         isWritable: () => true,
@@ -1693,6 +1801,7 @@ describe("PluginHost", () => {
     const engine = createWorkspaceEngineCapture({
       workspaceId: "workspace-a",
       rootPath: root,
+      attachmentId: Symbol("test-workspace-attachment"),
       rustEngineSessions: mockLiveSessions(loopback),
     });
     await writeFile(join(root, "queue-blocker.txt"), "block\n", "utf8");
@@ -1723,20 +1832,11 @@ describe("PluginHost", () => {
         };
       },
       routeSdkRequest: defaultRouter,
-      onStatusChange: (pluginId, status) =>
-        revokePluginPanelAuthoritiesForStatus({
-          workspaceId: "workspace-a",
-          pluginId,
-          status,
-          panels: [
-            {
-              workspaceId: "workspace-a",
-              pluginId: "hello-plugin",
-              panelId: "main",
-            },
-          ],
-          revokePanel: registry.revokePanel,
-        }),
+      onStatusChange: (pluginId, status) => {
+        if (status === "crashed" || status === "failed" || status === "disabled") {
+          registry.revokePanel("workspace-a", pluginId, "main");
+        }
+      },
     });
     await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await waitFor(
@@ -1751,6 +1851,7 @@ describe("PluginHost", () => {
         pluginId: "hello-plugin",
         workspaceRoot: root,
         reads: localWorkspaceSdkReads(root),
+        editDatabase: localWorkspaceSdkDatabaseEditor(root),
         spawnId,
         requestPath: "panel",
         isWritable: () => true,
@@ -1786,7 +1887,7 @@ describe("PluginHost", () => {
     await engine.stop();
   });
 
-  it("aborts a queued panel write when its plugin is disabled (#779 round 12 A4)", async () => {
+  it("aborts a queued panel write when onWillStop revokes its authority", async () => {
     const root = await workspaceRoot();
     const entered = deferredVoid();
     const release = deferredVoid();
@@ -1811,6 +1912,7 @@ describe("PluginHost", () => {
     const engine = createWorkspaceEngineCapture({
       workspaceId: "workspace-a",
       rootPath: root,
+      attachmentId: Symbol("test-workspace-attachment"),
       rustEngineSessions: mockLiveSessions(loopback),
     });
     await writeFile(join(root, "queue-blocker.txt"), "block\n", "utf8");
@@ -1838,6 +1940,7 @@ describe("PluginHost", () => {
       }),
       routeSdkRequest: defaultRouter,
     });
+    const ownership = new PluginHostOwnership(host);
     await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
@@ -1851,6 +1954,7 @@ describe("PluginHost", () => {
         pluginId: "hello-plugin",
         workspaceRoot: root,
         reads: localWorkspaceSdkReads(root),
+        editDatabase: localWorkspaceSdkDatabaseEditor(root),
         spawnId,
         requestPath: "panel",
         isWritable: () => true,
@@ -1873,23 +1977,31 @@ describe("PluginHost", () => {
     );
     await writeQueued.promise;
 
-    // What the disable action site does before it stops the plugin. Stopping
-    // the process alone leaves this queued write holding a live authority.
-    revokePluginPanelAuthorities({
-      workspaceId: "workspace-a",
-      pluginId: "hello-plugin",
-      panels: [
-        {
-          workspaceId: "workspace-a",
-          pluginId: "hello-plugin",
-          panelId: "main",
-        },
-      ],
-      revokePanel: registry.revokePanel,
+    const steps: string[] = [];
+    const originalStop = host.stop.bind(host);
+    const stop = vi.spyOn(host, "stop").mockImplementation(async (pluginId) => {
+      steps.push("host-stop");
+      await originalStop(pluginId);
     });
-    await host.stop("hello-plugin");
+    // Ownership calls this hook after it proves the change owns the stop and
+    // immediately before PluginHost.stop starts.
+    const stopOutcome = await ownership.runChange(
+      "hello-plugin",
+      async (change) => {
+        const outcome = await change.stop({
+          onWillStop: () => {
+            steps.push("revoke");
+            registry.revokePanel("workspace-a", "hello-plugin", "main");
+          },
+        });
+        return change.preserve({ kind: "existing", value: outcome });
+      },
+    );
+    stop.mockRestore();
     release.resolve();
 
+    expect(stopOutcome).toMatchObject({ kind: "stopped" });
+    expect(steps).toEqual(["revoke", "host-stop"]);
     await expect(pending).rejects.toThrow("Plugin panel is no longer active.");
     expect(grant.signal.aborted).toBe(true);
     expect(existsSync(join(root, "disabled.txt"))).toBe(false);
@@ -1960,103 +2072,6 @@ describe("PluginHost", () => {
       liveSpawnId: restartedSpawnId,
     })).toMatchObject({ spawnId: restartedSpawnId });
     expect(grant.signal.aborted).toBe(false);
-  });
-
-  it("sequences different panels against one plugin host", async () => {
-    const root = await workspaceRoot();
-    const stopEntered = deferredVoid();
-    const releaseStop = deferredVoid();
-    let spawnCount = 0;
-    const host = trackHost({
-      stateDir: await stateDir(),
-      workspaceRoot: root,
-      spawnTransport: () => {
-        spawnCount += 1;
-        const thisSpawn = spawnCount;
-        return {
-          request: async <T,>(method: string) => {
-            if (
-              thisSpawn === 1 &&
-              method === PLUGIN_HOST_METHODS.deactivate
-            ) {
-              stopEntered.resolve();
-              await releaseStop.promise;
-            }
-            return (method === PLUGIN_HOST_METHODS.activate
-              ? { commands: ["hello.write"], drivers: [] }
-              : {}) as T;
-          },
-          notify: () => undefined,
-          dispose: async () => undefined,
-        };
-      },
-      routeSdkRequest: defaultRouter,
-    });
-    const manifest = await fixtureManifest();
-    await host.start(helloPluginRoot, "hello-plugin", manifest);
-    await waitFor(
-      () => host.getStatus("hello-plugin") === "ready",
-      "Plugin did not become ready.",
-    );
-
-    const panelLocks = new Map<string, Promise<void>>();
-    const pluginLocks = new Map<string, Promise<void>>();
-    const lock = (locks: Map<string, Promise<void>>) =>
-      async <T>(key: string, operation: () => Promise<T>) => {
-        const previous = locks.get(key) ?? Promise.resolve();
-        let release!: () => void;
-        const current = new Promise<void>((resolve) => {
-          release = resolve;
-        });
-        const queued = previous.catch(() => undefined).then(() => current);
-        locks.set(key, queued);
-        await previous.catch(() => undefined);
-        try {
-          return await operation();
-        } finally {
-          release();
-          if (locks.get(key) === queued) locks.delete(key);
-        }
-      };
-    const withPanelLock = lock(panelLocks);
-    const withPluginLock = lock(pluginLocks);
-    const panels = new Set(["panel-a"]);
-
-    const stop = stopPluginPanelWithLock(
-      "workspace-a\0hello-plugin\0panel-a",
-      "workspace-a\0hello-plugin",
-      withPanelLock,
-      withPluginLock,
-      async () => {
-        panels.delete("panel-a");
-        await host.stop("hello-plugin");
-      },
-    );
-    await stopEntered.promise;
-    const start = startPluginPanelWithLock(
-      "workspace-a\0hello-plugin\0panel-b",
-      "workspace-a\0hello-plugin",
-      withPanelLock,
-      withPluginLock,
-      async () => {
-        if (!host.getSpawnId("hello-plugin")) {
-          await host.start(helloPluginRoot, "hello-plugin", manifest);
-        }
-        return host;
-      },
-      async () => {
-        panels.add("panel-b");
-      },
-    );
-    expect(spawnCount).toBe(1);
-    expect(panels).toEqual(new Set());
-
-    releaseStop.resolve();
-    await Promise.all([stop, start]);
-
-    expect(spawnCount).toBe(2);
-    expect(host.getSpawnId("hello-plugin")).toBeTruthy();
-    expect(panels).toEqual(new Set(["panel-b"]));
   });
 
   it("cleanly stops the respawned plugin when a status listener reacts to a crash", async () => {

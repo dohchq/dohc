@@ -36,6 +36,8 @@ import type {
   ListFileChatsResult,
   ListMyShareChangesResult,
   ListShareProposalsResult,
+  ListWorkspaceFilesPayload,
+  ListWorkspaceFilesResult,
   ListWorkspaceVersionsResult,
   ReadShareProposalChangesResult,
   ReadShareProposalFileContentResult,
@@ -54,6 +56,7 @@ import type {
   RebuildEngineStoreResult,
   RefreshSharedViewResult,
   StartAgentRunResult,
+  StartPluginPanelResult,
   SwitchWorkspaceVersionResult,
   SyncDmsPayload,
   SyncDmsResult,
@@ -64,6 +67,7 @@ import type {
   UpdateStateEvent,
   WriteWorkspaceTextPayload,
   WriteWorkspaceTextResult,
+  WorkspaceActivityEvent,
   WorkspaceSearchPayload,
   WorkspaceUiState,
 } from "../ipc/bridgeContract";
@@ -93,6 +97,9 @@ import {
   shareRefreshSummary,
   shareUnmountProjection,
   versionCompareOffCopy,
+  WORKBENCH_PERSIST_DELAY_MS,
+  WORKSPACE_ACTIVITY_REFRESH_DELAY_MS,
+  WORKSPACE_ACTIVITY_REFRESH_MAX_WAIT_MS,
   type Workspace,
 } from "./DesktopWorkspaceShell";
 import type { ChatsNav } from "./workbench/ChatsView";
@@ -115,6 +122,15 @@ import {
 import { disposeEngineDocLeasesForTests } from "./collab/useEngineDoc";
 import { resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
 import { RecoveryList } from "./RecoveryList";
+import { documentVersionKey } from "./documentVersionKey";
+import { leafOf } from "./workbench/path-tree";
+
+// Real implementations, spied (the chatFileMentions precedent): FileInspector
+// derives its document key on every render, and every explorer surface names
+// its rows through leafOf — so these call counts show whether the inspector
+// and the tree actually re-rendered across a shell render.
+vi.mock("./documentVersionKey", { spy: true });
+vi.mock("./workbench/path-tree", { spy: true });
 
 // The close dialog's list, standing on its own: the guard subscribes and hands
 // the rows down, so a test of the LIST needs the same one-line subscriber.
@@ -127,6 +143,12 @@ const WORKSPACE: Workspace = {
   rootPath: "/home/ice/dohc/personal",
   kind: "personal",
   mode: "local-first",
+};
+
+const OTHER_WORKSPACE: Workspace = {
+  ...WORKSPACE,
+  workspaceId: "ws-shell-other",
+  rootPath: "/home/ice/dohc/other",
 };
 
 const SYNC_STATUS: SyncStatusResult = {
@@ -293,8 +315,11 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
-  const activityCallbacks = new Set<() => void>();
+function makeBridge(
+  uiStatePromise: Promise<WorkspaceUiState | null>,
+  platform: NodeJS.Platform = "linux",
+) {
+  const activityCallbacks = new Set<(event: WorkspaceActivityEvent) => void>();
   let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
   let menuCallback: ((command: MenuCommandId) => void) | null = null;
   let pluginPanelOpenedCallback:
@@ -304,9 +329,11 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     | ((event: PluginWebAppOpenedEvent) => void)
     | null = null;
   return {
-    emitWorkspaceActivity: () => {
-      for (const callback of [...activityCallbacks]) callback();
+    platform,
+    emitWorkspaceActivity: (event: WorkspaceActivityEvent = {}) => {
+      for (const callback of [...activityCallbacks]) callback(event);
     },
+    workspaceActivitySubscriberCount: () => activityCallbacks.size,
     emitSearchResults: (batch: SearchResultsEvent) => searchCallback?.(batch),
     emitPluginPanelOpened: (event: PluginPanelOpenedEvent) =>
       pluginPanelOpenedCallback?.(event),
@@ -321,13 +348,17 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     setWorkspaceUiState: vi.fn(
       async (_payload: { workspaceId: string; state: WorkspaceUiState }) => undefined,
     ),
-    listWorkspaceFiles: vi.fn(async () => ({
-      files: [
-        { path: "a.md", kind: "file" as const },
-        { path: "b.md", kind: "file" as const },
-      ],
-      folders: [] as string[],
-    })),
+    listWorkspaceFiles: vi.fn(
+      async (
+        _payload: ListWorkspaceFilesPayload,
+      ): Promise<ListWorkspaceFilesResult> => ({
+        files: [
+          { path: "a.md", kind: "file" },
+          { path: "b.md", kind: "file" },
+        ],
+        folders: [],
+      }),
+    ),
     openWorkspace: vi.fn(async () => SYNC_STATUS),
     getSyncStatus: vi.fn(async () => SYNC_STATUS),
     // #874: the refused-store rebuild. Typed to the contract, not to this
@@ -561,12 +592,14 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
         refusedDetail: null,
       }),
     ),
-    onWorkspaceActivity: vi.fn((callback: () => void) => {
-      activityCallbacks.add(callback);
-      return () => {
-        activityCallbacks.delete(callback);
-      };
-    }),
+    onWorkspaceActivity: vi.fn(
+      (callback: (event: WorkspaceActivityEvent) => void) => {
+        activityCallbacks.add(callback);
+        return () => {
+          activityCallbacks.delete(callback);
+        };
+      },
+    ),
     onCloudSessionChanged: vi.fn((_callback: () => void) => () => {}),
     onMenuCommand: vi.fn((callback: (command: MenuCommandId) => void) => {
       menuCallback = callback;
@@ -623,13 +656,16 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     }),
     searchWorkspace: vi.fn(async (_payload: WorkspaceSearchPayload) => undefined),
     cancelWorkspaceSearch: vi.fn(async () => undefined),
-    startPluginPanel: vi.fn(async () => ({
+    startPluginPanel: vi.fn(async (): Promise<StartPluginPanelResult> => ({
+      status: "ok" as const,
       url: "http://127.0.0.1:49160/" as const,
       title: "Hello panel",
+      surfaceId: 1,
     })),
     stopPluginPanel: vi.fn(async () => undefined),
     invokePluginPanelSdk: vi.fn(async () => ({ result: null })),
     onPluginPanelSdkEvent: vi.fn(() => () => undefined),
+    onPluginPanelInvalidated: vi.fn(() => () => undefined),
   };
 }
 
@@ -657,6 +693,7 @@ function makeEngineBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
         nextBeforeMomentOrder: null,
         latestMomentOrder: 0,
         activeVersionId: "main",
+        protectedTruncated: false,
       }),
     ),
     // Typed to the contract, not to these empty defaults: the freshness tests
@@ -707,6 +744,15 @@ function makeEngineBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
       async (_payload: SyncDmsPayload): Promise<SyncDmsResult> =>
         dmSyncResult([], false),
     ),
+    // A fresh revision per read preserves the pre-gating contract for this
+    // suite: every open-DM tick reloads. A test exercising the revision gate
+    // itself overrides this with a stable value.
+    getChatThreadRevision: vi.fn(
+      (() => {
+        let revision = 0;
+        return async () => ({ revision: ++revision });
+      })(),
+    ),
     listFileChats: vi.fn(
       async (): Promise<ListFileChatsResult> => ({ fileObjectId: null, threads: [] }),
     ),
@@ -723,10 +769,58 @@ function renderShell(
     <DesktopWorkspaceShell
       workspace={workspace}
       workspaces={workspaces}
+      {...shellBootstrapProps(bridge)}
       onSwitchWorkspace={() => {}}
     />,
   );
 }
+
+function shellBootstrapProps(bridge: ReturnType<typeof makeBridge>) {
+  return {
+    userSettings: {
+      settings: DEFAULT_USER_SETTINGS,
+      source: "default" as const,
+    },
+    refreshWorkspaceRegistry: async () =>
+      (await bridge.getWorkspaceRegistry()).workspaces as Workspace[],
+  };
+}
+
+describe("workspace switch performance timeline", () => {
+  it("reuses the bootstrap agent-status read for initial history", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    renderShell(bridge);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalled());
+    expect(bridge.getAgentRunStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("records the existing shell readiness commits for a restored file", async () => {
+    const previousOrdinal = rendererMarks.readSwitchTimeline().at(-1)?.ordinal ?? 0;
+    renderShell(makeBridge(Promise.resolve(STORED_STATE)));
+
+    await screen.findByTestId("view-markdown");
+    await waitFor(() => {
+      const timeline = rendererMarks
+        .readSwitchTimeline()
+        .find((entry) => entry.ordinal > previousOrdinal);
+      expect(timeline).toMatchObject({
+        listingSource: "fresh",
+        phases: {
+          "switch-start": expect.any(Number),
+          "session-admitted": expect.any(Number),
+          "files-painted": expect.any(Number),
+          "files-revalidated": expect.any(Number),
+          "history-ready": expect.any(Number),
+          "restored-active-surface-ready": expect.any(Number),
+        },
+      });
+    });
+  });
+});
 
 describe("direct message workspace picker", () => {
   it("does not offer shared-view workspaces for acceptance", async () => {
@@ -934,6 +1028,7 @@ describe("plugin panel tabs", () => {
       <DesktopWorkspaceShell
         workspace={otherWorkspace}
         workspaces={[otherWorkspace]}
+        {...shellBootstrapProps(bridge)}
         onSwitchWorkspace={() => {}}
       />,
     );
@@ -1070,6 +1165,7 @@ describe("plugin web app tabs", () => {
       <DesktopWorkspaceShell
         workspace={otherWorkspace}
         workspaces={[otherWorkspace]}
+        {...shellBootstrapProps(bridge)}
         onSwitchWorkspace={() => {}}
       />,
     );
@@ -3223,7 +3319,10 @@ describe("editor groups", () => {
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(() => () => undefined),
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
-      acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({ updates: [] })),
+      acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
+        accepted: true as const,
+        updates: [],
+      })),
     });
     renderShell(bridge);
     await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
@@ -3763,7 +3862,252 @@ const SKIPPED_RECORD = {
   generation: 3,
 };
 
+describe("workspace switch admission", () => {
+  it("restores B's layout and engine surfaces after one admitted open", async () => {
+    let selectedWorkspace = WORKSPACE;
+    let admittedWorkspaceId = WORKSPACE.workspaceId;
+    const rejectedReads: string[] = [];
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.getWorkspaceUiState = vi.fn(async () => {
+      if (admittedWorkspaceId !== selectedWorkspace.workspaceId) {
+        rejectedReads.push(`ui-state:${selectedWorkspace.workspaceId}`);
+        throw new Error("UI state read stopped because this window changed workspaces.");
+      }
+      return selectedWorkspace.workspaceId === OTHER_WORKSPACE.workspaceId
+        ? storedStateWithTabs(["b.md"], "b.md")
+        : null;
+    });
+    bridge.getWorkspaceSettings = vi.fn(async (): Promise<WorkspaceSettingsResult> => {
+      if (admittedWorkspaceId !== selectedWorkspace.workspaceId) {
+        rejectedReads.push(`settings:${selectedWorkspace.workspaceId}`);
+        throw new Error(
+          "Workspace settings read stopped because this window changed workspaces.",
+        );
+      }
+      return {
+        settings: {
+          ...DEFAULT_WORKSPACE_SETTINGS,
+          experimental: {
+            ...DEFAULT_WORKSPACE_SETTINGS.experimental,
+            workspaceEngineAlpha:
+              selectedWorkspace.workspaceId === OTHER_WORKSPACE.workspaceId,
+          },
+        },
+        source: "stored",
+      };
+    });
+    bridge.openWorkspace = vi.fn(async () => {
+      admittedWorkspaceId = selectedWorkspace.workspaceId;
+      return SYNC_STATUS;
+    });
+    const shell = (workspace: Workspace) => (
+      <DesktopWorkspaceShell
+        key={workspace.workspaceId}
+        workspace={workspace}
+        workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
+        onSwitchWorkspace={() => {}}
+      />
+    );
+    vi.stubGlobal("dohcDesktop", bridge);
+    const view = render(shell(WORKSPACE));
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+    bridge.getWorkspaceUiState.mockClear();
+    bridge.getWorkspaceSettings.mockClear();
+    bridge.openWorkspace.mockClear();
+
+    selectedWorkspace = OTHER_WORKSPACE;
+    view.rerender(shell(OTHER_WORKSPACE));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+    await screen.findByTestId("tab-b.md");
+    await screen.findByTestId("titlebar-chats-sidebar");
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalled());
+    await act(async () => {});
+
+    expect(rejectedReads).toEqual([
+      `ui-state:${OTHER_WORKSPACE.workspaceId}`,
+      `settings:${OTHER_WORKSPACE.workspaceId}`,
+    ]);
+    expect(bridge.getWorkspaceUiState).toHaveBeenCalledTimes(2);
+    expect(bridge.getWorkspaceSettings).toHaveBeenCalledTimes(2);
+    expect(bridge.openWorkspace).toHaveBeenCalledOnce();
+  });
+});
+
+describe("workspace switch-back file listing", () => {
+  it("paints a completed cached listing before the forced disk walk replaces it", async () => {
+    const revalidation = deferred<ListWorkspaceFilesResult>();
+    const bridge = makeBridge(Promise.resolve(null));
+    let workspaceACalls = 0;
+    bridge.listWorkspaceFiles = vi.fn(
+      async (
+        payload: ListWorkspaceFilesPayload,
+      ): Promise<ListWorkspaceFilesResult> => {
+        if (payload.workspaceId === OTHER_WORKSPACE.workspaceId) {
+          return {
+            files: [{ path: "other.md", kind: "file" }],
+            folders: [],
+          };
+        }
+        workspaceACalls += 1;
+        if (workspaceACalls === 1) {
+          return {
+            files: [{ path: "cached.md", kind: "file" }],
+            folders: [],
+          };
+        }
+        if (workspaceACalls === 2) {
+          return {
+            files: [{ path: "cached.md", kind: "file" }],
+            folders: [],
+            cached: true,
+          };
+        }
+        return revalidation.promise;
+      },
+    );
+    const shell = (workspace: Workspace) => (
+      <DesktopWorkspaceShell
+        key={workspace.workspaceId}
+        workspace={workspace}
+        workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
+        onSwitchWorkspace={() => {}}
+      />
+    );
+    vi.stubGlobal("dohcDesktop", bridge);
+    const view = render(shell(WORKSPACE));
+    expect(await screen.findByText("cached.md")).toBeTruthy();
+
+    view.rerender(shell(OTHER_WORKSPACE));
+    expect(await screen.findByText("other.md")).toBeTruthy();
+
+    view.rerender(shell(WORKSPACE));
+    expect(await screen.findByText("cached.md")).toBeTruthy();
+    await waitFor(() => expect(workspaceACalls).toBe(3));
+    expect(screen.queryByText("fresh.md")).toBeNull();
+
+    await act(async () => {
+      revalidation.resolve({
+        files: [{ path: "fresh.md", kind: "file" }],
+        folders: [],
+      });
+      await revalidation.promise;
+    });
+    expect(await screen.findByText("fresh.md")).toBeTruthy();
+    expect(screen.queryByText("cached.md")).toBeNull();
+
+    const workspaceARequests = bridge.listWorkspaceFiles.mock.calls
+      .map(([payload]) => payload)
+      .filter((payload) => payload.workspaceId === WORKSPACE.workspaceId);
+    expect(workspaceARequests).toEqual([
+      { workspaceId: WORKSPACE.workspaceId, allowCached: true },
+      { workspaceId: WORKSPACE.workspaceId, allowCached: true },
+      { workspaceId: WORKSPACE.workspaceId },
+    ]);
+  });
+
+  it("does not prune a restored tab from the cached paint alone", async () => {
+    const revalidation = deferred<ListWorkspaceFilesResult>();
+    const bridge = makeBridge(
+      Promise.resolve(
+        storedStateWithTabs(["survivor.md", "gone.md"], "survivor.md"),
+      ),
+    );
+    bridge.listWorkspaceFiles = vi
+      .fn()
+      .mockResolvedValueOnce({
+        files: [{ path: "survivor.md", kind: "file" as const }],
+        folders: [],
+        cached: true,
+      })
+      .mockImplementationOnce(() => revalidation.promise);
+    renderShell(bridge);
+
+    expect(
+      (await screen.findAllByText("survivor.md")).length,
+    ).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2),
+    );
+    expect(await screen.findByTestId("tab-gone.md")).toBeTruthy();
+
+    await act(async () => {
+      revalidation.resolve({
+        files: [{ path: "survivor.md", kind: "file" }],
+        folders: [],
+      });
+      await revalidation.promise;
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("tab-gone.md")).toBeNull();
+    });
+    expect(screen.getByTestId("tab-survivor.md")).toBeTruthy();
+  });
+
+  it("performs one disk listing when the permitted cache read misses", async () => {
+    const walk = deferred<ListWorkspaceFilesResult>();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listWorkspaceFiles.mockImplementation(() => walk.promise);
+    renderShell(bridge);
+
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledOnce());
+    expect(screen.queryByText("cold.md")).toBeNull();
+    await act(async () => {
+      walk.resolve({
+        files: [{ path: "cold.md", kind: "file" }],
+        folders: [],
+      });
+      await walk.promise;
+    });
+    expect(await screen.findByText("cold.md")).toBeTruthy();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(bridge.listWorkspaceFiles).toHaveBeenCalledOnce();
+    expect(bridge.listWorkspaceFiles).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE.workspaceId,
+      allowCached: true,
+    });
+  });
+});
+
 describe("ui-state merge-on-load", () => {
+  it("drops saved state answered after the shell changes workspaces", async () => {
+    const first = deferred<WorkspaceUiState | null>();
+    const bridge = makeBridge(first.promise);
+    bridge.getWorkspaceUiState
+      .mockImplementationOnce(() => first.promise)
+      .mockResolvedValueOnce(storedStateWithTabs(["b.md"], "b.md"));
+    const workspaces = [WORKSPACE, OTHER_WORKSPACE];
+    const view = renderShell(bridge, WORKSPACE, workspaces);
+
+    view.rerender(
+      <DesktopWorkspaceShell
+        workspace={OTHER_WORKSPACE}
+        workspaces={workspaces}
+        {...shellBootstrapProps(bridge)}
+        onSwitchWorkspace={() => {}}
+      />,
+    );
+    expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
+
+    await act(async () => {
+      first.resolve(storedStateWithTabs(["a.md"], "a.md"));
+      await first.promise;
+    });
+
+    // MUTATION: omit the response guard's cleanup invalidation. The first
+    // workspace's late answer replaces b.md with a.md here.
+    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+    expect(screen.queryByTestId("tab-a.md")).toBeNull();
+  });
+
   it("restores saved state after a no-op focus before the load resolves", async () => {
     const stored = deferred<WorkspaceUiState | null>();
     const bridge = makeBridge(stored.promise);
@@ -4366,6 +4710,7 @@ describe("ui-state merge-on-load", () => {
       <DesktopWorkspaceShell
         workspace={secondWorkspace}
         workspaces={[firstWorkspace, secondWorkspace]}
+        {...shellBootstrapProps(bridge)}
         onSwitchWorkspace={() => {}}
       />,
     );
@@ -5138,11 +5483,10 @@ describe("ui-state merge-on-load", () => {
     expect(await screen.findByTestId(`tab-${CHATS_TAB_PATH}`)).toBeTruthy();
   }, 20_000);
 
-  // Cancelling on EVERY workbench write would make this seam hostile: a width
-  // drag streams one mutation per pointermove, so a user who clicks a DM and
-  // then adjusts the sidebar loses the click — and the syncDms failure branch
-  // is isCurrent-gated too, so nothing would surface. Only a destination
-  // change cancels.
+  // Cancelling on EVERY workbench write would make this seam hostile: a user
+  // who clicks a DM and then adjusts the sidebar would lose the click when the
+  // final width commits — and the syncDms failure branch is isCurrent-gated
+  // too, so nothing would surface. Only a destination change cancels.
   it("keeps an in-flight DM navigation through a sidebar width drag", async () => {
     Object.defineProperty(HTMLElement.prototype, "setPointerCapture", {
       configurable: true,
@@ -5168,14 +5512,14 @@ describe("ui-state merge-on-load", () => {
     await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
     await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
 
-    // Drag the sidebar edge: a workbench write per pointermove, and not one
-    // that moves the active tab.
+    // Drag the sidebar edge. Its one release commit does not move the active
+    // tab.
     const panel = screen.getByTestId("side-panel");
     expect(panel.style.width).toBe("240px");
     const handle = screen.getByTestId("sidebar-resize");
     fireEvent.pointerDown(handle, { button: 0, buttons: 1, pointerId: 1 });
-    fireEvent.pointerMove(handle, { buttons: 1, clientX: 300 });
-    fireEvent.pointerMove(handle, { buttons: 1, clientX: 420 });
+    fireEvent.pointerMove(handle, { buttons: 1, clientX: 300, pointerId: 1 });
+    fireEvent.pointerMove(handle, { buttons: 1, clientX: 420, pointerId: 1 });
     fireEvent.pointerUp(handle, { button: 0, pointerId: 1 });
     await waitFor(() => expect(panel.style.width).toBe("420px"));
 
@@ -5490,7 +5834,7 @@ describe("ui-state merge-on-load", () => {
       listChatThreadAttachments: vi.fn(async () => ({ attachments: [] })),
       chatRunRecordsForThread: vi.fn(async () => ({ runs: {} })),
       chatDispatchStateForThread: vi.fn(async () => ({
-        liveRun: false,
+        liveRunId: null,
         pendingCount: 0,
         paused: false,
       })),
@@ -5827,10 +6171,21 @@ describe("ui-state merge-on-load", () => {
     renderShell(bridge);
 
     await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1));
-    act(() => {
-      bridge.emitWorkspaceActivity();
-    });
-    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2));
+    // Notifications subscribes immediately; the listing refresh listener is
+    // the second live subscription and waits for workspace readiness.
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
+    vi.useFakeTimers();
+    try {
+      act(() => {
+        bridge.emitWorkspaceActivity();
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
+      });
+      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
 
     // The newer request fails. Nothing has been displayed yet.
     await act(async () => {
@@ -6182,6 +6537,7 @@ describe("engine store recovery", () => {
         onEngineYDocSaveState: vi.fn(() => () => undefined),
         onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
         acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
+          accepted: true as const,
           updates: [],
         })),
       });
@@ -6273,13 +6629,17 @@ describe("engine store recovery", () => {
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(() => () => undefined),
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
-      acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({ updates: [] })),
+      acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
+        accepted: true as const,
+        updates: [],
+      })),
     });
     vi.stubGlobal("dohcDesktop", bridge);
     const first = render(
       <DesktopWorkspaceShell
         workspace={WORKSPACE}
         workspaces={[WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
         onSwitchWorkspace={() => {}}
       />,
     );
@@ -6291,6 +6651,7 @@ describe("engine store recovery", () => {
       <DesktopWorkspaceShell
         workspace={WORKSPACE}
         workspaces={[WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
         onSwitchWorkspace={() => {}}
       />,
     );
@@ -6380,7 +6741,10 @@ describe("engine store recovery", () => {
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(() => () => undefined),
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
-      acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({ updates: [] })),
+      acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
+        accepted: true as const,
+        updates: [],
+      })),
     });
     const view = renderShell(bridge, WORKSPACE, [WORKSPACE, workspaceB]);
     await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledOnce());
@@ -6390,6 +6754,7 @@ describe("engine store recovery", () => {
       <DesktopWorkspaceShell
         workspace={workspaceB}
         workspaces={[WORKSPACE, workspaceB]}
+        {...shellBootstrapProps(bridge)}
         onSwitchWorkspace={() => {}}
       />,
     );
@@ -6441,7 +6806,10 @@ describe("engine store recovery", () => {
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(() => () => undefined),
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
-      acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({ updates: [] })),
+      acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
+        accepted: true as const,
+        updates: [],
+      })),
     });
     const { user, dialog } = await openRebuildDialog(bridge);
     await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
@@ -6559,6 +6927,7 @@ describe("engine store recovery", () => {
       <DesktopWorkspaceShell
         workspace={workspaceB}
         workspaces={[WORKSPACE, workspaceB]}
+        {...shellBootstrapProps(bridge)}
         onSwitchWorkspace={() => {}}
       />,
     );
@@ -9482,8 +9851,26 @@ describe("history page", () => {
       nextBeforeMomentOrder: null,
       latestMomentOrder: 1,
       activeVersionId,
+      protectedTruncated: false,
     };
   }
+
+  it("shows the protected truncation marker from the history page", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(async () => ({
+      ...historyPage([historyMoment("m-1", "Wrote the plan")]),
+      protectedTruncated: true,
+    }));
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await settleEngineOnRead(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+
+    expect(
+      await screen.findAllByText("Some protected activity in this range is not shown."),
+    ).toHaveLength(1);
+  });
 
   it("keeps a moment diff selected when an older duplicate-file open finishes flushing", async () => {
     const save = deferred<{ status: "written"; contentHash: string }>();
@@ -11920,9 +12307,17 @@ describe("history page", () => {
       bridge.emitWorkspaceActivity();
     });
     await waitFor(() => expect(nextRead).toBeNull());
+    const statusReads = bridge.getSyncStatus.mock.calls.length;
     act(() => {
       bridge.emitWorkspaceActivity();
     });
+    // Activity refreshes ride a trailing-edge debounce now, so the newer read
+    // this scenario needs — the one the older answer must lose to — is issued
+    // only after the window elapses. Wait for its issue, or the older answer
+    // IS the newest information and displaying it would be correct.
+    await waitFor(() =>
+      expect(bridge.getSyncStatus.mock.calls.length).toBe(statusReads + 1),
+    );
     await waitFor(() =>
       expect(screen.getByTestId("sync-status").dataset.state).toBe("syncing"),
     );
@@ -12262,8 +12657,8 @@ describe("history page", () => {
       lastRun: null,
     };
     const heldRead = deferred<AgentRunStatusResult>();
-    // Which read gets what is set by this test, not by a call count: the shell
-    // reads agent state more than once while a workspace opens.
+    // Which read gets what is set by this test, not by a call count: activity
+    // refreshes keep reading after bootstrap has shared its first answer.
     let holdNextRead = false;
     let runIsActive = false;
     const bridge = makeBridge(Promise.resolve(null));
@@ -12276,7 +12671,7 @@ describe("history page", () => {
     });
     renderShell(bridge);
 
-    await waitFor(() => expect(bridge.getAgentRunStatus).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalled());
     expect(screen.queryByTestId("agent-run-indicator")).toBeNull();
 
     // One refresh's agent read is still in flight.
@@ -12347,45 +12742,33 @@ describe("history page", () => {
     expect(placeholder.textContent).not.toContain("Settings");
   });
 
-  // #636, the other untimed write: the workspace-open effect. It runs twice —
-  // the settings read changes refreshHistory's identity — and its status was
-  // written with no token, so it moved no watermark and any older read still
-  // in flight could land on top of the newer open's answer.
-  it("keeps an older status read from landing over the second open's status", async () => {
-    const syncingStatus = { ...SYNC_STATUS, state: "syncing" as const };
-    const conflictStatus = { ...SYNC_STATUS, state: "conflict" as const };
-    const heldRead = deferred<typeof SYNC_STATUS | typeof conflictStatus>();
-    let holdNextRead = true;
+  it("does not reopen the workspace when the engine setting enables history", async () => {
+    const settings = deferred<WorkspaceSettingsResult>();
     const bridge = makeEngineBridge(Promise.resolve(null));
-    // The first open answers before the settings read lands; the second one
-    // carries the workspace as it stands now.
-    let opens = 0;
-    bridge.openWorkspace = vi.fn(async () => {
-      opens += 1;
-      return opens === 1 ? SYNC_STATUS : syncingStatus;
-    });
-    bridge.getSyncStatus = vi.fn(() => {
-      if (holdNextRead) {
-        holdNextRead = false;
-        return heldRead.promise;
-      }
-      return Promise.resolve(syncingStatus);
-    });
+    bridge.getWorkspaceSettings = vi.fn(() => settings.promise);
     renderShell(bridge);
 
-    // Both opens have answered, and so has the refresh that followed the
-    // second one. Only the first refresh's status read is outstanding.
-    await waitFor(() => expect(bridge.openWorkspace).toHaveBeenCalledTimes(2));
     await waitFor(() =>
-      expect(screen.getByTestId("sync-status").dataset.state).toBe("syncing"),
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
+    expect(bridge.openWorkspace).toHaveBeenCalledOnce();
 
-    // It answers last, describing a workspace both newer answers have left.
     await act(async () => {
-      heldRead.resolve(conflictStatus);
-      await heldRead.promise;
+      settings.resolve({
+        settings: {
+          ...DEFAULT_WORKSPACE_SETTINGS,
+          experimental: {
+            ...DEFAULT_WORKSPACE_SETTINGS.experimental,
+            workspaceEngineAlpha: true,
+          },
+        },
+        source: "stored",
+      });
+      await settings.promise;
     });
-    expect(screen.getByTestId("sync-status").dataset.state).toBe("syncing");
+
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalled());
+    expect(bridge.openWorkspace).toHaveBeenCalledOnce();
   });
 });
 
@@ -12556,6 +12939,68 @@ describe("versions surface after a failed capture build", () => {
 
     expect(await screen.findByTestId("version-menu-button")).toBeTruthy();
     await waitFor(() => expect(bridge.listWorkspaceVersions).toHaveBeenCalled());
+  });
+
+  it("does not reuse a late capability read after leaving and returning", async () => {
+    const staleFirstRead = deferred<WorkspaceSettingsResult>();
+    const freshReturnRead = deferred<WorkspaceSettingsResult>();
+    const engineOn: WorkspaceSettingsResult = {
+      settings: {
+        ...DEFAULT_WORKSPACE_SETTINGS,
+        experimental: {
+          ...DEFAULT_WORKSPACE_SETTINGS.experimental,
+          workspaceEngineAlpha: true,
+        },
+      },
+      source: "stored",
+    };
+    const engineOff: WorkspaceSettingsResult = {
+      settings: {
+        ...DEFAULT_WORKSPACE_SETTINGS,
+        experimental: {
+          ...DEFAULT_WORKSPACE_SETTINGS.experimental,
+          workspaceEngineAlpha: false,
+        },
+      },
+      source: "stored",
+    };
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.getWorkspaceSettings = vi
+      .fn()
+      .mockImplementationOnce(() => staleFirstRead.promise)
+      .mockResolvedValueOnce(engineOff)
+      .mockImplementationOnce(() => freshReturnRead.promise);
+    const workspaces = [WORKSPACE, OTHER_WORKSPACE];
+    const view = renderShell(bridge, WORKSPACE, workspaces);
+
+    view.rerender(
+      <DesktopWorkspaceShell
+        workspace={OTHER_WORKSPACE}
+        workspaces={workspaces}
+        {...shellBootstrapProps(bridge)}
+        onSwitchWorkspace={() => {}}
+      />,
+    );
+    await waitFor(() => expect(bridge.getWorkspaceSettings).toHaveBeenCalledTimes(2));
+    expect(screen.queryByTestId("titlebar-chats-sidebar")).toBeNull();
+
+    await act(async () => {
+      staleFirstRead.resolve(engineOn);
+      await staleFirstRead.promise;
+    });
+    view.rerender(
+      <DesktopWorkspaceShell
+        workspace={WORKSPACE}
+        workspaces={workspaces}
+        {...shellBootstrapProps(bridge)}
+        onSwitchWorkspace={() => {}}
+      />,
+    );
+
+    await waitFor(() => expect(bridge.getWorkspaceSettings).toHaveBeenCalledTimes(3));
+    // MUTATION: let the first response commit after its dependency changes.
+    // Returning to that workspace exposes the obsolete engine-on answer.
+    expect(screen.queryByTestId("titlebar-chats-sidebar")).toBeNull();
   });
 
   // The window the test above cannot see. Its status fake answers in the same
@@ -13466,6 +13911,131 @@ describe("moment-diff tab after a failed capture build", () => {
   });
 });
 
+describe("workbench resize commits", () => {
+  it("keeps four pointer-rate previews local and arms persistence once per drag", async () => {
+    Object.defineProperty(HTMLElement.prototype, "setPointerCapture", {
+      configurable: true,
+      value: vi.fn(),
+    });
+    const bridge = makeEngineBridge(
+      Promise.resolve({
+        ...STORED_STATE,
+        editorGroups: [
+          { id: "left", tabs: ["a.md"], activeTab: "a.md", size: 0.5 },
+          { id: "right", tabs: ["b.md"], activeTab: "b.md", size: 0.5 },
+        ],
+        activeEditorGroup: "left",
+      }),
+    );
+    renderShell(bridge);
+
+    const sidebar = await screen.findByTestId("side-panel");
+    const chats = await screen.findByTestId("chats-panel");
+    const openEditors = await screen.findByTestId("open-editors-list");
+    const editorLayout = await screen.findByTestId("editor-group-layout");
+    await screen.findByTestId("editor-group-left");
+    Object.defineProperty(chats, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ right: 1_000 }),
+    });
+    Object.defineProperty(editorLayout, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ width: 1_000 }),
+    });
+
+    const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const persistenceArms = () =>
+      timeoutSpy.mock.calls.filter(
+        ([, delay]) => delay === WORKBENCH_PERSIST_DELAY_MS,
+      ).length;
+    try {
+      const sidebarHandle = screen.getByTestId("sidebar-resize");
+      timeoutSpy.mockClear();
+      fireEvent.pointerDown(sidebarHandle, {
+        button: 0,
+        buttons: 1,
+        pointerId: 1,
+      });
+      for (const clientX of [360, 400, 440]) {
+        fireEvent.pointerMove(sidebarHandle, {
+          buttons: 1,
+          clientX,
+          pointerId: 1,
+        });
+      }
+      expect(sidebar.style.width).toBe("440px");
+      expect(persistenceArms()).toBe(0);
+      fireEvent.pointerUp(sidebarHandle, { pointerId: 1 });
+      expect(sidebar.style.width).toBe("440px");
+      expect(persistenceArms()).toBe(1);
+
+      const chatsHandle = screen.getByTestId("chats-panel-resize");
+      timeoutSpy.mockClear();
+      fireEvent.pointerDown(chatsHandle, {
+        button: 0,
+        buttons: 1,
+        pointerId: 2,
+      });
+      for (const clientX of [620, 560, 500]) {
+        fireEvent.pointerMove(chatsHandle, {
+          buttons: 1,
+          clientX,
+          pointerId: 2,
+        });
+      }
+      expect(chats.style.width).toBe("500px");
+      expect(persistenceArms()).toBe(0);
+      fireEvent.pointerCancel(chatsHandle, { pointerId: 2 });
+      expect(chats.style.width).toBe("500px");
+      expect(persistenceArms()).toBe(1);
+
+      const openEditorsHandle = screen.getByTestId("open-editors-resize");
+      timeoutSpy.mockClear();
+      fireEvent.pointerDown(openEditorsHandle, {
+        button: 0,
+        buttons: 1,
+        clientY: OPEN_EDITORS_DEFAULT_HEIGHT,
+        pointerId: 3,
+      });
+      for (const clientY of [150, 180, 200]) {
+        fireEvent.pointerMove(openEditorsHandle, {
+          buttons: 1,
+          clientY,
+          pointerId: 3,
+        });
+      }
+      expect(openEditors.style.maxHeight).toBe("200px");
+      expect(persistenceArms()).toBe(0);
+      fireEvent(window, new Event("blur"));
+      expect(openEditors.style.maxHeight).toBe("200px");
+      expect(persistenceArms()).toBe(1);
+
+      const groupHandle = screen.getByTestId("editor-group-resize-left-right");
+      timeoutSpy.mockClear();
+      fireEvent.pointerDown(groupHandle, {
+        button: 0,
+        buttons: 1,
+        clientX: 500,
+        pointerId: 4,
+      });
+      for (const clientX of [550, 600, 650]) {
+        fireEvent.pointerMove(groupHandle, {
+          buttons: 1,
+          clientX,
+          pointerId: 4,
+        });
+      }
+      expect(screen.getByTestId("editor-group-left").style.flexGrow).toBe("0.65");
+      expect(persistenceArms()).toBe(0);
+      fireEvent.lostPointerCapture(groupHandle, { pointerId: 4 });
+      expect(screen.getByTestId("editor-group-left").style.flexGrow).toBe("0.65");
+      expect(persistenceArms()).toBe(1);
+    } finally {
+      timeoutSpy.mockRestore();
+    }
+  });
+});
+
 describe("open editors", () => {
   it("highlights the full open editors and files header bars on hover", async () => {
     const bridge = makeBridge(Promise.resolve(null));
@@ -13561,6 +14131,10 @@ describe("open editors", () => {
     await waitFor(() =>
       expect(bridge.listWorkspaceFiles.mock.calls.length).toBeGreaterThan(refreshCount),
     );
+    // MUTATION: an explicit refresh must not opt into the activity cache.
+    expect(bridge.listWorkspaceFiles).toHaveBeenLastCalledWith({
+      workspaceId: WORKSPACE.workspaceId,
+    });
   });
 
   it("creates files and folders from the files title actions at the focused tree context", async () => {
@@ -13685,7 +14259,7 @@ describe("open editors", () => {
       clientY: 200,
       pointerId: 1,
     });
-    fireEvent.pointerMove(handle, { buttons: 2, clientY: 500 });
+    fireEvent.pointerMove(handle, { buttons: 2, clientY: 500, pointerId: 1 });
     expect(list.style.maxHeight).toBe(`${OPEN_EDITORS_DEFAULT_HEIGHT}px`);
 
     fireEvent.pointerDown(handle, {
@@ -13696,16 +14270,16 @@ describe("open editors", () => {
     });
     // The one-item list is shorter than its cap; a zero-delta move must
     // preserve the saved cap.
-    fireEvent.pointerMove(handle, { buttons: 1, clientY: 200 });
+    fireEvent.pointerMove(handle, { buttons: 1, clientY: 200, pointerId: 1 });
     expect(list.style.maxHeight).toBe(`${OPEN_EDITORS_DEFAULT_HEIGHT}px`);
 
-    fireEvent.pointerMove(handle, { buttons: 1, clientY: 374 });
+    fireEvent.pointerMove(handle, { buttons: 1, clientY: 374, pointerId: 1 });
     await waitFor(() => {
       expect(list.style.maxHeight).toBe("300px");
     });
 
     // Dragging far above the list clamps at the minimum height.
-    fireEvent.pointerMove(handle, { buttons: 1, clientY: 0 });
+    fireEvent.pointerMove(handle, { buttons: 1, clientY: 0, pointerId: 1 });
     await waitFor(() => {
       expect(list.style.maxHeight).toBe(`${OPEN_EDITORS_MIN_HEIGHT}px`);
     });
@@ -13742,7 +14316,7 @@ describe("open editors", () => {
         clientY: 100,
         pointerId: 1,
       });
-      fireEvent.pointerMove(handle, { buttons: 1, clientY: 200 });
+      fireEvent.pointerMove(handle, { buttons: 1, clientY: 200, pointerId: 1 });
       expect(list.style.maxHeight).toBe("90px");
 
       Object.defineProperty(window, "innerHeight", {
@@ -13881,7 +14455,7 @@ describe("chats panel (right side)", () => {
 
     const handle = screen.getByTestId("chats-panel-resize");
     fireEvent.pointerDown(handle, { button: 0, buttons: 1, pointerId: 1 });
-    fireEvent.pointerMove(handle, { buttons: 1, clientX: 100 });
+    fireEvent.pointerMove(handle, { buttons: 1, clientX: 100, pointerId: 1 });
 
     await waitFor(() => {
       expect(panel.style.width).toBe("900px");
@@ -14918,5 +15492,501 @@ describe("set-aside draft recovery", () => {
     expect(
       (screen.getByTestId("markdown-editor") as HTMLTextAreaElement).value,
     ).toContain("Draft!");
+  });
+});
+
+// D2#2/#5/#6/#8: the shell stops re-rendering the world. The probes are real
+// functions the memoized surfaces call once per render (see the vi.mock spies
+// at the top), so a zero delta IS the bailout — and breaking any stabilization
+// (an inline arrow back in the Explorer prop set, a dropped memo, a dropped
+// suspendPolling plumb) makes these fail.
+describe("workbench render cost", () => {
+  it("a shell re-render with unchanged props re-renders neither tree rows nor the inspector", async () => {
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    vi.stubGlobal("dohcDesktop", bridge);
+    // A FRESH element per render with identical prop values: rerendering the
+    // same element reference lets React skip the subtree outright, which
+    // would pass without re-rendering the shell at all.
+    const workspaces = [WORKSPACE];
+    const onSwitchWorkspace = () => {};
+    const bootstrapProps = shellBootstrapProps(bridge);
+    const shellElement = () => (
+      <DesktopWorkspaceShell
+        workspace={WORKSPACE}
+        workspaces={workspaces}
+        {...bootstrapProps}
+        onSwitchWorkspace={onSwitchWorkspace}
+      />
+    );
+    const view = render(shellElement());
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+    await screen.findByTestId("markdown-editor");
+    expect(screen.getAllByTestId("tree-row").length).toBeGreaterThan(0);
+
+    // The deltas are measured across ONE synchronous re-render, so a read
+    // still in flight cannot inflate them: nothing async can interleave
+    // between the capture, the rerender, and the assertions.
+    const keyCalls = vi.mocked(documentVersionKey).mock.calls.length;
+    const leafCalls = vi.mocked(leafOf).mock.calls.length;
+    view.rerender(shellElement());
+    expect(vi.mocked(documentVersionKey).mock.calls.length).toBe(keyCalls);
+    expect(vi.mocked(leafOf).mock.calls.length).toBe(leafCalls);
+  });
+
+  it("caps a sustained activity burst and keeps its trailing refresh", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    renderShell(bridge);
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+    await screen.findAllByTestId("tree-row");
+
+    vi.useFakeTimers();
+    try {
+      const listings = bridge.listWorkspaceFiles.mock.calls.length;
+      const statusReads = bridge.getSyncStatus.mock.calls.length;
+      const eventIntervalMs = 100;
+      const burstDurationMs = WORKSPACE_ACTIVITY_REFRESH_MAX_WAIT_MS * 2.5;
+      for (let elapsed = 0; elapsed < burstDurationMs; elapsed += eventIntervalMs) {
+        act(() => bridge.emitWorkspaceActivity());
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(eventIntervalMs);
+        });
+      }
+      // Events never go quiet for the 200ms trailing delay. The 1s cap still
+      // refreshes at t=1000 and t=2000, then leaves one trailing pass armed.
+      expect(bridge.listWorkspaceFiles.mock.calls.length).toBe(listings + 2);
+      expect(bridge.getSyncStatus.mock.calls.length).toBe(statusReads + 2);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
+      });
+      expect(bridge.listWorkspaceFiles.mock.calls.length).toBe(listings + 3);
+      expect(bridge.getSyncStatus.mock.calls.length).toBe(statusReads + 3);
+
+      // The window re-arms: a later lone event still refreshes.
+      act(() => bridge.emitWorkspaceActivity());
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
+      });
+      expect(bridge.listWorkspaceFiles.mock.calls.length).toBe(listings + 4);
+      expect(bridge.getSyncStatus.mock.calls.length).toBe(statusReads + 4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("skips only an all-hidden file window and still refreshes every history lane", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    renderShell(bridge);
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+    await screen.findAllByTestId("tree-row");
+
+    vi.useFakeTimers();
+    try {
+      const listings = bridge.listWorkspaceFiles.mock.calls.length;
+      const moments = bridge.listEngineMoments.mock.calls.length;
+      const statuses = bridge.getSyncStatus.mock.calls.length;
+      const agents = bridge.getAgentRunStatus.mock.calls.length;
+      const tryStates = bridge.getTryInVersionState.mock.calls.length;
+
+      act(() =>
+        bridge.emitWorkspaceActivity({
+          workspaceId: WORKSPACE.workspaceId,
+          paths: [".dohc/engine/index", "pkg/node_modules/cache.bin"],
+        }),
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
+      });
+
+      // MUTATION: refreshing files for every path-rich event makes the hidden
+      // engine and dependency churn pay for a disk walk it cannot change.
+      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(listings);
+      // Path alone cannot prove history harmless. A deleted or retired path
+      // may be absent from the current tree and still change these surfaces.
+      expect(bridge.listEngineMoments).toHaveBeenCalledTimes(moments + 1);
+      expect(bridge.getSyncStatus).toHaveBeenCalledTimes(statuses + 1);
+      expect(bridge.getAgentRunStatus).toHaveBeenCalledTimes(agents + 1);
+      expect(bridge.getTryInVersionState).toHaveBeenCalledTimes(tryStates + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("coalesces a mixed path-rich window through main's complete-listing cache", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    renderShell(bridge);
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+
+    vi.useFakeTimers();
+    try {
+      const listings = bridge.listWorkspaceFiles.mock.calls.length;
+      const statusReads = bridge.getSyncStatus.mock.calls.length;
+      act(() => {
+        bridge.emitWorkspaceActivity({
+          workspaceId: WORKSPACE.workspaceId,
+          paths: [".git/objects/ignored"],
+        });
+        bridge.emitWorkspaceActivity({
+          workspaceId: WORKSPACE.workspaceId,
+          paths: ["notes/created.md"],
+        });
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
+      });
+
+      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(listings + 1);
+      expect(bridge.listWorkspaceFiles).toHaveBeenLastCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        allowCached: true,
+      });
+      expect(bridge.getSyncStatus).toHaveBeenCalledTimes(statusReads + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("refreshes files for a POSIX-distinct .GIT activity path", async () => {
+    const bridge = makeBridge(Promise.resolve(null), "linux");
+    renderShell(bridge);
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+
+    vi.useFakeTimers();
+    try {
+      const listings = bridge.listWorkspaceFiles.mock.calls.length;
+      act(() =>
+        bridge.emitWorkspaceActivity({
+          workspaceId: WORKSPACE.workspaceId,
+          paths: [".GIT/file.md"],
+        }),
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
+      });
+
+      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(listings + 1);
+      expect(bridge.listWorkspaceFiles).toHaveBeenLastCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        allowCached: true,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("makes any pathless event in a mixed window force the full refresh", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    renderShell(bridge);
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+
+    vi.useFakeTimers();
+    try {
+      const listings = bridge.listWorkspaceFiles.mock.calls.length;
+      const statusReads = bridge.getSyncStatus.mock.calls.length;
+      act(() => {
+        bridge.emitWorkspaceActivity({
+          workspaceId: WORKSPACE.workspaceId,
+          paths: ["notes/changed.md"],
+        });
+        bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId });
+        bridge.emitWorkspaceActivity({
+          workspaceId: WORKSPACE.workspaceId,
+          paths: [".dohc/engine/index"],
+        });
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
+      });
+
+      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(listings + 1);
+      // MUTATION: once broad, a later scoped event must not downgrade the
+      // window to a cacheable request.
+      expect(bridge.listWorkspaceFiles).toHaveBeenLastCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+      });
+      expect(bridge.getSyncStatus).toHaveBeenCalledTimes(statusReads + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("treats a mismatched workspace payload as a full refresh", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    renderShell(bridge);
+    await screen.findAllByTestId("tree-row");
+
+    vi.useFakeTimers();
+    try {
+      const listings = bridge.listWorkspaceFiles.mock.calls.length;
+      act(() =>
+        bridge.emitWorkspaceActivity({
+          workspaceId: "ws-other",
+          paths: [".dohc/engine/index"],
+        }),
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
+      });
+
+      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(listings + 1);
+      expect(bridge.listWorkspaceFiles).toHaveBeenLastCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not skip an all-hidden window before the first listing commits", async () => {
+    const pending = deferred<{
+      files: { path: string; kind: "file" }[];
+      folders: string[];
+    }>();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listWorkspaceFiles = vi.fn(() => pending.promise);
+    renderShell(bridge);
+    await waitFor(() =>
+      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1),
+    );
+
+    vi.useFakeTimers();
+    try {
+      act(() =>
+        bridge.emitWorkspaceActivity({
+          workspaceId: WORKSPACE.workspaceId,
+          paths: [".dohc/engine/index"],
+        }),
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
+      });
+
+      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2);
+      expect(bridge.listWorkspaceFiles).toHaveBeenLastCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        allowCached: true,
+      });
+    } finally {
+      await act(async () => {
+        pending.resolve({
+          files: [{ path: "a.md", kind: "file" }],
+          folders: [],
+        });
+        await pending.promise;
+      });
+      vi.useRealTimers();
+    }
+  });
+
+  it("suspends the navigator's polling while a Chats tab is live", async () => {
+    const user = userEvent.setup();
+    const bridge = makeEngineBridge(
+      Promise.resolve(storedStateWithTabs([], null)),
+    );
+    renderShell(bridge);
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+    await screen.findByTestId("chats-view");
+
+    // Alone, the panel navigator answers activity itself: one DM sync.
+    // (Both chats instances call syncDms synchronously from the activity
+    // listener, so the counts need no settling wait.)
+    const alone = bridge.syncDms.mock.calls.length;
+    act(() => bridge.emitWorkspaceActivity());
+    expect(bridge.syncDms.mock.calls.length).toBe(alone + 1);
+
+    // With the Chats tab live there are two mounted instances — and still
+    // exactly one poller: the page. Without the suspendPolling plumb this
+    // reads +2.
+    await user.click(await screen.findByTestId("chats-open-tab"));
+    await waitFor(() =>
+      expect(screen.getAllByTestId("chats-view")).toHaveLength(2),
+    );
+    const paired = bridge.syncDms.mock.calls.length;
+    act(() => bridge.emitWorkspaceActivity());
+    expect(bridge.syncDms.mock.calls.length).toBe(paired + 1);
+  });
+
+  it("does not sync DMs from the suspended navigator when an open channel thread refreshes", async () => {
+    const user = userEvent.setup();
+    const bridge = Object.assign(
+      makeEngineBridge(Promise.resolve(storedStateWithTabs([], null))),
+      {
+        listChatChannels: vi.fn(async () => ({
+          channels: [
+            {
+              id: "channel-team",
+              name: "team",
+              slug: "team",
+              kind: "channel" as const,
+              createdAtMs: 1,
+              updatedAtMs: 1,
+              threadCount: 1,
+              unreadCount: 0,
+              wireId: "channel-team",
+            },
+          ],
+          fileThreads: [],
+        })),
+        listChatChannelShares: vi.fn(async () => ({
+          joined: [{ channelWireId: "channel-team", joined: null }],
+          sessionKey: "session-a",
+          relay: {
+            state: "answered" as const,
+            granted: [],
+            received: [],
+          },
+        })),
+        listChannelThreads: vi.fn(async () => ({
+          threads: [
+            {
+              id: "thread-team",
+              title: "Team update",
+              createdAtMs: 1,
+              updatedAtMs: 1,
+              channelId: "channel-team",
+              messageCount: 1,
+              lastReadSequence: 1,
+              unreadCount: 0,
+              openingMessage: {
+                id: "message-team",
+                authorKind: "human" as const,
+                authorDisplayName: "Alice",
+                bodySnippet: "A settled update",
+                createdAtMs: 1,
+                reactions: [],
+              },
+            },
+          ],
+          viewerAuthorId: "you",
+        })),
+        listChatMessages: vi.fn(async () => ({
+          messages: [
+            {
+              id: "message-team",
+              threadId: "thread-team",
+              authorKind: "human" as const,
+              authorDisplayName: "Alice",
+              body: "A settled update",
+              createdAtMs: 1,
+            },
+          ],
+        })),
+        listChatReactions: vi.fn(async () => ({
+          reactions: [],
+          viewerAuthorId: "you",
+        })),
+        listChatThreadDecisions: vi.fn(async () => ({ decisions: [] })),
+        listChatThreadAttachments: vi.fn(async () => ({ attachments: [] })),
+        chatRunRecordsForThread: vi.fn(async () => ({ runs: {} })),
+        chatDispatchStateForThread: vi.fn(async () => ({
+          liveRun: false,
+          pendingCount: 0,
+          paused: false,
+        })),
+        markChatThreadRead: vi.fn(async () => ({
+          lastReadSequence: 1,
+          revision: 1,
+        })),
+      },
+    );
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await screen.findByTestId("chats-channel-view");
+    expect(screen.getByTestId("chats-new-thread-composer")).toBeTruthy();
+    await user.click(await screen.findByTestId("chats-post-card"));
+    await screen.findByTestId("chats-thread-view");
+    await waitFor(() => expect(bridge.markChatThreadRead).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
+    bridge.markChatThreadRead.mockClear();
+    bridge.syncDms.mockClear();
+
+    for (let pass = 1; pass <= 3; pass += 1) {
+      act(() => bridge.emitWorkspaceActivity());
+      await waitFor(() =>
+        expect(bridge.markChatThreadRead).toHaveBeenCalledTimes(pass),
+      );
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(bridge.syncDms).not.toHaveBeenCalled();
+    }
+  });
+
+  it("clears the suspended navigator's DM unread pill when the page read lands", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      let unreadCount = 1;
+      const markRead = deferred<void>();
+      const bridge = Object.assign(
+        makeEngineBridge(Promise.resolve(storedStateWithTabs([], null))),
+        {
+          syncDms: vi.fn(async () =>
+            dmSyncResult([{ ...CANONICAL_DM, unreadCount }]),
+          ),
+          listChatMessages: vi.fn(async () => ({
+            messages: [
+              {
+                id: "dm-message",
+                threadId: CANONICAL_DM.threadId!,
+                authorKind: "human" as const,
+                authorDisplayName: "Alice",
+                body: "Read me",
+                createdAtMs: 1,
+              },
+            ],
+          })),
+          listChatReactions: vi.fn(async () => ({
+            reactions: [],
+            viewerAuthorId: "you",
+          })),
+          markChatThreadRead: vi.fn(async () => {
+            await markRead.promise;
+            unreadCount = 0;
+            return { lastReadSequence: 1, revision: 1 };
+          }),
+        },
+      );
+      renderShell(bridge);
+
+      expect((await screen.findByTestId("chats-dm-unread")).textContent).toBe(
+        "1",
+      );
+      // The panel hands the conversation to a Chats page. That page becomes
+      // the only poller while the panel stays mounted and suspended.
+      await user.click(screen.getByTestId("chats-dm-item"));
+      await screen.findByTestId("chats-dm-view");
+      await waitFor(() => expect(bridge.markChatThreadRead).toHaveBeenCalled());
+      expect(screen.getByTestId("chats-dm-unread").textContent).toBe("1");
+
+      await act(async () => {
+        markRead.resolve();
+        await markRead.promise;
+      });
+      await waitFor(() =>
+        expect(screen.queryByTestId("chats-dm-unread")).toBeNull(),
+      );
+      expect(screen.getByTestId("chats-view")).toBeTruthy();
+      expect(screen.getByTestId("chats-dm-view")).toBeTruthy();
+      expect(screen.getByTestId(`tab-${CHATS_TAB_PATH}`).dataset.active).toBe(
+        "true",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

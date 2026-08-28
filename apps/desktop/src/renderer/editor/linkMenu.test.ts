@@ -3,13 +3,12 @@ import { describe, expect, it, vi } from "vitest";
 import { Editor } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
 import { bridge } from "../bridge";
+import { normalizeLinkUrl, openLinkExternally } from "../linkActivation";
 import {
   applyLinkMenu,
   CLOSED_LINK_MENU_STATE,
   computeLinkMenuState,
   makeLinkMenuPlugin,
-  normalizeLinkUrl,
-  openLinkExternally,
   removeLinkMenu,
   type LinkMenuState,
 } from "./linkMenu";

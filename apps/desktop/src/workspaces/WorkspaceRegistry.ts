@@ -1,4 +1,5 @@
 import { app } from "electron";
+import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
@@ -45,6 +46,18 @@ export function listWorkspaces(): RegistryEntry[] {
 }
 
 export function registerWorkspace(workspace: RegistryEntry): void {
+  const canonicalRoot = realpathSync.native(workspace.rootPath);
+  for (const existing of store().list()) {
+    let existingCanonicalRoot: string;
+    try {
+      existingCanonicalRoot = realpathSync.native(existing.rootPath);
+    } catch {
+      continue;
+    }
+    if (existingCanonicalRoot === canonicalRoot) {
+      throw new Error(`Folder is already attached: ${existing.rootPath}`);
+    }
+  }
   store().register(workspace);
 }
 

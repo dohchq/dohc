@@ -88,19 +88,18 @@ export function resolveWorkspaceRelayAuthorId(
   return workspace.remote.ownerUserId;
 }
 
-export function syncEnrollmentRemoteWorkspaceId(
-  workspace: Pick<RegistryEntry, "workspaceId" | "remote">,
+export function assertSyncEnrollmentCredentials(
+  workspace: Pick<RegistryEntry, "remote">,
   credentials: Pick<CloudCredentials, "serverUrl" | "userId">,
-): string {
+): void {
   const remote = workspace.remote;
-  if (!remote) return workspace.workspaceId;
+  if (!remote) return;
   if (!serverUrlsMatch(remote.serverUrl, credentials.serverUrl)) {
     throw new Error("Sign in to the cloud server this workspace uses.");
   }
   if (remote.ownerUserId !== credentials.userId) {
     throw new Error("Sign in to the account that synced this workspace.");
   }
-  return remote.remoteWorkspaceId;
 }
 
 export async function resolveChatRelayIdentity(input: {

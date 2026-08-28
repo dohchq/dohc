@@ -63,8 +63,8 @@ export function applyPendingTreeMoves(
   files: ReadonlyArray<FileRow>,
   folders: ReadonlyArray<FolderInput>,
   moves: ReadonlyArray<PendingTreeChange>,
-): { files: FileRow[]; folders: FolderInput[] } {
-  if (moves.length === 0) return { files: [...files], folders: [...folders] }
+): { files: ReadonlyArray<FileRow>; folders: ReadonlyArray<FolderInput> } {
+  if (moves.length === 0) return { files, folders }
   let nextFiles = [...files]
   let nextFolders = [...folders]
 

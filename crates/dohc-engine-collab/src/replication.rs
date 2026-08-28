@@ -19,16 +19,18 @@
 //! per-peer applied cursor is R11b's replication-drain job (the `origin_seq`
 //! carried on [`RemoteUpdate`] is that cursor's input).
 
-use dohc_engine_storage::{put_binary_blob, EngineStore, FaultInjector, TxnOutcome};
+use dohc_engine_storage::{put_binary_blob_with_sha, EngineStore, FaultInjector, TxnOutcome};
 use rusqlite::Transaction;
 
+use crate::doc_cache::{GateBaseSource, RemoteAppendProbe, ServedGateBase};
 use crate::durable::{
     append_row, blob_seq_in_log, index_applied_frontmatter, load_for_replay_gate, maybe_compact,
-    query_marker, validate_update_bytes, Regime,
+    query_marker, validate_update_bytes, CompactOutcome, Regime,
 };
 use crate::error::CollabError;
 use crate::limits::DEFAULT_COMPACTION_THRESHOLD;
-use crate::DocKey;
+use crate::ydoc::{ContentKind, Ydoc};
+use crate::{DocKey, WriterDocCache};
 
 /// Who produced an update — the actor tag journaled into `ydoc_updates`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +79,15 @@ pub enum ReplicationApplyOutcome {
     Deduped { seq: i64 },
 }
 
+/// One remote admission result plus the gate's isolated post-candidate doc for
+/// projection in the same transaction. The projection doc is never a cache
+/// adoption candidate or a source of durable lineage bytes.
+pub struct RemoteApplyProjection {
+    pub outcome: ReplicationApplyOutcome,
+    pub doc: Ydoc,
+    pub content_kind: ContentKind,
+}
+
 /// Apply a remote `ydoc.update` op into a replicated durable lineage.
 ///
 /// - **Validated first** (constraint 5): empty/oversized/truncated bytes are
@@ -96,9 +107,37 @@ pub fn apply_remote_update(
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<ReplicationApplyOutcome>, CollabError> {
+    apply_remote_update_outer(store, None, key, remote, faults, now_ms)
+}
+
+/// Drain-only outer wrapper that keeps an already-resident writer-cache entry
+/// aligned after the remote append commits. The remote replay gate itself
+/// remains cold; serving it is PR4 scope.
+pub fn apply_remote_update_for_deferred_drain(
+    store: &mut EngineStore,
+    cache: &mut WriterDocCache,
+    key: &DocKey,
+    remote: &RemoteUpdate,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+) -> Result<TxnOutcome<ReplicationApplyOutcome>, CollabError> {
+    apply_remote_update_outer(store, Some(cache), key, remote, faults, now_ms)
+}
+
+fn apply_remote_update_outer(
+    store: &mut EngineStore,
+    mut cache: Option<&mut WriterDocCache>,
+    key: &DocKey,
+    remote: &RemoteUpdate,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+) -> Result<TxnOutcome<ReplicationApplyOutcome>, CollabError> {
     let outcome = store.write_with(faults, |tx| {
         apply_remote_update_in_transaction(tx, key, remote, now_ms)
     })?;
+    if let Some(cache) = cache.as_deref_mut() {
+        cache.finish_deferred_remote_append(store, key, &outcome, &remote.bytes);
+    }
     // Self-bound the log: a genuinely-applied remote update folds the log once it
     // grows past the threshold (a replicated fold keeps a full-state snapshot,
     // never prunes — peers still bootstrap). A dedup/crash does nothing.
@@ -106,7 +145,23 @@ pub fn apply_remote_update(
         outcome,
         TxnOutcome::Committed(ReplicationApplyOutcome::Applied { .. })
     ) {
-        let _ = maybe_compact(store, key, DEFAULT_COMPACTION_THRESHOLD, faults, now_ms)?;
+        match maybe_compact(store, key, DEFAULT_COMPACTION_THRESHOLD, faults, now_ms)? {
+            TxnOutcome::Committed(CompactOutcome::Compacted {
+                up_to_seq,
+                snapshot_sha,
+                ..
+            }) => {
+                if let Some(cache) = cache.as_deref_mut() {
+                    cache.note_compacted(store, key, up_to_seq, &snapshot_sha);
+                }
+            }
+            TxnOutcome::Committed(CompactOutcome::Skipped { .. }) => {}
+            TxnOutcome::Crashed { .. } => {
+                if let Some(cache) = cache {
+                    cache.remove(key);
+                }
+            }
+        }
     }
     Ok(outcome)
 }
@@ -142,12 +197,13 @@ pub fn apply_remote_update_in_transaction(
             reason: "remote update applied to a non-replicated lineage".to_owned(),
         });
     }
-    let base = load_for_replay_gate(tx, key)?;
-    crate::validate_replay_parity(&base, &remote.bytes)?;
-    if let Some(existing) = blob_seq_in_log(tx, key, &sha)? {
+    // Dedup BEFORE the gate — `blob_seq_in_log`'s doc explains the order.
+    if let Some(existing) = blob_seq_in_log(tx, key, &sha, &remote.bytes)? {
         return Ok(ReplicationApplyOutcome::Deduped { seq: existing });
     }
-    put_binary_blob(tx, &remote.bytes)?;
+    let base = load_for_replay_gate(tx, key)?;
+    crate::validate_replay_parity(&base, &remote.bytes)?;
+    put_binary_blob_with_sha(tx, &remote.bytes, &sha)?;
     let seq = append_row(tx, key, &sha, origin.actor_id(), now_ms)?;
     index_applied_frontmatter(
         tx,
@@ -162,4 +218,411 @@ pub fn apply_remote_update_in_transaction(
         seq,
         emit_outbound: false,
     })
+}
+
+/// Transaction-composable remote admission that returns the gate's scratch
+/// document for per-envelope projection. This cold form preserves the existing
+/// reconstruction path when no writer cache is available.
+pub fn apply_remote_update_in_transaction_with_projection(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    remote: &RemoteUpdate,
+    now_ms: i64,
+) -> Result<RemoteApplyProjection, CollabError> {
+    validate_update_bytes(&remote.bytes)?;
+    if remote.origin_id.is_empty()
+        || remote.origin_id.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES
+    {
+        return Err(CollabError::InvalidIdentifier {
+            reason: "remote origin_id must be non-empty and bounded".to_owned(),
+        });
+    }
+    let sha = crate::hex_sha256(&remote.bytes);
+    let origin = UpdateOrigin::Remote {
+        origin_id: remote.origin_id.clone(),
+    };
+    let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
+    if marker.regime != Regime::Replicated {
+        return Err(CollabError::InvalidIdentifier {
+            reason: "remote update applied to a non-replicated lineage".to_owned(),
+        });
+    }
+    if let Some(existing) = blob_seq_in_log(tx, key, &sha, &remote.bytes)? {
+        // There is no gate scratch on a dedupe. Reconstruct the byte-replay
+        // base instead of forking a full-state encode: merged forks can split
+        // delete-set endpoints differently from an incremental rebuild.
+        return Ok(RemoteApplyProjection {
+            outcome: ReplicationApplyOutcome::Deduped { seq: existing },
+            doc: load_for_replay_gate(tx, key)?,
+            content_kind: marker.content_kind,
+        });
+    }
+    let base = load_for_replay_gate(tx, key)?;
+    let projection = crate::validate_replay_parity_with_scratch(&base, &remote.bytes)?;
+    put_binary_blob_with_sha(tx, &remote.bytes, &sha)?;
+    let seq = append_row(tx, key, &sha, origin.actor_id(), now_ms)?;
+    Ok(RemoteApplyProjection {
+        outcome: ReplicationApplyOutcome::Applied {
+            seq,
+            emit_outbound: false,
+        },
+        doc: projection,
+        content_kind: marker.content_kind,
+    })
+}
+
+/// Cache-backed form of [`apply_remote_update_in_transaction_with_projection`].
+/// The cache serves only the read-only integration base. The returned document
+/// is the gate's scratch, while `probe` carries the byte-replay-identical base
+/// to post-commit cache maintenance.
+pub fn apply_remote_update_in_transaction_cached_with_projection(
+    tx: &Transaction<'_>,
+    cache: &WriterDocCache,
+    probe: &mut RemoteAppendProbe,
+    key: &DocKey,
+    remote: &RemoteUpdate,
+    now_ms: i64,
+) -> Result<RemoteApplyProjection, CollabError> {
+    validate_update_bytes(&remote.bytes)?;
+    if remote.origin_id.is_empty()
+        || remote.origin_id.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES
+    {
+        return Err(CollabError::InvalidIdentifier {
+            reason: "remote origin_id must be non-empty and bounded".to_owned(),
+        });
+    }
+    let sha = crate::hex_sha256(&remote.bytes);
+    let origin = UpdateOrigin::Remote {
+        origin_id: remote.origin_id.clone(),
+    };
+    let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
+    if marker.regime != Regime::Replicated {
+        return Err(CollabError::InvalidIdentifier {
+            reason: "remote update applied to a non-replicated lineage".to_owned(),
+        });
+    }
+    if let Some(existing) = blob_seq_in_log(tx, key, &sha, &remote.bytes)? {
+        // A dedupe never reached the gate, so it has no gate scratch. Keep the
+        // projection on the byte-replay-identical cold base; do not synthesize
+        // an owned doc by applying a cached full-state encode.
+        return Ok(RemoteApplyProjection {
+            outcome: ReplicationApplyOutcome::Deduped { seq: existing },
+            doc: load_for_replay_gate(tx, key)?,
+            content_kind: marker.content_kind,
+        });
+    }
+
+    let (projection, source) = match cache.base_for_gate(tx, key, &marker)? {
+        Some(base) => (
+            crate::validate_replay_parity_with_scratch(base, &remote.bytes)?,
+            GateBaseSource::Hit,
+        ),
+        None => {
+            let base = load_for_replay_gate(tx, key)?;
+            let projection = crate::validate_replay_parity_with_scratch(&base, &remote.bytes)?;
+            (projection, GateBaseSource::Rebuilt(base))
+        }
+    };
+    put_binary_blob_with_sha(tx, &remote.bytes, &sha)?;
+    let seq = append_row(tx, key, &sha, origin.actor_id(), now_ms)?;
+    probe.served = Some(ServedGateBase {
+        source,
+        observed: marker.clone(),
+    });
+    probe.applied_seq = Some(seq);
+    Ok(RemoteApplyProjection {
+        outcome: ReplicationApplyOutcome::Applied {
+            seq,
+            emit_outbound: false,
+        },
+        doc: projection,
+        content_kind: marker.content_kind,
+    })
+}
+
+// Unit tests rather than integration tests because the proof rides the gate's
+// `cfg(test)` seam, `with_armed_gate`.
+#[cfg(test)]
+mod dedupe_hoist_tests {
+    use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
+    use dohc_test_scratch::ScratchDir;
+
+    use super::*;
+    use crate::durable::{
+        claim_base, record_local_update, record_local_update_creating_marker, CompactOutcome,
+    };
+    use crate::replay_parity::with_armed_gate;
+    use crate::ydoc::{ContentKind, Ydoc};
+
+    fn committed<T>(outcome: TxnOutcome<T>) -> T {
+        match outcome {
+            TxnOutcome::Committed(value) => value,
+            TxnOutcome::Crashed { .. } => panic!("expected committed, got crashed"),
+        }
+    }
+
+    fn fresh_store(tag: &str) -> (ScratchDir, EngineStore) {
+        let dir = ScratchDir::new_named(tag).expect("scratch dir");
+        let store = EngineStore::open(&dir.join("engine.db"), 1_000).expect("open store");
+        (dir, store)
+    }
+
+    fn seeded_key(store: &mut EngineStore) -> DocKey {
+        let key = DocKey::new("ws-1", "ver-1", "obj-1").expect("key");
+        let sql_err = |e: rusqlite::Error| CollabError::Corrupt {
+            reason: e.to_string(),
+        };
+        let outcome = store
+            .write_with(&NoFaults, |tx| -> Result<(), CollabError> {
+                tx.execute(
+                    "INSERT INTO versioned_workspaces (workspace_id, main_version_id) \
+                     VALUES (?1, ?2)",
+                    rusqlite::params![key.workspace_id, key.version_id],
+                )
+                .map_err(sql_err)?;
+                tx.execute(
+                    "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
+                     VALUES (?1, ?2, 1000)",
+                    rusqlite::params![key.workspace_id, key.object_id],
+                )
+                .map_err(sql_err)?;
+                Ok(())
+            })
+            .expect("seed parent rows");
+        assert!(matches!(outcome, TxnOutcome::Committed(())));
+        key
+    }
+
+    fn update_rows(store: &EngineStore, key: &DocKey) -> i64 {
+        store
+            .read_with(|conn| -> Result<i64, CollabError> {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_updates \
+                     WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| CollabError::Corrupt {
+                    reason: e.to_string(),
+                })
+            })
+            .expect("count update rows")
+    }
+
+    /// Rot the canonical stored blob for `bytes` out-of-band (bit-rot
+    /// simulation). Returns the blob's sha.
+    fn rot_stored_blob(store: &mut EngineStore, bytes: &[u8]) -> String {
+        let sha = crate::hex_sha256(bytes);
+        let outcome = store
+            .write_with(&NoFaults, |tx| -> Result<usize, CollabError> {
+                tx.execute(
+                    "UPDATE binary_blobs SET bytes = ?2, byte_length = ?3 WHERE sha256 = ?1",
+                    rusqlite::params![sha, b"rotted".as_slice(), 6_i64],
+                )
+                .map_err(|e| CollabError::Corrupt {
+                    reason: e.to_string(),
+                })
+            })
+            .expect("rot blob");
+        assert_eq!(committed(outcome), 1, "the canonical blob row must exist");
+        sha
+    }
+
+    /// A replicated lineage with one applied remote delta: (store guard, store,
+    /// key, the delta as a redeliverable remote op, the delta's admitted seq).
+    fn replicated_with_applied_delta(
+        tag: &str,
+    ) -> (ScratchDir, EngineStore, DocKey, RemoteUpdate, i64) {
+        let (dir, mut store) = fresh_store(tag);
+        let key = seeded_key(&mut store);
+        let doc = Ydoc::wire();
+        doc.plaintext_insert(0, "hello ");
+        let base = doc.encode_full_state();
+        let peer = Ydoc::wire();
+        peer.apply(&base).expect("peer base");
+        let delta = peer.plaintext_insert(6, "world");
+        committed(
+            claim_base(
+                &mut store,
+                &key,
+                ContentKind::Plaintext,
+                &base,
+                &NoFaults,
+                1_000,
+            )
+            .expect("claim base"),
+        );
+        let remote = RemoteUpdate {
+            origin_id: "peer-A".to_owned(),
+            origin_seq: 1,
+            bytes: delta,
+        };
+        let seq = match committed(
+            apply_remote_update(&mut store, &key, &remote, &NoFaults, 1_100).expect("apply"),
+        ) {
+            ReplicationApplyOutcome::Applied { seq, .. } => seq,
+            ReplicationApplyOutcome::Deduped { .. } => panic!("first apply must land"),
+        };
+        (dir, store, key, remote, seq)
+    }
+
+    #[test]
+    fn redelivered_in_log_remote_bytes_dedupe_without_the_gate() {
+        let (_dir, mut store, key, remote, seq) =
+            replicated_with_applied_delta("dedupe-hoist-remote");
+
+        let again =
+            with_armed_gate(|| apply_remote_update(&mut store, &key, &remote, &NoFaults, 1_200))
+                .expect("an in-log redelivery must dedupe without invoking the gate");
+        assert_eq!(
+            committed(again),
+            ReplicationApplyOutcome::Deduped { seq },
+            "a redelivery acks the original coordinate"
+        );
+        assert_eq!(update_rows(&store, &key), 1, "no duplicate row");
+    }
+
+    #[test]
+    fn duplicate_local_append_dedupes_without_the_gate() {
+        let (_dir, mut store) = fresh_store("dedupe-hoist-local");
+        let key = seeded_key(&mut store);
+        let doc = Ydoc::wire();
+        let update = doc.plaintext_insert(0, "hello ");
+
+        let first = committed(
+            record_local_update_creating_marker(
+                &mut store,
+                &mut crate::WriterDocCache::new(),
+                &key,
+                None,
+                ContentKind::Plaintext,
+                crate::durable::Regime::LocalOnly,
+                &update,
+                None,
+                &NoFaults,
+                1_000,
+            )
+            .expect("first append"),
+        );
+        assert!(!first.deduped, "first append must land");
+
+        let again = with_armed_gate(|| {
+            record_local_update(
+                &mut store,
+                &mut crate::WriterDocCache::new(),
+                &key,
+                &update,
+                &NoFaults,
+                1_100,
+            )
+        })
+        .expect("a duplicate local append must dedupe without invoking the gate");
+        let again = committed(again);
+        assert_eq!(
+            again,
+            crate::durable::AppendOutcome {
+                seq: first.seq,
+                deduped: true,
+                emit_outbound: false,
+            },
+            "duplicate append outcome unchanged by the hoist"
+        );
+        assert_eq!(update_rows(&store, &key), 1, "no duplicate row");
+    }
+
+    #[test]
+    fn a_rotted_canonical_blob_fails_the_remote_dedup_as_corrupt() {
+        let (_dir, mut store, key, remote, _seq) =
+            replicated_with_applied_delta("dedupe-hoist-rot-remote");
+        let sha = rot_stored_blob(&mut store, &remote.bytes);
+
+        let refused = apply_remote_update(&mut store, &key, &remote, &NoFaults, 1_200)
+            .expect_err("a redelivery over a rotted blob must surface Corrupt, not a false ack");
+        assert!(
+            matches!(&refused, CollabError::Corrupt { reason } if reason.contains(&sha)),
+            "expected Corrupt naming the sha: {refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_rotted_canonical_blob_fails_the_local_dedup_as_corrupt() {
+        let (_dir, mut store) = fresh_store("dedupe-hoist-rot-local");
+        let key = seeded_key(&mut store);
+        let doc = Ydoc::wire();
+        let update = doc.plaintext_insert(0, "hello ");
+        let first = committed(
+            record_local_update_creating_marker(
+                &mut store,
+                &mut crate::WriterDocCache::new(),
+                &key,
+                None,
+                ContentKind::Plaintext,
+                crate::durable::Regime::LocalOnly,
+                &update,
+                None,
+                &NoFaults,
+                1_000,
+            )
+            .expect("first append"),
+        );
+        assert!(!first.deduped, "first append must land");
+        rot_stored_blob(&mut store, &update);
+
+        let refused = record_local_update(
+            &mut store,
+            &mut crate::WriterDocCache::new(),
+            &key,
+            &update,
+            &NoFaults,
+            1_100,
+        )
+        .expect_err("a duplicate append over a rotted blob must surface Corrupt");
+        assert!(
+            matches!(refused, CollabError::Corrupt { .. }),
+            "expected Corrupt: {refused:?}"
+        );
+    }
+
+    #[test]
+    fn redelivered_folded_bytes_take_the_full_gate_and_reappend() {
+        let (_dir, mut store, key, remote, _seq) =
+            replicated_with_applied_delta("dedupe-hoist-folded");
+
+        // Fold the applied delta into a snapshot: its log row is pruned, so the
+        // redelivery below is OUTSIDE the dedup span.
+        let folded =
+            committed(maybe_compact(&mut store, &key, 1, &NoFaults, 1_300).expect("compact"));
+        assert!(
+            matches!(folded, CompactOutcome::Compacted { .. }),
+            "the fold must fire: {folded:?}"
+        );
+        assert_eq!(update_rows(&store, &key), 0, "folded row pruned");
+
+        // Armed gate: a folded redelivery MUST reach the gate, which the armed
+        // seam turns into a fail-closed refusal.
+        let refused =
+            with_armed_gate(|| apply_remote_update(&mut store, &key, &remote, &NoFaults, 1_400))
+                .expect_err("a folded redelivery must take the full gate");
+        assert!(
+            matches!(refused, CollabError::ReplayParityViolation { .. }),
+            "expected the armed gate's fail-closed refusal: {refused:?}"
+        );
+
+        // Disarmed, the same redelivery passes the gate and re-appends as a
+        // fresh row (a CRDT no-op; re-folded at the next compaction).
+        let reapplied = committed(
+            apply_remote_update(&mut store, &key, &remote, &NoFaults, 1_500).expect("re-append"),
+        );
+        assert!(
+            matches!(
+                reapplied,
+                ReplicationApplyOutcome::Applied {
+                    emit_outbound: false,
+                    ..
+                }
+            ),
+            "folded bytes re-append: {reapplied:?}"
+        );
+        assert_eq!(update_rows(&store, &key), 1, "re-appended as a fresh row");
+    }
 }

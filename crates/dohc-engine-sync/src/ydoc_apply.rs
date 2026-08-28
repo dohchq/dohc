@@ -1,7 +1,10 @@
 use dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD;
 use dohc_engine_collab::{
-    CollabError, ContentKind, DocKey, RemoteUpdate, ReplicationApplyOutcome, apply_remote_update,
-    apply_remote_update_in_transaction, maybe_compact,
+    CollabError, CompactOutcome, ContentKind, DocKey, RemoteAppendProbe, RemoteUpdate,
+    ReplicationApplyOutcome, WriterDocCache, apply_remote_update,
+    apply_remote_update_for_deferred_drain,
+    apply_remote_update_in_transaction_cached_with_projection,
+    apply_remote_update_in_transaction_with_projection, maybe_compact,
 };
 use dohc_engine_domain::{
     ConflictFileState, DomainError, WriteText, enqueue_write, select_snapshot_by_path_in_tx,
@@ -468,7 +471,17 @@ pub fn drain_deferred_ydoc_for_key(
     key: &DocKey,
     faults: &dyn FaultInjector,
 ) -> Result<YdocDrainResult, SyncError> {
-    drain_deferred_ydoc(store, key, DeferredDrainMode::All, faults)
+    drain_deferred_ydoc(store, None, key, DeferredDrainMode::All, faults)
+}
+
+/// Cache-backed actor form of [`drain_deferred_ydoc_for_key`].
+pub fn drain_deferred_ydoc_for_key_cached(
+    store: &mut EngineStore,
+    cache: &mut WriterDocCache,
+    key: &DocKey,
+    faults: &dyn FaultInjector,
+) -> Result<YdocDrainResult, SyncError> {
+    drain_deferred_ydoc(store, Some(cache), key, DeferredDrainMode::All, faults)
 }
 
 /// Drain only deferred coordinates that belong to the lineage an open editor
@@ -492,6 +505,32 @@ pub fn drain_deferred_ydoc_for_live_session(
     }
     drain_deferred_ydoc(
         store,
+        None,
+        key,
+        DeferredDrainMode::Live(expected_lineage_claim_id),
+        faults,
+    )
+}
+
+/// Cache-backed actor form of [`drain_deferred_ydoc_for_live_session`].
+pub fn drain_deferred_ydoc_for_live_session_cached(
+    store: &mut EngineStore,
+    cache: &mut WriterDocCache,
+    key: &DocKey,
+    expected_lineage_claim_id: Option<&str>,
+    faults: &dyn FaultInjector,
+) -> Result<YdocDrainResult, SyncError> {
+    let observed = dohc_engine_collab::read_marker(store, key)
+        .map_err(map_collab_hard_error)?
+        .and_then(|marker| marker.lineage_claim_id);
+    if observed.as_deref() != expected_lineage_claim_id {
+        return Err(SyncError::RetryableState {
+            reason: "live Y.Doc session lineage changed before deferred drain",
+        });
+    }
+    drain_deferred_ydoc(
+        store,
+        Some(cache),
         key,
         DeferredDrainMode::Live(expected_lineage_claim_id),
         faults,
@@ -506,6 +545,7 @@ enum DeferredDrainMode<'a> {
 
 fn drain_deferred_ydoc(
     store: &mut EngineStore,
+    mut cache: Option<&mut WriterDocCache>,
     key: &DocKey,
     mode: DeferredDrainMode<'_>,
     faults: &dyn FaultInjector,
@@ -597,6 +637,12 @@ fn drain_deferred_ydoc(
             return Err(SyncError::BlobInvalid);
         }
         if payload.is_base_state {
+            // A base can replace the lineage while reusing durable coordinates.
+            // Evict before the transaction so a committed crash cannot leave an
+            // ABA-valid entry behind.
+            if let Some(cache) = cache.as_deref_mut() {
+                cache.remove(key);
+            }
             if lineage_claim_id != payload.update_blob_sha256 {
                 return Err(local_corruption(
                     "parked Y.Doc base claim does not match its full-state digest",
@@ -655,17 +701,24 @@ fn drain_deferred_ydoc(
                 Err(SyncError::InvalidInput { reason }) => Some(reason),
                 Err(hard) => return Err(hard),
             };
-        let outcome = match apply_remote_update(
-            store,
-            key,
-            &RemoteUpdate {
-                origin_id: origin_id.clone(),
-                origin_seq,
-                bytes,
-            },
-            faults,
-            recorded_at_ms,
-        ) {
+        let remote = RemoteUpdate {
+            origin_id: origin_id.clone(),
+            origin_seq,
+            bytes,
+        };
+        let apply_result = if let Some(cache) = cache.as_deref_mut() {
+            apply_remote_update_for_deferred_drain(
+                store,
+                cache,
+                key,
+                &remote,
+                faults,
+                recorded_at_ms,
+            )
+        } else {
+            apply_remote_update(store, key, &remote, faults, recorded_at_ms)
+        };
+        let outcome = match apply_result {
             Ok(outcome) => outcome,
             Err(error) => {
                 match map_collab_payload_error(error, "parked ydoc.update could not be applied") {
@@ -716,28 +769,18 @@ fn drain_deferred_ydoc(
         None => ("deferred-drain", payload_recorded_at),
     };
     if let Some(payload) = last_payload
-        && let Some(persisted) =
-            dohc_engine_collab::load_persisted(store, key).map_err(map_collab_hard_error)?
-        && !persisted.doc.has_pending_dependencies()
+        && let Some((projected, projected_kind)) = project_final_drained_doc(
+            store,
+            cache.as_deref(),
+            key,
+            &payload,
+            drain_origin,
+            drain_seq,
+            payload_recorded_at,
+            search_policy.as_ref(),
+            faults,
+        )?
     {
-        let projected = store.write_with(faults, |tx| {
-            project_and_write_in_tx(
-                tx,
-                key,
-                &payload.path,
-                &persisted.doc,
-                persisted.marker.content_kind,
-                // The REAL last drained coordinate keys the moment id: a
-                // synthetic (origin, recorded_at_ms) pair collides when two
-                // drain batches land updates in the same millisecond, and
-                // the duplicate id wedges the projection write.
-                drain_origin,
-                drain_seq,
-                payload_recorded_at,
-                search_policy.as_ref(),
-            )?;
-            crate::originate_ydoc_base_in_tx(tx, key, &payload.path, payload_recorded_at)
-        });
         match projected {
             Ok(TxnOutcome::Committed(crate::BaseOrigination::Declined(declined))) => {
                 sharing_declined.push(declined);
@@ -764,7 +807,7 @@ fn drain_deferred_ydoc(
                     drain_origin,
                     drain_seq,
                     projection_too_large_reason(
-                        persisted.marker.content_kind,
+                        projected_kind,
                         constraint,
                         actual_bytes,
                         limit_bytes,
@@ -811,6 +854,102 @@ fn drain_deferred_ydoc(
         refusals,
         sharing_declined,
         lineage_replacements,
+    })
+}
+
+type FinalDrainProjection = Result<TxnOutcome<crate::BaseOrigination>, SyncError>;
+
+#[allow(clippy::too_many_arguments)]
+fn project_final_drained_doc(
+    store: &mut EngineStore,
+    cache: Option<&WriterDocCache>,
+    key: &DocKey,
+    payload: &YdocUpdatePayload,
+    drain_origin: &str,
+    drain_seq: i64,
+    payload_recorded_at: i64,
+    search_policy: Option<&SearchPolicySnapshot>,
+    faults: &dyn FaultInjector,
+) -> Result<Option<(FinalDrainProjection, ContentKind)>, SyncError> {
+    if let Some(cache) = cache
+        && let Some(doc) = store
+            .read_with(|conn| cache.doc_for_consumer(conn, key))
+            .map_err(map_collab_hard_error)?
+    {
+        let marker = dohc_engine_collab::read_marker(store, key)
+            .map_err(map_collab_hard_error)?
+            .ok_or_else(|| local_corruption("drained Y.Doc marker disappeared"))?;
+        if doc.has_pending_dependencies() {
+            return Ok(None);
+        }
+        let projected = write_final_drained_projection(
+            store,
+            key,
+            payload,
+            doc,
+            marker.content_kind,
+            drain_origin,
+            drain_seq,
+            payload_recorded_at,
+            search_policy,
+            faults,
+        );
+        return Ok(Some((projected, marker.content_kind)));
+    }
+
+    let Some(persisted) =
+        dohc_engine_collab::load_persisted(store, key).map_err(map_collab_hard_error)?
+    else {
+        return Ok(None);
+    };
+    if persisted.doc.has_pending_dependencies() {
+        return Ok(None);
+    }
+    let kind = persisted.marker.content_kind;
+    let projected = write_final_drained_projection(
+        store,
+        key,
+        payload,
+        &persisted.doc,
+        kind,
+        drain_origin,
+        drain_seq,
+        payload_recorded_at,
+        search_policy,
+        faults,
+    );
+    Ok(Some((projected, kind)))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_final_drained_projection(
+    store: &mut EngineStore,
+    key: &DocKey,
+    payload: &YdocUpdatePayload,
+    doc: &dohc_engine_collab::Ydoc,
+    content_kind: ContentKind,
+    drain_origin: &str,
+    drain_seq: i64,
+    payload_recorded_at: i64,
+    search_policy: Option<&SearchPolicySnapshot>,
+    faults: &dyn FaultInjector,
+) -> Result<TxnOutcome<crate::BaseOrigination>, SyncError> {
+    store.write_with(faults, |tx| {
+        project_and_write_in_tx(
+            tx,
+            key,
+            &payload.path,
+            doc,
+            content_kind,
+            // The REAL last drained coordinate keys the moment id: a synthetic
+            // pair can collide when two batches land in one millisecond.
+            drain_origin,
+            drain_seq,
+            payload_recorded_at,
+            search_policy,
+        )?;
+        // Origination intentionally remains a full cold reconstruction.
+        crate::originate_ydoc_base_in_tx(tx, key, &payload.path, payload_recorded_at)
     })
 }
 
@@ -1787,6 +1926,29 @@ pub fn apply_ydoc_envelope(
     faults: &dyn FaultInjector,
     leases: &dyn LeaseProbe,
 ) -> Result<ApplyOutcome<YdocApplyResult>, SyncError> {
+    apply_ydoc_envelope_inner(store, None, envelope, faults, leases)
+}
+
+/// Actor pull path with access to the single-writer document cache. Only the
+/// PR3 defer-validation and drain consumers use it; ordinary remote admission
+/// and its scratch projection remain cold.
+pub fn apply_ydoc_envelope_cached(
+    store: &mut EngineStore,
+    cache: &mut WriterDocCache,
+    envelope: &ReplicationEnvelope,
+    faults: &dyn FaultInjector,
+    leases: &dyn LeaseProbe,
+) -> Result<ApplyOutcome<YdocApplyResult>, SyncError> {
+    apply_ydoc_envelope_inner(store, Some(cache), envelope, faults, leases)
+}
+
+fn apply_ydoc_envelope_inner(
+    store: &mut EngineStore,
+    mut cache: Option<&mut WriterDocCache>,
+    envelope: &ReplicationEnvelope,
+    faults: &dyn FaultInjector,
+    leases: &dyn LeaseProbe,
+) -> Result<ApplyOutcome<YdocApplyResult>, SyncError> {
     if envelope.op_kind != "ydoc.update" {
         return Err(SyncError::UnsupportedOperation);
     }
@@ -1839,6 +2001,13 @@ pub fn apply_ydoc_envelope(
             );
         }
     };
+    if payload.is_base_state
+        && let Some(cache) = cache.as_deref_mut()
+    {
+        // Claim/arbitration can replace a lineage with ABA-equal coordinates.
+        // Invalidate before any transaction so a committed crash stays safe.
+        cache.remove(&key);
+    }
     // The blob is validated BEFORE any ack path — including the live-lease
     // defer. A defer acks the coordinate with the imported log as the durable
     // queue; if the referenced blob were missing or tampered, the peer cursor
@@ -1926,7 +2095,15 @@ pub fn apply_ydoc_envelope(
             .map_err(map_collab_hard_error)?
             .and_then(|marker| marker.lineage_claim_id);
         let validation = if active_claim.as_deref() == Some(payload.lineage_claim_id.as_str()) {
-            dohc_engine_collab::validate_remote_update_with_pending(store, &key, &queued, &bytes)
+            if let Some(cache) = cache.as_deref() {
+                dohc_engine_collab::validate_remote_update_with_pending_cached(
+                    store, cache, &key, &queued, &bytes,
+                )
+            } else {
+                dohc_engine_collab::validate_remote_update_with_pending(
+                    store, &key, &queued, &bytes,
+                )
+            }
         } else {
             // A foreign queued lineage is validated only against its own
             // relay-ordered prefix. Replaying it on the active winner even in
@@ -2437,7 +2614,11 @@ pub fn apply_ydoc_envelope(
                 .map_err(map_collab_hard_error)?
                 .is_some_and(|marker| marker.regime == dohc_engine_collab::Regime::Replicated)
         {
-            let drain = drain_deferred_ydoc_for_key(store, &key, faults)?;
+            let drain = if let Some(cache) = cache.as_deref_mut() {
+                drain_deferred_ydoc_for_key_cached(store, cache, &key, faults)?
+            } else {
+                drain_deferred_ydoc_for_key(store, &key, faults)?
+            };
             return Ok(
                 merge_lineage_replacements(outcome, drain.lineage_replacements)
                     .with_sharing_declined(drain.sharing_declined)
@@ -2454,16 +2635,20 @@ pub fn apply_ydoc_envelope(
         .map_err(map_collab_hard_error)?
         .is_some_and(|marker| marker.regime == dohc_engine_collab::Regime::Replicated)
     {
-        drain_deferred_ydoc_for_key(store, &key, faults)?
+        if let Some(cache) = cache.as_deref_mut() {
+            drain_deferred_ydoc_for_key_cached(store, cache, &key, faults)?
+        } else {
+            drain_deferred_ydoc_for_key(store, &key, faults)?
+        }
     } else {
         YdocDrainResult::default()
     };
-    // Reconstruct the post-apply doc OUTSIDE the admission tx (commutative:
-    // the in-tx apply of the same bytes yields the same converged state, and
-    // a dedup changes nothing).
-    let projected_doc = {
-        let Some(persisted) =
-            dohc_engine_collab::load_persisted(store, &key).map_err(map_collab_hard_error)?
+    // Only the marker is read before admission. Candidate integration and its
+    // projection doc are produced by the replay gate inside the transaction,
+    // so neither a cold doc nor the writer cache is mutated before commit.
+    {
+        let Some(marker) =
+            dohc_engine_collab::read_marker(store, &key).map_err(map_collab_hard_error)?
         else {
             if let Err(error) = dohc_engine_collab::Ydoc::wire().apply(&bytes) {
                 return match map_collab_payload_error(
@@ -2531,12 +2716,12 @@ pub fn apply_ydoc_envelope(
                 })
             });
         };
-        if persisted.marker.lineage_claim_status != dohc_engine_collab::LineageClaimStatus::Exact {
+        if marker.lineage_claim_status != dohc_engine_collab::LineageClaimStatus::Exact {
             return Err(SyncError::RetryableState {
                 reason: "ydoc.update delta is waiting for a verified base identity",
             });
         }
-        if persisted.marker.lineage_claim_id.as_deref() != Some(payload.lineage_claim_id.as_str()) {
+        if marker.lineage_claim_id.as_deref() != Some(payload.lineage_claim_id.as_str()) {
             // The relay winner is already known. This coordinate still gets
             // its normal durable ack/log record, but its causal bytes must not
             // enter a different immutable lineage.
@@ -2554,102 +2739,123 @@ pub fn apply_ydoc_envelope(
                     .with_refusals(drain.refusals),
             );
         }
-        if persisted.doc.apply(&bytes).is_err() {
-            return refuse_ydoc(
-                store,
-                envelope,
-                faults,
-                "ydoc.update bytes fail durable validation",
-            )
-            .map(|outcome| {
-                merge_lineage_replacements(outcome, drain.lineage_replacements)
-                    .with_sharing_declined(drain.sharing_declined)
-                    .with_refusals(drain.refusals)
-            });
-        }
-        persisted
-    };
+    }
     let update_path = payload.path.clone();
-    let update_kind = projected_doc.marker.content_kind;
     let remote = RemoteUpdate {
         origin_id: envelope.origin_id.clone(),
         origin_seq: envelope.origin_seq,
         bytes,
     };
     let mut sharing_declined = None;
+    let mut cache_probe = RemoteAppendProbe::default();
     let outcome =
         crate::apply::apply_envelope_with_mutation_outcome(store, envelope, faults, |tx, op| {
-            let applied = apply_remote_update_in_transaction(tx, &key, &remote, op.recorded_at_ms)
-                .map_err(|error| {
-                    map_collab_payload_error(error, "ydoc.update could not be applied")
-                })?;
+            let projected = if let Some(cache) = cache.as_deref() {
+                apply_remote_update_in_transaction_cached_with_projection(
+                    tx,
+                    cache,
+                    &mut cache_probe,
+                    &key,
+                    &remote,
+                    op.recorded_at_ms,
+                )
+            } else {
+                apply_remote_update_in_transaction_with_projection(
+                    tx,
+                    &key,
+                    &remote,
+                    op.recorded_at_ms,
+                )
+            }
+            .map_err(|error| map_collab_payload_error(error, "ydoc.update could not be applied"))?;
+            let applied = projected.outcome;
+            let update_kind = projected.content_kind;
             // An out-of-order cross-origin update parks durably with missing
             // dependencies; a projection taken NOW would omit the pending remote
             // content and materialize an incomplete view. Skip — the envelope
             // that completes the dependency projects the full doc.
-            if projected_doc.doc.has_pending_dependencies() {
-                return Ok(crate::apply::MutationOutcome::Applied(applied));
-            }
-            tx.execute_batch("SAVEPOINT dohc_ydoc_projection")
-                .map_err(SyncError::persist)?;
-            match project_and_write_in_tx(
-                tx,
-                &key,
-                &update_path,
-                &projected_doc.doc,
-                update_kind,
-                &op.origin_id,
-                op.origin_seq,
-                op.recorded_at_ms,
-                search_policy.as_ref(),
-            ) {
-                Ok(()) => {
-                    if let crate::BaseOrigination::Declined(declined) =
-                        crate::originate_ydoc_base_in_tx(tx, &key, &update_path, op.recorded_at_ms)?
-                    {
-                        sharing_declined = Some(declined);
+            let mutation = if projected.doc.has_pending_dependencies() {
+                crate::apply::MutationOutcome::Applied(applied)
+            } else {
+                tx.execute_batch("SAVEPOINT dohc_ydoc_projection")
+                    .map_err(SyncError::persist)?;
+                match project_and_write_in_tx(
+                    tx,
+                    &key,
+                    &update_path,
+                    &projected.doc,
+                    update_kind,
+                    &op.origin_id,
+                    op.origin_seq,
+                    op.recorded_at_ms,
+                    search_policy.as_ref(),
+                ) {
+                    Ok(()) => {
+                        if let crate::BaseOrigination::Declined(declined) =
+                            crate::originate_ydoc_base_in_tx(
+                                tx,
+                                &key,
+                                &update_path,
+                                op.recorded_at_ms,
+                            )?
+                        {
+                            sharing_declined = Some(declined);
+                        }
+                        tx.execute_batch("RELEASE dohc_ydoc_projection")
+                            .map_err(SyncError::persist)?;
+                        crate::apply::MutationOutcome::Applied(applied)
                     }
-                    tx.execute_batch("RELEASE dohc_ydoc_projection")
+                    Err(SyncError::InvalidInput { reason }) => {
+                        tx.execute_batch(
+                            "ROLLBACK TO dohc_ydoc_projection; \
+                         RELEASE dohc_ydoc_projection",
+                        )
                         .map_err(SyncError::persist)?;
+                        crate::apply::MutationOutcome::RefusedRetainingMutation {
+                            reason: reason.to_owned(),
+                        }
+                    }
+                    Err(SyncError::ProjectionTooLarge {
+                        constraint,
+                        actual_bytes,
+                        limit_bytes,
+                    }) => {
+                        tx.execute_batch(
+                            "ROLLBACK TO dohc_ydoc_projection; \
+                         RELEASE dohc_ydoc_projection",
+                        )
+                        .map_err(SyncError::persist)?;
+                        crate::apply::MutationOutcome::RefusedRetainingMutation {
+                            reason: projection_too_large_reason(
+                                update_kind,
+                                constraint,
+                                actual_bytes,
+                                limit_bytes,
+                            ),
+                        }
+                    }
+                    Err(hard) => return Err(hard),
                 }
-                Err(SyncError::InvalidInput { reason }) => {
-                    tx.execute_batch(
-                        "ROLLBACK TO dohc_ydoc_projection; \
-                     RELEASE dohc_ydoc_projection",
-                    )
-                    .map_err(SyncError::persist)?;
-                    return Ok(crate::apply::MutationOutcome::RefusedRetainingMutation {
-                        reason: reason.to_owned(),
-                    });
-                }
-                Err(SyncError::ProjectionTooLarge {
-                    constraint,
-                    actual_bytes,
-                    limit_bytes,
-                }) => {
-                    tx.execute_batch(
-                        "ROLLBACK TO dohc_ydoc_projection; \
-                     RELEASE dohc_ydoc_projection",
-                    )
-                    .map_err(SyncError::persist)?;
-                    return Ok(crate::apply::MutationOutcome::RefusedRetainingMutation {
-                        reason: projection_too_large_reason(
-                            update_kind,
-                            constraint,
-                            actual_bytes,
-                            limit_bytes,
-                        ),
-                    });
-                }
-                Err(hard) => return Err(hard),
-            }
-            Ok(crate::apply::MutationOutcome::Applied(applied))
+            };
+            cache_probe.capture_commit(tx, &key);
+            Ok(mutation)
         })?;
+    if let Some(cache) = cache.as_deref_mut() {
+        match &outcome {
+            ApplyOutcome::Applied(_) | ApplyOutcome::Refused(_) => {
+                cache.finish_remote_append(&key, &remote.bytes, cache_probe);
+            }
+            ApplyOutcome::Crashed { committed: true } => cache.remove(&key),
+            ApplyOutcome::Skipped
+            | ApplyOutcome::Crashed { committed: false }
+            | ApplyOutcome::WithDiagnostics { .. } => {}
+        }
+    }
     if matches!(
         outcome,
         ApplyOutcome::Applied(ReplicationApplyOutcome::Applied { .. })
     ) {
-        maybe_compact(
+        let compacted = maybe_compact(
             store,
             &key,
             DEFAULT_COMPACTION_THRESHOLD,
@@ -2659,6 +2865,17 @@ pub fn apply_ydoc_envelope(
         .map_err(|_| SyncError::InvalidInput {
             reason: "ydoc.update compaction failed",
         })?;
+        if let Some(cache) = cache {
+            match compacted {
+                TxnOutcome::Committed(CompactOutcome::Compacted {
+                    up_to_seq,
+                    snapshot_sha,
+                    ..
+                }) => cache.note_compacted(store, &key, up_to_seq, &snapshot_sha),
+                TxnOutcome::Committed(CompactOutcome::Skipped { .. }) => {}
+                TxnOutcome::Crashed { .. } => cache.remove(&key),
+            }
+        }
     }
     Ok(merge_lineage_replacements(
         map_applied_ydoc_outcome(outcome, sharing_declined),

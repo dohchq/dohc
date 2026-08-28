@@ -3,11 +3,13 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   closeWorkspaceActivityAndRelay,
-  createWorkspaceActivity,
+  createWorkspaceActivity as createPhysicalWorkspaceActivity,
+  WorkspaceActivityState,
+  type ActivityWorkspace,
   type WorkspaceCaptureHooks,
 } from "./workspaceActivity";
+import { createInMemoryWorkspaceActivity as createWorkspaceActivity } from "./workspaceActivity.testSupport";
 import { captureForFlaggedWorkspace } from "./engineCaptureGate";
-import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createTestScratch } from "./testTemp";
 
@@ -36,10 +38,13 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-function workspace(): CreatedWorkspace {
+const ATTACHMENT_ID = Symbol("activity-test-attachment");
+
+function workspace(): ActivityWorkspace {
   return {
     workspaceId: "activity-test",
     rootPath: root,
+    attachmentId: ATTACHMENT_ID,
     kind: "personal",
     mode: "local-first",
   };
@@ -49,6 +54,45 @@ function workspace(): CreatedWorkspace {
 // the engine capture can stamp settled batches with agent authorship while a
 // dohc-tracked run is active.
 describe("workspaceActivity capture hooks", () => {
+  it("keeps an old attachment close from stopping its successor", async () => {
+    const successorRoot = await createTestScratch("dohc-activity-successor-");
+    const oldCaptureStop = vi.fn(async () => undefined);
+    const successorCaptureStop = vi.fn(async () => undefined);
+    const activity = createPhysicalWorkspaceActivity(() => {}, {
+      captureFor: (candidate) => ({
+        shareView: false,
+        capture: {
+          start: vi.fn(),
+          settleAndCloseAllLiveSessions: vi.fn(async () => undefined),
+          stop:
+            candidate.rootPath === root
+              ? oldCaptureStop
+              : successorCaptureStop,
+        } as never,
+      }),
+    });
+    const oldState = new WorkspaceActivityState();
+    const successorState = new WorkspaceActivityState();
+    const oldWorkspace = workspace();
+    const successorWorkspace = {
+      ...oldWorkspace,
+      rootPath: successorRoot,
+    };
+    try {
+      await activity.open(oldWorkspace, oldState);
+      await activity.open(successorWorkspace, successorState);
+
+      await activity.close(oldWorkspace, oldState);
+
+      expect(oldCaptureStop).toHaveBeenCalledOnce();
+      expect(successorCaptureStop).not.toHaveBeenCalled();
+      expect(activity.isOpen(successorState)).toBe(true);
+    } finally {
+      await activity.stop(successorState);
+      await rm(successorRoot, { recursive: true, force: true });
+    }
+  });
+
   it("fires and contains the dormant Rust shadow observer only when supplied", async () => {
     const captureBatch = vi.fn();
     const onRustEngineShadowActivity = vi.fn(async () => {
@@ -81,6 +125,28 @@ describe("workspaceActivity capture hooks", () => {
           expect.stringContaining("Rust engine shadow activity failed"),
           expect.any(Error),
         );
+      },
+      { timeout: 3_000 },
+    );
+    await activity.stopAll();
+  });
+
+  it("publishes settled watcher paths with the workspace activity", async () => {
+    const notify = vi.fn();
+    const activity = createWorkspaceActivity(notify, {
+      captureFor: () => ({ capture: null, shareView: false }),
+    });
+    await activity.open(workspace());
+    notify.mockClear();
+
+    await writeFile(join(root, "changed.md"), "changed");
+
+    await vi.waitFor(
+      () => {
+        expect(notify).toHaveBeenCalledWith({
+          workspaceId: "activity-test",
+          paths: ["changed.md"],
+        });
       },
       { timeout: 3_000 },
     );
@@ -163,7 +229,12 @@ describe("workspaceActivity history-off status (retirement Phase C)", () => {
     const activity = createWorkspaceActivity(() => {}, {
       captureFor: (w, hooks) =>
         captureForFlaggedWorkspace(
-          { workspaceId: w.workspaceId, rootPath: w.rootPath, shareView: true },
+          {
+            workspaceId: w.workspaceId,
+            rootPath: w.rootPath,
+            attachmentId: w.attachmentId,
+            shareView: true,
+          },
           hooks,
           engineUnreachableSessions,
         ),
@@ -496,7 +567,11 @@ describe("workspaceActivity cloud sync nudge (0P-C)", () => {
     await activity.close("activity-test", { preserveStatus: true });
     expect(retireLiveSessions).toHaveBeenCalledOnce();
     expect(activity.getStatus("activity-test").liveSessionsGeneration).toBe(1);
-    expect(notify).toHaveBeenCalledOnce();
+    // The close notifies with its own workspace as the scope — a wrong or
+    // missing workspaceId would repaint other workspaces' windows.
+    expect(notify).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "activity-test",
+    });
 
     expect((await activity.open(workspace())).liveSessionsGeneration).toBe(1);
     notify.mockClear();
@@ -630,6 +705,11 @@ describe("workspaceActivity cloud sync nudge (0P-C)", () => {
     expect(otherFailure.historyCaptureFailed).toBe(true);
     expect(otherFailure.engineStoreRefused).toBeNull();
     expect(notify).toHaveBeenCalledTimes(3);
+    // Every transition names its workspace — a scope-free notify here would
+    // repaint every window.
+    for (const call of notify.mock.calls) {
+      expect(call).toEqual([{ workspaceId: "activity-test" }]);
+    }
     await activity.stopAll();
   });
 });

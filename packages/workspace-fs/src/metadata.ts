@@ -25,13 +25,10 @@ export type WorkspaceManifest = {
   version: 1;
   workspaceId: string;
   backend: WorkspaceBackendMode;
-  // Server binding (Phase 9): the sync baseline is only valid against the
-  // server that produced it. Pull REFUSES (no deletes) if the engine is
-  // pointed at a different server/workspace — guards "re-point at an empty
-  // server -> mass-delete clean local files". Optional for back-compat with
-  // pre-binding manifests; initialize() writes them.
+  // The sync baseline is valid only against the server that produced it.
+  // Pull refuses if the engine points at another server, which prevents an
+  // empty server from reading as authority to delete clean local files.
   serverUrl?: string;
-  remoteWorkspaceId?: string;
   files: Record<string, WorkspaceManifestEntry>;
 };
 

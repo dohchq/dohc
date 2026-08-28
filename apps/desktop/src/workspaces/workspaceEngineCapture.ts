@@ -62,6 +62,7 @@ import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promise
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isInside } from "../security/pathContainment";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
+import { workspaceRelativePathIsAtOrUnder } from "./workspaceRelativePathIdentity";
 import {
   type ActiveAgentRun,
 } from "./workspaceWatcher";
@@ -74,6 +75,7 @@ import {
   isEngineWorkspaceOpenRefusedError,
   TRANSPORT_REBIND_MAX_BACKOFF_MS,
   WORKSPACE_OPEN_DEADLINE_MS,
+  type AttachedEngineWorkspace,
   type EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import {
@@ -93,15 +95,14 @@ export {
 export const DAEMON_CAPTURE_HEALTH_POLL_MS = 5_000;
 
 export async function probeEngineStoreRefusal(
-  workspaceId: string,
-  rootPath: string,
+  workspace: AttachedEngineWorkspace,
   rustEngineSessions: EngineWorkspaceSessions,
 ): Promise<EngineStoreRefusal | null> {
   try {
     await createCaptureLiveStores(
-      { workspaceId, rootPath },
+      workspace,
       rustEngineSessions,
-    ).store.ensureMainVersion({ workspaceId });
+    ).store.ensureMainVersion({ workspaceId: workspace.workspaceId });
     return null;
   } catch (error) {
     const refusal = engineStoreRefusalOf(error);
@@ -272,6 +273,7 @@ export interface WorkspaceEngineMomentPage {
   nextBeforeMomentOrder: number | null;
   latestMomentOrder: number;
   activeVersionId: string;
+  protectedTruncated: boolean;
 }
 
 // The diff page's payload: a text moment carries its full before/after
@@ -608,8 +610,9 @@ export interface WorkspaceEngineCapture {
 export interface WorkspaceEngineCaptureOptions {
   workspaceId: string;
   rootPath: string;
+  attachmentId: symbol;
   // Injectable for tests; production uses the required Rust workspace sessions.
-  store?: VersionedTextStore;
+  store?: CaptureVersionedTextStore;
   // Injectable for tests; production uses the daemon's encrypted secret store.
   secretStore?: SecretFileStore;
   now?: () => number;
@@ -1437,7 +1440,7 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
 export function createWorkspaceEngineCapture(
   options: WorkspaceEngineCaptureOptions,
 ): WorkspaceEngineCapture {
-  const { workspaceId, rootPath } = options;
+  const { workspaceId, rootPath, attachmentId } = options;
   const now = options.now ?? (() => Date.now());
   const createId = options.createId ?? (() => randomUUID());
   const reportError =
@@ -1463,7 +1466,7 @@ export function createWorkspaceEngineCapture(
   let liveStores: ReturnType<typeof createCaptureLiveStores> | null = null;
   function daemonStores() {
     liveStores ??= createCaptureLiveStores(
-      { workspaceId, rootPath },
+      { workspaceId, rootPath, attachmentId },
       options.rustEngineSessions,
     );
     return liveStores;
@@ -1811,7 +1814,11 @@ export function createWorkspaceEngineCapture(
     const openProvider =
       options.openRustYDocProviderSession ??
       openEngineYdocProviderSession;
-    const workspace = { workspaceId, rootPath };
+    const workspace = {
+      workspaceId,
+      rootPath,
+      attachmentId,
+    };
     let canonicalDoc: Y.Doc | null = null;
     let canonicalLineageClaimId: string | null = null;
     let current: EngineYdocProviderSession | null = null;
@@ -2535,7 +2542,7 @@ export function createWorkspaceEngineCapture(
     return result;
   }
 
-  let initialized: Promise<VersionedTextStore> | null = null;
+  let initialized: Promise<CaptureVersionedTextStore> | null = null;
   function engineStore(): Promise<CaptureVersionedTextStore> {
     if (!initialized) {
       const attempt = (async () => {
@@ -2566,7 +2573,7 @@ export function createWorkspaceEngineCapture(
   // RETIREMENT decision needs it, so a task that retires nothing never builds
   // it; a task that retires many pays for one listing, not one per path.
   function makeYdocOwnedPathsLookup(
-    engine: VersionedTextStore,
+    engine: CaptureVersionedTextStore,
     versionId: string,
   ): () => Promise<Set<string>> {
     let cache: Set<string> | null = null;
@@ -2581,61 +2588,10 @@ export function createWorkspaceEngineCapture(
   }
 
   async function listTextFileMetadata(
-    engine: VersionedTextStore,
+    engine: CaptureVersionedTextStore,
     versionId: string,
   ): Promise<CaptureTextFileMetadata[]> {
-    const captureEngine = engine as CaptureVersionedTextStore;
-    if (captureEngine.listTextFileMetadata) {
-      return await captureEngine.listTextFileMetadata({ workspaceId, versionId });
-    }
-    const snapshots = await engine.listTextFiles({ workspaceId, versionId });
-    // The in-process store has no metadata listing, so the Y.Doc marker is
-    // read straight from engine.db through the write lane it owns. An engine
-    // without the lane answers "no marker", which only costs the oversized
-    // Y.Doc protection the daemon path gets — it never retires anything the
-    // old code would have kept.
-    const ydocObjectIds = await ydocMarkedObjectIds(engine, versionId);
-    return snapshots.map((snapshot) => ({
-      path: snapshot.path,
-      objectId: snapshot.objectId,
-      contentKind: snapshot.contentKind ?? "text",
-      byteLength: snapshot.byteLength ?? Buffer.byteLength(snapshot.text, "utf8"),
-      sha256:
-        snapshot.sha256 ??
-        (snapshot.contentKind === "binary"
-          ? null
-          : sha256Utf8(snapshot.text)),
-      updatedAtMs: snapshot.updatedAtMs,
-      latestMomentId: snapshot.latestMomentId,
-      hasYdocMarker: ydocObjectIds.has(snapshot.objectId),
-    }));
-  }
-
-  // Object ids carrying a ydoc_docs marker in this version. MARKER-EXISTS,
-  // not durable-state: a default local close prunes updates and snapshots but
-  // KEEPS the marker, and such a file is still Y.Doc-owned.
-  async function ydocMarkedObjectIds(
-    engine: VersionedTextStore,
-    versionId: string,
-  ): Promise<Set<string>> {
-    const runInLane = engine.runInEngineWriteLane?.bind(engine);
-    if (!runInLane) return new Set();
-    try {
-      const ids = await runInLane((connection) => {
-        const rows = connection
-          .prepare(
-            "SELECT object_id AS objectId FROM ydoc_docs WHERE workspace_id = ? AND version_id = ?",
-          )
-          .all(workspaceId, versionId) as Array<{ objectId: string }>;
-        return rows.map((row) => row.objectId);
-      });
-      return new Set(ids);
-    } catch (error) {
-      // A store without the table (or a read failure) must not take the
-      // reconcile pass down; fall back to "no markers".
-      onError("ydoc marker lookup", error);
-      return new Set();
-    }
+    return await engine.listTextFileMetadata({ workspaceId, versionId });
   }
 
   function consumeExpectedEvent(
@@ -2994,7 +2950,7 @@ export function createWorkspaceEngineCapture(
   // nothing-is-ever-lost capture before a switch, and as the crash-honest
   // recovery when a switch fails mid-materialization.
   async function reconcileDiskIntoVersion(
-    engine: VersionedTextStore,
+    engine: CaptureVersionedTextStore,
     versionId: string,
     policy: WorkspaceEnginePolicySnapshot,
     metadata: ActorNeutralWriteMetadata,
@@ -3202,7 +3158,7 @@ export function createWorkspaceEngineCapture(
   // now follow versions; oversized, ignored, secret, and transiently
   // unreadable paths are never touched.
   async function planMaterialization(
-    engine: VersionedTextStore,
+    engine: CaptureVersionedTextStore,
     targetVersionId: string,
     previousVersionId: string,
     policy: WorkspaceEnginePolicySnapshot,
@@ -4934,7 +4890,7 @@ export function createWorkspaceEngineCapture(
       // a later payment would recreate it), `false` restores and re-arms
       // (the path is still there and still owes its write).
       const match = (p: string) =>
-        p === pathOrPrefix || p.startsWith(`${pathOrPrefix}/`);
+        workspaceRelativePathIsAtOrUnder(p, pathOrPrefix);
       return enqueueResult("close live session for destructive op", async () => {
         await settleAndCloseLiveYDocSessions(
           match,
@@ -5532,61 +5488,22 @@ export function createWorkspaceEngineCapture(
     async listMoments(input = {}) {
       await chain;
       const engine = await engineStore();
-      if (options.daemonOwnsCapture) {
-        await engine.flushCapture?.();
-      }
-      const activeVersionId = await activeVersionIdOf(engine);
-      const page = await engine.listMoments({
+      const history = await engine.listHistoryPage({
         workspaceId,
-        versionId: activeVersionId,
         ...(input.limit !== undefined ? { limit: input.limit } : {}),
         ...(input.beforeMomentOrder !== undefined
           ? { beforeMomentOrder: input.beforeMomentOrder }
           : {}),
       });
+      const activeVersionId = history.activeVersion.id;
+      const page = history.textMomentPage;
       const textMoments: WorkspaceEngineMomentSummary[] = page.moments.map(
         (moment) => ({ ...moment, protected: false }),
       );
-      // Interleave PROTECTED (secret) moments by recording time (PR 08).
-      // Pagination stays keyed on the text timeline's momentOrder; each page
-      // carries the secret moments recorded inside its half-open time window
-      // (oldest-text-moment, previous-page-cursor-moment] so pages never
-      // duplicate or drop a protected row. The secret timeline is short by
-      // nature (.env edits are rare), so it is read whole per page.
-      //
-      // The OPEN end is the older one, because a tie can outlast a page: one
-      // reconcile pass can stamp more text moments with a millisecond than a
-      // page holds, and the shell appends each later page. Holding a tied
-      // protected moment back until the page where the tie group ends keeps
-      // text before protected across the assembled timeline, not just inside
-      // one page. The last page's lower bound is -Infinity, so nothing is
-      // held back forever.
-      let upperMs = Number.POSITIVE_INFINITY;
-      if (input.beforeMomentOrder !== undefined) {
-        // The cursor is the previous page's oldest text moment; its
-        // timestamp bounds this page's window from above (inclusive).
-        const cursorPage = await engine.listMoments({
-          workspaceId,
-          versionId: activeVersionId,
-          limit: 1,
-          beforeMomentOrder: input.beforeMomentOrder + 1,
-        });
-        upperMs = cursorPage.moments[0]?.recordedAtMs ?? Number.POSITIVE_INFINITY;
-      }
-      const lowerMs =
-        page.nextBeforeMomentOrder === null
-          ? Number.NEGATIVE_INFINITY
-          : (page.moments[page.moments.length - 1]?.recordedAtMs ??
-            Number.NEGATIVE_INFINITY);
-      const secretMoments = await secretStoreFor().listSecretMoments({
-        workspaceId,
-        versionId: activeVersionId,
-      });
-      const protectedInWindow: WorkspaceEngineMomentSummary[] = secretMoments
-        .filter(
-          (moment) => moment.recordedAtMs > lowerMs && moment.recordedAtMs <= upperMs,
-        )
-        .map((moment) => ({
+      // The daemon already restricted protected moments to this text page's
+      // half-open time window. The desktop owns only the visible merge order.
+      const protectedInWindow: WorkspaceEngineMomentSummary[] =
+        history.protectedMoments.map((moment) => ({
           id: moment.id,
           versionId: moment.versionId,
           path: moment.path,
@@ -5617,6 +5534,7 @@ export function createWorkspaceEngineCapture(
         nextBeforeMomentOrder: page.nextBeforeMomentOrder,
         latestMomentOrder: page.latestMomentOrder,
         activeVersionId,
+        protectedTruncated: history.protectedTruncated,
       };
     },
 
@@ -5869,10 +5787,7 @@ export function createWorkspaceEngineCapture(
       await chain;
       const engine = await engineStore();
       const activeVersionId = await activeVersionIdOf(engine);
-      const files = await engine.listTextFiles({
-        workspaceId,
-        versionId: activeVersionId,
-      });
+      const files = await listTextFileMetadata(engine, activeVersionId);
       return files.find((file) => file.objectId === objectId)?.path ?? null;
     },
 
@@ -6233,11 +6148,10 @@ export function createWorkspaceEngineCapture(
         // path. Both the vacate right below and the debt drain further down
         // share this one match.
         const isSourceSide = (candidate: string): boolean =>
-          candidate === fromPath || candidate.startsWith(`${fromPath}/`);
+          workspaceRelativePathIsAtOrUnder(candidate, fromPath);
         const endpointMatch = (candidate: string): boolean =>
           isSourceSide(candidate) ||
-          candidate === toPath ||
-          candidate.startsWith(`${toPath}/`);
+          workspaceRelativePathIsAtOrUnder(candidate, toPath);
         // A live Y.Doc session over either endpoint (or child) is vacated
         // FIRST, ahead of the detached-debt drain below (#681 round 2). A
         // session recovering a stood-down path (reopened, per every

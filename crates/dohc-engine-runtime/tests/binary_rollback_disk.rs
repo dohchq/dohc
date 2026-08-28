@@ -831,6 +831,7 @@ async fn capture_ignores_a_pending_rename_rollback_delete_until_retry() {
             ManifestEntry {
                 size: entry.size,
                 sha256: entry.sha256,
+                mtime_ms: 0,
             },
         )
     }));
@@ -983,6 +984,7 @@ async fn conflicted_rename_rollback_terminates_delete_and_capture_sees_survivor(
             ManifestEntry {
                 size: entry.size,
                 sha256: entry.sha256,
+                mtime_ms: 0,
             },
         )
     }));
@@ -1159,6 +1161,7 @@ async fn capture_ingests_an_inactive_versions_pending_rename_destination() {
             ManifestEntry {
                 size: entry.size,
                 sha256: entry.sha256,
+                mtime_ms: 0,
             },
         )
     }));
@@ -2086,6 +2089,7 @@ async fn inactive_rollback_write_does_not_hide_active_capture_retire() {
             ManifestEntry {
                 size: entry.size,
                 sha256: entry.sha256,
+                mtime_ms: 0,
             },
         )
     }));

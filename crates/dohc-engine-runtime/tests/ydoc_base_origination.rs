@@ -605,6 +605,109 @@ async fn a_first_edit_on_a_synced_workspace_originates_one_base_then_deltas() {
     );
 }
 
+/// One digest, computed once at the append entry, is the sha the outbound
+/// journal payload names, the sha the update log row records, and the blob
+/// store's content address — all three must be the digest of exactly the
+/// appended bytes. Reading the blob back re-verifies the stored bytes against
+/// that key, so a blob filed under a digest of anything else fails here.
+///
+/// Mutation check: make any of the three consumers re-derive its own digest
+/// from different bytes (or hand `put_binary_blob_with_sha` a digest the
+/// append did not compute from these bytes) and an equality below fails.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_journaled_delta_names_the_exact_stored_update_blob() {
+    const WS: &str = "ws-journal-blob-sha";
+    const PATH: &str = "notes/journal-sha.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    enable_sync(&db, WS);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let object_id = capture_seed(&handle, WS, PATH, 100).await;
+    let key = DocKey::new(WS, "main", &object_id).expect("key");
+
+    let doc = Ydoc::wire();
+    let first = doc.plaintext_insert(0, "hello ");
+    let first_append = handle
+        .ydoc_record_update(
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            first,
+            None,
+            None,
+            true,
+            None,
+            None,
+            200,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("first update");
+
+    let second = doc.plaintext_insert(6, "world");
+    let expected_sha = dohc_engine_storage::hex_sha256(&second);
+    let second_append = handle
+        .ydoc_record_update(
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            second.clone(),
+            None,
+            first_append.lineage_claim_id,
+            false,
+            None,
+            None,
+            300,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("second update");
+    supervisor.close(&db).expect("close actor");
+
+    let ops = local_ydoc_ops(&db);
+    let delta = ops
+        .iter()
+        .find(|op| !op.is_base())
+        .expect("the second edit journals one non-base op");
+    assert_eq!(
+        delta.blob_sha(),
+        expected_sha,
+        "the journal payload names the digest of exactly the appended bytes"
+    );
+
+    let store = EngineStore::open(&db, 9_107).expect("open store");
+    let logged_sha: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT update_blob_sha256 FROM ydoc_updates \
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND seq=?4",
+                rusqlite::params![
+                    key.workspace_id,
+                    key.version_id,
+                    key.object_id,
+                    second_append.outcome.seq
+                ],
+                |row| row.get(0),
+            )
+        })
+        .expect("the appended log row records its blob sha");
+    assert_eq!(
+        logged_sha, expected_sha,
+        "the update log row records the same digest"
+    );
+    assert_eq!(
+        blob_bytes(&db, &expected_sha),
+        second,
+        "the blob store holds the exact appended bytes under that address"
+    );
+}
+
 #[derive(Debug, Clone, Copy)]
 struct AlwaysLiveLease;
 

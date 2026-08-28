@@ -6,10 +6,13 @@ import {
   EngineRequestError,
 } from "../daemon/engineClient";
 import {
+  DaemonRefusalError,
   isDaemonReconnectError,
   isTransientEngineRefusal,
   isYdocRemoteUpdatesPendingRefusal,
   isYdocSessionNotFoundRefusal,
+  WorkspaceDaemonRequester,
+  type DaemonRequesterClient,
 } from "../live/daemonLiveAdapter";
 import type { Event } from "./generated/Event";
 import type { Request } from "./generated/Request";
@@ -47,14 +50,14 @@ export const ENGINE_DELIVERED_ORIGIN: unique symbol = Symbol(
   "dohc.workspaceEngineClient.engineDeliveredOrigin",
 );
 
-export interface EngineTransport {
-  sendRequest(request: Request): Promise<Response>;
+export interface EngineTransport extends DaemonRequesterClient {
   onEvent(handler: (event: Event) => void): () => void;
 }
 
 export type YdocAdapterErrorCode =
   | "invalid-update"
   | "lineage-changed"
+  | "missing-response-blob"
   | "response-mismatch"
   | "resync-needed"
   | "seed-not-permitted"
@@ -167,7 +170,9 @@ function isYdocOpenDeadlineFailure(error: unknown): boolean {
   return (
     error instanceof EngineRequestDeadlineError ||
     (error instanceof EngineRequestError &&
-      error.wireError?.code === "DEADLINE_EXCEEDED")
+      error.wireError?.code === "DEADLINE_EXCEEDED") ||
+    (error instanceof DaemonRefusalError &&
+      error.wireCode === "DEADLINE_EXCEEDED")
   );
 }
 
@@ -1121,12 +1126,14 @@ export class YdocAdapterSession {
     recoveredPaths: string[];
     artifactAssets: readonly ArtifactAssetDescriptor[];
   }> {
-    const raw = await this.adapter.request(this.workspace, YDOC_METHOD.resync, {
-      sessionId: this.sessionId,
-    });
-    const result = decodeYdocResyncResult(raw);
+    const delivery = await this.adapter.requestWithBlob(
+      this.workspace,
+      YDOC_METHOD.resync,
+      { sessionId: this.sessionId },
+    );
+    const result = decodeYdocResyncResult(delivery.result);
     return {
-      update: base64ToBytes(result.initialUpdateBase64),
+      update: delivery.bytes,
       lineageClaimId: result.lineageClaimId,
       recoveredPaths: result.recoveredPaths,
       artifactAssets: result.artifactAssets,
@@ -1279,17 +1286,16 @@ export class YdocAdapterSession {
 }
 
 export class YdocLiveAdapter {
-  private nextRequestId = 1;
   private readonly sessions = new Map<string, YdocAdapterSession>();
   private readonly unsubscribeEvents: () => void;
-  private readonly transport: EngineTransport;
+  private readonly requester: WorkspaceDaemonRequester;
   private readonly eventPositions = new Map<
     string,
     { seq: number; sessionGeneration: number }
   >();
 
   constructor(transport: EngineTransport) {
-    this.transport = transport;
+    this.requester = new WorkspaceDaemonRequester(transport);
     this.unsubscribeEvents = transport.onEvent((event) => this.receiveEvent(event));
   }
 
@@ -1305,25 +1311,28 @@ export class YdocLiveAdapter {
         : {}),
     };
     const startedAtMs = performance.now();
-    let rawResult: Response["result"];
+    let delivery: Awaited<ReturnType<YdocLiveAdapter["requestWithBlob"]>>;
     try {
-      rawResult = await this.request(input.workspace, YDOC_METHOD.open, params, {
-        deadlineMs: YDOC_OPEN_DEADLINE_MS,
-      });
+      delivery = await this.requestWithBlob(
+        input.workspace,
+        YDOC_METHOD.open,
+        params,
+        { deadlineMs: YDOC_OPEN_DEADLINE_MS },
+      );
     } catch (error) {
       if (!isYdocOpenDeadlineFailure(error)) throw error;
       throw new YdocOpenTimedOutError(
         input.path,
         Math.round(performance.now() - startedAtMs),
-        error,
+        error instanceof DaemonRefusalError ? error.cause : error,
       );
     }
-    const result = decodeYdocOpenResult(rawResult);
+    const result = decodeYdocOpenResult(delivery.result);
     const session = new YdocAdapterSession(this, input.workspace, result.sessionId, {
       objectId: result.objectId,
       path: result.path,
       contentKind: result.contentKind,
-      initialUpdate: base64ToBytes(result.initialUpdateBase64),
+      initialUpdate: delivery.bytes,
       artifactAssets: result.artifactAssets,
       lineageClaimId: result.lineageClaimId,
     });
@@ -1390,10 +1399,7 @@ export class YdocLiveAdapter {
     params: Request["params"],
     options?: { idempotencyKey?: string; deadlineMs?: number },
   ): Promise<Response["result"]> {
-    const id = this.nextRequestId++;
-    const response = await this.transport.sendRequest({
-      id,
-      method,
+    return this.requester.request(method, params, {
       workspace,
       ...(options?.idempotencyKey
         ? { idempotencyKey: options.idempotencyKey }
@@ -1401,15 +1407,36 @@ export class YdocLiveAdapter {
       ...(options?.deadlineMs !== undefined
         ? { deadlineMs: options.deadlineMs }
         : {}),
-      params,
     });
-    if (response.id !== id) {
+  }
+
+  async requestWithBlob(
+    workspace: WorkspaceHandle,
+    method: typeof YDOC_METHOD.open | typeof YDOC_METHOD.resync,
+    params: Request["params"],
+    options?: { deadlineMs?: number },
+  ): Promise<{ result: Response["result"]; bytes: Uint8Array }> {
+    const delivery = await this.requester.requestWithBlob(
+      method,
+      params,
+      () => true,
+      {
+        workspace,
+        ...(options?.deadlineMs !== undefined
+          ? { deadlineMs: options.deadlineMs }
+          : {}),
+      },
+    );
+    if (delivery.blob === null) {
       throw new YdocAdapterError(
-        "response-mismatch",
-        `Expected response ${id}, received ${response.id}.`,
+        "missing-response-blob",
+        `${method} completed without its mandatory raw state blob.`,
       );
     }
-    return response.result;
+    return {
+      result: delivery.result,
+      bytes: delivery.blob.bytes,
+    };
   }
 
   releaseSession(sessionId: string): void {

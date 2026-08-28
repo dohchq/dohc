@@ -33,6 +33,8 @@ const SEARCH_MAX_MATCHES_PER_FILE = 200;
 const SEARCH_BATCH_MAX_ENTRIES = 50;
 const SEARCH_BATCH_FLUSH_MS = 30;
 const SEARCH_MAX_FILESIZE = "2M";
+const SEARCH_TERMINATION_GRACE_MS = 1_000;
+const SEARCH_TERMINATION_FINAL_MS = 1_000;
 
 export interface WorkspaceSearchRequest {
   query: string;
@@ -246,7 +248,13 @@ export function toSearchEntries(data: RgMatchData): SearchResultEntry[] {
 
 export interface SearchHandle {
   searchId: string;
-  kill(): void;
+  settled: Promise<void>;
+  kill(signal?: NodeJS.Signals): void;
+}
+
+export interface SearchExecution {
+  readonly settled: Promise<void>;
+  cancel(): Promise<void>;
 }
 
 // Spawns rg for one search and streams bounded batches to onBatch. The
@@ -277,6 +285,7 @@ export function startRipgrepSearch(options: {
   let finished = false;
   let pending: SearchResultEntry[] = [];
   let flushTimer: NodeJS.Timeout | null = null;
+  const settled = Promise.withResolvers<void>();
 
   function flush(done: boolean): void {
     if (flushTimer) {
@@ -293,6 +302,7 @@ export function startRipgrepSearch(options: {
     if (finished) return;
     finished = true;
     flush(true);
+    settled.resolve();
   }
 
   const lines = createInterface({ input: child.stdout });
@@ -331,12 +341,43 @@ export function startRipgrepSearch(options: {
 
   return {
     searchId,
-    kill: () => {
-      // Idempotent: kill() after exit is a no-op. SIGTERM is enough — rg
-      // exits promptly; the close handler emits the final done batch.
-      child.kill();
+    settled: settled.promise,
+    kill: (signal = "SIGTERM") => {
+      // Idempotent after exit. The registry starts with SIGTERM, then uses
+      // SIGKILL if the child does not emit its final close event in time.
+      child.kill(signal);
     },
   };
+}
+
+async function settlesWithin(
+  settled: Promise<void>,
+  timeoutMs: number,
+): Promise<boolean> {
+  return await new Promise<boolean>((resolve) => {
+    let finished = false;
+    const finish = (didSettle: boolean): void => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      resolve(didSettle);
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    void settled.then(
+      () => finish(true),
+      () => finish(true),
+    );
+  });
+}
+
+async function terminateSearch(search: {
+  handle: SearchHandle;
+  settled: Promise<void>;
+}): Promise<void> {
+  search.handle.kill("SIGTERM");
+  if (await settlesWithin(search.settled, SEARCH_TERMINATION_GRACE_MS)) return;
+  search.handle.kill("SIGKILL");
+  await settlesWithin(search.settled, SEARCH_TERMINATION_FINAL_MS);
 }
 
 // Tracks at most ONE active search per owner (an owner is a renderer
@@ -347,8 +388,33 @@ export function createSearchRegistry(deps: {
   rgPath: string;
   start?: typeof startRipgrepSearch;
 }) {
-  const active = new Map<number, SearchHandle>();
+  interface ActiveSearch {
+    readonly attachmentId: symbol;
+    readonly handle: SearchHandle;
+    readonly childSettled: Promise<void>;
+    readonly settled: Promise<void>;
+    readonly completeTermination: () => void;
+    termination?: Promise<void>;
+  }
+  const active = new Map<number, ActiveSearch>();
   const start = deps.start ?? startRipgrepSearch;
+  const stopActive = async (
+    ownerId: number,
+    search: ActiveSearch,
+  ): Promise<void> => {
+    search.termination ??= (async () => {
+      try {
+        await terminateSearch({
+          handle: search.handle,
+          settled: search.childSettled,
+        });
+      } finally {
+        search.completeTermination();
+        if (active.get(ownerId) === search) active.delete(ownerId);
+      }
+    })();
+    await search.termination;
+  };
 
   return {
     // Containment of the root itself (resolveWorkspaceFile idiom, applied to
@@ -361,11 +427,13 @@ export function createSearchRegistry(deps: {
       request: WorkspaceSearchRequest,
       onBatch: (batch: SearchBatch) => void,
       options: {
+        attachmentId: symbol;
+        signal: AbortSignal;
         isCurrent: () => boolean;
         allowPath?: (path: string) => boolean;
       },
-    ): Promise<void> {
-      const { isCurrent, allowPath } = options;
+    ): Promise<SearchExecution | null> {
+      const { attachmentId, signal, isCurrent, allowPath } = options;
       const realRoot = await realpath(rootPath);
       if (!(await stat(realRoot)).isDirectory()) {
         throw new Error("Workspace root is not a directory");
@@ -373,45 +441,87 @@ export function createSearchRegistry(deps: {
       // Root validation is async. A renderer reload/newer generation can win
       // while it is in flight; the stale call must not kill or replace that
       // generation's active search when validation eventually finishes.
-      if (!isCurrent()) return;
-      active.get(ownerId)?.kill();
-      const handle = start({
+      if (!isCurrent() || signal.aborted) return null;
+      const previous = active.get(ownerId);
+      if (previous) {
+        await stopActive(ownerId, previous);
+        if (!isCurrent() || signal.aborted) return null;
+      }
+      let handle: SearchHandle | null = null;
+      handle = start({
         rgPath: deps.rgPath,
         realRoot,
         searchId,
         request,
         allowPath,
         onBatch: (batch) => {
-          // Drop the registry entry when the CURRENT search finishes (a
-          // superseded search's late done-batch must not delete its
-          // replacement's handle).
-          if (batch.done && active.get(ownerId)?.searchId === batch.searchId) {
-            active.delete(ownerId);
+          const current = active.get(ownerId);
+          if (
+            signal.aborted ||
+            current?.handle !== handle ||
+            current.attachmentId !== attachmentId
+          ) {
+            return;
           }
           onBatch(batch);
         },
       });
-      active.set(ownerId, handle);
+      const onAbort = (): void => {
+        const current = active.get(ownerId);
+        if (
+          current?.handle !== handle ||
+          current.attachmentId !== attachmentId
+        ) {
+          return;
+        }
+        void stopActive(ownerId, current);
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      let entry!: ActiveSearch;
+      const terminationComplete = Promise.withResolvers<void>();
+      const settled = Promise.race([
+        handle.settled,
+        terminationComplete.promise,
+      ]).finally(() => {
+        signal.removeEventListener("abort", onAbort);
+        if (active.get(ownerId) === entry) active.delete(ownerId);
+      });
+      entry = {
+        attachmentId,
+        handle,
+        childSettled: handle.settled,
+        settled,
+        completeTermination: terminationComplete.resolve,
+      };
+      active.set(ownerId, entry);
+      if (signal.aborted) onAbort();
+      return {
+        settled,
+        cancel: async () => {
+          await stopActive(ownerId, entry);
+        },
+      };
     },
-    cancel(ownerId: number, searchId: string): void {
-      const handle = active.get(ownerId);
-      if (handle && handle.searchId === searchId) {
-        handle.kill();
-        active.delete(ownerId);
+    async cancel(ownerId: number, searchId: string): Promise<void> {
+      const activeSearch = active.get(ownerId);
+      if (activeSearch?.handle.searchId === searchId) {
+        await stopActive(ownerId, activeSearch);
       }
     },
     // Renderer went away (window closed / reloaded): kill its child.
-    disposeOwner(ownerId: number): void {
-      const handle = active.get(ownerId);
-      if (handle) {
-        handle.kill();
-        active.delete(ownerId);
+    async disposeOwner(ownerId: number): Promise<void> {
+      const activeSearch = active.get(ownerId);
+      if (activeSearch) {
+        await stopActive(ownerId, activeSearch);
       }
     },
     // App quit: kill every tracked child (and only those).
-    killAll(): void {
-      for (const handle of active.values()) handle.kill();
-      active.clear();
+    async killAll(): Promise<void> {
+      await Promise.all(
+        [...active.entries()].map(async ([ownerId, search]) => {
+          await stopActive(ownerId, search);
+        }),
+      );
     },
   };
 }

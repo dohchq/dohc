@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createIpcPresenceTransport } from "./ipcPresenceTransport";
-import type { PresenceScope } from "./presenceChannel";
+import type { PresenceScopeInput } from "../../ipc/bridgeContract";
 
 // MU-C5 — the IPC-PROXIED presence transport. It must forward the scope, carry
 // NO relay token, normalize the snapshot, and abort an in-flight poll over IPC
 // (presenceCancel) so a workspace switch can't leak a request or repaint stale.
 
-const SCOPE: PresenceScope = { kind: "workspace", workspaceId: "ws-a" };
+const SCOPE: PresenceScopeInput = { kind: "workspace", workspaceId: "ws-a" };
+const INCARNATION_ID = "123e4567-e89b-42d3-a456-426614174000";
 
 const bridgeMock = {
   presencePublish: vi.fn(),
@@ -37,12 +38,14 @@ describe("createIpcPresenceTransport", () => {
     const snapshot = await transport.publish({
       topic: "chat:channel:1",
       clientId: "me",
+      incarnationId: INCARNATION_ID,
       state: { displayName: "Me", typing: true },
     });
     expect(bridgeMock.presencePublish).toHaveBeenCalledWith({
       scope: SCOPE,
       topic: "chat:channel:1",
       clientId: "me",
+      incarnationId: INCARNATION_ID,
       state: { displayName: "Me", typing: true },
     });
     expect(snapshot).toEqual({
@@ -55,18 +58,30 @@ describe("createIpcPresenceTransport", () => {
     bridgeMock.presencePublish.mockResolvedValue({ ok: false, reason: "unavailable" });
     const transport = createIpcPresenceTransport(SCOPE);
     await expect(
-      transport.publish({ topic: "t", clientId: "me", state: null }),
+      transport.publish({
+        topic: "t",
+        clientId: "me",
+        incarnationId: INCARNATION_ID,
+        state: null,
+      }),
     ).rejects.toThrow(/unavailable/);
   });
 
   it("leave publishes a leave and swallows a rejection (best-effort)", async () => {
     bridgeMock.presencePublish.mockRejectedValue(new Error("relay down"));
     const transport = createIpcPresenceTransport(SCOPE);
-    await expect(transport.leave({ topic: "t", clientId: "me" })).resolves.toBeUndefined();
+    await expect(
+      transport.leave({
+        topic: "t",
+        clientId: "me",
+        incarnationId: INCARNATION_ID,
+      }),
+    ).resolves.toBeUndefined();
     expect(bridgeMock.presencePublish).toHaveBeenCalledWith({
       scope: SCOPE,
       topic: "t",
       clientId: "me",
+      incarnationId: INCARNATION_ID,
       leave: true,
     });
   });
@@ -131,7 +146,12 @@ describe("createIpcPresenceTransport", () => {
       snapshot: { version: 0, peers: [] },
     });
     const transport = createIpcPresenceTransport(SCOPE);
-    await transport.publish({ topic: "t", clientId: "me", state: { displayName: "Me" } });
+    await transport.publish({
+      topic: "t",
+      clientId: "me",
+      incarnationId: INCARNATION_ID,
+      state: { displayName: "Me" },
+    });
     const arg = JSON.stringify(bridgeMock.presencePublish.mock.calls[0][0]);
     expect(arg).not.toMatch(/token|bearer|authorization/i);
   });

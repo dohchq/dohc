@@ -1,5 +1,6 @@
 import { rmSync, symlinkSync } from "node:fs";
 import {
+  lstat,
   mkdir,
   readFile,
   readdir,
@@ -23,6 +24,7 @@ import {
   resolveWorkspaceFile,
   restoreWorkspaceText,
   withExclusiveWorkspaceOperation,
+  type WorkspaceOperationLease,
   writeWorkspaceAsset,
   writeWorkspaceText,
 } from "./workspaceAssets";
@@ -133,6 +135,29 @@ describe("resolveWorkspaceFile containment", () => {
         return thenable;
       }),
     ).rejects.toThrow(/file changed/i);
+  });
+
+  it("holds file identity across an asynchronous native-path operation", async () => {
+    const root = await makeWorkspace();
+    const prepared = await prepareWorkspaceFileRead(root, "notes/a.md");
+    const started = Promise.withResolvers<void>();
+    const finish = Promise.withResolvers<void>();
+
+    const operation = prepared.withVerifiedPath(async (absolutePath) => {
+      expect(absolutePath).toBe(join(root, "notes", "a.md"));
+      started.resolve();
+      await finish.promise;
+      return "finished";
+    });
+
+    await started.promise;
+    const replacement = join(root, "notes", "replacement-async.md");
+    await writeFile(replacement, "replacement");
+    await rm(join(root, "notes", "a.md"));
+    await symlink(replacement, join(root, "notes", "a.md"));
+    finish.resolve();
+
+    await expect(operation).rejects.toThrow(/file changed/i);
   });
 });
 
@@ -738,6 +763,281 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
     ]);
   });
 
+  it("rejects a leased target order for the wrong root or after admission ends", async () => {
+    const scheduler = createWorkspaceOperationScheduler();
+    const access = createOrderedWorkspaceTextAccess({
+      resolveTarget: async (rootPath, relativePath) => join(rootPath, relativePath),
+      readTarget: async () => ({
+        text: "",
+        truncated: false,
+        contentHash: INITIAL_CONTENT_HASH,
+      }),
+      writeTarget: async () => ({
+        status: "written" as const,
+        contentHash: INITIAL_CONTENT_HASH,
+      }),
+      scheduler,
+    });
+    let escapedLease!: WorkspaceOperationLease;
+
+    await scheduler.exclusive("C:/workspace", async (_markChanged, lease) => {
+      escapedLease = lease;
+      await expect(
+        access.orderedOnResolvedTargetInLease(
+          "C:/other-workspace",
+          lease,
+          "C:/other-workspace/notes/a.md",
+          async () => "wrong-root",
+        ),
+      ).rejects.toThrow(
+        "Workspace operation lease is inactive or belongs to another root.",
+      );
+      await expect(
+        access.orderedOnResolvedTargetInLease(
+          "C:/workspace",
+          lease,
+          "C:/workspace/notes/a.md",
+          async () => "ordered",
+        ),
+      ).resolves.toBe("ordered");
+    });
+
+    await expect(
+      access.orderedOnResolvedTargetInLease(
+        "C:/workspace",
+        escapedLease,
+        "C:/workspace/notes/a.md",
+        async () => "late",
+      ),
+    ).rejects.toThrow(
+      "Workspace operation lease is inactive or belongs to another root.",
+    );
+  });
+
+  it("keeps leased target work behind an ordinary order on the same target", async () => {
+    const rootPath = "C:/workspace";
+    const resolvedTarget = "C:/workspace/notes/a.md";
+    const scheduler = createWorkspaceOperationScheduler();
+    const access = createOrderedWorkspaceTextAccess({
+      resolveTarget: async (root, relativePath) => join(root, relativePath),
+      readTarget: async () => ({
+        text: "",
+        truncated: false,
+        contentHash: INITIAL_CONTENT_HASH,
+      }),
+      writeTarget: async () => ({
+        status: "written" as const,
+        contentHash: INITIAL_CONTENT_HASH,
+      }),
+      scheduler,
+    });
+    let markFirstStarted!: () => void;
+    let releaseFirst!: () => void;
+    let markLeasedAdmitted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => {
+      markFirstStarted = resolve;
+    });
+    const firstHeld = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const leasedAdmitted = new Promise<void>((resolve) => {
+      markLeasedAdmitted = resolve;
+    });
+    const order: string[] = [];
+
+    const first = access.orderedOnResolvedTarget(
+      rootPath,
+      resolvedTarget,
+      async () => {
+        order.push("first:start");
+        markFirstStarted();
+        await firstHeld;
+        order.push("first:end");
+      },
+    );
+    await firstStarted;
+    const leased = scheduler.staleSensitiveShared(rootPath, async (lease) => {
+      markLeasedAdmitted();
+      return access.orderedOnResolvedTargetInLease(
+        rootPath,
+        lease,
+        resolvedTarget,
+        async () => {
+          order.push("leased");
+        },
+      );
+    });
+    await leasedAdmitted;
+
+    expect(order).toEqual(["first:start"]);
+    releaseFirst();
+    await Promise.all([first, leased]);
+    expect(order).toEqual(["first:start", "first:end", "leased"]);
+  });
+
+  it("does not deadlock leased target work behind a queued exclusive request", async () => {
+    const rootPath = "C:/workspace";
+    const resolvedTarget = "C:/workspace/notes/a.md";
+    const scheduler = createWorkspaceOperationScheduler();
+    const access = createOrderedWorkspaceTextAccess({
+      resolveTarget: async (root, relativePath) => join(root, relativePath),
+      readTarget: async () => ({
+        text: "",
+        truncated: false,
+        contentHash: INITIAL_CONTENT_HASH,
+      }),
+      writeTarget: async () => ({
+        status: "written" as const,
+        contentHash: INITIAL_CONTENT_HASH,
+      }),
+      scheduler,
+    });
+    const order: string[] = [];
+    let firstExclusive!: Promise<void>;
+
+    await expect(
+      scheduler.staleSensitiveShared(rootPath, async (lease) => {
+        order.push("leased:start");
+        firstExclusive = scheduler.exclusive(rootPath, async () => {
+          order.push("exclusive:after-leased");
+        });
+        const value = await access.orderedOnResolvedTargetInLease(
+          rootPath,
+          lease,
+          resolvedTarget,
+          async () => {
+            order.push("leased:target");
+            return "leased";
+          },
+        );
+        order.push("leased:end");
+        return value;
+      }),
+    ).resolves.toBe("leased");
+    await firstExclusive;
+    expect(order).toEqual([
+      "leased:start",
+      "leased:target",
+      "leased:end",
+      "exclusive:after-leased",
+    ]);
+    order.length = 0;
+
+    let markSharedStarted!: () => void;
+    let releaseShared!: () => void;
+    const sharedStarted = new Promise<void>((resolve) => {
+      markSharedStarted = resolve;
+    });
+    const sharedHeld = new Promise<void>((resolve) => {
+      releaseShared = resolve;
+    });
+    const shared = scheduler.staleSensitiveShared(rootPath, async () => {
+      order.push("ordinary-shape:shared:start");
+      markSharedStarted();
+      await sharedHeld;
+      order.push("ordinary-shape:shared:end");
+    });
+    await sharedStarted;
+
+    let markExclusiveStarted!: () => void;
+    let releaseExclusive!: () => void;
+    const exclusiveStarted = new Promise<void>((resolve) => {
+      markExclusiveStarted = resolve;
+    });
+    const exclusiveHeld = new Promise<void>((resolve) => {
+      releaseExclusive = resolve;
+    });
+    const exclusive = scheduler.exclusive(rootPath, async () => {
+      order.push("ordinary-shape:exclusive:start");
+      markExclusiveStarted();
+      await exclusiveHeld;
+      order.push("ordinary-shape:exclusive:end");
+    });
+    const ordinaryRun = vi.fn(async () => {
+      order.push("ordinary-shape:target");
+      return "ordinary";
+    });
+    const ordinary = access.orderedOnResolvedTarget(
+      rootPath,
+      resolvedTarget,
+      ordinaryRun,
+    );
+
+    releaseShared();
+    await exclusiveStarted;
+    try {
+      expect(ordinaryRun).not.toHaveBeenCalled();
+      expect(order).toEqual([
+        "ordinary-shape:shared:start",
+        "ordinary-shape:shared:end",
+        "ordinary-shape:exclusive:start",
+      ]);
+    } finally {
+      releaseExclusive();
+    }
+    await Promise.all([shared, exclusive]);
+    await expect(ordinary).resolves.toBe("ordinary");
+    expect(ordinaryRun).toHaveBeenCalledOnce();
+    expect(order.slice(-2)).toEqual([
+      "ordinary-shape:exclusive:end",
+      "ordinary-shape:target",
+    ]);
+  });
+
+  it("rejects queued leased target work after its scheduler callback returns", async () => {
+    const rootPath = "C:/workspace";
+    const resolvedTarget = "C:/workspace/notes/a.md";
+    const scheduler = createWorkspaceOperationScheduler();
+    const access = createOrderedWorkspaceTextAccess({
+      resolveTarget: async (root, relativePath) => join(root, relativePath),
+      readTarget: async () => ({
+        text: "",
+        truncated: false,
+        contentHash: INITIAL_CONTENT_HASH,
+      }),
+      writeTarget: async () => ({
+        status: "written" as const,
+        contentHash: INITIAL_CONTENT_HASH,
+      }),
+      scheduler,
+    });
+    let markFirstStarted!: () => void;
+    let releaseFirst!: () => void;
+    const firstStarted = new Promise<void>((resolve) => {
+      markFirstStarted = resolve;
+    });
+    const firstHeld = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const escapedRun = vi.fn(async () => "escaped");
+    let escaped!: Promise<string>;
+
+    const first = access.orderedOnResolvedTarget(
+      rootPath,
+      resolvedTarget,
+      async () => {
+        markFirstStarted();
+        await firstHeld;
+      },
+    );
+    await firstStarted;
+    await scheduler.staleSensitiveShared(rootPath, async (lease) => {
+      escaped = access.orderedOnResolvedTargetInLease(
+        rootPath,
+        lease,
+        resolvedTarget,
+        escapedRun,
+      );
+    });
+
+    const rejected = expect(escaped).rejects.toThrow(
+      "Workspace operation lease is inactive or belongs to another root.",
+    );
+    releaseFirst();
+    await Promise.all([first, rejected]);
+    expect(escapedRun).not.toHaveBeenCalled();
+  });
+
   it("holds later direct-text reads and writes behind an exclusive workspace operation", async () => {
     const root = await makeWorkspace();
     let releaseExclusive!: () => void;
@@ -1040,24 +1340,128 @@ describe("restoreWorkspaceText", () => {
     expect(await readFile(join(root, "notes", "a.md"), "utf8")).toBe("# Before\n");
   });
 
-  it("keeps same-millisecond contained writes to one target independent", async () => {
+  it("deduplicates an identical image attachment without replacing a collision", async () => {
     const root = await makeWorkspace();
-    vi.spyOn(Date, "now").mockReturnValue(1_000);
-    const asset = writeWorkspaceAsset(
-      root,
-      "notes/a.md",
-      new Uint8Array(20 * 1024 * 1024),
-    );
-    const restored = restoreWorkspaceText(root, "notes/a.md", "restored");
+    await mkdir(join(root, "assets"), { recursive: true });
+    await writeFile(join(root, "assets/pixel.png"), new Uint8Array([1, 2, 3]));
 
-    await expect(Promise.all([restored, asset])).resolves.toEqual([
-      undefined,
-      undefined,
-    ]);
-    expect(["restored".length, 20 * 1024 * 1024]).toContain(
-      (await readFile(join(root, "notes", "a.md"))).byteLength,
+    await expect(
+      writeWorkspaceAsset(root, "assets/pixel.png", new Uint8Array([1, 2, 3])),
+    ).resolves.toBeUndefined();
+    await expect(
+      writeWorkspaceAsset(root, "assets/pixel.png", new Uint8Array([4, 5, 6])),
+    ).rejects.toThrow(
+      "An image attachment already exists at assets/pixel.png with different content.",
     );
-    expect(await readdir(join(root, "notes"))).toEqual(["a.md"]);
+    expect(await readFile(join(root, "assets/pixel.png"))).toEqual(
+      Buffer.from([1, 2, 3]),
+    );
+    expect(await readdir(join(root, "assets"))).toEqual(["pixel.png"]);
+  });
+
+  it("does not deduplicate an identical attachment through a symlink leaf", async () => {
+    const root = await makeWorkspace();
+    await mkdir(join(root, "assets"), { recursive: true });
+    const target = join(root, "assets", "target.png");
+    const alias = join(root, "assets", "pixel.png");
+    await writeFile(target, new Uint8Array([1, 2, 3]));
+    await symlink(target, alias);
+
+    await expect(
+      writeWorkspaceAsset(root, "assets/pixel.png", new Uint8Array([1, 2, 3])),
+    ).rejects.toThrow(
+      "An image attachment already exists at assets/pixel.png and is not a regular file.",
+    );
+    expect((await lstat(alias)).isSymbolicLink()).toBe(true);
+    expect(await readFile(target)).toEqual(Buffer.from([1, 2, 3]));
+  });
+
+  it.each(["changed", "unverifiable", "not-file"] as const)(
+    "maps a %s collision read to a retryable attachment error",
+    async (failureKind) => {
+      vi.doMock("./boundedFileRead", async (importOriginal) => {
+        const original =
+          await importOriginal<typeof import("./boundedFileRead")>();
+        const failure =
+          failureKind === "changed"
+            ? new original.BoundedFileReadChangedError()
+            : failureKind === "unverifiable"
+              ? new original.BoundedFileReadUnverifiableError()
+              : new original.BoundedFileReadNotFileError();
+        return {
+          ...original,
+          readFileHandleExact: vi.fn(async () => {
+            throw failure;
+          }),
+        };
+      });
+      vi.resetModules();
+      try {
+        const collisionWrites = await import("./workspaceAssets");
+        const root = await makeWorkspace();
+        await mkdir(join(root, "assets"), { recursive: true });
+        await writeFile(
+          join(root, "assets/pixel.png"),
+          new Uint8Array([1, 2, 3]),
+        );
+
+        await expect(
+          collisionWrites.writeWorkspaceAsset(
+            root,
+            "assets/pixel.png",
+            new Uint8Array([1, 2, 3]),
+          ),
+        ).rejects.toThrow(
+          "An image attachment changed at assets/pixel.png before this write could finish. Try the action again.",
+        );
+      } finally {
+        vi.doUnmock("./boundedFileRead");
+        vi.resetModules();
+      }
+    },
+  );
+
+  it("fails closed when the filesystem cannot publish without replacing a target", async () => {
+    const hardLinkUnsupported = Object.assign(new Error("hard links unsupported"), {
+      code: "ENOTSUP",
+    });
+    vi.doMock("node:fs/promises", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("node:fs/promises")>()),
+      link: vi.fn(async () => {
+        throw hardLinkUnsupported;
+      }),
+    }));
+    vi.resetModules();
+    try {
+      const fallbackWrites = await import("./workspaceAssets");
+      const root = await makeWorkspace();
+
+      await expect(
+        fallbackWrites.writeWorkspaceAsset(
+          root,
+          "assets/pixel.png",
+          new Uint8Array([1, 2, 3]),
+        ),
+      ).rejects.toBe(hardLinkUnsupported);
+      await expect(readFile(join(root, "assets", "pixel.png"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      expect(await readdir(join(root, "assets"))).toEqual([]);
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
+  });
+
+  it("refuses the asset writer for a document path", async () => {
+    const root = await makeWorkspace();
+
+    await expect(
+      writeWorkspaceAsset(root, "notes/a.md", new Uint8Array([1, 2, 3])),
+    ).rejects.toThrow(
+      "The attachment path must end with a supported image extension.",
+    );
+    expect(await readFile(join(root, "notes/a.md"), "utf8")).toBe("# A\n");
   });
 
   it("restores a valid long filename without extending its basename for staging", async () => {
@@ -1121,6 +1525,8 @@ describe("restoreWorkspaceText", () => {
 describe("mediaTypeForExtension", () => {
   it("maps known media types and falls back to octet-stream (never executable)", () => {
     expect(mediaTypeForExtension("a/b.png")).toBe("image/png");
+    expect(mediaTypeForExtension("a/b.avif")).toBe("image/avif");
+    expect(mediaTypeForExtension("a/b.bmp")).toBe("image/bmp");
     expect(mediaTypeForExtension("x.PDF")).toBe("application/pdf");
     expect(mediaTypeForExtension("voice.m4a")).toBe("audio/mp4");
     expect(mediaTypeForExtension("app.html")).toBe("application/octet-stream");

@@ -88,13 +88,17 @@ const Tab = memo(function Tab(props: {
   dirty: boolean;
   dragging: boolean;
   dropBefore: boolean;
-  onActivate: (path: string) => void;
-  onClose: (path: string) => void;
-  onContextMenu: (path: string) => void;
-  onDragPreview: (path: string, toIndex: number) => void;
-  onDragEnd: () => void;
-  onMove: (path: string, toIndex: number) => void;
-  onMoveToGroup: (path: string, targetGroupId: string, toIndex: number) => void;
+  onActivate: (groupId: string, path: string) => void;
+  onClose: (groupId: string, path: string) => void;
+  onContextMenu: (groupId: string, path: string) => void;
+  setDragPreview: (preview: DragPreview) => void;
+  onMove: (groupId: string, path: string, toIndex: number) => void;
+  onMoveToGroup: (
+    sourceGroupId: string,
+    targetGroupId: string,
+    path: string,
+    toIndex: number,
+  ) => void;
 }) {
   const name = fileName(props.path, props.label);
   // Pointer-drag reorder (no dnd dep): a press only becomes a drag after 4px
@@ -138,17 +142,17 @@ const Tab = memo(function Tab(props: {
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
-          props.onActivate(props.path);
+          props.onActivate(props.groupId, props.path);
         }
       }}
       // Middle-click closes (VS Code convention); auxclick is the only
       // reliable middle-button event.
       onAuxClick={(event) => {
-        if (event.button === 1) props.onClose(props.path);
+        if (event.button === 1) props.onClose(props.groupId, props.path);
       }}
       onContextMenu={(event) => {
         event.preventDefault();
-        props.onContextMenu(props.path);
+        props.onContextMenu(props.groupId, props.path);
       }}
       onPointerDown={(event) => {
         if (event.button !== 0) return;
@@ -158,7 +162,7 @@ const Tab = memo(function Tab(props: {
         // Activate on PRESS (VS Code behavior) — click can't be relied on
         // after a drag: the live reorder re-inserts the DOM node, which
         // cancels both pointer capture and click synthesis in Chromium.
-        if (!props.active) props.onActivate(props.path);
+        if (!props.active) props.onActivate(props.groupId, props.path);
         drag.current = {
           pointerId: event.pointerId,
           startX: event.clientX,
@@ -183,14 +187,19 @@ const Tab = memo(function Tab(props: {
           detach();
           cancelDrag.current = () => undefined;
           if (!state.active) return;
-          props.onDragEnd();
+          props.setDragPreview(null);
           if (pointerEvent === null) return;
           const target = editorGroupAtPoint(
             pointerEvent.clientX,
             pointerEvent.clientY,
           );
           if (target && target.groupId !== props.groupId) {
-            props.onMoveToGroup(props.path, target.groupId, target.toIndex);
+            props.onMoveToGroup(
+              props.groupId,
+              target.groupId,
+              props.path,
+              target.toIndex,
+            );
           }
         };
         const onMove = (pointerEvent: PointerEvent) => {
@@ -230,8 +239,8 @@ const Tab = memo(function Tab(props: {
             pointerEvent.clientX,
             current,
           );
-          props.onDragPreview(props.path, toIndex);
-          props.onMove(props.path, toIndex);
+          props.setDragPreview({ path: props.path, toIndex });
+          props.onMove(props.groupId, props.path, toIndex);
         };
         const onCancel = (pointerEvent: PointerEvent) => {
           if (drag.current?.pointerId !== pointerEvent.pointerId) return;
@@ -277,7 +286,7 @@ const Tab = memo(function Tab(props: {
         onPointerDown={(event) => event.stopPropagation()}
         onClick={(event) => {
           event.stopPropagation();
-          props.onClose(props.path);
+          props.onClose(props.groupId, props.path);
         }}
         className={`grid size-4 place-items-center rounded text-subtle hover:bg-line hover:text-ink ${
           props.active ? "" : "opacity-0 focus:opacity-100 group-hover:opacity-100"
@@ -341,7 +350,9 @@ function thumbWidth(strip: HTMLElement): number {
 // runtime-only and known for the ACTIVE tab (the one mounted inspector
 // reports its save state). h-9: ONE header band height with the side panel
 // and Chats panel, so the three hairlines meet at the vertical seams.
-export function EditorTabs(props: {
+type DragPreview = { path: string; toIndex: number } | null;
+
+export const EditorTabs = memo(function EditorTabs(props: {
   groupId: string;
   groupNumber: number;
   tabs: Array<{ path: string }>;
@@ -355,19 +366,21 @@ export function EditorTabs(props: {
   // knowable for EVERY tab — the store outlives the keyed inspectors — so an
   // inactive tab keeps its marker (#579 review, r4).
   recoveryPaths: ReadonlySet<string>;
-  onActivate: (path: string) => void;
-  onClose: (path: string) => void;
-  onContextMenu: (path: string) => void;
-  onMove: (path: string, toIndex: number) => void;
-  onMoveToGroup: (path: string, targetGroupId: string, toIndex: number) => void;
-  onCreateGroupRight: () => void;
-  onCloseGroup?: () => void;
+  onActivate: (groupId: string, path: string) => void;
+  onClose: (groupId: string, path: string) => void;
+  onContextMenu: (groupId: string, path: string) => void;
+  onMove: (groupId: string, path: string, toIndex: number) => void;
+  onMoveToGroup: (
+    sourceGroupId: string,
+    targetGroupId: string,
+    path: string,
+    toIndex: number,
+  ) => void;
+  onCreateGroupRight: (groupId: string) => void;
+  onCloseGroup?: (groupId: string) => void;
 }) {
   const [listOpen, setListOpen] = useState(false);
-  const [dragPreview, setDragPreview] = useState<{
-    path: string;
-    toIndex: number;
-  } | null>(null);
+  const [dragPreview, setDragPreview] = useState<DragPreview>(null);
   // VS Code wheel behavior: a vertical wheel over the strip scrolls it
   // horizontally. Native listener because React registers `wheel` passive,
   // so preventDefault (needed once we consume the gesture) is a no-op there.
@@ -472,8 +485,7 @@ export function EditorTabs(props: {
             onActivate={props.onActivate}
             onClose={props.onClose}
             onContextMenu={props.onContextMenu}
-            onDragPreview={(path, toIndex) => setDragPreview({ path, toIndex })}
-            onDragEnd={() => setDragPreview(null)}
+            setDragPreview={setDragPreview}
             onMove={props.onMove}
             onMoveToGroup={props.onMoveToGroup}
           />
@@ -487,7 +499,7 @@ export function EditorTabs(props: {
           type="button"
           aria-label="Close editor group"
           title="Close editor group"
-          onClick={props.onCloseGroup}
+          onClick={() => props.onCloseGroup?.(props.groupId)}
           className="grid w-7 shrink-0 place-items-center border-b border-line text-subtle hover:bg-line/50 hover:text-ink"
         >
           <X size={14} aria-hidden />
@@ -499,7 +511,7 @@ export function EditorTabs(props: {
         aria-label="New editor group right"
         title="New editor group right"
         disabled={empty || isSingletonEditorTabPath(props.activeTab)}
-        onClick={props.onCreateGroupRight}
+        onClick={() => props.onCreateGroupRight(props.groupId)}
         className="grid w-7 shrink-0 place-items-center border-b border-line text-subtle hover:bg-line/50 hover:text-ink disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-subtle"
       >
         <Columns2 size={14} aria-hidden />
@@ -594,7 +606,7 @@ export function EditorTabs(props: {
                 title={tab.path}
                 onClick={() => {
                   setListOpen(false);
-                  props.onActivate(tab.path);
+                  props.onActivate(props.groupId, tab.path);
                 }}
                 className={`flex h-7 w-full items-center px-3 text-left text-[13px] ${
                   tab.path === props.activeTab
@@ -612,4 +624,4 @@ export function EditorTabs(props: {
       ) : null}
     </div>
   );
-}
+});

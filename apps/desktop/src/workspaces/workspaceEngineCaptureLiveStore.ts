@@ -9,6 +9,7 @@ import type {
   SecretFileMoment,
   SecretFileStore,
   TextFileSnapshot,
+  VersionRecord,
   VersionedTextFileState,
   VersionedTextMoment,
   VersionedTextMomentSummary,
@@ -30,8 +31,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   EngineWorkspaceSessions,
-  type EngineWorkspace,
+  type AttachedEngineWorkspace,
   type EngineWorkspaceBinding,
+  type ShareMountEngineWorkspace,
 } from "@dohc/workspace-engine-client/daemon";
 
 // A manifest rebuild after a version switch costs ONE unsettled pass, so this
@@ -131,10 +133,20 @@ export interface CaptureTextFileMetadata {
 }
 
 export type CaptureVersionedTextStore = VersionedTextStore & {
-  listTextFileMetadata?(input: {
+  listTextFileMetadata(input: {
     workspaceId: string;
     versionId: string;
   }): Promise<CaptureTextFileMetadata[]>;
+  listHistoryPage(input: {
+    workspaceId: string;
+    limit?: number;
+    beforeMomentOrder?: number;
+  }): Promise<{
+    activeVersion: VersionRecord;
+    textMomentPage: Awaited<ReturnType<VersionedTextStore["listMoments"]>>;
+    protectedMoments: SecretFileMoment[];
+    protectedTruncated: boolean;
+  }>;
   flushCapture?(): Promise<void>;
   reconcileCapture?(): Promise<void>;
   watcherStatus?(): Promise<{
@@ -513,11 +525,13 @@ function adapterAuthor(author: MomentAuthor): AgentAuthor {
 }
 
 export function createCaptureLiveStores(
-  workspace: EngineWorkspace,
+  workspace: AttachedEngineWorkspace | ShareMountEngineWorkspace,
   sessions: EngineWorkspaceSessions,
 ): CaptureLiveStores {
   const adapters = new WeakMap<object, Map<string, VersionedLiveAdapter>>();
-  sessions.rememberCaptureAuthor(workspace.workspaceId, null);
+  if (workspace.shareMount !== true) {
+    sessions.rememberCaptureAuthor(workspace, null);
+  }
 
   function adapterFor(binding: EngineWorkspaceBinding): VersionedLiveAdapter {
     const clientKey = binding.client as object;
@@ -804,16 +818,6 @@ export function createCaptureLiveStores(
       }));
     },
 
-    async listTextFiles(input: {
-      workspaceId: string;
-      versionId: string;
-    }) {
-      const values = await runRead(
-        async (adapter) => await adapter.listTextFiles(input),
-      );
-      return values.map((value) => snapshotFromWire(value));
-    },
-
     async writeTextFile(input: {
       workspaceId: string;
       versionId: string;
@@ -1007,6 +1011,27 @@ export function createCaptureLiveStores(
         moments: page.moments.map((moment) =>
           momentSummaryFromWire(input.workspaceId, moment),
         ),
+      };
+    },
+
+    async listHistoryPage(input: {
+      workspaceId: string;
+      limit?: number;
+      beforeMomentOrder?: number;
+    }) {
+      const page = await runRead(
+        async (adapter) => await adapter.readHistoryPage(input),
+      );
+      return {
+        activeVersion: page.activeVersion,
+        textMomentPage: {
+          ...page.textMomentPage,
+          moments: page.textMomentPage.moments.map((moment) =>
+            momentSummaryFromWire(input.workspaceId, moment),
+          ),
+        },
+        protectedMoments: page.protectedMoments.map(secretMomentFromWire),
+        protectedTruncated: page.protectedTruncated,
       };
     },
 
@@ -1268,10 +1293,12 @@ export function createCaptureLiveStores(
       });
       // Reopen replay is a cache of daemon-accepted state, not caller intent.
       // Remember only after the mutation succeeds.
-      sessions.rememberCaptureAuthor(workspace.workspaceId, desired);
+      if (workspace.shareMount !== true) {
+        sessions.rememberCaptureAuthor(workspace, desired);
+      }
     },
 
-    close: async () => await sessions.closeWorkspace(workspace.workspaceId),
+    close: async () => await sessions.closeWorkspace(workspace),
   };
 
   const secretStore = {
@@ -1305,14 +1332,6 @@ export function createCaptureLiveStores(
     },
     listSecretFiles: (input: Parameters<SecretFileStore["listSecretFiles"]>[0]) =>
       runRawRead(async (adapter) => await adapter.listSecretFiles(input)),
-    async listSecretMoments(
-      input: Parameters<SecretFileStore["listSecretMoments"]>[0],
-    ) {
-      const moments = await runRawRead(
-        async (adapter) => await adapter.listSecretMoments(input),
-      );
-      return moments.map(secretMomentFromWire);
-    },
     async getSecretMoment(
       input: Parameters<SecretFileStore["getSecretMoment"]>[0],
     ) {
@@ -1353,7 +1372,7 @@ export function createCaptureLiveStores(
       input: Parameters<SecretFileStore["materializeSecretFile"]>[0],
     ) =>
       runRawRead(async (adapter) => await adapter.materializeSecretFile(input)),
-    close: async () => await sessions.closeWorkspace(workspace.workspaceId),
+    close: async () => await sessions.closeWorkspace(workspace),
   };
 
   return {

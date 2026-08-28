@@ -1,7 +1,10 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { mainBundledWorkspaceDeps } from "../electron.vite.config";
+import {
+  mainBuildEntries,
+  mainBundledWorkspaceDeps,
+} from "../electron.vite.config";
 
 // electron-vite's externalizeDepsPlugin externalizes every entry in this
 // package's `dependencies` that is not listed in `mainBundledWorkspaceDeps`.
@@ -41,6 +44,12 @@ function mainProcessSourceFiles(dir: string, found: string[] = []): string[] {
 }
 
 describe("main bundle config", () => {
+  it("emits the reusable database worker beside main", () => {
+    expect(mainBuildEntries["workspace-database-worker"]).toBe(
+      "src/workspaces/workspaceDatabaseThread.ts",
+    );
+  });
+
   it("bundles every workspace package the main process imports", () => {
     const imported = new Set<string>();
     for (const file of mainProcessSourceFiles(MAIN_SOURCE_ROOT)) {

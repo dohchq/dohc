@@ -17,6 +17,8 @@ import {
   ChatDispatchStateForThreadPayload,
   ChatDispatchStateForThreadResult,
   ChatReactionRecord,
+  DatabaseEditResult,
+  DatabasePageResult,
   DatabaseSnapshotResult,
   DesktopMarksResult,
   CreateWorkspaceFilePayload,
@@ -25,7 +27,11 @@ import {
   EngineMomentDetailRecord,
   ApplyEngineYDocUpdatePayload,
   ApplyEngineYDocUpdateResult,
+  AcknowledgeEngineYDocLineageReplacementResult,
   OpenEngineYDocSessionResult,
+  OpenWorkspaceRequestPayload,
+  ReloadRendererRequestPayload,
+  ReadWorkspaceDatabasePagePayload,
   ReadEngineYDocArtifactAssetResult,
   ExportDocumentFilePayload,
   ExportDocumentFileResult,
@@ -40,6 +46,7 @@ import {
   SDK_PARAMS_MAX_DEPTH,
   SDK_PARAMS_MAX_VALUES,
   PresencePublishPayload,
+  PresencePublishRequestPayload,
   presenceStateWithinCap,
   RestoreEngineMomentFileResult,
   RunnerSelfTestPayload,
@@ -78,6 +85,7 @@ import {
   OpenPluginPanelPayload,
   OpenPluginPanelResult,
   PluginPanelOpenedEvent,
+  PluginPanelInvalidatedEvent,
   StartPluginPanelPayload,
   StartPluginPanelResult,
   StopPluginPanelPayload,
@@ -89,6 +97,7 @@ import {
   WriteWorkspaceTextPayload,
   WriteWorkspaceTextResult,
   parseInvokePluginPanelSdkPayloadForIpc,
+  parsePluginPanelInvalidatedEventForIpc,
   parsePluginPanelSdkEventForIpc,
   CloudJoinWorkspacePayload,
   ReadShareProposalFileContentPayload,
@@ -97,6 +106,10 @@ import {
   ListShareProposalsResult,
   ListMyShareChangesPayload,
   ListMyShareChangesResult,
+  ListRelaySharesResult,
+  RelayShareGrantedRow,
+  RelayShareReceivedRow,
+  RelayShareSelector,
   ReadShareProposalChangesResult,
   RefreshSharedViewResult,
   SettleShareProposalPayload,
@@ -116,6 +129,156 @@ import {
 } from "../renderer/workbench/workbenchState";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "../workspaces/workspaceTextLimits";
+
+describe("relay share listing IPC contract", () => {
+  const selector = { paths: ["docs"], versionId: null };
+  const grant = { access: "edit" as const, grantId: "grant-1", generation: 2 };
+
+  it("keeps stored selector scope separate from grant fields", () => {
+    expect(RelayShareSelector.parse(selector)).toEqual(selector);
+    expect(
+      ListRelaySharesResult.parse({
+        granted: [
+          {
+            shareId: "share-1",
+            workspaceId: "remote-1",
+            recipientUserId: "recipient-1",
+            recipientEmail: "recipient@example.test",
+            selector,
+            ...grant,
+            createdAtMs: 1,
+            revokedAtMs: null,
+            shareCode: "dohc-share:share-1:https://relay.test",
+          },
+        ],
+        received: [
+          {
+            shareId: "share-2",
+            granterEmail: "owner@example.test",
+            selector,
+            ...grant,
+            createdAtMs: 1,
+            shareCode: "dohc-share:share-2:https://relay.test",
+          },
+        ],
+      }),
+    ).toMatchObject({
+      granted: [{ selector, ...grant }],
+      received: [{ selector, ...grant }],
+    });
+  });
+
+  it("keeps a damaged row listable when its raw access belongs to another selector kind", () => {
+    expect(
+      ListRelaySharesResult.parse({
+        granted: [
+          {
+            shareId: "share-damaged-granted",
+            workspaceId: "remote-1",
+            recipientUserId: "recipient-1",
+            recipientEmail: "recipient@example.test",
+            selector: null,
+            access: "read-write",
+            grantId: "grant-damaged-granted",
+            generation: 1,
+            damaged: true,
+            createdAtMs: 1,
+            revokedAtMs: null,
+            shareCode: "dohc-share:share-damaged-granted:https://relay.test",
+          },
+        ],
+        received: [
+          {
+            shareId: "share-damaged-received",
+            granterEmail: "owner@example.test",
+            selector: null,
+            access: "read-write",
+            grantId: "grant-damaged-received",
+            generation: 1,
+            damaged: true,
+            createdAtMs: 1,
+            shareCode: "dohc-share:share-damaged-received:https://relay.test",
+          },
+        ],
+      }),
+    ).toMatchObject({
+      granted: [{ selector: null, access: "read-write", damaged: true }],
+      received: [{ selector: null, access: "read-write", damaged: true }],
+    });
+  });
+
+  it("refuses chat access on readable path rows and bounds damaged raw access", () => {
+    const granted = {
+      shareId: "share-1",
+      workspaceId: "remote-1",
+      recipientUserId: "recipient-1",
+      recipientEmail: "recipient@example.test",
+      selector,
+      access: "read-write",
+      grantId: "grant-1",
+      generation: 1,
+      createdAtMs: 1,
+      revokedAtMs: null,
+      shareCode: "dohc-share:share-1:https://relay.test",
+    };
+    const received = {
+      shareId: "share-2",
+      granterEmail: "owner@example.test",
+      selector,
+      access: "read-write",
+      grantId: "grant-2",
+      generation: 1,
+      createdAtMs: 1,
+      shareCode: "dohc-share:share-2:https://relay.test",
+    };
+
+    expect(RelayShareGrantedRow.safeParse(granted).success).toBe(false);
+    expect(RelayShareReceivedRow.safeParse(received).success).toBe(false);
+    expect(
+      RelayShareGrantedRow.safeParse({
+        ...granted,
+        selector: null,
+        damaged: true,
+        access: "x".repeat(65),
+      }).success,
+    ).toBe(false);
+    expect(
+      RelayShareReceivedRow.safeParse({
+        ...received,
+        selector: null,
+        damaged: true,
+        access: "x".repeat(65),
+      }).success,
+    ).toBe(false);
+  });
+
+  it("refuses the retired nested-access listing shape and incomplete grant fields", () => {
+    const oldSelector = { ...selector, access: "edit" };
+    const granted = {
+      shareId: "share-1",
+      workspaceId: "remote-1",
+      recipientUserId: "recipient-1",
+      recipientEmail: "recipient@example.test",
+      selector: oldSelector,
+      createdAtMs: 1,
+      revokedAtMs: null,
+      shareCode: "dohc-share:share-1:https://relay.test",
+    };
+    const received = {
+      shareId: "share-2",
+      granterEmail: "owner@example.test",
+      selector: oldSelector,
+      createdAtMs: 1,
+      shareCode: "dohc-share:share-2:https://relay.test",
+    };
+
+    expect(RelayShareGrantedRow.safeParse(granted).success).toBe(false);
+    expect(RelayShareReceivedRow.safeParse(received).success).toBe(false);
+    expect(RelayShareGrantedRow.safeParse({ ...granted, ...grant, generation: 0 }).success).toBe(
+      false,
+    );
+  });
+});
 
 describe("shared view refresh IPC contract", () => {
   it("preserves pull exclusions and unjournalable paths independently", () => {
@@ -554,10 +717,70 @@ describe("record IPC contracts", () => {
             name: "tasks",
             columns: [],
             rows: [{ "task title": "Ship Zod 4", priority: 1, done: false }],
+            nextOffset: 1000,
           },
         ],
       }).tables[0]?.rows[0],
     ).toEqual({ "task title": "Ship Zod 4", priority: 1, done: false });
+
+    expect(
+      ReadWorkspaceDatabasePagePayload.parse({
+        workspaceId: "workspace-1",
+        relativePath: "workspace.db",
+        table: "tasks",
+        offset: 1000,
+      }),
+    ).toEqual({
+      workspaceId: "workspace-1",
+      relativePath: "workspace.db",
+      table: "tasks",
+      offset: 1000,
+    });
+    expect(
+      DatabasePageResult.parse({
+        path: "workspace.db",
+        table: "tasks",
+        offset: 1000,
+        rows: [{ "task title": "Keep paging" }],
+        nextOffset: null,
+      }),
+    ).toEqual({
+      path: "workspace.db",
+      table: "tasks",
+      offset: 1000,
+      rows: [{ "task title": "Keep paging" }],
+      nextOffset: null,
+    });
+    expect(
+      DatabaseEditResult.parse({
+        path: "workspace.db",
+        table: "tasks",
+        page: {
+          offset: 0,
+          rows: [{ "task title": "Ship the worker" }],
+          nextOffset: null,
+        },
+        version: 2,
+      }),
+    ).toEqual({
+      path: "workspace.db",
+      table: "tasks",
+      page: {
+        offset: 0,
+        rows: [{ "task title": "Ship the worker" }],
+        nextOffset: null,
+      },
+      version: 2,
+    });
+
+    expect(
+      ReadWorkspaceDatabasePagePayload.safeParse({
+        workspaceId: "workspace-1",
+        relativePath: "workspace.db",
+        table: "tasks",
+        offset: -1,
+      }).success,
+    ).toBe(false);
 
     expect(
       DesktopMarksResult.safeParse({
@@ -673,9 +896,12 @@ describe("settings IPC contract", () => {
   });
 
   it("keeps chat-run stop and resume controls workspace scoped", () => {
-    expect(StopAgentRunPayload.parse({ workspaceId: "ws-settings" })).toEqual({
-      workspaceId: "ws-settings",
-    });
+    expect(
+      StopAgentRunPayload.parse({
+        workspaceId: "ws-settings",
+        runId: "run-1",
+      }),
+    ).toEqual({ workspaceId: "ws-settings", runId: "run-1" });
     expect(
       StopAgentRunPayload.safeParse({
         workspaceId: "ws-settings",
@@ -703,14 +929,14 @@ describe("settings IPC contract", () => {
     ).toEqual({ workspaceId: "ws-settings", threadId: "thread-1" });
     expect(
       ChatDispatchStateForThreadResult.parse({
-        liveRun: true,
+        liveRunId: "run-1",
         pendingCount: 2,
         paused: false,
       }),
-    ).toEqual({ liveRun: true, pendingCount: 2, paused: false });
+    ).toEqual({ liveRunId: "run-1", pendingCount: 2, paused: false });
     expect(
       ChatDispatchStateForThreadResult.safeParse({
-        liveRun: false,
+        liveRunId: null,
         pendingCount: -1,
         paused: true,
       }).success,
@@ -1546,15 +1772,25 @@ describe("plugin guest SDK IPC contract", () => {
         status: "ok",
         url: "http://127.0.0.1:43123/",
         title: "Reports",
+        surfaceId: 1,
       }),
     ).toEqual({
       status: "ok",
       url: "http://127.0.0.1:43123/",
       title: "Reports",
+      surfaceId: 1,
     });
     expect(
       StartPluginPanelResult.parse({ status: "not-registered" }),
     ).toEqual({ status: "not-registered" });
+    const invalidated = { ...identity, surfaceId: 1 };
+    expect(PluginPanelInvalidatedEvent.parse(invalidated)).toEqual(invalidated);
+    expect(parsePluginPanelInvalidatedEventForIpc(invalidated)).toEqual(
+      invalidated,
+    );
+    expect(
+      parsePluginPanelInvalidatedEventForIpc({ ...invalidated, extra: true }),
+    ).toBeNull();
 
     expect(
       StartPluginPanelPayload.safeParse({ ...identity, extra: true }).success,
@@ -1593,6 +1829,7 @@ describe("plugin guest SDK IPC contract", () => {
         status: "ok",
         url: "https://127.0.0.1:43123/",
         title: "Reports",
+        surfaceId: 1,
       }).success,
     ).toBe(false);
   });
@@ -1934,8 +2171,10 @@ describe("engine history and linked Chats IPC contract (PR 0M-5)", () => {
       nextBeforeMomentOrder: null,
       latestMomentOrder: 7,
       activeVersionId: "main",
+      protectedTruncated: true,
     });
     expect(page.moments[0].summary).toBe("Reconciled offline edits");
+    expect(page.protectedTruncated).toBe(true);
     expect(
       EngineMomentDetailRecord.parse({
         id: "moment_2",
@@ -2081,12 +2320,35 @@ describe("chat reaction emoji trust boundary (WS-MU-C2)", () => {
   });
 });
 
+describe("renderer document request identity", () => {
+  const rendererDocumentId = "123e4567-e89b-42d3-a456-426614174000";
+
+  it("requires preload's document id on workspace open and reload requests", () => {
+    expect(
+      OpenWorkspaceRequestPayload.parse({
+        workspaceId: "ws-1",
+        rendererDocumentId,
+      }),
+    ).toEqual({ workspaceId: "ws-1", rendererDocumentId });
+    expect(
+      ReloadRendererRequestPayload.parse({ rendererDocumentId }),
+    ).toEqual({ rendererDocumentId });
+    expect(
+      OpenWorkspaceRequestPayload.safeParse({ workspaceId: "ws-1" }).success,
+    ).toBe(false);
+    expect(ReloadRendererRequestPayload.safeParse({}).success).toBe(false);
+  });
+});
+
 describe("presence state size cap (MU-C5 DoS boundary)", () => {
+  const incarnationId = "123e4567-e89b-42d3-a456-426614174001";
+
   function publishPayload(state: unknown) {
     return PresencePublishPayload.safeParse({
       scope: { kind: "workspace", workspaceId: "ws-1" },
       topic: "chat:thread_1",
       clientId: "client-1",
+      incarnationId,
       state,
     });
   }
@@ -2100,9 +2362,52 @@ describe("presence state size cap (MU-C5 DoS boundary)", () => {
       scope: { kind: "workspace", workspaceId: "ws-1" },
       topic: "chat:thread_1",
       clientId: "client-1",
+      incarnationId,
       leave: true,
     });
     expect(result.success).toBe(true);
+  });
+
+  it("binds a share presence scope to its origin workspace", () => {
+    const base = {
+      topic: "chat:thread_1",
+      clientId: "client-1",
+      incarnationId,
+      state: null,
+    };
+    expect(
+      PresencePublishPayload.safeParse({
+        ...base,
+        scope: {
+          kind: "share",
+          workspaceId: "ws-1",
+          shareId: "share-1",
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      PresencePublishPayload.safeParse({
+        ...base,
+        scope: { kind: "share", shareId: "share-1" },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("requires preload's document identity only at the main request boundary", () => {
+    const payload = PresencePublishPayload.parse({
+      scope: { kind: "workspace", workspaceId: "ws-1" },
+      topic: "chat:thread_1",
+      clientId: "client-1",
+      incarnationId,
+      state: null,
+    });
+    expect(
+      PresencePublishRequestPayload.safeParse({
+        ...payload,
+        rendererDocumentId: "123e4567-e89b-42d3-a456-426614174002",
+      }).success,
+    ).toBe(true);
+    expect(PresencePublishRequestPayload.safeParse(payload).success).toBe(false);
   });
 
   it("rejects an oversized JSON state before main would serialize it", () => {
@@ -2230,6 +2535,18 @@ describe("engine Y.Doc update IPC contract", () => {
     });
   });
 
+  it("keeps an unresolved live path out of the writable fallback", () => {
+    expect(
+      OpenEngineYDocSessionResult.parse({
+        available: false,
+        documentUnavailable: true,
+      }),
+    ).toEqual({
+      available: false,
+      documentUnavailable: true,
+    });
+  });
+
   it("keeps a removal-window open refusal operation-aware in the renderer", () => {
     expect(
       OpenEngineYDocSessionResult.parse({
@@ -2335,6 +2652,21 @@ describe("engine Y.Doc update IPC contract", () => {
         reason: "silently-dropped",
       }).success,
     ).toBe(false);
+  });
+
+  it("distinguishes lineage acknowledgement from refusal", () => {
+    expect(
+      AcknowledgeEngineYDocLineageReplacementResult.parse({
+        accepted: true,
+        updates: [],
+      }),
+    ).toEqual({ accepted: true, updates: [] });
+    expect(
+      AcknowledgeEngineYDocLineageReplacementResult.parse({
+        accepted: false,
+        reason: "session-unavailable",
+      }),
+    ).toEqual({ accepted: false, reason: "session-unavailable" });
   });
 });
 

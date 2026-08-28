@@ -31,6 +31,7 @@ import type {
   ChatFileMentionRecord,
   ChatThreadRecord,
   CloudStatusResult,
+  DesktopUserSettingsResult,
   DmRecord,
   EngineMomentDetailRecord,
   EngineMomentRecord,
@@ -39,15 +40,18 @@ import type {
   MyShareChangeRow,
   RefreshSharedViewResult,
   RebuildEngineStoreResult,
+  AgentRunStatusResult,
   ShareProposalRow,
   SyncStatusResult,
   TryInVersionRunState,
   WorkbenchMenuCommand,
   WorkspaceGraphResult,
   WorkspaceFileEntry,
+  WorkspaceActivityEvent,
   WorkspaceSummary,
 } from "../ipc/bridgeContract";
 import {
+  activityPathsAffectWorkspaceListing,
   ENGINE_STORE_BACKUP_DIR,
   engineStoreRefusalSentence,
 } from "../ipc/bridgeContract";
@@ -66,8 +70,11 @@ import type { SearchResultsEventEntry } from "../ipc/channels";
 import {
   fileOpenStartMark,
   rendererMarks,
+  type SwitchCompletionPhase,
+  type SwitchPhaseDetails,
 } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
+import { useAsyncResponseEffect } from "./useAsyncResponseEffect";
 import { PLUGIN_WEB_APP_OPEN_ERROR } from "./pluginWebAppCopy";
 import type { RelayShareTarget } from "./RelayShareDialog";
 import { useSnapshotLane } from "./snapshotLane";
@@ -76,6 +83,7 @@ import { CloudLogin } from "./CloudLogin";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { ExternalLinkConfirm } from "./ExternalLinkConfirm";
 import { CommandPalette, type Command } from "./CommandPalette";
+import { QuickOpenPalette } from "./QuickOpenPalette";
 import {
   classifyForView,
   FileInspector,
@@ -86,16 +94,15 @@ import {
   type HeadingTarget,
   type ScrollTarget,
 } from "./FileInspector";
-import type { WikilinkFile } from "./editor/wikilinkPlugin";
 import { NewFileDialog } from "./NewFileDialog";
 import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
 import { useGuestBlockingUi } from "./guestBlockingUi";
-import { DesktopSettings } from "./settings/DesktopSettings";
 import {
   DEFAULT_SETTINGS_SECTION,
   type SettingsSectionId,
 } from "./settings/settingsRegistry";
+import { LazyDesktopSettings } from "./settings/LazyDesktopSettings";
 import { Titlebar, workspaceName } from "./Titlebar";
 import { toggleTheme } from "./theme";
 import {
@@ -108,13 +115,13 @@ import { EditorTabs } from "./workbench/EditorTabs";
 import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
 import { Explorer } from "./workbench/Explorer";
 import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
+import { indexFileListing } from "./workbench/file-listing-index";
 import {
   noteWorkspaceLabel,
   remapOrphanedDraftPaths,
   useOrphanedDraftPaths,
 } from "./orphanedDrafts";
 import { requestGuardedUpdateInstall } from "./RecoveryCloseGuard";
-import { rankQuickOpenPaths } from "./workbench/quick-open-rank";
 // Eager on purpose. Behind lazy(), the search input did not exist until the
 // chunk resolved, and every character typed in that gap went to whatever the
 // user clicked to open the panel — queries arrived with their first letters
@@ -230,6 +237,7 @@ import {
   type WorkbenchState,
   type WorkbenchTab,
 } from "./workbench/workbenchState";
+import { useCommitOnRelease } from "./workbench/useCommitOnRelease";
 
 // Mounted-share paths (shared-with-me/…) are read-only projections of
 // someone else's files. This check is a renderer UX affordance only — main
@@ -663,6 +671,7 @@ export function pendingHeadingTargetForOpen(
 }
 
 export type Workspace = WorkspaceSummary;
+const EMPTY_SHARE_MOUNTS: NonNullable<Workspace["shareMounts"]> = [];
 
 const LazyRelayShareDialog = lazy(() =>
   import("./RelayShareDialog").then((mod) => ({ default: mod.RelayShareDialog })),
@@ -673,6 +682,18 @@ const MARKDOWN_PRELOAD_IDLE_DELAY_MS = 150;
 // a recipient's mounts, and a granter's waiting changes. Slow on purpose —
 // neither is urgent, and both cost a relay round trip per workspace.
 const SHARE_RELAY_POLL_MS = 5 * 60 * 1000;
+
+// Trailing-edge window that coalesces a burst of workspace-activity events
+// into one files+history refresh. Short enough that a lone save still feels
+// immediate; long enough to cover main's per-batch event cadence.
+export const WORKSPACE_ACTIVITY_REFRESH_DELAY_MS = 200;
+
+// Cap on how long the trailing edge may keep sliding: a sustained burst
+// whose events land inside the window (a long import, an agent writing
+// continuously) would otherwise starve every refresh until it ends. During
+// such a burst one refresh still fires per cap window.
+export const WORKSPACE_ACTIVITY_REFRESH_MAX_WAIT_MS = 1_000;
+export const WORKBENCH_PERSIST_DELAY_MS = 500;
 
 function scheduleMarkdownEditorPreload(): () => void {
   let idleHandle: number | null = null;
@@ -1279,6 +1300,8 @@ function ChatsPanel(props: {
 }) {
   const panelRef = useRef<HTMLElement>(null);
   const dragRight = useRef<number | null>(null);
+  const resize = useCommitOnRelease(props.onWidthChange);
+  const width = resize.previewValue ?? props.width;
 
   return (
     <aside
@@ -1286,7 +1309,7 @@ function ChatsPanel(props: {
       data-testid="chats-panel"
       aria-label="Chats"
       className="relative flex shrink-0 flex-col border-l border-line bg-panel-2"
-      style={{ width: props.width }}
+      style={{ width }}
     >
       <div
         data-testid="chats-panel-resize"
@@ -1298,27 +1321,20 @@ function ChatsPanel(props: {
           if (event.button !== 0) return;
           dragRight.current =
             panelRef.current?.getBoundingClientRect().right ?? window.innerWidth;
+          resize.begin(event.pointerId, width);
           event.currentTarget.setPointerCapture(event.pointerId);
         }}
         onPointerMove={(event) => {
-          if (dragRight.current === null) return;
-          // A buttons-up move means the release was missed (capture lost
-          // outside the window): end the drag instead of resizing on hover.
-          if ((event.buttons & 1) === 0) {
-            dragRight.current = null;
-            return;
-          }
-          props.onWidthChange(clampChatsWidth(dragRight.current - event.clientX));
+          if (dragRight.current === null || !resize.isActive(event.pointerId)) return;
+          resize.update(
+            event.pointerId,
+            clampChatsWidth(dragRight.current - event.clientX),
+            event.buttons,
+          );
         }}
-        onPointerUp={() => {
-          dragRight.current = null;
-        }}
-        onPointerCancel={() => {
-          dragRight.current = null;
-        }}
-        onLostPointerCapture={() => {
-          dragRight.current = null;
-        }}
+        onPointerUp={(event) => resize.commit(event.pointerId)}
+        onPointerCancel={(event) => resize.commit(event.pointerId)}
+        onLostPointerCapture={(event) => resize.commit(event.pointerId)}
         className="absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize bg-transparent transition-colors hover:bg-line/80"
       />
       {/* Same header grammar + h-9 band as the side panel: the two
@@ -1466,13 +1482,16 @@ function shareUnjournalableNotice(
 export function DesktopWorkspaceShell(props: {
   workspace: Workspace;
   workspaces: Workspace[];
+  userSettings: DesktopUserSettingsResult | null;
+  refreshWorkspaceRegistry: () => Promise<Workspace[]>;
   onSwitchWorkspace: (workspace: Workspace) => void;
 }) {
+  const workspaceShareMounts = props.workspace.shareMounts ?? EMPTY_SHARE_MOUNTS;
   const [files, setFiles] = useState<WorkspaceFileEntry[]>([]);
-  // An empty workspace also lists zero files, so "loaded" needs its own flag —
-  // the restored-tab reconciliation below must never run against a listing
-  // that has not happened yet.
-  const [filesLoaded, setFilesLoaded] = useState(false);
+  // An empty workspace also lists zero files, so freshness needs its own flag.
+  // A completed main-process cache hit can paint the explorer immediately,
+  // but restored-tab reconciliation must wait for an independent disk walk.
+  const [filesRevalidated, setFilesRevalidated] = useState(false);
   const [folders, setFolders] = useState<string[]>([]);
   // Main's single answer to "does anything record here" (#542): when the
   // open-time decision produced no recorder — opt-out, unreadable settings,
@@ -1499,18 +1518,11 @@ export function DesktopWorkspaceShell(props: {
   // resolving is the answer, and it is the only one available here — main
   // awaits the capture build before it returns, and `getSyncStatus` does not
   // await anything at all (its handler reads the entry as it stands).
-  //
-  // This shell opens the workspace TWICE — the effect below re-runs when the
-  // settings read changes `refreshHistory`'s identity — and both calls answer
-  // after the decision because main hands a concurrent second open the first
-  // one's promise (`main.ts`, `ensureWorkspaceActivityOpen`). That invariant
-  // is what makes this fact a fact; the pins below drive it the way main
-  // behaves, with one promise answering every call.
   const [captureDecidedFor, setCaptureDecidedForState] = useState<string | null>(null);
   // Mirror of the same fact, for the callbacks that must consult it without
-  // listing it as a dependency — the same reason `syncStatusRef` exists
-  // beside it (#542): `refreshHistory` is a dependency of the workspace-open
-  // effect, so an identity change there re-opens the workspace.
+  // recreating `refreshHistory`. The workspace-open effect is owned by the
+  // renderer selection alone, so a settings-driven callback change cannot
+  // open the workspace again.
   const captureDecidedRef = useRef<string | null>(null);
   const setCaptureDecidedFor = useCallback((decidedFor: string) => {
     captureDecidedRef.current = decidedFor;
@@ -1528,8 +1540,9 @@ export function DesktopWorkspaceShell(props: {
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
   const [cloudOpen, setCloudOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId | null>(null);
-  const [agentSetup, setAgentSetup] = useState<AgentSetupSummary | null>(null);
+  const [agentRunStatus, setAgentRunStatus] = useState<AgentRunStatusResult | null>(null);
   const agentSetupRequestRef = useRef(0);
+  const bootstrapAgentStatusRead = useRef<Promise<AgentRunStatusResult> | null>(null);
   // Relay-share dialog target (PR 18): paths, or a version.
   const [shareTarget, setShareTarget] = useState<RelayShareTarget | null>(null);
   const [openShareOpen, setOpenShareOpen] = useState(false);
@@ -1601,30 +1614,55 @@ export function DesktopWorkspaceShell(props: {
   );
   const closeSettings = useCallback(() => setSettingsSection(null), []);
 
-  // Refresh after Settings closes as well as on workspace changes. A request
-  // version prevents a slow response for workspace A from painting workspace B.
+  const agentSetup = useMemo<AgentSetupSummary | null>(() => {
+    if (!props.userSettings || !agentRunStatus) return null;
+    return {
+      preferredName: props.userSettings.settings.profile.preferredName,
+      runnerConfigured:
+        props.userSettings.settings.runner.command.trim().length > 0,
+      runnerEnabled: props.userSettings.settings.runner.enabled,
+      mcpEnabled: agentRunStatus.mcpEnabled,
+    };
+  }, [agentRunStatus, props.userSettings]);
+
+  // The workspace-scoped half of the setup snapshot is also the initial
+  // history lane's agent-status answer. Both consumers share this promise.
   useEffect(() => {
     const version = agentSetupRequestRef.current + 1;
     agentSetupRequestRef.current = version;
-    void Promise.all([
-      bridge().getUserSettings(),
-      bridge().getAgentRunStatus({ workspaceId: props.workspace.workspaceId }),
-    ])
-      .then(([user, run]) => {
+    setAgentRunStatus(null);
+    const read = bridge().getAgentRunStatus({
+      workspaceId: props.workspace.workspaceId,
+    });
+    bootstrapAgentStatusRead.current = read;
+    void read
+      .then((run) => {
         if (agentSetupRequestRef.current !== version) return;
-        setAgentSetup({
-          preferredName: user.settings.profile.preferredName,
-          runnerConfigured: user.settings.runner.command.trim().length > 0,
-          runnerEnabled: user.settings.runner.enabled,
-          mcpEnabled: run.mcpEnabled,
-        });
+        setAgentRunStatus(run);
       })
       .catch(() => {
-        if (agentSetupRequestRef.current === version) setAgentSetup(null);
+        if (agentSetupRequestRef.current === version) setAgentRunStatus(null);
       });
     return () => {
       if (agentSetupRequestRef.current === version) agentSetupRequestRef.current += 1;
     };
+  }, [props.workspace.workspaceId]);
+
+  const previousSettingsSection = useRef<SettingsSectionId | null>(null);
+  useEffect(() => {
+    const wasOpen = previousSettingsSection.current !== null;
+    previousSettingsSection.current = settingsSection;
+    if (!wasOpen || settingsSection !== null) return;
+    const version = agentSetupRequestRef.current + 1;
+    agentSetupRequestRef.current = version;
+    void bridge()
+      .getAgentRunStatus({ workspaceId: props.workspace.workspaceId })
+      .then((run) => {
+        if (agentSetupRequestRef.current === version) setAgentRunStatus(run);
+      })
+      .catch(() => {
+        if (agentSetupRequestRef.current === version) setAgentRunStatus(null);
+      });
   }, [props.workspace.workspaceId, settingsSection]);
 
   // An Explorer operation retains every closure that is current while its
@@ -1776,6 +1814,83 @@ export function DesktopWorkspaceShell(props: {
   }, [flushStableDrafts]);
 
   const workspaceId = props.workspace.workspaceId;
+  // `openWorkspace` installs main's exact renderer session before it waits
+  // for watcher readiness. Its response is the renderer's existing proof that
+  // both happened; there is no separate admission IPC. Exact-session bootstrap
+  // reads that lose the admission race retry after that proof. The local
+  // generation also keeps an A -> B -> A prop sequence from reusing A's earlier
+  // proof (DesktopRoot normally gives each workspace a fresh keyed shell).
+  const workspaceSelection = useRef({ workspaceId, generation: 0 });
+  if (workspaceSelection.current.workspaceId !== workspaceId) {
+    workspaceSelection.current = {
+      workspaceId,
+      generation: workspaceSelection.current.generation + 1,
+    };
+  }
+  const workspaceSelectionGeneration = workspaceSelection.current.generation;
+  const switchTimelineToken = useRef<
+    ReturnType<typeof rendererMarks.startSwitch> | null
+  >(null);
+  // Passive effects run after the new keyed shell commits. Starting here
+  // excludes abandoned renders while still preceding every async readiness
+  // effect declared below.
+  useEffect(() => {
+    switchTimelineToken.current = rendererMarks.startSwitch(
+      workspaceSelectionGeneration,
+    );
+  }, [workspaceSelectionGeneration]);
+  const markCurrentSwitchPhase = useCallback(
+    (phase: SwitchCompletionPhase, details?: SwitchPhaseDetails) => {
+      const token = switchTimelineToken.current;
+      if (
+        token === null ||
+        token.selectionGeneration !== workspaceSelectionGeneration
+      ) {
+        return false;
+      }
+      return rendererMarks.markSwitchPhase(token, phase, details);
+    },
+    [workspaceSelectionGeneration],
+  );
+  const workspaceReadyGate = useRef<{
+    workspaceId: string;
+    selectionGeneration: number;
+    promise: Promise<void>;
+    resolve: () => void;
+    superseded: boolean;
+  } | null>(null);
+  if (
+    workspaceReadyGate.current?.workspaceId !== workspaceId ||
+    workspaceReadyGate.current.selectionGeneration !== workspaceSelectionGeneration
+  ) {
+    if (workspaceReadyGate.current) {
+      workspaceReadyGate.current.superseded = true;
+      workspaceReadyGate.current.resolve();
+    }
+    const { promise, resolve } = Promise.withResolvers<void>();
+    workspaceReadyGate.current = {
+      workspaceId,
+      selectionGeneration: workspaceSelectionGeneration,
+      promise,
+      resolve,
+      superseded: false,
+    };
+  }
+  const workspaceAdmission = workspaceReadyGate.current!;
+  useEffect(
+    () => () => {
+      workspaceAdmission.superseded = true;
+      workspaceAdmission.resolve();
+    },
+    [workspaceAdmission],
+  );
+  const [workspaceReadyFor, setWorkspaceReadyFor] = useState<{
+    workspaceId: string;
+    selectionGeneration: number;
+  } | null>(null);
+  const workspaceIsReady =
+    workspaceReadyFor?.workspaceId === workspaceId &&
+    workspaceReadyFor.selectionGeneration === workspaceSelectionGeneration;
   // Set-aside recovery markers (#567): every path holding a draft marks its
   // tab and Open Editors row — inactive tabs included, because the store is
   // knowable for all of them (#579 review, r4). Deliberately NOT part of
@@ -1900,43 +2015,18 @@ export function DesktopWorkspaceShell(props: {
   useEffect(() => {
     return scheduleMarkdownEditorPreload();
   }, [workspaceId]);
-  const markdownWikilinkFiles = useMemo<WikilinkFile[]>(
-    () =>
-      files
-        .filter((file) => file.kind === "file" && /\.(md|markdown)$/i.test(file.path))
-        .map((file) => {
-          const pathNoExt = file.path.replace(/\.(md|markdown)$/i, "");
-          return {
-            path: file.path,
-            title: pathNoExt.split("/").pop() ?? file.path,
-            fileId: null,
-          };
-        }),
-    [files],
-  );
-  const conflictSummaries = useMemo(
-    () =>
-      files
-        .filter((file) => file.kind === "file" && file.path.endsWith(".conflict"))
-        .slice(0, 5)
-        .map((file) =>
-          `${file.path.replace(/\.conflict$/, "")} has a sync conflict (${file.path})`,
-        ),
-    [files],
-  );
+  const {
+    markdownWikilinkFiles,
+    conflictSummaries,
+    presentPaths,
+    hasMarkdownPath,
+    graphRefreshKey,
+  } = useMemo(() => indexFileListing(files), [files]);
 
   // Content search (Phase E5.0). The model lives HERE, not in the Search
   // view, so results — and the activity-bar count badge — survive switching
   // views while the panel unmounts.
   const search = useWorkspaceSearch(workspaceId);
-  const graphRefreshKey = useMemo(
-    () =>
-      [
-        String(files.length),
-        files.map((file) => file.path).join("\0"),
-      ].join("\0"),
-    [files],
-  );
   const focusedGroup = activeGroup(wb);
   const focusedTabPath = activeTabPath(wb);
   // The plugins list marks the row whose details tab the user is looking at,
@@ -2091,6 +2181,15 @@ export function DesktopWorkspaceShell(props: {
   // the stored one.
   const uiStateLoaded = useRef(false);
   const userTouchedWb = useRef(false);
+  const restoredActiveFileSurface = useRef<{
+    selectionGeneration: number;
+    groupId: string;
+    path: string;
+  } | null>(null);
+  const [restoredSurfaceCommit, setRestoredSurfaceCommit] = useState<{
+    selectionGeneration: number;
+    waitsForFile: boolean;
+  } | null>(null);
   // The tab paths the stored state restored — the only ones a file listing is
   // allowed to close. Empty until the load applies, and empty forever when the
   // user acted first and the stored tabs were discarded. STATE, not a ref: the
@@ -2106,10 +2205,10 @@ export function DesktopWorkspaceShell(props: {
   const mutateWb = useCallback(
     (updater: (state: WorkbenchState) => WorkbenchState) => {
       // A pending canonical DM navigation loses to a DESTINATION change, not
-      // to every workbench write. Most writes here are not one: a width drag
-      // streams a mutation per pointermove, and the share-mount poll reaches
-      // this seam with no user involved at all — cancelling on those would
-      // silently discard a DM the user had just clicked. The transition is
+      // to every workbench write. Most writes here are not one: a panel resize
+      // commits its final size, and the share-mount poll reaches this seam with
+      // no user involved at all — cancelling on those would silently discard a
+      // DM the user had just clicked. The transition is
       // computed from wbRef outside the functional updater, the idiom openFile
       // and closeFileTab already use for their marks (updaters are
       // side-effect-free by contract, so probing one is safe).
@@ -2211,14 +2310,32 @@ export function DesktopWorkspaceShell(props: {
     [invalidateDeferredFileOpen, mutateWb, workspaceId],
   );
 
-  useEffect(() => {
-    let cancelled = false;
-    void bridge()
-      .getWorkspaceUiState({ workspaceId })
-      .then((stored) => {
-        if (cancelled) return;
+  useAsyncResponseEffect(
+    async () => {
+      try {
+        return await bridge().getWorkspaceUiState({ workspaceId });
+      } catch (error) {
+        await workspaceAdmission.promise;
+        if (workspaceAdmission.superseded) throw error;
+        return bridge().getWorkspaceUiState({ workspaceId });
+      }
+    },
+    {
+      onSuccess: (stored) => {
+        let restoredFileSurface: typeof restoredActiveFileSurface.current = null;
         if (stored && !userTouchedWb.current) {
           const parsed = parseUiState(stored);
+          const restoredGroup = activeGroup(parsed);
+          if (
+            restoredGroup.activeTab !== null &&
+            !isVirtualTabPath(restoredGroup.activeTab)
+          ) {
+            restoredFileSurface = {
+              selectionGeneration: workspaceSelectionGeneration,
+              groupId: restoredGroup.id,
+              path: restoredGroup.activeTab,
+            };
+          }
           // Order matters: wbRef first, THEN setWb, THEN enable flushes — a
           // beforeunload between "loaded" and the restored state's commit
           // must flush the restored state, never the stale default.
@@ -2226,20 +2343,59 @@ export function DesktopWorkspaceShell(props: {
           setWb(parsed);
           setRestoredTabPaths(new Set(allTabs(parsed).map((tab) => tab.path)));
         }
+        restoredActiveFileSurface.current = restoredFileSurface;
+        setRestoredSurfaceCommit({
+          selectionGeneration: workspaceSelectionGeneration,
+          waitsForFile: restoredFileSurface !== null,
+        });
         uiStateLoaded.current = true;
         if (userTouchedWb.current) {
           void bridge()
             .setWorkspaceUiState({ workspaceId, state: serializeUiState(wbRef.current) })
             .catch(() => undefined);
         }
-      })
-      .catch(() => {
+      },
+      onError: () => {
+        restoredActiveFileSurface.current = null;
+        setRestoredSurfaceCommit({
+          selectionGeneration: workspaceSelectionGeneration,
+          waitsForFile: false,
+        });
         uiStateLoaded.current = true;
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [workspaceId]);
+      },
+    },
+    [workspaceAdmission, workspaceId, workspaceSelectionGeneration],
+  );
+  useEffect(() => {
+    if (
+      restoredSurfaceCommit?.selectionGeneration !==
+        workspaceSelectionGeneration ||
+      restoredSurfaceCommit.waitsForFile
+    ) {
+      return;
+    }
+    markCurrentSwitchPhase("restored-active-surface-ready");
+  }, [
+    markCurrentSwitchPhase,
+    restoredSurfaceCommit,
+    workspaceSelectionGeneration,
+  ]);
+  const onRestoredFileSurfaceReady = useCallback(
+    (path: string, groupId: string) => {
+      const target = restoredActiveFileSurface.current;
+      if (
+        target?.selectionGeneration !== workspaceSelectionGeneration ||
+        target.groupId !== groupId ||
+        target.path !== path
+      ) {
+        return;
+      }
+      if (markCurrentSwitchPhase("restored-active-surface-ready")) {
+        restoredActiveFileSurface.current = null;
+      }
+    },
+    [markCurrentSwitchPhase, workspaceSelectionGeneration],
+  );
 
   // Debounced persist (500ms): tabs, view, panel visibility/width, rail.
   useEffect(() => {
@@ -2249,7 +2405,7 @@ export function DesktopWorkspaceShell(props: {
       void bridge()
         .setWorkspaceUiState({ workspaceId, state: serializeUiState(wb) })
         .catch(() => undefined);
-    }, 500);
+    }, WORKBENCH_PERSIST_DELAY_MS);
     return () => clearTimeout(timer);
   }, [wb, workspaceId]);
 
@@ -2301,26 +2457,45 @@ export function DesktopWorkspaceShell(props: {
   // purpose that cannot be undone. See the close below.
   const failedFilesRequest = useRef(0);
   const [listingsSettled, setListingsSettled] = useState(0);
-  const refreshFiles = useCallback(async () => {
-    const request = ++filesRequest.current;
-    pendingFilesRequests.current += 1;
-    try {
-      const result = await bridge().listWorkspaceFiles({ workspaceId });
-      if (request <= committedFilesRequest.current) return;
-      committedFilesRequest.current = request;
-      setFiles(result.files);
-      setFolders(result.folders ?? []);
-      setFilesLoaded(true);
-    } catch (error) {
-      if (request > failedFilesRequest.current) failedFilesRequest.current = request;
-      throw error;
-    } finally {
-      pendingFilesRequests.current -= 1;
-      if (pendingFilesRequests.current === 0) {
-        setListingsSettled((settled) => settled + 1);
+  const [fileListingCommit, setFileListingCommit] = useState<{
+    request: number;
+    listingSource: "cached" | "fresh";
+  } | null>(null);
+  const refreshFiles = useCallback(
+    async (options: { allowCached?: true } = {}) => {
+      const request = ++filesRequest.current;
+      pendingFilesRequests.current += 1;
+      try {
+        const result = await bridge().listWorkspaceFiles({
+          workspaceId,
+          ...options,
+        });
+        if (request <= committedFilesRequest.current) {
+          return result.cached === true;
+        }
+        committedFilesRequest.current = request;
+        setFiles(result.files);
+        setFolders(result.folders ?? []);
+        setFilesRevalidated(result.cached !== true);
+        setFileListingCommit({
+          request,
+          listingSource: result.cached === true ? "cached" : "fresh",
+        });
+        return result.cached === true;
+      } catch (error) {
+        if (request > failedFilesRequest.current) {
+          failedFilesRequest.current = request;
+        }
+        throw error;
+      } finally {
+        pendingFilesRequests.current -= 1;
+        if (pendingFilesRequests.current === 0) {
+          setListingsSettled((settled) => settled + 1);
+        }
       }
-    }
-  }, [workspaceId]);
+    },
+    [workspaceId],
+  );
 
   // Keep a restored tab only while the workspace still lists its file. A
   // rollback, an external delete, or a share pull changes the tree without an
@@ -2338,7 +2513,7 @@ export function DesktopWorkspaceShell(props: {
   // that beats the ui-state load finds nothing restored yet, and the restore
   // is what has to re-run the check.
   useEffect(() => {
-    if (!filesLoaded || restoredTabPaths.size === 0) return;
+    if (!filesRevalidated || restoredTabPaths.size === 0) return;
     // Closing a tab is destructive, so it waits until no listing is in
     // flight. The watermark above deliberately lets an older success fill the
     // display — right for the explorer, wrong for closing tabs, because a
@@ -2364,8 +2539,7 @@ export function DesktopWorkspaceShell(props: {
     const closable = new Set(
       [...restoredTabPaths].filter((path) => !dirtyPaths.has(path)),
     );
-    const present = new Set(files.map((file) => file.path));
-    const fileExists = (path: string) => present.has(path);
+    const fileExists = (path: string) => presentPaths.has(path);
     const current = wbRef.current;
     const next = pruneMissingRestoredTabs(current, closable, fileExists);
     if (next === current) return;
@@ -2389,8 +2563,8 @@ export function DesktopWorkspaceShell(props: {
     }
     setWb((state) => pruneMissingRestoredTabs(state, closable, fileExists));
   }, [
-    files,
-    filesLoaded,
+    presentPaths,
+    filesRevalidated,
     listingsSettled,
     restoredTabPaths,
     dirtyPaths,
@@ -2528,6 +2702,7 @@ export function DesktopWorkspaceShell(props: {
     moments: EngineMomentRecord[];
     nextBeforeMomentOrder: number | null;
     latestMomentOrder: number;
+    protectedTruncated: boolean;
   } | null>(null);
   const [engineHistoryLoadingMore, setEngineHistoryLoadingMore] = useState(false);
   // Why there is no page. A null timeline is not "no changes": it is also a
@@ -2716,6 +2891,14 @@ export function DesktopWorkspaceShell(props: {
         ),
     );
   }, [agentActiveLane, reportLaneFailure, workspaceId]);
+  const readAgentStatusForHistory = useCallback(() => {
+    const bootstrapRead = bootstrapAgentStatusRead.current;
+    if (bootstrapRead) {
+      bootstrapAgentStatusRead.current = null;
+      return bootstrapRead;
+    }
+    return bridge().getAgentRunStatus({ workspaceId });
+  }, [workspaceId]);
   const onSettingsAgentActiveChange = useCallback(
     ({ active, mutated }: { active: boolean; mutated: boolean }) => {
       if (!mutated) {
@@ -2785,7 +2968,7 @@ export function DesktopWorkspaceShell(props: {
       );
       agentActiveLane.settle(
         token,
-        bridge().getAgentRunStatus({ workspaceId }),
+        readAgentStatusForHistory(),
         (agent) => agent.activeRun !== null,
         (error) =>
           reportLaneFailure("dohc could not refresh agent runs.", error, askAgain),
@@ -2829,6 +3012,7 @@ export function DesktopWorkspaceShell(props: {
           moments: page.moments,
           nextBeforeMomentOrder: page.nextBeforeMomentOrder,
           latestMomentOrder: page.latestMomentOrder,
+          protectedTruncated: page.protectedTruncated,
         });
       };
       // Blocked by a newer pagination: hold this answer instead of throwing it
@@ -2857,7 +3041,7 @@ export function DesktopWorkspaceShell(props: {
     const token = ++engineHistoryToken.current;
     const [status, agent] = await Promise.all([
       bridge().getSyncStatus({ workspaceId }),
-      bridge().getAgentRunStatus({ workspaceId }),
+      readAgentStatusForHistory(),
     ]);
     syncStatusLane.commit(token, status);
     agentActiveLane.commit(token, agent.activeRun !== null);
@@ -2865,6 +3049,7 @@ export function DesktopWorkspaceShell(props: {
     agentActiveLane,
     engineEnabled,
     isShareView,
+    readAgentStatusForHistory,
     reportLaneFailure,
     reportShellError,
     syncStatusLane,
@@ -2913,6 +3098,8 @@ export function DesktopWorkspaceShell(props: {
                   current.latestMomentOrder,
                   page.latestMomentOrder,
                 ),
+                protectedTruncated:
+                  current.protectedTruncated || page.protectedTruncated,
               }
             : current,
         );
@@ -2999,18 +3186,24 @@ export function DesktopWorkspaceShell(props: {
   // open-time read (syncStatus.settingsWarning), the read that decided
   // whether anything is recorded. This read only drives which engine
   // surfaces the shell offers (versions and chats).
-  useEffect(() => {
-    let cancelled = false;
-    void bridge()
-      .getWorkspaceSettings({ workspaceId })
-      .then((result) => {
-        if (cancelled) return;
+  useAsyncResponseEffect(
+    async () => {
+      try {
+        return await bridge().getWorkspaceSettings({ workspaceId });
+      } catch (error) {
+        await workspaceAdmission.promise;
+        if (workspaceAdmission.superseded) throw error;
+        return bridge().getWorkspaceSettings({ workspaceId });
+      }
+    },
+    {
+      onSuccess: (result) => {
         setEngineRead({
           workspaceId,
           enabled: result.settings.experimental.workspaceEngineAlpha,
         });
-      })
-      .catch(() => {
+      },
+      onError: () => {
         // Settings unavailable reads as flag off — never a broken shell.
         // Capability only, fail-closed (#329): the surface hides, but what
         // the placeholder then SAYS comes from main's status. This failure
@@ -3019,13 +3212,28 @@ export function DesktopWorkspaceShell(props: {
         // It is still an ANSWER. Recording it is what releases the surfaces
         // below from their load state; a failure held as "pending" would
         // leave a persisted tab spinning for the rest of the session.
-        if (cancelled) return;
         setEngineRead({ workspaceId, enabled: false });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [workspaceId]);
+      },
+    },
+    [workspaceAdmission, workspaceId, workspaceSelectionGeneration],
+  );
+  // History needs both main's capture decision and the renderer's settings
+  // answer. This used to happen accidentally because the settings answer
+  // changed `refreshHistory` and re-ran the whole workspace-open effect.
+  useEffect(() => {
+    if (!workspaceIsReady || engineReadForWorkspace === null) return;
+    void refreshHistory()
+      .then(() => {
+        markCurrentSwitchPhase("history-ready");
+      })
+      .catch((error) => reportShellError("Could not refresh history.", error));
+  }, [
+    engineReadForWorkspace,
+    markCurrentSwitchPhase,
+    refreshHistory,
+    reportShellError,
+    workspaceIsReady,
+  ]);
   // Conflict review (0P-C): opened from the notice center's conflict notice.
   // Lists every open conflict — two machines editing apart, or a merge left
   // with "Finish later" — with the same side-by-side cards as the merge flow.
@@ -3391,8 +3599,12 @@ export function DesktopWorkspaceShell(props: {
   // editor is what performs the reads — without this the panel keeps showing
   // counts the user already cleared until something remounts it.
   const [chatsReadRevision, setChatsReadRevision] = useState(0);
+  const [chatsDmReadRevision, setChatsDmReadRevision] = useState(0);
   const onChatsThreadRead = useCallback(() => {
     setChatsReadRevision((current) => current + 1);
+  }, []);
+  const onChatsDmRead = useCallback(() => {
+    setChatsDmReadRevision((current) => current + 1);
   }, []);
   // THE one write of the chat destination: the ref the panel reads, the state
   // the navigator highlights, and the cancellation that choosing a different
@@ -3950,7 +4162,7 @@ export function DesktopWorkspaceShell(props: {
   // unmount / refresh — otherwise the poll gate and unmount lookups would
   // run against a stale boot-time snapshot (gpt-5.6-sol P1).
   const [shareMounts, setShareMounts] = useState(
-    props.workspace.shareMounts ?? [],
+    workspaceShareMounts,
   );
   // Bumped whenever a share pull changed files: mounted content has no host
   // history, so the open-file refresh key needs its own signal or an open
@@ -3969,18 +4181,9 @@ export function DesktopWorkspaceShell(props: {
   // a folder delete over files that are still there.
   const foldersLeftBehind = useRef(new Set<string>());
   const shareMountsToken = useRef(0);
-  const reloadShareMounts = useCallback(async () => {
-    const token = ++shareMountsToken.current;
-    try {
-      const registry = await bridge().getWorkspaceRegistry();
-      if (token !== shareMountsToken.current) return;
-      const entry = registry.workspaces.find(
-        (candidate) => candidate.workspaceId === workspaceId,
-      );
-      const next = entry?.shareMounts ?? [];
-      // A mount that vanished (removed from Settings or another surface)
-      // reprojects tabs/pins exactly like the Explorer unmount path — open
-      // tabs under the deleted folder must not linger with stale content.
+  const commitShareMounts = useCallback(
+    (next: NonNullable<Workspace["shareMounts"]>) => {
+      if (next === shareMountsRef.current) return;
       const gone = goneMountProjections({
         previous: shareMountsRef.current,
         next,
@@ -3988,10 +4191,22 @@ export function DesktopWorkspaceShell(props: {
       });
       if (gone.length > 0) onExplorerPathsChanged(gone);
       setShareMounts(next);
+    },
+    [onExplorerPathsChanged],
+  );
+  const reloadShareMounts = useCallback(async () => {
+    const token = ++shareMountsToken.current;
+    try {
+      const workspaces = await props.refreshWorkspaceRegistry();
+      if (token !== shareMountsToken.current) return;
+      const entry = workspaces.find(
+        (candidate) => candidate.workspaceId === workspaceId,
+      );
+      commitShareMounts(entry?.shareMounts ?? []);
     } catch {
       // Keep the last known set; the next reload corrects it.
     }
-  }, [workspaceId, onExplorerPathsChanged]);
+  }, [commitShareMounts, props.refreshWorkspaceRegistry, workspaceId]);
 
   // Share mounts: pull every mount's share once (quietly — offline or
   // signed-out refreshes are no-ops main-side). `announce` adds the visible
@@ -4020,12 +4235,12 @@ export function DesktopWorkspaceShell(props: {
     [workspaceId, refreshFiles, reportShellError, showShellNotice, reloadShareMounts],
   );
 
-  // The workspace prop is DesktopRoot's boot-time registry snapshot — a
-  // shell that remounts after workspace switching needs a fresh read or a
-  // mount added/removed in the previous visit is invisible (codex P2).
+  // DesktopRoot owns the live registry snapshot above this keyed shell. A
+  // switch consumes that snapshot without another full-registry IPC; registry
+  // change events and explicit writers refresh it at the root.
   useEffect(() => {
-    void reloadShareMounts();
-  }, [reloadShareMounts]);
+    commitShareMounts(workspaceShareMounts);
+  }, [commitShareMounts, workspaceShareMounts]);
 
   const mountCount = shareMounts.length;
 
@@ -4140,6 +4355,28 @@ export function DesktopWorkspaceShell(props: {
       reportShellError("Could not create a drawing.", error);
     }
   }, [files, folders, openFile, refreshFiles, reportShellError, workspaceId]);
+  // Stable identities for the memoized explorer and inspector (D2#2/#5).
+  // Inline arrows here handed every shell render a fresh prop set, which
+  // re-rendered every TreeRow and re-ran FileInspector for renders that
+  // changed nothing they show.
+  const onOpenEditorsHeightChange = useCallback(
+    (height: number) => mutateWb((state) => setOpenEditorsHeight(state, height)),
+    [mutateWb],
+  );
+  const onExplorerRefreshShareMounts = useCallback(() => {
+    void refreshShareMounts(true);
+  }, [refreshShareMounts]);
+  // One share entry point for both surfaces: the explorer row's "Share…" and
+  // the inspector header's share control open the same dialog.
+  const onSharePath = useCallback((path: string) => {
+    setShareTarget({ kind: "paths", paths: [path] });
+  }, []);
+  const onExplorerRefresh = useCallback(() => {
+    void refreshFiles().catch((error) =>
+      reportShellError("Could not refresh workspace files.", error),
+    );
+  }, [refreshFiles, reportShellError]);
+  const openNewFileDialog = useCallback(() => setNewFileOpen(true), []);
   const openHistoryView = useCallback(() => {
     mutateWb((state) => ({
       ...setView(state, "history"),
@@ -4356,7 +4593,6 @@ export function DesktopWorkspaceShell(props: {
       }
     },
     [
-      activeDocumentPath,
       closeGroupAfterFlush,
       closeFileTab,
       closeOtherTabs,
@@ -4393,6 +4629,13 @@ export function DesktopWorkspaceShell(props: {
     [reportShellError, runWorkbenchMenuCommand, workspaceId],
   );
 
+  const showTabContextMenu = useCallback(
+    (groupId: string, path: string) => {
+      void showWorkbenchMenu("tab", path, groupId);
+    },
+    [showWorkbenchMenu],
+  );
+
   // Performance marks (post-commit, so the rendered surface is included):
   // file tree populated, and shell interactive once status/history landed.
   // These live in the workbench ROOT — a view may unmount, this must not.
@@ -4400,62 +4643,149 @@ export function DesktopWorkspaceShell(props: {
     if (files.length > 0) rendererMarks.markOnce("file-tree-loaded");
   }, [files]);
   useEffect(() => {
-    if (!files.some((file) => /\.(md|markdown)$/i.test(file.path))) return;
+    if (fileListingCommit === null) return;
+    markCurrentSwitchPhase("files-painted", {
+      listingSource: fileListingCommit.listingSource,
+    });
+  }, [fileListingCommit, markCurrentSwitchPhase]);
+  useEffect(() => {
+    if (!filesRevalidated) return;
+    markCurrentSwitchPhase("files-revalidated");
+  }, [filesRevalidated, markCurrentSwitchPhase]);
+  useEffect(() => {
+    if (!hasMarkdownPath) return;
     return scheduleMarkdownEditorPreload();
-  }, [files]);
+  }, [files, hasMarkdownPath]);
   useEffect(() => {
     if (syncStatus) rendererMarks.markOnce("workspace-shell-interactive");
   }, [syncStatus]);
 
-  // Open the workspace (starts the file watcher in main), load the initial
-  // file tree + history, and refresh everything whenever a settled batch is
-  // recorded — the timeline and status stay live without polling.
+  // Open the workspace exactly once for this renderer selection. Main admits
+  // the exact session before watcher readiness, then returns the capture
+  // decision and status once the workspace is ready.
   useEffect(() => {
     let cancelled = false;
     // The open carries a status, so it takes its place in the same issue order
-    // as every other read of that lane. This effect re-runs when
-    // refreshHistory's identity changes, and the second open used to write its
-    // status untimed — leaving the lane's watermark where it was, so the first
-    // run's refresh could still land its older status on top (#636).
+    // as every other read of that lane.
     const token = ++engineHistoryToken.current;
     void (async () => {
       try {
         const status = await bridge().openWorkspace({ workspaceId });
+        if (cancelled) return;
+        markCurrentSwitchPhase("session-admitted");
         // Main awaits the capture build before it answers, so this is the
         // moment the decision exists — and the status committed beside it is
         // the first one that describes a decided workspace (#626). The two
         // commit together, so "decided" never runs ahead of what it decided.
-        // Recorded per workspace, so a switch cannot inherit it, and never
-        // retracted: this effect re-runs whenever refreshHistory's identity
-        // changes, and retracting here would blink every version surface off
-        // and on when the settings read lands.
-        //
         // The lane may refuse this status, and the decision still stands: what
         // outranks it is a NEWER status, which describes a workspace at least
         // as decided as this one.
-        if (!cancelled) {
-          syncStatusLane.commit(token, status);
-          setCaptureDecidedFor(workspaceId);
-        }
-        await refreshFiles();
-        await refreshHistory();
+        syncStatusLane.commit(token, status);
+        setCaptureDecidedFor(workspaceId);
+        workspaceAdmission.resolve();
+        setWorkspaceReadyFor({
+          workspaceId,
+          selectionGeneration: workspaceSelectionGeneration,
+        });
+        const paintedCachedListing = await refreshFiles({ allowCached: true });
+        if (cancelled || !paintedCachedListing) return;
+        void refreshFiles().catch((error) =>
+          reportShellError("Could not refresh workspace files.", error),
+        );
       } catch (error) {
         if (!cancelled) reportShellError("Could not open this workspace.", error);
       }
     })();
-    const unsubscribe = bridge().onWorkspaceActivity(() => {
-      void refreshFiles().catch((error) =>
-        reportShellError("Could not refresh workspace files.", error),
-      );
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    workspaceId,
+    workspaceSelectionGeneration,
+    markCurrentSwitchPhase,
+    refreshFiles,
+    reportShellError,
+    setCaptureDecidedFor,
+    syncStatusLane,
+    workspaceAdmission,
+  ]);
+
+  // Once open has established watcher readiness, refresh everything whenever
+  // a settled batch is recorded. The timeline and status stay live without
+  // polling. Callback identity changes may replace this subscription, but can
+  // never reopen the workspace.
+  useEffect(() => {
+    if (!workspaceIsReady) return;
+    // Trailing-edge coalescing (D2#8): main emits one activity event per
+    // settled batch, and a burst (an import, an agent writing many files)
+    // used to issue a listing + four history reads PER event. One refresh
+    // after the burst quiets answers them all — refreshFiles's committed-
+    // request watermark and refreshHistory's tokened lanes are latest-wins,
+    // so the coalesced (newest) refresh can never lose to a dropped one.
+    // A pending timer cleared by this effect's cleanup is not a lost refresh
+    // either: every re-run's body above refreshes both surfaces itself.
+    // Path detail scopes only the file listing. A complete listing also feeds
+    // empty folders, icons, wikilinks, and graph keys, so a named visible path
+    // still asks main for one complete result. Main can coalesce that walk
+    // across windows after it invalidates the workspace's cached listing.
+    // Paths hidden by the lister cannot change any of those structures, so an
+    // all-hidden window skips the file IPC once a listing has committed.
+    // History always refreshes: capture outcomes and deletes/retirements are
+    // not distinguishable from path strings alone.
+    //
+    // The max-wait deadline keeps a burst that never quiets honest: the
+    // trailing edge slides only until the deadline, then the refresh fires
+    // and the next event starts a fresh window.
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+    let refreshDeadline: number | null = null;
+    let filesRefreshMode: "skip" | "cached" | "full" = "skip";
+    const runActivityRefresh = () => {
+      const mode = filesRefreshMode;
+      refreshTimer = null;
+      refreshDeadline = null;
+      filesRefreshMode = "skip";
+      if (mode !== "skip" || committedFilesRequest.current === 0) {
+        void refreshFiles(mode === "full" ? {} : { allowCached: true }).catch(
+          (error) =>
+            reportShellError("Could not refresh workspace files.", error),
+        );
+      }
       void refreshHistory().catch((error) =>
         reportShellError("Could not refresh history.", error),
       );
-    });
+    };
+    const unsubscribe = bridge().onWorkspaceActivity(
+      (event: WorkspaceActivityEvent) => {
+        const paths =
+          event.workspaceId === workspaceId ? event.paths : undefined;
+        if (!paths?.length) {
+          filesRefreshMode = "full";
+        } else if (
+          filesRefreshMode !== "full" &&
+          activityPathsAffectWorkspaceListing(paths, bridge().platform)
+        ) {
+          filesRefreshMode = "cached";
+        }
+        const now = Date.now();
+        refreshDeadline ??= now + WORKSPACE_ACTIVITY_REFRESH_MAX_WAIT_MS;
+        if (refreshTimer !== null) clearTimeout(refreshTimer);
+        refreshTimer = setTimeout(
+          runActivityRefresh,
+          Math.min(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS, refreshDeadline - now),
+        );
+      },
+    );
     return () => {
-      cancelled = true;
+      if (refreshTimer !== null) clearTimeout(refreshTimer);
       unsubscribe();
     };
-  }, [workspaceId, refreshFiles, refreshHistory, reportShellError, syncStatusLane]);
+  }, [
+    workspaceId,
+    workspaceIsReady,
+    refreshFiles,
+    refreshHistory,
+    reportShellError,
+  ]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -4825,9 +5155,9 @@ export function DesktopWorkspaceShell(props: {
   const shareSkippedToken = useRef(0);
   const reloadShareSkipped = useCallback(async () => {
     const token = ++shareSkippedToken.current;
-    const registry = await bridge().getWorkspaceRegistry();
+    const workspaces = await props.refreshWorkspaceRegistry();
     if (token !== shareSkippedToken.current) return;
-    const entry = registry.workspaces.find(
+    const entry = workspaces.find(
       (candidate) => candidate.workspaceId === workspaceId,
     );
     const skipped = entry?.shareView?.skippedOps ?? null;
@@ -4835,7 +5165,7 @@ export function DesktopWorkspaceShell(props: {
     // without deleting the record, so this reads the marker rather than the
     // record's presence.
     setShareSkipped(hasUnacknowledgedShareSkips(skipped) ? skipped : null);
-  }, [workspaceId]);
+  }, [props.refreshWorkspaceRegistry, workspaceId]);
   const refreshShareView = useCallback(async () => {
     if (!shareView || shareViewDamaged) return;
     const token = ++shareRefreshToken.current;
@@ -4899,9 +5229,11 @@ export function DesktopWorkspaceShell(props: {
   }, [shareView?.shareId, shareViewEnded, workspaceId, reloadShareSkipped]);
   useEffect(() => {
     // One automatic refresh when a shared view opens; afterwards on demand.
-    if (shareView && !shareViewEnded && !shareViewDamaged) void refreshShareView();
+    if (workspaceIsReady && shareView && !shareViewEnded && !shareViewDamaged) {
+      void refreshShareView();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceId]);
+  }, [workspaceId, workspaceIsReady]);
 
   // ---- The recipient's own submitted changes (#646 PR3a) ----
   // A submission exists only from Send changes: there is no draft at the
@@ -5053,7 +5385,7 @@ export function DesktopWorkspaceShell(props: {
   const pollsShareMounts = mountCount > 0;
   const pollsShareProposals = !isShareView;
   useEffect(() => {
-    if (!pollsShareMounts && !pollsShareProposals) return;
+    if (!workspaceIsReady || (!pollsShareMounts && !pollsShareProposals)) return;
     const pull = () => {
       if (pollsShareMounts) void refreshShareMounts();
       if (pollsShareProposals) void reloadShareProposals().catch(() => undefined);
@@ -5061,7 +5393,13 @@ export function DesktopWorkspaceShell(props: {
     pull();
     const timer = setInterval(pull, SHARE_RELAY_POLL_MS);
     return () => clearInterval(timer);
-  }, [pollsShareMounts, pollsShareProposals, refreshShareMounts, reloadShareProposals]);
+  }, [
+    pollsShareMounts,
+    pollsShareProposals,
+    refreshShareMounts,
+    reloadShareProposals,
+    workspaceIsReady,
+  ]);
   const shareChangeNotices = useMemo(
     () =>
       shareProposals.map((proposal) => ({
@@ -5100,6 +5438,7 @@ export function DesktopWorkspaceShell(props: {
         moments={engineHistory.moments}
         hasMore={engineHistory.nextBeforeMomentOrder != null}
         loadingMore={engineHistoryLoadingMore}
+        protectedTruncated={engineHistory.protectedTruncated}
         onLoadMore={() => void loadMoreEngineHistory()}
         onOpenMoment={openMomentDiffTab}
       />
@@ -5169,46 +5508,52 @@ export function DesktopWorkspaceShell(props: {
         expandedFolders={wb.expandedFolders}
         pinned={wb.pinned}
         openEditorsHeight={wb.openEditorsHeight}
-        onOpenEditorsHeightChange={(height) =>
-          mutateWb((state) => setOpenEditorsHeight(state, height))
-        }
+        onOpenEditorsHeightChange={onOpenEditorsHeightChange}
         createRequest={createRequest}
         onOpenFile={openFile}
         onActivateTab={activateEditorTab}
         onCloseTab={closeFileTab}
         onCloseAllTabs={closeAllTabs}
-        onNewUntitledTextFile={() => void createUntitledTextFile()}
+        onNewUntitledTextFile={createUntitledTextFile}
         onCollapseFolders={collapseExplorerFolders}
         onSetFolderExpanded={setExplorerFolderExpanded}
         onToggleFolder={toggleExplorerFolder}
         onTogglePin={toggleExplorerPin}
         onBeginChanges={beginDraftOperation}
         onPathsChanged={onExplorerPathsChanged}
-        onImportFiles={(droppedPaths, targetDir) =>
-          void importFiles(droppedPaths, targetDir)
-        }
+        onImportFiles={importFiles}
         shareView={shareView}
-        onRefreshShareMounts={() => void refreshShareMounts(true)}
-        onUnmountShare={(path) => void unmountShare(path)}
-        onShare={(path) => setShareTarget({ kind: "paths", paths: [path] })}
-        onRefresh={() =>
-          void refreshFiles().catch((error) =>
-            reportShellError("Could not refresh workspace files.", error),
-          )
-        }
-        onNewFileDialog={() => setNewFileOpen(true)}
+        onRefreshShareMounts={onExplorerRefreshShareMounts}
+        onUnmountShare={unmountShare}
+        onShare={onSharePath}
+        onRefresh={onExplorerRefresh}
+        onNewFileDialog={openNewFileDialog}
       />
     </>
   );
 
   // The editor is the one live conversation surface. It owns presence,
   // drafts, and navigation state.
-  const dmWorkspaceOptions = props.workspaces
-    .filter((workspace) => !workspace.shareView)
-    .map((workspace) => ({
-      workspaceId: workspace.workspaceId,
-      label: workspaceName(workspace),
-    }));
+  const dmWorkspaceOptions = useMemo(
+    () =>
+      props.workspaces
+        .filter((workspace) => !workspace.shareView)
+        .map((workspace) => ({
+          workspaceId: workspace.workspaceId,
+          label: workspaceName(workspace),
+        })),
+    [props.workspaces],
+  );
+  // Stable per-field identities (D2#5): ChatsView keys real work off these —
+  // its refresh callbacks depend on onError, so a fresh arrow per shell render
+  // tore down and re-armed its polls and activity subscription every render.
+  const onChatsError = useCallback((message: string) => {
+    setShellError({ message, retry: null });
+  }, []);
+  const openAgentSettings = useCallback(
+    () => openSettings("agents"),
+    [openSettings],
+  );
   const chatsViewProps = {
     workspaceId,
     workspaces: dmWorkspaceOptions,
@@ -5218,36 +5563,44 @@ export function DesktopWorkspaceShell(props: {
     onNavCommand: onChatsNavCommand,
     onDraftsChange: onChatsDrafts,
     onThreadRead: onChatsThreadRead,
+    onDmRead: onChatsDmRead,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
-    onError: (message: string) => setShellError({ message, retry: null }),
+    onError: onChatsError,
     mentionCandidates,
     workspaceFiles: files,
     addressedToMe,
     collaboration: chatCollaboration,
     agentSetup,
-    onSetupAgent: () => openSettings("agents"),
+    onSetupAgent: openAgentSettings,
   } as const;
   // The panel intentionally stays on the overview and only selects editor
-  // destinations. While the Chats editor is active, disable its collaboration
-  // transport so the navigator cannot create a duplicate presence lease.
+  // destinations. While the Chats editor is active, the page instance owns the
+  // live surface: disable the navigator's collaboration transport so it cannot
+  // create a duplicate presence lease, and suspend its polls so one open
+  // conversation does not double every chat read (D2#6). The page's landed
+  // reads still reach the navigator through their local-thread and DM
+  // revisions.
+  const chatsTabIsLive = wb.editorGroups.some((group) =>
+    isChatsTabPath(group.activeTab),
+  );
   const chatsNavigatorProps = {
     workspaceId,
     workspaces: dmWorkspaceOptions,
     selectedNav: selectedChatsNav ?? undefined,
     readRevision: chatsReadRevision,
+    dmReadRevision: chatsDmReadRevision,
     onOpenInTab: openChatsNavInTab,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
-    onError: (message: string) => setShellError({ message, retry: null }),
+    onError: onChatsError,
     mentionCandidates,
     workspaceFiles: files,
     addressedToMe,
-    collaboration: wb.editorGroups.some((group) => isChatsTabPath(group.activeTab))
-      ? null
-      : chatCollaboration,
+    collaboration: chatsTabIsLive ? null : chatCollaboration,
+    suspendPolling: chatsTabIsLive,
     agentSetup,
-    onSetupAgent: () => openSettings("agents"),
+    onSetupAgent: openAgentSettings,
   } as const;
 
   return (
@@ -5747,25 +6100,14 @@ export function DesktopWorkspaceShell(props: {
                       tabLabels={tabLabels}
                       recoveryPaths={recoveryPaths}
                       groupNumber={groupIndex + 1}
-                      onActivate={(path) => activateEditorTab(editorGroup.id, path)}
-                      onClose={(path) => closeFileTab(editorGroup.id, path)}
-                      onContextMenu={(path) =>
-                        void showWorkbenchMenu("tab", path, editorGroup.id)
-                      }
-                      onMove={(path, toIndex) =>
-                        moveFileTab(editorGroup.id, path, toIndex)
-                      }
-                      onMoveToGroup={(path, targetGroupId, toIndex) =>
-                        moveFileTabToGroup(
-                          editorGroup.id,
-                          targetGroupId,
-                          path,
-                          toIndex,
-                        )
-                      }
-                      onCreateGroupRight={() => openEditorGroupRight(editorGroup.id)}
+                      onActivate={activateEditorTab}
+                      onClose={closeFileTab}
+                      onContextMenu={showTabContextMenu}
+                      onMove={moveFileTab}
+                      onMoveToGroup={moveFileTabToGroup}
+                      onCreateGroupRight={openEditorGroupRight}
                       {...(wb.editorGroups.length > 1
-                        ? { onCloseGroup: () => closeGroupAfterFlush(editorGroup.id) }
+                        ? { onCloseGroup: closeGroupAfterFlush }
                         : {})}
                     />
                     <div
@@ -6080,6 +6422,8 @@ export function DesktopWorkspaceShell(props: {
                 }
                 onScrollConsumed={consumeSearchScrollTarget}
                 onSaveStateChange={editorCallbacks.onSaveStateChange}
+                surfaceKey={editorGroup.id}
+                onSurfaceReady={onRestoredFileSurfaceReady}
                 registerDraftFlush={editorCallbacks.registerDraftFlush}
                 registerSourceToggle={editorCallbacks.registerSourceToggle}
                 autoFocus={wb.activeEditorGroup === editorGroup.id}
@@ -6090,7 +6434,7 @@ export function DesktopWorkspaceShell(props: {
                 }
                 {...(shareView || isMountedSharePath(tabPath)
                   ? {}
-                  : { onSharePath: (path: string) => setShareTarget({ kind: "paths", paths: [path] }) })}
+                  : { onSharePath })}
               />
             ) : (
               <div className="flex flex-1 flex-col items-center justify-center gap-4 text-center">
@@ -6209,7 +6553,7 @@ export function DesktopWorkspaceShell(props: {
                     onInitialThreadConsumed={() => setSearchChatTarget(null)}
                     onOpenPath={openPathWithHeading}
                     onThreadRead={onChatsThreadRead}
-                    onError={(message) => setShellError({ message, retry: null })}
+                    onError={onChatsError}
                   />
                 </Suspense>
               ) : (
@@ -6375,25 +6719,11 @@ export function DesktopWorkspaceShell(props: {
         />
       ) : null}
       {quickOpenOpen ? (
-        <CommandPalette
-          testId="quick-open"
-          placeholder="Go to file…"
-          ariaLabel="File"
-          commands={files.map((file) => ({
-            id: file.path,
-            label: file.path,
-            run: () => openFile(file.path),
-          }))}
-          // Quick-open ranking (E5.0): prefix > word-boundary > substring >
-          // fuzzy; recent files boosted; pinned first. Pure function — the
-          // command ids ARE the paths.
-          rank={(query, commands) => {
-            const byPath = new Map(commands.map((command) => [command.id, command]));
-            return rankQuickOpenPaths(query, [...byPath.keys()], {
-              recent: wb.recentFiles,
-              pinned: wb.pinned,
-            }).map((path) => byPath.get(path)!);
-          }}
+        <QuickOpenPalette
+          files={files}
+          recent={wb.recentFiles}
+          pinned={wb.pinned}
+          onOpenPath={openFile}
           onClose={() => setQuickOpenOpen(false)}
         />
       ) : null}
@@ -6448,7 +6778,7 @@ export function DesktopWorkspaceShell(props: {
       ) : null}
       {settingsSection ? (
         <Overlay onClose={closeSettings}>
-          <DesktopSettings
+          <LazyDesktopSettings
             workspaceId={workspaceId}
             workspacePath={props.workspace.rootPath}
             sharedView={isShareView}

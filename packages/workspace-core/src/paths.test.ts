@@ -9,6 +9,7 @@ import {
   validateUserMaterializePath,
   validateUserReadPath,
   validateUserWritePath,
+  hasEngineIgnoredSegment,
   hasIgnoredSegment,
   isSiteSourcePath,
 } from "./paths";
@@ -449,6 +450,28 @@ describe("hasIgnoredSegment (shared tree/watcher ignore rule)", () => {
     expect(hasIgnoredSegment(".dohcrc")).toBe(false);
     expect(hasIgnoredSegment("notes/git/readme.md")).toBe(false);
     expect(hasIgnoredSegment("my-node_modules-notes.md")).toBe(false);
+  });
+});
+
+describe("hasEngineIgnoredSegment (Rust capture floor parity)", () => {
+  it("uses exact names and prefixes at any depth on POSIX", () => {
+    expect(hasEngineIgnoredSegment(".dohc/history/index.json", "linux")).toBe(true);
+    expect(hasEngineIgnoredSegment("sub/.git/config", "linux")).toBe(true);
+    expect(hasEngineIgnoredSegment("pkg/node_modules/x.js", "linux")).toBe(true);
+    expect(hasEngineIgnoredSegment("sub/.dohc-write-123.tmp", "linux")).toBe(true);
+
+    expect(hasEngineIgnoredSegment(".DOHC/history/index.json", "linux")).toBe(false);
+    expect(hasEngineIgnoredSegment("sub/.GIT/config", "linux")).toBe(false);
+    expect(hasEngineIgnoredSegment("pkg/NODE_MODULES/x.js", "linux")).toBe(false);
+    expect(hasEngineIgnoredSegment(".dohc./history/index.json", "linux")).toBe(false);
+    expect(hasEngineIgnoredSegment(".DOHC-WRITE-123.tmp", "linux")).toBe(false);
+  });
+
+  it("normalizes case and trailing aliases on Windows", () => {
+    expect(hasEngineIgnoredSegment(".DOHC/history/index.json", "win32")).toBe(true);
+    expect(hasEngineIgnoredSegment("sub/.git./config", "win32")).toBe(true);
+    expect(hasEngineIgnoredSegment("pkg/NODE_MODULES /x.js", "win32")).toBe(true);
+    expect(hasEngineIgnoredSegment(".DOHC-WRITE-123.tmp", "win32")).toBe(true);
   });
 });
 

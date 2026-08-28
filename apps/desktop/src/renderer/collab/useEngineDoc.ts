@@ -119,9 +119,9 @@ function snapshotsEqual(a: Uint8Array, b: Uint8Array): boolean {
 // available:false AND opening:false => the doc is NOT engine-backed (unflagged
 // workspace, secret path, or already live) — the caller stays on the plain
 // local autosave editor showing the real on-disk content. While opening:true
-// the answer is not known yet and the caller must stay read-only. The other
-// exception is `notInVersion`, where the answer IS known and the caller must
-// stop editing rather than fall back (#534). Each editor owns undo: rich
+// the answer is not known yet and the caller must stay read-only. Named refusal
+// outcomes also block the writable fallback when main cannot prove it is safe.
+// Each editor owns undo: rich
 // documents use their collaboration history, while drawings use Excalidraw's
 // native history and publish the resulting higher element revision.
 //
@@ -153,8 +153,9 @@ export type EngineDocSaveState =
   | "deleted";
 
 export type UseEngineDoc = {
-  // True once the engine session is open and the mirror doc is bound. false =>
-  // fall back to the local autosave editor, but ONLY once `opening` is false.
+  // True once the engine session is open and the mirror doc is bound. false
+  // permits the local autosave editor only after opening settles without a
+  // named refusal outcome.
   available: boolean;
   // No open has answered for the CURRENT request yet (#533). "Opening" and
   // "not engine-backed" used to be the same `available: false`, so the caller
@@ -183,11 +184,13 @@ export type UseEngineDoc = {
   // its generic error text so it can name the constraint and measured bytes.
   saveError: string | null;
   // The path is not in the version this workspace is on: a version switch
-  // removed it while this open was queued behind that switch (#534). Unlike
-  // every other available:false the caller must NOT fall back to the writable
-  // plain editor, whose autosave would write the file back into the version the
-  // user just entered.
+  // removed it while this open was queued behind that switch (#534).
+  // The caller must NOT fall back to the writable plain editor, whose autosave
+  // would write the file back into the version the user just entered.
   notInVersion: boolean;
+  // Main could no longer resolve the live file at the path the renderer read.
+  // The caller replaces the stale document instead of recreating the file.
+  documentUnavailable: boolean;
   // The open did not land and a session for this document may still be the
   // engine's (#564, #657). Same no-downgrade rule as notInVersion: the caller
   // stays read-only, states the reason, and offers a retry (bump retryKey),
@@ -257,11 +260,11 @@ type EngineDocOpenOutcome =
       readArtifactAsset: EngineYDocBinding["readArtifactAsset"];
     }
   | { kind: "unavailable" }
-  // Their OWN kinds, not flags on "unavailable": every other unavailable
-  // answer means "fall back to the plain editor", and these two mean the
-  // opposite (#534, #564). Collapsing them would put the branches back
-  // behind one flag.
+  // Their OWN kinds, not flags on "unavailable": only the unqualified outcome
+  // means "fall back to the plain editor". Collapsing these outcomes would put
+  // distinct user states and retry rules behind one flag.
   | { kind: "not-in-version" }
+  | { kind: "document-unavailable" }
   | { kind: "engine-may-hold-document" }
   | { kind: "artifact-assets-invalid" }
   | { kind: "removal-in-progress"; removal: EngineRemovalInProgress };
@@ -308,6 +311,7 @@ function makeTransport(
           ? { lineageGeneration: result.lineageGeneration }
           : {}),
         ...(result.notInVersion ? { notInVersion: true } : {}),
+        ...(result.documentUnavailable ? { documentUnavailable: true } : {}),
         ...(result.engineMayHoldDocument ? { engineMayHoldDocument: true } : {}),
         ...(result.artifactAssetsInvalid ? { artifactAssetsInvalid: true } : {}),
         ...(result.removalInProgress
@@ -364,6 +368,9 @@ function makeTransport(
         sessionId,
         lineageGeneration: nextLineageGeneration,
       });
+      if (!result.accepted) {
+        throw new EngineYDocDeliveryRefusedError(result.reason);
+      }
       lineageGeneration = nextLineageGeneration;
       return result.updates;
     },
@@ -1260,6 +1267,8 @@ function createEngineDocSession(
             // autosave would race the session it still binds (#564, #657).
             if (bound.notInVersion) {
               setOutcome({ kind: "not-in-version" });
+            } else if (bound.documentUnavailable) {
+              setOutcome({ kind: "document-unavailable" });
             } else if (bound.artifactAssetsInvalid) {
               setOutcome({ kind: "artifact-assets-invalid" });
             } else if (bound.engineMayHoldDocument) {
@@ -1634,6 +1643,7 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
   const versionId = outcome?.kind === "bound" ? outcome.versionId : null;
   const opening = input.enabled && outcome === null;
   const notInVersion = outcome?.kind === "not-in-version";
+  const documentUnavailable = outcome?.kind === "document-unavailable";
   const engineMayHoldDocument = outcome?.kind === "engine-may-hold-document";
   const artifactAssetsInvalid = outcome?.kind === "artifact-assets-invalid";
   const artifactAssets =
@@ -1679,6 +1689,7 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     saveState: settled?.saveState ?? "saved",
     saveError: settled?.saveError ?? null,
     notInVersion,
+    documentUnavailable,
     engineMayHoldDocument,
     artifactAssetsInvalid,
     deletedWhileEditing,

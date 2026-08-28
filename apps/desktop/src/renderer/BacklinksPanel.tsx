@@ -1,10 +1,11 @@
 import { ChevronRight, Link2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   ChatFileMentionRecord,
   GetBacklinksResult,
 } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
+import { useAsyncResponseEffect } from "./useAsyncResponseEffect";
 
 type BacklinkSource = GetBacklinksResult["sources"][number];
 type BacklinkSnippet = BacklinkSource["snippets"][number];
@@ -14,6 +15,36 @@ type LoadedBacklinks = {
   sources: BacklinkSource[];
   chatMentions: ChatFileMentionRecord[];
 };
+type BacklinksLoadIdentity = {
+  chatMentionsAvailable: boolean;
+  workspaceId: string;
+  path: string;
+  refreshKey: number | undefined;
+  focusNonce: number;
+};
+type BacklinksLoadOutcome =
+  | {
+      ok: true;
+      result: GetBacklinksResult;
+      chatMentions: ChatFileMentionRecord[];
+    }
+  | { ok: false };
+type BacklinksLoadRequest = {
+  identity: BacklinksLoadIdentity;
+  response: Promise<BacklinksLoadOutcome>;
+};
+
+function sameBacklinksLoadBase(
+  left: BacklinksLoadIdentity,
+  right: BacklinksLoadIdentity,
+): boolean {
+  return (
+    left.chatMentionsAvailable === right.chatMentionsAvailable &&
+    left.workspaceId === right.workspaceId &&
+    left.path === right.path &&
+    left.refreshKey === right.refreshKey
+  );
+}
 
 // Splits a snippet line into before / highlighted / after so the linked text
 // reads out of the surrounding line. Ranges come clamped from main, but this
@@ -57,75 +88,92 @@ export function BacklinksPanel(props: {
   // Absent reads as unavailable: a caller that has not decided must not make
   // dohc ask for a capability it may not have.
   const chatMentionsAvailable = props.chatMentionsAvailable === true;
+  const [focusNonce, setFocusNonce] = useState(0);
+  const previousRequest = useRef<BacklinksLoadRequest | null>(null);
   const current =
     loaded?.workspaceId === workspaceId && loaded.path === path ? loaded : null;
   const sources = current?.sources ?? [];
   const chatMentions = current?.chatMentions ?? [];
 
-  useEffect(() => {
-    const getBacklinks = bridge().getBacklinks;
-    // Partial bridges (tests, older hosts) may not expose it — degrade to none.
-    if (typeof getBacklinks !== "function") return;
-
-    let active = true;
-    const getChatMentions = chatMentionsAvailable
-      ? bridge().listChatFileMentions
-      : undefined;
-    void Promise.all([
-      getBacklinks({ workspaceId, path }),
-      typeof getChatMentions === "function"
-        ? getChatMentions({ workspaceId, path }).catch(() => ({ mentions: [] }))
-        : Promise.resolve({ mentions: [] }),
-    ])
-      .then(([result, chats]) => {
-        // Guard the async response against a workspace/path switch mid-flight
-        // (product invariant: a slow response must never repaint the wrong doc).
-        if (active) {
-          setLoaded({ workspaceId, path, sources: result.sources, chatMentions: chats.mentions });
-        }
-      })
-      .catch(() => {
-        if (active) {
-          setLoaded({ workspaceId, path, sources: [], chatMentions: [] });
-        }
-      });
-    return () => {
-      active = false;
-    };
-  }, [chatMentionsAvailable, workspaceId, path, refreshKey]);
-
-  // Recompute when the window regains focus — catches edits made in another app
-  // (e.g. an agent) without polling.
-  const [focusNonce, setFocusNonce] = useState(0);
+  // Recompute when the window regains focus. This catches edits made in
+  // another app without polling. The focus nonce joins the same request
+  // identity as workspace activity so the two triggers cannot race each other.
   useEffect(() => {
     const onFocus = () => setFocusNonce((nonce) => nonce + 1);
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, []);
-  useEffect(() => {
-    if (focusNonce === 0) return;
-    const getBacklinks = bridge().getBacklinks;
-    if (typeof getBacklinks !== "function") return;
-    let active = true;
-    const getChatMentions = chatMentionsAvailable
-      ? bridge().listChatFileMentions
-      : undefined;
-    void Promise.all([
-      getBacklinks({ workspaceId, path }),
-      typeof getChatMentions === "function"
-        ? getChatMentions({ workspaceId, path }).catch(() => ({ mentions: [] }))
-        : Promise.resolve({ mentions: [] }),
-    ])
-      .then(([result, chats]) => {
-        if (active) {
-          setLoaded({ workspaceId, path, sources: result.sources, chatMentions: chats.mentions });
+
+  useAsyncResponseEffect<BacklinksLoadOutcome>(
+    () => {
+      const identity: BacklinksLoadIdentity = {
+        chatMentionsAvailable,
+        workspaceId,
+        path,
+        refreshKey,
+        focusNonce,
+      };
+      const prior = previousRequest.current;
+      const focusOnlyRefresh = Boolean(
+        prior &&
+          sameBacklinksLoadBase(prior.identity, identity) &&
+          prior.identity.focusNonce !== identity.focusNonce,
+      );
+
+      const getBacklinks = bridge().getBacklinks;
+      // Partial bridges (tests, older hosts) may not expose it — degrade to none.
+      if (typeof getBacklinks !== "function") {
+        previousRequest.current = null;
+        return null;
+      }
+      const getChatMentions = chatMentionsAvailable
+        ? bridge().listChatFileMentions
+        : undefined;
+      const response = Promise.all([
+        getBacklinks({ workspaceId, path }),
+        typeof getChatMentions === "function"
+          ? getChatMentions({ workspaceId, path }).catch(() => ({ mentions: [] }))
+          : Promise.resolve({ mentions: [] }),
+      ]).then<BacklinksLoadOutcome, BacklinksLoadOutcome>(
+        ([result, chats]) => ({
+          ok: true,
+          result,
+          chatMentions: chats.mentions,
+        }),
+        () => ({ ok: false }),
+      );
+      // Focus refreshes are opportunistic. If one fails, the preceding
+      // same-document request remains the last useful answer, even if pending.
+      const currentResponse =
+        focusOnlyRefresh && prior
+          ? response.then((outcome) =>
+              outcome.ok ? outcome : prior.response,
+            )
+          : response;
+      previousRequest.current = { identity, response: currentResponse };
+      return currentResponse;
+    },
+    {
+      onSuccess: (outcome) => {
+        if (!outcome.ok) {
+          setLoaded({ workspaceId, path, sources: [], chatMentions: [] });
+          return;
         }
-      })
-      .catch(() => undefined);
-    return () => {
-      active = false;
-    };
-  }, [chatMentionsAvailable, focusNonce, workspaceId, path]);
+        // Guard the async response against a workspace/path switch mid-flight
+        // (product invariant: a slow response must never repaint the wrong doc).
+        setLoaded({
+          workspaceId,
+          path,
+          sources: outcome.result.sources,
+          chatMentions: outcome.chatMentions,
+        });
+      },
+      onError: () => {
+        setLoaded({ workspaceId, path, sources: [], chatMentions: [] });
+      },
+    },
+    [chatMentionsAvailable, workspaceId, path, refreshKey, focusNonce],
+  );
 
   const linkedTotal = sources.reduce((sum, source) => sum + source.snippets.length, 0);
   const total = linkedTotal + chatMentions.length;

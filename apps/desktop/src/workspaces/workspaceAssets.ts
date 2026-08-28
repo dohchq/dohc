@@ -8,6 +8,8 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import type { FileHandle } from "node:fs/promises";
 import {
+  link,
+  lstat,
   mkdir,
   open,
   realpath,
@@ -41,6 +43,8 @@ const MEDIA_TYPES: Record<string, string> = {
   webp: "image/webp",
   gif: "image/gif",
   svg: "image/svg+xml",
+  avif: "image/avif",
+  bmp: "image/bmp",
   pdf: "application/pdf",
   m4a: "audio/mp4",
   mp3: "audio/mpeg",
@@ -51,6 +55,36 @@ const MEDIA_TYPES: Record<string, string> = {
 export function mediaTypeForExtension(path: string): string {
   const ext = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
   return MEDIA_TYPES[ext] ?? "application/octet-stream";
+}
+
+const IMAGE_ASSET_EXTENSIONS = new Set([
+  "png",
+  "jpg",
+  "jpeg",
+  "webp",
+  "gif",
+  "svg",
+  "avif",
+  "bmp",
+]);
+
+/** Validate the image-attachment contract and return its canonical path. */
+export function normalizeWorkspaceImageAssetPath(relativePath: string): string {
+  const validated = validateUserMaterializePath(relativePath);
+  if (!validated.ok) {
+    throw new Error(
+      `Invalid image attachment path (${validated.reason}): ${relativePath}`,
+    );
+  }
+  const extension = validated.normalized
+    .slice(validated.normalized.lastIndexOf(".") + 1)
+    .toLowerCase();
+  if (!IMAGE_ASSET_EXTENSIONS.has(extension)) {
+    throw new Error(
+      "The attachment path must end with a supported image extension.",
+    );
+  }
+  return validated.normalized;
 }
 
 function assertWriteNotAborted(signal?: AbortSignal): void {
@@ -95,6 +129,35 @@ async function resolveWorkspaceFileTarget(
   return {
     realTarget: resolvedAbsolute,
     normalized: validated.normalized,
+    resolvedPath: resolvedPath.replaceAll("\\", "/"),
+  };
+}
+
+/** Resolve a not-yet-created disk target to the path whose identity it uses. */
+export interface WorkspaceMaterializePath {
+  requestedPath: string;
+  resolvedPath: string;
+}
+
+export async function resolveWorkspaceMaterializePath(
+  rootPath: string,
+  relativePath: string,
+): Promise<WorkspaceMaterializePath> {
+  const validated = validateUserMaterializePath(relativePath);
+  if (!validated.ok) {
+    throw new Error(
+      `Invalid materialize path (${validated.reason}): ${relativePath}`,
+    );
+  }
+  const { relative: resolvedPath } = await assertResolvedWorkspacePath({
+    rootPath,
+    absolutePath: join(rootPath, validated.normalized),
+    spelled: relativePath,
+    label: "Materialize path",
+    access: "write",
+  });
+  return {
+    requestedPath: validated.normalized,
     resolvedPath: resolvedPath.replaceAll("\\", "/"),
   };
 }
@@ -169,6 +232,9 @@ export interface PreparedWorkspaceFileRead {
   readonly path: string;
   readAsset(): Promise<WorkspaceAssetSource>;
   readText(): Promise<WorkspaceTextReadResult>;
+  withVerifiedPath<T>(
+    run: (absolutePath: string) => Promise<T>,
+  ): Promise<T>;
   withVerifiedPathSync<T>(
     run: (
       absolutePath: string,
@@ -294,6 +360,19 @@ class PreparedWorkspaceFileReadCapability implements PreparedWorkspaceFileRead {
           );
         }
         return result;
+      } finally {
+        await this.#assertCanonicalPath();
+      }
+    });
+  }
+
+  withVerifiedPath<T>(
+    run: (absolutePath: string) => Promise<T>,
+  ): Promise<T> {
+    return this.#withVerifiedHandle(async () => {
+      await this.#assertCanonicalPath();
+      try {
+        return await run(this.#realTarget);
       } finally {
         await this.#assertCanonicalPath();
       }
@@ -561,6 +640,7 @@ class WorkspaceOperationSupersededError extends Error {
 
 export function createWorkspaceOperationScheduler() {
   const states = new Map<string, WorkspaceOperationState>();
+  const activeLeases = new WeakMap<WorkspaceOperationLease, string>();
   const pathKey = (value: string) =>
     process.platform === "win32" ? value.toLowerCase() : value;
 
@@ -632,8 +712,9 @@ export function createWorkspaceOperationScheduler() {
             return { changed: false };
           }
           let changed = false;
+          const lease = Object.freeze({ rootPath }) as WorkspaceOperationLease;
+          activeLeases.set(lease, key);
           try {
-            const lease = { rootPath } as WorkspaceOperationLease;
             const value = await operation(
               () => {
                 changed = true;
@@ -644,6 +725,8 @@ export function createWorkspaceOperationScheduler() {
             resolve(value);
           } catch (error) {
             reject(error);
+          } finally {
+            activeLeases.delete(lease);
           }
           return { changed };
         },
@@ -673,6 +756,16 @@ export function createWorkspaceOperationScheduler() {
         lease: WorkspaceOperationLease,
       ) => Promise<T>,
     ) => enqueue(rootPath, "exclusive", operation),
+    assertActiveLease: (
+      rootPath: string,
+      lease: WorkspaceOperationLease,
+    ): void => {
+      if (activeLeases.get(lease) !== pathKey(rootPath)) {
+        throw new Error(
+          "Workspace operation lease is inactive or belongs to another root.",
+        );
+      }
+    },
   };
 }
 
@@ -733,6 +826,26 @@ export function createOrderedWorkspaceTextAccess(deps: {
           deps.writeTarget(target, text, expectedContentHash),
         ),
       ),
+    // The caller already holds scheduler admission for this root. Re-entering
+    // it can deadlock behind a later exclusive request, so retain only the
+    // existing root/target ordering here.
+    writeInLease: (
+      rootPath: string,
+      lease: WorkspaceOperationLease,
+      relativePath: string,
+      text: string,
+      expectedContentHash: string,
+    ): Promise<WorkspaceTextWriteResult> => {
+      try {
+        scheduler.assertActiveLease(rootPath, lease);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return admit(rootPath, relativePath, "write", (target) => {
+        scheduler.assertActiveLease(rootPath, lease);
+        return deps.writeTarget(target, text, expectedContentHash);
+      });
+    },
     // The same admission, for a save that does NOT land on disk here. A share
     // view's save goes through its engine store and then projects the result,
     // so it cannot call `write` — but two saves racing on one path must be
@@ -763,6 +876,24 @@ export function createOrderedWorkspaceTextAccess(deps: {
       scheduler.shared(rootPath, () =>
         enqueueOrdered(targetTails, pathKey(resolvedTarget), run),
       ),
+    // The caller already owns scheduler admission for this exact root. Taking
+    // another shared admission can deadlock behind a queued exclusive request.
+    orderedOnResolvedTargetInLease: <T>(
+      rootPath: string,
+      lease: WorkspaceOperationLease,
+      resolvedTarget: string,
+      run: () => Promise<T>,
+    ): Promise<T> => {
+      try {
+        scheduler.assertActiveLease(rootPath, lease);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return enqueueOrdered(targetTails, pathKey(resolvedTarget), () => {
+        scheduler.assertActiveLease(rootPath, lease);
+        return run();
+      });
+    },
   };
 }
 
@@ -808,6 +939,13 @@ const atomicTextWriter = createAtomicTextWriter({
 });
 
 const workspaceOperationScheduler = createWorkspaceOperationScheduler();
+
+export function assertActiveWorkspaceOperationLease(
+  rootPath: string,
+  lease: WorkspaceOperationLease,
+): void {
+  workspaceOperationScheduler.assertActiveLease(rootPath, lease);
+}
 
 const orderedWorkspaceTextAccess = createOrderedWorkspaceTextAccess({
   resolveTarget: async (rootPath, relativePath, access) => {
@@ -865,6 +1003,20 @@ export function withOrderedWorkspaceTargetPath<T>(
   );
 }
 
+export function withOrderedWorkspaceTargetPathInLease<T>(
+  rootPath: string,
+  lease: WorkspaceOperationLease,
+  resolvedTarget: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  return orderedWorkspaceTextAccess.orderedOnResolvedTargetInLease(
+    rootPath,
+    lease,
+    resolvedTarget,
+    run,
+  );
+}
+
 export function withExclusiveWorkspaceOperation<T>(
   rootPath: string,
   operation: (
@@ -910,8 +1062,34 @@ export async function writeWorkspaceText(
   }
 }
 
-// Binary sibling of restoreWorkspaceText: writes image (or other asset) bytes
-// pasted/dropped into the editor next to the current document. Same validation,
+export async function writeWorkspaceTextInLease(
+  rootPath: string,
+  lease: WorkspaceOperationLease,
+  relativePath: string,
+  text: string,
+  expectedContentHash: string,
+): Promise<WorkspaceTextWriteResult> {
+  if (Buffer.byteLength(text, "utf8") > MAX_TEXT_BYTES) {
+    throw new Error(`Text exceeds the ${MAX_TEXT_BYTES}-byte editor limit`);
+  }
+  try {
+    return await orderedWorkspaceTextAccess.writeInLease(
+      rootPath,
+      lease,
+      relativePath,
+      text,
+      expectedContentHash,
+    );
+  } catch (error) {
+    if (error instanceof WorkspaceTextTargetMissingError) {
+      return { status: "conflict", currentContentHash: null };
+    }
+    throw error;
+  }
+}
+
+// Binary sibling of restoreWorkspaceText: writes image bytes pasted/dropped
+// into the editor next to the current document. Same validation,
 // parent-dir creation, and real-path containment as text writes — a renderer
 // can never write outside the workspace or follow a symlink out — plus a 20MB
 // cap so a giant paste can't wedge the main process.
@@ -946,10 +1124,10 @@ async function writeContainedFile(
   // entry and never follows -- so a tampered leaf is the thing being repaired,
   // and refusing it would fail the restore on the very file it fixes.
   //
-  // `wx` does NOT refuse every existing entry: on a DANGLING link it follows
-  // the link and creates its target (measured, not assumed). So the exclusive
-  // path must judge the leaf, and a planted `note.md -> .dohc/x` is refused
-  // rather than followed. A live link there still answers EEXIST.
+  // The exclusive commit is an atomic hard-link publish. It refuses every
+  // existing leaf, including a dangling link, instead of following or
+  // replacing it. The access mode still judges the leaf before staging so a
+  // planted alias cannot redirect either path involved in the commit.
   const { relative: resolvedRelative, resolvedAbsolute: absolute } =
     await assertResolvedWorkspacePath({
       rootPath,
@@ -976,21 +1154,27 @@ async function writeContainedFile(
   }
   assertWriteNotAborted(signal);
   if (exclusive) {
-    const handle = await open(absolute, "wx");
+    const temp = siblingTempPath(absolute, Date.now(), randomUUID());
+    let handle: FileHandle | undefined;
     try {
       assertWriteNotAborted(signal);
+      handle = await open(temp, "wx");
       if (typeof data === "string") {
         await handle.writeFile(data, "utf8");
       } else {
         await handle.writeFile(data);
       }
+      await handle.close();
+      handle = undefined;
       assertWriteNotAborted(signal);
+      // Publish a fully written inode atomically without replacing a target.
+      await link(temp, absolute);
     } catch (error) {
-      await handle.close().catch(() => undefined);
-      await rm(absolute, { force: true }).catch(() => undefined);
+      await handle?.close().catch(() => undefined);
+      await rm(temp, { force: true }).catch(() => undefined);
       throw error;
     }
-    await handle.close();
+    await rm(temp, { force: true }).catch(() => undefined);
     return;
   }
   const temp = siblingTempPath(absolute, Date.now(), randomUUID());
@@ -1014,13 +1198,95 @@ export async function writeWorkspaceAsset(
   relativePath: string,
   bytes: Uint8Array,
 ): Promise<void> {
+  await workspaceOperationScheduler.staleSensitiveShared(
+    rootPath,
+    async (lease) => {
+      const path = await resolveWorkspaceMaterializePath(rootPath, relativePath);
+      await writeWorkspaceAssetInLease(rootPath, lease, path, bytes);
+    },
+  );
+}
+
+export async function writeWorkspaceAssetInLease(
+  rootPath: string,
+  lease: WorkspaceOperationLease,
+  target: WorkspaceMaterializePath,
+  bytes: Uint8Array,
+): Promise<void> {
+  workspaceOperationScheduler.assertActiveLease(rootPath, lease);
+  const requestedPath = normalizeWorkspaceImageAssetPath(target.requestedPath);
+  const resolvedPath = normalizeWorkspaceImageAssetPath(target.resolvedPath);
   if (bytes.byteLength > MAX_ASSET_WRITE_BYTES) {
     throw new Error(
       `Asset exceeds the ${MAX_ASSET_WRITE_BYTES}-byte write limit`,
     );
   }
-  await workspaceOperationScheduler.staleSensitiveShared(rootPath, () =>
-    writeContainedFile(rootPath, relativePath, bytes, "asset"),
+  try {
+    await writeContainedFile(rootPath, resolvedPath, bytes, "asset", {
+      exclusive: true,
+    });
+    return;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") throw error;
+  }
+
+  const changedCollision = () =>
+    new Error(
+      `An image attachment changed at ${requestedPath} before this write could finish. Try the action again.`,
+    );
+  const existingLeaf = await lstat(join(rootPath, requestedPath), {
+    bigint: true,
+  }).catch(() => {
+    throw changedCollision();
+  });
+  if (!existingLeaf.isFile()) {
+    throw new Error(
+      `An image attachment already exists at ${requestedPath} and is not a regular file.`,
+    );
+  }
+  const currentTarget = await resolveWorkspaceFile(
+    rootPath,
+    requestedPath,
+    "read",
+  ).catch(() => {
+    throw changedCollision();
+  });
+  if (currentTarget.resolvedPath !== resolvedPath) {
+    throw changedCollision();
+  }
+  const handle = await open(currentTarget.realTarget, "r").catch(() => {
+    throw changedCollision();
+  });
+  try {
+    const openedFile = await handle.stat({ bigint: true }).catch(() => {
+      throw changedCollision();
+    });
+    if (
+      !openedFile.isFile() ||
+      sameFsEntry(existingLeaf, openedFile) !== "same"
+    ) {
+      throw changedCollision();
+    }
+    const existing = await readFileHandleExact(handle, MAX_ASSET_WRITE_BYTES);
+    if (Buffer.from(bytes).equals(existing.bytes)) return;
+  } catch (error) {
+    if (
+      error instanceof BoundedFileReadChangedError ||
+      error instanceof BoundedFileReadUnverifiableError ||
+      error instanceof BoundedFileReadNotFileError
+    ) {
+      throw changedCollision();
+    }
+    if (
+      !(error instanceof BoundedFileReadTooLargeError)
+    ) {
+      throw error;
+    }
+  } finally {
+    await handle.close();
+  }
+  throw new Error(
+    `An image attachment already exists at ${requestedPath} with different content.`,
   );
 }
 

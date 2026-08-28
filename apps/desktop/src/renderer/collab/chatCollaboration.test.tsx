@@ -3,9 +3,9 @@ import { useMemo } from "react";
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatPresenceCollaboration } from "../workbench/ChatsView";
+import type { PresenceScopeInput } from "../../ipc/bridgeContract";
 import { buildChatCollaboration } from "./chatCollaboration";
 import { PresenceFaces } from "./PresenceIndicators";
-import type { PresenceScope } from "./presenceChannel";
 import { usePresence } from "./usePresence";
 
 // MU-C5 — the collaboration construction + the workspace-switch no-repaint
@@ -47,7 +47,11 @@ describe("buildChatCollaboration", () => {
     expect(typeof wsTransport?.publish).toBe("function");
     expect(typeof wsTransport?.poll).toBe("function");
     expect(typeof wsTransport?.leave).toBe("function");
-    const shareTransport = collaboration?.transportForScope({ kind: "share", shareId: "share-1" });
+    const shareTransport = collaboration?.transportForScope({
+      kind: "share",
+      workspaceId: "ws-a",
+      shareId: "share-1",
+    });
     expect(typeof shareTransport?.publish).toBe("function");
   });
 
@@ -238,9 +242,9 @@ function ScopeHarness(props: {
 }) {
   const transport = useMemo(() => {
     if (!props.collaboration) return null;
-    const scope: PresenceScope =
+    const scope: PresenceScopeInput =
       props.scopeKind === "share"
-        ? { kind: "share", shareId: props.scopeId }
+        ? { kind: "share", workspaceId: "ws-a", shareId: props.scopeId }
         : { kind: "workspace", workspaceId: props.scopeId };
     return props.collaboration.transportForScope(scope);
   }, [props.collaboration, props.scopeKind, props.scopeId]);

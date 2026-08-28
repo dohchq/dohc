@@ -14,7 +14,7 @@ import {
   handleRelayUnauthorized,
   createChatChannelIpcHandler,
   createListJoinedSharedChannelsIpcHandler,
-  createSharedChannelWritableChatIpcHandler,
+  createMarkChatThreadReadIpcHandler,
   createSetChatReactionIpcHandler,
   reactionsForViewer,
   readRelayChatShareLanes,
@@ -29,6 +29,7 @@ import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
 
 interface TestEvent {
   trusted: boolean;
+  activeWorkspaceId?: string;
 }
 
 interface TestContext {
@@ -414,7 +415,7 @@ describe("runtime main chat IPC boundaries", () => {
     ]);
   });
 
-  it("rejects a read-cursor write before mutation when its joined channel is locked", async () => {
+  it("updates reader-local state without a write boundary", async () => {
     interface MarkThreadReadPayload {
       workspaceId: string;
       threadId: string;
@@ -432,40 +433,32 @@ describe("runtime main chat IPC boundaries", () => {
         revision: 2,
       }),
     );
-    const assertJoinedChannelWritable = vi.fn(
-      async (_context: TestContext, payload: MarkThreadReadPayload) => {
-        if (payload.threadId === "thread-locked") {
-          throw new Error("This shared channel is read-only.");
-        }
-      },
-    );
-
+    const parsePayload = vi.fn((payload): MarkThreadReadPayload => {
+      const parsed = payload as {
+        workspaceId?: unknown;
+        threadId?: unknown;
+        upToSequence?: unknown;
+      };
+      if (
+        typeof parsed.workspaceId !== "string" ||
+        typeof parsed.threadId !== "string" ||
+        typeof parsed.upToSequence !== "number"
+      ) {
+        throw new Error("Invalid payload.");
+      }
+      return {
+        workspaceId: parsed.workspaceId,
+        threadId: parsed.threadId,
+        upToSequence: parsed.upToSequence,
+      };
+    });
+    const requireContext = vi.fn(deps.requireContext);
     ipc.handle(
       CHANNELS.markChatThreadRead,
-      createSharedChannelWritableChatIpcHandler({
+      createMarkChatThreadReadIpcHandler({
         assertTrustedSender: deps.assertTrustedSender,
-        parsePayload: (payload): MarkThreadReadPayload => {
-          const parsed = payload as {
-            workspaceId?: unknown;
-            threadId?: unknown;
-            upToSequence?: unknown;
-          };
-          if (
-            typeof parsed.workspaceId !== "string" ||
-            typeof parsed.threadId !== "string" ||
-            typeof parsed.upToSequence !== "number"
-          ) {
-            throw new Error("Invalid payload.");
-          }
-          return {
-            workspaceId: parsed.workspaceId,
-            threadId: parsed.threadId,
-            upToSequence: parsed.upToSequence,
-          };
-        },
-        requireContext: deps.requireContext,
-        assertWritable: deps.assertWritable,
-        assertSharedChannelWritable: assertJoinedChannelWritable,
+        parsePayload,
+        requireContext,
         run: markThreadRead,
       }),
     );
@@ -473,24 +466,34 @@ describe("runtime main chat IPC boundaries", () => {
     await expect(
       ipc.invoke(CHANNELS.markChatThreadRead, {
         workspaceId,
-        threadId: "thread-locked",
-        upToSequence: 4,
-      }),
-    ).rejects.toThrow(/read-only/u);
-    expect(markThreadRead).not.toHaveBeenCalled();
-
-    await expect(
-      ipc.invoke(CHANNELS.markChatThreadRead, {
-        workspaceId,
-        threadId: "thread-writable",
+        threadId: "thread-view",
         upToSequence: 4,
       }),
     ).resolves.toEqual({ lastReadSequence: 4, revision: 2 });
-    expect(assertJoinedChannelWritable).toHaveBeenLastCalledWith(
-      contexts.get(workspaceId),
-      expect.objectContaining({ threadId: "thread-writable" }),
-    );
-    expect(markThreadRead).toHaveBeenCalledOnce();
+
+    const validParseCount = parsePayload.mock.calls.length;
+    await expect(
+      ipc.invoke(
+        CHANNELS.markChatThreadRead,
+        { workspaceId, threadId: "thread-view", upToSequence: 4 },
+        { trusted: false },
+      ),
+    ).rejects.toThrow("Untrusted renderer.");
+    expect(parsePayload).toHaveBeenCalledTimes(validParseCount);
+    expect(requireContext).toHaveBeenCalledTimes(1);
+    await expect(
+      ipc.invoke(CHANNELS.markChatThreadRead, { workspaceId }),
+    ).rejects.toThrow("Invalid payload.");
+    expect(requireContext).toHaveBeenCalledTimes(1);
+    await expect(
+      ipc.invoke(CHANNELS.markChatThreadRead, {
+        workspaceId: "missing-workspace",
+        threadId: "thread-view",
+        upToSequence: 4,
+      }),
+    ).rejects.toThrow("Workspace not found.");
+    expect(requireContext).toHaveBeenCalledTimes(2);
+    expect(markThreadRead).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -504,7 +507,7 @@ describe("readRelayChatShareLanes", () => {
     const lanes = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () => Promise.reject(new Error("relay down")),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(lanes).toEqual({ state: "unreachable" });
   });
@@ -518,7 +521,7 @@ describe("readRelayChatShareLanes", () => {
             "Your dohc Cloud session expired. Sign in again, then retry.",
           ),
         ),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(lanes).toEqual({ state: "signed-out" });
   });
@@ -527,12 +530,12 @@ describe("readRelayChatShareLanes", () => {
     const lanes = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () => Promise.resolve({}),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(lanes).toEqual({ state: "answered", granted: [], received: [] });
   });
 
-  it("maps chat-channel rows and scopes grants to this workspace's remote identity", async () => {
+  it("maps chat-channel rows and scopes grants to this workspace coordinate", async () => {
     const lanes = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () =>
@@ -540,14 +543,16 @@ describe("readRelayChatShareLanes", () => {
           granted: [
             {
               shareId: "share-mine",
-              workspaceId: "remote-1",
+              workspaceId: "workspace-1",
               recipientEmail: "ana@example.com",
               revokedAtMs: null,
               selector: {
                 kind: "chat-channel",
                 channelWireId: "wire-1",
-                access: "read-only",
               },
+              access: "read-only",
+              grantId: "grant-mine",
+              generation: 1,
             },
             // Managed by another workspace: not this listing's row.
             {
@@ -556,20 +561,22 @@ describe("readRelayChatShareLanes", () => {
               recipientEmail: "bo@example.com",
               revokedAtMs: null,
               selector: { kind: "chat-channel", channelWireId: "wire-2" },
+              access: "read-write",
             },
             // Not a chat-channel share.
-            { shareId: "share-doc", workspaceId: "remote-1", selector: { kind: "document" } },
+            { shareId: "share-doc", workspaceId: "workspace-1", selector: { kind: "document" } },
           ],
           received: [
             {
               shareId: "share-in",
               granterEmail: "owner@example.com",
               selector: { kind: "chat-channel", channelWireId: "wire-in" },
+              access: "read-write",
             },
             { shareId: "share-other", selector: { kind: "document" } },
           ],
         }),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(lanes).toEqual({
       state: "answered",
@@ -593,6 +600,28 @@ describe("readRelayChatShareLanes", () => {
     });
   });
 
+  it("reports a chat-channel row with unreadable access as unreachable", async () => {
+    const lanes = await readRelayChatShareLanes({
+      shareIdsClaimedElsewhere: new Set<string>(),
+      fetchListing: () =>
+        Promise.resolve({
+          granted: [
+            {
+              shareId: "share-corrupt",
+              workspaceId: "workspace-1",
+              recipientEmail: "ana@example.com",
+              revokedAtMs: null,
+              selector: { kind: "chat-channel", channelWireId: "wire-corrupt" },
+              access: "edit",
+            },
+          ],
+        }),
+      workspaceId: "workspace-1",
+    });
+
+    expect(lanes).toEqual({ state: "unreachable" });
+  });
+
   it("excludes a cached DM share id from the ordinary received-channel lane", async () => {
     const lanes = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set(["share-dm"]),
@@ -603,15 +632,17 @@ describe("readRelayChatShareLanes", () => {
               shareId: "share-dm",
               granterEmail: "dm@example.com",
               selector: { kind: "chat-channel", channelWireId: "wire-dm" },
+              access: "read-write",
             },
             {
               shareId: "share-channel",
               granterEmail: "owner@example.com",
               selector: { kind: "chat-channel", channelWireId: "wire-channel" },
+              access: "read-write",
             },
           ],
         }),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
 
     expect(lanes).toEqual({
@@ -628,7 +659,7 @@ describe("readRelayChatShareLanes", () => {
     });
   });
 
-  it("drops every grant when the workspace has no remote identity", async () => {
+  it("drops every grant when the workspace has no cloud binding", async () => {
     const lanes = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () =>
@@ -636,14 +667,15 @@ describe("readRelayChatShareLanes", () => {
           granted: [
             {
               shareId: "share-mine",
-              workspaceId: "remote-1",
+              workspaceId: "workspace-1",
               recipientEmail: "ana@example.com",
               revokedAtMs: null,
               selector: { kind: "chat-channel", channelWireId: "wire-1" },
+              access: "read-write",
             },
           ],
         }),
-      remoteWorkspaceId: null,
+      workspaceId: null,
     });
     expect(lanes).toEqual({ state: "answered", granted: [], received: [] });
   });
@@ -657,11 +689,12 @@ describe("readRelayChatShareLanes", () => {
     const over = MAX_CHAT_CHANNEL_SHARE_ROWS + 1;
     const rows = Array.from({ length: over }, (_, index) => ({
       shareId: `share-${index}`,
-      workspaceId: "remote-1",
+      workspaceId: "workspace-1",
       recipientEmail: "ana@example.com",
       granterEmail: "owner@example.com",
       revokedAtMs: null,
       selector: { kind: "chat-channel", channelWireId: `wire-${index}` },
+      access: "read-write",
     }));
     return { [lane]: rows };
   }
@@ -673,7 +706,7 @@ describe("readRelayChatShareLanes", () => {
         const lanes = await readRelayChatShareLanes({
           shareIdsClaimedElsewhere: new Set<string>(),
           fetchListing: () => Promise.resolve(relayRowsOverCap(lane)),
-          remoteWorkspaceId: "remote-1",
+          workspaceId: "workspace-1",
         });
         // NOT "unreachable": that word means dohc could not read the answer,
         // and it earns a Try again. This answer arrived and will arrive again
@@ -719,7 +752,7 @@ describe("readRelayChatShareLanes", () => {
             ...relayRowsOverCap("granted"),
             ...relayRowsOverCap("received"),
           }),
-        remoteWorkspaceId: "remote-1",
+        workspaceId: "workspace-1",
       });
       expect(lanes).toEqual({
         state: "over-limit",
@@ -746,15 +779,16 @@ describe("readRelayChatShareLanes", () => {
   it("answers a lane that sits exactly at the cap", async () => {
     const rows = Array.from({ length: MAX_CHAT_CHANNEL_SHARE_ROWS }, (_, index) => ({
       shareId: `share-${index}`,
-      workspaceId: "remote-1",
+      workspaceId: "workspace-1",
       recipientEmail: "ana@example.com",
       revokedAtMs: null,
       selector: { kind: "chat-channel", channelWireId: `wire-${index}` },
+      access: "read-write",
     }));
     const lanes = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () => Promise.resolve({ granted: rows }),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(lanes.state).toBe("answered");
     expect(lanes.state === "answered" && lanes.granted).toHaveLength(
@@ -775,23 +809,24 @@ describe("readRelayChatShareLanes", () => {
   it("counts what it will list, not what the relay sent", async () => {
     const listed = Array.from({ length: 10 }, (_, index) => ({
       shareId: `share-${index}`,
-      workspaceId: "remote-1",
+      workspaceId: "workspace-1",
       recipientEmail: "ana@example.com",
       revokedAtMs: null,
       selector: { kind: "chat-channel", channelWireId: `wire-${index}` },
+      access: "read-write",
     }));
     const filteredOut = Array.from(
       { length: MAX_CHAT_CHANNEL_SHARE_ROWS + 1 },
       (_, index) => ({
         shareId: `doc-${index}`,
-        workspaceId: "remote-1",
+        workspaceId: "workspace-1",
         selector: { kind: "document" },
       }),
     );
     const lanes = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () => Promise.resolve({ granted: [...listed, ...filteredOut] }),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(lanes.state).toBe("answered");
     expect(lanes.state === "answered" && lanes.granted).toHaveLength(10);
@@ -810,15 +845,17 @@ describe("readRelayChatShareLanes", () => {
               shareId: "share-in-work",
               granterEmail: "owner@example.com",
               selector: { kind: "chat-channel", channelWireId: "wire-work" },
+              access: "read-write",
             },
             {
               shareId: "share-unclaimed",
               granterEmail: "owner@example.com",
               selector: { kind: "chat-channel", channelWireId: "wire-free" },
+              access: "read-write",
             },
           ],
         }),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(lanes.state === "answered" && lanes.received).toEqual([
       {
@@ -840,10 +877,11 @@ describe("readRelayChatShareLanes", () => {
     const grantRows = (revokedFrom: number) =>
       Array.from({ length: MAX_CHAT_CHANNEL_SHARE_ROWS + 1 }, (_, index) => ({
         shareId: `share-${index}`,
-        workspaceId: "remote-1",
+        workspaceId: "workspace-1",
         recipientEmail: "ana@example.com",
         revokedAtMs: index >= revokedFrom ? 1_700_000_000_000 : null,
         selector: { kind: "chat-channel", channelWireId: `wire-${index}` },
+        access: "read-write",
       }));
 
     // Every grant live: genuinely over the cap.
@@ -853,7 +891,7 @@ describe("readRelayChatShareLanes", () => {
         shareIdsClaimedElsewhere: new Set<string>(),
         fetchListing: () =>
           Promise.resolve({ granted: grantRows(MAX_CHAT_CHANNEL_SHARE_ROWS + 1) }),
-        remoteWorkspaceId: "remote-1",
+        workspaceId: "workspace-1",
       });
       expect(allLive.state).toBe("over-limit");
     } finally {
@@ -866,7 +904,7 @@ describe("readRelayChatShareLanes", () => {
       shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () =>
         Promise.resolve({ granted: grantRows(MAX_CHAT_CHANNEL_SHARE_ROWS) }),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(afterOneRevoke.state).toBe("answered");
     expect(
@@ -894,6 +932,7 @@ describe("readRelayChatShareLanes", () => {
             shareId: "share-left-elsewhere",
             granterEmail: "owner@example.com",
             selector: { kind: "chat-channel", channelWireId: "wire-left" },
+            access: "read-write",
           },
         ],
       });
@@ -901,7 +940,7 @@ describe("readRelayChatShareLanes", () => {
     const whileHeld = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set(["share-left-elsewhere"]),
       fetchListing: listing,
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(whileHeld.state === "answered" && whileHeld.received).toHaveLength(0);
 
@@ -910,7 +949,7 @@ describe("readRelayChatShareLanes", () => {
     const afterLeave = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: listing,
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(
       afterLeave.state === "answered" && afterLeave.received.map((row) => row.shareId),
@@ -928,6 +967,7 @@ describe("readRelayChatShareLanes", () => {
         shareId: `share-other-${index}`,
         granterEmail: "owner@example.com",
         selector: { kind: "chat-channel", channelWireId: `wire-other-${index}` },
+        access: "read-write",
       }),
     );
     const lanes = await readRelayChatShareLanes({
@@ -937,10 +977,11 @@ describe("readRelayChatShareLanes", () => {
           granted: [
             {
               shareId: "share-mine",
-              workspaceId: "remote-1",
+              workspaceId: "workspace-1",
               recipientEmail: "ana@example.com",
               revokedAtMs: null,
               selector: { kind: "chat-channel", channelWireId: "wire-mine" },
+              access: "read-write",
             },
           ],
           received: [
@@ -949,10 +990,11 @@ describe("readRelayChatShareLanes", () => {
               shareId: "share-here",
               granterEmail: "owner@example.com",
               selector: { kind: "chat-channel", channelWireId: "wire-here" },
+              access: "read-write",
             },
           ],
         }),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(lanes.state).toBe("answered");
     expect(lanes.state === "answered" && lanes.granted).toHaveLength(1);
@@ -1154,7 +1196,7 @@ describe("readRelayChatShareLanes session classification", () => {
             sessionWasCurrent: false,
           }),
         ),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(lanes).toEqual({ state: "unreachable" });
   });
@@ -1167,7 +1209,7 @@ describe("readRelayChatShareLanes session classification", () => {
       shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () =>
         Promise.resolve(null as unknown as { granted?: Array<Record<string, unknown>> }),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(nullBody).toEqual({ state: "unreachable" });
 
@@ -1177,7 +1219,7 @@ describe("readRelayChatShareLanes session classification", () => {
         Promise.resolve({ granted: 3 } as unknown as {
           granted?: Array<Record<string, unknown>>;
         }),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(nonArray).toEqual({ state: "unreachable" });
 
@@ -1190,7 +1232,7 @@ describe("readRelayChatShareLanes session classification", () => {
         Promise.resolve({ granted: "malformed" } as unknown as {
           granted?: Array<Record<string, unknown>>;
         }),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(stringLane).toEqual({ state: "unreachable" });
 
@@ -1200,7 +1242,7 @@ describe("readRelayChatShareLanes session classification", () => {
         Promise.resolve({ received: "malformed" } as unknown as {
           received?: Array<Record<string, unknown>>;
         }),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(stringReceived).toEqual({ state: "unreachable" });
   });
@@ -1216,14 +1258,15 @@ describe("readRelayChatShareLanes session classification", () => {
         Promise.resolve({
           granted: [
             {
-              workspaceId: "remote-1",
+              workspaceId: "workspace-1",
               recipientEmail: "ana@example.com",
               revokedAtMs: null,
               selector: { kind: "chat-channel", channelWireId: "wire-1" },
+              access: "read-write",
             },
           ],
         }),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(missingShareId).toEqual({ state: "unreachable" });
 
@@ -1237,10 +1280,11 @@ describe("readRelayChatShareLanes session classification", () => {
               shareId: "share-in",
               granterEmail: 42,
               selector: { kind: "chat-channel", channelWireId: "wire-in" },
+              access: "read-write",
             },
           ],
         }),
-      remoteWorkspaceId: "remote-1",
+      workspaceId: "workspace-1",
     });
     expect(badEmail).toEqual({ state: "unreachable" });
   });
@@ -1266,7 +1310,19 @@ describe("createListJoinedSharedChannelsIpcHandler", () => {
   function handlerOver(rows: ReturnType<typeof registry>) {
     return createListJoinedSharedChannelsIpcHandler<TestEvent>({
       assertTrustedSender: () => undefined,
-      answerJoinedChannels: (_workspaceId, channelWireIds) =>
+      withWorkspaceOperation: async (event, workspaceId, work) => {
+        if (
+          event.activeWorkspaceId !== undefined &&
+          event.activeWorkspaceId !== workspaceId
+        ) {
+          throw new Error("This window changed workspaces.");
+        }
+        return await work({
+          workspace: { workspaceId },
+          assertCurrent: () => undefined,
+        });
+      },
+      answerJoinedChannels: (_workspace, channelWireIds) =>
         scopeJoinedChannels(
           rows.map((row) => ({
             ...row,
@@ -1319,11 +1375,27 @@ describe("createListJoinedSharedChannelsIpcHandler", () => {
     ]);
   });
 
+  it("refuses a payload workspace that is not active in the renderer", async () => {
+    const handler = handlerOver(registry(4));
+
+    await expect(
+      handler(
+        { trusted: true, activeWorkspaceId: "ws-2" },
+        { workspaceId: "ws-1", channelWireIds: ["wire-1"] },
+      ),
+    ).rejects.toThrow("changed workspaces");
+  });
+
   it("refuses an untrusted sender before it reads anything", async () => {
     const handler = createListJoinedSharedChannelsIpcHandler<TestEvent>({
       assertTrustedSender: (event) => {
         if (!event.trusted) throw new Error("untrusted");
       },
+      withWorkspaceOperation: async (_event, workspaceId, work) =>
+        await work({
+          workspace: { workspaceId },
+          assertCurrent: () => undefined,
+        }),
       answerJoinedChannels: () => {
         throw new Error("must not read");
       },
@@ -1470,23 +1542,24 @@ describe("chat scope write gate (#646 PR2)", () => {
     expect(run).toHaveBeenCalledTimes(1);
   });
 
-  it("marks a thread read at EVERY level, view included", async () => {
+  it("marks a thread read at every level and after the share ends", async () => {
     // Read state is the reader's own, written locally and never replicated.
-    // `assertWritable: null` is the call site saying so out loud.
-    for (const access of ["view", "comment", "edit"] as const) {
-      const { ipc, run, deps } = harnessFor(shareScope({ access }));
+    const cases = [
+      ["view", shareScope({ access: "view" })],
+      ["comment", shareScope({ access: "comment" })],
+      ["edit", shareScope({ access: "edit" })],
+      ["ended", shareScope({ ended: true })],
+    ] as const;
+    for (const [label, scope] of cases) {
+      const { ipc, run, deps } = harnessFor(scope);
       ipc.handle(
         CHANNELS.markChatThreadRead,
-        createSharedChannelWritableChatIpcHandler({
-          ...deps,
-          assertWritable: null,
-          assertSharedChannelWritable: async () => undefined,
-        }),
+        createMarkChatThreadReadIpcHandler(deps),
       );
       await expect(ipc.invoke(CHANNELS.markChatThreadRead, { workspaceId })).resolves.toEqual({
         ok: true,
       });
-      expect(run, access).toHaveBeenCalledTimes(1);
+      expect(run, label).toHaveBeenCalledTimes(1);
     }
   });
 

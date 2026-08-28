@@ -18,6 +18,7 @@ export const CHATS_METHOD = {
   threadsListForChannel: "chats.threads.listForChannel",
   threadFindChannelId: "chats.threads.findChannelId",
   threadGetProjection: "chats.threads.getProjection",
+  threadRevision: "chats.threads.revision",
   messageSend: "chats.messages.send",
   messagesList: "chats.messages.list",
   readStateGet: "chats.readState.get",
@@ -513,6 +514,7 @@ export type ChatThreadStartResult = ChatsJsonObject & {
   thread: ChatThread;
   message: ChatMessage;
 };
+export type ChatThreadRevisionResult = ChatsJsonObject & { revision: number };
 export type ChatWireIdResult = ChatsJsonObject & { wireId: string | null };
 export type ChatChannelsListResult = ChatsJsonObject & {
   channels: ChatChannelSummary[];
@@ -610,6 +612,7 @@ export type ChatsMethodParamsMap = {
   [CHATS_METHOD.threadsListForChannel]: ChatThreadsListForChannelParams;
   [CHATS_METHOD.threadFindChannelId]: ChatThreadParams;
   [CHATS_METHOD.threadGetProjection]: ChatThreadProjectionParams;
+  [CHATS_METHOD.threadRevision]: ChatThreadParams;
   [CHATS_METHOD.messageSend]: ChatMessageSendParams;
   [CHATS_METHOD.messagesList]: ChatMessagesListParams;
   [CHATS_METHOD.readStateGet]: ChatThreadParams;
@@ -674,6 +677,7 @@ export type ChatsMethodResultMap = {
   [CHATS_METHOD.threadsListForChannel]: ChatChannelThreadsPage;
   [CHATS_METHOD.threadFindChannelId]: string | null;
   [CHATS_METHOD.threadGetProjection]: ChatProjection;
+  [CHATS_METHOD.threadRevision]: ChatThreadRevisionResult;
   [CHATS_METHOD.messageSend]: ChatMessage;
   [CHATS_METHOD.messagesList]: ChatMessagesListResult;
   [CHATS_METHOD.readStateGet]: ChatThreadReadState;
@@ -1038,6 +1042,7 @@ const ChatsResultSchemas = {
   channelThreadsPage: pageSchema("threads", ChatChannelThreadSummarySchema),
   maybeString: Schema.NullOr(Schema.String),
   projection: ChatProjectionSchema,
+  revision: mutableStruct({ revision: NonnegativeInt }),
   message: ChatMessageSchema,
   messagesList: mutableStruct({
     messages: Schema.mutable(Schema.Array(ChatMessageSchema)),
@@ -1191,6 +1196,8 @@ export function decodeChatsResult<M extends ChatsMethod>(
       result = decodeChatsSchema(ChatsResultSchemas.maybeString, value, label); break;
     case CHATS_METHOD.threadGetProjection:
       result = decodeChatsSchema(ChatsResultSchemas.projection, value, label); break;
+    case CHATS_METHOD.threadRevision:
+      result = decodeChatsSchema(ChatsResultSchemas.revision, value, label); break;
     case CHATS_METHOD.messageSend:
       result = decodeChatsSchema(ChatsResultSchemas.message, value, label); break;
     case CHATS_METHOD.messagesList:

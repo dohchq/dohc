@@ -16,6 +16,7 @@ import {
 } from "@dohc/workspace-contracts/relay";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  EngineClientError,
   EngineRequestError,
   EngineWorkspaceSessions,
   type EngineDaemonClient,
@@ -30,13 +31,15 @@ import {
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
 import {
-  createMountDirectory,
   mountRootFor,
   mountStoreWorkspaceIdFor,
 } from "./shareMounts";
-import { refreshShareMountThroughOwnerForTest } from "../testing/shareViewFilesMountHarness";
+import {
+  createShareMountDirectoryThroughOwnerForTest,
+  refreshShareMountThroughOwnerForTest,
+  refreshStandaloneShareThroughOwnerForTest,
+} from "../testing/shareViewFilesMountHarness";
 import { syncJoinedSharedChannels } from "./sharedChannels";
-import { refreshSharedViewOnce } from "./sharedView";
 
 // Every test in this file pulls with the selector its share record pins. The
 // damaged-record path has its own tests in sharedView.test.ts. This is a REAL
@@ -195,6 +198,7 @@ afterEach(async () => {
 
 async function harness(daemon = new MockDaemon()) {
   const rootPath = await createTestScratch("dohc-relay-client-unit-");
+  const attachmentId = Symbol("test-workspace-attachment");
   roots.push(rootPath);
   const routes = new RelayTransportRouteGuard();
   const source = new RelayConfiguredDaemonClientSource(
@@ -213,9 +217,19 @@ async function harness(daemon = new MockDaemon()) {
   const client = live.bind({
     workspaceId: "workspace-a",
     rootPath,
+    attachmentId,
     relay,
   });
-  return { rootPath, daemon, routes, sessions, live, relay, client };
+  return {
+    rootPath,
+    attachmentId,
+    daemon,
+    routes,
+    sessions,
+    live,
+    relay,
+    client,
+  };
 }
 
 function expectStatefulRequestsScoped(requests: Request[]): void {
@@ -394,9 +408,11 @@ describe("EngineRelayClient", () => {
         };
       }
       if (request.method === "sync.commitCursor") {
-        const cursor = (request.params as unknown as {
+        const cursor = (
+          request.params as unknown as {
           pendingCursor: { token?: string };
-        }).pendingCursor;
+          }
+        ).pendingCursor;
         expect(cursor.token).toBe(`cursor-${committedPages + 1}`);
         expect(materializedPaths.at(-1)).toBe(
           `notes/page-${committedPages + 1}.md`,
@@ -419,7 +435,9 @@ describe("EngineRelayClient", () => {
       },
     );
 
-    await expect(client.pull(materializePage)).rejects.toThrow("disk unavailable");
+    await expect(client.pull(materializePage)).rejects.toThrow(
+      "disk unavailable",
+    );
     expect(committedPages).toBe(1);
     expect(materializedPaths).toEqual(["notes/page-1.md"]);
 
@@ -663,7 +681,12 @@ describe("EngineRelayClient", () => {
   it("reports an empty share proposal submit as offering nothing, not as a failure", async () => {
     const daemon = new MockDaemon((request) =>
       request.method === "share.proposal.submit"
-        ? { submitted: 0, proposalId: null, skippedOutsideShare: 3, morePending: false }
+        ? {
+            submitted: 0,
+            proposalId: null,
+            skippedOutsideShare: 3,
+            morePending: false,
+          }
         : undefined,
     );
     const { client, sessions } = await harness(daemon);
@@ -689,11 +712,19 @@ describe("EngineRelayClient", () => {
   // would tell the recipient everything went when some of it did not.
   it("refuses a share proposal submit that does not say what it left behind", async () => {
     for (const [label, reply] of [
-      ["no skipped count", { submitted: 1, proposalId: "p", morePending: false }],
-      ["no pending flag", { submitted: 1, proposalId: "p", skippedOutsideShare: 0 }],
+      [
+        "no skipped count",
+        { submitted: 1, proposalId: "p", morePending: false },
+      ],
+      [
+        "no pending flag",
+        { submitted: 1, proposalId: "p", skippedOutsideShare: 0 },
+      ],
     ] as const) {
       const daemon = new MockDaemon((request) =>
-        request.method === "share.proposal.submit" ? (reply as JsonValue) : undefined,
+        request.method === "share.proposal.submit"
+          ? (reply as JsonValue)
+          : undefined,
       );
       const { client, sessions } = await harness(daemon);
       await expect(
@@ -727,9 +758,7 @@ describe("EngineRelayClient", () => {
       });
 
     // Changes offered, but no proposal to show the sender or to withdraw.
-    await expect(submit("submit-a")).rejects.toThrow(
-      /disagreed with itself/u,
-    );
+    await expect(submit("submit-a")).rejects.toThrow(/disagreed with itself/u);
     // A proposal opened over nothing.
     reply = {
       submitted: 0,
@@ -737,9 +766,7 @@ describe("EngineRelayClient", () => {
       skippedOutsideShare: 0,
       morePending: false,
     };
-    await expect(submit("submit-b")).rejects.toThrow(
-      /disagreed with itself/u,
-    );
+    await expect(submit("submit-b")).rejects.toThrow(/disagreed with itself/u);
     // Neither field may be coerced: a number is not an id, and "" is not a
     // proposal that exists.
     reply = { submitted: 1, proposalId: 7 };
@@ -874,31 +901,192 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
-  it("orders join identity bootstrap before registration and activity capture", async () => {
-    const source = await readFile(new URL("../main.ts", import.meta.url), "utf8");
-    const bootstrap = source.indexOf(
-      "await bootstrapJoinedWorkspace({",
+  it("orders join identity bootstrap before physical registration and activity capture", async () => {
+    const source = (await readFile(
+      new URL("../main.ts", import.meta.url),
+      "utf8",
+    )).replaceAll("\r\n", "\n");
+    const reservation = source.indexOf(
+      "const authorityReservation = workspaceAuthorities.reserveBinding({",
     );
+    const folderCreation = source.indexOf(
+      "created = await createWorkspaceFolder({",
+      reservation,
+    );
+    const bootstrap = source.indexOf("await bootstrapJoinedWorkspace({");
     const registration = source.indexOf(
-      "registerWorkspace({ ...created, joinBootstrapPending: true });",
+      "authorityBinding = registerReservedPhysicalWorkspace(",
       bootstrap,
     );
     const activityOpen = source.indexOf(
       "await openWorkspaceActivity(created",
       bootstrap,
     );
-    expect(bootstrap).toBeGreaterThanOrEqual(0);
+    expect(reservation).toBeGreaterThanOrEqual(0);
+    expect(folderCreation).toBeGreaterThan(reservation);
+    expect(bootstrap).toBeGreaterThan(folderCreation);
     expect(registration).toBeGreaterThan(bootstrap);
     expect(activityOpen).toBeGreaterThan(registration);
   });
 
+  it("keeps failed join cleanup inside the retirement tombstone and removes the registry last", async () => {
+    const source = (await readFile(
+      new URL("../main.ts", import.meta.url),
+      "utf8",
+    )).replaceAll("\r\n", "\n");
+    const removeStart = source.indexOf("function removePhysicalWorkspace(");
+    const removeEnd = source.indexOf(
+      "async function cleanupFailedPhysicalWorkspace(",
+      removeStart,
+    );
+    expect(removeStart).toBeGreaterThanOrEqual(0);
+    expect(removeEnd).toBeGreaterThan(removeStart);
+    const remove = source.slice(removeStart, removeEnd);
+    const cleanupAt = remove.indexOf("finalize: beforeRegistryRemoval");
+    const registryRemoveAt = remove.indexOf(
+      "removeWorkspace(binding.workspaceId);",
+    );
+    expect(cleanupAt).toBeGreaterThanOrEqual(0);
+    expect(registryRemoveAt).toBeGreaterThan(cleanupAt);
+
+    const cleanupStart = removeEnd;
+    const cleanupEndMatch = source
+      .slice(cleanupStart)
+      .match(/\nfunction\s+serializeWorkspaceAuthorityWork(?:<[^>]+>)?\s*\(/);
+    const cleanupEnd =
+      cleanupEndMatch?.index === undefined
+        ? -1
+        : cleanupStart + cleanupEndMatch.index;
+    expect(cleanupEnd).toBeGreaterThan(cleanupStart);
+    const cleanup = source.slice(cleanupStart, cleanupEnd);
+    const relayCloseAt = cleanup.indexOf(
+      "await closeRelayTransportWorkspace(workspaceId);",
+    );
+    const folderResetAt = cleanup.indexOf(
+      "await resetFailedJoinFolder(rootPath);",
+    );
+    expect(relayCloseAt).toBeGreaterThanOrEqual(0);
+    expect(folderResetAt).toBeGreaterThan(relayCloseAt);
+
+    const joinRollbackStart = source.indexOf(
+      "console.error(`[desktop] join rollback for ${rootPath}:`, error);",
+    );
+    const joinRollbackEnd = source.indexOf(
+      'desktopMarks.measureSince("workspace-join"',
+      joinRollbackStart,
+    );
+    expect(joinRollbackStart).toBeGreaterThanOrEqual(0);
+    expect(joinRollbackEnd).toBeGreaterThan(joinRollbackStart);
+    const joinRollback = source.slice(joinRollbackStart, joinRollbackEnd);
+    expect(joinRollback).toContain(
+      "await removePhysicalWorkspace(authorityBinding, () =>",
+    );
+    expect(joinRollback).toContain(
+      "cleanupFailedPhysicalWorkspace(parsed.workspaceId, rootPath)",
+    );
+    expect(joinRollback).toMatch(
+      /workspaceAuthorities\.releaseReservation\(\s*authorityReservation,/,
+    );
+
+    const shareRollbackStart = source.indexOf(
+      "console.error(`[desktop] open-share rollback for ${rootPath}:`, error);",
+    );
+    const shareRollbackEnd = source.indexOf(
+      "// A share view is opened HERE",
+      shareRollbackStart,
+    );
+    expect(shareRollbackStart).toBeGreaterThanOrEqual(0);
+    expect(shareRollbackEnd).toBeGreaterThan(shareRollbackStart);
+    const shareRollback = source.slice(shareRollbackStart, shareRollbackEnd);
+    const shareOperationStart = source.lastIndexOf(
+      "const authorityReservation = workspaceAuthorities.reserveBinding({",
+      shareRollbackStart,
+    );
+    expect(shareOperationStart).toBeGreaterThanOrEqual(0);
+    expect(shareOperationStart).toBeLessThan(shareRollbackStart);
+    const shareOperation = source.slice(shareOperationStart, shareRollbackEnd);
+    expect(shareRollback).toContain(
+      "await removePhysicalWorkspace(authorityBinding, () =>",
+    );
+    expect(shareOperation).toContain(
+      "authorityBinding = registerReservedPhysicalWorkspace(",
+    );
+    expect(shareRollback).toContain("if (authorityBinding)");
+    expect(shareRollback).toContain("} else {");
+    expect(shareRollback).toContain(
+      "cleanupFailedPhysicalWorkspace(created.workspaceId, rootPath)",
+    );
+    expect(shareRollback).toMatch(
+      /workspaceAuthorities\.releaseReservation\(\s*authorityReservation,/,
+    );
+    const tryAt = shareOperation.indexOf("try {");
+    const registrationAt = shareOperation.indexOf(
+      "authorityBinding = registerReservedPhysicalWorkspace(",
+    );
+    const metadataAt = shareOperation.indexOf("setWorkspaceShareView(");
+    const catchAt = shareOperation.indexOf("} catch (error) {");
+    expect(tryAt).toBeGreaterThanOrEqual(0);
+    expect(registrationAt).toBeGreaterThan(tryAt);
+    expect(metadataAt).toBeGreaterThan(registrationAt);
+    expect(catchAt).toBeGreaterThan(metadataAt);
+  });
+
+  it("registers the registry row and its exact authority as one operation", async () => {
+    const source = (await readFile(
+      new URL("../main.ts", import.meta.url),
+      "utf8",
+    )).replaceAll("\r\n", "\n");
+    const registerStart = source.indexOf("function physicalWorkspaceRegistration(");
+    const registerEnd = source.indexOf(
+      "function removePhysicalWorkspace(",
+      registerStart,
+    );
+    expect(registerStart).toBeGreaterThanOrEqual(0);
+    expect(registerEnd).toBeGreaterThan(registerStart);
+    const register = source.slice(registerStart, registerEnd);
+    expect(register).toContain("workspaceAuthorities.registerBinding(");
+    expect(register).toContain("workspaceAuthorities.registerReservedBinding(");
+    expect(register).toContain("persist: () => registerWorkspace(workspace)");
+    expect(register).toContain("rollback: () => {");
+    expect(register).toContain("current.rootPath !== workspace.rootPath");
+    expect(register).toContain("removeWorkspace(workspace.workspaceId);");
+  });
+
+  it("retires the registered relay under the attachment's one workspace coordinate", async () => {
+    const source = (await readFile(
+      new URL("../main.ts", import.meta.url),
+      "utf8",
+    )).replaceAll("\r\n", "\n");
+    const ownerStart = source.indexOf(
+      "const workspaceAuthorities = createWorkspaceAuthorityOwner({",
+    );
+    const ownerEnd = source.indexOf(
+      "function requireWorkspaceAuthority(",
+      ownerStart,
+    );
+    expect(ownerStart).toBeGreaterThanOrEqual(0);
+    expect(ownerEnd).toBeGreaterThan(ownerStart);
+    const owner = source.slice(ownerStart, ownerEnd);
+    expect(owner).toContain(
+      "disposeState: async (state, binding, workspaceAtDisposal)",
+    );
+    expect(owner).toContain("...workspaceAtDisposal");
+    expect(owner).toContain("attachmentId: binding.attachmentId");
+    expect(owner).toContain(
+      "relayCloseTargetsForPhysicalWorkspace(physicalWorkspace)",
+    );
+    expect(owner).not.toContain("remoteWorkspaceId");
+    expect(owner).not.toContain("binding.workspace.remote");
+  });
+
   it("refreshes a share view and commits its opaque daemon cursor", async () => {
-    const { rootPath, daemon, sessions, client, relay } = await harness();
+    const { rootPath, attachmentId, daemon, sessions, client, relay } =
+      await harness();
     const store = createCaptureLiveStores(
-      { workspaceId: "workspace-a", rootPath },
+      { workspaceId: "workspace-a", rootPath, attachmentId },
       sessions,
     ).store;
-    const outcome = await refreshSharedViewOnce({
+    const outcome = await refreshStandaloneShareThroughOwnerForTest({
       rootDir: rootPath,
       workspaceId: "workspace-a",
       relay,
@@ -918,26 +1106,31 @@ describe("EngineRelayClient", () => {
       changedPaths: 0,
       excludedPaths: [],
       unjournalablePaths: [],
+      collisionRecordQuarantined: false,
       refusedOps: 0,
       refusedDetail: null,
     });
     expect(daemon.requests.map((request) => request.method)).toEqual([
       "workspace.open",
+      "versions.ensureMain",
+      "versionedText.list",
+      "versions.ensureMain",
+      "versionedText.list",
+      "workspace.close",
+      "workspace.open",
       "share.view.pull",
       "sync.commitCursor",
     ]);
     expect(
-      daemon.requests.find(
-        (request) => request.method === "sync.commitCursor",
-      )?.params,
+      daemon.requests.find((request) => request.method === "sync.commitCursor")
+        ?.params,
     ).toMatchObject({
       pendingCursor: { kind: "shareView", token: "share-cursor-13" },
     });
     expectStatefulRequestsScoped(daemon.requests);
     expect(
-      daemon.requests.find(
-        (request) => request.method === "share.view.pull",
-      )?.params,
+      daemon.requests.find((request) => request.method === "share.view.pull")
+        ?.params,
     ).toEqual({
       workspaceId: "workspace-a",
       shareId: "share-view",
@@ -950,12 +1143,13 @@ describe("EngineRelayClient", () => {
   // either one widens the grant: no paths reads as "the whole workspace", and
   // no version reads as "any version's fork".
   it("sends the accepted selector's paths AND version to the engine", async () => {
-    const { rootPath, daemon, sessions, client, relay } = await harness();
+    const { rootPath, attachmentId, daemon, sessions, client, relay } =
+      await harness();
     const store = createCaptureLiveStores(
-      { workspaceId: "workspace-a", rootPath },
+      { workspaceId: "workspace-a", rootPath, attachmentId },
       sessions,
     ).store;
-    await refreshSharedViewOnce({
+    await refreshStandaloneShareThroughOwnerForTest({
       rootDir: rootPath,
       workspaceId: "workspace-a",
       relay,
@@ -971,9 +1165,8 @@ describe("EngineRelayClient", () => {
     });
 
     expect(
-      daemon.requests.find(
-        (request) => request.method === "share.view.pull",
-      )?.params,
+      daemon.requests.find((request) => request.method === "share.view.pull")
+        ?.params,
       "MUTATION: dropping any dimension on the wire widens the accepted grant, or leaves one the engine cannot read",
     ).toEqual({
       workspaceId: "workspace-a",
@@ -1101,7 +1294,8 @@ describe("EngineRelayClient", () => {
             originSeq: 4,
             opKind: "moment.append",
             code: "share-boundary-violation",
-            detail: "the share granted version main, the relay offered version version-other",
+            detail:
+              "the share granted version main, the relay offered version version-other",
           },
         ],
         hasMore: true,
@@ -1233,7 +1427,11 @@ describe("EngineRelayClient", () => {
           hasMore: false,
           nextCursor: 14,
           changedPaths: [
-            { path: "notes/daemon.md", operation: "write", contentKind: "text" },
+            {
+              path: "notes/daemon.md",
+              operation: "write",
+              contentKind: "text",
+            },
           ],
           pendingCursor: { kind: "shareView", token: "share-cursor-14" },
         };
@@ -1267,14 +1465,15 @@ describe("EngineRelayClient", () => {
       }
       return undefined;
     });
-    const { rootPath, sessions, client, relay } = await harness(daemon);
+    const { rootPath, attachmentId, sessions, client, relay } =
+      await harness(daemon);
     const store = createCaptureLiveStores(
-      { workspaceId: "workspace-a", rootPath },
+      { workspaceId: "workspace-a", rootPath, attachmentId },
       sessions,
     ).store;
 
     await expect(
-      refreshSharedViewOnce({
+      refreshStandaloneShareThroughOwnerForTest({
         rootDir: rootPath,
         workspaceId: "workspace-a",
         relay,
@@ -1293,11 +1492,14 @@ describe("EngineRelayClient", () => {
       changedPaths: 1,
       excludedPaths: [],
       unjournalablePaths: [],
+      collisionRecordQuarantined: false,
       refusedOps: 0,
       refusedDetail: null,
     });
 
-    expect(await readFile(join(rootPath, "notes/daemon.md"), "utf8")).toBe(body);
+    expect(await readFile(join(rootPath, "notes/daemon.md"), "utf8")).toBe(
+      body,
+    );
     expect(daemon.requests.map((request) => request.method)).toContain(
       "versionedText.read",
     );
@@ -1307,7 +1509,7 @@ describe("EngineRelayClient", () => {
   it("opens an owner-managed share mount store with capture disabled", async () => {
     const { rootPath, daemon, routes, sessions, live, relay } = await harness();
     const mount = { shareId: "share-mounted", label: "alex" };
-    await createMountDirectory(rootPath, mount.label);
+    await createShareMountDirectoryThroughOwnerForTest(rootPath, mount.label);
     const target = {
       workspaceId: mountStoreWorkspaceIdFor("workspace-a", mount.shareId),
       rootPath: mountRootFor(rootPath, mount.label),
@@ -1354,17 +1556,14 @@ describe("EngineRelayClient", () => {
     );
     expect(ownerOpenIndex).toBeGreaterThanOrEqual(0);
     expect(ownerOpenIndex).toBeLessThan(pullIndex);
-    expect(
-      daemon.requests[ownerOpenIndex]?.params,
-    ).toMatchObject({
+    expect(daemon.requests[ownerOpenIndex]?.params).toMatchObject({
       rootDir: target.rootPath,
       workspaceId: target.workspaceId,
       captureMode: "none",
     });
     expect(
-      daemon.requests.find(
-        (request) => request.method === "share.view.pull",
-      )?.params,
+      daemon.requests.find((request) => request.method === "share.view.pull")
+        ?.params,
     ).toMatchObject({
       workspaceId: target.workspaceId,
       shareId: mount.shareId,
@@ -1386,9 +1585,10 @@ describe("EngineRelayClient", () => {
       }
       return undefined;
     });
-    const { rootPath, client, relay, sessions } = await harness(daemon);
+    const { rootPath, attachmentId, client, relay, sessions } =
+      await harness(daemon);
     const store = createCaptureLiveStores(
-      { workspaceId: "workspace-a", rootPath },
+      { workspaceId: "workspace-a", rootPath, attachmentId },
       sessions,
     ).store;
 
@@ -1399,7 +1599,7 @@ describe("EngineRelayClient", () => {
       }),
     ).rejects.toBeInstanceOf(ShareUnavailableError);
     await expect(
-      refreshSharedViewOnce({
+      refreshStandaloneShareThroughOwnerForTest({
         rootDir: rootPath,
         workspaceId: "workspace-a",
         relay,
@@ -1418,6 +1618,7 @@ describe("EngineRelayClient", () => {
       changedPaths: 0,
       excludedPaths: [],
       unjournalablePaths: [],
+      collisionRecordQuarantined: false,
       refusedOps: 0,
       refusedDetail: null,
     });
@@ -1465,6 +1666,394 @@ describe("EngineRelayClient", () => {
       daemon.requests,
       "bind must not require workspace preparation or workspace.open",
     ).toEqual([]);
+    await sessions.closeAll();
+  });
+
+  it("carries a physical attachment through bootstrap run and close", async () => {
+    const { rootPath, live, relay, sessions } = await harness();
+    const attachmentId = Symbol("relay-attachment");
+    const workspace = {
+      workspaceId: "workspace-attached",
+      rootPath,
+      attachmentId,
+    };
+    const run = vi.spyOn(sessions, "run");
+    const closeWorkspace = vi.spyOn(sessions, "closeWorkspace");
+    const client = live.bind({ ...workspace, relay });
+
+    await client.bootstrapJoinIdentity(null);
+
+    expect(run).toHaveBeenCalledWith(
+      { ...workspace, captureMode: "none" },
+      expect.any(Function),
+      { retryTransportErrors: true },
+    );
+    expect(closeWorkspace).toHaveBeenCalledWith(workspace);
+    await sessions.closeAll();
+  });
+
+  it("keeps the relay route available after bootstrap closes its temporary session", async () => {
+    const { routes, live, client } = await harness();
+
+    await client.bootstrapJoinIdentity(null);
+
+    expect(routes.modeFor("workspace-a")).toBe("daemon");
+    await expect(client.push()).resolves.toMatchObject({ pushed: 3 });
+    await live.closeAll();
+    expect(routes.modeFor("workspace-a")).toBeNull();
+  });
+
+  it("orders bootstrap retirement after requests already queued by initialization", async () => {
+    const daemon = new MockDaemon();
+    const sendRequest = daemon.sendRequest.bind(daemon);
+    const firstStarted = Promise.withResolvers<void>();
+    const secondStarted = Promise.withResolvers<void>();
+    const secondQueued = Promise.withResolvers<void>();
+    const releaseFirst = Promise.withResolvers<void>();
+    const releaseSecond = Promise.withResolvers<void>();
+    let pushesStarted = 0;
+    daemon.sendRequest = async (request) => {
+      if (request.method === "sync.push") {
+        pushesStarted += 1;
+        if (pushesStarted === 1) {
+          firstStarted.resolve();
+          await releaseFirst.promise;
+        } else if (pushesStarted === 2) {
+          secondStarted.resolve();
+          await releaseSecond.promise;
+        }
+      }
+      return await sendRequest(request);
+    };
+    const { sessions, live, client } = await harness(daemon);
+    const closeWorkspace = vi.spyOn(sessions, "closeWorkspace");
+    const pushes: Array<Promise<unknown>> = [];
+
+    const bootstrap = client.bootstrapJoinIdentity(null, async () => {
+      pushes.push(client.push());
+      await firstStarted.promise;
+      pushes.push(client.push());
+      secondQueued.resolve();
+    });
+    await secondQueued.promise;
+    releaseFirst.resolve();
+    await secondStarted.promise;
+    const closeCallsWhileSecondWasPending = closeWorkspace.mock.calls.length;
+    releaseSecond.resolve();
+    await Promise.all([bootstrap, ...pushes]);
+
+    expect(closeCallsWhileSecondWasPending).toBe(0);
+    expect(closeWorkspace).toHaveBeenCalledOnce();
+    await live.closeAll();
+  });
+
+  it("retires the bare bootstrap owner before an exact successor closes", async () => {
+    const { rootPath, routes, sessions, live, relay, client } = await harness();
+    const closeWorkspace = vi.spyOn(sessions, "closeWorkspace");
+
+    await client.bootstrapJoinIdentity(null);
+    const workspace = {
+      workspaceId: "workspace-a",
+      rootPath,
+      attachmentId: Symbol("post-bootstrap-attachment"),
+    };
+    const exact = live.bind({ ...workspace, relay });
+    await exact.push();
+    await live.closeWorkspace(workspace);
+
+    expect(routes.modeFor(workspace.workspaceId)).toBeNull();
+    closeWorkspace.mockClear();
+    await live.closeAll();
+    expect(closeWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("retires the bootstrap alias after an exact successor opens but its request fails", async () => {
+    const daemon = new MockDaemon((request) => {
+      if (request.method === "sync.push") {
+        throw new Error("injected push failure");
+      }
+      return undefined;
+    });
+    const { rootPath, routes, live, relay, client } = await harness(daemon);
+
+    await client.bootstrapJoinIdentity(null);
+    const workspace = {
+      workspaceId: "workspace-a",
+      rootPath,
+      attachmentId: Symbol("failed-successor-attachment"),
+    };
+    const exact = live.bind({ ...workspace, relay });
+
+    await expect(exact.push()).rejects.toThrow("injected push failure");
+    await live.closeWorkspace(workspace);
+    expect(routes.modeFor(workspace.workspaceId)).toBeNull();
+  });
+
+  it("rebinds the attachment-keyed session before and after a transport restart", async () => {
+    const rootPath = await createTestScratch("dohc-relay-attachment-rebind-");
+    roots.push(rootPath);
+    const routes = new RelayTransportRouteGuard();
+    const second = new MockDaemon();
+    let current: EngineDaemonClient;
+    const first = new MockDaemon((request) => {
+      if (request.method === "sync.push") {
+        current = second;
+        throw new EngineClientError(
+          "transport-error",
+          "injected daemon restart",
+        );
+      }
+      return undefined;
+    });
+    current = first;
+    const sessions = new EngineWorkspaceSessions(
+      new RelayConfiguredDaemonClientSource(
+        { currentClient: () => current },
+        routes,
+      ),
+      {
+        transportRebindAttempts: 2,
+        sleep: async () => undefined,
+      },
+    );
+    const live = new EngineRelayClient({ sessions, routes });
+    const workspace = {
+      workspaceId: "workspace-rebind-attached",
+      rootPath,
+      attachmentId: Symbol("relay-rebind-attachment"),
+    };
+    const client = live.bind({
+      ...workspace,
+      relay: { baseUrl: "https://relay.test", token: "secret-token" },
+    });
+    await sessions.run(workspace, async () => undefined);
+
+    await expect(client.push()).resolves.toMatchObject({ pushed: 3 });
+
+    expect(first.requests.map((request) => request.method)).toEqual([
+      "workspace.open",
+      "workspace.close",
+      "workspace.open",
+      "sync.push",
+    ]);
+    expect(second.requests.map((request) => request.method)).toEqual([
+      "workspace.open",
+      "sync.push",
+    ]);
+    await sessions.closeAll();
+  });
+
+  it("isolates same-id physical successors through run and close", async () => {
+    let opens = 0;
+    const daemon = new MockDaemon((request) => {
+      if (request.method === "workspace.open") {
+        opens += 1;
+        return { workspace: `ws-${opens}` };
+      }
+      return undefined;
+    });
+    const { rootPath, live, relay, routes, sessions } = await harness(daemon);
+    const firstWorkspace = {
+      workspaceId: "workspace-successor",
+      rootPath,
+      attachmentId: Symbol("relay-predecessor"),
+    };
+    const secondWorkspace = {
+      ...firstWorkspace,
+      attachmentId: Symbol("relay-successor"),
+    };
+    const first = live.bind({ ...firstWorkspace, relay });
+    await first.push();
+    await live.closeWorkspace(firstWorkspace);
+
+    const second = live.bind({ ...secondWorkspace, relay });
+    await second.push();
+    expect(opens).toBe(2);
+
+    // A delayed predecessor cleanup must not release the successor's route or
+    // close its attachment-keyed session.
+    await live.closeWorkspace(firstWorkspace);
+    expect(routes.modeFor(firstWorkspace.workspaceId)).toBe("daemon");
+    await second.push();
+    expect(opens).toBe(2);
+    expect(
+      daemon.requests
+        .filter((request) => request.method === "workspace.close")
+        .map((request) => request.workspace),
+    ).toEqual(["ws-1"]);
+
+    await live.closeWorkspace(secondWorkspace);
+    expect(routes.modeFor(firstWorkspace.workspaceId)).toBeNull();
+    expect(
+      daemon.requests
+        .filter((request) => request.method === "workspace.close")
+        .map((request) => request.workspace),
+    ).toEqual(["ws-1", "ws-2"]);
+    await sessions.closeAll();
+  });
+
+  it("rebinds the attachment-keyed session before a token refresh", async () => {
+    const { rootPath, live, relay, sessions } = await harness();
+    const workspace = {
+      workspaceId: "workspace-attached-refresh",
+      rootPath,
+      attachmentId: Symbol("relay-refresh-attachment"),
+    };
+    const closeWorkspaceBinding = vi.spyOn(sessions, "closeWorkspaceBinding");
+    const first = live.bind({ ...workspace, relay });
+    await first.push();
+    closeWorkspaceBinding.mockClear();
+
+    const refreshed = live.bind({
+      ...workspace,
+      relay: { ...relay, token: "refreshed-token" },
+    });
+    await refreshed.push();
+
+    expect(closeWorkspaceBinding).toHaveBeenCalledWith(workspace);
+    await live.closeWorkspace(workspace);
+  });
+
+  it("keeps exact capture authorship through relay token refresh", async () => {
+    const { rootPath, daemon, live, relay, sessions } = await harness();
+    const workspace = {
+      workspaceId: "workspace-capture-refresh",
+      rootPath,
+      attachmentId: Symbol("relay-capture-refresh"),
+    };
+    const author = {
+      kind: "agent" as const,
+      agentId: "agent",
+      onBehalfOf: "local",
+      agentRunId: "run",
+    };
+    sessions.rememberCaptureAuthor(workspace, author);
+
+    const first = live.bind({ ...workspace, relay });
+    await first.push();
+    const refreshed = live.bind({
+      ...workspace,
+      relay: { ...relay, token: "refreshed-token" },
+    });
+    await refreshed.push();
+
+    const opens = daemon.requests.filter(
+      (request) => request.method === "workspace.open",
+    );
+    expect(opens).toHaveLength(2);
+    expect(opens.map((request) => request.params)).toEqual([
+      expect.objectContaining({
+        workspaceId: workspace.workspaceId,
+        captureAuthor: author,
+      }),
+      expect.objectContaining({
+        workspaceId: workspace.workspaceId,
+        captureAuthor: author,
+      }),
+    ]);
+    await live.closeWorkspace(workspace);
+  });
+
+  it("keeps exact share-mount policy through relay token refresh", async () => {
+    const { rootPath, daemon, live, relay } = await harness();
+    const workspace = {
+      workspaceId: "workspace-share-refresh",
+      rootPath,
+      attachmentId: Symbol("relay-share-refresh"),
+    };
+
+    const first = live.bind({ ...workspace, shareMount: true, relay });
+    await first.push();
+    const refreshed = live.bind({
+      ...workspace,
+      relay: { ...relay, token: "refreshed-token" },
+    });
+    await refreshed.push();
+
+    const opens = daemon.requests.filter(
+      (request) => request.method === "workspace.open",
+    );
+    expect(opens).toHaveLength(2);
+    expect(opens.map((request) => request.params)).toEqual([
+      expect.objectContaining({
+        workspaceId: workspace.workspaceId,
+        captureMode: "none",
+      }),
+      expect.objectContaining({
+        workspaceId: workspace.workspaceId,
+        captureMode: "none",
+      }),
+    ]);
+    await live.closeWorkspace(workspace);
+  });
+
+  it("closes every attachment-keyed session during closeAll", async () => {
+    let opens = 0;
+    const daemon = new MockDaemon((request) => {
+      if (request.method === "workspace.open") {
+        opens += 1;
+        return { workspace: `ws-close-all-${opens}` };
+      }
+      return undefined;
+    });
+    const { rootPath, live, relay, routes, sessions } = await harness(daemon);
+    const firstWorkspaceId = "workspace-attached-close-all-first";
+    const secondWorkspaceId = "workspace-attached-close-all-second";
+    const first = live.bind({
+      workspaceId: firstWorkspaceId,
+      rootPath,
+      attachmentId: Symbol("relay-close-all-first"),
+      relay,
+    });
+    const second = live.bind({
+      workspaceId: secondWorkspaceId,
+      rootPath,
+      attachmentId: Symbol("relay-close-all-second"),
+      relay,
+    });
+    await first.push();
+    await second.push();
+
+    await live.closeAll();
+
+    expect(
+      daemon.requests
+        .filter((request) => request.method === "workspace.close")
+        .map((request) => request.workspace)
+        .sort(),
+    ).toEqual(["ws-close-all-1", "ws-close-all-2"]);
+    expect(routes.modeFor(firstWorkspaceId)).toBeNull();
+    expect(routes.modeFor(secondWorkspaceId)).toBeNull();
+    await sessions.closeAll();
+  });
+
+  it("releases only a closed attachment's stale route location", async () => {
+    const { rootPath, live, relay, routes, sessions } = await harness();
+    const successorRoot = await createTestScratch(
+      "dohc-relay-successor-location-",
+    );
+    roots.push(successorRoot);
+    const workspaceId = "workspace-moved-successor";
+    const predecessor = {
+      workspaceId,
+      rootPath,
+      attachmentId: Symbol("relay-location-predecessor"),
+    };
+    const successor = {
+      workspaceId,
+      rootPath: successorRoot,
+      attachmentId: Symbol("relay-location-successor"),
+    };
+    live.bind({ ...predecessor, relay });
+    live.bind({ ...successor, relay });
+
+    await live.closeWorkspace(predecessor);
+
+    expect(routes.relayForOpen(workspaceId, rootPath)).toBeNull();
+    expect(routes.relayForOpen(workspaceId, successorRoot)).toMatchObject({
+      bearerToken: relay.token,
+    });
+    await live.closeWorkspace(successor);
     await sessions.closeAll();
   });
 
@@ -1823,6 +2412,7 @@ describe("RelayConfiguredDaemonClientSource capability forwarding", () => {
     const inner: EngineDaemonClient = {
       sendRequest: () => Promise.reject(new Error("unused")),
       close: () => undefined,
+      helloAck: { capabilities: ["blobs"] },
       cancelRequest: async (requestId) => {
         seen.push(`cancel:${requestId}`);
       },
@@ -1848,6 +2438,7 @@ describe("RelayConfiguredDaemonClientSource capability forwarding", () => {
     // a wrapper that drops it silently downgrades every rich doc to the plain
     // editor.
     expect(typeof wrapped.onEvent).toBe("function");
+    expect(wrapped.helloAck).toEqual({ capabilities: ["blobs"] });
     expect(wrapped.onEvent?.(() => undefined)).toBe(unsubscribe);
     expect(wrapped.onBlob?.(() => undefined)).toBe(unsubscribe);
     void wrapped.cancelRequest?.(7);
@@ -1865,6 +2456,7 @@ describe("RelayConfiguredDaemonClientSource capability forwarding", () => {
       new RelayTransportRouteGuard(),
     );
     const wrapped = source.currentClient();
+    expect(wrapped.helloAck).toBeUndefined();
     expect(wrapped.onEvent).toBeUndefined();
     expect(wrapped.onBlob).toBeUndefined();
     expect(wrapped.cancelRequest).toBeUndefined();
@@ -1884,7 +2476,10 @@ describe("allowInsecureLoopbackRelayForTests", () => {
       allowInsecureLoopbackRelayForTests("http://127.0.0.1:8787", enabled),
     ).toBe(true);
     expect(
-      allowInsecureLoopbackRelayForTests("http://localhost:8787/relay", enabled),
+      allowInsecureLoopbackRelayForTests(
+        "http://localhost:8787/relay",
+        enabled,
+      ),
     ).toBe(true);
     expect(
       allowInsecureLoopbackRelayForTests("http://[::1]:8787", enabled),
@@ -1907,9 +2502,9 @@ describe("allowInsecureLoopbackRelayForTests", () => {
   });
 
   it("stays off without the exact flag, for https, and for junk URLs", () => {
-    expect(allowInsecureLoopbackRelayForTests("http://127.0.0.1:8787", {})).toBe(
-      false,
-    );
+    expect(
+      allowInsecureLoopbackRelayForTests("http://127.0.0.1:8787", {}),
+    ).toBe(false);
     expect(
       allowInsecureLoopbackRelayForTests("http://127.0.0.1:8787", {
         [INSECURE_LOOPBACK_RELAY_TEST_ENV]: "true",
@@ -1918,7 +2513,9 @@ describe("allowInsecureLoopbackRelayForTests", () => {
     expect(
       allowInsecureLoopbackRelayForTests("https://relay.test", enabled),
     ).toBe(false);
-    expect(allowInsecureLoopbackRelayForTests("not a url", enabled)).toBe(false);
+    expect(allowInsecureLoopbackRelayForTests("not a url", enabled)).toBe(
+      false,
+    );
   });
 
   it("flows from the env flag into the daemon workspace.open relay config", async () => {

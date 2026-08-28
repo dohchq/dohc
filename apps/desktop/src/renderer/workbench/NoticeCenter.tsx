@@ -16,12 +16,11 @@ import {
   ENGINE_STORE_BACKUP_DIR,
   engineStoreRefusalSentence,
   type SyncStatusResult,
-  type UpdateStateEvent,
 } from "../../ipc/bridgeContract";
 import { useAllOrphanedDrafts } from "../orphanedDrafts";
 import { RecoveryList } from "../RecoveryList";
 import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
-import { bridge } from "../bridge";
+import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
 import type {
   AgentNotification,
   AgentNotificationKind,
@@ -125,78 +124,55 @@ export function NoticeCenter(props: {
     const interval = setInterval(() => forceTick((n) => n + 1), 30_000);
     return () => clearInterval(interval);
   }, [open]);
-  const [updateState, setUpdateState] = useState<UpdateStateEvent | null>(null);
   const [dismissedUpdateToastKey, setDismissedUpdateToastKey] = useState<
     string | null
   >(null);
   const [updateActionError, setUpdateActionError] = useState<string | null>(null);
   const [installPending, setInstallPending] = useState(false);
+  const { updateState: desktopUpdateState, acceptUpdateResult } =
+    useDesktopUpdateStateFeed((update) => {
+      setUpdateActionError(update.status === "error" ? update.message : null);
+    });
+  const updateState =
+    desktopUpdateState?.status === "ready" ? desktopUpdateState : null;
   const centerRef = useRef<HTMLDivElement | null>(null);
   const toggleRef = useRef<HTMLButtonElement | null>(null);
   const toastRef = useRef<HTMLDivElement | null>(null);
-  const updateSubscriptionFiredRef = useRef(false);
-
-  const applyUpdateState = useCallback((update: UpdateStateEvent) => {
-    if (update.status === "ready") {
-      setUpdateState(update);
-      setUpdateActionError(null);
-      return;
-    }
-    setUpdateState(null);
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    updateSubscriptionFiredRef.current = false;
-    void bridge()
-      .getUpdateState()
-      .then((update) => {
-        if (!cancelled && !updateSubscriptionFiredRef.current) {
-          applyUpdateState(update);
-        }
-      })
-      .catch(() => undefined);
-    const unsubscribe = bridge().onUpdateState((update) => {
-      updateSubscriptionFiredRef.current = true;
-      applyUpdateState(update);
-    });
-    return () => {
-      cancelled = true;
-      unsubscribe();
-    };
-  }, [applyUpdateState]);
 
   const readyUpdateKey =
     updateState?.status === "ready"
       ? `${updateState.version ?? "unknown"}:${updateState.message}`
       : null;
   const updateToastVisible =
-    updateState?.status === "ready" &&
-    readyUpdateKey !== null &&
-    readyUpdateKey !== dismissedUpdateToastKey;
+    updateActionError !== null ||
+    (updateState?.status === "ready" &&
+      readyUpdateKey !== null &&
+      readyUpdateKey !== dismissedUpdateToastKey);
   const installUpdate = useCallback(async () => {
     if (installPending) return;
     try {
       setInstallPending(true);
-      setUpdateActionError(null);
       // Through the guard (#579 review, r8 + r10): with set-aside drafts
       // present the recovery dialog opens INSTEAD of the one-shot install,
       // and its confirm makes the only quitAndInstall call.
       const result = await requestGuardedUpdateInstall();
       if (result === null) return;
+      acceptUpdateResult(result.state);
       if (!result.accepted || result.state.status === "error") {
         setUpdateActionError(
           result.state.status === "error"
             ? result.state.message
             : "Could not restart into the update.",
         );
+      } else {
+        setUpdateActionError(null);
       }
     } catch {
       setUpdateActionError("Could not restart into the update.");
     } finally {
       setInstallPending(false);
     }
-  }, [installPending]);
+  }, [acceptUpdateResult, installPending]);
 
   useEffect(() => {
     if (!open) return;
@@ -420,6 +396,15 @@ export function NoticeCenter(props: {
           : undefined,
         Icon: Download,
       });
+    } else if (updateActionError) {
+      next.push({
+        id: "update-error",
+        tone: "danger",
+        title: "Update failed",
+        body: updateActionError,
+        action: { label: "Open Settings", onClick: props.onOpenSettings },
+        Icon: AlertTriangle,
+      });
     }
 
     return next;
@@ -457,15 +442,15 @@ export function NoticeCenter(props: {
 
   return (
     <>
-      {updateToastVisible && updateState?.status === "ready" ? (
+      {updateToastVisible ? (
         <div
           ref={toastRef}
           data-testid="update-toast"
           role="status"
           className="dohc-popover dohc-pop-in fixed bottom-9 right-3 z-30 flex max-w-md items-center gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
         >
-          <span>{updateActionError ?? updateState.message}</span>
-          {updateState.canInstall ? (
+          <span>{updateActionError ?? updateState?.message}</span>
+          {updateState?.canInstall ? (
             <button
               type="button"
               disabled={installPending}
@@ -474,11 +459,24 @@ export function NoticeCenter(props: {
             >
               {installPending ? "Restarting" : "Restart"}
             </button>
+          ) : updateActionError ? (
+            <button
+              type="button"
+              onClick={props.onOpenSettings}
+              className="shrink-0 rounded bg-accent px-2 py-1 text-[11px] font-semibold text-bg hover:opacity-90"
+            >
+              Open Settings
+            </button>
           ) : null}
           <button
             type="button"
             aria-label="Dismiss update notice"
-            onClick={() => setDismissedUpdateToastKey(readyUpdateKey)}
+            onClick={() => {
+              setUpdateActionError(null);
+              if (readyUpdateKey) {
+                setDismissedUpdateToastKey(readyUpdateKey);
+              }
+            }}
             className="grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
           >
             <X size={12} aria-hidden />

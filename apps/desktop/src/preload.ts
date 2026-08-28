@@ -9,6 +9,7 @@ import type {
   ListSitesPayload,
   MenuCommand,
   PluginPanelOpenedEvent,
+  PluginPanelInvalidatedEvent,
   PluginPanelSdkEvent,
   PluginStatusChangedEvent,
   PluginWebAppFailedEvent,
@@ -26,6 +27,7 @@ import type {
   StopPluginPanelPayload,
   StopSitePreviewPayload,
   WorkspaceSettingsPayload,
+  WorkspaceActivityEvent,
   WorkspaceSummary,
   WriteClipboardTextPayload,
 } from "./ipc/bridgeContract";
@@ -43,9 +45,11 @@ import {
   StartPluginPanelResult,
   StartPluginWebAppResult,
   parseInvokePluginPanelSdkPayloadForIpc,
+  parsePluginPanelInvalidatedEventForIpc,
   parsePluginPanelSdkEventForIpc,
   parsePluginStatusChangedEventForIpc,
   parsePluginWebAppFailedEventForIpc,
+  parseWorkspaceActivityEventForIpc,
 } from "./ipc/bridgeContract";
 import {
   CHANNELS,
@@ -71,9 +75,15 @@ const pluginWebAppOpenedListeners = new Set<
   (event: PluginWebAppOpenedEvent) => void
 >();
 
+// One unforgeable identity per preload/document lifetime. Main uses it to
+// reject IPC that the outgoing document queued while renderer reload cleanup
+// was draining on the same WebContents object.
+const rendererDocumentId = crypto.randomUUID();
+
 const bridge: DohcDesktopBridge = {
   platform: process.platform,
-  reloadRenderer: () => ipcRenderer.invoke(CHANNELS.reloadRenderer),
+  reloadRenderer: () =>
+    ipcRenderer.invoke(CHANNELS.reloadRenderer, { rendererDocumentId }),
   pickWorkspaceRoot: () => ipcRenderer.invoke(CHANNELS.pickWorkspaceRoot),
   getWorkspaceRegistry: () => ipcRenderer.invoke(CHANNELS.getWorkspaceRegistry),
   getDefaultWorkspaceRoot: () =>
@@ -158,6 +168,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.archiveChatBookmark, payload),
   readWorkspaceDatabase: (payload) =>
     ipcRenderer.invoke(CHANNELS.readWorkspaceDatabase, payload),
+  readWorkspaceDatabasePage: (payload) =>
+    ipcRenderer.invoke(CHANNELS.readWorkspaceDatabasePage, payload),
   applyDatabaseEdit: (payload) =>
     ipcRenderer.invoke(CHANNELS.applyDatabaseEdit, payload),
   importToDatabase: (payload) =>
@@ -191,6 +203,17 @@ const bridge: DohcDesktopBridge = {
     StartPluginPanelResult.parse(
       await ipcRenderer.invoke(CHANNELS.startPluginPanel, payload),
     ),
+  onPluginPanelInvalidated: (
+    listener: (event: PluginPanelInvalidatedEvent) => void,
+  ) => {
+    const handler = (_event: unknown, raw: unknown) => {
+      const parsed = parsePluginPanelInvalidatedEventForIpc(raw);
+      if (parsed) listener(parsed);
+    };
+    ipcRenderer.on(CHANNELS.pluginPanelInvalidated, handler);
+    return () =>
+      ipcRenderer.removeListener(CHANNELS.pluginPanelInvalidated, handler);
+  },
   invokePluginCommand: async (payload: InvokePluginCommandPayload) =>
     InvokePluginCommandResult.parse(
       await ipcRenderer.invoke(CHANNELS.invokePluginCommand, payload),
@@ -325,7 +348,11 @@ const bridge: DohcDesktopBridge = {
   mountShare: (payload) => ipcRenderer.invoke(CHANNELS.mountShare, payload),
   refreshShareMounts: (payload) => ipcRenderer.invoke(CHANNELS.refreshShareMounts, payload),
   unmountShare: (payload) => ipcRenderer.invoke(CHANNELS.unmountShare, payload),
-  openWorkspace: (payload) => ipcRenderer.invoke(CHANNELS.openWorkspace, payload),
+  openWorkspace: (payload) =>
+    ipcRenderer.invoke(CHANNELS.openWorkspace, {
+      ...payload,
+      rendererDocumentId,
+    }),
   listWorkspaceVersions: (payload) =>
     ipcRenderer.invoke(CHANNELS.listWorkspaceVersions, payload),
   createWorkspaceVersion: (payload) =>
@@ -358,6 +385,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.createFileChat, payload),
   listChatMessages: (payload) =>
     ipcRenderer.invoke(CHANNELS.listChatMessages, payload),
+  getChatThreadRevision: (payload) =>
+    ipcRenderer.invoke(CHANNELS.getChatThreadRevision, payload),
   sendChatMessage: (payload) =>
     ipcRenderer.invoke(CHANNELS.sendChatMessage, payload),
   listChatThreadDecisions: (payload) =>
@@ -395,7 +424,11 @@ const bridge: DohcDesktopBridge = {
   requestDmAgain: (payload) => ipcRenderer.invoke(CHANNELS.requestDmAgain, payload),
   startDm: (payload) => ipcRenderer.invoke(CHANNELS.startDm, payload),
   leaveDm: (payload) => ipcRenderer.invoke(CHANNELS.leaveDm, payload),
-  presencePublish: (payload) => ipcRenderer.invoke(CHANNELS.presencePublish, payload),
+  presencePublish: (payload) =>
+    ipcRenderer.invoke(CHANNELS.presencePublish, {
+      ...payload,
+      rendererDocumentId,
+    }),
   presencePoll: (payload) => ipcRenderer.invoke(CHANNELS.presencePoll, payload),
   presenceCancel: (payload) => ipcRenderer.invoke(CHANNELS.presenceCancel, payload),
   getSyncStatus: (payload) => ipcRenderer.invoke(CHANNELS.getSyncStatus, payload),
@@ -452,8 +485,11 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.getWorkspaceUiState, payload),
   setWorkspaceUiState: (payload) =>
     ipcRenderer.invoke(CHANNELS.setWorkspaceUiState, payload),
-  onWorkspaceActivity: (listener: () => void) => {
-    const handler = () => listener();
+  onWorkspaceActivity: (listener: (event: WorkspaceActivityEvent) => void) => {
+    // Degrades to the payload-free global ping on a malformed payload; an
+    // activity notification is never dropped (see the parser's contract).
+    const handler = (_event: unknown, raw: unknown) =>
+      listener(parseWorkspaceActivityEventForIpc(raw));
     ipcRenderer.on(CHANNELS.workspaceActivity, handler);
     return () => ipcRenderer.removeListener(CHANNELS.workspaceActivity, handler);
   },

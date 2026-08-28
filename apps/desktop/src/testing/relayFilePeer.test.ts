@@ -3,7 +3,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   EngineDaemonLifecycle,
-  EngineWorkspaceSessions,
+  type EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import { describe, expect, it } from "vitest";
 import { claimRelayWorkspace } from "../../e2e/helpers/relayPeer";
@@ -17,6 +17,7 @@ import {
   RelayTransportRouteGuard,
 } from "../workspaces/engineRelayClient";
 import { requireEngineBinaryOrSkip } from "./engineBinary";
+import { createRealDaemonWorkspaceSessions } from "./realDaemonWorkspaceSessions";
 import { RelayFilePeer } from "./relayFilePeer";
 import { createTestScratch } from "../workspaces/testTemp";
 
@@ -332,9 +333,8 @@ describe("RelayFilePeer receiver contract", () => {
         });
         await lifecycle.start();
         const routes = new RelayTransportRouteGuard();
-        sessions = new EngineWorkspaceSessions(
+        sessions = createRealDaemonWorkspaceSessions(
           new RelayConfiguredDaemonClientSource(lifecycle, routes),
-          { workspaceOpenDeadlineMs: 10_000 },
         );
         const receiver = new EngineRelayClient({
           sessions,

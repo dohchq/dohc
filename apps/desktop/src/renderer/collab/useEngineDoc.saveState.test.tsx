@@ -110,6 +110,10 @@ function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
   let artifactAssets: readonly typeof IMAGE_DESCRIPTOR[] = [];
   let artifactAssetsInvalid = false;
   let lineageReplacementFailure: Error | null = null;
+  let lineageReplacementRefusal:
+    | "session-unavailable"
+    | "lineage-transition"
+    | null = null;
   let permanentApplyFailure = false;
   let readArtifactAsset: (descriptor: typeof IMAGE_DESCRIPTOR) => Promise<{
     descriptor: typeof IMAGE_DESCRIPTOR;
@@ -183,7 +187,13 @@ function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
     }) {
       acknowledgedGenerations.push(payload.lineageGeneration);
       if (lineageReplacementFailure) throw lineageReplacementFailure;
-      return { updates: [] };
+      if (lineageReplacementRefusal) {
+        return {
+          accepted: false as const,
+          reason: lineageReplacementRefusal,
+        };
+      }
+      return { accepted: true as const, updates: [] };
     },
     onEngineYDocSaveState: (listener: SaveStateListener) => {
       saveStateListeners.add(listener);
@@ -327,6 +337,9 @@ function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
     },
     setLineageReplacementFailure(value: Error | null) {
       lineageReplacementFailure = value;
+    },
+    setLineageReplacementRefusal(value: typeof lineageReplacementRefusal) {
+      lineageReplacementRefusal = value;
     },
     deferNextApplyFailure() {
       let rejectFailure!: (error: Error) => void;
@@ -584,6 +597,22 @@ it("keeps a failed lineage handoff visible and read-only", async () => {
   act(() => screen.getByTestId("type").click());
   await flushLocalBatch();
   expect(harness.applyAttempts).toHaveLength(attemptsBefore);
+});
+
+it("keeps a refused lineage acknowledgement visible and read-only", async () => {
+  await mountBound();
+  harness.setLineageReplacementRefusal("session-unavailable");
+
+  act(() => screen.getByTestId("type").click());
+  harness.emitLineageReplacement("winner");
+
+  await waitFor(() =>
+    expect(screen.getByTestId("state").textContent).toBe("error"),
+  );
+  expect(screen.getByTestId("read-only-transition").textContent).toBe("true");
+  expect(screen.getByTestId("save-error").textContent).toContain(
+    "session-unavailable",
+  );
 });
 
 it("restores a failed scene handoff with the losing asset authority", async () => {

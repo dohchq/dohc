@@ -8,7 +8,7 @@ import {
   type PluginSettingDeclaration,
   type PluginSettingValue,
 } from "../plugins/pluginManifestSchema";
-import { activateReadOnlyLinkHref } from "./editor/linkMenu";
+import { activateReadOnlyLinkHref } from "./linkActivation";
 import { SettingRow, SwitchControl } from "./settings/SettingRow";
 import { bridge } from "./bridge";
 import { IncrementalMarkdownDocument } from "./markdown/IncrementalMarkdownDocument";
@@ -16,6 +16,7 @@ import { MARKDOWN_COMPONENTS } from "./markdown/markdownComponents";
 import { parseFrontmatter } from "./markdown/frontmatter";
 import { Overlay } from "./Overlay";
 import { PrimaryButton, SecondaryButton } from "./ui/controls";
+import { useAsyncResponseEffect } from "./useAsyncResponseEffect";
 import { PluginIcon } from "./workbench/PluginIcon";
 import {
   actionLabel,
@@ -102,38 +103,34 @@ function findTabPlugin(
 
 function useReadme(workspaceId: string, directoryName: string): ReadmeState {
   const [state, setState] = useState<ReadmeState>({ status: "loading" });
-  // The request token is the whole guard: this effect re-runs for every
-  // workspace or folder change and its cleanup raises the token, so a read
-  // for the folder the plugin no longer has can never repaint this one.
-  const requestToken = useRef(0);
 
-  useEffect(() => {
-    const request = ++requestToken.current;
-    setState({ status: "loading" });
-    void bridge()
-      .readWorkspaceText({
-        workspaceId,
-        relativePath: readmePath(directoryName),
-      })
-      .then((result) => {
-        if (request !== requestToken.current) return;
-        const body = parseFrontmatter(result.text).body.trim();
-        setState(
-          body.length > 0 ? { status: "ready", body } : { status: "absent" },
-        );
-      })
-      .catch((error: unknown) => {
-        if (request !== requestToken.current) return;
+  useAsyncResponseEffect(
+    () => {
+      setState({ status: "loading" });
+      return bridge()
+        .readWorkspaceText({
+          workspaceId,
+          relativePath: readmePath(directoryName),
+        })
+        .then<ReadmeState>((result) => {
+          const body = parseFrontmatter(result.text).body.trim();
+          return body.length > 0
+            ? { status: "ready", body }
+            : { status: "absent" };
+        });
+    },
+    {
+      onSuccess: setState,
+      onError: (error: unknown) => {
         setState(
           isMissingFileError(error)
             ? { status: "absent" }
             : { status: "error", message: readableReason(error) },
         );
-      });
-    return () => {
-      requestToken.current += 1;
-    };
-  }, [workspaceId, directoryName]);
+      },
+    },
+    [workspaceId, directoryName],
+  );
 
   return state;
 }
@@ -442,39 +439,32 @@ function usePluginSizes(
   directoryName: string,
 ): SizesState {
   const [state, setState] = useState<SizesState>({ status: "loading" });
-  // The same guard the README and the settings section use: the effect
-  // re-runs for every workspace or plugin and its cleanup raises the token,
-  // so a measurement of the workspace the user just left can never repaint
-  // the workspace they are now looking at.
-  const requestToken = useRef(0);
 
-  useEffect(() => {
-    const request = ++requestToken.current;
-    setState({ status: "loading" });
-    void bridge()
+  useAsyncResponseEffect(
+    () => {
+      setState({ status: "loading" });
       // The exact row this rail is about, never pluginId alone — two rows
       // can share an id (a broken manifest's directory-derived fallback
       // colliding with some other, unrelated plugin's real id), and dohc's
       // own build and state storage answers only ever what THIS id
       // actually built and ran, which the pipeline refuses to report for a
       // directory it does not belong to.
-      .pluginSizes({ workspaceId, pluginId, directoryName })
-      .then((result) => {
-        if (request !== requestToken.current) return;
-        setState(
+      return bridge()
+        .pluginSizes({ workspaceId, pluginId, directoryName })
+        .then<SizesState>((result) =>
           result.ok
             ? { status: "ready", sizes: result.sizes }
-            : { status: "unavailable" },
+            : { status: "unavailable" }
         );
-      })
-      .catch(() => {
-        if (request !== requestToken.current) return;
+    },
+    {
+      onSuccess: setState,
+      onError: () => {
         setState({ status: "unavailable" });
-      });
-    return () => {
-      requestToken.current += 1;
-    };
-  }, [workspaceId, pluginId, directoryName]);
+      },
+    },
+    [workspaceId, pluginId, directoryName],
+  );
 
   return state;
 }

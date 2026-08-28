@@ -87,6 +87,64 @@ async fn call_error(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn chat_thread_revision_is_zero_until_the_first_visible_mutation() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "chat-thread-revision").await;
+    let mut id = 1;
+
+    let absent = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.revision",
+        json!({ "threadId": "thread" }),
+    )
+    .await;
+    assert_eq!(absent, json!({ "revision": 0 }));
+
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.create",
+        json!({
+            "channelId": "channel",
+            "name": "General",
+            "kind": "channel",
+            "nowMs": 10,
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "channel",
+            "threadId": "thread",
+            "messageId": "opening",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Hello",
+            "nowMs": 20,
+        }),
+    )
+    .await;
+
+    let changed = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.revision",
+        json!({ "threadId": "thread" }),
+    )
+    .await;
+    assert_eq!(changed, json!({ "revision": 1 }));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn chats_feed_list_personal_refuses_limit_above_cap() {
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));

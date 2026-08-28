@@ -16,6 +16,7 @@ use dohc_engine_domain::{
 use dohc_engine_storage::{EngineStore, FaultPoint, NoFaults, TxnOutcome};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
 use rusqlite::{OptionalExtension, params};
+use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -1929,6 +1930,230 @@ fn pending_chat_coordinate_count(engine: &EngineStore) -> i64 {
             .map_err(dohc_engine_storage::StorageError::corrupt_public)
         })
         .expect("pending chat coordinate count")
+}
+
+fn chat_content_revision(engine: &EngineStore, thread_id: &str) -> i64 {
+    engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT content_revision FROM chat_conversation_revisions \
+                 WHERE workspace_id='ws' AND thread_id=?1",
+                [thread_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(|revision| revision.unwrap_or(0))
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("chat content revision")
+}
+
+fn seed_unowned_chat_thread(engine: &mut EngineStore, thread_id: &str) {
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO chat_threads \
+                 (workspace_id,thread_id,title,created_at_ms,updated_at_ms) \
+                 VALUES ('ws',?1,'',10,10)",
+                [thread_id],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed chat thread");
+}
+
+#[test]
+fn imported_chat_winners_bump_and_losing_lww_coordinates_do_not() {
+    let (_scratch, _path, mut engine) = store();
+    seed_unowned_chat_thread(&mut engine, "thread");
+    assert_eq!(chat_content_revision(&engine, "thread"), 0);
+
+    let message = envelope(
+        "message-winner",
+        0,
+        "chat.message.append",
+        json!({
+            "messageId": "message",
+            "threadId": "thread",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Imported",
+            "createdAtMs": 20
+        }),
+    );
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &message, &NoFaults),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+    assert_eq!(chat_content_revision(&engine, "thread"), 1);
+
+    let attachment_id = attachment_id_for("message", "object", None, None);
+    let attachment = envelope(
+        "attachment-winner",
+        0,
+        "chat.attachment.add",
+        json!({
+            "attachmentId": attachment_id,
+            "threadId": "thread",
+            "messageId": "message",
+            "targetKind": "file",
+            "objectId": "object",
+            "pathHint": "notes/imported.md",
+            "createdAtMs": 21
+        }),
+    );
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &attachment, &NoFaults),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+    assert_eq!(chat_content_revision(&engine, "thread"), 2);
+
+    let reaction_winner = envelope(
+        "reaction-winner",
+        0,
+        "chat.reaction.set",
+        reaction_payload("added", "👍", 100, "ada"),
+    );
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &reaction_winner, &NoFaults),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+    assert_eq!(chat_content_revision(&engine, "thread"), 3);
+    let reaction_loser = envelope(
+        "reaction-loser",
+        0,
+        "chat.reaction.set",
+        reaction_payload("removed", "👍", 99, "ada"),
+    );
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &reaction_loser, &NoFaults),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+    assert_eq!(
+        chat_content_revision(&engine, "thread"),
+        3,
+        "a losing imported reaction must not invalidate the conversation"
+    );
+
+    let decision_winner = envelope(
+        "decision-winner",
+        0,
+        "chat.decision.set",
+        decision_payload("resolved", 100, Some("message")),
+    );
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &decision_winner, &NoFaults),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+    assert_eq!(chat_content_revision(&engine, "thread"), 4);
+    let decision_loser = envelope(
+        "decision-loser",
+        0,
+        "chat.decision.set",
+        decision_payload("open", 99, None),
+    );
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &decision_loser, &NoFaults),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+    assert_eq!(
+        chat_content_revision(&engine, "thread"),
+        4,
+        "a losing imported decision must not invalidate the conversation"
+    );
+}
+
+#[test]
+fn imported_parent_arrival_repairs_the_child_and_bumps_the_conversation() {
+    let (_scratch, _path, mut engine) = store();
+    seed_unowned_chat_thread(&mut engine, "parent-thread");
+    let child = envelope(
+        "child-origin",
+        0,
+        "chat.message.append",
+        json!({
+            "messageId": "child",
+            "threadId": "parent-thread",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "parentMessageId": "parent",
+            "body": "Child first",
+            "createdAtMs": 30
+        }),
+    );
+    apply_chat_envelope(&mut engine, &child, &NoFaults).expect("child apply");
+    assert_eq!(chat_content_revision(&engine, "parent-thread"), 1);
+
+    let parent = envelope(
+        "parent-origin",
+        0,
+        "chat.message.append",
+        json!({
+            "messageId": "parent",
+            "threadId": "parent-thread",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Parent later",
+            "createdAtMs": 20
+        }),
+    );
+    apply_chat_envelope(&mut engine, &parent, &NoFaults).expect("parent apply");
+    let repaired_parent: Option<String> = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT parent_message_id FROM chat_messages \
+                 WHERE workspace_id='ws' AND message_id='child'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("repaired parent");
+    assert_eq!(repaired_parent.as_deref(), Some("parent"));
+    assert_eq!(chat_content_revision(&engine, "parent-thread"), 2);
+}
+
+#[test]
+fn ready_pending_replay_bumps_every_conversation_it_materializes() {
+    let (_scratch, _path, mut engine) = store();
+    for (origin, thread_id, message_id) in [
+        ("pending-a", "thread-a", "message-a"),
+        ("pending-b", "thread-b", "message-b"),
+    ] {
+        let operation = envelope(
+            origin,
+            0,
+            "chat.message.append",
+            json!({
+                "messageId": message_id,
+                "threadId": thread_id,
+                "authorKind": "human",
+                "authorDisplayName": "Ada",
+                "body": format!("Pending for {thread_id}"),
+                "createdAtMs": 20
+            }),
+        );
+        apply_chat_envelope(&mut engine, &operation, &NoFaults).expect("park message");
+    }
+    assert_eq!(pending_chat_coordinate_count(&engine), 2);
+    seed_unowned_chat_thread(&mut engine, "thread-a");
+    seed_unowned_chat_thread(&mut engine, "thread-b");
+
+    LinkedChatStore::new(&mut engine)
+        .create_channel(
+            "ws",
+            "replay-trigger",
+            "Replay trigger",
+            ChatChannelKind::Channel,
+            30,
+            &NoFaults,
+        )
+        .expect("trigger ready replay");
+
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
+    assert_eq!(chat_content_revision(&engine, "thread-a"), 1);
+    assert_eq!(chat_content_revision(&engine, "thread-b"), 1);
 }
 
 #[test]
@@ -8999,6 +9224,791 @@ fn parked_ydoc_envelope_drains_into_the_lineage_and_redrains_deduped() {
 }
 
 #[test]
+fn cached_defer_and_drain_match_the_cold_path() {
+    let (_warm_scratch, _warm_path, mut warm_store) = store();
+    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
+    let mut cold_seed_cache = dohc_engine_collab::WriterDocCache::new();
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-cache-pair").expect("key");
+
+    let author = dohc_engine_collab::Ydoc::wire();
+    let local = author.plaintext_insert(0, "local");
+    let remote_one = author.plaintext_insert(5, " remote");
+    let remote_two = author.plaintext_insert(12, " final");
+    let empty_base = dohc_engine_collab::Ydoc::wire().encode_full_state();
+
+    let setup =
+        |store: &mut EngineStore, cache: &mut dohc_engine_collab::WriterDocCache| -> String {
+            VersionedTextStore::new(store)
+                .ensure_main_version("ws", "main", 1_000, &NoFaults)
+                .expect("main version");
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                    "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                     VALUES ('ws','object-cache-pair',1_001)",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                    Ok::<_, SyncError>(())
+                })
+                .expect("file object");
+            let claim = match dohc_engine_collab::claim_base(
+                store,
+                &key,
+                dohc_engine_collab::ContentKind::Plaintext,
+                &empty_base,
+                &NoFaults,
+                1_002,
+            )
+            .expect("claim base")
+            {
+                TxnOutcome::Committed(dohc_engine_collab::ClaimOutcome::Claimed {
+                    base_snapshot_sha,
+                }) => base_snapshot_sha,
+                other => panic!("unexpected claim: {other:?}"),
+            };
+            dohc_engine_collab::record_local_update(store, cache, &key, &local, &NoFaults, 1_003)
+                .expect("warm local append");
+            claim
+        };
+    let warm_claim = setup(&mut warm_store, &mut warm_cache);
+    let cold_claim = setup(&mut cold_store, &mut cold_seed_cache);
+    assert_eq!(warm_claim, cold_claim);
+
+    let remote_one_sha = warm_store
+        .put_binary_blob(&remote_one)
+        .expect("warm first remote blob");
+    cold_store
+        .put_binary_blob(&remote_one)
+        .expect("cold first remote blob");
+    let remote_two_sha = warm_store
+        .put_binary_blob(&remote_two)
+        .expect("warm second remote blob");
+    cold_store
+        .put_binary_blob(&remote_two)
+        .expect("cold second remote blob");
+    let deferred = [
+        envelope(
+            "peer",
+            0,
+            "ydoc.update",
+            json!({
+                "versionId": "main",
+                "objectId": "object-cache-pair",
+                "path": "notes/cache-pair.md",
+                "contentKind": "plaintext",
+                "updateBlobSha256": remote_one_sha,
+                "lineageClaimId": warm_claim,
+                "isBaseState": false
+            }),
+        ),
+        envelope(
+            "peer",
+            1,
+            "ydoc.update",
+            json!({
+                "versionId": "main",
+                "objectId": "object-cache-pair",
+                "path": "notes/cache-pair.md",
+                "contentKind": "plaintext",
+                "updateBlobSha256": remote_two_sha,
+                "lineageClaimId": cold_claim,
+                "isBaseState": false
+            }),
+        ),
+    ];
+
+    for operation in &deferred {
+        let warm = apply_ydoc_envelope_cached(
+            &mut warm_store,
+            &mut warm_cache,
+            operation,
+            &NoFaults,
+            &AlwaysLive,
+        )
+        .expect("warm defer");
+        let cold = apply_ydoc_envelope(&mut cold_store, operation, &NoFaults, &AlwaysLive)
+            .expect("cold defer");
+        assert_eq!(warm, cold);
+    }
+
+    let warm_drain =
+        drain_deferred_ydoc_for_key_cached(&mut warm_store, &mut warm_cache, &key, &NoFaults)
+            .expect("warm drain");
+    let cold_drain =
+        drain_deferred_ydoc_for_key(&mut cold_store, &key, &NoFaults).expect("cold drain");
+    assert_eq!(warm_drain, cold_drain);
+
+    let warm_doc = dohc_engine_collab::load_persisted(&warm_store, &key)
+        .expect("warm persisted")
+        .expect("warm doc");
+    let cold_doc = dohc_engine_collab::load_persisted(&cold_store, &key)
+        .expect("cold persisted")
+        .expect("cold doc");
+    // One author produced every delta, so no Any::Map or multi-client map
+    // iteration can perturb this plaintext full-state encoding: byte equality
+    // is the strongest valid assertion here.
+    assert_eq!(
+        warm_doc.doc.encode_full_state(),
+        cold_doc.doc.encode_full_state()
+    );
+    assert_eq!(
+        warm_cache
+            .doc_full_state_for_test(&key)
+            .expect("warm cache remains resident"),
+        cold_doc.doc.encode_full_state()
+    );
+    let warm_head = VersionedTextStore::new(&mut warm_store)
+        .read_text("ws", "main", "notes/cache-pair.md")
+        .expect("warm head")
+        .expect("warm snapshot");
+    let cold_head = VersionedTextStore::new(&mut cold_store)
+        .read_text("ws", "main", "notes/cache-pair.md")
+        .expect("cold head")
+        .expect("cold snapshot");
+    assert_eq!(warm_head.text, cold_head.text);
+    assert_eq!(warm_head.blob_sha256, cold_head.blob_sha256);
+    assert_eq!(warm_head.latest_moment_id, cold_head.latest_moment_id);
+    assert_eq!(warm_head.text, "local remote final");
+
+    let stats = warm_cache.stats();
+    // The second defer gate has a queued predecessor, and the cached form
+    // deliberately reconstructs cold for a non-empty queue: a scratch forked
+    // from the cached full state can re-encode delete-set endpoints the gate
+    // reads differently than the cold incremental rebuild.
+    assert_eq!(
+        stats.hits, 2,
+        "empty-queue defer gate plus final drain projection"
+    );
+    assert_eq!(stats.misses, 1, "only the first local append reconstructs");
+    assert_eq!(stats.installs, 1);
+    assert_eq!(stats.advances, 2, "both committed drain deltas advance");
+}
+
+fn seed_warm_and_cold_remote_lineage(
+    warm_store: &mut EngineStore,
+    warm_cache: &mut dohc_engine_collab::WriterDocCache,
+    cold_store: &mut EngineStore,
+    object_id: &str,
+    path: &str,
+    content_kind: &str,
+) -> (dohc_engine_collab::DocKey, String) {
+    seed_replication_version(warm_store, "main", "main");
+    seed_replication_version(cold_store, "main", "main");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", object_id).expect("key");
+    let empty_base = dohc_engine_collab::Ydoc::wire().encode_full_state();
+    let warm_claim = warm_store
+        .put_binary_blob(&empty_base)
+        .expect("warm empty base");
+    let cold_claim = cold_store
+        .put_binary_blob(&empty_base)
+        .expect("cold empty base");
+    assert_eq!(warm_claim, cold_claim);
+    let base = envelope(
+        "cache-pair-base",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": object_id,
+            "path": path,
+            "contentKind": content_kind,
+            "updateBlobSha256": warm_claim.clone(),
+            "lineageClaimId": warm_claim.clone(),
+            "isBaseState": true
+        }),
+    );
+    let warm_base =
+        apply_ydoc_envelope_cached(warm_store, warm_cache, &base, &NoFaults, &NoLiveLeases)
+            .expect("warm base");
+    let cold_base =
+        apply_ydoc_envelope(cold_store, &base, &NoFaults, &NoLiveLeases).expect("cold base");
+    assert_eq!(warm_base, cold_base);
+
+    // This valid empty-state row changes no content. It establishes identical
+    // durable replay paths while retaining only the warm side's installed doc.
+    let mut cold_seed_cache = dohc_engine_collab::WriterDocCache::new();
+    let warm_seed = dohc_engine_collab::record_local_update(
+        warm_store,
+        warm_cache,
+        &key,
+        &empty_base,
+        &NoFaults,
+        2_001,
+    )
+    .expect("warm cache seed");
+    let cold_seed = dohc_engine_collab::record_local_update(
+        cold_store,
+        &mut cold_seed_cache,
+        &key,
+        &empty_base,
+        &NoFaults,
+        2_001,
+    )
+    .expect("cold cache seed");
+    assert_eq!(warm_seed, cold_seed);
+    assert!(warm_cache.contains_for_test(&key));
+    (key, warm_claim)
+}
+
+#[derive(Deserialize)]
+struct RemoteCacheFixtureCorpus {
+    scenarios: Vec<RemoteCacheScenario>,
+}
+
+#[derive(Deserialize)]
+struct RemoteCacheScenario {
+    name: String,
+    #[serde(rename = "contentKind")]
+    content_kind: String,
+    #[serde(rename = "authoredUpdates")]
+    authored_updates: Vec<RemoteCacheAuthoredUpdate>,
+    #[serde(rename = "replayOrder")]
+    replay_order: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct RemoteCacheAuthoredUpdate {
+    id: String,
+    #[serde(rename = "updateBase64")]
+    update_base64: String,
+}
+
+#[test]
+fn cross_engine_replay_fixtures_match_cold_through_a_warmed_remote_cache() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+
+    const FIXTURES: &str =
+        include_str!("../../../tools/rust-engine-program/ydoc-replay-fixtures.json");
+    let fixtures: RemoteCacheFixtureCorpus =
+        serde_json::from_str(FIXTURES).expect("Y.Doc replay fixtures");
+    assert!(fixtures.scenarios.len() >= 6, "retain the full T6 corpus");
+
+    for (scenario_index, scenario) in fixtures.scenarios.iter().enumerate() {
+        let (_warm_scratch, _warm_path, mut warm_store) = store();
+        let (_cold_scratch, _cold_path, mut cold_store) = store();
+        let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
+        let object_id = format!("object-remote-cache-{scenario_index}");
+        let extension = if scenario.content_kind == "scene" {
+            "excalidraw"
+        } else {
+            "md"
+        };
+        let path = format!("cache/{scenario_index}.{extension}");
+        let (key, claim) = seed_warm_and_cold_remote_lineage(
+            &mut warm_store,
+            &mut warm_cache,
+            &mut cold_store,
+            &object_id,
+            &path,
+            &scenario.content_kind,
+        );
+        let updates: BTreeMap<&str, &RemoteCacheAuthoredUpdate> = scenario
+            .authored_updates
+            .iter()
+            .map(|update| (update.id.as_str(), update))
+            .collect();
+        assert_eq!(updates.len(), scenario.authored_updates.len());
+        let before = warm_cache.stats();
+
+        for (step, update_id) in scenario.replay_order.iter().enumerate() {
+            let update = updates.get(update_id.as_str()).unwrap_or_else(|| {
+                panic!("{} references unknown update {update_id}", scenario.name)
+            });
+            let bytes = STANDARD
+                .decode(&update.update_base64)
+                .unwrap_or_else(|error| panic!("{} {update_id}: {error}", scenario.name));
+            let warm_sha = warm_store
+                .put_binary_blob(&bytes)
+                .expect("warm fixture blob");
+            let cold_sha = cold_store
+                .put_binary_blob(&bytes)
+                .expect("cold fixture blob");
+            assert_eq!(warm_sha, cold_sha);
+            let mut operation = envelope(
+                &format!("fixture-{scenario_index}-{step}"),
+                0,
+                "ydoc.update",
+                json!({
+                    "versionId": "main",
+                    "objectId": object_id.clone(),
+                    "path": path.clone(),
+                    "contentKind": scenario.content_kind.clone(),
+                    "updateBlobSha256": warm_sha,
+                    "lineageClaimId": claim.clone(),
+                    "isBaseState": false
+                }),
+            );
+            operation.relay_seq = Some(i64::try_from(step + 1).expect("relay sequence"));
+            let warm = apply_ydoc_envelope_cached(
+                &mut warm_store,
+                &mut warm_cache,
+                &operation,
+                &NoFaults,
+                &NoLiveLeases,
+            )
+            .unwrap_or_else(|error| panic!("{} {update_id} warm: {error}", scenario.name));
+            let cold = apply_ydoc_envelope(&mut cold_store, &operation, &NoFaults, &NoLiveLeases)
+                .unwrap_or_else(|error| panic!("{} {update_id} cold: {error}", scenario.name));
+            assert_eq!(
+                warm, cold,
+                "{} {update_id} warm/cold verdict",
+                scenario.name
+            );
+        }
+
+        let after = warm_cache.stats();
+        let count = u64::try_from(scenario.replay_order.len()).expect("fixture update count");
+        assert_eq!(
+            after.hits - before.hits,
+            count,
+            "{} every remote candidate gates on the warmed cache",
+            scenario.name
+        );
+        assert_eq!(
+            after.advances - before.advances,
+            count,
+            "{} every committed remote candidate advances the cache",
+            scenario.name
+        );
+        let warm = dohc_engine_collab::load_persisted(&warm_store, &key)
+            .expect("warm persisted")
+            .expect("warm lineage");
+        let cold = dohc_engine_collab::load_persisted(&cold_store, &key)
+            .expect("cold persisted")
+            .expect("cold lineage");
+        assert!(
+            dohc_engine_collab::replay_parity::structurally_equal_v2_for_test(&warm.doc, &cold.doc)
+                .expect("warm/cold scan_v2"),
+            "{} final warm/cold replay structure",
+            scenario.name
+        );
+        let cached = dohc_engine_collab::Ydoc::wire();
+        cached
+            .apply(
+                &warm_cache
+                    .doc_full_state_for_test(&key)
+                    .expect("remote cache remains resident"),
+            )
+            .expect("cached full state");
+        assert!(
+            dohc_engine_collab::replay_parity::structurally_equal_v2_for_test(&cached, &cold.doc)
+                .expect("cache/cold scan_v2"),
+            "{} final cache/cold replay structure",
+            scenario.name
+        );
+        let warm_head = VersionedTextStore::new(&mut warm_store)
+            .read_text("ws", "main", &path)
+            .expect("warm visible head")
+            .expect("warm visible snapshot");
+        let cold_head = VersionedTextStore::new(&mut cold_store)
+            .read_text("ws", "main", &path)
+            .expect("cold visible head")
+            .expect("cold visible snapshot");
+        assert_eq!(
+            warm_head.text, cold_head.text,
+            "{} visible text",
+            scenario.name
+        );
+        assert_eq!(
+            warm_head.blob_sha256, cold_head.blob_sha256,
+            "{} visible digest",
+            scenario.name
+        );
+        assert_eq!(
+            warm_head.latest_moment_id, cold_head.latest_moment_id,
+            "{} visible moment",
+            scenario.name
+        );
+    }
+}
+
+#[test]
+fn refused_remote_projection_retains_and_advances_the_warmed_cache() {
+    let (_warm_scratch, _warm_path, mut warm_store) = store();
+    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
+    let object_id = "object-cache-refusal";
+    let path = "notes/cache-refusal.md";
+    let (key, claim) = seed_warm_and_cold_remote_lineage(
+        &mut warm_store,
+        &mut warm_cache,
+        &mut cold_store,
+        object_id,
+        path,
+        "plaintext",
+    );
+    seed_text_head(
+        &mut warm_store,
+        "object-cache-refusal-occupant",
+        "notes/cache-refusal-occupied.md",
+        "occupied",
+    );
+    seed_text_head(
+        &mut cold_store,
+        "object-cache-refusal-occupant",
+        "notes/cache-refusal-occupied.md",
+        "occupied",
+    );
+
+    let source = dohc_engine_collab::Ydoc::wire();
+    let refused_bytes = source.plaintext_insert(0, "refused-clock");
+    let descendant_bytes = source.plaintext_insert(13, " descendant");
+    let warm_refused_sha = warm_store
+        .put_binary_blob(&refused_bytes)
+        .expect("warm refused blob");
+    let cold_refused_sha = cold_store
+        .put_binary_blob(&refused_bytes)
+        .expect("cold refused blob");
+    assert_eq!(warm_refused_sha, cold_refused_sha);
+    let refused = envelope(
+        "cache-refusal-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": object_id,
+            "path": "notes/cache-refusal-occupied.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": warm_refused_sha,
+            "lineageClaimId": claim.clone(),
+            "isBaseState": false
+        }),
+    );
+    let before = warm_cache.stats();
+    let warm_refusal = apply_ydoc_envelope_cached(
+        &mut warm_store,
+        &mut warm_cache,
+        &refused,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("warm retained refusal");
+    let cold_refusal = apply_ydoc_envelope(&mut cold_store, &refused, &NoFaults, &NoLiveLeases)
+        .expect("cold retained refusal");
+    assert_eq!(warm_refusal, cold_refusal);
+    assert!(matches!(warm_refusal, ApplyOutcome::Refused(_)));
+    let after_refusal = warm_cache.stats();
+    assert_eq!(after_refusal.hits, before.hits + 1);
+    assert_eq!(
+        after_refusal.advances,
+        before.advances + 1,
+        "the retained domain mutation advances the cache"
+    );
+    assert!(warm_cache.contains_for_test(&key));
+
+    let warm_descendant_sha = warm_store
+        .put_binary_blob(&descendant_bytes)
+        .expect("warm descendant blob");
+    let cold_descendant_sha = cold_store
+        .put_binary_blob(&descendant_bytes)
+        .expect("cold descendant blob");
+    assert_eq!(warm_descendant_sha, cold_descendant_sha);
+    let descendant = envelope(
+        "cache-refusal-peer",
+        1,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": object_id,
+            "path": path,
+            "contentKind": "plaintext",
+            "updateBlobSha256": warm_descendant_sha,
+            "lineageClaimId": claim,
+            "isBaseState": false
+        }),
+    );
+    let warm_descendant = apply_ydoc_envelope_cached(
+        &mut warm_store,
+        &mut warm_cache,
+        &descendant,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("warm descendant");
+    let cold_descendant =
+        apply_ydoc_envelope(&mut cold_store, &descendant, &NoFaults, &NoLiveLeases)
+            .expect("cold descendant");
+    assert_eq!(warm_descendant, cold_descendant);
+    assert!(matches!(warm_descendant, ApplyOutcome::Applied(_)));
+    let final_stats = warm_cache.stats();
+    assert_eq!(final_stats.hits, before.hits + 2);
+    assert_eq!(final_stats.advances, before.advances + 2);
+
+    let warm = dohc_engine_collab::load_persisted(&warm_store, &key)
+        .expect("warm persisted")
+        .expect("warm lineage");
+    let cold = dohc_engine_collab::load_persisted(&cold_store, &key)
+        .expect("cold persisted")
+        .expect("cold lineage");
+    assert!(!warm.doc.has_pending_dependencies());
+    assert!(!cold.doc.has_pending_dependencies());
+    assert!(
+        dohc_engine_collab::replay_parity::structurally_equal_v2_for_test(&warm.doc, &cold.doc)
+            .expect("warm/cold refused lineage")
+    );
+    let cached = dohc_engine_collab::Ydoc::wire();
+    cached
+        .apply(
+            &warm_cache
+                .doc_full_state_for_test(&key)
+                .expect("advanced cache state"),
+        )
+        .expect("cached full state");
+    assert!(
+        dohc_engine_collab::replay_parity::structurally_equal_v2_for_test(&cached, &cold.doc)
+            .expect("cache/cold refused lineage")
+    );
+    let warm_head = VersionedTextStore::new(&mut warm_store)
+        .read_text("ws", "main", path)
+        .expect("warm head")
+        .expect("warm snapshot");
+    let cold_head = VersionedTextStore::new(&mut cold_store)
+        .read_text("ws", "main", path)
+        .expect("cold head")
+        .expect("cold snapshot");
+    assert_eq!(warm_head.text, cold_head.text);
+    assert!(warm_head.text.contains("refused-clock"));
+    assert!(warm_head.text.contains("descendant"));
+}
+
+fn assert_remote_cache_crash_seam(point: FaultPoint, committed: bool) {
+    let (_warm_scratch, _warm_path, mut warm_store) = store();
+    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
+    let object_id = format!("object-cache-crash-{}", point.as_str().replace('.', "-"));
+    let path = format!("notes/{object_id}.md");
+    let (key, claim) = seed_warm_and_cold_remote_lineage(
+        &mut warm_store,
+        &mut warm_cache,
+        &mut cold_store,
+        &object_id,
+        &path,
+        "plaintext",
+    );
+    let source = dohc_engine_collab::Ydoc::wire();
+    let first = source.plaintext_insert(0, "first");
+    let second = source.plaintext_insert(5, " second");
+    let warm_sha = warm_store.put_binary_blob(&first).expect("warm crash blob");
+    let cold_sha = cold_store.put_binary_blob(&first).expect("cold crash blob");
+    assert_eq!(warm_sha, cold_sha);
+    let operation = envelope(
+        "cache-crash-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": object_id,
+            "path": path,
+            "contentKind": "plaintext",
+            "updateBlobSha256": warm_sha,
+            "lineageClaimId": claim.clone(),
+            "isBaseState": false
+        }),
+    );
+    let before = warm_cache.stats();
+    let warm_faults = ScriptedFaults::crash_at(point);
+    let cold_faults = ScriptedFaults::crash_at(point);
+    let warm_outcome = apply_ydoc_envelope_cached(
+        &mut warm_store,
+        &mut warm_cache,
+        &operation,
+        warm_faults.as_ref(),
+        &NoLiveLeases,
+    )
+    .expect("warm crash outcome");
+    let cold_outcome = apply_ydoc_envelope(
+        &mut cold_store,
+        &operation,
+        cold_faults.as_ref(),
+        &NoLiveLeases,
+    )
+    .expect("cold crash outcome");
+    assert_eq!(warm_outcome, cold_outcome);
+    assert_eq!(warm_outcome, ApplyOutcome::Crashed { committed });
+    assert_eq!(warm_cache.stats().hits, before.hits + 1);
+    assert_eq!(
+        warm_cache.stats().advances,
+        before.advances,
+        "a cache cannot advance before an acknowledged commit"
+    );
+
+    if committed {
+        assert!(
+            !warm_cache.contains_for_test(&key),
+            "a durable-but-unacked append evicts the cache"
+        );
+        let warm = dohc_engine_collab::load_persisted(&warm_store, &key)
+            .expect("warm durable crash state")
+            .expect("warm lineage");
+        let cold = dohc_engine_collab::load_persisted(&cold_store, &key)
+            .expect("cold durable crash state")
+            .expect("cold lineage");
+        assert!(
+            dohc_engine_collab::replay_parity::structurally_equal_v2_for_test(&warm.doc, &cold.doc)
+                .expect("post-commit crash parity")
+        );
+        assert_eq!(
+            apply_ydoc_envelope_cached(
+                &mut warm_store,
+                &mut warm_cache,
+                &operation,
+                &NoFaults,
+                &NoLiveLeases,
+            )
+            .expect("warm crash retry"),
+            ApplyOutcome::Skipped
+        );
+        assert!(!warm_cache.contains_for_test(&key));
+
+        let warm_second_sha = warm_store
+            .put_binary_blob(&second)
+            .expect("warm post-crash blob");
+        let cold_second_sha = cold_store
+            .put_binary_blob(&second)
+            .expect("cold post-crash blob");
+        assert_eq!(warm_second_sha, cold_second_sha);
+        let second_operation = envelope(
+            "cache-crash-peer",
+            1,
+            "ydoc.update",
+            json!({
+                "versionId": "main",
+                "objectId": object_id,
+                "path": path,
+                "contentKind": "plaintext",
+                "updateBlobSha256": warm_second_sha,
+                "lineageClaimId": claim,
+                "isBaseState": false
+            }),
+        );
+        let before_rebuild = warm_cache.stats();
+        let warm_second = apply_ydoc_envelope_cached(
+            &mut warm_store,
+            &mut warm_cache,
+            &second_operation,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("warm post-crash append");
+        let cold_second =
+            apply_ydoc_envelope(&mut cold_store, &second_operation, &NoFaults, &NoLiveLeases)
+                .expect("cold post-crash append");
+        assert_eq!(warm_second, cold_second);
+        assert_eq!(warm_cache.stats().misses, before_rebuild.misses + 1);
+        assert_eq!(warm_cache.stats().installs, before_rebuild.installs + 1);
+        assert!(warm_cache.contains_for_test(&key));
+    } else {
+        assert!(
+            warm_cache.contains_for_test(&key),
+            "a rolled-back transaction preserves the validated cache entry"
+        );
+        let retry_before = warm_cache.stats();
+        let warm_retry = apply_ydoc_envelope_cached(
+            &mut warm_store,
+            &mut warm_cache,
+            &operation,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("warm rollback retry");
+        let cold_retry = apply_ydoc_envelope(&mut cold_store, &operation, &NoFaults, &NoLiveLeases)
+            .expect("cold rollback retry");
+        assert_eq!(warm_retry, cold_retry);
+        assert!(matches!(warm_retry, ApplyOutcome::Applied(_)));
+        assert_eq!(warm_cache.stats().hits, retry_before.hits + 1);
+        assert_eq!(warm_cache.stats().advances, retry_before.advances + 1);
+    }
+}
+
+#[test]
+fn sync_rollback_keeps_the_warmed_remote_cache_valid() {
+    assert_remote_cache_crash_seam(FaultPoint::SyncBeforeApplyCommit, false);
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn storage_rollback_keeps_the_warmed_remote_cache_valid() {
+    assert_remote_cache_crash_seam(FaultPoint::StorageBeforePersist, false);
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn storage_committed_crash_evicts_and_rebuilds_the_remote_cache() {
+    assert_remote_cache_crash_seam(FaultPoint::StorageAfterCommitBeforeAck, true);
+}
+
+#[test]
+fn pulled_lineage_replacement_evicts_the_warmed_remote_path_entry() {
+    let (_scratch, _path, mut store) = store();
+    seed_replication_version(&mut store, "main", "main");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-cache-replaced")
+        .expect("replacement key");
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) \
+                 VALUES ('ws','object-cache-replaced',1)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("replacement object");
+    dohc_engine_collab::ensure_marker(
+        &mut store,
+        &key,
+        dohc_engine_collab::ContentKind::Plaintext,
+        dohc_engine_collab::Regime::LocalOnly,
+        &NoFaults,
+        1_000,
+    )
+    .expect("local marker");
+    let local = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "local draft");
+    let mut cache = dohc_engine_collab::WriterDocCache::new();
+    dohc_engine_collab::record_local_update(&mut store, &mut cache, &key, &local, &NoFaults, 1_001)
+        .expect("warm local lineage");
+    assert!(cache.contains_for_test(&key));
+    let before = cache.stats();
+
+    let incoming = dohc_engine_collab::Ydoc::wire();
+    incoming.plaintext_insert(0, "remote winner");
+    let incoming_bytes = incoming.encode_full_state();
+    let claim = store
+        .put_binary_blob(&incoming_bytes)
+        .expect("incoming base blob");
+    let base = envelope(
+        "cache-replacement-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-cache-replaced",
+            "path": "notes/cache-replaced.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": claim.clone(),
+            "lineageClaimId": claim,
+            "isBaseState": true
+        }),
+    );
+    let outcome =
+        apply_ydoc_envelope_cached(&mut store, &mut cache, &base, &NoFaults, &NoLiveLeases)
+            .expect("replace local lineage");
+    let ApplyOutcome::Applied(result) = outcome else {
+        panic!("replacement did not apply: {outcome:?}");
+    };
+    assert!(result.lineage_replacement.is_some());
+    assert!(!cache.contains_for_test(&key));
+    assert_eq!(
+        cache.stats().removes,
+        before.removes + 1,
+        "the base payload evicts before its replacement transaction"
+    );
+}
+
+#[test]
 fn applied_ydoc_envelopes_materialize_the_projection_with_the_cursorable_ack() {
     // Oracle parity (`projectYDocUpdate` → `writeTextFileInDb` → CRDT rows):
     // an APPLIED (non-deferred) ydoc envelope must advance the VISIBLE head
@@ -9337,6 +10347,7 @@ fn a_base_over_an_unmerged_head_conflicts_even_when_the_lineage_holds_rows() {
     let draft = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "crashed draft");
     dohc_engine_collab::record_local_update_creating_marker(
         &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
         &key,
         Some("notes/crashed.md"),
         dohc_engine_collab::ContentKind::Plaintext,
@@ -12621,8 +13632,15 @@ fn a_pulled_base_replaces_local_only_rows_and_recovers_their_content() {
     )
     .expect("local-only marker");
     let local_update = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "local-part ");
-    dohc_engine_collab::record_local_update(&mut engine, &key, &local_update, &NoFaults, 1_460)
-        .expect("local row");
+    dohc_engine_collab::record_local_update(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &local_update,
+        &NoFaults,
+        1_460,
+    )
+    .expect("local row");
     // A lineage the client seeded from a captured head (#815). The
     // replacement below must clear this witness — the winning base holds
     // content the file does not, and a surviving stamp would feed the
@@ -12742,8 +13760,15 @@ fn a_deferred_base_replaces_local_only_rows_and_recovers_their_content() {
     )
     .expect("local-only marker");
     let local_update = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "local-part ");
-    dohc_engine_collab::record_local_update(&mut engine, &key, &local_update, &NoFaults, 1_460)
-        .expect("local row");
+    dohc_engine_collab::record_local_update(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &local_update,
+        &NoFaults,
+        1_460,
+    )
+    .expect("local row");
     // Same witness pin as the pulled-base twin (#815): the deferred drain's
     // replacement must clear the seed source with the rows it described.
     engine

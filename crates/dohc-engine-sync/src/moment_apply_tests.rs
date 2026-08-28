@@ -559,6 +559,7 @@ fn moment_delete_with_unsettled_lineage_stays_unacked() {
     let update = doc.plaintext_insert(0, "only durable draft");
     dohc_engine_collab::record_local_update_creating_marker(
         &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
         &key,
         Some("notes/unsettled.md"),
         YdocContentKind::Plaintext,
@@ -678,6 +679,7 @@ fn moment_delete_with_orphan_scene_lineage_stays_unacked() {
     .expect("import scene");
     dohc_engine_collab::record_local_update_creating_marker(
         &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
         &key,
         Some("drawings/orphan.excalidraw"),
         YdocContentKind::Scene,
@@ -760,6 +762,7 @@ fn moment_delete_from_absent_sender_head_preserves_unsettled_lineage() {
     let update = doc.plaintext_insert(0, "only durable draft");
     dohc_engine_collab::record_local_update_creating_marker(
         &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
         &key,
         Some("notes/absent.md"),
         YdocContentKind::Plaintext,
@@ -1027,6 +1030,7 @@ fn moment_append_live_lease_blocks_all_mutations_and_write_waits_for_ydoc_rewrit
         let update = doc.plaintext_insert(0, "before");
         dohc_engine_collab::record_local_update_creating_marker(
             &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &key,
             Some("head.md"),
             YdocContentKind::Plaintext,

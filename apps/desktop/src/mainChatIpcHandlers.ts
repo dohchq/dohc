@@ -54,24 +54,64 @@ export function createWritableChatIpcHandler<
   };
 }
 
+export function createMarkChatThreadReadIpcHandler<
+  Event,
+  Payload extends WorkspacePayload,
+  Context extends WorkspaceContext,
+  Result,
+>(input: {
+  assertTrustedSender: (event: Event) => void;
+  parsePayload: (payload: unknown) => Payload;
+  requireContext: (workspaceId: string) => Promise<Context>;
+  run: (context: Context, payload: Payload) => Promise<Result>;
+}): MainChatIpcHandler<Event, Result> {
+  return createWritableChatIpcHandler({
+    ...input,
+    // Read state belongs to this reader, stays local, and never replicates.
+    // Neither a share level nor a joined-channel grant gates this operation.
+    assertWritable: null,
+  });
+}
+
 // The joined lane's read, as a handler a test can drive without booting
 // Electron. It exists as a seam because the scoping is the whole contract of
 // #640: the registry array grows with every channel the workspace has ever
 // joined, and the response must not. Source-text pins cannot show a response
 // size, so this is the layer the size test drives.
-export function createListJoinedSharedChannelsIpcHandler<Event>(input: {
+export function createListJoinedSharedChannelsIpcHandler<
+  Event,
+  Workspace extends { readonly workspaceId: string } = {
+    readonly workspaceId: string;
+  },
+>(input: {
   assertTrustedSender: (event: Event) => void;
-  answerJoinedChannels: (
+  withWorkspaceOperation: <Result>(
+    event: Event,
     workspaceId: string,
+    work: (operation: {
+      readonly workspace: Workspace;
+      assertCurrent(): void;
+    }) => Result | Promise<Result>,
+  ) => Promise<Result>;
+  answerJoinedChannels: (
+    workspace: Workspace,
     channelWireIds: readonly string[],
   ) => JoinedChannelAnswer[];
 }): MainChatIpcHandler<Event, ListJoinedSharedChannelsResult> {
   return async (event, rawPayload) => {
     input.assertTrustedSender(event);
     const payload = ListJoinedSharedChannelsPayload.parse(rawPayload);
-    return ListJoinedSharedChannelsResult.parse({
-      joined: input.answerJoinedChannels(payload.workspaceId, payload.channelWireIds),
-    });
+    return input.withWorkspaceOperation(
+      event,
+      payload.workspaceId,
+      (operation) =>
+        ListJoinedSharedChannelsResult.parse({
+          joined: input.answerJoinedChannels(
+            operation.workspace,
+            payload.channelWireIds,
+          ),
+        }),
+    );
   };
 }
 
@@ -91,31 +131,6 @@ export function createChatChannelIpcHandler<
   return createWritableChatIpcHandler({
     ...input,
     afterWrite: [({ workspace }) => input.queueCloudSync(workspace.workspaceId)],
-  });
-}
-
-export function createSharedChannelWritableChatIpcHandler<
-  Event,
-  Payload extends WorkspacePayload,
-  Context extends WorkspaceContext,
-  Result,
->(input: {
-  assertTrustedSender: (event: Event) => void;
-  parsePayload: (payload: unknown) => Payload;
-  requireContext: (workspaceId: string) => Promise<Context>;
-  assertWritable: ((context: Context) => void) | null;
-  assertSharedChannelWritable: (
-    context: Context,
-    payload: Payload,
-  ) => Promise<void>;
-  run: (context: Context, payload: Payload) => Promise<Result>;
-}): MainChatIpcHandler<Event, Result> {
-  return createWritableChatIpcHandler({
-    ...input,
-    run: async (context, payload) => {
-      await input.assertSharedChannelWritable(context, payload);
-      return input.run(context, payload);
-    },
   });
 }
 
@@ -349,7 +364,7 @@ export async function readRelayChatShareLanes(input: {
     granted?: Array<Record<string, unknown>>;
     received?: Array<Record<string, unknown>>;
   }>;
-  remoteWorkspaceId: string | null;
+  workspaceId: string | null;
   // Received shares that belong to ANOTHER local workspace: already joined
   // there. A received grant is
   // account-wide, so without this the lane is the same in every workspace —
@@ -380,7 +395,7 @@ export async function readRelayChatShareLanes(input: {
   try {
     const mapped = mapRelayShareListing(
       listing,
-      input.remoteWorkspaceId,
+      input.workspaceId,
       input.shareIdsClaimedElsewhere,
     );
     // Size is validated HERE, not by the contract schema. Every row can be
@@ -440,7 +455,7 @@ function mapRelayShareListing(
     granted?: Array<Record<string, unknown>>;
     received?: Array<Record<string, unknown>>;
   },
-  remoteWorkspaceId: string | null,
+  workspaceId: string | null,
   shareIdsClaimedElsewhere: ReadonlySet<string>,
 ): {
   granted: Array<Record<string, unknown>>;
@@ -448,15 +463,19 @@ function mapRelayShareListing(
 } {
   const chatSelector = (row: Record<string, unknown>) => {
     const selector = row.selector as
-      | { kind?: unknown; channelWireId?: unknown; access?: unknown }
+      | { kind?: unknown; channelWireId?: unknown }
       | undefined;
-    return selector?.kind === "chat-channel" &&
-      typeof selector.channelWireId === "string"
-      ? {
-          channelWireId: selector.channelWireId,
-          access: selector.access === "read-only" ? "read-only" : "read-write",
-        }
-      : null;
+    if (selector?.kind !== "chat-channel" || typeof selector.channelWireId !== "string") {
+      return null;
+    }
+    // A readable chat selector whose grant access is unreadable is a
+    // malformed listing, not an empty one: answering would clear cached
+    // grants the relay never disavowed. Throwing lands in the guard above,
+    // which reports the listing as unreachable.
+    if (row.access !== "read-only" && row.access !== "read-write") {
+      throw new Error("chat share row carries unreadable access");
+    }
+    return { channelWireId: selector.channelWireId, access: row.access };
   };
   const grantedRows = listing.granted ?? [];
   const receivedRows = listing.received ?? [];
@@ -470,10 +489,10 @@ function mapRelayShareListing(
   const received: Array<Record<string, unknown>> = [];
   for (const row of grantedRows) {
     const selector = chatSelector(row);
-    // Grants are scoped to THIS workspace's remote identity: a channel shared
+    // Grants are scoped to this workspace: a channel shared
     // from another workspace is managed there.
-    if (!selector || remoteWorkspaceId === null) continue;
-    if (row.workspaceId !== remoteWorkspaceId) continue;
+    if (!selector || workspaceId === null) continue;
+    if (row.workspaceId !== workspaceId) continue;
     // REVOKED grants are the granted lane's tombstones, and they are dropped
     // rather than listed. The relay keeps returning them to the granter, so
     // counting them made the cap measure an account's LIFETIME grants: past

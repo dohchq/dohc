@@ -19,6 +19,14 @@ export interface OfferedPluginSource {
   publisher: string | null;
 }
 
+export interface BuiltinPluginOfferManifest extends OfferedPluginSource {
+  pluginId: string;
+}
+
+export type BuiltinPluginOfferManifestReader = (
+  directoryName: (typeof BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES)[number],
+) => Promise<BuiltinPluginOfferManifest>;
+
 function isMissing(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === "ENOENT";
 }
@@ -49,6 +57,8 @@ export async function listOfferedPlugins(
   builtinPluginsRoot: string,
   workspaceRoot: string,
   existingPluginIds: ReadonlySet<string>,
+  readBuiltinManifest: BuiltinPluginOfferManifestReader = (directoryName) =>
+    readBuiltinPluginOfferManifest(builtinPluginsRoot, directoryName),
 ): Promise<OfferedPluginSource[]> {
   const offers: OfferedPluginSource[] = [];
   for (const directoryName of BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES) {
@@ -60,30 +70,44 @@ export async function listOfferedPlugins(
       continue;
     }
 
-    const sourceRoot = join(builtinPluginsRoot, directoryName);
-    const manifest = await readPluginManifestFile(sourceRoot);
-    if (!manifest.ok) {
-      // A built-in ships with dohc itself — dev repo path or packaged
-      // extraResources — so its manifest is never optional the way a
-      // hand-authored plugin's is. Silently omitting it here would read as
-      // "nothing to offer" instead of "the packaged install is broken";
-      // propagating it as a real failure surfaces the retryable offers-error
-      // state instead of a falsely reassuring empty list.
-      throw new Error(
-        `The built-in ${directoryName} plugin's manifest could not be read: ` +
-          manifest.diagnostics.join(" "),
-      );
-    }
+    const manifest = await readBuiltinManifest(directoryName);
     // Read from the manifest itself, never directoryName (see above).
-    if (existingPluginIds.has(manifest.manifest.name)) continue;
+    if (existingPluginIds.has(manifest.pluginId)) continue;
     offers.push({
       directoryName,
-      displayName: manifest.manifest.displayName ?? null,
-      description: manifest.manifest.description ?? null,
-      publisher: manifest.manifest.publisher ?? null,
+      displayName: manifest.displayName,
+      description: manifest.description,
+      publisher: manifest.publisher,
     });
   }
   return offers;
+}
+
+export async function readBuiltinPluginOfferManifest(
+  builtinPluginsRoot: string,
+  directoryName: (typeof BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES)[number],
+): Promise<BuiltinPluginOfferManifest> {
+  const sourceRoot = join(builtinPluginsRoot, directoryName);
+  const manifest = await readPluginManifestFile(sourceRoot);
+  if (!manifest.ok) {
+    // A built-in ships with dohc itself — dev repo path or packaged
+    // extraResources — so its manifest is never optional the way a
+    // hand-authored plugin's is. Silently omitting it here would read as
+    // "nothing to offer" instead of "the packaged install is broken";
+    // propagating it as a real failure surfaces the retryable offers-error
+    // state instead of a falsely reassuring empty list.
+    throw new Error(
+      `The built-in ${directoryName} plugin's manifest could not be read: ` +
+        manifest.diagnostics.join(" "),
+    );
+  }
+  return {
+    directoryName,
+    pluginId: manifest.manifest.name,
+    displayName: manifest.manifest.displayName ?? null,
+    description: manifest.manifest.description ?? null,
+    publisher: manifest.manifest.publisher ?? null,
+  };
 }
 
 export class OfferedPluginAddError extends Error {

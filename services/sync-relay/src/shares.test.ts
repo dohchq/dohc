@@ -173,9 +173,13 @@ describe("share grants", () => {
       ok: true,
       shareId: "share-0",
       workspaceId: WORKSPACE,
-      selector: { paths: ["docs", "notes.md"], versionId: null, access: "view" },
+      selector: { paths: ["docs", "notes.md"], versionId: null },
+      access: "view",
+      grantId: expect.any(String),
+      generation: 1,
       createdAtMs: 5555,
     });
+    expect(created.selector).not.toHaveProperty("access");
     expect(created).not.toHaveProperty("recipientUserId");
 
     const granterList = await json(await h(request(GRANTER, "/sync/shares")));
@@ -185,7 +189,11 @@ describe("share grants", () => {
         workspaceId: WORKSPACE,
         recipientUserId: RECIPIENT,
         recipientEmail: `${RECIPIENT}@dohc.test`,
-        selector: { paths: ["docs", "notes.md"], versionId: null, access: "view" },
+        selector: { paths: ["docs", "notes.md"], versionId: null },
+        access: "view",
+        grantId: expect.any(String),
+        principalKind: "user",
+        generation: 1,
         createdAtMs: 5555,
         revokedAtMs: null,
       },
@@ -200,6 +208,11 @@ describe("share grants", () => {
       shareId: "share-0",
       granterUserId: GRANTER,
       granterEmail: `${GRANTER}@dohc.test`,
+      selector: { paths: ["docs", "notes.md"], versionId: null },
+      access: "view",
+      grantId: expect.any(String),
+      principalKind: "user",
+      generation: 1,
     });
     // The recipient never learns the granter's workspace id.
     expect(received[0]).not.toHaveProperty("workspaceId");
@@ -209,7 +222,83 @@ describe("share grants", () => {
       ok: true,
       shareId: "share-0",
       granterUserId: GRANTER,
-      selector: { paths: ["docs", "notes.md"], versionId: null, access: "view" },
+      selector: { paths: ["docs", "notes.md"], versionId: null },
+      access: "view",
+      grantId: expect.any(String),
+      principalKind: "user",
+      generation: 1,
+    });
+  });
+
+  it("marks a file selector with chat access as damaged and keeps the share revocable", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    storage.createShare({
+      share: {
+        shareId: "share-damaged-file-access",
+        workspaceId: WORKSPACE,
+        granterUserId: GRANTER,
+        selectorJson: JSON.stringify({ paths: ["docs"], versionId: null }),
+        createdAtMs: 1000,
+      },
+      grant: {
+        grantId: "grant-damaged-file-access",
+        shareId: "share-damaged-file-access",
+        principalKind: "user",
+        principalUserId: RECIPIENT,
+        principalEmail: null,
+        access: "read-write",
+        generation: 1,
+        status: "active",
+        createdAtMs: 1000,
+        revokedAtMs: null,
+        parentGrantId: null,
+      },
+    });
+
+    const granted = (await json(await h(request(GRANTER, "/sync/shares")))).granted as Array<
+      Record<string, unknown>
+    >;
+    expect(granted).toContainEqual(
+      expect.objectContaining({
+        shareId: "share-damaged-file-access",
+        selector: null,
+        access: "read-write",
+        damaged: true,
+        revokedAtMs: null,
+      }),
+    );
+
+    const received = (await json(await h(request(RECIPIENT, "/sync/shares")))).received as Array<
+      Record<string, unknown>
+    >;
+    expect(received).toContainEqual(
+      expect.objectContaining({
+        shareId: "share-damaged-file-access",
+        selector: null,
+        access: "read-write",
+        damaged: true,
+      }),
+    );
+    expect(received[0]).not.toHaveProperty("workspaceId");
+
+    const revoke = await h(
+      request(GRANTER, "/sync/shares/share-damaged-file-access/revoke", { method: "POST" }),
+    );
+    expect(revoke.status).toBe(200);
+    expect((await json(await h(request(RECIPIENT, "/sync/shares")))).received).toEqual([]);
+    expect(
+      ((await json(await h(request(GRANTER, "/sync/shares")))).granted as Array<
+        Record<string, unknown>
+      >)[0],
+    ).toMatchObject({
+      shareId: "share-damaged-file-access",
+      selector: null,
+      access: "read-write",
+      damaged: true,
+      generation: 2,
+      revokedAtMs: 5555,
     });
   });
 
@@ -227,16 +316,20 @@ describe("share grants", () => {
         ),
       );
       expect(create.status, access).toBe(200);
-      expect((await json(create)).selector, access).toMatchObject({ access });
+      const created = await json(create);
+      expect(created.access, access).toBe(access);
+      expect(created.selector, access).not.toHaveProperty("access");
     }
 
     const granterList = await json(await h(request(GRANTER, "/sync/shares")));
-    const granted = granterList.granted as Array<{ selector: { access: string } }>;
-    expect(granted.map((row) => row.selector.access)).toEqual(["view", "comment", "edit"]);
+    const granted = granterList.granted as Array<{ access: string; selector: object }>;
+    expect(granted.map((row) => row.access)).toEqual(["view", "comment", "edit"]);
+    expect(granted.every((row) => !("access" in row.selector))).toBe(true);
 
     const recipientList = await json(await h(request(RECIPIENT, "/sync/shares")));
-    const received = recipientList.received as Array<{ selector: { access: string } }>;
-    expect(received.map((row) => row.selector.access)).toEqual(["view", "comment", "edit"]);
+    const received = recipientList.received as Array<{ access: string; selector: object }>;
+    expect(received.map((row) => row.access)).toEqual(["view", "comment", "edit"]);
+    expect(received.every((row) => !("access" in row.selector))).toBe(true);
   });
 
   it("refuses an unrecognized access value at grant time", async () => {
@@ -604,6 +697,57 @@ describe("share grants", () => {
     expect(await denialBytes(await h(request(STRANGER, `/sync/shares/share-0/blobs/${sharedSha}`)))).toBe(unknown);
   });
 
+  it("serves an earlier write's blob to an authenticated recipient replaying share history", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const earlierContent = "earlier body";
+    const replacementContent = "replacement body";
+    const earlierSha = await putBlob(h, earlierContent);
+    await putBlob(h, replacementContent);
+    await appendOps(h, [
+      momentOp("docs/shared.md", earlierContent),
+      momentOp("docs/shared.md", replacementContent, {
+        payloadBeforeBlobSha256: earlierSha,
+        payloadBeforePath: "docs/shared.md",
+        beforePresent: "present",
+      }),
+    ]);
+    await createShare(h);
+
+    const earlier = await h(
+      request(RECIPIENT, `/sync/shares/share-0/blobs/${earlierSha}`),
+    );
+    expect(earlier.status, await earlier.clone().text()).toBe(200);
+    expect(await earlier.text()).toBe(earlierContent);
+  });
+
+  it("serves a deleted file's blob to an authenticated recipient replaying share history", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const deletedContent = "deleted body";
+    const deletedSha = await putBlob(h, deletedContent);
+    await appendOps(h, [
+      momentOp("docs/shared.md", deletedContent),
+      momentOp("docs/shared.md", deletedContent, {
+        operation: "delete",
+        payloadBeforeBlobSha256: deletedSha,
+        payloadBeforePath: "docs/shared.md",
+        payloadAfterBlobSha256: null,
+        payloadAfterPath: null,
+        beforePresent: "present",
+      }),
+    ]);
+    await createShare(h);
+
+    const deleted = await h(
+      request(RECIPIENT, `/sync/shares/share-0/blobs/${deletedSha}`),
+    );
+    expect(deleted.status, await deleted.clone().text()).toBe(200);
+    expect(await deleted.text()).toBe(deletedContent);
+  });
+
   it("stops serving a revoked share on the next fetch, byte-identically to one that never existed", async () => {
     const storage = await testStorage();
     const h = handler(storage);
@@ -613,6 +757,11 @@ describe("share grants", () => {
     await createShare(h);
 
     expect((await h(request(RECIPIENT, "/sync/shares/share-0/log?since=0"))).status).toBe(200);
+    expect(storage.listSharesGrantedBy(GRANTER)[0]?.grant).toMatchObject({
+      generation: 1,
+      status: "active",
+      revokedAtMs: null,
+    });
 
     // The recipient cannot revoke; only the granter can.
     const recipientRevoke = await h(request(RECIPIENT, "/sync/shares/share-0/revoke", { method: "POST" }));
@@ -622,6 +771,11 @@ describe("share grants", () => {
     expect(revoke.status).toBe(200);
     // Idempotent for the granter.
     expect((await h(request(GRANTER, "/sync/shares/share-0/revoke", { method: "POST" }))).status).toBe(200);
+    expect(storage.listSharesGrantedBy(GRANTER)[0]?.grant).toMatchObject({
+      generation: 2,
+      status: "revoked",
+      revokedAtMs: 5555,
+    });
 
     const missing = await denialBytes(await h(request(RECIPIENT, "/sync/shares/share-404/log?since=0")));
     expect(await denialBytes(await h(request(RECIPIENT, "/sync/shares/share-0/log?since=0")))).toBe(missing);

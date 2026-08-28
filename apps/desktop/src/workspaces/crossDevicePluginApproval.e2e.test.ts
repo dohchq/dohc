@@ -20,6 +20,7 @@ import { afterAll, beforeAll, expect, it } from "vitest";
 import { openLiveDaemonWorkspace } from "../../e2e/helpers/daemonSeed";
 import { spawnSyncRelay } from "../../e2e/helpers/syncRelay";
 import { PluginHost, type PluginHostOptions } from "../plugins/PluginHost";
+import { PluginHostOwnership } from "../plugins/pluginHostOwnership";
 import { PluginPipeline } from "../plugins/PluginPipeline";
 import { resolvePluginEsbuildBinary } from "../plugins/pluginBuildRunner";
 import {
@@ -198,7 +199,10 @@ async function openDaemon(
   join_: boolean,
 ): Promise<LiveDaemonCapture> {
   const workspace = await openLiveDaemonWorkspace(input, { maxRestarts: 0 });
-  const relay = workspace.relay.bind(input);
+  const relay = workspace.relay.bind({
+    ...workspace.workspace,
+    relay: input.relay,
+  });
   if (join_) {
     const probe = await probeRelayWorkspace({
       workspaceId: input.workspaceId,
@@ -217,8 +221,7 @@ async function openDaemon(
     }
   }
   const capture = createWorkspaceEngineCapture({
-    workspaceId: input.workspaceId,
-    rootPath: input.rootPath,
+    ...workspace.workspace,
     rustEngineSessions: workspace.sessions,
     daemonOwnsCapture: true,
   });
@@ -315,7 +318,7 @@ async function openDevice(
   pipeline = new PluginPipeline({
     workspaceRoot,
     stateDir,
-    pluginHost: host,
+    hostOwnership: new PluginHostOwnership(host),
     resourcesBasePath,
     pnpmRunnerEntry,
     operations: {

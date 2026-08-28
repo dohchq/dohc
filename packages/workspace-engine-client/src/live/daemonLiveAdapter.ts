@@ -37,12 +37,15 @@ export interface DaemonWireError extends Omit<WireError, "code"> {
   code: DaemonErrorCode;
 }
 
-export interface MinimalDaemonClient {
+export interface DaemonRequesterClient {
   sendRequest(request: Request): Promise<Response>;
   readonly helloAck?: {
     readonly capabilities: readonly string[];
   };
   onBlob?(handler: (blob: CompletedDaemonBlob) => void): () => void;
+}
+
+export interface MinimalDaemonClient extends DaemonRequesterClient {
   close(): void;
 }
 
@@ -348,11 +351,11 @@ interface SharedRequestIdState {
 }
 
 const requestIdsByClient = new WeakMap<
-  MinimalDaemonClient,
+  DaemonRequesterClient,
   SharedRequestIdState
 >();
 
-function sharedRequestIds(client: MinimalDaemonClient): SharedRequestIdState {
+function sharedRequestIds(client: DaemonRequesterClient): SharedRequestIdState {
   const existing = requestIdsByClient.get(client);
   if (existing !== undefined) return existing;
   const created = { nextRequestId: 1 };
@@ -363,7 +366,7 @@ function sharedRequestIds(client: MinimalDaemonClient): SharedRequestIdState {
 export class WorkspaceDaemonRequester {
   private readonly requestIds: SharedRequestIdState;
 
-  constructor(private readonly client: MinimalDaemonClient) {
+  constructor(private readonly client: DaemonRequesterClient) {
     this.requestIds = sharedRequestIds(client);
   }
 
@@ -470,6 +473,11 @@ export class WorkspaceDaemonRequester {
   }
 
   closeTransport(): void {
+    if (!("close" in this.client) || typeof this.client.close !== "function") {
+      throw new DaemonProtocolError(
+        "This daemon requester client does not expose transport close.",
+      );
+    }
     this.client.close();
   }
 }

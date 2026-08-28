@@ -985,10 +985,6 @@ export interface VersionedTextStore {
       | { kind: "apply-merged"; text: string };
     metadata: ActorNeutralWriteMetadata;
   }): Promise<VersionedTextConflictResolveResult>;
-  listTextFiles(input: {
-    workspaceId: WorkspaceId;
-    versionId: VersionId;
-  }): Promise<TextFileSnapshot[]>;
   renameTextFile(input: {
     workspaceId: WorkspaceId;
     versionId: VersionId;
@@ -1594,6 +1590,10 @@ export interface LinkedChatStore {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;
   }): Promise<ChatMessage[]>;
+  getThreadRevision(input: {
+    workspaceId: WorkspaceId;
+    threadId: ChatThreadId;
+  }): Promise<number>;
   resolveChatDecision(input: {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;
@@ -2052,12 +2052,6 @@ export interface SecretFileStore {
     workspaceId: WorkspaceId;
     versionId: VersionId;
   }): Promise<SecretFileStat[]>;
-  // Newest first (descending momentOrder). The secret timeline is expected
-  // to stay short; callers merge it into paged text timelines by time range.
-  listSecretMoments(input: {
-    workspaceId: WorkspaceId;
-    versionId?: VersionId;
-  }): Promise<SecretFileMoment[]>;
   getSecretMoment(input: {
     workspaceId: WorkspaceId;
     momentId: string;

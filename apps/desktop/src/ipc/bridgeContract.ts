@@ -1,6 +1,7 @@
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { SHARE_ACCESS_VALUES } from "@dohc/security-contract/share-selector";
 import {
+  hasEngineIgnoredSegment,
   WORKSPACE_KINDS,
   WORKSPACE_MODES,
 } from "@dohc/workspace-core";
@@ -39,9 +40,7 @@ import {
   MENU_COMMANDS,
   ENGINE_YDOC_SESSION_ID_MAX_CHARS,
   ENGINE_YDOC_UPDATE_MAX_BYTES,
-  SEARCH_EVENT_MAX_ENTRIES,
   SEARCH_EVENT_MAX_ID_CHARS,
-  SEARCH_EVENT_MAX_PREVIEW_CHARS,
   BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES,
   PLUGIN_PIPELINE_ERROR_STAGES,
   PLUGIN_PIPELINE_STATUSES,
@@ -140,9 +139,9 @@ const WORKSPACE_EDITOR_TEXT = z.string().superRefine((text, ctx) => {
 // Matching the STORAGE contract does not promise that every stored body
 // arrives. The daemon caps one wire string at 8 MiB (`WireLimits`,
 // `crates/dohc-engine-protocol/src/limits.rs`), so a larger body reaches the
-// renderer only by blob hydration. `versionedText.read` and the moment
-// timeline hydrate, compare rows inherit that through `listTextFiles`, and
-// conflict listing hydrates its withheld sides too (#537) — see VERSION_TEXT.
+// renderer only by blob hydration. `versionedText.read`, the moment timeline,
+// compare rows, and conflict listing all hydrate withheld bodies (#537) — see
+// VERSION_TEXT.
 //
 // One REQUEST field shares the schema — the combined conflict resolution at
 // VERSION_TEXT. There this bound is only a ceiling on what crosses IPC; the
@@ -306,8 +305,16 @@ export type AttachWorkspaceFolderPayload = z.infer<
   typeof AttachWorkspaceFolderPayload
 >;
 
-export const ListWorkspaceFilesPayload = z.object({
+export const WorkspaceIdPayload = z.object({
   workspaceId: WORKSPACE_ID,
+});
+export type WorkspaceIdPayload = z.infer<typeof WorkspaceIdPayload>;
+
+export const ListWorkspaceFilesPayload = WorkspaceIdPayload.extend({
+  // Activity refreshes may reuse main's last complete listing. Every other
+  // caller omits this and forces a disk/share walk, so direct mutations and
+  // the Explorer's explicit refresh cannot observe a pre-watcher cache.
+  allowCached: z.literal(true).optional(),
 });
 export type ListWorkspaceFilesPayload = z.infer<
   typeof ListWorkspaceFilesPayload
@@ -329,6 +336,10 @@ export const ListWorkspaceFilesResult = z.object({
   // appear in the tree. Optional so older fixtures/consumers keep parsing;
   // the main-side walk always provides it.
   folders: z.array(PATH_STRING).optional(),
+  // Hit-only presentation provenance. Absence means this request performed
+  // the owned-workspace walk; a cached answer must be revalidated before the
+  // renderer uses it as evidence that a path is missing.
+  cached: z.literal(true).optional(),
 });
 export type ListWorkspaceFilesResult = z.infer<typeof ListWorkspaceFilesResult>;
 
@@ -511,6 +522,16 @@ export const OpenWorkspacePayload = z.object({
   workspaceId: WORKSPACE_ID,
 });
 export type OpenWorkspacePayload = z.infer<typeof OpenWorkspacePayload>;
+
+// Preload adds one identity for its renderer document. It is intentionally not
+// part of DohcDesktopBridge: renderer code cannot choose or reuse it across a
+// reload, while main can distinguish a late invoke from the outgoing document.
+export const OpenWorkspaceRequestPayload = OpenWorkspacePayload.extend({
+  rendererDocumentId: z.uuid(),
+});
+export const ReloadRendererRequestPayload = z.object({
+  rendererDocumentId: z.uuid(),
+});
 
 export const ReadWorkspaceTextPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -783,6 +804,7 @@ const DatabaseTableView = z.object({
   name: z.string(),
   columns: z.array(DatabaseColumnView),
   rows: z.array(z.record(z.string(), z.unknown())),
+  nextOffset: z.number().int().nonnegative().nullable(),
 });
 
 export const DatabaseSnapshotResult = z.object({
@@ -797,6 +819,25 @@ export const ReadWorkspaceDatabasePayload = z.object({
 });
 export type ReadWorkspaceDatabasePayload = z.infer<typeof ReadWorkspaceDatabasePayload>;
 
+export const ReadWorkspaceDatabasePagePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  relativePath: PATH_STRING,
+  table: SQL_IDENT,
+  offset: z.number().int().nonnegative(),
+});
+export type ReadWorkspaceDatabasePagePayload = z.infer<
+  typeof ReadWorkspaceDatabasePagePayload
+>;
+
+export const DatabasePageResult = z.object({
+  path: z.string(),
+  table: z.string(),
+  offset: z.number().int().nonnegative(),
+  rows: z.array(z.record(z.string(), z.unknown())),
+  nextOffset: z.number().int().nonnegative().nullable(),
+});
+export type DatabasePageResult = z.infer<typeof DatabasePageResult>;
+
 export const ApplyDatabaseEditPayload = z.object({
   workspaceId: WORKSPACE_ID,
   relativePath: PATH_STRING,
@@ -809,6 +850,18 @@ export const ApplyDatabaseEditPayload = z.object({
   }),
 });
 export type ApplyDatabaseEditPayload = z.infer<typeof ApplyDatabaseEditPayload>;
+
+export const DatabaseEditResult = z.object({
+  path: z.string(),
+  table: z.string(),
+  page: z.object({
+    offset: z.number().int().nonnegative(),
+    rows: z.array(z.record(z.string(), z.unknown())),
+    nextOffset: z.number().int().nonnegative().nullable(),
+  }),
+  version: z.number().int().nonnegative(),
+});
+export type DatabaseEditResult = z.infer<typeof DatabaseEditResult>;
 
 export const ImportToDatabasePayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -1005,6 +1058,7 @@ export const ListEngineMomentsResult = z.object({
   // timeline; anything below that is malformed.
   latestMomentOrder: z.number().int().min(-1),
   activeVersionId: z.string().min(1).max(200),
+  protectedTruncated: z.boolean(),
 });
 export type ListEngineMomentsResult = z.infer<typeof ListEngineMomentsResult>;
 
@@ -1274,6 +1328,21 @@ export const ListChatMessagesResult = z.object({
   messages: z.array(ChatMessageRecord),
 });
 export type ListChatMessagesResult = z.infer<typeof ListChatMessagesResult>;
+
+export const GetChatThreadRevisionPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  threadId: CHAT_THREAD_ID,
+});
+export type GetChatThreadRevisionPayload = z.infer<
+  typeof GetChatThreadRevisionPayload
+>;
+
+export const GetChatThreadRevisionResult = z.object({
+  revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+});
+export type GetChatThreadRevisionResult = z.infer<
+  typeof GetChatThreadRevisionResult
+>;
 
 export const SendChatMessagePayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -1766,7 +1835,11 @@ export type StartDmResult = z.infer<typeof StartDmResult>;
 // the bearer independently.
 export const PresenceScopeInput = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("workspace"), workspaceId: WORKSPACE_ID }),
-  z.object({ kind: z.literal("share"), shareId: z.string().min(1).max(200) }),
+  z.object({
+    kind: z.literal("share"),
+    workspaceId: WORKSPACE_ID,
+    shareId: z.string().min(1).max(200),
+  }),
 ]);
 export type PresenceScopeInput = z.infer<typeof PresenceScopeInput>;
 
@@ -1774,6 +1847,7 @@ export type PresenceScopeInput = z.infer<typeof PresenceScopeInput>;
 // MAX_CLIENT_ID_CHARS): reject early rather than round-trip an over-long value.
 const PRESENCE_TOPIC = z.string().min(1).max(1024);
 const PRESENCE_CLIENT_ID = z.string().min(1).max(128);
+const PRESENCE_INCARNATION_ID = z.uuid();
 const PRESENCE_POLL_ID = z.string().min(1).max(128);
 
 // Cap the opaque presence state at the IPC boundary, mirroring the relay's
@@ -1856,6 +1930,7 @@ export const PresencePublishPayload = z.object({
   scope: PresenceScopeInput,
   topic: PRESENCE_TOPIC,
   clientId: PRESENCE_CLIENT_ID,
+  incarnationId: PRESENCE_INCARNATION_ID,
   // Opaque display payload (e.g. { displayName, typing }) — forwarded verbatim
   // to the relay, which caps its serialized size. Absent on a leave; bounded
   // here so main never serializes an attacker-sized payload.
@@ -1868,6 +1943,9 @@ export const PresencePublishPayload = z.object({
   leave: z.boolean().optional(),
 });
 export type PresencePublishPayload = z.infer<typeof PresencePublishPayload>;
+export const PresencePublishRequestPayload = PresencePublishPayload.extend({
+  rendererDocumentId: z.uuid(),
+});
 
 export const PresencePollPayload = z.object({
   scope: PresenceScopeInput,
@@ -2488,10 +2566,30 @@ export const StartPluginPanelResult = z.discriminatedUnion("status", [
     status: z.literal("ok"),
     url: LoopbackPreviewUrl,
     title: z.string().min(1).max(120),
+    surfaceId: z.number().int().positive(),
   }).strict(),
   z.object({ status: z.literal("not-registered") }).strict(),
 ]);
 export type StartPluginPanelResult = z.infer<typeof StartPluginPanelResult>;
+
+/** Main retired this exact panel preview because the active runtime no
+ * longer matches it. The page restarts only when it still shows surfaceId. */
+export const PluginPanelInvalidatedEvent = z.object({
+  workspaceId: WORKSPACE_ID,
+  pluginId: PLUGIN_ID,
+  panelId: PLUGIN_PANEL_ID,
+  surfaceId: z.number().int().positive(),
+}).strict();
+export type PluginPanelInvalidatedEvent = z.infer<
+  typeof PluginPanelInvalidatedEvent
+>;
+
+export function parsePluginPanelInvalidatedEventForIpc(
+  value: unknown,
+): PluginPanelInvalidatedEvent | null {
+  const parsed = PluginPanelInvalidatedEvent.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
 
 export const InvokePluginCommandPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -2521,7 +2619,7 @@ export const InvokePluginCommandResult = z.discriminatedUnion("status", [
     message: z.string(),
   }).strict(),
   // A rebuild's old-runtime stop is already draining this plugin's
-  // in-flight command claims — refused outright rather than queued, so
+  // in-flight plugin work — refused outright rather than queued, so
   // that wait stays bounded by the claims it began with (round-10
   // finding 2).
   z.object({
@@ -2992,6 +3090,46 @@ export function parsePluginStatusChangedEventForIpc(
   return parsed.success ? parsed.data : null;
 }
 
+// The daemon caps its own capture event at this many paths; a merged or
+// oversized set stops being a useful hint and the payload omits it
+// ("refresh broadly"). One constant for the schema, the broadcaster, and
+// the capture aggregation.
+export const MAX_ACTIVITY_EVENT_PATHS = 32;
+
+// What one workspace-activity ping says happened. Main already filters the
+// send by each window's active workspace, so `workspaceId` is context for a
+// path-scoped refresh, not an authorization fact. Absent workspaceId = a
+// global event (logout, registry change, daemon relaunch) delivered to every
+// window. `paths` is a bounded hint from the daemon's capture payload; a
+// batch too large to enumerate omits it and means "refresh broadly".
+export const WorkspaceActivityEvent = z
+  .object({
+    workspaceId: z.string().min(1).optional(),
+    paths: z.array(z.string()).max(MAX_ACTIVITY_EVENT_PATHS).optional(),
+  })
+  .strict();
+export type WorkspaceActivityEvent = z.infer<typeof WorkspaceActivityEvent>;
+
+// Shared by main's complete-listing cache and the renderer's activity
+// debounce. Keeping this decision beside the event prevents either side from
+// broadening its idea of a visible path without the other.
+export function activityPathsAffectWorkspaceListing(
+  paths: readonly string[],
+  platform: NodeJS.Platform,
+): boolean {
+  return paths.some((path) => !hasEngineIgnoredSegment(path, platform));
+}
+
+// Unlike plugin events, an activity ping must never be DROPPED on a schema
+// failure: under-notifying is the staleness bug the channel exists to
+// prevent. A malformed payload degrades to the global, payload-free ping.
+export function parseWorkspaceActivityEventForIpc(
+  value: unknown,
+): WorkspaceActivityEvent {
+  const parsed = WorkspaceActivityEvent.safeParse(value);
+  return parsed.success ? parsed.data : {};
+}
+
 export const PluginPanelSdkEvent = z
   .object({
     workspaceId: WORKSPACE_ID,
@@ -3281,42 +3419,61 @@ export type CloudJoinWorkspaceResult = z.infer<typeof CloudJoinWorkspaceResult>;
 export const RelayShareSelector = z.object({
   paths: z.array(PATH_STRING).max(100),
   versionId: z.string().min(1).max(128).nullable(),
-  access: SHARE_ACCESS,
 });
 export type RelayShareSelector = z.infer<typeof RelayShareSelector>;
 
-export const RelayShareGrantedRow = z.object({
+const RelayShareReadableState = z.object({
+  selector: RelayShareSelector,
+  access: SHARE_ACCESS,
+  damaged: z.never().optional(),
+});
+
+const RelayShareDamagedState = z.object({
+  selector: z.null(),
+  // Damage reports carry the raw stored value so Settings can keep the
+  // reverse path available without treating that value as authority.
+  access: z.string().max(64),
+  damaged: z.literal(true),
+});
+
+const RelayShareGrantedRowBase = z.object({
   shareId: SHARE_ID,
-  // The relay-side workspace id (the remote identity, not necessarily a
-  // local registry id).
+  // The workspace coordinate. This device need not have that workspace in
+  // its local registry.
   workspaceId: z.string().min(1).max(256),
   // null for a PENDING email invite (an addressed email that has no dohc
   // account yet); the recipientEmail carries who it was shared with (PR 18).
   recipientUserId: z.string().min(1).max(256).nullable(),
   recipientEmail: EMAIL_STRING.nullable(),
-  // null when the relay could not read this row's stored selector. The row
-  // stays listed so ending the share remains possible; it states the damage
-  // rather than a level nobody granted (#646).
-  selector: RelayShareSelector.nullable(),
-  damaged: z.literal(true).optional(),
+  grantId: z.string().min(1).max(200),
+  generation: z.number().int().min(1),
   createdAtMs: z.number().int().nonnegative(),
   revokedAtMs: z.number().int().nonnegative().nullable(),
   shareCode: z.string().min(1).max(4096),
 });
+
+export const RelayShareGrantedRow = z.union([
+  RelayShareGrantedRowBase.extend(RelayShareReadableState.shape),
+  RelayShareGrantedRowBase.extend(RelayShareDamagedState.shape),
+]);
 export type RelayShareGrantedRow = z.infer<typeof RelayShareGrantedRow>;
 
 // A path/version share granted TO this account (the receive side). The
 // relay deliberately omits the granter's workspace id; the selector and
 // granter identity are all a recipient ever sees.
-export const RelayShareReceivedRow = z.object({
+const RelayShareReceivedRowBase = z.object({
   shareId: SHARE_ID,
   granterEmail: EMAIL_STRING.nullable(),
-  // null when the relay could not read this row's stored selector (#646).
-  selector: RelayShareSelector.nullable(),
-  damaged: z.literal(true).optional(),
+  grantId: z.string().min(1).max(200),
+  generation: z.number().int().min(1),
   createdAtMs: z.number().int().nonnegative(),
   shareCode: z.string().min(1).max(4096),
 });
+
+export const RelayShareReceivedRow = z.union([
+  RelayShareReceivedRowBase.extend(RelayShareReadableState.shape),
+  RelayShareReceivedRowBase.extend(RelayShareDamagedState.shape),
+]);
 export type RelayShareReceivedRow = z.infer<typeof RelayShareReceivedRow>;
 
 export const ListRelaySharesResult = z.object({
@@ -4091,6 +4248,7 @@ export type RunnerSelfTestPayload = z.infer<typeof RunnerSelfTestPayload>;
 
 export const StopAgentRunPayload = z.object({
   workspaceId: WORKSPACE_ID,
+  runId: z.string().min(1).max(200),
 }).strict();
 export type StopAgentRunPayload = z.infer<typeof StopAgentRunPayload>;
 
@@ -4111,7 +4269,7 @@ export type ChatDispatchStateForThreadPayload = z.infer<
 >;
 
 export const ChatDispatchStateForThreadResult = z.object({
-  liveRun: z.boolean(),
+  liveRunId: z.string().min(1).max(200).nullable(),
   pendingCount: z.number().int().nonnegative(),
   paused: z.boolean(),
   pausedReason: z.string().min(1).max(500).optional(),
@@ -4397,9 +4555,8 @@ export type SetWorkspaceUiStatePayload = z.infer<typeof SetWorkspaceUiStatePaylo
 // Workspace content search (Phase E5.0). The renderer mints a bounded
 // searchId per search; main spawns ripgrep rooted at the real workspace root
 // and STREAMS batches back over the desktop:search-results event channel
-// (closed shape, validated in the dependency-free preload via
-// parseSearchResultsEvent — these zod schemas are the main-side mirror, with
-// the same bounds, used to validate batches BEFORE they are sent).
+// (closed shape, validated before send and again in the dependency-free
+// preload by the single parseSearchResultsEvent implementation).
 const SEARCH_ID = z.string().min(1).max(SEARCH_EVENT_MAX_ID_CHARS);
 
 export const WorkspaceSearchPayload = z.object({
@@ -4421,31 +4578,6 @@ export const CancelWorkspaceSearchPayload = z.object({
 export type CancelWorkspaceSearchPayload = z.infer<
   typeof CancelWorkspaceSearchPayload
 >;
-
-const SearchResultEntrySchema = z.object({
-  path: PATH_STRING,
-  line: z.number().int().min(1),
-  column: z.number().int().min(1),
-  preview: z.string().max(SEARCH_EVENT_MAX_PREVIEW_CHARS),
-  matchStart: z.number().int().min(0),
-  matchEnd: z.number().int().min(0),
-  surface: z.enum(["file", "chat"]).optional(),
-  threadId: z.string().min(1).max(200).optional(),
-  objectId: z.string().min(1).max(200).optional(),
-  title: z.string().min(1).max(500).optional(),
-});
-
-export const SearchResultsEventSchema = z.object({
-  searchId: SEARCH_ID,
-  entries: z.array(SearchResultEntrySchema).max(SEARCH_EVENT_MAX_ENTRIES),
-  done: z.boolean(),
-  limitHit: z.boolean(),
-  // A short, user-facing explanation when search is paused/degraded (e.g. a
-  // policy file failed to parse and file search fails closed). Optional so
-  // ordinary result batches omit it entirely.
-  notice: z.string().min(1).max(500).optional(),
-});
-export type SearchResultsEventSchema = z.infer<typeof SearchResultsEventSchema>;
 
 // WS-G2-C-2 engine Y.Doc binding IPC. The renderer mints a bounded sessionId
 // per open; main constructs the node-only live session (through the workspace's
@@ -4508,11 +4640,13 @@ export const OpenEngineYDocSessionResult = z.object({
   artifactAssets: z.array(ARTIFACT_ASSET_DESCRIPTOR).optional(),
   lineageGeneration: z.number().int().positive().optional(),
   // The path is not in the version the workspace is on — a version switch
-  // removed it while this open was queued behind that switch (#534). Every
-  // other available:false reason downgrades the document to the writable plain
-  // editor; this one must not, because that editor would autosave the path back
-  // into the version as a phantom file.
+  // removed it while this open was queued behind that switch (#534).
+  // This reason must not downgrade to the writable plain editor, because that
+  // editor would autosave the path back into the version as a phantom file.
   notInVersion: z.boolean().optional(),
+  // Main could no longer resolve the live file at the path the renderer read.
+  // The caller must not recreate it through the writable plain editor.
+  documentUnavailable: z.boolean().optional(),
   // The open did not land, and a session for this document may still be the
   // engine's. It is raised by an open that hit its retry deadline while the
   // engine was unreachable (#564), an open whose refusal could not release its
@@ -4601,9 +4735,17 @@ export const AcknowledgeEngineYDocLineageReplacementPayload = z.object({
 export type AcknowledgeEngineYDocLineageReplacementPayload = z.infer<
   typeof AcknowledgeEngineYDocLineageReplacementPayload
 >;
-export const AcknowledgeEngineYDocLineageReplacementResult = z.object({
-  updates: z.array(ENGINE_YDOC_UPDATE),
-});
+export const AcknowledgeEngineYDocLineageReplacementResult =
+  z.discriminatedUnion("accepted", [
+    z.object({
+      accepted: z.literal(true),
+      updates: z.array(ENGINE_YDOC_UPDATE),
+    }),
+    z.object({
+      accepted: z.literal(false),
+      reason: z.enum(["session-unavailable", "lineage-transition"]),
+    }),
+  ]);
 export type AcknowledgeEngineYDocLineageReplacementResult = z.infer<
   typeof AcknowledgeEngineYDocLineageReplacementResult
 >;
@@ -4646,6 +4788,9 @@ export type DesktopMarksResult = z.infer<typeof DesktopMarksResult>;
 
 export const LaunchMarksResult = z.object({
   appReadyMs: z.number().positive(),
+  // The daemon handshake and the renderer's first paint race each other, so a
+  // snapshot taken after paint may not have the daemon mark yet.
+  daemonReadyMs: z.number().positive().optional(),
   firstWindowMs: z.number().positive(),
   firstPaintMs: z.number().positive(),
   shellVisibleMs: z.number().positive().optional(),
@@ -4734,9 +4879,12 @@ export interface DohcDesktopBridge {
   readWorkspaceDatabase(
     payload: ReadWorkspaceDatabasePayload,
   ): Promise<DatabaseSnapshotResult>;
+  readWorkspaceDatabasePage(
+    payload: ReadWorkspaceDatabasePagePayload,
+  ): Promise<DatabasePageResult>;
   applyDatabaseEdit(
     payload: ApplyDatabaseEditPayload,
-  ): Promise<DatabaseSnapshotResult>;
+  ): Promise<DatabaseEditResult>;
   importToDatabase(
     payload: ImportToDatabasePayload,
   ): Promise<ImportToDatabaseResult>;
@@ -4752,6 +4900,9 @@ export interface DohcDesktopBridge {
     listener: (event: PluginPanelOpenedEvent) => void,
   ): () => void;
   startPluginPanel(payload: StartPluginPanelPayload): Promise<StartPluginPanelResult>;
+  onPluginPanelInvalidated(
+    listener: (event: PluginPanelInvalidatedEvent) => void,
+  ): () => void;
   invokePluginCommand(
     payload: InvokePluginCommandPayload,
   ): Promise<InvokePluginCommandResult>;
@@ -4851,7 +5002,7 @@ export interface DohcDesktopBridge {
   // Named versions (PR 0M-4). Gated in main on the workspace-engine alpha
   // flag: for unflagged workspaces every call rejects.
   listWorkspaceVersions(
-    payload: ListWorkspaceFilesPayload,
+    payload: WorkspaceIdPayload,
   ): Promise<ListWorkspaceVersionsResult>;
   createWorkspaceVersion(
     payload: CreateWorkspaceVersionPayload,
@@ -4877,9 +5028,9 @@ export interface DohcDesktopBridge {
     payload: TryInWorkspaceVersionPayload,
   ): Promise<TryInWorkspaceVersionResult>;
   getTryInVersionState(
-    payload: ListWorkspaceFilesPayload,
+    payload: WorkspaceIdPayload,
   ): Promise<TryInVersionStateResult>;
-  dismissTryInVersionReview(payload: ListWorkspaceFilesPayload): Promise<void>;
+  dismissTryInVersionReview(payload: WorkspaceIdPayload): Promise<void>;
   // Engine history + linked Chats (PR 0M-5). Gated in main on the
   // workspace-engine alpha flag: for unflagged workspaces every call rejects.
   listEngineMoments(
@@ -4896,6 +5047,9 @@ export interface DohcDesktopBridge {
   listChatMessages(
     payload: ListChatMessagesPayload,
   ): Promise<ListChatMessagesResult>;
+  getChatThreadRevision(
+    payload: GetChatThreadRevisionPayload,
+  ): Promise<GetChatThreadRevisionResult>;
   sendChatMessage(payload: SendChatMessagePayload): Promise<SendChatMessageResult>;
   listChatThreadDecisions(
     payload: ListChatThreadDecisionsPayload,
@@ -4953,7 +5107,7 @@ export interface DohcDesktopBridge {
   presencePublish(payload: PresencePublishPayload): Promise<PresenceResult>;
   presencePoll(payload: PresencePollPayload): Promise<PresenceResult>;
   presenceCancel(payload: PresenceCancelPayload): Promise<void>;
-  getSyncStatus(payload: ListWorkspaceFilesPayload): Promise<SyncStatusResult>;
+  getSyncStatus(payload: WorkspaceIdPayload): Promise<SyncStatusResult>;
   rebuildEngineStore(
     payload: RebuildEngineStorePayload,
   ): Promise<RebuildEngineStoreResult>;
@@ -4994,13 +5148,15 @@ export interface DohcDesktopBridge {
   ): Promise<DesktopUserSettingsResult>;
   // Per-workspace workbench UI state (.dohc/ui-state.json), main-owned.
   getWorkspaceUiState(
-    payload: ListWorkspaceFilesPayload,
+    payload: WorkspaceIdPayload,
   ): Promise<GetWorkspaceUiStateResult>;
   setWorkspaceUiState(payload: SetWorkspaceUiStatePayload): Promise<void>;
   // Live push: main signals the renderer when the active workspace's files
-  // or history changed (settled filesystem batch recorded). Returns an
-  // unsubscribe function.
-  onWorkspaceActivity(listener: () => void): () => void;
+  // or history changed (settled filesystem batch recorded). Main filters by
+  // each window's active workspace, so a window only hears about its own
+  // workspace plus global events. The payload is additive context — a
+  // subscriber may ignore it. Returns an unsubscribe function.
+  onWorkspaceActivity(listener: (event: WorkspaceActivityEvent) => void): () => void;
   onPluginStatusChanged(
     listener: (event: PluginStatusChangedEvent) => void,
   ): () => void;

@@ -9,12 +9,10 @@ import {
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
-import {
-  EngineDaemonLifecycle,
-  EngineWorkspaceSessions,
-} from "@dohc/workspace-engine-client/daemon";
+import { EngineDaemonLifecycle } from "@dohc/workspace-engine-client/daemon";
 import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
+import { createRealDaemonWorkspaceSessions } from "../testing/realDaemonWorkspaceSessions";
 import { createTestScratch } from "./testTemp";
 
 // #616, AGENTS.md "measure limits that reject work". YDOC_OPEN_DEADLINE_MS
@@ -59,6 +57,10 @@ class TimingTransport implements EngineTransport {
 
   constructor(private readonly inner: EngineTransport) {}
 
+  get helloAck(): EngineTransport["helloAck"] {
+    return this.inner.helloAck;
+  }
+
   async sendRequest(request: Request): Promise<Response> {
     const startedAt = performance.now();
     try {
@@ -72,6 +74,15 @@ class TimingTransport implements EngineTransport {
 
   onEvent(handler: Parameters<EngineTransport["onEvent"]>[0]): () => void {
     return this.inner.onEvent(handler);
+  }
+
+  onBlob(
+    handler: Parameters<NonNullable<EngineTransport["onBlob"]>>[0],
+  ): () => void {
+    if (this.inner.onBlob === undefined) {
+      throw new Error("The measured transport does not expose blob delivery.");
+    }
+    return this.inner.onBlob(handler);
   }
 
   requireOpenMs(): number {
@@ -119,10 +130,14 @@ it.skipIf(engine.missing)(
       maxRestarts: 0,
     });
     await lifecycle.start();
-    let sessions = new EngineWorkspaceSessions(lifecycle);
-    let capture = createWorkspaceEngineCapture({
+    let sessions = createRealDaemonWorkspaceSessions(lifecycle);
+    let workspace = {
       workspaceId: WORKSPACE_ID,
       rootPath: root,
+      attachmentId: Symbol("test-workspace-attachment"),
+    };
+    let capture = createWorkspaceEngineCapture({
+      ...workspace,
       rustEngineSessions: sessions,
       daemonOwnsCapture: true,
     });
@@ -151,7 +166,7 @@ it.skipIf(engine.missing)(
         ) => Promise<void>,
       ): Promise<void> => {
         await sessions.run(
-          { workspaceId: WORKSPACE_ID, rootPath: root },
+          workspace,
           async (binding) => {
             const timing = new TimingTransport(binding.client as EngineTransport);
             const adapter = new YdocLiveAdapter(timing);
@@ -191,7 +206,7 @@ it.skipIf(engine.missing)(
       // case this bound has to clear.
       const appends = 800;
       await sessions.run(
-        { workspaceId: WORKSPACE_ID, rootPath: root },
+        workspace,
         async (binding) => {
           const adapter = new YdocLiveAdapter(binding.client as EngineTransport);
           const session = await adapter.openSession({
@@ -215,10 +230,14 @@ it.skipIf(engine.missing)(
         maxRestarts: 0,
       });
       await lifecycle.start();
-      sessions = new EngineWorkspaceSessions(lifecycle);
-      capture = createWorkspaceEngineCapture({
+      sessions = createRealDaemonWorkspaceSessions(lifecycle);
+      workspace = {
         workspaceId: WORKSPACE_ID,
         rootPath: root,
+        attachmentId: Symbol("test-workspace-attachment"),
+      };
+      capture = createWorkspaceEngineCapture({
+        ...workspace,
         rustEngineSessions: sessions,
         daemonOwnsCapture: true,
       });

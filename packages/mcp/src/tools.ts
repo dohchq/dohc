@@ -1374,7 +1374,6 @@ export async function deleteWorkspacePath(
 
 interface RemoteIdentity {
   serverUrl: string;
-  remoteWorkspaceId: string;
   ownerUserId: string;
 }
 
@@ -1394,7 +1393,6 @@ interface RegistryFile {
 interface SyncManifest {
   workspaceId?: string;
   serverUrl?: string;
-  remoteWorkspaceId?: string;
 }
 
 type CloudCredentialLoad =
@@ -1439,7 +1437,6 @@ function validRemote(remote: unknown): remote is RemoteIdentity {
     remote !== null &&
     typeof remote === "object" &&
     nonEmptyString((remote as RemoteIdentity).serverUrl) &&
-    nonEmptyString((remote as RemoteIdentity).remoteWorkspaceId) &&
     nonEmptyString((remote as RemoteIdentity).ownerUserId)
   );
 }
@@ -1567,18 +1564,16 @@ export async function workspaceStatus(ctx: ToolContext) {
     remoteForCurrentWorkspace(ctx),
     loadCloudCredentials(ctx),
   ]);
-  const remoteWorkspaceId = remote?.remoteWorkspaceId ?? manifest?.remoteWorkspaceId;
   const serverUrl = remote?.serverUrl ?? manifest?.serverUrl;
-  const synced = !!remoteWorkspaceId;
+  const synced = remote !== null || nonEmptyString(manifest?.serverUrl);
   const credential = credentialStatusFor(remote, credentials);
   return {
     synced,
     scope: synced ? ("cloud" as const) : ("local" as const),
     ...credential,
-    ...(manifest?.workspaceId ?? remote?.workspaceId
-      ? { workspaceId: manifest?.workspaceId ?? remote?.workspaceId }
+    ...(remote?.workspaceId ?? manifest?.workspaceId
+      ? { workspaceId: remote?.workspaceId ?? manifest?.workspaceId }
       : {}),
-    ...(remoteWorkspaceId ? { remoteWorkspaceId } : {}),
     ...(serverUrl ? { serverUrl } : {}),
   };
 }

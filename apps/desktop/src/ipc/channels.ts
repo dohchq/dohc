@@ -410,8 +410,8 @@ export function parseSearchResultsEvent(value: unknown): SearchResultsEvent | nu
 export const ENGINE_YDOC_SESSION_ID_MAX_CHARS = 64;
 // Raw bytes cross renderer IPC by structured clone. Admit the durable engine's
 // measured raw-update range so an engine-owned session can always hand its
-// accepted state to the renderer. The daemon's base64 JSON frame remains a
-// separate, smaller transport bound.
+// accepted state to the renderer. The daemon carries full states as raw blob
+// chunks under the same bound.
 export const ENGINE_YDOC_UPDATE_MAX_BYTES = 20 * 1024 * 1024;
 
 export interface EngineYDocRemoteUpdateEvent {
@@ -659,6 +659,7 @@ export const CHANNELS = {
   saveChatBookmark: "desktop:save-chat-bookmark",
   archiveChatBookmark: "desktop:archive-chat-bookmark",
   readWorkspaceDatabase: "desktop:read-workspace-database",
+  readWorkspaceDatabasePage: "desktop:read-workspace-database-page",
   applyDatabaseEdit: "desktop:apply-database-edit",
   importToDatabase: "desktop:import-to-database",
   listSites: "desktop:list-sites",
@@ -670,6 +671,7 @@ export const CHANNELS = {
   startPluginPanel: "desktop:start-plugin-panel",
   invokePluginCommand: "desktop:invoke-plugin-command",
   stopPluginPanel: "desktop:stop-plugin-panel",
+  pluginPanelInvalidated: "desktop:plugin-panel-invalidated",
   invokePluginPanelSdk: "desktop:invoke-plugin-panel-sdk",
   openPluginWebApp: "desktop:open-plugin-web-app",
   startPluginWebApp: "desktop:start-plugin-web-app",
@@ -735,6 +737,7 @@ export const CHANNELS = {
   listFileChats: "desktop:list-file-chats",
   createFileChat: "desktop:create-file-chat",
   listChatMessages: "desktop:list-chat-messages",
+  getChatThreadRevision: "desktop:get-chat-thread-revision",
   sendChatMessage: "desktop:send-chat-message",
   listChatThreadDecisions: "desktop:list-chat-thread-decisions",
   resolveChatDecision: "desktop:resolve-chat-decision",

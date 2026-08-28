@@ -34,6 +34,7 @@ export type PluginWorkspaceEventsOwner =
       workspaceId: string;
       pluginId: string;
       panelId: string;
+      surfaceId: number;
     };
 
 export interface PluginWorkspaceEventsContext {
@@ -51,7 +52,7 @@ interface WatchRecord {
 function ownerKey(owner: PluginWorkspaceEventsOwner): string {
   return owner.kind === "process"
     ? `${owner.kind}\0${owner.pluginId}\0${owner.spawnId}`
-    : `${owner.kind}\0${owner.workspaceId}\0${owner.pluginId}\0${owner.panelId}`;
+    : `${owner.kind}\0${owner.workspaceId}\0${owner.pluginId}\0${owner.panelId}\0${owner.surfaceId}`;
 }
 
 function ownerLabel(owner: PluginWorkspaceEventsOwner): string {

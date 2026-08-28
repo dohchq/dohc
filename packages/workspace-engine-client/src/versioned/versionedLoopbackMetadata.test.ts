@@ -2383,6 +2383,7 @@ describe("loopback moment metadata", () => {
       },
       [VERSIONED_METHOD.momentsList]: {},
       [VERSIONED_METHOD.momentsGet]: { momentId: "moment-1" },
+      [VERSIONED_METHOD.historyPage]: { workspaceId: WORKSPACE },
       [VERSIONED_METHOD.searchEnsureIndex]: {
         workspaceId: WORKSPACE, versionId: "main",
       },

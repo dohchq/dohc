@@ -36,6 +36,8 @@ export interface PluginSdkHostContext {
   writeAvailable: () => Promise<boolean>;
   /** Main-supplied owner-aware read authority; plugins cannot supply or widen it. */
   reads: WorkspaceSdkHostContext["reads"];
+  /** Main-supplied structured database writer. */
+  editDatabase: WorkspaceSdkHostContext["editDatabase"];
   /**
    * The web apps this plugin's manifest declares, so `ui.openWebApp` can
    * refuse an id the plugin never contributed and one whose shape does not
@@ -182,6 +184,7 @@ export async function invokePluginSdkHost(
     signal: context.signal,
     author: pluginDatabaseAuthor(context.pluginId),
     reads: context.reads,
+    editDatabase: context.editDatabase,
   };
 
   switch (method) {

@@ -6,16 +6,20 @@
 use std::path::PathBuf;
 
 use base64::Engine as _;
-use dohc_engine_collab::{CollabError, DocKey};
+use dohc_engine_collab::{CollabError, DocKey, WriterDocCache};
 use dohc_engine_storage::{
     EngineStore, FaultAction, FaultInjector, FaultPoint, NoFaults, TxnOutcome,
 };
 use dohc_test_scratch::ScratchDir;
 use serde::Deserialize;
 
-/// A temp engine.db that removes itself on drop.
+/// A temp engine.db that removes itself on drop, with a writer doc cache
+/// beside it (one writer, one cache — the production pairing). Threading the
+/// SAME cache through every append in a test makes later appends HIT it, so
+/// the debug differential check re-proves CACHE-VALID across the suite.
 pub struct TempStore {
     pub store: EngineStore,
+    pub cache: WriterDocCache,
     _scratch: ScratchDir,
 }
 
@@ -29,6 +33,7 @@ pub fn fresh_store(tag: &str) -> TempStore {
     let store = EngineStore::open(&dir.join("engine.db"), 1_000).expect("open store");
     TempStore {
         store,
+        cache: WriterDocCache::new(),
         _scratch: dir,
     }
 }

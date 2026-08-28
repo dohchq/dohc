@@ -4,7 +4,10 @@
     "frontmatter": "map",
     "meta": "map",
     "body": "xmlFragment",
-    "plainText": "text"
+    "plainText": "text",
+    "excalidraw:revisions": "map",
+    "excalidraw:app-state": "map",
+    "excalidraw:assets": "map"
   },
   "scenarios": [
     {
@@ -191,6 +194,38 @@
       "replayOrder": [
         "large-2",
         "large-1"
+      ]
+    },
+    {
+      "name": "scene-revisions-and-app-state",
+      "contentKind": "scene",
+      "dimensions": [
+        "scene revision map",
+        "scene app-state map",
+        "no binary assets",
+        "independent authors replayed out of order"
+      ],
+      "authoredUpdates": [
+        {
+          "id": "scene-1",
+          "author": "scene-author-1",
+          "updateBase64": "AQHZBAAoARRleGNhbGlkcmF3OnJldmlzaW9ucwtbImJveCIsMSwxXQF3TnsiaWQiOiJib3giLCJpc0RlbGV0ZWQiOmZhbHNlLCJ0eXBlIjoicmVjdGFuZ2xlIiwidmVyc2lvbiI6MSwidmVyc2lvbk5vbmNlIjoxfQA="
+        },
+        {
+          "id": "scene-2",
+          "author": "scene-author-2",
+          "updateBase64": "AQHaBAAoARRleGNhbGlkcmF3OnJldmlzaW9ucwtbImJveCIsMiwyXQF3VXsiaWQiOiJib3giLCJpc0RlbGV0ZWQiOmZhbHNlLCJ0eXBlIjoicmVjdGFuZ2xlIiwidmVyc2lvbiI6MiwidmVyc2lvbk5vbmNlIjoyLCJ4Ijo0MH0A"
+        },
+        {
+          "id": "scene-3",
+          "author": "scene-author-3",
+          "updateBase64": "AQHbBAAoARRleGNhbGlkcmF3OmFwcC1zdGF0ZQV0aGVtZQF3BiJkYXJrIgA="
+        }
+      ],
+      "replayOrder": [
+        "scene-2",
+        "scene-1",
+        "scene-3"
       ]
     }
   ]

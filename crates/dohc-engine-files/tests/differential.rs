@@ -106,8 +106,6 @@ struct FxManifestEntry {
     path: String,
     sha256: String,
     size: u64,
-    #[allow(dead_code)]
-    mtime: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -194,6 +192,11 @@ fn reconcile_matches_kernel_golden() {
             ManifestEntry {
                 size: m.size,
                 sha256: m.sha256.clone(),
+                // The fixture carries no trustworthy mtime observation (its
+                // kernel-era stamps can never match the scratch tree written
+                // moments ago), and the golden classifications are
+                // hash-decided — so record none.
+                mtime_ms: 0,
             },
         )
     }));
@@ -302,6 +305,7 @@ fn golden_is_sensitive_to_the_content_hash() {
             ManifestEntry {
                 size: 5,
                 sha256: common::sha256_hex(b"same\n"),
+                mtime_ms: 0,
             },
         ),
         (
@@ -309,6 +313,7 @@ fn golden_is_sensitive_to_the_content_hash() {
             ManifestEntry {
                 size: 6, // same size as "EDITED\n" — only the hash differs
                 sha256: common::sha256_hex(b"before\n"),
+                mtime_ms: 0,
             },
         ),
     ]);
@@ -374,6 +379,7 @@ fn normalize_plan(plan: &dohc_engine_files::ReconcilePlan) -> Vec<NormOp> {
                 path,
                 size,
                 sha256,
+                mtime_ms: _,
                 media_type,
                 reason,
             } => NormOp::Ingest {

@@ -22,7 +22,10 @@ const ACTIVE_SHARE = {
   workspaceId: "ws-remote",
   recipientUserId: "friend",
   recipientEmail: "friend@dohc.test",
-  selector: { paths: ["docs"], versionId: null, access: "view" },
+  selector: { paths: ["docs"], versionId: null },
+  access: "view",
+  grantId: "grant-1",
+  generation: 1,
   createdAtMs: 1000,
   revokedAtMs: null,
   shareCode: "dohc-share:share-1:http://relay.test",
@@ -73,12 +76,14 @@ describe("SharedByMeList", () => {
         {
           ...ACTIVE_SHARE,
           shareId: "share-2",
-          selector: { paths: ["notes"], versionId: null, access: "comment" },
+          selector: { paths: ["notes"], versionId: null },
+          access: "comment",
         },
         {
           ...ACTIVE_SHARE,
           shareId: "share-3",
-          selector: { paths: ["plans"], versionId: null, access: "edit" },
+          selector: { paths: ["plans"], versionId: null },
+          access: "edit",
         },
       ],
     });

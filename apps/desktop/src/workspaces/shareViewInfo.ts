@@ -23,9 +23,9 @@ export interface ShareViewInfo {
   granterUserId: string;
   granterEmail: string | null;
   /**
-   * The selector the relay states for this share, or null when the share
-   * grants a chat channel and has no file selector at all. NEVER a softened
-   * stand-in for a response this client could not read — see
+   * The effective selector composed from the relay's stored scope and grant
+   * access, or null when the share grants a chat channel and has no file
+   * selector at all. NEVER a softened stand-in for an unreadable response. See
    * `ShareSelectorInvalidError`.
    */
   selector: ShareViewSelector | null;
@@ -75,6 +75,7 @@ async function shareFetch(
 // anything unreadable throws rather than degrading into a wider grant.
 function parseSelector(
   value: unknown,
+  access: unknown,
   shareId: string,
 ): ShareViewSelector | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -84,7 +85,6 @@ function parseSelector(
     kind?: unknown;
     paths?: unknown;
     versionId?: unknown;
-    access?: unknown;
   };
   if (record.kind === "chat-channel") return null;
   if (!Array.isArray(record.paths)) throw new ShareSelectorInvalidError(shareId);
@@ -115,13 +115,13 @@ function parseSelector(
   // version dimension. A missing or unrecognized level is refused, never read
   // as `view`: the narrowest guess is still a guess, and the record it would
   // pin outlives the response it came from.
-  if (!isShareAccessValue(record.access)) {
+  if (!isShareAccessValue(access)) {
     throw new ShareSelectorInvalidError(shareId);
   }
   return {
     paths: record.paths as string[],
     versionId,
-    access: record.access,
+    access,
   };
 }
 
@@ -138,7 +138,7 @@ export async function fetchShareViewInfo(input: {
     shareId: String(body.shareId ?? input.shareId),
     granterUserId: String(body.granterUserId ?? ""),
     granterEmail: typeof body.granterEmail === "string" ? body.granterEmail : null,
-    selector: parseSelector(body.selector, input.shareId),
+    selector: parseSelector(body.selector, body.access, input.shareId),
     createdAtMs: Number(body.createdAtMs ?? 0),
   };
 }

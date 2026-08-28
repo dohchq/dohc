@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { classifyPath, hasEngineIgnoredSegment } from "@dohc/workspace-core";
 import {
   lstat,
   mkdtemp,
@@ -27,6 +28,7 @@ import {
   importDroppedPaths,
   listFiles,
   movePath,
+  prepareWorkspaceDelete,
 } from "./workspaceFiles";
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 import { createTestScratch } from "./testTemp";
@@ -49,6 +51,114 @@ async function caseInsensitiveFs(): Promise<boolean> {
 const rejectingTrash = async () => {
   throw new Error("g_file_trash: Unable to find or create trash directory");
 };
+
+type FileListing = Awaited<ReturnType<typeof listFiles>>;
+
+async function listFilesSerialReference(
+  rootPath: string,
+  platform: NodeJS.Platform,
+): Promise<FileListing> {
+  const files: FileListing["files"] = [];
+  const folders: string[] = [];
+
+  async function walk(dir: string, prefix: string): Promise<void> {
+    const dirents = await readdir(dir, { withFileTypes: true });
+    for (const dirent of dirents) {
+      const rel = prefix ? `${prefix}/${dirent.name}` : dirent.name;
+      if (hasEngineIgnoredSegment(rel, platform) || dirent.isSymbolicLink()) continue;
+      if (dirent.isDirectory()) {
+        folders.push(rel);
+        await walk(join(dir, dirent.name), rel);
+      } else if (dirent.isFile()) {
+        const kind = classifyPath(rel).kind;
+        const entry: FileListing["files"][number] = { path: rel, kind };
+        if (kind === "file" && /\.(md|markdown)$/i.test(rel)) {
+          const head = await readFile(join(dir, dirent.name)).catch(() => undefined);
+          const icon = head
+            ? extractFrontmatterIcon(head.subarray(0, 1024).toString("utf8"))
+            : undefined;
+          if (icon) entry.icon = icon;
+        }
+        files.push(entry);
+      }
+    }
+  }
+
+  await walk(rootPath, "");
+  files.sort((a, b) => a.path.localeCompare(b.path));
+  folders.sort((a, b) => a.localeCompare(b));
+  return { files, folders };
+}
+
+function seededIndex(seed: number): (limit: number) => number {
+  let state = seed >>> 0;
+  return (limit) => {
+    state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0;
+    return state % limit;
+  };
+}
+
+async function populateGeneratedListingTree(
+  treeRoot: string,
+  seed: number,
+): Promise<void> {
+  const next = seededIndex(seed);
+  const extensions = [".md", ".markdown", ".md", ".txt", ".json", ".sqlite"];
+
+  await mkdir(join(treeRoot, "empty", "nested"), { recursive: true });
+  await mkdir(join(treeRoot, `.hidden-${seed}`), { recursive: true });
+  await writeFile(
+    join(treeRoot, `.hidden-${seed}`, "visible.md"),
+    "---\nicon: 👁️\n---\n",
+  );
+
+  for (let index = 0; index < 48; index += 1) {
+    const depth = index < 12 ? 1 : 1 + next(5);
+    const segments = index < 12
+      ? ["flat"]
+      : Array.from({ length: depth }, (_, level) =>
+          `d${level}-${next(5)}`,
+        );
+    const dir = join(treeRoot, ...segments);
+    await mkdir(dir, { recursive: true });
+    const extension = extensions[next(extensions.length)] ?? ".md";
+    const path = join(dir, `item-${String(index).padStart(2, "0")}${extension}`);
+    const iconCase = next(4);
+    const contents = /\.(md|markdown)$/i.test(extension)
+      ? iconCase === 0
+        ? "---\nicon: 🚀\n---\n# Generated\n"
+        : iconCase === 1
+          ? "---\nicon: \"📄\"\n---\n# Generated\n"
+          : iconCase === 2
+            ? "---\nicon: 📝 # generated\n---\n# Generated\n"
+            : "# No frontmatter\n"
+      : `generated-${seed}-${index}\n`;
+    await writeFile(path, contents);
+  }
+
+  await mkdir(join(treeRoot, ".dohc", "nested"), { recursive: true });
+  await writeFile(join(treeRoot, ".dohc", "nested", "ignored.md"), "---\nicon: ❌\n---\n");
+  await mkdir(join(treeRoot, ".git"), { recursive: true });
+  await writeFile(join(treeRoot, ".git", "ignored.md"), "ignored");
+  await mkdir(join(treeRoot, "kept", "node_modules", "pkg"), { recursive: true });
+  await writeFile(join(treeRoot, "kept", "node_modules", "pkg", "ignored.md"), "ignored");
+  await writeFile(join(treeRoot, ".dohc-write-listing.tmp"), "ignored");
+  await mkdir(join(treeRoot, SHARED_WITH_ME_FOLDER, "alex"), { recursive: true });
+  await writeFile(
+    join(treeRoot, SHARED_WITH_ME_FOLDER, "alex", "brief.md"),
+    "---\nicon: 🤝\n---\n",
+  );
+
+  const linkTarget = join(treeRoot, "link-target");
+  await mkdir(linkTarget, { recursive: true });
+  await writeFile(join(linkTarget, "owned.md"), "owned");
+  await symlink(linkTarget, join(treeRoot, "linked-directory"), "dir");
+  await symlink(
+    join(linkTarget, "owned.md"),
+    join(treeRoot, "linked-file.md"),
+    "file",
+  );
+}
 
 describe("createFile", () => {
   it("creates nested files through validated paths", async () => {
@@ -109,10 +219,53 @@ describe("extractFrontmatterIcon", () => {
 });
 
 describe("listFiles", () => {
+  it("matches the serial walker byte-for-byte across generated trees", async () => {
+    for (const seed of [1, 7, 19, 41, 73, 101]) {
+      const treeRoot = join(root, `generated-${seed}`);
+      await mkdir(treeRoot, { recursive: true });
+      await populateGeneratedListingTree(treeRoot, seed);
+
+      const expected = await listFilesSerialReference(treeRoot, "linux");
+      const actual = await listFiles(treeRoot, { platform: "linux" });
+
+      expect(JSON.stringify(actual)).toBe(JSON.stringify(expected));
+    }
+  });
+
+  it("keeps serial ordering across concurrent walks of a deep tree", async () => {
+    for (const branch of ["z", "a", "m", "b", "y", "c", "x", "d"]) {
+      let dir = join(root, branch);
+      for (let depth = 0; depth < 12; depth += 1) {
+        dir = join(dir, `d${String(depth).padStart(2, "0")}`);
+        await mkdir(dir, { recursive: true });
+        await writeFile(join(dir, `z-${depth}.txt`), "text");
+        await writeFile(
+          join(dir, `a-${depth}.md`),
+          `---\nicon: ${depth % 2 === 0 ? "🌲" : "🌿"}\n---\n`,
+        );
+      }
+      await mkdir(join(dir, "empty"), { recursive: true });
+    }
+
+    const expected = JSON.stringify(await listFilesSerialReference(root, "linux"));
+    const listings = await Promise.all(
+      Array.from({ length: 4 }, () => listFiles(root, { platform: "linux" })),
+    );
+
+    for (const listing of listings) {
+      expect(JSON.stringify(listing)).toBe(expected);
+    }
+  });
+
   it("lists files and folders but skips internal directories", async () => {
     await mkdir(join(root, ".dohc"), { recursive: true });
     await writeFile(join(root, ".dohc", "manifest.json"), "{}");
+    await mkdir(join(root, ".git"), { recursive: true });
+    await writeFile(join(root, ".git", "index"), "internal");
     await mkdir(join(root, "notes"), { recursive: true });
+    await mkdir(join(root, "notes", "node_modules"), { recursive: true });
+    await writeFile(join(root, "notes", "node_modules", "cache.js"), "internal");
+    await writeFile(join(root, ".dohc-write-listing.tmp"), "internal");
     await writeFile(join(root, "notes", "a.md"), "");
     await writeFile(join(root, "wallet.sqlite"), "");
     const result = await listFiles(root);
@@ -121,6 +274,16 @@ describe("listFiles", () => {
       { path: "wallet.sqlite", kind: "database" },
     ]);
     expect(result.folders).toEqual(["notes"]);
+  });
+
+  it("keeps POSIX-distinct .GIT content in the listing", async () => {
+    await mkdir(join(root, ".GIT"), { recursive: true });
+    await writeFile(join(root, ".GIT", "file.md"), "owned");
+
+    const result = await listFiles(root, { platform: "linux" });
+
+    expect(result.files).toEqual([{ path: ".GIT/file.md", kind: "file" }]);
+    expect(result.folders).toEqual([".GIT"]);
   });
 
   it("surfaces a markdown page's icon frontmatter for the tree glyph", async () => {
@@ -134,6 +297,19 @@ describe("listFiles", () => {
       { path: "plain.md", kind: "file" },
       { path: "plan.md", kind: "file", icon: "🚀" },
     ]);
+  });
+
+  it("includes private Markdown content identity only when requested", async () => {
+    await writeFile(join(root, "plan.md"), "# Plan\n");
+
+    const ordinary = await listFiles(root);
+    expect(ordinary.files[0]).not.toHaveProperty("contentIdentity");
+
+    const indexed = await listFiles(root, { includeContentIdentity: true });
+    expect(indexed.files[0]).toHaveProperty(
+      "contentIdentity",
+      expect.stringMatching(/^disk:\d+:7$/),
+    );
   });
 
   it("returns EMPTY folders so the tree can render them", async () => {
@@ -367,6 +543,32 @@ describe("movePath", () => {
   });
 });
 
+describe("prepareWorkspaceDelete", () => {
+  it("returns the physical entry spelling without following a symlink leaf", async () => {
+    await mkdir(join(root, "Notes"), { recursive: true });
+    await writeFile(join(root, "Notes", "A.md"), "upper");
+
+    if (await caseInsensitiveFs()) {
+      await expect(prepareWorkspaceDelete(root, "notes/a.md")).resolves.toBe(
+        "Notes/A.md",
+      );
+    } else {
+      await writeFile(join(root, "Notes", "a.md"), "lower");
+      await expect(prepareWorkspaceDelete(root, "Notes/A.md")).resolves.toBe(
+        "Notes/A.md",
+      );
+      await expect(prepareWorkspaceDelete(root, "Notes/a.md")).resolves.toBe(
+        "Notes/a.md",
+      );
+    }
+
+    await symlink(join(root, "Notes", "A.md"), join(root, "alias.md"));
+    await expect(prepareWorkspaceDelete(root, "alias.md")).resolves.toBe(
+      "alias.md",
+    );
+  });
+});
+
 describe("deletePath", () => {
   it("hands the resolved real path to the OS trash", async () => {
     await writeFile(join(root, "junk.md"), "x");
@@ -515,8 +717,13 @@ describe("collectZipEntries", () => {
   it("exports the workspace excluding ignored segments and symlinks", async () => {
     await mkdir(join(root, ".dohc"), { recursive: true });
     await writeFile(join(root, ".dohc", "manifest.json"), "{}");
+    await mkdir(join(root, ".git"), { recursive: true });
+    await writeFile(join(root, ".git", "index"), "internal");
     await mkdir(join(root, "notes"), { recursive: true });
+    await mkdir(join(root, "notes", "node_modules"), { recursive: true });
+    await writeFile(join(root, "notes", "node_modules", "cache.js"), "internal");
     await writeFile(join(root, "notes", "a.md"), "alpha");
+    await writeFile(join(root, ".dohc-write-export.tmp"), "internal");
     await writeFile(join(root, "b.md"), "beta");
     const outside = await createTestScratch("dohc-outside-");
     await writeFile(join(outside, "secret.md"), "leak");
@@ -531,6 +738,17 @@ describe("collectZipEntries", () => {
     );
     expect(byPath.get("b.md")).toBe("beta");
     expect(byPath.get("notes/a.md")).toBe("alpha");
+  });
+
+  it("keeps POSIX-distinct .GIT content in ZIP exports", async () => {
+    await mkdir(join(root, ".GIT"), { recursive: true });
+    await writeFile(join(root, ".GIT", "file.md"), "owned");
+
+    const { entries } = await collectZipEntries(root, undefined, {
+      platform: "linux",
+    });
+
+    expect(entries.map((entry) => entry.path)).toEqual([".GIT/file.md"]);
   });
 
   it("exports a single folder under its own top-level name", async () => {

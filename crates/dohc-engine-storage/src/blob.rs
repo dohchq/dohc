@@ -40,7 +40,35 @@ pub fn put_binary_blob(conn: &Connection, bytes: &[u8]) -> Result<String, Storag
             actual: bytes.len(),
         });
     }
-    let sha256 = hex_sha256(bytes);
+    put_binary_blob_with_sha(conn, bytes, &hex_sha256(bytes))
+}
+
+/// [`put_binary_blob`] for a caller that already computed [`hex_sha256`] over
+/// exactly these bytes — reuses that digest instead of hashing a second time
+/// (the hot append path stores a blob inside its write transaction, where a
+/// redundant full pass over the bytes is pure contention).
+///
+/// The digest is the blob store's content address, so a wrong `sha256` would
+/// poison the store: only ever pass a digest THIS process computed (or
+/// verified) from these exact bytes, never one received from outside — an
+/// untrusted claim goes through [`put_binary_blob_verified`]. Debug builds
+/// recompute and assert the digest, so the whole debug test fleet checks every
+/// call site; release trusts the caller.
+pub fn put_binary_blob_with_sha(
+    conn: &Connection,
+    bytes: &[u8],
+    sha256: &str,
+) -> Result<String, StorageError> {
+    if bytes.len() > MAX_BLOB_BYTES {
+        return Err(StorageError::BlobTooLarge {
+            actual: bytes.len(),
+        });
+    }
+    debug_assert_eq!(
+        hex_sha256(bytes),
+        sha256,
+        "put_binary_blob_with_sha requires the hex_sha256 of exactly these bytes"
+    );
     // INSERT OR IGNORE is the dedup: an existing row for this hash is kept
     // (identical bytes by definition of content-addressing).
     let inserted = conn
@@ -53,11 +81,13 @@ pub fn put_binary_blob(conn: &Connection, bytes: &[u8]) -> Result<String, Storag
         // The row pre-existed: read it back through the verifying getter so a
         // corrupt canonical row surfaces as `BlobIntegrity` here, not as a
         // deferred failure on some later read.
-        if get_binary_blob(conn, &sha256)?.is_none() {
-            return Err(StorageError::BlobIntegrity { sha256 });
+        if get_binary_blob(conn, sha256)?.is_none() {
+            return Err(StorageError::BlobIntegrity {
+                sha256: sha256.to_owned(),
+            });
         }
     }
-    Ok(sha256)
+    Ok(sha256.to_owned())
 }
 
 /// Store bytes supplied with a claimed content address, rejecting the write if
@@ -78,12 +108,13 @@ pub fn put_binary_blob_verified(
             actual: bytes.len(),
         });
     }
-    if !hex_sha256(bytes).eq_ignore_ascii_case(claimed_sha256) {
+    let canonical = hex_sha256(bytes);
+    if !canonical.eq_ignore_ascii_case(claimed_sha256) {
         return Err(StorageError::BlobIntegrity {
             sha256: claimed_sha256.to_owned(),
         });
     }
-    put_binary_blob(conn, bytes)
+    put_binary_blob_with_sha(conn, bytes, &canonical)
 }
 
 /// Fetch a binary blob by key, verifying integrity on read. Returns `None` if
@@ -171,6 +202,40 @@ mod tests {
             matches!(error, StorageError::BlobTooLarge { actual } if actual == huge.len()),
             "size guard must win over the integrity check, got {error:?}"
         );
+    }
+
+    #[test]
+    fn with_sha_put_stores_under_the_supplied_digest_and_dedups() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        conn.execute_batch(
+            "CREATE TABLE binary_blobs (
+                sha256 TEXT NOT NULL PRIMARY KEY,
+                byte_length INTEGER NOT NULL,
+                bytes BLOB NOT NULL
+            ) STRICT;",
+        )
+        .expect("create binary_blobs");
+        let bytes = b"caller-hashed bytes";
+        let sha = hex_sha256(bytes);
+
+        let stored = put_binary_blob_with_sha(&conn, bytes, &sha).expect("first put");
+        assert_eq!(stored, sha);
+        assert_eq!(
+            get_binary_blob(&conn, &sha).expect("get").expect("row"),
+            bytes,
+            "the verifying getter accepts the stored row"
+        );
+        let again = put_binary_blob_with_sha(&conn, bytes, &sha).expect("dedup put");
+        assert_eq!(again, sha, "a second put of identical content dedups");
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "hex_sha256 of exactly these bytes")]
+    fn with_sha_put_asserts_the_digest_in_debug_builds() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        let wrong = hex_sha256(b"other bytes");
+        let _ = put_binary_blob_with_sha(&conn, b"actual bytes", &wrong);
     }
 
     #[test]

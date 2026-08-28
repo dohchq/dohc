@@ -3,10 +3,10 @@
     "maxBatchLen": 64,
     "maxBlobChunkBytes": 262144,
     "maxCollectionLen": 16384,
-    "maxFrameBytes": 1048576,
+    "maxFrameBytes": 8388608,
     "maxJsonDepth": 32,
-    "maxStringBytes": 65536
+    "maxStringBytes": 8388608
   },
   "maxWireInteger": 9007199254740991,
-  "protocolVersion": 1
+  "protocolVersion": 2
 }

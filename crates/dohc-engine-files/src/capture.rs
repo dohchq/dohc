@@ -139,6 +139,9 @@ pub fn apply_reconcile_plan(
                 path,
                 size,
                 sha256,
+                // Manifest bookkeeping consumed at acknowledgement; the sink
+                // contract never sees it.
+                mtime_ms: _,
                 media_type,
                 reason,
             } => {

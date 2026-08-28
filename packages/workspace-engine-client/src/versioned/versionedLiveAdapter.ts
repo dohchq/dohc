@@ -70,7 +70,7 @@ export interface VersionedLiveAdapterOptions {
   ) => string;
 }
 
-const LIST_TEXT_FILE_HYDRATION_CONCURRENCY = 8;
+const CONFLICT_HYDRATION_CONCURRENCY = 8;
 
 /**
  * The most reconstructed body text one hydrated `conflicts.list` page may
@@ -683,7 +683,7 @@ export class VersionedLiveAdapter {
     // instead of draining every page.
     const conflicts = await mapWithConcurrency(
       affordable,
-      LIST_TEXT_FILE_HYDRATION_CONCURRENCY,
+      CONFLICT_HYDRATION_CONCURRENCY,
       async (conflict) => {
         // Sides in sequence, so the concurrency bound counts blob reads —
         // three parallel sides per row would triple it.
@@ -749,27 +749,6 @@ export class VersionedLiveAdapter {
     return this.workspaceRequest(WORKSPACE_METHOD.conflictsResolve, input, {
       idempotencyKey,
     });
-  }
-
-  async listTextFiles(input: {
-    workspaceId: string;
-    versionId: string;
-  }): Promise<VersionedTextReadValue[]> {
-    this.assertWorkspace(input.workspaceId);
-    const metadata = await this.listTextFileMetadata(input);
-    const snapshots = await mapWithConcurrency(
-      metadata,
-      LIST_TEXT_FILE_HYDRATION_CONCURRENCY,
-      async (row) =>
-        await this.readTextFile({
-          workspaceId: input.workspaceId,
-          versionId: input.versionId,
-          path: row.path,
-        }),
-    );
-    return snapshots.filter(
-      (snapshot): snapshot is VersionedTextReadValue => snapshot !== null,
-    );
   }
 
   async listTextFileMetadata(input: {
@@ -886,6 +865,21 @@ export class VersionedLiveAdapter {
     return this.request(VERSIONED_METHOD.momentsList, {
       ...(input.versionId !== undefined ? { versionId: input.versionId } : {}),
       ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
+      ...(input.limit !== undefined ? { limit: input.limit } : {}),
+      ...(input.beforeMomentOrder !== undefined
+        ? { beforeMomentOrder: input.beforeMomentOrder }
+        : {}),
+    });
+  }
+
+  async readHistoryPage(input: {
+    workspaceId: string;
+    limit?: number;
+    beforeMomentOrder?: number;
+  }): Promise<VersionedMethodResultMap["history.page"]> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(VERSIONED_METHOD.historyPage, {
+      workspaceId: input.workspaceId,
       ...(input.limit !== undefined ? { limit: input.limit } : {}),
       ...(input.beforeMomentOrder !== undefined
         ? { beforeMomentOrder: input.beforeMomentOrder }
@@ -1029,28 +1023,6 @@ export class VersionedLiveAdapter {
   async secretStateExists(input: { workspaceId: string }): Promise<boolean> {
     this.assertWorkspace(input.workspaceId);
     return this.request(VERSIONED_METHOD.secretsStateExists, input);
-  }
-
-  async listSecretMoments(input: {
-    workspaceId: string;
-    versionId?: string;
-  }): Promise<SecretMomentRecord[]> {
-    this.assertWorkspace(input.workspaceId);
-    const rows: SecretMomentRecord[] = [];
-    let beforeMomentOrder: number | undefined;
-    do {
-      const page = await this.request(VERSIONED_METHOD.secretsMomentsList, {
-        workspaceId: input.workspaceId,
-        ...(input.versionId !== undefined
-          ? { versionId: input.versionId }
-          : {}),
-        limit: 500,
-        ...(beforeMomentOrder !== undefined ? { beforeMomentOrder } : {}),
-      });
-      rows.push(...page.moments);
-      beforeMomentOrder = page.nextBeforeMomentOrder ?? undefined;
-    } while (beforeMomentOrder !== undefined);
-    return rows;
   }
 
   async getSecretMoment(input: {

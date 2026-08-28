@@ -14,7 +14,8 @@ import { mockLiveSessions } from "../testing/liveEngineSessions";
 import { createTestScratch } from "./testTemp";
 import {
   createDefaultDiskWriter,
-  createWorkspaceEngineCapture,
+  createWorkspaceEngineCapture as createAttachedWorkspaceEngineCapture,
+  type WorkspaceEngineCaptureOptions,
 } from "./workspaceEngineCapture";
 import { createLiveLinkedChatStore } from "./liveLinkedChatStore";
 import { formatChatBookmarkProjection } from "./chatBookmarkProjection";
@@ -22,6 +23,15 @@ import {
   archiveChatBookmarkProjection,
   writeChatBookmarkProjection,
 } from "./chatBookmarkProjectionWrite";
+
+function createWorkspaceEngineCapture(
+  options: Omit<WorkspaceEngineCaptureOptions, "attachmentId">,
+) {
+  return createAttachedWorkspaceEngineCapture({
+    ...options,
+    attachmentId: Symbol(`test-workspace-attachment:${options.workspaceId}`),
+  });
+}
 
 const roots: string[] = [];
 

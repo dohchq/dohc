@@ -1,110 +1,233 @@
-import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
+import { CHANNELS } from "./ipc/channels";
+import { registerWorkspaceSearchIpcHandlers } from "./ipc/workspaceSearchIpc";
+import {
+  createSearchRegistry,
+  type SearchBatch,
+} from "./workspaces/workspaceSearch";
+import { WorkspaceSearchOwner } from "./workspaces/workspaceSearchOwner";
 
-const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
+const roots: string[] = [];
 
-function sourceBlock(startMarker: string, endMarker: string): string {
-  const start = mainSource.indexOf(startMarker);
-  expect(start).toBeGreaterThan(-1);
-  const end = mainSource.indexOf(endMarker, start);
-  expect(end).toBeGreaterThan(start);
-  return mainSource.slice(start, end);
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true })));
+});
+
+async function workspaceRoot(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "dohc-search-owner-"));
+  roots.push(root);
+  await mkdir(join(root, ".dohc"));
+  return root;
 }
 
-function functionSource(signature: string): string {
-  return sourceBlock(signature, "\n}\n");
+interface TestSender {
+  id: number;
+  isDestroyed(): boolean;
+  send: Mock<(channel: string, payload: unknown) => void>;
+  once: Mock<(event: "destroyed", listener: () => void) => void>;
 }
 
-function handlerSource(channel: string): string {
-  return sourceBlock(`ipcMain.handle(CHANNELS.${channel}`, "\n  });");
+interface TestEvent {
+  sender: TestSender;
 }
 
-describe("ShareViewFiles main-process wiring", () => {
-  it("falls back to registry and folder cleanup when registered unmount fails", () => {
-    const handler = handlerSource("mountShare");
-    const registeredAt = handler.indexOf("if (registered) {");
-    const rollback = handler.slice(
-      registeredAt,
-      handler.indexOf("notifyRenderer();", registeredAt),
+function harness(input: { capture: boolean; rootPath: string }) {
+  const handlers = new Map<
+    string,
+    (event: TestEvent, payload: unknown) => Promise<unknown> | unknown
+  >();
+  const starts: Array<{
+    request: { includeGlob?: string };
+    allowPath: (path: string) => boolean;
+  }> = [];
+  const workspace = {
+    workspaceId: "workspace-1",
+    rootPath: input.rootPath,
+    shareMounts: [
+      {
+        shareId: "11111111-1111-4111-8111-111111111111",
+        label: "alex",
+      },
+    ],
+  };
+  const owner = new WorkspaceSearchOwner({
+    searchRegistry: {
+      async startSearch(_ownerId, _rootPath, _searchId, request, _onBatch, options) {
+        starts.push({
+          request,
+          allowPath: options.allowPath ?? (() => true),
+        });
+        return {
+          settled: new Promise<void>(() => undefined),
+          cancel: async () => undefined,
+        };
+      },
+      cancel: vi.fn(),
+      disposeOwner: vi.fn(),
+      killAll: vi.fn(),
+    },
+    prepareOwnedSearch: async () => ({
+      allowPath: (path) => path === "shared-with-me/alex/owned.md",
+    }),
+    engineCaptureFor: () =>
+      input.capture ? { flush: vi.fn(async () => undefined) } : null,
+    queryEngine: vi.fn(async () => []),
+    logError: vi.fn(),
+  });
+  registerWorkspaceSearchIpcHandlers<TestEvent, typeof workspace>({
+    registerHandler: (channel, handler) => handlers.set(channel, handler),
+    assertTrustedSender: () => undefined,
+    withWorkspaceOperation: async (_event, workspaceId, work) => {
+      if (workspaceId !== workspace.workspaceId) throw new Error("Unknown workspace.");
+      return work({
+        workspace,
+        attachmentId: Symbol.for("workspace-1"),
+        signal: new AbortController().signal,
+        isCurrent: () => true,
+      });
+    },
+    authorizeCancel: () => true,
+    owner,
+    onActivityError: vi.fn(),
+  });
+  const sender: TestSender = {
+    id: input.capture ? 1 : 2,
+    isDestroyed: () => false,
+    send: vi.fn<(channel: string, payload: unknown) => void>(),
+    once: vi.fn<(event: "destroyed", listener: () => void) => void>(),
+  };
+  return {
+    starts,
+    invoke: async (payload: unknown) =>
+      await handlers.get(CHANNELS.searchWorkspace)!({ sender }, payload),
+  };
+}
+
+describe("ShareViewFiles workspace search wiring", () => {
+  it("repeated switch cleanup cancels an active ripgrep once and drops its late settlement", async () => {
+    const rootPath = await workspaceRoot();
+    const killed: string[] = [];
+    const emit: Array<(batch: SearchBatch) => void> = [];
+    const owner = new WorkspaceSearchOwner({
+      searchRegistry: createSearchRegistry({
+        rgPath: "/unused",
+        start: (options) => {
+          emit.push(options.onBatch);
+          const settled = Promise.withResolvers<void>();
+          let wasKilled = false;
+          return {
+            searchId: options.searchId,
+            kill: () => {
+              if (wasKilled) return;
+              wasKilled = true;
+              killed.push(options.searchId);
+              settled.resolve();
+            },
+            settled: settled.promise,
+          };
+        },
+      }),
+      prepareOwnedSearch: async () => ({ allowPath: () => true }),
+      engineCaptureFor: () => null,
+      queryEngine: vi.fn(async () => []),
+      logError: vi.fn(),
+    });
+    const sender: TestSender = {
+      id: 81,
+      isDestroyed: () => false,
+      send: vi.fn<(channel: string, payload: unknown) => void>(),
+      once: vi.fn<(event: "destroyed", listener: () => void) => void>(),
+    };
+    await owner.start(
+      sender,
+      {
+        workspace: { workspaceId: "workspace-a", rootPath },
+        attachmentId: Symbol.for("workspace-a"),
+        signal: new AbortController().signal,
+        isCurrent: () => true,
+      },
+      {
+        workspaceId: "workspace-a",
+        searchId: "search-a",
+        query: "needle",
+      },
     );
-    const unmountAt = rollback.indexOf(".unmount(lease,");
-    const fallbackAt = rollback.indexOf("catch (unmountError)");
-    const registryAt = rollback.indexOf("setWorkspaceShareMounts(", fallbackAt);
-    const registryCatchAt = rollback.indexOf("catch (registryError)", registryAt);
-    const folderAt = rollback.indexOf("removeMountFolder(", fallbackAt);
 
-    expect(registeredAt).toBeGreaterThan(-1);
-    expect(unmountAt).toBeGreaterThan(-1);
-    expect(fallbackAt).toBeGreaterThan(unmountAt);
-    expect(registryAt).toBeGreaterThan(fallbackAt);
-    expect(registryCatchAt).toBeGreaterThan(registryAt);
-    expect(folderAt).toBeGreaterThan(registryCatchAt);
+    await owner.disposeSender(sender.id);
+    await owner.disposeSender(sender.id);
+    await owner.start(
+      sender,
+      {
+        workspace: { workspaceId: "workspace-b", rootPath },
+        attachmentId: Symbol.for("workspace-b"),
+        signal: new AbortController().signal,
+        isCurrent: () => true,
+      },
+      {
+        workspaceId: "workspace-b",
+        searchId: "search-b",
+        query: "needle",
+      },
+    );
+    emit[0]?.({
+      searchId: "search-a",
+      entries: [],
+      done: true,
+      limitHit: false,
+    });
+
+    expect(killed).toEqual(["search-a"]);
+    expect(sender.send).not.toHaveBeenCalled();
+
+    emit[1]?.({
+      searchId: "search-b",
+      entries: [],
+      done: true,
+      limitHit: false,
+    });
+    expect(sender.send).toHaveBeenCalledWith(
+      CHANNELS.searchResults,
+      expect.objectContaining({ searchId: "search-b", done: true }),
+    );
   });
 
-  it("holds the mount lock across preflight but leases the workspace only for local mount work", () => {
-    const mount = handlerSource("mountShare");
-    const mountLockAt = mount.indexOf("return withShareMountLock(");
-    const infoAt = mount.indexOf("await fetchShareViewInfo(");
-    const exclusiveAt = mount.indexOf("return withExclusiveWorkspaceOperation(");
-    const createAt = mount.indexOf("await createMountDirectory(");
-    const reconcileAt = mount.indexOf("await shareViewFiles.reconcile(");
+  it("applies the owned-file predicate to mount-only and full-workspace ripgrep", async () => {
+    const rootPath = await workspaceRoot();
+    const engine = harness({ capture: true, rootPath });
+    await engine.invoke({
+      workspaceId: "workspace-1",
+      searchId: "engine-search",
+      query: "needle",
+      includeGlob: "*.md",
+    });
 
-    expect(mountLockAt).toBeGreaterThan(-1);
-    expect(infoAt).toBeGreaterThan(mountLockAt);
-    expect(exclusiveAt).toBeGreaterThan(infoAt);
-    expect(createAt).toBeGreaterThan(exclusiveAt);
-    expect(reconcileAt).toBeGreaterThan(createAt);
-
-    const refresh = handlerSource("refreshShareMounts");
-    const refreshLockAt = refresh.indexOf("return withShareMountLock(");
-    const loopAt = refresh.indexOf("for (const mount of mounts)");
-    const perMountLeaseAt = refresh.indexOf(
-      "await withExclusiveWorkspaceOperation(",
-      loopAt,
+    expect(engine.starts).toHaveLength(1);
+    expect(engine.starts[0]?.request.includeGlob).toBe(
+      "shared-with-me/**/*.md",
     );
-    const refreshReconcileAt = refresh.indexOf(
-      "shareViewFiles.reconcile(",
-      perMountLeaseAt,
+    expect(engine.starts[0]?.allowPath("shared-with-me/alex/owned.md")).toBe(
+      true,
+    );
+    expect(engine.starts[0]?.allowPath("shared-with-me/alex/leaked.md")).toBe(
+      false,
     );
 
-    expect(refreshLockAt).toBeGreaterThan(-1);
-    expect(loopAt).toBeGreaterThan(refreshLockAt);
-    expect(perMountLeaseAt).toBeGreaterThan(loopAt);
-    expect(refreshReconcileAt).toBeGreaterThan(perMountLeaseAt);
-    expect(refresh.slice(refreshLockAt, loopAt)).not.toContain(
-      "withExclusiveWorkspaceOperation(",
-    );
+    const ripgrep = harness({ capture: false, rootPath });
+    await ripgrep.invoke({
+      workspaceId: "workspace-1",
+      searchId: "ripgrep-search",
+      query: "needle",
+      includeGlob: "*.md",
+    });
 
-    const unmount = handlerSource("unmountShare");
-    expect(unmount.indexOf("return withShareMountLock(")).toBeLessThan(
-      unmount.indexOf("withExclusiveWorkspaceOperation("),
+    expect(ripgrep.starts).toHaveLength(1);
+    expect(ripgrep.starts[0]?.request.includeGlob).toBe("*.md");
+    expect(ripgrep.starts[0]?.allowPath("shared-with-me/alex/owned.md")).toBe(
+      true,
     );
-  });
-
-  it("limits received-share ripgrep passes to canonical share files", () => {
-    const handler = handlerSource("searchWorkspace");
-    const preparedAt = handler.indexOf(
-      ").prepareSearch();",
-    );
-    const mountStartAt = handler.indexOf("await searchRegistry.startSearch(");
-    const fallbackStartAt = handler.indexOf(
-      "await searchRegistry.startSearch(",
-      mountStartAt + 1,
-    );
-    const mountPredicateAt = handler.indexOf(
-      "allowPath: ownedSearchView.allowPath,",
-      mountStartAt,
-    );
-    const ownedPredicateAt = handler.indexOf(
-      "allowPath: ownedSearchView.allowPath,",
-      fallbackStartAt,
-    );
-
-    expect(preparedAt).toBeGreaterThan(-1);
-    expect(mountStartAt).toBeGreaterThan(preparedAt);
-    expect(fallbackStartAt).toBeGreaterThan(mountStartAt);
-    expect(mountPredicateAt).toBeGreaterThan(mountStartAt);
-    expect(mountPredicateAt).toBeLessThan(fallbackStartAt);
-    expect(ownedPredicateAt).toBeGreaterThan(fallbackStartAt);
+    expect(ripgrep.starts[0]?.allowPath("notes/leaked.md")).toBe(false);
   });
 });

@@ -2870,7 +2870,32 @@ ALTER TABLE ydoc_docs ADD COLUMN seed_source_sha256 TEXT;
 
 pub(crate) const YDOC_SEED_SOURCE_MIGRATION_ID: &str = "v1-ydoc-seed-source";
 
-/// Ordinal 39. Local collection detection and record bindings. Collection
+/// Ordinal 39. History pages bound protected moments by their recording-time
+/// window. This index makes that read proportional to the requested window
+/// instead of sorting every protected moment in the version.
+const V1_SECRET_MOMENT_HISTORY_TIME_INDEX_DDL: &str = "\
+CREATE INDEX idx_secret_moments_history_time
+    ON secret_moments(workspace_id, version_id, recorded_at_ms DESC, moment_order DESC);
+";
+
+pub(crate) const SECRET_MOMENT_HISTORY_TIME_INDEX_MIGRATION_ID: &str =
+    "v1-secret-moment-history-time-index";
+
+/// Ordinal 40. A receiver-local content revision for each chat conversation.
+/// Rows are created lazily: an absent row is revision zero and the first
+/// visible mutation inserts revision one.
+const V1_CHAT_CONVERSATION_REVISIONS_DDL: &str = "\
+CREATE TABLE chat_conversation_revisions (
+    workspace_id     TEXT    NOT NULL,
+    thread_id        TEXT    NOT NULL,
+    content_revision INTEGER NOT NULL CHECK (content_revision > 0),
+    PRIMARY KEY (workspace_id, thread_id)
+) STRICT;
+";
+
+pub(crate) const CHAT_CONVERSATION_REVISIONS_MIGRATION_ID: &str = "v1-chat-conversation-revisions";
+
+/// Ordinal 41. Local collection detection and record bindings. Collection
 /// state is derived from active-version file heads, but persists so record ids
 /// survive renames and copied-file collisions have an existing owner.
 const V1_COLLECTION_ADOPTION_DDL: &str = "\
@@ -2910,7 +2935,7 @@ CREATE INDEX collection_records_by_collection
 
 pub(crate) const COLLECTION_ADOPTION_MIGRATION_ID: &str = "v1-collection-adoption";
 
-/// Ordinal 40. The local collection projection derived from applied record
+/// Ordinal 42. The local collection projection derived from applied record
 /// frontmatter: current values with validation, per-field history, and
 /// relation edges used for referential cleanup.
 const V1_COLLECTION_INDEX_DDL: &str = "\
@@ -3253,13 +3278,27 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     },
     Migration {
         ordinal: 39,
+        id: SECRET_MOMENT_HISTORY_TIME_INDEX_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_SECRET_MOMENT_HISTORY_TIME_INDEX_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 40,
+        id: CHAT_CONVERSATION_REVISIONS_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_CHAT_CONVERSATION_REVISIONS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 41,
         id: COLLECTION_ADOPTION_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_COLLECTION_ADOPTION_DDL,
         sets_user_version: None,
     },
     Migration {
-        ordinal: 40,
+        ordinal: 42,
         id: COLLECTION_INDEX_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_COLLECTION_INDEX_DDL,

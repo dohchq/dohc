@@ -31,7 +31,7 @@ interface AuthoredUpdate {
 
 interface ReplayScenario {
   name: string;
-  contentKind: "plaintext" | "richdoc";
+  contentKind: "plaintext" | "richdoc" | "scene";
   dimensions: string[];
   authoredUpdates: AuthoredUpdate[];
   replayOrder: string[];
@@ -64,6 +64,9 @@ const SCHEMA = {
   meta: "map",
   body: "xmlFragment",
   plainText: "text",
+  "excalidraw:revisions": "map",
+  "excalidraw:app-state": "map",
+  "excalidraw:assets": "map",
 } as const;
 
 function deterministicDoc(clientID: number): Y.Doc {
@@ -427,6 +430,39 @@ function largeRichdoc(): ReplayScenario {
   };
 }
 
+function sceneRevisionsAndAppState(): ReplayScenario {
+  const baseDoc = deterministicDoc(601);
+  const secondDoc = deterministicDoc(602);
+  const stateDoc = deterministicDoc(603);
+  const base = capture(baseDoc, "scene-1", "scene-author-1", () => {
+    baseDoc.getMap<string>("excalidraw:revisions").set(
+      '["box",1,1]',
+      '{"id":"box","isDeleted":false,"type":"rectangle","version":1,"versionNonce":1}',
+    );
+  });
+  const secondRevision = capture(secondDoc, "scene-2", "scene-author-2", () => {
+    secondDoc.getMap<string>("excalidraw:revisions").set(
+      '["box",2,2]',
+      '{"id":"box","isDeleted":false,"type":"rectangle","version":2,"versionNonce":2,"x":40}',
+    );
+  });
+  const state = capture(stateDoc, "scene-3", "scene-author-3", () => {
+    stateDoc.getMap<string>("excalidraw:app-state").set("theme", '"dark"');
+  });
+  return {
+    name: "scene-revisions-and-app-state",
+    contentKind: "scene",
+    dimensions: [
+      "scene revision map",
+      "scene app-state map",
+      "no binary assets",
+      "independent authors replayed out of order",
+    ],
+    authoredUpdates: [base, secondRevision, state],
+    replayOrder: [secondRevision.id, base.id, state.id],
+  };
+}
+
 function replay(scenario: ReplayScenario, order: string[]): Y.Doc {
   const byId = new Map(
     scenario.authoredUpdates.map((update) => [update.id, update]),
@@ -453,6 +489,7 @@ function buildCorpus(): {
     unicodePlaintext(),
     richdocStructureAndMarks(),
     largeRichdoc(),
+    sceneRevisionsAndAppState(),
   ];
   const goldenScenarios: Record<string, Json> = {};
   for (const scenario of scenarios) {

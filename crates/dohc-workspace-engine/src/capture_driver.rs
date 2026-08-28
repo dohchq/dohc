@@ -1821,6 +1821,10 @@ async fn manifest_seed(
             ManifestEntry {
                 size: entry.size,
                 sha256,
+                // The domain stores no mtime observation; `0` never
+                // authorizes hash reuse, so the first scan after open hashes
+                // every file.
+                mtime_ms: 0,
             },
         )
     }));

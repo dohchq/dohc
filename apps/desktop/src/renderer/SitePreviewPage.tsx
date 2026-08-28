@@ -20,7 +20,7 @@ import type {
   WorkspaceSettingsResult,
 } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
-import { openLinkExternally } from "./editor/linkMenu";
+import { openLinkExternally } from "./linkActivation";
 import { isLoopbackOrigin } from "./sdkFrame";
 
 type WorkspacePreviewMode =
@@ -68,6 +68,24 @@ function availableModes(
     presentBuildOutput(site)
   ) modes.push("build");
   return modes;
+}
+
+// Reference-stable no-op for the 1s dev-log poll: an unchanged log ring MUST
+// keep the previous array so setState bails out instead of re-rendering the
+// page every second. Compare every entry: once the ring is at its cap the
+// length stays pinned, and multi-line chunks share one `at`, so length plus
+// last entry alone can miss an interior shift.
+function sameLogs(
+  prev: StartSitePreviewResult["logs"],
+  next: StartSitePreviewResult["logs"],
+): boolean {
+  return (
+    prev.length === next.length &&
+    prev.every((a, i) => {
+      const b = next[i]!;
+      return a.at === b.at && a.stream === b.stream && a.text === b.text;
+    })
+  );
 }
 
 const SITE_PREVIEW_MODE_STORAGE_PREFIX = "dohc.site-preview-mode.v1";
@@ -418,7 +436,7 @@ export function SitePreviewPage(props: {
         requestContext !== siteContextRef.current ||
         previewRequest !== previewStartRequestRef.current
       ) return;
-      setPreviewLogs(result.logs);
+      setPreviewLogs((prev) => (sameLogs(prev, result.logs) ? prev : result.logs));
       if (result.exited) {
         setPreview(null);
         setIdleReason("exited");

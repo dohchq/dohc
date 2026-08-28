@@ -98,6 +98,11 @@ describe("B2 chats wire contract and loopback", () => {
       "start-channel-thread",
     );
     expect(started.thread.id).toBe("channel-thread");
+    expect(
+      await roundTrip(CHATS_METHOD.threadRevision, {
+        threadId: "channel-thread",
+      }),
+    ).toEqual({ revision: 1 });
 
     const fileThread = await roundTrip(
       CHATS_METHOD.threadCreate,

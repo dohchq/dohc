@@ -27,11 +27,11 @@ use dohc_engine_domain::{
     CreateNamedVersion, DeleteTextFile, DispatchClaim, DispatchRecord, DomainError,
     FeedCursorValue, FollowState, FollowTargetKind, LocalAttachmentInput,
     MAX_COLLECTION_HISTORY_LIMIT, MentionCursor, MergeTextFileFromVersion, MergeTextFileResult,
-    MergeUnchangedReason, MomentOp, RenameTextFile, ResolveConflictKind, ResolveDecision,
-    ResolveTextConflict, RollbackTextFileMutation, SaveBookmark, SecretDelete, SecretDiskIntent,
-    SecretMomentRecord, SecretWrite, SendMessage, SetFollow, SetReaction, StartChannelThread,
-    TextConflict, TextSnapshot, ThreadDispatchPause, VersionFileChangeStatus, VersionRecord,
-    WriteBinary, WriteText, validate_addressable_plaintext_path,
+    MergeUnchangedReason, MomentOp, MomentPage, RenameTextFile, ResolveConflictKind,
+    ResolveDecision, ResolveTextConflict, RollbackTextFileMutation, SaveBookmark, SecretDelete,
+    SecretDiskIntent, SecretMomentRecord, SecretWrite, SendMessage, SetFollow, SetReaction,
+    StartChannelThread, TextConflict, TextSnapshot, ThreadDispatchPause, VersionFileChangeStatus,
+    VersionRecord, WriteBinary, WriteText, validate_addressable_plaintext_path,
 };
 use dohc_engine_protocol::{
     error::{ErrorCode, WireError},
@@ -57,7 +57,7 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{Arc, Mutex, MutexGuard},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 const MAX_OPEN_HANDLES: usize = 64;
@@ -160,14 +160,6 @@ fn collection_response_json(response: impl Serialize) -> Result<Value, WireError
 /// same fixed resident-memory ceiling.
 const BLOB_EGRESS_BYTE_BUDGET: usize = dohc_engine_storage::MAX_BLOB_BYTES;
 
-/// Largest raw Y.Doc full-state that still fits one wire string once
-/// base64-expanded (4/3): DOP1's `max_string_bytes` divided by 4,
-/// times 3. Refusing here surfaces a clean error instead of the framer
-/// rejecting the whole response (which InProcessTransport would not even
-/// catch). Docs beyond this belong to the blob-chunk streaming path.
-const MAX_YDOC_STATE_WIRE_BYTES: usize =
-    (dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_string_bytes as usize / 4) * 3;
-
 /// How many bytes a string occupies once JSON-encoded, quotes included.
 ///
 /// `check_string` bounds the DECODED length, so only the frame limit catches
@@ -258,18 +250,31 @@ fn resolve_answer_beside_conflict_bytes(local: &LocalResolveDto) -> usize {
         + 2 * optional(&local.author_json)
 }
 
-fn encode_ydoc_state_base64(full_state: &[u8]) -> Result<String, WireError> {
-    if full_state.len() > MAX_YDOC_STATE_WIRE_BYTES {
-        return Err(wire(ErrorCode::Internal, "ydoc-state-exceeds-wire-limit"));
-    }
-    Ok(base64::engine::general_purpose::STANDARD.encode(full_state))
-}
-
 /// Approximate serialized-bytes budget for one moments.list page: a row
 /// can legitimately carry 64 KiB strings (authorJson), so a row COUNT can
 /// never bound the frame — the page cuts when the running estimate would
 /// pass this, well under the 1 MiB frame limit.
 const MOMENTS_PAGE_BYTE_BUDGET: usize = 256 * 1024;
+const HISTORY_PROTECTED_MOMENT_LIMIT: usize = 500;
+const HISTORY_PAGE_FLUSH_RETRIES: usize = 50;
+const HISTORY_PAGE_FLUSH_RETRY_DELAY: Duration = Duration::from_millis(20);
+
+struct EncodedMomentPage {
+    rows: Vec<Value>,
+    included: usize,
+    next_before_moment_order: Option<i64>,
+    latest_moment_order: i64,
+}
+
+impl EncodedMomentPage {
+    fn into_json(self) -> Value {
+        json!({
+            "moments": self.rows[..self.included].to_vec(),
+            "nextBeforeMomentOrder": self.next_before_moment_order,
+            "latestMomentOrder": self.latest_moment_order,
+        })
+    }
+}
 
 /// How many leading serialized rows fit a byte budget (at least one always
 /// ships — every string is wire-capped, so a single row fits). MEASURED on
@@ -321,6 +326,7 @@ impl BlobEgressBudget {
         &self,
         byte_length: i64,
         cancellation: &OperationCancellation,
+        operation: &str,
     ) -> Result<tokio::sync::OwnedSemaphorePermit, WireError> {
         let bytes = usize::try_from(byte_length)
             .ok()
@@ -330,7 +336,7 @@ impl BlobEgressBudget {
         tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
-                Err(cancellation.interruption("versionedBinary.readBlob (egress budget)"))
+                Err(cancellation.interruption(&format!("{operation} (egress budget)")))
             }
             permit = Arc::clone(&self.permits).acquire_many_owned(bytes) => {
                 permit.map_err(|_| wire(ErrorCode::Internal, "blob egress budget unavailable"))
@@ -682,7 +688,7 @@ pub struct EngineService {
     supervisor: &'static WorkspaceSupervisor,
     handles: Mutex<HashMap<WorkspaceHandle, OpenWorkspace>>,
     pending_cursors: Mutex<HashMap<String, PendingCursor>>,
-    open_lock: tokio::sync::Mutex<()>,
+    open_lock: Arc<tokio::sync::Mutex<()>>,
     next_handle: std::sync::atomic::AtomicU64,
     sessions: Arc<Mutex<HashMap<String, YdocSession>>>,
     leases: LeaseRegistry,
@@ -697,6 +703,12 @@ pub struct EngineService {
     events: EngineEvents,
     #[cfg(feature = "harness")]
     capture_apply_probe: Option<capture_driver::CaptureApplyProbe>,
+    #[cfg(test)]
+    open_install_probe: Option<(
+        Arc<tokio::sync::Notify>,
+        Arc<tokio::sync::Notify>,
+        Arc<std::sync::atomic::AtomicBool>,
+    )>,
     /// PER-EngineService by design. Production runs exactly ONE EngineService per
     /// daemon process (the stdio host constructs a single service), so the
     /// `BLOB_EGRESS_BYTE_BUDGET` resident-memory ceiling is per-process there.
@@ -808,12 +820,21 @@ impl EngineService {
         Self::with_supervisor(WorkspaceSupervisor::global())
     }
 
+    /// Harness-only deterministic session namespace for paired actor tests.
+    #[cfg(feature = "harness")]
+    #[doc(hidden)]
+    pub fn with_session_epoch_for_harness(session_epoch: impl Into<String>) -> Self {
+        let mut service = Self::new();
+        service.session_epoch = session_epoch.into();
+        service
+    }
+
     fn with_supervisor(supervisor: &'static WorkspaceSupervisor) -> Self {
         EngineService {
             supervisor,
             handles: Mutex::new(HashMap::new()),
             pending_cursors: Mutex::new(HashMap::new()),
-            open_lock: tokio::sync::Mutex::new(()),
+            open_lock: Arc::new(tokio::sync::Mutex::new(())),
             next_handle: std::sync::atomic::AtomicU64::new(1),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             leases: {
@@ -851,6 +872,8 @@ impl EngineService {
             events: EngineEvents::default(),
             #[cfg(feature = "harness")]
             capture_apply_probe: None,
+            #[cfg(test)]
+            open_install_probe: None,
             blob_egress_budget: BlobEgressBudget::new(BLOB_EGRESS_BYTE_BUDGET),
         }
     }
@@ -885,6 +908,24 @@ impl EngineService {
             return Ok(ServiceResponse {
                 response: Response { id, result },
                 blob_egress,
+            });
+        }
+        if request.method == "ydoc.open" {
+            let (result, blob_egress) = self
+                .ydoc_open(&ctx, request.workspace, request.params, id)
+                .await?;
+            return Ok(ServiceResponse {
+                response: Response { id, result },
+                blob_egress: Some(blob_egress),
+            });
+        }
+        if request.method == "ydoc.resync" {
+            let (result, blob_egress) = self
+                .ydoc_resync(&ctx, request.workspace, request.params, id)
+                .await?;
+            return Ok(ServiceResponse {
+                response: Response { id, result },
+                blob_egress: Some(blob_egress),
             });
         }
         let result = match request.method.as_str() {
@@ -983,10 +1024,6 @@ impl EngineService {
                 self.versioned_text_read(&ctx, request.workspace, request.params)
                     .await?
             }
-            "ydoc.open" => {
-                self.ydoc_open(&ctx, request.workspace, request.params)
-                    .await?
-            }
             "ydoc.recordUpdate" => {
                 self.ydoc_record_update(
                     &ctx,
@@ -1010,10 +1047,6 @@ impl EngineService {
             }
             "ydoc.evict" => {
                 self.ydoc_evict(&ctx, request.workspace, request.params)
-                    .await?
-            }
-            "ydoc.resync" => {
-                self.ydoc_resync(&ctx, request.workspace, request.params)
                     .await?
             }
             "conflicts.list" => {
@@ -1100,6 +1133,10 @@ impl EngineService {
             }
             "moments.list" => {
                 self.moments_list(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "history.page" => {
+                self.history_page(&ctx, request.workspace, request.params)
                     .await?
             }
             "moments.get" => {
@@ -1210,6 +1247,10 @@ impl EngineService {
             }
             "chats.threads.getProjection" => {
                 self.chats_threads_get_projection(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.threads.revision" => {
+                self.chats_threads_revision(&ctx, request.workspace, request.params)
                     .await?
             }
             "chats.messages.send" => {
@@ -1530,7 +1571,7 @@ impl EngineService {
             () = cancellation.token.cancelled() => {
                 return Err(cancellation.interruption("workspace open (queued)"));
             }
-            serial = self.open_lock.lock() => serial,
+            serial = Arc::clone(&self.open_lock).lock_owned() => serial,
         };
         let validated =
             shadow_fence::validate_shadow_root(PathBuf::from(&params.root_dir).as_path())
@@ -1670,13 +1711,48 @@ impl EngineService {
         let supervisor = self.supervisor;
         let actor_path = db_path.clone();
         let now_ms = now_ms()?;
-        let actor_open = tokio::task::spawn_blocking(move || match requested_mode {
-            WorkspaceOpenMode::Full => supervisor.open(&actor_path, now_ms),
-            WorkspaceOpenMode::ReadOnly => supervisor.open_read_only(&actor_path),
-        })
-        .await
-        .map_err(|_| wire(ErrorCode::Internal, "workspace open task failed"))?
-        .map_err(map_runtime)?;
+        #[cfg(test)]
+        let open_install_probe = self.open_install_probe.clone();
+        let mut opening = tokio::task::spawn_blocking(move || {
+            let opened = match requested_mode {
+                WorkspaceOpenMode::Full => supervisor.open(&actor_path, now_ms),
+                WorkspaceOpenMode::ReadOnly => supervisor.open_read_only(&actor_path),
+            };
+            // Establish cleanup ownership inside the blocking task that creates
+            // the actor. If the awaiting request is cancelled, Tokio drops this
+            // task's unobserved output and the guard closes the actor. The guard
+            // also retains open serialization until cleanup installs Closing.
+            let open_guard = OpenGuard {
+                supervisor,
+                db_path: opened
+                    .as_ref()
+                    .ok()
+                    .and_then(|open| open.created_actor.then_some(actor_path)),
+                _open_serial,
+            };
+            #[cfg(test)]
+            if open_guard.db_path.is_some()
+                && let Some((reached, release, armed)) = open_install_probe
+                && armed.swap(false, std::sync::atomic::Ordering::AcqRel)
+            {
+                reached.notify_one();
+                tokio::runtime::Handle::current().block_on(release.notified());
+            }
+            (opened, open_guard)
+        });
+        let (actor_open, open_guard) = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                // Dropping the join handle detaches the blocking task. Its
+                // OpenGuard output is then discarded when startup returns,
+                // which installs Closing before releasing open serialization.
+                return Err(cancellation.interruption("workspace open (actor startup)"));
+            }
+            opened = &mut opening => {
+                opened.map_err(|_| wire(ErrorCode::Internal, "workspace open task failed"))?
+            }
+        };
+        let actor_open = actor_open.map_err(map_runtime)?;
         // The supervisor deduplicates by physical engine.db identity, including
         // root aliases and hard links. EngineService state (capture driver,
         // session registry, and version barriers) deliberately has one owner:
@@ -1700,22 +1776,12 @@ impl EngineService {
             Err(error) => Some(map_runtime(error)),
         };
         if let Some(error) = binding_error {
-            let supervisor = self.supervisor;
-            let rejected_path = db_path.clone();
-            let _ = tokio::task::spawn_blocking(move || supervisor.close(&rejected_path)).await;
             return Err(error);
         }
         let sequence = self
             .next_handle
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let handle = WorkspaceHandle(format!("ws-{sequence:016x}"));
-        // The guard arms BEFORE any fallible await past the shadow binding:
-        // an error in the startup replay below must close the actor rather
-        // than leak an unowned, handle-less binding in the supervisor.
-        let open_guard = OpenGuard {
-            supervisor: self.supervisor,
-            db_path: Some(db_path.clone()),
-        };
         let capture_apply_gate = Arc::new(tokio::sync::Mutex::new(()));
         let capture = if requested_mode == WorkspaceOpenMode::ReadOnly {
             None
@@ -1789,7 +1855,6 @@ impl EngineService {
             }
             capture
         };
-        open_guard.disarm();
         lock(&self.handles).insert(
             handle.clone(),
             OpenWorkspace {
@@ -1807,6 +1872,7 @@ impl EngineService {
                 session_ops: Arc::new(tokio::sync::Mutex::new(())),
             },
         );
+        open_guard.disarm();
         Ok(json!({ "workspace": handle }))
     }
 
@@ -3790,13 +3856,31 @@ impl EngineService {
         handle: Option<WorkspaceHandle>,
     ) -> Result<Value, WireError> {
         let open = self.open(handle.as_ref())?;
+        let outcome = self.capture_flush_once(ctx, &open, "capture.flush").await?;
+        Ok(json!({
+            "settled": outcome.settled,
+            "running": outcome.running,
+            "degraded": outcome.degraded,
+        }))
+    }
+
+    async fn capture_flush_once(
+        &self,
+        ctx: &RequestContext,
+        open: &OpenWorkspace,
+        operation: &'static str,
+    ) -> Result<capture_driver::FlushOutcome, WireError> {
         // Clone the sender OUT of the lock and await OUTSIDE it: a flush can
         // legitimately take many reconcile cycles, and the workspace table
         // must not be blocked for its duration.
         let sender = lock(&open.capture)
             .as_ref()
             .map(capture_driver::CaptureDriver::flush_sender);
-        let unavailable = json!({ "settled": false, "running": false, "degraded": true });
+        let unavailable = capture_driver::FlushOutcome {
+            settled: false,
+            running: false,
+            degraded: true,
+        };
         let Some(sender) = sender else {
             return Ok(unavailable);
         };
@@ -3810,7 +3894,7 @@ impl EngineService {
         tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
-                return Err(cancellation.interruption("capture.flush (queued)"));
+                return Err(cancellation.interruption(&format!("{operation} (queued)")));
             }
             sent = sender.send(reply_tx) => {
                 if sent.is_err() {
@@ -3821,16 +3905,9 @@ impl EngineService {
         tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
-                Err(cancellation.interruption("capture.flush"))
+                Err(cancellation.interruption(operation))
             }
-            outcome = reply_rx => match outcome {
-                Ok(outcome) => Ok(json!({
-                    "settled": outcome.settled,
-                    "running": outcome.running,
-                    "degraded": outcome.degraded,
-                })),
-                Err(_) => Ok(unavailable),
-            }
+            outcome = reply_rx => Ok(outcome.unwrap_or(unavailable)),
         }
     }
 
@@ -4275,7 +4352,7 @@ impl EngineService {
             }
             let byte_permit = self
                 .blob_egress_budget
-                .reserve(read.byte_length, &cancellation)
+                .reserve(read.byte_length, &cancellation, "versionedBinary.readBlob")
                 .await?;
             let hydrated = Self::read_under_ctx(
                 &cancellation,
@@ -4352,7 +4429,7 @@ impl EngineService {
             }
             let byte_permit = self
                 .blob_egress_budget
-                .reserve(read.byte_length, &cancellation)
+                .reserve(read.byte_length, &cancellation, "versionedText.readBlob")
                 .await?;
             let hydrated = Self::read_under_ctx(
                 &cancellation,
@@ -4438,45 +4515,87 @@ impl EngineService {
                 }),
         )
         .await?;
-        // A row COUNT cannot bound the frame: authorJson alone may be a
-        // 64 KiB string. Cut the page when the running size estimate would
-        // pass the budget (at least one row always ships — a single row
-        // fits by construction, every string being wire-capped).
-        let mut rows: Vec<Value> = page.moments.iter().map(moment_json).collect();
-        // A single row can legitimately exceed the page budget (several
-        // wire-legal strings plus escaping). The page must still make
-        // progress: degrade THAT row to metadata (texts nulled — their
-        // byte lengths remain) rather than ship an over-frame page or
-        // dead-end the cursor.
-        if let Some(first) = rows.first_mut() {
-            if serde_json::to_string(first).map_or(0, |s| s.len()) > MOMENTS_PAGE_BYTE_BUDGET {
-                first["afterText"] = Value::Null;
-                first["beforeText"] = Value::Null;
-                first["afterInbandLimitBytes"] = json!(MAX_INBAND_CONTENT_BYTES);
-                first["beforeInbandLimitBytes"] = json!(MAX_INBAND_CONTENT_BYTES);
+        Ok(encode_moment_page(&page)?.into_json())
+    }
+
+    async fn history_page(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: HistoryPageParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+
+        let mut flush = self
+            .capture_flush_once(ctx, &open, "history.page capture flush")
+            .await?;
+        for _ in 0..HISTORY_PAGE_FLUSH_RETRIES {
+            if flush.settled {
+                break;
             }
+            let cancellation = OperationCancellation::new(ctx);
+            tokio::select! {
+                biased;
+                () = cancellation.token.cancelled() => {
+                    return Err(cancellation.interruption("history.page capture flush retry"));
+                }
+                () = tokio::time::sleep(HISTORY_PAGE_FLUSH_RETRY_DELAY) => {}
+            }
+            flush = self
+                .capture_flush_once(ctx, &open, "history.page capture flush")
+                .await?;
         }
-        let included = byte_budget_cut_serialized(&rows, MOMENTS_PAGE_BYTE_BUDGET);
-        if included == 0 && !rows.is_empty() {
+        if !flush.settled {
             return Err(wire(
-                ErrorCode::Internal,
-                "a moment row exceeds the response frame budget",
+                ErrorCode::Overloaded,
+                "History is still updating. Try again.",
             ));
         }
-        let truncated = included < rows.len();
-        let next_before = if truncated {
-            page.moments[..included]
-                .last()
-                .map(|moment| moment.moment_order)
-        } else {
-            page.next_before_moment_order
-        };
+
+        let cancellation = OperationCancellation::new(ctx);
+        let read = Self::read_under_ctx(
+            &cancellation,
+            "history.page",
+            open.actor.history_page(
+                open.workspace_id,
+                params.limit.unwrap_or(200).min(500),
+                params.before_moment_order,
+                HISTORY_PROTECTED_MOMENT_LIMIT + 1,
+            ),
+        )
+        .await?;
+        let text_page = encode_moment_page(&read.text_moment_page)?;
+        let lower_recorded_at_ms = text_page.next_before_moment_order.and_then(|_| {
+            read.text_moment_page
+                .moments
+                .get(text_page.included.saturating_sub(1))
+                .map(|moment| moment.recorded_at_ms)
+        });
+        let protected_moments: Vec<&SecretMomentRecord> = read
+            .protected_moments
+            .iter()
+            .filter(|moment| {
+                lower_recorded_at_ms.is_none_or(|lower| moment.recorded_at_ms > lower)
+                    && read
+                        .upper_recorded_at_ms
+                        .is_none_or(|upper| moment.recorded_at_ms <= upper)
+            })
+            .collect();
+        let row_truncated = protected_moments.len() > HISTORY_PROTECTED_MOMENT_LIMIT;
+        let protected_rows: Vec<Value> = protected_moments
+            .into_iter()
+            .take(HISTORY_PROTECTED_MOMENT_LIMIT)
+            .map(secret_moment_json)
+            .collect();
+        let included = byte_budget_cut_serialized(&protected_rows, MOMENTS_PAGE_BYTE_BUDGET);
+        let byte_truncated = included < protected_rows.len();
         Ok(json!({
-            "moments": rows[..included].to_vec(),
-            "nextBeforeMomentOrder": next_before,
-            // The TS contract's numeric sentinel: -1 for an empty timeline,
-            // never null (numeric comparisons drive polling/cursor state).
-            "latestMomentOrder": page.latest_moment_order.unwrap_or(-1),
+            "activeVersion": version_record_json(&read.active_version),
+            "textMomentPage": text_page.into_json(),
+            "protectedMoments": &protected_rows[..included],
+            "protectedTruncated": row_truncated || byte_truncated,
         }))
     }
 
@@ -5577,6 +5696,32 @@ impl EngineService {
         )
         .await?;
         Ok(channel_id.map_or(Value::Null, Value::String))
+    }
+
+    async fn chats_threads_revision(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatThreadParams = parse(params)?;
+        if params.thread_id.is_empty()
+            || params.thread_id.encode_utf16().count() > 256
+            || params.thread_id.len() > 512
+            || params.thread_id.chars().any(char::is_control)
+        {
+            return Err(wire(ErrorCode::InvalidParams, "invalid-parameters"));
+        }
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let revision = Self::read_under_ctx(
+            &cancellation,
+            "chats.threads.revision",
+            open.actor
+                .chat_thread_revision(open.workspace_id, params.thread_id),
+        )
+        .await?;
+        Ok(json!({ "revision": revision }))
     }
 
     async fn chats_threads_get_projection(
@@ -7390,7 +7535,8 @@ impl EngineService {
         ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
         params: Value,
-    ) -> Result<Value, WireError> {
+        request_id: u64,
+    ) -> Result<(Value, BlobEgress), WireError> {
         let params: YdocOpenParams = parse(params)?;
         validate_ydoc_path(&params.path)?;
         let handle = handle.ok_or_else(workspace_unavailable)?;
@@ -7496,12 +7642,22 @@ impl EngineService {
             .next_session
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let session_id = format!("ydoc-{}-{sequence:016x}", self.session_epoch);
+        let initial_update = state.initial_update;
+        let byte_permit = self
+            .blob_egress_budget
+            .reserve(
+                i64::try_from(initial_update.len())
+                    .map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?,
+                &cancellation,
+                "ydoc.open",
+            )
+            .await?;
+        let initial_update_sha256 = dohc_engine_storage::hex_sha256(&initial_update);
         let result = YdocOpenResult {
             session_id: session_id.clone(),
             object_id: state.key.object_id.clone(),
             path: params.path.clone(),
             content_kind: ydoc_content_kind_name(state.content_kind),
-            initial_update_base64: encode_ydoc_state_base64(&state.initial_update)?,
             lineage: if state.lineage_existing {
                 "existing"
             } else {
@@ -7562,8 +7718,19 @@ impl EngineService {
             },
         );
         drop(serial);
-        serde_json::to_value(result)
-            .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))
+        let result = serde_json::to_value(result)
+            .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))?;
+        Ok((
+            result,
+            BlobEgress {
+                stream_id: request_id,
+                sha256: initial_update_sha256,
+                bytes: initial_update,
+                cancel: ctx.cancel.clone(),
+                deadline: ctx.deadline,
+                byte_permit: Some(byte_permit),
+            },
+        ))
     }
 
     async fn ydoc_record_update(
@@ -7962,7 +8129,8 @@ impl EngineService {
         ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
         params: Value,
-    ) -> Result<Value, WireError> {
+        request_id: u64,
+    ) -> Result<(Value, BlobEgress), WireError> {
         let params: YdocResyncParams = parse(params)?;
         let cancellation = OperationCancellation::new(ctx);
         let open = self.open(handle.as_ref())?;
@@ -7982,8 +8150,18 @@ impl EngineService {
         if let Some(session) = lock(&self.sessions).get_mut(&params.session_id) {
             session.lineage_claim_id = state.lineage_claim_id.clone();
         }
-        serde_json::to_value(YdocResyncResult {
-            initial_update_base64: encode_ydoc_state_base64(&state.initial_update)?,
+        let initial_update = state.initial_update;
+        let byte_permit = self
+            .blob_egress_budget
+            .reserve(
+                i64::try_from(initial_update.len())
+                    .map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?,
+                &cancellation,
+                "ydoc.resync",
+            )
+            .await?;
+        let initial_update_sha256 = dohc_engine_storage::hex_sha256(&initial_update);
+        let result = serde_json::to_value(YdocResyncResult {
             lineage_claim_id: state.lineage_claim_id,
             recovered_paths: state.recovered_paths,
             artifact_assets: state
@@ -8000,7 +8178,18 @@ impl EngineService {
                 })
                 .collect(),
         })
-        .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))
+        .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))?;
+        Ok((
+            result,
+            BlobEgress {
+                stream_id: request_id,
+                sha256: initial_update_sha256,
+                bytes: initial_update,
+                cancel: ctx.cancel.clone(),
+                deadline: ctx.deadline,
+                byte_permit: Some(byte_permit),
+            },
+        ))
     }
 
     fn ydoc_session(
@@ -8629,6 +8818,35 @@ impl EngineService {
         Ok(json!({}))
     }
 
+    /// Observe the actor-local writer cache without adding a product RPC.
+    #[cfg(feature = "harness")]
+    #[doc(hidden)]
+    pub async fn ydoc_cache_stats_for_harness(
+        &self,
+        handle: &WorkspaceHandle,
+    ) -> Result<dohc_engine_collab::CacheStats, RuntimeError> {
+        let actor = lock(&self.handles)
+            .get(handle)
+            .map(|open| open.actor.clone())
+            .ok_or(RuntimeError::ActorUnavailable)?;
+        actor.ydoc_cache_stats_for_test().await
+    }
+
+    /// Evict every actor-local document so the next consumer proves its cold
+    /// fallback on the same durable state.
+    #[cfg(feature = "harness")]
+    #[doc(hidden)]
+    pub async fn ydoc_cache_clear_for_harness(
+        &self,
+        handle: &WorkspaceHandle,
+    ) -> Result<dohc_engine_collab::CacheStats, RuntimeError> {
+        let actor = lock(&self.handles)
+            .get(handle)
+            .map(|open| open.actor.clone())
+            .ok_or(RuntimeError::ActorUnavailable)?;
+        actor.ydoc_cache_clear_for_test().await
+    }
+
     fn open(&self, handle: Option<&WorkspaceHandle>) -> Result<OpenWorkspace, WireError> {
         let handle = handle.ok_or_else(workspace_unavailable)?;
         lock(&self.handles)
@@ -8938,10 +9156,12 @@ impl OperationCancellation {
 
 /// Closes a just-opened store actor if `workspace_open` is dropped before the
 /// handle reaches `handles` (a cancelled/deadline-expired open). Disarmed on
-/// the success path, where the handle owns the actor.
+/// the success path, where the handle owns the actor. Open serialization stays
+/// held until either transfer or `begin_close` installs the Closing marker.
 struct OpenGuard {
     supervisor: &'static WorkspaceSupervisor,
     db_path: Option<PathBuf>,
+    _open_serial: tokio::sync::OwnedMutexGuard<()>,
 }
 
 impl OpenGuard {
@@ -8956,10 +9176,14 @@ impl Drop for OpenGuard {
             return;
         };
         let supervisor = self.supervisor;
+        let Ok(Some(closing)) = supervisor.begin_close(&db_path) else {
+            return;
+        };
         // Detached + blocking: never run the actor join on a runtime worker
-        // (the #201 cancellation-safety contract).
+        // (the #201 cancellation-safety contract). begin_close installed the
+        // Closing marker synchronously, so an immediate reopen waits here.
         tokio::task::spawn_blocking(move || {
-            let _ = supervisor.close(&db_path);
+            let _ = closing.finish();
         });
     }
 }
@@ -9530,6 +9754,16 @@ struct MomentsListParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HistoryPageParams {
+    workspace_id: String,
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    before_moment_order: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct MomentsGetParams {
     moment_id: String,
 }
@@ -9552,7 +9786,6 @@ struct YdocOpenResult {
     object_id: String,
     path: String,
     content_kind: &'static str,
-    initial_update_base64: String,
     lineage: &'static str,
     lineage_claim_id: Option<String>,
     /// Whether the ENTERED VERSION has a committed snapshot for this path.
@@ -9697,7 +9930,6 @@ struct YdocResyncParams {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct YdocResyncResult {
-    initial_update_base64: String,
     lineage_claim_id: Option<String>,
     recovered_paths: Vec<String>,
     artifact_assets: Vec<ArtifactAssetDescriptorResult>,
@@ -11008,6 +11240,45 @@ fn moment_json(moment: &dohc_engine_domain::MomentRecord) -> Value {
         "beforeByteLength": moment.before_byte_length,
         "beforeInbandLimitBytes": before_inband_limit,
         "beforePath": moment.before_path,
+    })
+}
+
+fn encode_moment_page(page: &MomentPage) -> Result<EncodedMomentPage, WireError> {
+    // A row COUNT cannot bound the frame: authorJson alone may be a 64 KiB
+    // string. The measured serialized cut is shared by moments.list and the
+    // aggregate history page so their text page and cursor stay identical.
+    let mut rows: Vec<Value> = page.moments.iter().map(moment_json).collect();
+    // A first row may legitimately exceed the page budget. Degrade that row
+    // to metadata so the cursor still makes progress, exactly as moments.list
+    // did before the history aggregate existed.
+    if let Some(first) = rows.first_mut() {
+        if serde_json::to_string(first).map_or(0, |s| s.len()) > MOMENTS_PAGE_BYTE_BUDGET {
+            first["afterText"] = Value::Null;
+            first["beforeText"] = Value::Null;
+            first["afterInbandLimitBytes"] = json!(MAX_INBAND_CONTENT_BYTES);
+            first["beforeInbandLimitBytes"] = json!(MAX_INBAND_CONTENT_BYTES);
+        }
+    }
+    let included = byte_budget_cut_serialized(&rows, MOMENTS_PAGE_BYTE_BUDGET);
+    if included == 0 && !rows.is_empty() {
+        return Err(wire(
+            ErrorCode::Internal,
+            "a moment row exceeds the response frame budget",
+        ));
+    }
+    let next_before_moment_order = if included < rows.len() {
+        page.moments[..included]
+            .last()
+            .map(|moment| moment.moment_order)
+    } else {
+        page.next_before_moment_order
+    };
+    Ok(EncodedMomentPage {
+        rows,
+        included,
+        next_before_moment_order,
+        // The TS contract uses -1 for an empty timeline, never null.
+        latest_moment_order: page.latest_moment_order.unwrap_or(-1),
     })
 }
 
@@ -12944,7 +13215,7 @@ mod tests {
         let first_ctx = RequestContext::unbounded();
         let first_cancellation = OperationCancellation::new(&first_ctx);
         let first = budget
-            .reserve(5, &first_cancellation)
+            .reserve(5, &first_cancellation, "test.first")
             .await
             .expect("reserve first five bytes");
         assert_eq!(budget.permits.available_permits(), 3);
@@ -12953,7 +13224,9 @@ mod tests {
         let mut waiting = tokio::spawn(async move {
             let ctx = RequestContext::unbounded();
             let cancellation = OperationCancellation::new(&ctx);
-            waiting_budget.reserve(5, &cancellation).await
+            waiting_budget
+                .reserve(5, &cancellation, "test.waiting")
+                .await
         });
         assert!(
             tokio::time::timeout(Duration::from_millis(100), &mut waiting)
@@ -13504,6 +13777,85 @@ mod tests {
             .expect_err("cancelled queued open must fail");
         assert_eq!(result.code, ErrorCode::Cancelled);
         drop(held);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_workspace_open_releases_actor_before_immediate_reopen() {
+        let scratch = ScratchDir::new().expect("scratch");
+        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
+            .expect("shadow marker");
+        let db_path = scratch.path().join(".dohc/engine/engine.db");
+        let mut store = dohc_engine_storage::EngineStore::open(&db_path, 1).expect("fixture store");
+        assert!(
+            store
+                .bind_shadow_clone_token(SHADOW_TOKEN)
+                .expect("bind shadow token")
+        );
+        drop(store);
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mut service = EngineService::with_supervisor(supervisor);
+        service.open_install_probe = Some((
+            Arc::clone(&reached),
+            release,
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        ));
+        let service = Arc::new(service);
+        let params = json!({
+            "rootDir": scratch.path().to_string_lossy(),
+            "workspaceId": "cancelled-open-reopen",
+            "captureMode": "none"
+        });
+
+        let opening_context = RequestContext::unbounded();
+        let cancel_opening = opening_context.cancel.clone();
+        let opening_service = Arc::clone(&service);
+        let opening_params = params.clone();
+        let opening = tokio::spawn(async move {
+            opening_service
+                .workspace_open(&opening_context, opening_params)
+                .await
+        });
+        reached.notified().await;
+        assert_eq!(supervisor.actor_count(), 1, "the supervisor actor exists");
+        assert!(
+            lock(&service.handles).is_empty(),
+            "the service handle is not installed yet"
+        );
+
+        cancel_opening.cancel();
+        let cancelled_open = tokio::time::timeout(Duration::from_millis(250), opening).await;
+        let cleanup_retains_serialization = service.open_lock.try_lock().is_err();
+        let reopening_service = Arc::clone(&service);
+        let reopening = tokio::spawn(async move {
+            reopening_service
+                .workspace_open(&RequestContext::unbounded(), params)
+                .await
+        });
+        service.open_install_probe.as_ref().unwrap().1.notify_one();
+        let cancelled_open = cancelled_open
+            .expect("cancelled workspace.open resolved promptly")
+            .expect("workspace.open task completed")
+            .expect_err("cancelled workspace.open must fail");
+        assert_eq!(cancelled_open.code, ErrorCode::Cancelled);
+        assert!(
+            cleanup_retains_serialization,
+            "cancelled open must retain serialization until cleanup starts"
+        );
+
+        let reopened = reopening
+            .await
+            .expect("reopen task completed")
+            .expect("immediate workspace reopen");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(reopened["workspace"].clone()).expect("workspace handle");
+        service
+            .workspace_close(Some(handle))
+            .await
+            .expect("workspace close");
+        assert_eq!(supervisor.actor_count(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -8,7 +8,7 @@ import { open } from "node:fs/promises";
 // interaction here -- an RPC would add a failure mode where today there is none.
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 import { resolveWorkspaceFile } from "./workspaceAssets";
-import { listFiles } from "./workspaceFiles";
+import { createBoundedTaskQueue, listFiles } from "./workspaceFiles";
 
 export type WorkspaceGraphEdgeKind = "wikilink" | "markdown";
 
@@ -41,8 +41,10 @@ export interface MarkdownGraphDocument {
 }
 
 export interface WorkspaceGraphFileSource {
-  list(): Promise<{ files: readonly { path: string }[] }>;
-  readText(path: string): Promise<{ text: string; truncated: boolean }>;
+  list(): Promise<{
+    files: readonly { path: string; contentIdentity?: string }[];
+  }>;
+  readText?(path: string): Promise<{ text: string; truncated: boolean }>;
 }
 
 // One mention of the target file inside a source document: the line that
@@ -72,6 +74,9 @@ const MAX_GRAPH_EDGES = 10000;
 const MAX_GRAPH_LINK_CANDIDATES = 20000;
 const MAX_GRAPH_FILE_TEXT_BYTES = 512 * 1024;
 const MAX_GRAPH_TOTAL_TEXT_BYTES = 32 * 1024 * 1024;
+const GRAPH_TEXT_READ_CONCURRENCY = 8;
+
+const runGraphTextRead = createBoundedTaskQueue(GRAPH_TEXT_READ_CONCURRENCY);
 
 const MARKDOWN_EXTENSIONS = new Set([".md", ".markdown", ".mdx"]);
 const WIKILINK_RE = /(?<!!)\[\[([^\]\n]{1,500})\]\]/g;
@@ -80,6 +85,14 @@ type LinkCandidate = {
   kind: WorkspaceGraphEdgeKind;
   target: string;
 };
+
+interface ParsedMarkdownGraphDocument extends MarkdownGraphDocument {
+  title: string;
+  links: LinkCandidate[];
+  linkLimit: number;
+  backlinkMentions?: ParsedBacklinkMentions;
+  backlinkMentionLimit: number;
+}
 
 type PathIndex = {
   byPath: Map<string, string>;
@@ -378,6 +391,29 @@ export function extractMarkdownGraphLinks(
   return links;
 }
 
+function parseMarkdownGraphDocument(
+  document: MarkdownGraphDocument,
+): ParsedMarkdownGraphDocument {
+  return {
+    ...document,
+    title: titleFor(document.path, document.text),
+    links: [],
+    linkLimit: 0,
+    backlinkMentionLimit: 0,
+  };
+}
+
+function graphLinksWithinLimit(
+  document: ParsedMarkdownGraphDocument,
+  limit: number,
+): LinkCandidate[] {
+  if (document.linkLimit < limit) {
+    document.links = extractMarkdownGraphLinks(document.text, limit);
+    document.linkLimit = limit;
+  }
+  return document.links.slice(0, limit);
+}
+
 function withoutGraphExtension(path: string): string {
   const ext = posix.extname(path);
   return ext ? path.slice(0, -ext.length) : path;
@@ -496,8 +532,8 @@ function resolveLinkTarget(
   return null;
 }
 
-export function buildMarkdownGraph(
-  docs: MarkdownGraphDocument[],
+function buildParsedMarkdownGraph(
+  docs: ParsedMarkdownGraphDocument[],
   options: {
     allPaths?: string[];
     omittedFileCount?: number;
@@ -531,7 +567,7 @@ export function buildMarkdownGraph(
     }
     const remainingLinkCandidates =
       MAX_GRAPH_LINK_CANDIDATES - processedLinkCandidates;
-    for (const link of extractMarkdownGraphLinks(doc.text, remainingLinkCandidates)) {
+    for (const link of graphLinksWithinLimit(doc, remainingLinkCandidates)) {
       processedLinkCandidates += 1;
       if (edges.length >= MAX_GRAPH_EDGES) break;
       const target = resolveLinkTarget(doc.path, link.target, link.kind, index);
@@ -551,9 +587,7 @@ export function buildMarkdownGraph(
 
   const nodes = allPaths.map((path) => ({
     path,
-    title: docByPath.has(path)
-      ? titleFor(path, docByPath.get(path)!.text)
-      : posix.basename(path).slice(0, 120),
+    title: docByPath.get(path)?.title ?? posix.basename(path).slice(0, 120),
     outgoing: stats.get(path)?.outgoing ?? 0,
     incoming: stats.get(path)?.incoming ?? 0,
   }));
@@ -573,6 +607,17 @@ export function buildMarkdownGraph(
     omittedFileCount: options.omittedFileCount ?? 0,
     truncatedFileCount: sortedDocs.filter((doc) => doc.truncated).length,
   };
+}
+
+export function buildMarkdownGraph(
+  docs: MarkdownGraphDocument[],
+  options: {
+    allPaths?: string[];
+    omittedFileCount?: number;
+    scannedFileCount?: number;
+  } = {},
+): WorkspaceGraph {
+  return buildParsedMarkdownGraph(docs.map(parseMarkdownGraphDocument), options);
 }
 
 // Replaces every code character (fenced blocks, indented blocks, inline spans)
@@ -654,19 +699,24 @@ interface RawMention {
   end: number;
 }
 
-// Like extractMarkdownGraphLinks, but over the offset-preserving code MASK
-// (not the length-changing strip) so each mention carries its position in the
-// ORIGINAL text. Returned in document order.
-function extractMentionsWithPositions(text: string, limit: number): RawMention[] {
+interface ParsedBacklinkMentions {
+  wikilinks: RawMention[];
+  markdownSpans: Array<RawMention | null>;
+}
+
+function parseBacklinkMentions(
+  text: string,
+  limit: number,
+): ParsedBacklinkMentions {
   const masked = maskCode(text);
-  const mentions: RawMention[] = [];
+  const wikilinks: RawMention[] = [];
 
   for (const match of masked.matchAll(WIKILINK_RE)) {
-    if (mentions.length >= limit) break;
+    if (wikilinks.length >= limit) break;
     const raw = match[1]?.split("|")[0]?.trim();
     if (raw && isLocalGraphTarget(raw)) {
       const start = match.index ?? 0;
-      mentions.push({
+      wikilinks.push({
         kind: "wikilink",
         target: raw,
         start,
@@ -675,19 +725,44 @@ function extractMentionsWithPositions(text: string, limit: number): RawMention[]
     }
   }
 
-  for (const span of extractMarkdownLinkSpans(masked, limit)) {
-    if (mentions.length >= limit) break;
-    const href = markdownHref(span.rawHref);
-    if (href && isLocalGraphTarget(href)) {
-      mentions.push({
-        kind: "markdown",
-        target: href,
-        start: span.start,
-        end: span.end,
-      });
+  const markdownSpans = extractMarkdownLinkSpans(masked, limit).map(
+    (span): RawMention | null => {
+      const href = markdownHref(span.rawHref);
+      return href && isLocalGraphTarget(href)
+        ? {
+            kind: "markdown",
+            target: href,
+            start: span.start,
+            end: span.end,
+          }
+        : null;
+    },
+  );
+  return { wikilinks, markdownSpans };
+}
+
+function backlinkMentionsWithinLimit(
+  document: ParsedMarkdownGraphDocument,
+  limit: number,
+): RawMention[] {
+  if (
+    !document.backlinkMentions ||
+    document.backlinkMentionLimit < limit
+  ) {
+    document.backlinkMentions = parseBacklinkMentions(document.text, limit);
+    document.backlinkMentionLimit = limit;
+  }
+  const parsed = document.backlinkMentions;
+  const mentions = parsed.wikilinks.slice(0, limit);
+  if (mentions.length < limit) {
+    // The existing extractor bounds raw markdown spans by `limit`, not by the
+    // remaining valid-link count. Preserve that slightly stricter behavior so
+    // an incremental result stays byte-for-byte equal to a fresh rebuild.
+    for (const mention of parsed.markdownSpans.slice(0, limit)) {
+      if (mentions.length >= limit) break;
+      if (mention) mentions.push(mention);
     }
   }
-
   mentions.sort((a, b) => a.start - b.start || a.end - b.end);
   return mentions;
 }
@@ -772,8 +847,8 @@ function buildBacklinkSnippet(
 // `targetPath`, with a snippet per mention. Self-links (a doc linking to
 // itself) and unresolved links are excluded — the same rules the graph applies.
 // Pure over an in-memory document map so it is testable without any IPC/FS.
-export function computeBacklinks(
-  docs: MarkdownGraphDocument[],
+function computeParsedBacklinks(
+  docs: ParsedMarkdownGraphDocument[],
   targetPath: string,
   options: { allPaths?: string[] } = {},
 ): BacklinkSource[] {
@@ -798,8 +873,8 @@ export function computeBacklinks(
     const snippets: BacklinkSnippet[] = [];
     const seen = new Set<string>();
 
-    for (const mention of extractMentionsWithPositions(
-      doc.text,
+    for (const mention of backlinkMentionsWithinLimit(
+      doc,
       remainingLinkCandidates,
     )) {
       remainingLinkCandidates -= 1;
@@ -820,7 +895,7 @@ export function computeBacklinks(
     if (snippets.length > 0) {
       sources.push({
         sourcePath: doc.path,
-        sourceTitle: titleFor(doc.path, doc.text),
+        sourceTitle: doc.title,
         snippets,
       });
     }
@@ -829,12 +904,24 @@ export function computeBacklinks(
   return sources;
 }
 
+export function computeBacklinks(
+  docs: MarkdownGraphDocument[],
+  targetPath: string,
+  options: { allPaths?: string[] } = {},
+): BacklinkSource[] {
+  return computeParsedBacklinks(
+    docs.map(parseMarkdownGraphDocument),
+    targetPath,
+    options,
+  );
+}
+
 async function readGraphText(
   rootPath: string,
   relativePath: string,
   source?: WorkspaceGraphFileSource,
 ): Promise<{ text: string; truncated: boolean; bytesRead: number }> {
-  if (source) {
+  if (source?.readText) {
     const result = await source.readText(relativePath);
     const sourceBytes = Buffer.byteLength(result.text, "utf8");
     if (sourceBytes <= MAX_GRAPH_FILE_TEXT_BYTES) {
@@ -932,6 +1019,230 @@ async function loadGraphDocuments(
     scannedFileCount: graphPaths.length,
     omittedFileCount,
   };
+}
+
+interface CachedMarkdownGraphDocument extends ParsedMarkdownGraphDocument {
+  contentIdentity: string | undefined;
+  bytesRead: number;
+  indexedAtInvalidation: number;
+  serial: number;
+}
+
+interface WorkspaceGraphIndexView {
+  docs: CachedMarkdownGraphDocument[];
+  graphPaths: string[];
+  scannedFileCount: number;
+  omittedFileCount: number;
+  key: string;
+}
+
+// Main owns one instance per physical workspace attachment. Construction is
+// intentionally inert: the first graph/backlinks request performs the cold
+// bounded pass. Later requests still obtain the current authority-visible
+// listing, but unchanged Markdown bodies stay parsed in this bounded layer.
+export class WorkspaceGraphIndex {
+  readonly #documents = new Map<string, CachedMarkdownGraphDocument>();
+  readonly #dirtyPaths = new Map<string, number>();
+  #started = false;
+  #invalidation = 0;
+  #broadInvalidation = 0;
+  #documentSerial = 0;
+  #tail: Promise<void> = Promise.resolve();
+  #viewKey: string | null = null;
+  #graph: WorkspaceGraph | null = null;
+  readonly #backlinks = new Map<string, BacklinkSource[]>();
+
+  invalidate(paths?: readonly string[]): void {
+    if (!this.#started) return;
+    this.#invalidation += 1;
+    if (!paths?.length) {
+      this.#broadInvalidation = this.#invalidation;
+      return;
+    }
+    for (const path of paths) {
+      this.#dirtyPaths.set(path.replaceAll("\\", "/"), this.#invalidation);
+    }
+  }
+
+  readGraph(
+    rootPath: string,
+    source: WorkspaceGraphFileSource,
+  ): Promise<WorkspaceGraph> {
+    this.#started = true;
+    return this.#enqueue(async () => {
+      const view = await this.#loadView(rootPath, source);
+      this.#adoptView(view.key);
+      if (!this.#graph) {
+        this.#graph = buildParsedMarkdownGraph(view.docs, {
+          allPaths: view.graphPaths,
+          omittedFileCount: view.omittedFileCount,
+          scannedFileCount: view.scannedFileCount,
+        });
+      }
+      return this.#graph;
+    });
+  }
+
+  readBacklinks(
+    rootPath: string,
+    targetPath: string,
+    source: WorkspaceGraphFileSource,
+  ): Promise<BacklinkSource[]> {
+    this.#started = true;
+    return this.#enqueue(async () => {
+      const view = await this.#loadView(rootPath, source);
+      this.#adoptView(view.key);
+      const cached = this.#backlinks.get(targetPath);
+      if (cached) return cached;
+      const backlinks = computeParsedBacklinks(view.docs, targetPath, {
+        allPaths: view.graphPaths,
+      });
+      this.#backlinks.set(targetPath, backlinks);
+      return backlinks;
+    });
+  }
+
+  #enqueue<Result>(work: () => Promise<Result>): Promise<Result> {
+    const result = this.#tail.then(work, work);
+    this.#tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  #adoptView(key: string): void {
+    if (this.#viewKey === key) return;
+    this.#viewKey = key;
+    this.#graph = null;
+    this.#backlinks.clear();
+  }
+
+  async #loadView(
+    rootPath: string,
+    source: WorkspaceGraphFileSource,
+  ): Promise<WorkspaceGraphIndexView> {
+    const invalidationAtStart = this.#invalidation;
+    const listed = await source.list();
+    const visible = listed.files.filter(
+      (file) => classifyEngineFilePathForRead(file.path).kind === "tracked",
+    );
+    const graphFiles = visible.slice(0, MAX_GRAPH_FILES);
+    const graphPaths = graphFiles.map((file) => file.path);
+    const markdown = graphFiles.filter((file) =>
+      isMarkdownGraphPath(file.path),
+    );
+    const selectedPaths = new Set(markdown.map((file) => file.path));
+
+    for (const path of this.#documents.keys()) {
+      if (!selectedPaths.has(path)) this.#documents.delete(path);
+    }
+
+    const docs: CachedMarkdownGraphDocument[] = [];
+    let totalTextBytes = 0;
+    let omittedFileCount = Math.max(0, visible.length - graphFiles.length);
+    const omitRemaining = (start: number) => {
+      omittedFileCount += markdown.length - start;
+      for (const omitted of markdown.slice(start)) {
+        this.#documents.delete(omitted.path);
+      }
+    };
+
+    graphRead: for (
+      let batchStart = 0;
+      batchStart < markdown.length;
+      batchStart += GRAPH_TEXT_READ_CONCURRENCY
+    ) {
+      const batch = markdown.slice(
+        batchStart,
+        batchStart + GRAPH_TEXT_READ_CONCURRENCY,
+      );
+      const reads = await Promise.all(
+        batch.map(async (file) => {
+          const cached = this.#documents.get(file.path);
+          const pathInvalidation = this.#dirtyPaths.get(file.path) ?? 0;
+          const needsRead =
+            !cached ||
+            cached.contentIdentity !== file.contentIdentity ||
+            pathInvalidation > cached.indexedAtInvalidation ||
+            (file.contentIdentity === undefined &&
+              this.#broadInvalidation > cached.indexedAtInvalidation);
+          if (!needsRead) {
+            return { status: "cached" as const, file, cached };
+          }
+          try {
+            const result = await runGraphTextRead(() =>
+              readGraphText(rootPath, file.path, source),
+            );
+            return { status: "fulfilled" as const, file, cached, result };
+          } catch {
+            return { status: "rejected" as const, file, cached };
+          }
+        }),
+      );
+
+      // Promise.all retains the listing order even when reads settle in a
+      // different order. Keep every cache and budget decision on that order.
+      for (let batchIndex = 0; batchIndex < reads.length; batchIndex += 1) {
+        const index = batchStart + batchIndex;
+        const read = reads[batchIndex];
+        let document = read.cached;
+
+        if (read.status === "rejected") {
+          // Match the fresh reader's watcher race behavior: the missing body is
+          // absent from this view and retried on the next request.
+          this.#documents.delete(read.file.path);
+          continue;
+        }
+
+        if (read.status === "fulfilled") {
+          if (
+            totalTextBytes + read.result.bytesRead >
+            MAX_GRAPH_TOTAL_TEXT_BYTES
+          ) {
+            omitRemaining(index);
+            break graphRead;
+          }
+          document = {
+            ...parseMarkdownGraphDocument({
+              path: read.file.path,
+              text: read.result.text,
+              truncated: read.result.truncated,
+            }),
+            contentIdentity: read.file.contentIdentity,
+            bytesRead: read.result.bytesRead,
+            indexedAtInvalidation: invalidationAtStart,
+            serial: ++this.#documentSerial,
+          };
+          this.#documents.set(read.file.path, document);
+        }
+
+        if (!document) continue;
+        if (totalTextBytes + document.bytesRead > MAX_GRAPH_TOTAL_TEXT_BYTES) {
+          omitRemaining(index);
+          break graphRead;
+        }
+        totalTextBytes += document.bytesRead;
+        docs.push(document);
+      }
+    }
+
+    for (const [path, version] of this.#dirtyPaths) {
+      if (version <= invalidationAtStart) this.#dirtyPaths.delete(path);
+    }
+
+    return {
+      docs,
+      graphPaths,
+      scannedFileCount: graphPaths.length,
+      omittedFileCount,
+      key: JSON.stringify([
+        graphPaths,
+        docs.map((doc) => [doc.path, doc.serial]),
+        omittedFileCount,
+      ]),
+    };
+  }
 }
 
 export async function readWorkspaceGraph(

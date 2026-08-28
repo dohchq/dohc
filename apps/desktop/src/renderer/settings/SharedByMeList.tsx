@@ -158,7 +158,7 @@ export function SharedByMeList(props: { workspaceId: string }) {
                 {selectorLabel(share)}
               </span>
               {share.selector ? (
-                <ShareAccessBadge access={share.selector.access} />
+                <ShareAccessBadge access={share.access} />
               ) : null}
             </div>
             <div className="truncate text-[11px] text-subtle">

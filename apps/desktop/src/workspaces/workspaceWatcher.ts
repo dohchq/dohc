@@ -83,10 +83,10 @@ export function startWorkspaceWatch(
   workspace: CreatedWorkspace,
   options: {
     settleMs?: number;
-    onRecorded?: () => void;
+    onRecorded?: (events: readonly WatcherEvent[]) => void;
     // Internal consumers that need path detail (for example, the plugin
     // pipeline) receive the same settled batch before onRecorded triggers the
-    // renderer's path-free activity notification. This adds no debounce.
+    // renderer activity notification. This adds no debounce.
     onSettledBatch?: (events: WatcherEvent[]) => void;
     // Read at the moment a batch settles: a non-null capture records the
     // batch as engine moments. Null (explicit engine opt-out, or a failed
@@ -134,7 +134,7 @@ export function startWorkspaceWatch(
         error,
       );
     }
-    options.onRecorded?.();
+    options.onRecorded?.(events.map((event) => ({ ...event })));
   }
 
   // Batches are processed strictly in order on one chain; a failure is logged

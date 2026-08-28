@@ -50,6 +50,7 @@ const SELF_TEST_SCRATCH_BODY =
 export interface ChatDispatchWorkspace {
   workspaceId: string;
   rootPath: string;
+  attachmentId?: symbol;
 }
 
 export interface ChatDispatchIdentity {
@@ -87,6 +88,7 @@ export type SpawnRunner = (
 
 export interface ChatDispatchPresenceInput {
   workspaceId: string;
+  attachmentId?: symbol;
   threadId: string;
   clientId: string;
   state?: {
@@ -112,14 +114,14 @@ export interface ChatDispatchServiceOptions {
   ): AwaitableAgentDispatchStore;
   readRunnerSettings(): Promise<RunnerSettings>;
   identityFor(
-    workspaceId: string,
+    workspace: ChatDispatchWorkspace,
     target?: { channelId: string } | { threadId: string },
   ): Promise<ChatDispatchIdentity>;
   stateDir(): string;
   appRoot(): string;
   isPackaged(): boolean;
   resourcesPath?: () => string | undefined;
-  queueSync(workspaceId: string): void | boolean | Promise<void | boolean>;
+  queueSync(workspace: ChatDispatchWorkspace): void | boolean | Promise<void | boolean>;
   // The engine opt-out gate: when it resolves false, a scan is a no-op.
   // Merely resolving the chat/dispatch stores opens the workspace in the
   // engine daemon, which would create an engine store for a workspace that
@@ -137,22 +139,23 @@ export interface ChatDispatchServiceOptions {
   ): Promise<boolean>;
   // The thread names the chat target, so a shared-channel push can cover the
   // channel this message landed in instead of waiting for the sync rotation.
-  onMessagePosted(workspaceId: string, threadId: string): void;
-  onRunUpdated?(workspaceId: string): void;
+  onMessagePosted(workspace: ChatDispatchWorkspace, threadId: string): void;
+  onRunUpdated?(workspace: ChatDispatchWorkspace): void;
   setRunAttribution(
-    workspaceId: string,
+    workspace: ChatDispatchWorkspace,
     run: { agentId: string; onBehalfOf: string; agentRunId: string } | null,
   ): void | Promise<void>;
-  runSlotOccupied?(workspaceId: string): boolean;
+  runSlotOccupied?(workspace: ChatDispatchWorkspace): boolean;
   publishPresence?(input: ChatDispatchPresenceInput): Promise<void>;
   requeueFailedTrigger?(input: {
     workspaceId: string;
+    attachmentId?: symbol;
     triggerMessageId: string;
     runId: string;
   }): boolean | Promise<boolean>;
-  hasPendingRunMessageLink?(workspaceId: string, runId: string): boolean;
+  hasPendingRunMessageLink?(workspace: ChatDispatchWorkspace, runId: string): boolean;
   listAppQuitRecoveries?(
-    workspaceId: string,
+    workspace: ChatDispatchWorkspace,
   ): ChatDispatchRecovery[] | Promise<ChatDispatchRecovery[]>;
   spawnRunner?: SpawnRunner;
   killProcessGroup?: (pid: number, signal: NodeJS.Signals) => void;
@@ -163,7 +166,7 @@ export interface ChatDispatchServiceOptions {
 }
 
 export interface ChatDispatchThreadState {
-  liveRun: boolean;
+  liveRunId: string | null;
   pendingCount: number;
   paused: boolean;
   pausedReason?: string;
@@ -203,13 +206,14 @@ interface PendingInterruptedRequeue {
   workspace: ChatDispatchWorkspace;
   input: {
     workspaceId: string;
+    attachmentId?: symbol;
     triggerMessageId: string;
     runId: string;
   };
 }
 
 interface SelfTestState {
-  workspaceId: string;
+  workspace: ChatDispatchWorkspace;
   child: RunnerProcess;
   threadId: string;
   runId: string;
@@ -472,9 +476,9 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     } catch {}
   }
 
-  function notifyRunUpdated(workspaceId: string): void {
+  function notifyRunUpdated(workspace: ChatDispatchWorkspace): void {
     try {
-      options.onRunUpdated?.(workspaceId);
+      options.onRunUpdated?.(workspace);
     } catch (error) {
       reportError(error);
     }
@@ -496,7 +500,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     return `${workspaceId}\u0000${runId}`;
   }
 
-  function scheduleRecoveryScan(workspaceId: string): void {
+  function scheduleRecoveryScan(workspace: ChatDispatchWorkspace): void {
+    const workspaceId = workspace.workspaceId;
     if (stopped || recoveryTimers.has(workspaceId)) return;
     const attempt = (recoveryAttempts.get(workspaceId) ?? 0) + 1;
     recoveryAttempts.set(workspaceId, attempt);
@@ -507,7 +512,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     const timer = setTimeout(() => {
       recoveryTimers.delete(workspaceId);
       if (stopped) return;
-      void scanWorkspace(workspaceId).then(
+      void scanWorkspace(workspaceId, workspace.attachmentId).then(
         () => {
           if (!recoveryTimers.has(workspaceId)) {
             recoveryAttempts.delete(workspaceId);
@@ -515,7 +520,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         },
         (error: unknown) => {
           reportError(error);
-          scheduleRecoveryScan(workspaceId);
+          scheduleRecoveryScan(workspace);
         },
       );
     }, delay);
@@ -526,18 +531,22 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     return `${workspaceId}\u0000${threadId}`;
   }
 
-  function runMessageLinkPending(workspaceId: string, runId: string): boolean {
-    return options.hasPendingRunMessageLink?.(workspaceId, runId) === true;
+  function runMessageLinkPending(
+    workspace: ChatDispatchWorkspace,
+    runId: string,
+  ): boolean {
+    return options.hasPendingRunMessageLink?.(workspace, runId) === true;
   }
 
-  function workspaceProcessReserved(workspaceId: string): boolean {
+  function workspaceProcessReserved(workspace: ChatDispatchWorkspace): boolean {
+    const workspaceId = workspace.workspaceId;
     return (
       liveRuns.has(workspaceId) ||
       pendingPreRunFailures.has(workspaceId) ||
       runReservations.has(workspaceId) ||
       selfTests.has(workspaceId) ||
       selfTestReservations.has(workspaceId) ||
-      options.runSlotOccupied?.(workspaceId) === true
+      options.runSlotOccupied?.(workspace) === true
     );
   }
 
@@ -550,14 +559,17 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   }
 
   function workingPresenceInput(
-    workspaceId: string,
+    workspace: ChatDispatchWorkspace,
     threadId: string,
     displayName: string,
   ): ChatDispatchPresenceInput {
     return {
-      workspaceId,
+      workspaceId: workspace.workspaceId,
+      ...(workspace.attachmentId
+        ? { attachmentId: workspace.attachmentId }
+        : {}),
       threadId,
-      clientId: `agent:${workspaceId}`,
+      clientId: `agent:${workspace.workspaceId}`,
       state: {
         displayName: runnerDisplayName(displayName),
         agent: true,
@@ -570,10 +582,13 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     if (live.presenceHeartbeat) clearInterval(live.presenceHeartbeat);
     live.presenceHeartbeat = null;
     void options
-      .identityFor(live.workspace.workspaceId)
+      .identityFor(live.workspace)
       .then(async (identity) => {
         const base = {
           workspaceId: live.workspace.workspaceId,
+          ...(live.workspace.attachmentId
+            ? { attachmentId: live.workspace.attachmentId }
+            : {}),
           threadId: live.claim.run.threadId,
           clientId: `agent:${live.workspace.workspaceId}`,
         };
@@ -698,7 +713,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     runId?: string,
     dispatchRequest?: AgentDispatchRequestOptions,
   ): Promise<string | null> {
-    const identity = await options.identityFor(workspace.workspaceId, { threadId });
+    const identity = await options.identityFor(workspace, { threadId });
     if (
       !(await options.authorizeServiceNote(
         workspace,
@@ -739,7 +754,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         // The report itself is authoritative; a provenance chip is optional.
       }
     }
-    options.onMessagePosted(workspace.workspaceId, threadId);
+    options.onMessagePosted(workspace, threadId);
     return message.id;
   }
 
@@ -848,7 +863,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
   }
 
   async function clearLiveAttribution(live: LiveRun): Promise<void> {
-    await options.setRunAttribution(live.workspace.workspaceId, null);
+    await options.setRunAttribution(live.workspace, null);
     finishPresence(live);
   }
 
@@ -906,7 +921,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
               runKey(live.workspace.workspaceId, live.claim.run.runId),
               { workspace: live.workspace, run: live.claim.run },
             );
-            scheduleRecoveryScan(live.workspace.workspaceId);
+            scheduleRecoveryScan(live.workspace);
           }
         }
         if (intent.exitCode !== 0) {
@@ -918,7 +933,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         } else if (linkedMessages?.length === 0) {
           if (
             runMessageLinkPending(
-              live.workspace.workspaceId,
+              live.workspace,
               live.claim.run.runId,
             )
           ) {
@@ -926,7 +941,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
               runKey(live.workspace.workspaceId, live.claim.run.runId),
               { workspace: live.workspace, run: live.claim.run },
             );
-            scheduleRecoveryScan(live.workspace.workspaceId);
+            scheduleRecoveryScan(live.workspace);
           } else {
             await postFailureNote(
               live.workspace,
@@ -952,10 +967,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           });
         }
         live.terminalDurable = true;
-        notifyRunUpdated(live.workspace.workspaceId);
+        notifyRunUpdated(live.workspace);
       } catch (error) {
         reportError(error);
-        scheduleRecoveryScan(live.workspace.workspaceId);
+        scheduleRecoveryScan(live.workspace);
         return false;
       }
     }
@@ -991,10 +1006,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         reason: `timed out after ${live.timeoutMinutes}m`,
       });
       live.terminalDurable = true;
-      notifyRunUpdated(live.workspace.workspaceId);
+      notifyRunUpdated(live.workspace);
     } catch (error) {
       reportError(error);
-      scheduleRecoveryScan(live.workspace.workspaceId);
+      scheduleRecoveryScan(live.workspace);
     }
   }
 
@@ -1010,7 +1025,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     // in-memory reservation would deadlock dispatch until app quit.
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        await options.setRunAttribution(workspace.workspaceId, null);
+        await options.setRunAttribution(workspace, null);
         break;
       } catch (error) {
         reportError(error);
@@ -1025,7 +1040,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       runId: claim.run.runId,
       reason,
     });
-    notifyRunUpdated(workspace.workspaceId);
+    notifyRunUpdated(workspace);
   }
 
   async function recoverPreRunFailure(
@@ -1041,13 +1056,13 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       ) {
         pendingPreRunFailures.delete(recovery.workspace.workspaceId);
       }
-      notifyRunUpdated(recovery.workspace.workspaceId);
+      notifyRunUpdated(recovery.workspace);
       await releaseWorkspaceLease(recovery.releaseWorkspace);
       recovery.releaseWorkspace = null;
       return true;
     } catch (error) {
       reportError(error);
-      scheduleRecoveryScan(recovery.workspace.workspaceId);
+      scheduleRecoveryScan(recovery.workspace);
       return false;
     }
   }
@@ -1062,8 +1077,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     const logPath = actualLogPath(claim.run.runId, claim.run.logPath);
     runReservations.add(workspace.workspaceId);
     try {
-      const identity = await options.identityFor(workspace.workspaceId);
-      await options.setRunAttribution(workspace.workspaceId, {
+      const identity = await options.identityFor(workspace);
+      await options.setRunAttribution(workspace, {
         agentId: "dohc-chat-runner",
         onBehalfOf: "local",
         agentRunId: claim.run.runId,
@@ -1118,11 +1133,11 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           }
         });
       });
-      notifyRunUpdated(workspace.workspaceId);
+      notifyRunUpdated(workspace);
       const publishWorking = () =>
         presence(
           workingPresenceInput(
-            workspace.workspaceId,
+            workspace,
             claim.run.threadId,
             identity.displayName,
           ),
@@ -1148,7 +1163,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           reason,
           releaseWorkspace,
         });
-        scheduleRecoveryScan(workspace.workspaceId);
+        scheduleRecoveryScan(workspace);
         return;
       }
       if ((await dispatch.openRuns(workspace.workspaceId)).length === 0) {
@@ -1161,7 +1176,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     if (
       stopped ||
       paused ||
-      workspaceProcessReserved(workspace.workspaceId)
+      workspaceProcessReserved(workspace)
     ) {
       return;
     }
@@ -1179,7 +1194,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           threadId,
           reason: "no-runner",
         });
-        if (failedCount > 0) notifyRunUpdated(workspace.workspaceId);
+        if (failedCount > 0) notifyRunUpdated(workspace);
         if (
           failedCount === 0 ||
           (await mostRecentAgentNoteIs(workspace, threadId, NO_RUNNER_NOTE))
@@ -1194,7 +1209,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       }
       return;
     }
-    if (stopped || paused || workspaceProcessReserved(workspace.workspaceId)) {
+    if (stopped || paused || workspaceProcessReserved(workspace)) {
       return;
     }
     if (dispatch.resolveUncertainClaim) {
@@ -1267,7 +1282,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           paused: true,
           reason: "re-dispatch budget exceeded",
         });
-        notifyRunUpdated(workspace.workspaceId);
+        notifyRunUpdated(workspace);
         try {
           await sendAgentMessage(
             workspace,
@@ -1284,7 +1299,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         }
         continue;
       }
-      if (stopped || paused || workspaceProcessReserved(workspace.workspaceId)) {
+      if (stopped || paused || workspaceProcessReserved(workspace)) {
         return;
       }
       runReservations.add(workspace.workspaceId);
@@ -1328,7 +1343,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
 
   async function scanTriggers(workspace: ChatDispatchWorkspace): Promise<void> {
     const [identity] = await Promise.all([
-      options.identityFor(workspace.workspaceId),
+      options.identityFor(workspace),
       options.chatStoreFor(workspace).ensureAgentChannel({
         workspaceId: workspace.workspaceId,
       }),
@@ -1341,7 +1356,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           ? { verifiedUserId: identity.verifiedUserId }
           : {}),
       });
-    if (recordedCount > 0) notifyRunUpdated(workspace.workspaceId);
+    if (recordedCount > 0) notifyRunUpdated(workspace);
   }
 
   async function persistInterruptedRequeue(
@@ -1363,7 +1378,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       return true;
     } catch (error) {
       reportError(error);
-      scheduleRecoveryScan(recovery.workspace.workspaceId);
+      scheduleRecoveryScan(recovery.workspace);
       return false;
     }
   }
@@ -1415,11 +1430,14 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         runId: claim.run.runId,
         reason: "app restart during run",
       });
-      notifyRunUpdated(workspace.workspaceId);
+      notifyRunUpdated(workspace);
       if (claim.dispatch.attemptCount < 2) {
         if (
           !(await requeueInterruptedRun(workspace, {
             workspaceId: workspace.workspaceId,
+            ...(workspace.attachmentId
+              ? { attachmentId: workspace.attachmentId }
+              : {}),
             triggerMessageId: claim.run.triggerMessageId,
             runId: claim.run.runId,
           }))
@@ -1429,7 +1447,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       }
     }
     const recoveries =
-      (await options.listAppQuitRecoveries?.(workspace.workspaceId)) ?? [];
+      (await options.listAppQuitRecoveries?.(workspace)) ?? [];
     for (const recovery of recoveries) {
       const linked = await dispatch.listRunMessages(
         workspace.workspaceId,
@@ -1460,6 +1478,9 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         if (
           !(await requeueInterruptedRun(workspace, {
             workspaceId: workspace.workspaceId,
+            ...(workspace.attachmentId
+              ? { attachmentId: workspace.attachmentId }
+              : {}),
             triggerMessageId: recovery.run.triggerMessageId,
             runId: recovery.run.runId,
           }))
@@ -1482,11 +1503,11 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     for (const [key, recovery] of pending) {
       if (
         runMessageLinkPending(
-          recovery.workspace.workspaceId,
+          recovery.workspace,
           recovery.run.runId,
         )
       ) {
-        scheduleRecoveryScan(workspace.workspaceId);
+        scheduleRecoveryScan(workspace);
         continue;
       }
       try {
@@ -1507,7 +1528,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         pendingNoReplyChecks.delete(key);
       } catch (error) {
         reportError(error);
-        scheduleRecoveryScan(workspace.workspaceId);
+        scheduleRecoveryScan(workspace);
       }
     }
   }
@@ -1526,14 +1547,27 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     await drain(workspace);
   }
 
-  function scanWorkspace(workspaceId: string): Promise<void> {
+  function scanWorkspace(
+    workspaceId: string,
+    expectedAttachmentId?: symbol,
+  ): Promise<void> {
+    let scannedWorkspace: ChatDispatchWorkspace | null = null;
     const scan = enqueue(workspaceId, async () => {
       const workspace = options.workspaceFor(workspaceId);
       if (!workspace || stopped) return;
+      if (
+        expectedAttachmentId !== undefined &&
+        workspace.attachmentId !== expectedAttachmentId
+      ) {
+        return;
+      }
+      scannedWorkspace = workspace;
       if ((await options.scanEligible?.(workspace)) === false) return;
       await scanAndDrain(workspace);
     });
-    void scan.catch(() => scheduleRecoveryScan(workspaceId));
+    void scan.catch(() => {
+      if (scannedWorkspace) scheduleRecoveryScan(scannedWorkspace);
+    });
     return scan;
   }
 
@@ -1542,7 +1576,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     await Promise.allSettled(
       workspaces.map(async (workspace) => {
         try {
-          const ready = await options.queueSync(workspace.workspaceId);
+          const ready = await options.queueSync(workspace);
           if (ready === false) return;
         } catch (cause) {
           // A transient pull failure must not prevent a scan of this
@@ -1554,7 +1588,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           reportError(error);
         }
         try {
-          await scanWorkspace(workspace.workspaceId);
+          await scanWorkspace(workspace.workspaceId, workspace.attachmentId);
         } catch (cause) {
           const error = new Error(
             `Agent dispatch scan failed for workspace ${workspace.workspaceId}.`,
@@ -1597,11 +1631,20 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     }
   }
 
-  async function stopAgentRun(workspaceId: string): Promise<boolean> {
+  async function stopAgentRun(
+    workspaceId: string,
+    expectedRunId: string,
+  ): Promise<boolean> {
     let stoppedRun = false;
     await enqueue(workspaceId, async () => {
       const live = liveRuns.get(workspaceId);
-      if (!live || live.finalized) return;
+      if (
+        !live ||
+        live.finalized ||
+        live.claim.run.runId !== expectedRunId
+      ) {
+        return;
+      }
       stoppedRun = true;
       live.finalized = true;
       live.terminalIntent = {
@@ -1636,7 +1679,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           durableDispatchRequest,
         );
       }
-      notifyRunUpdated(workspaceId);
+      notifyRunUpdated(live.workspace);
     });
     return stoppedRun;
   }
@@ -1653,7 +1696,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         threadId,
         paused: false,
       });
-      notifyRunUpdated(workspaceId);
+      notifyRunUpdated(workspace);
       budgetBypassThreads.add(threadKey(workspaceId, threadId));
       await scanAndDrain(workspace);
     });
@@ -1672,8 +1715,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     ]);
     const live = liveRuns.get(workspaceId);
     return {
-      liveRun:
-        live?.claim.run.threadId === threadId && live.finalized === false,
+      liveRunId:
+        live?.claim.run.threadId === threadId && live.finalized === false
+          ? live.claim.run.runId
+          : null,
       pendingCount: pending
         .filter((pending) => pending.threadId === threadId).length,
       paused: pauseState?.paused ?? false,
@@ -1690,7 +1735,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     if (!workspace) return { ok: false, detail: "That workspace is not available." };
     if (shuttingDown) return { ok: false, detail: "Agent dispatch is stopping." };
     if (
-      workspaceProcessReserved(workspaceId)
+      workspaceProcessReserved(workspace)
     ) {
       return { ok: false, detail: "A runner is already active in this workspace." };
     }
@@ -1718,7 +1763,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       }
 
       const chat = options.chatStoreFor(workspace);
-      const identity = await options.identityFor(workspaceId);
+      const identity = await options.identityFor(workspace);
       const agentChannel = await chat.ensureAgentChannel({ workspaceId });
       const summaries = await chat.listChannelThreads({
         workspaceId,
@@ -1753,7 +1798,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           body: SELF_TEST_SCRATCH_BODY,
         });
         scratchThreadId = scratch.thread.id;
-        options.onMessagePosted(workspaceId, scratchThreadId);
+        options.onMessagePosted(workspace, scratchThreadId);
       }
       const runId = `run_self_test_${createId()}`;
       const marker = `dohc-runner-self-test:${runId}`;
@@ -1765,7 +1810,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           liveRuns.has(workspaceId) ||
           runReservations.has(workspaceId) ||
           selfTests.has(workspaceId) ||
-          options.runSlotOccupied?.(workspaceId) === true
+          options.runSlotOccupied?.(workspace) === true
         ) {
           return {
             ok: false,
@@ -1774,7 +1819,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
               : "A runner became active before the self-test could start.",
           };
         }
-        await options.setRunAttribution(workspaceId, {
+        await options.setRunAttribution(workspace, {
           agentId: "dohc-chat-runner-self-test",
           onBehalfOf: "local",
           agentRunId: runId,
@@ -1800,7 +1845,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             }
             selfTests.delete(workspaceId);
             try {
-              await options.setRunAttribution(workspaceId, null);
+              await options.setRunAttribution(workspace, null);
             } catch (error) {
               reportError(error);
             }
@@ -1867,7 +1912,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
             });
           }, RUNNER_SELF_TEST_TIMEOUT_MS);
           const state: SelfTestState = {
-            workspaceId,
+            workspace,
             child: spawned.child,
             threadId: scratchThreadId,
             runId,
@@ -1901,7 +1946,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         });
       } catch (error) {
         try {
-          await options.setRunAttribution(workspaceId, null);
+          await options.setRunAttribution(workspace, null);
         } catch {}
         reportError(error);
         return {
@@ -1970,7 +2015,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       clearTimeout(test.timeout);
       if (test.killEscalation) clearTimeout(test.killEscalation);
       try {
-        await options.setRunAttribution(test.workspaceId, null);
+        await options.setRunAttribution(test.workspace, null);
       } catch {}
       test.resolve({
         ok: false,
@@ -2018,8 +2063,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     runnerSelfTest,
     setPaused,
     isPaused: () => paused,
-    hasLiveRun: (workspaceId: string) =>
-      workspaceProcessReserved(workspaceId),
+    hasLiveRun: (workspaceId: string) => {
+      const workspace = options.workspaceFor(workspaceId);
+      return workspace ? workspaceProcessReserved(workspace) : false;
+    },
   };
 }
 

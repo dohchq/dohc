@@ -268,6 +268,7 @@ describe("Excalidraw presence", () => {
         scope: { kind: "workspace", workspaceId: "workspace-1" },
         topic: "scene-1",
         clientId: "local",
+        incarnationId: "123e4567-e89b-42d3-a456-426614174000",
         state,
       }).success,
     ).toBe(true);

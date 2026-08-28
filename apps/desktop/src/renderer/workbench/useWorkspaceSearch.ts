@@ -43,10 +43,6 @@ export interface WorkspaceSearchApi {
   clear: () => void;
 }
 
-// Monotonic across remounts (workspace switches remount the shell): a stale
-// batch from the previous mount's search can never collide with a new id.
-let searchSequence = 0;
-
 // Owns the streamed-search lifecycle for ONE workspace: mints search ids,
 // folds validated batches into the pure model, and drops stale batches by
 // identity (applyBatch returns the same reference for a superseded search).
@@ -75,7 +71,11 @@ export function useWorkspaceSearch(workspaceId: string): WorkspaceSearchApi {
 
   const run = useCallback(
     (options: SearchRunOptions) => {
-      const searchId = `s${++searchSequence}`;
+      // A renderer reload preserves its webContents sender id but creates a
+      // new JavaScript realm. A realm-local sequence could therefore reuse an
+      // old request id; a UUID keeps cancellation and late events exact across
+      // that reload seam as well as ordinary remounts.
+      const searchId = crypto.randomUUID();
       // Perf bracket start (budgets contentSearchFirstResultMs/-CompleteMs):
       // issue → rg spawn → first streamed batch / final batch COMMITTED.
       // The SearchView's post-commit effects record the measures.

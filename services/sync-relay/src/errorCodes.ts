@@ -15,6 +15,7 @@ export const RELAY_ERROR_STATUSES = Object.freeze({
   invalid_path: 400,
   invalid_version: 400,
   key_envelope_not_found: 404,
+  link_read_rate_limited: 429,
   method_not_allowed: 405,
   not_found: 404,
   payload_too_large: 413,

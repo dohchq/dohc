@@ -75,6 +75,7 @@ function ownerFiles(input: {
     | "markEnded"
     | "retireTarget"
     | "assertProjectionRoot"
+    | "createMount"
     | "removeMount"
   > = {
     resolveRelay: async () => null,
@@ -85,6 +86,7 @@ function ownerFiles(input: {
     markEnded: async () => undefined,
     retireTarget: async () => undefined,
     assertProjectionRoot: async () => undefined,
+    createMount: async () => undefined,
     removeMount: async () => ({ folderLeft: false }),
   };
   return createShareViewFiles({

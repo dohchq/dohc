@@ -8,6 +8,23 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
 import { openSyncRelayStorage, type SyncRelayStorage } from "./storage";
 
+interface InspectionStatement {
+  get(...params: unknown[]): Record<string, unknown> | undefined;
+  run(...params: unknown[]): unknown;
+}
+
+interface InspectionDatabase {
+  prepare(sql: string): InspectionStatement;
+  exec(sql: string): void;
+  close(): void;
+}
+
+const { DatabaseSync: InspectionDatabaseSync } = createRequire(import.meta.url)(
+  "node:sqlite",
+) as {
+  DatabaseSync: new (path: string) => InspectionDatabase;
+};
+
 // #646 PR2 — chat follows the file share, driven through the REAL routes.
 //
 // Everything here goes through HTTP: the granter appends real moments and real
@@ -549,6 +566,73 @@ describe("chat over a file share (#646 PR2)", () => {
     expect(push.status).toBe(404);
   });
 
+  it("rechecks the active grant inside the append transaction", async () => {
+    const { storage, dbPath } = await testStorage();
+    const h = handler(storage);
+    await seedWorkspace(h);
+    const shareId = await createShare(h, "comment");
+
+    let revoked = false;
+    const original = storage.appendLogBatch.bind(storage);
+    storage.appendLogBatch = (input) => {
+      if (!revoked) {
+        revoked = true;
+        const raw = new InspectionDatabaseSync(dbPath);
+        try {
+          raw
+            .prepare(
+              `UPDATE sync_relay_share_grants
+               SET status = 'revoked', generation = generation + 1, revoked_at_ms = ?
+               WHERE share_id = ?`,
+            )
+            .run(9999, shareId);
+        } finally {
+          raw.close();
+        }
+      }
+      return original(input);
+    };
+
+    const push = await h(
+      request(
+        RECIPIENT,
+        `/sync/shares/${shareId}/log`,
+        jsonBody({
+          originId: "recipient-origin",
+          ops: [
+            {
+              originSeq: 0,
+              opKind: "chat.message.append",
+              recordedAtMs: 5000,
+              payload: {
+                messageId: "m-grant-raced",
+                threadId: "thread-in",
+                authorKind: "human",
+                authorDisplayName: "Recipient",
+                authorUserId: RECIPIENT,
+                body: "too late for this grant",
+                createdAtMs: 5000,
+              },
+            },
+          ],
+        }),
+      ),
+    );
+    expect(revoked).toBe(true);
+    expect(
+      push.status,
+      "MUTATION: without the in-transaction active-grant check this append lands",
+    ).toBe(404);
+    const ownerLog = storage.fetchLogPage({
+      workspaceId: WORKSPACE,
+      sinceRelaySeq: 0,
+      limit: 500,
+    });
+    expect(ownerLog.rows.map((row) => row.payloadJson).join("\n")).not.toContain(
+      "m-grant-raced",
+    );
+  });
+
   it("re-reads the LEVEL inside the write transaction, not just the entry check", async () => {
     // The entry check reads the selector once. The guard re-reads it under the
     // write lock, so a row that stops admitting appends between the two loses
@@ -560,22 +644,19 @@ describe("chat over a file share (#646 PR2)", () => {
     await seedWorkspace(h);
     const shareId = await createShare(h, "comment");
 
-    const requireModule = createRequire(import.meta.url);
-    const { DatabaseSync } = requireModule("node:sqlite") as {
-      DatabaseSync: new (path: string) => {
-        prepare(sql: string): { run(...params: unknown[]): unknown };
-        close(): void;
-      };
-    };
     let tampered = false;
     const original = storage.appendLogBatch.bind(storage);
     storage.appendLogBatch = (input) => {
       if (!tampered) {
         tampered = true;
-        const raw = new DatabaseSync(dbPath);
+        const raw = new InspectionDatabaseSync(dbPath);
         raw
-          .prepare("UPDATE sync_relay_shares SET selector_json = ? WHERE share_id = ?")
-          .run(JSON.stringify({ paths: ["docs"], versionId: null, access: "view" }), shareId);
+          .prepare(
+            `UPDATE sync_relay_share_grants
+             SET access = 'view', generation = generation + 1
+             WHERE share_id = ?`,
+          )
+          .run(shareId);
         raw.close();
       }
       return original(input);
@@ -1031,14 +1112,7 @@ describe("sync_relay_object_paths seeding (#646 PR2, addendum A)", () => {
     // migration unrecorded, with the log untouched.
     storage.close();
     storages.splice(storages.indexOf(storage), 1);
-    const requireModule = createRequire(import.meta.url);
-    const { DatabaseSync } = requireModule("node:sqlite") as {
-      DatabaseSync: new (path: string) => {
-        exec(sql: string): void;
-        close(): void;
-      };
-    };
-    const raw = new DatabaseSync(dbPath);
+    const raw = new InspectionDatabaseSync(dbPath);
     raw.exec("DROP TABLE sync_relay_object_paths");
     raw.exec("DELETE FROM sync_relay_migrations WHERE migration_id = 'object-paths-seed-v1'");
     raw.close();
@@ -1070,6 +1144,107 @@ describe("sync_relay_object_paths seeding (#646 PR2, addendum A)", () => {
     // applies the same latest-wins rule the insert-time upsert does.
     await log.append(log.delete("object-in", "docs/renamed.md"));
     expect(storage.objectCurrentPath(WORKSPACE, "object-in")).toBeNull();
+  });
+});
+
+describe("sync_relay_version_snapshot_blobs seeding", () => {
+  it("indexes existing version.create snapshot blobs once", async () => {
+    const { storage, dbPath } = await testStorage();
+    const versionId = "snapshot-before-index";
+    const snapshotContent = "# snapshot before index\n";
+    const snapshotSha = sha256(snapshotContent);
+    storage.claimWorkspace({
+      workspaceId: WORKSPACE,
+      ownerUserId: GRANTER,
+      createdAtMs: 1,
+    });
+    storage.putBlob({
+      workspaceId: WORKSPACE,
+      sha256: snapshotSha,
+      content: Buffer.from(snapshotContent),
+      createdAtMs: 2,
+    });
+    storage.appendLogBatch({
+      workspaceId: WORKSPACE,
+      originId: "origin-before-index",
+      ops: [
+        {
+          originSeq: 0,
+          opKind: "version.create",
+          payloadJson: JSON.stringify({
+            versionId,
+            forkSnapshots: [
+              {
+                objectId: "object-snapshot-only",
+                path: "docs/snapshot-only.md",
+                blobSha256: snapshotSha,
+              },
+            ],
+          }),
+          recordedAtMs: 3,
+        },
+      ],
+    });
+    expect(
+      storage.listVersionCreateLogRowsByBlob({
+        workspaceId: WORKSPACE,
+        versionId,
+        sha256: snapshotSha,
+      }),
+    ).toHaveLength(1);
+
+    // Put the database back into its pre-index shape while preserving the
+    // version.create row that the original append path wrote.
+    storage.close();
+    storages.splice(storages.indexOf(storage), 1);
+    const legacy = new InspectionDatabaseSync(dbPath);
+    legacy.exec(`
+      DROP TABLE sync_relay_version_snapshot_blobs;
+      DELETE FROM sync_relay_migrations
+      WHERE migration_id = 'version-snapshot-blobs-seed-v1';
+    `);
+    legacy.close();
+
+    const reopened = openSyncRelayStorage(dbPath);
+    storages.push(reopened);
+    expect(
+      reopened.listVersionCreateLogRowsByBlob({
+        workspaceId: WORKSPACE,
+        versionId,
+        sha256: snapshotSha,
+      }),
+      "MUTATION: without the seed, an existing version.create snapshot blob stays undiscoverable",
+    ).toHaveLength(1);
+
+    reopened.close();
+    storages.splice(storages.indexOf(reopened), 1);
+    const afterFirstOpen = new InspectionDatabaseSync(dbPath);
+    const indexedAfterFirstOpen = afterFirstOpen
+      .prepare("SELECT COUNT(*) AS count FROM sync_relay_version_snapshot_blobs")
+      .get();
+    const markersAfterFirstOpen = afterFirstOpen
+      .prepare(
+        "SELECT COUNT(*) AS count FROM sync_relay_migrations WHERE migration_id = ?",
+      )
+      .get("version-snapshot-blobs-seed-v1");
+    afterFirstOpen.close();
+    expect(Number(indexedAfterFirstOpen?.count)).toBe(1);
+    expect(Number(markersAfterFirstOpen?.count)).toBe(1);
+
+    const reopenedAgain = openSyncRelayStorage(dbPath);
+    storages.push(reopenedAgain);
+    const afterSecondOpen = new InspectionDatabaseSync(dbPath);
+    const indexedAfterSecondOpen = afterSecondOpen
+      .prepare("SELECT COUNT(*) AS count FROM sync_relay_version_snapshot_blobs")
+      .get();
+    const markersAfterSecondOpen = afterSecondOpen
+      .prepare(
+        "SELECT COUNT(*) AS count FROM sync_relay_migrations WHERE migration_id = ?",
+      )
+      .get("version-snapshot-blobs-seed-v1");
+    afterSecondOpen.close();
+    expect(Number(indexedAfterSecondOpen?.count)).toBe(1);
+    expect(Number(markersAfterSecondOpen?.count)).toBe(1);
   });
 });
 

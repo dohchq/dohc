@@ -9,7 +9,7 @@ use dohc_engine_domain::{
     AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChatActorKind, ChatChannelKind,
     ChatReactionState, FeedCursorValue, FollowState, FollowTargetKind, GENERAL_CHANNEL_WIRE_ID,
     LinkedChatStore, LocalAttachmentInput, NoFaults, PENDING_CHAT_WORKSPACE_EXISTS_SQL,
-    SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread,
+    ResolveDecision, SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread,
     base32_lowercase_no_padding, bookmark_id_for, channel_slug_for_name, decode_feed_cursor,
     encode_feed_cursor, linked_chat_projection_path,
 };
@@ -365,6 +365,142 @@ fn start_channel_thread_creates_thread_and_first_message_atomically() {
     let rs = chats.read_state(WS, "t1").expect("read state");
     assert_eq!(rs.last_read_sequence, 1);
     assert_eq!(rs.revision, 1);
+}
+
+#[test]
+fn conversation_revision_tracks_local_content_winners_but_not_read_state() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+
+    assert_eq!(
+        chats
+            .conversation_revision(WS, "no-revision-row")
+            .expect("absent revision"),
+        0
+    );
+    chats
+        .ensure_general_channel(WS, "gen-revision", 10, &NO_FAULTS)
+        .expect("general");
+
+    let mut opening = start_thread(
+        "gen-revision",
+        "thread-revision",
+        "message-opening",
+        "Choose",
+        ChatActorKind::Agent,
+        20,
+    );
+    opening.needs_decision = true;
+    chats
+        .start_channel_thread(&opening, &NO_FAULTS)
+        .expect("start with open decision");
+    assert_eq!(
+        chats
+            .conversation_revision(WS, "thread-revision")
+            .expect("start revision"),
+        2,
+        "thread start/opening message and the opened decision each bump"
+    );
+
+    let mut reply = send_msg("thread-revision", "message-reply", None, "Resolve", 30);
+    reply.author_kind = ChatActorKind::Agent;
+    reply.attachments = vec![LocalAttachmentInput {
+        object_id: "object-revision".to_owned(),
+        path_hint: Some("notes/revision.md".to_owned()),
+        heading_text: None,
+        heading_anchor: None,
+        heading_occurrence: None,
+    }];
+    chats
+        .send_message(&reply, &NO_FAULTS)
+        .expect("send with attachment");
+    assert_eq!(
+        chats
+            .conversation_revision(WS, "thread-revision")
+            .expect("send revision"),
+        4,
+        "message send and its local attachment each bump"
+    );
+
+    let reaction = SetReaction {
+        workspace_id: WS.to_owned(),
+        thread_id: "thread-revision".to_owned(),
+        message_id: "message-opening".to_owned(),
+        emoji: "👍".to_owned(),
+        author_id: "user-ada".to_owned(),
+        replication_author_id: Some("user-ada".to_owned()),
+        author_kind: ChatActorKind::Human,
+        author_display_name: "Ada".to_owned(),
+        state: ChatReactionState::Added,
+        now_ms: 40,
+        request_id: "reaction-revision".to_owned(),
+    };
+    chats
+        .set_reaction(&reaction, &NO_FAULTS)
+        .expect("winning reaction");
+    assert_eq!(
+        chats
+            .conversation_revision(WS, "thread-revision")
+            .expect("reaction revision"),
+        5
+    );
+    chats
+        .set_reaction(&reaction, &NO_FAULTS)
+        .expect("idempotent reaction retry");
+    assert_eq!(
+        chats
+            .conversation_revision(WS, "thread-revision")
+            .expect("reaction retry revision"),
+        5
+    );
+
+    chats
+        .resolve_decision(
+            &ResolveDecision {
+                workspace_id: WS.to_owned(),
+                thread_id: "thread-revision".to_owned(),
+                message_id: "message-opening".to_owned(),
+                resolved_by_message_id: "message-reply".to_owned(),
+                now_ms: 50,
+                request_id: "decision-revision".to_owned(),
+            },
+            &NO_FAULTS,
+        )
+        .expect("resolve decision");
+    assert_eq!(
+        chats
+            .conversation_revision(WS, "thread-revision")
+            .expect("decision revision"),
+        6
+    );
+
+    let read_state = chats
+        .mark_thread_read(WS, "thread-revision", 2, None, 60, &NO_FAULTS)
+        .expect("mark read");
+    assert_eq!(read_state.last_read_sequence, 2);
+    assert_eq!(read_state.revision, 1);
+    let agent_read_state = chats
+        .mark_thread_read_by_agent(
+            WS,
+            "thread-revision",
+            30,
+            "message-reply",
+            None,
+            61,
+            &NO_FAULTS,
+        )
+        .expect("mark agent read");
+    assert_eq!(agent_read_state.last_read_message_id, "message-reply");
+    assert_eq!(agent_read_state.revision, 1);
+    assert_eq!(
+        chats
+            .conversation_revision(WS, "thread-revision")
+            .expect("content revision after read"),
+        6,
+        "human and agent read state must not invalidate conversation content"
+    );
 }
 
 #[test]
@@ -1532,6 +1668,136 @@ fn personal_feed_visibility_and_base64url_cursor_round_trip() {
         page2.items[0].message.message_id,
         chan_feed.items[0].message.message_id
     );
+}
+
+#[test]
+fn personal_feed_batch_keeps_attachments_with_their_own_messages() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let attach = |object: &str| LocalAttachmentInput {
+        object_id: object.to_owned(),
+        path_hint: Some(format!("notes/{object}.md")),
+        heading_text: None,
+        heading_anchor: None,
+        heading_occurrence: None,
+    };
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
+        .expect("general");
+    let mut o1 = start_thread("gen-1", "t1", "o1", "opening one", ChatActorKind::Human, 20);
+    o1.attachments = vec![attach("alpha")];
+    chats.start_channel_thread(&o1, &NO_FAULTS).expect("t1");
+    let mut r1 = send_msg("t1", "r1", Some("o1"), "reply one", 30);
+    r1.attachments = vec![attach("beta")];
+    chats.send_message(&r1, &NO_FAULTS).expect("r1");
+    chats
+        .send_message(
+            &send_msg("t1", "r2", Some("o1"), "reply two", 40),
+            &NO_FAULTS,
+        )
+        .expect("r2");
+    chats
+        .start_channel_thread(
+            &start_thread("gen-1", "t2", "o2", "opening two", ChatActorKind::Human, 50),
+            &NO_FAULTS,
+        )
+        .expect("t2");
+    let mut r3 = send_msg("t2", "r3", None, "reply three", 60);
+    r3.attachments = vec![attach("delta")];
+    chats.send_message(&r3, &NO_FAULTS).expect("r3");
+    chats
+        .send_message(
+            &send_msg("t2", "r4", Some("r3"), "reply four", 70),
+            &NO_FAULTS,
+        )
+        .expect("r4");
+    for (thread, at) in [("t1", 80), ("t2", 81)] {
+        chats
+            .set_follow(
+                &SetFollow {
+                    workspace_id: WS.to_owned(),
+                    owner_user_id: "owner".to_owned(),
+                    replication_owner_user_id: None,
+                    target_kind: FollowTargetKind::Thread,
+                    target_id: thread.to_owned(),
+                    state: FollowState::Following,
+                    now_ms: at,
+                },
+                &NO_FAULTS,
+            )
+            .expect("follow");
+    }
+    // r3's row disappears while its attachment row dangles: the batch join
+    // must not resurrect "delta" anywhere, and r4 keeps a None parent.
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute(
+                "DELETE FROM chat_messages WHERE workspace_id = ?1 AND message_id = 'r3'",
+                [WS],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("prune r3");
+
+    let page = LinkedChatStore::new(&mut store)
+        .list_personal_feed(WS, "owner", Some(10), None)
+        .expect("feed");
+    // MUTATION: hydrating the page's attachments in one query without
+    // distributing per occurrence -> the opening/parent shared by several
+    // items goes empty for all but one of them, a bare message collects a
+    // neighbor's attachments, or a dangling attachment resurfaces.
+    fn objects(message: &dohc_engine_domain::ChatMessage) -> Vec<&str> {
+        message
+            .attachments
+            .iter()
+            .map(|attachment| attachment.object_id.as_deref().expect("object id"))
+            .collect()
+    }
+    assert_eq!(
+        page.items
+            .iter()
+            .map(|item| item.message.message_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["r4", "o2", "r2", "r1", "o1"]
+    );
+    let [r4, o2, r2, r1, o1] = page.items.as_slice() else {
+        panic!("five feed items");
+    };
+    assert!(objects(&r4.message).is_empty());
+    assert!(r4.parent_message.is_none(), "deleted parent stays absent");
+    let r4_opening = r4.opening_message.as_ref().expect("r4 opening");
+    assert_eq!(r4_opening.message_id, "o2");
+    assert!(objects(r4_opening).is_empty());
+    assert!(objects(&o2.message).is_empty());
+    assert!(o2.opening_message.is_none() && o2.parent_message.is_none());
+    assert_eq!(objects(&r1.message), vec!["beta"]);
+    assert!(objects(&r2.message).is_empty());
+    for item in [r2, r1] {
+        let opening = item.opening_message.as_ref().expect("shared opening");
+        assert_eq!(opening.message_id, "o1");
+        assert_eq!(objects(opening), vec!["alpha"]);
+        let parent = item.parent_message.as_ref().expect("shared parent");
+        assert_eq!(parent.message_id, "o1");
+        assert_eq!(objects(parent), vec!["alpha"]);
+    }
+    assert_eq!(objects(&o1.message), vec!["alpha"]);
+    assert!(o1.opening_message.is_none() && o1.parent_message.is_none());
+    for item in &page.items {
+        for message in std::iter::once(&item.message)
+            .chain(item.opening_message.as_ref())
+            .chain(item.parent_message.as_ref())
+        {
+            assert_eq!(message.thread_id, item.thread.thread_id);
+            for attachment in &message.attachments {
+                assert_eq!(attachment.message_id, message.message_id);
+                assert_eq!(attachment.thread_id, message.thread_id);
+                assert_ne!(attachment.object_id.as_deref(), Some("delta"));
+            }
+        }
+    }
 }
 
 #[test]

@@ -7,10 +7,11 @@
 //! durable yrs reconstruction → `ydoc.resync` path and compares the resulting
 //! typed-root state against the yjs oracle.
 
-use base64::Engine as _;
-use dohc_engine_collab::Ydoc;
+use dohc_engine_collab::{CacheStats, Ydoc};
 use dohc_engine_protocol::{
-    transport::{EngineTransport, InProcessTransport, RequestContext},
+    transport::{
+        EngineService as ProtocolEngineService, EngineTransport, InProcessTransport, RequestContext,
+    },
     wire::{Request, WorkspaceHandle},
 };
 use dohc_engine_testkit::ScratchDir;
@@ -93,6 +94,7 @@ async fn call(
     id: u64,
     method: &str,
     params: Value,
+    failure_context: &str,
 ) -> Value {
     transport
         .call(
@@ -100,13 +102,54 @@ async fn call(
             request(id, method, Some(handle.clone()), params),
         )
         .await
-        .unwrap_or_else(|error| panic!("{method} failed: {error:?}"))
+        .unwrap_or_else(|error| panic!("{failure_context}: {method} failed: {error:?}"))
         .result
 }
 
-/// Replay one scenario through the real daemon Y.Doc surface and return the
-/// semantic state reconstructed from the daemon's yrs full-state resync.
-async fn replay_through_engine(scenario: &Scenario, ordinal: usize) -> Value {
+async fn call_ydoc_with_blob(
+    service: &EngineService,
+    handle: &WorkspaceHandle,
+    id: u64,
+    method: &str,
+    params: Value,
+    failure_context: &str,
+) -> (Value, Vec<u8>) {
+    let output = ProtocolEngineService::call(
+        service,
+        RequestContext::unbounded().with_capability("blobs"),
+        request(id, method, Some(handle.clone()), params),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{failure_context}: {method} failed: {error:?}"));
+    assert_eq!(output.response.id, id);
+    assert!(
+        output.response.result.get("initialUpdateBase64").is_none(),
+        "{failure_context}: {method} must not duplicate the Y.Doc state in JSON"
+    );
+    let egress = output
+        .blob_egress
+        .unwrap_or_else(|| panic!("{failure_context}: {method} did not return blob egress"));
+    assert_eq!(egress.stream_id, id);
+    assert_eq!(
+        egress.sha256,
+        dohc_engine_storage::hex_sha256(&egress.bytes),
+        "{failure_context}: {method} blob digest"
+    );
+    (output.response.result, egress.bytes)
+}
+
+struct ReplayRun {
+    semantic_state: Value,
+    initial_update: Vec<u8>,
+    settlement: Value,
+    after_records: CacheStats,
+    after_consumers: CacheStats,
+}
+
+/// Replay one scenario through the real daemon Y.Doc surface. `force_cold`
+/// clears only the actor cache after the identical update stream, leaving the
+/// durable state and session identity unchanged for the paired consumer run.
+async fn replay_through_engine(scenario: &Scenario, ordinal: usize, force_cold: bool) -> ReplayRun {
     assert!(
         !scenario.dimensions.is_empty(),
         "{} must declare coverage dimensions",
@@ -125,7 +168,10 @@ async fn replay_through_engine(scenario: &Scenario, ordinal: usize) -> Value {
 
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
-    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let service = Arc::new(EngineService::with_session_epoch_for_harness(format!(
+        "replay-parity-{ordinal}"
+    )));
+    let transport = InProcessTransport::new(Arc::clone(&service));
     let handle = open_workspace(
         &transport,
         &scratch,
@@ -139,9 +185,14 @@ async fn replay_through_engine(scenario: &Scenario, ordinal: usize) -> Value {
         "ydoc.open",
         json!({
             "versionId": "main",
-            "path": format!("parity/{ordinal}.md"),
+            "path": if scenario.content_kind == "scene" {
+                format!("parity/{ordinal}.excalidraw")
+            } else {
+                format!("parity/{ordinal}.md")
+            },
             "contentKind": scenario.content_kind,
         }),
+        &scenario.name,
     )
     .await;
     assert_eq!(
@@ -178,6 +229,7 @@ async fn replay_through_engine(scenario: &Scenario, ordinal: usize) -> Value {
                 "updateBase64": update.update_base64,
                 "actorOriginId": update.author,
             }),
+            &format!("{} update {}", scenario.name, update.id),
         )
         .await;
         assert_eq!(
@@ -196,26 +248,135 @@ async fn replay_through_engine(scenario: &Scenario, ordinal: usize) -> Value {
         scenario.name
     );
 
-    let resynced = call(
-        &transport,
+    let after_records = service
+        .ydoc_cache_stats_for_harness(&handle)
+        .await
+        .expect("cache stats after fixture replay");
+    let expected_hits = u64::try_from(scenario.replay_order.len() - 1).expect("hit count");
+    assert_eq!(
+        after_records.hits, expected_hits,
+        "{} must prove every post-install recordUpdate used the cache",
+        scenario.name
+    );
+    assert_eq!(
+        after_records.misses, 1,
+        "{} first append miss",
+        scenario.name
+    );
+    assert_eq!(after_records.installs, 1, "{} cache install", scenario.name);
+    assert_eq!(
+        after_records.advances, expected_hits,
+        "{} committed cache advances",
+        scenario.name
+    );
+    if force_cold {
+        service
+            .ydoc_cache_clear_for_harness(&handle)
+            .await
+            .expect("clear actor cache for cold pair");
+    }
+
+    let (_resynced, state) = call_ydoc_with_blob(
+        service.as_ref(),
         &handle,
         request_id,
         "ydoc.resync",
         json!({ "sessionId": session_id }),
+        &scenario.name,
     )
     .await;
-    let state = base64::engine::general_purpose::STANDARD
-        .decode(
-            resynced["initialUpdateBase64"]
-                .as_str()
-                .expect("resync full-state update"),
-        )
-        .expect("resync base64");
     let replayed = Ydoc::wire();
     replayed
         .apply(&state)
         .unwrap_or_else(|error| panic!("{} resync state failed to apply: {error}", scenario.name));
-    normalize(replayed.canonical_content())
+    let semantic_state = normalize(replayed.canonical_content());
+    request_id += 1;
+    let settlement = call(
+        &transport,
+        &handle,
+        request_id,
+        "ydoc.settle",
+        json!({ "sessionId": session_id }),
+        &scenario.name,
+    )
+    .await;
+    let after_consumers = service
+        .ydoc_cache_stats_for_harness(&handle)
+        .await
+        .expect("cache stats after resync and settle");
+    call(
+        &transport,
+        &handle,
+        request_id + 1,
+        "ydoc.close",
+        json!({ "sessionId": session_id }),
+        &scenario.name,
+    )
+    .await;
+
+    ReplayRun {
+        semantic_state,
+        initial_update: state,
+        settlement,
+        after_records,
+        after_consumers,
+    }
+}
+
+async fn replay_warm_and_cold(scenario: &Scenario, ordinal: usize) -> ReplayRun {
+    let warm = replay_through_engine(scenario, ordinal, false).await;
+    let cold = replay_through_engine(scenario, ordinal, true).await;
+
+    assert_eq!(warm.after_records, cold.after_records);
+    assert_eq!(
+        warm.after_consumers.hits,
+        warm.after_records.hits + 2,
+        "{} warm resync and settle must each prove a cache hit",
+        scenario.name
+    );
+    assert_eq!(
+        cold.after_consumers.misses,
+        cold.after_records.misses + 2,
+        "{} cold resync and settle must each prove fallback reconstruction",
+        scenario.name
+    );
+    assert_eq!(
+        warm.settlement, cold.settlement,
+        "{} warm/cold settle output and moment fingerprint",
+        scenario.name
+    );
+    assert_eq!(warm.semantic_state, cold.semantic_state);
+
+    if scenario.content_kind == "richdoc" && warm.initial_update != cold.initial_update {
+        // Richdoc attributes contain Any::Map values backed by HashMap. Their
+        // raw key order may legitimately re-encode differently across Y.Doc
+        // instances, so require the complete scan_v2 structure instead.
+        let warm_doc = Ydoc::wire();
+        warm_doc
+            .apply(&warm.initial_update)
+            .expect("warm resync update");
+        let cold_doc = Ydoc::wire();
+        cold_doc
+            .apply(&cold.initial_update)
+            .expect("cold resync update");
+        assert!(
+            dohc_engine_collab::replay_parity::structurally_equal_v2_for_test(&warm_doc, &cold_doc)
+                .expect("scan_v2 warm/cold comparison"),
+            "{} warm/cold resync structure",
+            scenario.name
+        );
+    } else {
+        // Plaintext and scene fixtures contain no Any::Map payload; yrs sorts
+        // client blocks in full-state updates, so their wire bytes must match.
+        // Richdoc also takes this stronger branch whenever its encoding is
+        // stable for the fixture.
+        assert_eq!(
+            warm.initial_update, cold.initial_update,
+            "{} warm/cold resync bytes",
+            scenario.name
+        );
+    }
+    warm
 }
 
 /// Normalize identically to the TypeScript emitter:
@@ -321,8 +482,15 @@ async fn daemon_yrs_replay_matches_yjs_goldens() {
         "every fixture must have exactly one golden"
     );
     assert!(
-        fixtures.scenarios.len() >= 5,
+        fixtures.scenarios.len() >= 6,
         "the release corpus must retain all required dimensions"
+    );
+    assert!(
+        fixtures
+            .scenarios
+            .iter()
+            .any(|scenario| scenario.content_kind == "scene"),
+        "the cache-served resync corpus must include a scene"
     );
 
     for (ordinal, scenario) in fixtures.scenarios.iter().enumerate() {
@@ -330,8 +498,8 @@ async fn daemon_yrs_replay_matches_yjs_goldens() {
             .scenarios
             .get(&scenario.name)
             .unwrap_or_else(|| panic!("missing golden for {}", scenario.name));
-        let actual = replay_through_engine(scenario, ordinal).await;
-        compare_to_golden(&scenario.name, &actual, expected)
+        let actual = replay_warm_and_cold(scenario, ordinal).await;
+        compare_to_golden(&scenario.name, &actual.semantic_state, expected)
             .unwrap_or_else(|difference| panic!("{difference}"));
     }
 }
@@ -344,17 +512,18 @@ async fn tampered_yjs_golden_is_rejected_by_the_real_comparator() {
         .scenarios
         .first()
         .expect("at least one replay scenario");
-    let actual = replay_through_engine(scenario, 10_000).await;
+    let actual = replay_through_engine(scenario, 10_000, false).await;
     let committed = goldens
         .scenarios
         .get(&scenario.name)
         .expect("committed golden");
-    compare_to_golden(&scenario.name, &actual, committed).expect("untampered control must match");
+    compare_to_golden(&scenario.name, &actual.semantic_state, committed)
+        .expect("untampered control must match");
 
     let mut tampered = committed.clone();
     tampered["plainText"]["delta"][0]["insert"] =
         Value::String("TAMPERED: the comparator must observe this".to_owned());
-    let mismatch = compare_to_golden(&scenario.name, &actual, &tampered)
+    let mismatch = compare_to_golden(&scenario.name, &actual.semantic_state, &tampered)
         .expect_err("a mutated visible-content golden must fail the parity comparison");
     assert!(
         mismatch.contains(&scenario.name) && mismatch.contains("diverged"),

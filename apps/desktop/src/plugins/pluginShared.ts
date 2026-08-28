@@ -43,34 +43,7 @@ export function raceWithTimeout<T>(
 // the grace a user-initiated stop grants in-flight work before it proceeds
 // anyway. Set to PluginHost's own PLUGIN_ACTIVATION_TIMEOUT_MS — the same
 // order this host already uses for "still working" vs. "never will".
-export const COMMAND_CLAIMS_DRAIN_DEADLINE_MS = 30_000;
-
-/**
- * Wraps a command-claims drain with COMMAND_CLAIMS_DRAIN_DEADLINE_MS: if
- * `drained` is still outstanding past the deadline, logs which plugin
- * overran and resolves with a no-op lower so the caller proceeds to stop
- * the host — the real lower is never discarded, so the barrier still
- * clears once the hung command's handler eventually settles.
- */
-export function awaitCommandClaimsDrainedWithDeadline(
-  pluginId: string,
-  drained: Promise<() => void>,
-  warn: (message: string) => void = (message) => console.warn(message),
-): Promise<() => void> {
-  return raceWithTimeout(
-    drained,
-    COMMAND_CLAIMS_DRAIN_DEADLINE_MS,
-    `Plugin "${pluginId}" still has command claims outstanding after ${COMMAND_CLAIMS_DRAIN_DEADLINE_MS} ms`,
-  ).catch((error: unknown) => {
-    warn(`[desktop] ${errorMessage(error)}. Stopping its host anyway.`);
-    // The claim will still lower once its command eventually settles —
-    // never discard the real lower, or the barrier leaks. Also catches: a
-    // rejected drain has no lower to call, only itself to swallow (#779
-    // round 22 finding 13).
-    void drained.then((lower) => lower()).catch(() => undefined);
-    return () => {};
-  });
-}
+export const PLUGIN_HOST_DRAIN_DEADLINE_MS = 30_000;
 
 export const WINDOWS_RENAME_RETRY_DELAYS_MS = [100, 150, 200, 250, 300] as const;
 

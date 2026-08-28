@@ -93,7 +93,6 @@ test("grant side: share a file by email from the explorer, copy the code, and en
         rootPath: temp.rootPath,
         remote: {
           serverUrl: relay.baseUrl,
-          remoteWorkspaceId: workspaceId,
           ownerUserId: "e2e-granter",
         },
       },
@@ -396,7 +395,7 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
       relay.baseUrl,
       GRANTER_TOKEN,
       `/sync/shares/${shareId}/revoke`,
-      { method: "POST", body: JSON.stringify({}) },
+      { method: "POST" },
     );
     expect(revoke.status).toBe(200);
     await page.getByTestId("shared-view-refresh").click();
@@ -569,7 +568,7 @@ test("mount side: add a share into a workspace as shared-with-me/, follow edits,
       relay.baseUrl,
       GRANTER_TOKEN,
       `/sync/shares/${shareId}/revoke`,
-      { method: "POST", body: JSON.stringify({}) },
+      { method: "POST" },
     );
     expect(revoke.status).toBe(200);
     const endedOutcome = await page.evaluate(async () => {

@@ -1,15 +1,18 @@
 import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
 import { createSessionActorResolver, UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
 import { writeSync } from "node:fs";
-import { createServer } from "node:http";
+import { createServer, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Pool } from "pg";
 import { RELAY_ERRORS } from "./errorCodes";
+import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import { PresenceHub } from "./presence";
 import { MAX_BLOB_BYTES, createSyncRelayHandler } from "./server";
 import { DEFAULT_WORKSPACE_QUOTA_BYTES, openSyncRelayStorage } from "./storage";
 
+const DEFAULT_SHUTDOWN_GRACE_PERIOD_MS = 10_000;
+const SHUTDOWN_GRACE_PERIOD_MS = shutdownGracePeriodMs();
 const requestedPort = process.env.SYNC_RELAY_PORT === undefined ? 1788 : Number(process.env.SYNC_RELAY_PORT);
 const workspaceQuotaBytes =
   process.env.SYNC_RELAY_WORKSPACE_QUOTA_BYTES === undefined
@@ -20,6 +23,15 @@ const secret = process.env.BETTER_AUTH_SECRET ?? "";
 const nodeEnv = process.env.NODE_ENV;
 const isDevOrTest = nodeEnv === "development" || nodeEnv === "test";
 const testAuthSeam = process.env.SYNC_RELAY_TEST_AUTH === "1" && isDevOrTest;
+const controlledStreamTestSeam =
+  testAuthSeam && process.env.SYNC_RELAY_TEST_CONTROLLED_STREAM === "1";
+let emitResponseErrorDuringPipeTestSeam =
+  controlledStreamTestSeam &&
+  process.env.SYNC_RELAY_TEST_RESPONSE_ERROR_DURING_PIPE === "1";
+const linkKey = process.env.DOHC_RELAY_LINK_KEY;
+const relayExchangeKey = process.env.DOHC_RELAY_EXCHANGE_KEY;
+const relayExchangeKeyHash =
+  relayExchangeKey === undefined ? undefined : hashRelayExchangeKey(relayExchangeKey);
 
 function fatal(message: string): never {
   writeSync(2, `${message}\n`);
@@ -55,6 +67,18 @@ if (!isDevOrTest && !testAuthSeam && process.env.POSTGRES_URL === undefined) {
   fatal(
     "FATAL: POSTGRES_URL must be set outside development/test (it must match workspace-api's database).",
   );
+}
+
+if (!isDevOrTest && !linkKey) {
+  fatal("FATAL: DOHC_RELAY_LINK_KEY must be set outside development/test.");
+}
+
+if (!isDevOrTest && !relayExchangeKey) {
+  fatal("FATAL: DOHC_RELAY_EXCHANGE_KEY must be set outside development/test.");
+}
+
+if (relayExchangeKey !== undefined && relayExchangeKey.length < 32) {
+  fatal("FATAL: DOHC_RELAY_EXCHANGE_KEY must be at least 32 characters.");
 }
 
 if (process.env.SYNC_RELAY_TEST_AUTH === "1" && !isDevOrTest) {
@@ -143,6 +167,7 @@ if (testAuthSeam) {
 // transport is never persisted, so it lives only here and is lost on restart
 // (by design — presence is not durable).
 const presence = new PresenceHub();
+let finishControlledTestStream: (() => void) | undefined;
 
 const relayHandler = createSyncRelayHandler({
   storage,
@@ -150,9 +175,59 @@ const relayHandler = createSyncRelayHandler({
   resolveUserIdByEmail: (email) => resolveUserIdByEmail(email),
   lookupUserEmail: (userId) => lookupUserEmail(userId),
   presence,
+  linkKey,
+  relayExchangeKey,
 });
 const fetchHandler = async (request: Request): Promise<Response> => {
   const url = new URL(request.url);
+  if (controlledStreamTestSeam && url.pathname === "/__test/controlled-stream") {
+    if (request.method === "POST") {
+      const finish = finishControlledTestStream;
+      if (!finish) return new Response(null, { status: 409 });
+      finish();
+      return new Response(null, { status: 204 });
+    }
+    if (request.method === "GET") {
+      if (finishControlledTestStream) return new Response(null, { status: 409 });
+      const chunkBytes = 1024 * 1024;
+      let active = true;
+      let removeAbortListener = (): void => undefined;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const abort = (): void => {
+            if (!active) return;
+            active = false;
+            finishControlledTestStream = undefined;
+            controller.error(new Error("controlled stream client disconnected"));
+          };
+          removeAbortListener = () => request.signal.removeEventListener("abort", abort);
+          request.signal.addEventListener("abort", abort, { once: true });
+          controller.enqueue(new Uint8Array(chunkBytes).fill(0x61));
+          finishControlledTestStream = () => {
+            if (!active) return;
+            active = false;
+            finishControlledTestStream = undefined;
+            removeAbortListener();
+            controller.enqueue(new Uint8Array(chunkBytes).fill(0x62));
+            controller.close();
+          };
+        },
+        cancel() {
+          active = false;
+          finishControlledTestStream = undefined;
+          removeAbortListener();
+        },
+      });
+      return new Response(body, {
+        status: 200,
+        headers: {
+          "content-type": "application/octet-stream",
+          "x-dohc-test-stream": "controlled",
+        },
+      });
+    }
+    return new Response(null, { status: 405 });
+  }
   if (url.pathname === "/health") {
     // The presence hub footprint is exposed ONLY under the dev/test seam so
     // integration tests can assert parked waiters are released on disconnect;
@@ -178,8 +253,42 @@ const fetchHandler = async (request: Request): Promise<Response> => {
 // memory waiting for the handler's MAX_BLOB_BYTES check. Small headroom over
 // the blob cap so a maximal valid blob PUT still passes.
 const MAX_BODY_BYTES = MAX_BLOB_BYTES + 1024 * 1024;
+const MAX_LINK_EXCHANGE_BODY_BYTES = 4096;
+
+function isLinkExchangePath(pathname: string): boolean {
+  try {
+    const parts = pathname.split("/").filter(Boolean).map(decodeURIComponent);
+    return parts.length === 2 && parts[0] === "sync" && parts[1] === "link-exchange";
+  } catch {
+    return false;
+  }
+}
+
+function isLinkRefreshPath(pathname: string): boolean {
+  try {
+    const parts = pathname.split("/").filter(Boolean).map(decodeURIComponent);
+    return parts.length === 2 && parts[0] === "sync" && parts[1] === "link-refresh";
+  } catch {
+    return false;
+  }
+}
+
+function presentsValidRelayExchangeKey(headers: Headers): boolean {
+  const presented = headers.get("x-dohc-relay-exchange-key");
+  return (
+    relayExchangeKeyHash !== undefined &&
+    verifyRelayExchangeKey(presented, relayExchangeKeyHash)
+  );
+}
 
 const server = createServer((request, response) => {
+  const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+  const isLinkExchange = isLinkExchangePath(url.pathname);
+  const isLinkRefresh = isLinkRefreshPath(url.pathname);
+  const isLinkWorkloadRequest = isLinkExchange || isLinkRefresh;
+  const maxBodyBytes = isLinkWorkloadRequest
+    ? MAX_LINK_EXCHANGE_BODY_BYTES
+    : MAX_BODY_BYTES;
   const chunks: Buffer[] = [];
   let received = 0;
   let rejected = false;
@@ -200,19 +309,22 @@ const server = createServer((request, response) => {
   request.on("data", (chunk: Buffer) => {
     if (rejected) return;
     received += chunk.length;
-    if (received > MAX_BODY_BYTES) {
+    if (received > maxBodyBytes) {
       rejected = true;
       chunks.length = 0;
-      response.statusCode = RELAY_ERRORS.payload_too_large.status;
+      const refusal = isLinkWorkloadRequest
+        ? { error: "not found", definition: RELAY_ERRORS.not_found }
+        : { error: "payload too large", definition: RELAY_ERRORS.payload_too_large };
+      response.statusCode = refusal.definition.status;
       response.setHeader("content-type", "application/json");
       response.setHeader("connection", "close");
-      // Flush the 413 for well-behaved clients, then destroy the socket so
+      // Flush the refusal for well-behaved clients, then destroy the socket so
       // the sender cannot keep streaming.
       response.end(
         JSON.stringify({
           ok: false,
-          error: "payload too large",
-          code: RELAY_ERRORS.payload_too_large.code,
+          error: refusal.error,
+          code: refusal.definition.code,
         }),
         () => {
           request.destroy();
@@ -224,10 +336,19 @@ const server = createServer((request, response) => {
   });
   request.on("end", () => {
     if (rejected) return;
-    const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+    const headers = new Headers(request.headers as Record<string, string>);
+    const forwardedClientAddress = headers.get("x-dohc-relay-client-ip");
+    if (
+      !isLinkExchange ||
+      forwardedClientAddress === null ||
+      !presentsValidRelayExchangeKey(headers)
+    ) {
+      // Only the keyed share-web exchange hop can select a forwarded bucket.
+      headers.set("x-dohc-relay-client-ip", request.socket.remoteAddress ?? "unknown");
+    }
     const webRequest = new Request(url, {
       method: request.method,
-      headers: request.headers as Record<string, string>,
+      headers,
       body: chunks.length === 0 ? undefined : Buffer.concat(chunks),
       signal: disconnect.signal,
     });
@@ -235,7 +356,11 @@ const server = createServer((request, response) => {
       .then(async (webResponse) => {
         response.statusCode = webResponse.status;
         for (const [key, value] of webResponse.headers) response.setHeader(key, value);
-        response.end(Buffer.from(await webResponse.arrayBuffer()));
+        if (!webResponse.body) {
+          response.end();
+          return;
+        }
+        await pipeResponseBody(webResponse.body, response);
       })
       .catch(() => {
         // Never echo internal error details (or anything derived from the
@@ -246,6 +371,68 @@ const server = createServer((request, response) => {
       });
   });
 });
+
+async function pipeResponseBody(
+  body: ReadableStream<Uint8Array>,
+  outgoing: ServerResponse,
+): Promise<void> {
+  const reader = body.getReader();
+  const cancelOnClose = (): void => {
+    if (!outgoing.writableFinished) void reader.cancel().catch(() => undefined);
+  };
+  const destroyOnError = (): void => {
+    if (!outgoing.destroyed) outgoing.destroy();
+  };
+  outgoing.once("close", cancelOnClose);
+  outgoing.on("error", destroyOnError);
+  try {
+    while (!outgoing.destroyed) {
+      const read = await reader.read();
+      if (read.done) {
+        outgoing.end();
+        return;
+      }
+      const needsDrain = !outgoing.write(read.value);
+      if (emitResponseErrorDuringPipeTestSeam) {
+        emitResponseErrorDuringPipeTestSeam = false;
+        queueMicrotask(() => {
+          outgoing.emit("error", new Error("controlled response error during pipe"));
+        });
+      }
+      if (needsDrain) {
+        const drained = await waitForDrain(outgoing);
+        if (!drained) return;
+      }
+    }
+  } catch {
+    if (!outgoing.destroyed) outgoing.destroy();
+  } finally {
+    outgoing.off("close", cancelOnClose);
+    outgoing.off("error", destroyOnError);
+    if (!outgoing.writableFinished) await reader.cancel().catch(() => undefined);
+  }
+}
+
+function waitForDrain(outgoing: ServerResponse): Promise<boolean> {
+  if (outgoing.destroyed) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const cleanup = (): void => {
+      outgoing.off("close", closed);
+      outgoing.off("drain", drained);
+    };
+    const closed = (): void => {
+      cleanup();
+      resolve(false);
+    };
+    const drained = (): void => {
+      cleanup();
+      resolve(true);
+    };
+    outgoing.once("close", closed);
+    outgoing.once("drain", drained);
+  });
+}
+
 const host = testAuthSeam ? "127.0.0.1" : (process.env.SYNC_RELAY_BIND ?? "0.0.0.0");
 server.listen(requestedPort, host, () => {
   const address = server.address();
@@ -255,12 +442,33 @@ server.listen(requestedPort, host, () => {
   if (testAuthSeam) console.log("[sync-relay] SYNC_RELAY_TEST_AUTH seam ENABLED (dev/test only)");
 });
 
+let shuttingDown = false;
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.on(signal, () => {
-    server.close(() => {
-      storage.close();
-      void pool?.end().finally(() => process.exit(0));
-      if (!pool) process.exit(0);
-    });
+  process.on(signal, shutdown);
+}
+
+function shutdown(): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  let forceCloseTimer: ReturnType<typeof setTimeout> | undefined;
+  server.close(() => {
+    if (forceCloseTimer !== undefined) clearTimeout(forceCloseTimer);
+    storage.close();
+    void pool?.end().finally(() => process.exit(0));
+    if (!pool) process.exit(0);
   });
+  forceCloseTimer = setTimeout(() => {
+    server.closeAllConnections();
+  }, SHUTDOWN_GRACE_PERIOD_MS);
+  forceCloseTimer.unref();
+}
+
+function shutdownGracePeriodMs(): number {
+  if (process.env.NODE_ENV !== "test") return DEFAULT_SHUTDOWN_GRACE_PERIOD_MS;
+  const configured = process.env.SYNC_RELAY_TEST_SHUTDOWN_GRACE_PERIOD_MS;
+  if (configured === undefined) return DEFAULT_SHUTDOWN_GRACE_PERIOD_MS;
+  const parsed = Number(configured);
+  return Number.isSafeInteger(parsed) && parsed >= 0
+    ? parsed
+    : DEFAULT_SHUTDOWN_GRACE_PERIOD_MS;
 }

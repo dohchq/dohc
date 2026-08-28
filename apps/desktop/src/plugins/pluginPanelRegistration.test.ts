@@ -3,20 +3,12 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createTestScratch } from "../workspaces/testTemp";
 import {
-  CLAIMS_DRAINING_ERROR_CODE,
-  PluginClaimsDrainingError,
-} from "./pluginCommandInvocation";
-import {
   forgetRemovedPlugin,
   forgetUninstalledPlugin,
-  forgetWorkspaceRegistrations,
   loadPluginPanelRegistration,
   loadPluginWebAppRegistration,
-  pluginLifecycleKey,
   rememberPluginRegistration,
   resolveRegisteredPlugin,
-  startPluginForPanel,
-  toPluginPanelHostStartResult,
   type RegisteredPlugin,
 } from "./pluginPanelRegistration";
 
@@ -339,7 +331,7 @@ describe("plugin panel registration", () => {
     const workspace = await scratch("dohc-plugin-panel-workspace-");
     const pluginRoot = join(workspace, "plugins", "hello-plugin");
     await writePlugin(pluginRoot);
-    const registrations = new Map<string, Map<string, RegisteredPlugin>>();
+    const registrations = new Map<string, RegisteredPlugin>();
     const load = (panelId: string) =>
       loadPluginPanelRegistration({
         workspaceRoot: workspace,
@@ -350,7 +342,6 @@ describe("plugin panel registration", () => {
 
     rememberPluginRegistration(
       registrations,
-      "workspace-1",
       { ...await load("main"), directoryName: "hello-plugin" },
     );
 
@@ -372,13 +363,12 @@ describe("plugin panel registration", () => {
 
     const remembered = rememberPluginRegistration(
       registrations,
-      "workspace-1",
       { ...await load("second"), directoryName: "hello-plugin" },
     );
 
     expect(remembered.manifest.panels?.map((panel) => panel.id))
       .toEqual(["main", "second"]);
-    expect(registrations.get("workspace-1")?.get("hello-plugin")?.manifest)
+    expect(registrations.get("hello-plugin")?.manifest)
       .toBe(remembered.manifest);
     expect(remembered.manifest.panels?.[0]?.title).toBe("Hello again");
   });
@@ -423,323 +413,28 @@ describe("plugin panel registration", () => {
     ).toEqual({ id: "hello.write", title: "Write hello note" });
   });
 
-  it("claims a plugin host only when the panel's own start ran it (#779 round 10 B3)", async () => {
-    const panelStartedHosts = new Set<string>();
-    const claim = (result: {
-      running: boolean;
-      startedHost: boolean;
-    }) => {
-      const calls: string[] = [];
-      let running = result.running;
-      return {
-        calls,
-        run: () =>
-          startPluginForPanel({
-            panelStartedHosts,
-            workspaceId: "workspace-1",
-            pluginId: "hello-plugin",
-            hostActivation: () => (running ? Promise.resolve() : undefined),
-            ensureStarted: async () => {
-              calls.push("ensureStarted");
-              running = true;
-              return { ok: true, startedHost: result.startedHost };
-            },
-          }),
-      };
-    };
-
-    // Already running: the panel rides along and starts nothing.
-    const riding = claim({ running: true, startedHost: false });
-    await riding.run();
-    expect(riding.calls).toEqual([]);
-    expect(panelStartedHosts.size).toBe(0);
-
-    // Started by something else between the check and the start — a queued
-    // workspace reconciliation. The pipeline says this call did not perform
-    // the transition, so the panel must not own the host.
-    const overtaken = claim({ running: false, startedHost: false });
-    await overtaken.run();
-    expect(overtaken.calls).toEqual(["ensureStarted"]);
-    expect(panelStartedHosts.size).toBe(0);
-
-    // This start ran the host: the panel owns stopping it.
-    await claim({ running: false, startedHost: true }).run();
-    expect([...panelStartedHosts]).toEqual([
-      pluginLifecycleKey("workspace-1", "hello-plugin"),
-    ]);
-  });
-
-  it("does not claim a host started for a plugin command, and reports the cold start instead (round-9 finding 1)", async () => {
-    const panelStartedHosts = new Set<string>();
-    let running = false;
-    let coldStarts = 0;
-
-    await startPluginForPanel({
-      panelStartedHosts,
-      workspaceId: "workspace-1",
-      pluginId: "hello-plugin",
-      claim: false,
-      onColdStartWithoutClaim: () => {
-        coldStarts += 1;
-      },
-      hostActivation: () => (running ? Promise.resolve() : undefined),
-      ensureStarted: async () => {
-        running = true;
-        return { ok: true, startedHost: true };
-      },
-    });
-
-    expect(running).toBe(true);
-    expect(panelStartedHosts.size).toBe(0);
-    // Without a panelStartedHosts entry, this is the only record that the
-    // host is running only because this command cold-started it — without
-    // it, nothing would ever stop it once the command settles.
-    expect(coldStarts).toBe(1);
-  });
-
-  it("does not report a cold start for a command that only rode an already-running host", async () => {
-    const panelStartedHosts = new Set<string>();
-    let coldStarts = 0;
-
-    await startPluginForPanel({
-      panelStartedHosts,
-      workspaceId: "workspace-1",
-      pluginId: "hello-plugin",
-      claim: false,
-      onColdStartWithoutClaim: () => {
-        coldStarts += 1;
-      },
-      hostActivation: () => Promise.resolve(),
-      ensureStarted: async () => {
-        throw new Error("ensureStarted must not run when a host is already active.");
-      },
-    });
-
-    expect(coldStarts).toBe(0);
-  });
-
-  it("does not report a cold start for a normal panel claim (claim left at its default)", async () => {
-    const panelStartedHosts = new Set<string>();
-    let coldStarts = 0;
-
-    await startPluginForPanel({
-      panelStartedHosts,
-      workspaceId: "workspace-1",
-      pluginId: "hello-plugin",
-      onColdStartWithoutClaim: () => {
-        coldStarts += 1;
-      },
-      hostActivation: () => undefined,
-      ensureStarted: async () => ({ ok: true, startedHost: true }),
-    });
-
-    expect([...panelStartedHosts]).toEqual([
-      pluginLifecycleKey("workspace-1", "hello-plugin"),
-    ]);
-    expect(coldStarts).toBe(0);
-  });
-
-  it("reports a refused start instead of claiming the host", async () => {
-    const panelStartedHosts = new Set<string>();
-
-    await expect(
-      startPluginForPanel({
-        panelStartedHosts,
-        workspaceId: "workspace-1",
-        pluginId: "hello-plugin",
-        hostActivation: () => undefined,
-        ensureStarted: async () => ({
-          ok: false,
-          error: { message: "Plugin source changed. Review it again." },
-        }),
-      }),
-    ).rejects.toThrow("Plugin source changed. Review it again.");
-    expect(panelStartedHosts.size).toBe(0);
-  });
-
-  it("reports the retryable claims-draining failure as PluginClaimsDrainingError, not a generic refusal (#779 round 25 finding 3)", async () => {
-    const panelStartedHosts = new Set<string>();
-
-    const start = startPluginForPanel({
-      panelStartedHosts,
-      workspaceId: "workspace-1",
-      pluginId: "hello-plugin",
-      hostActivation: () => undefined,
-      // The one shape PluginPipeline.ensureStarted's own refusal takes for
-      // this exact case: the code, not the message text, is what this
-      // conversion recognizes — the command layer's own catch checks the
-      // error class, not the string.
-      ensureStarted: async () => ({
-        ok: false,
-        error: {
-          message: 'dohc is still working on plugin "hello-plugin". Try the command again in a moment.',
-          code: "claims-draining",
-        },
-      }),
-    });
-
-    await expect(start).rejects.toBeInstanceOf(PluginClaimsDrainingError);
-    expect(panelStartedHosts.size).toBe(0);
-  });
-
-  describe("toPluginPanelHostStartResult (#779 round 27)", () => {
-    // PluginPipelineEnsureStartedResult's own full shape carries fields this
-    // function never reads (plugin, stage) — only .ok and .error's own code
-    // and message. Cast rather than stub every unrelated required field.
-    function ensureStartedResult(input: unknown) {
-      return input as Parameters<typeof toPluginPanelHostStartResult>[0];
-    }
-
-    it("passes a started result through unchanged", () => {
-      expect(
-        toPluginPanelHostStartResult(
-          ensureStartedResult({ ok: true, startedHost: true }),
-        ),
-      ).toEqual({ ok: true, startedHost: true });
-    });
-
-    it("keeps the one code startPluginForPanel recognizes", () => {
-      expect(
-        toPluginPanelHostStartResult(
-          ensureStartedResult({
-            ok: false,
-            error: { stage: "runtime", code: CLAIMS_DRAINING_ERROR_CODE, message: "retry" },
-          }),
-        ),
-      ).toEqual({
-        ok: false,
-        error: { message: "retry", code: CLAIMS_DRAINING_ERROR_CODE },
-      });
-    });
-
-    it("drops any other pipeline error code to undefined — the same as no code at all, so a producer misspelling degrades honestly instead of matching by accident", () => {
-      expect(
-        toPluginPanelHostStartResult(
-          ensureStartedResult({
-            ok: false,
-            error: { stage: "runtime", code: "install-failed", message: "install failed" },
-          }),
-        ),
-      ).toEqual({
-        ok: false,
-        error: { message: "install failed", code: undefined },
-      });
-    });
-  });
-
-  it("waits for a host that is spawned but still activating (#798)", async () => {
-    // Both surfaces reach this through main's ensurePluginStarted: a panel
-    // open and a web-app open share this one path, so this covers both.
-    for (const startedHere of [false, true]) {
-      const panelStartedHosts = new Set<string>();
-      let activated = false;
-      let settleActivation!: () => void;
-      const activation = new Promise<void>((resolve) => {
-        settleActivation = () => {
-          activated = true;
-          resolve();
-        };
-      });
-      let spawned = !startedHere;
-
-      let opened = false;
-      const open = startPluginForPanel({
-        panelStartedHosts,
-        workspaceId: "workspace-1",
-        pluginId: "hello-plugin",
-        hostActivation: () => (spawned ? activation : undefined),
-        ensureStarted: async () => {
-          // The pipeline reports a started host the moment it spawns one,
-          // which is before the plugin can serve anything.
-          spawned = true;
-          return { ok: true, startedHost: true };
-        },
-      }).then(() => {
-        opened = true;
-      });
-
-      // Long enough for every pending job to run: the open must still be
-      // waiting, because the plugin cannot answer yet.
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      expect(opened).toBe(false);
-
-      settleActivation();
-      await open;
-      expect(opened).toBe(true);
-      expect(activated).toBe(true);
-      expect([...panelStartedHosts]).toEqual(
-        startedHere ? [pluginLifecycleKey("workspace-1", "hello-plugin")] : [],
-      );
-    }
-  });
-
-  it("reports the activation error of a host that never became ready (#798)", async () => {
-    for (const startedHere of [false, true]) {
-      const panelStartedHosts = new Set<string>();
-      let spawned = !startedHere;
-      const activation = Promise.reject(
-        new Error('Plugin "hello-plugin" activation failed: bad entry.'),
-      );
-      activation.catch(() => undefined);
-
-      await expect(
-        startPluginForPanel({
-          panelStartedHosts,
-          workspaceId: "workspace-1",
-          pluginId: "hello-plugin",
-          hostActivation: () => (spawned ? activation : undefined),
-          ensureStarted: async () => {
-            spawned = true;
-            return { ok: true, startedHost: startedHere };
-          },
-        }),
-      ).rejects.toThrow('Plugin "hello-plugin" activation failed: bad entry.');
-
-      // A start that ran the host still owns it — the accounting follows who
-      // started the process, not whether the process then activated.
-      expect([...panelStartedHosts]).toEqual(
-        startedHere ? [pluginLifecycleKey("workspace-1", "hello-plugin")] : [],
-      );
-    }
-  });
-
   it("forgets an uninstalled plugin, and only when uninstall succeeded (#779 round 10 B7)", () => {
     const registration: RegisteredPlugin = {
       pluginRoot: "plugins/hello-plugin",
       manifest: { version: 1, name: "hello-plugin", entry: "plugin.mjs" },
       directoryName: "hello-plugin",
     };
-    const registrations = new Map([
-      ["workspace-1", new Map([["hello-plugin", registration]])],
-    ]);
-    const panelStartedHosts = new Set([
-      pluginLifecycleKey("workspace-1", "hello-plugin"),
-    ]);
-
+    const registrations = new Map([["hello-plugin", registration]]);
     // A refused uninstall deleted nothing, so the plugin keeps serving.
     forgetUninstalledPlugin({
       registrations,
-      panelStartedHosts,
-      workspaceId: "workspace-1",
       pluginId: "hello-plugin",
       directoryName: "hello-plugin",
-      uninstalled: false,
+      released: false,
     });
-    expect(registrations.get("workspace-1")?.get("hello-plugin"))
-      .toBe(registration);
-    expect(panelStartedHosts.size).toBe(1);
-
+    expect(registrations.get("hello-plugin")).toBe(registration);
     forgetUninstalledPlugin({
       registrations,
-      panelStartedHosts,
-      workspaceId: "workspace-1",
       pluginId: "hello-plugin",
       directoryName: "hello-plugin",
-      uninstalled: true,
+      released: true,
     });
-    expect(registrations.get("workspace-1")?.get("hello-plugin"))
-      .toBeUndefined();
-    expect(panelStartedHosts.size).toBe(0);
+    expect(registrations.get("hello-plugin")).toBeUndefined();
   });
 
   // #779-offers round 24 finding 4: an id-losing collision loser's own
@@ -752,39 +447,24 @@ describe("plugin panel registration", () => {
       manifest: { version: 1, name: "shared-id", entry: "plugin.mjs" },
       directoryName: "winner-dir",
     };
-    const registrations = new Map([
-      ["workspace-1", new Map([["shared-id", registration]])],
-    ]);
-    const panelStartedHosts = new Set([
-      pluginLifecycleKey("workspace-1", "shared-id"),
-    ]);
-
+    const registrations = new Map([["shared-id", registration]]);
     // The loser at a DIFFERENT directory left — not the winner this id's
     // registration actually traces to.
     forgetUninstalledPlugin({
       registrations,
-      panelStartedHosts,
-      workspaceId: "workspace-1",
       pluginId: "shared-id",
       directoryName: "loser-dir",
-      uninstalled: true,
+      released: true,
     });
-    expect(registrations.get("workspace-1")?.get("shared-id"))
-      .toBe(registration);
-    expect(panelStartedHosts.size).toBe(1);
-
+    expect(registrations.get("shared-id")).toBe(registration);
     // The winner's OWN directory leaving is still forgotten normally.
     forgetUninstalledPlugin({
       registrations,
-      panelStartedHosts,
-      workspaceId: "workspace-1",
       pluginId: "shared-id",
       directoryName: "winner-dir",
-      uninstalled: true,
+      released: true,
     });
-    expect(registrations.get("workspace-1")?.get("shared-id"))
-      .toBeUndefined();
-    expect(panelStartedHosts.size).toBe(0);
+    expect(registrations.get("shared-id")).toBeUndefined();
   });
 
   // CodeRabbit on #779-offers round 24: directoryName used to be derived
@@ -795,53 +475,28 @@ describe("plugin panel registration", () => {
   // trace-to-directory check this field exists for. Registration must
   // carry the pipeline's discovered name explicitly, never re-derive it.
   it("carries the discovered directoryName through registration, even when it differs from pluginRoot's own basename", () => {
-    const registrations = new Map<string, Map<string, RegisteredPlugin>>();
-    const panelStartedHosts = new Set([
-      pluginLifecycleKey("workspace-1", "hello-plugin"),
-    ]);
-
+    const registrations = new Map<string, RegisteredPlugin>();
     // A symlinked plugin root's REAL target has a different final path
     // segment than the directory the pipeline actually discovered this
     // plugin under.
-    const remembered = rememberPluginRegistration(registrations, "workspace-1", {
+    const remembered = rememberPluginRegistration(registrations, {
       pluginRoot: "plugins/symlink-target-name",
       manifest: { version: 1, name: "hello-plugin", entry: "plugin.mjs" },
       directoryName: "real-discovered-name",
     });
     expect(remembered.directoryName).toBe("real-discovered-name");
-    expect(registrations.get("workspace-1")?.get("hello-plugin")?.directoryName)
+    expect(registrations.get("hello-plugin")?.directoryName)
       .toBe("real-discovered-name");
 
     // The pipeline's own removed event names its own discovered
     // directory — the one that must match for this to forget correctly.
     forgetUninstalledPlugin({
       registrations,
-      panelStartedHosts,
-      workspaceId: "workspace-1",
       pluginId: "hello-plugin",
       directoryName: "real-discovered-name",
-      uninstalled: true,
+      released: true,
     });
-    expect(registrations.get("workspace-1")?.get("hello-plugin")).toBeUndefined();
-    expect(panelStartedHosts.size).toBe(0);
-  });
-
-  it("forgets the registrations of a closing workspace and no others", () => {
-    const registration: RegisteredPlugin = {
-      pluginRoot: "plugins/hello-plugin",
-      manifest: { version: 1, name: "hello-plugin", entry: "plugin.mjs" },
-      directoryName: "hello-plugin",
-    };
-    const registrations = new Map([
-      ["workspace-1", new Map([["hello-plugin", registration]])],
-      ["workspace-2", new Map([["hello-plugin", registration]])],
-    ]);
-
-    forgetWorkspaceRegistrations(registrations, "workspace-1");
-
-    expect(registrations.get("workspace-1")).toBeUndefined();
-    expect(registrations.get("workspace-2")?.get("hello-plugin"))
-      .toBe(registration);
+    expect(registrations.get("hello-plugin")).toBeUndefined();
   });
 
   it("refuses a second registration from another root", async () => {
@@ -854,15 +509,14 @@ describe("plugin panel registration", () => {
       pluginId: "hello-plugin",
       panelId: "main",
     });
-    const registrations = new Map<string, Map<string, RegisteredPlugin>>();
+    const registrations = new Map<string, RegisteredPlugin>();
     rememberPluginRegistration(
       registrations,
-      "workspace-1",
       { ...registration, directoryName: "hello-plugin" },
     );
 
     expect(() =>
-      rememberPluginRegistration(registrations, "workspace-1", {
+      rememberPluginRegistration(registrations, {
         ...registration,
         pluginRoot: join(workspace, "plugins", "elsewhere"),
         directoryName: "elsewhere",
@@ -880,21 +534,15 @@ describe("plugin panel registration", () => {
       pluginId: "hello-plugin",
       panelId: "main",
     });
-    const registrations = new Map<string, Map<string, RegisteredPlugin>>();
-    const panelStartedHosts = new Set([
-      pluginLifecycleKey("workspace-1", "hello-plugin"),
-    ]);
+    const registrations = new Map<string, RegisteredPlugin>();
     const remembered = rememberPluginRegistration(
       registrations,
-      "workspace-1",
       { ...registration, directoryName: "foo" },
     );
 
     // Ordinary status traffic changes nothing.
     forgetRemovedPlugin({
       registrations,
-      panelStartedHosts,
-      workspaceId: "workspace-1",
       event: {
         kind: "changed",
         plugin: {
@@ -927,8 +575,7 @@ describe("plugin panel registration", () => {
         },
       },
     });
-    expect(registrations.get("workspace-1")?.get("hello-plugin"))
-      .toBe(remembered);
+    expect(registrations.get("hello-plugin")).toBe(remembered);
 
     // The rename departs the old identity through the watcher path — not
     // uninstall — and its removed event must release the registration, or
@@ -936,11 +583,8 @@ describe("plugin panel registration", () => {
     // another root" until the workspace reopens.
     forgetRemovedPlugin({
       registrations,
-      panelStartedHosts,
-      workspaceId: "workspace-1",
       event: { kind: "removed", pluginId: "hello-plugin", directoryName: "foo" },
     });
-    expect(panelStartedHosts.size).toBe(0);
 
     const newRoot = join(workspace, "plugins", "bar");
     await writePlugin(newRoot);
@@ -953,7 +597,6 @@ describe("plugin panel registration", () => {
     expect(
       rememberPluginRegistration(
         registrations,
-        "workspace-1",
         { ...reinstalled, directoryName: "bar" },
       ),
     ).toMatchObject({ pluginRoot: newRoot });

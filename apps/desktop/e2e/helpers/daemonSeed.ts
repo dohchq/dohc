@@ -1,8 +1,10 @@
 import {
   EngineDaemonLifecycle,
-  EngineWorkspaceSessions,
+  type AttachedEngineWorkspace,
+  type EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import { resolveEngineBinary } from "../../src/testing/engineBinary";
+import { createRealDaemonWorkspaceSessions } from "../../src/testing/realDaemonWorkspaceSessions";
 import {
   EngineRelayClient,
   RelayConfiguredDaemonClientSource,
@@ -32,10 +34,23 @@ export interface DaemonSeedStores {
 }
 
 export interface LiveDaemonWorkspace {
+  workspace: AttachedEngineWorkspace;
   chats: DesktopLinkedChatStore;
   relay: EngineRelayClient;
   sessions: EngineWorkspaceSessions;
   close(): Promise<void>;
+}
+
+function attachWorkspace(workspace: {
+  workspaceId: string;
+  rootPath: string;
+}): AttachedEngineWorkspace {
+  return {
+    ...workspace,
+    attachmentId: Symbol(
+      `test-workspace-attachment:${workspace.workspaceId}`,
+    ),
+  };
 }
 
 export async function openLiveDaemonWorkspace(
@@ -49,7 +64,8 @@ export async function openLiveDaemonWorkspace(
   await lifecycle.start();
   const routes = new RelayTransportRouteGuard();
   const source = new RelayConfiguredDaemonClientSource(lifecycle, routes);
-  const sessions = new EngineWorkspaceSessions(source);
+  const sessions = createRealDaemonWorkspaceSessions(source);
+  const attachedWorkspace = attachWorkspace(workspace);
   const relay = new EngineRelayClient({
     sessions,
     routes,
@@ -57,7 +73,8 @@ export async function openLiveDaemonWorkspace(
   });
   let closed = false;
   return {
-    chats: createLiveLinkedChatStore(workspace, sessions),
+    workspace: attachedWorkspace,
+    chats: createLiveLinkedChatStore(attachedWorkspace, sessions),
     relay,
     sessions,
     close: async () => {
@@ -81,10 +98,11 @@ export async function seedThroughDaemon<T>(
   let sessions: EngineWorkspaceSessions | null = null;
   try {
     await lifecycle.start();
-    sessions = new EngineWorkspaceSessions(lifecycle);
+    sessions = createRealDaemonWorkspaceSessions(lifecycle);
+    const attachedWorkspace = attachWorkspace(workspace);
     return await seed({
-      chats: createLiveLinkedChatStore(workspace, sessions),
-      files: createCaptureLiveStores(workspace, sessions).store,
+      chats: createLiveLinkedChatStore(attachedWorkspace, sessions),
+      files: createCaptureLiveStores(attachedWorkspace, sessions).store,
     });
   } finally {
     await sessions?.closeAll();

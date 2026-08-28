@@ -1,4 +1,6 @@
 import { useRef, type PointerEvent, type ReactNode } from "react";
+import { clampEditorGroupPairLeftSize } from "./workbenchState";
+import { useCommitOnRelease } from "./useCommitOnRelease";
 
 const KEYBOARD_RESIZE_STEP = 0.05;
 
@@ -6,6 +8,13 @@ export interface EditorGroupLayoutItem {
   id: string;
   size: number;
   content: ReactNode;
+}
+
+interface EditorGroupResizePreview {
+  leftGroupId: string;
+  rightGroupId: string;
+  leftSize: number;
+  rightSize: number;
 }
 
 export function EditorGroupLayout(props: {
@@ -26,22 +35,39 @@ export function EditorGroupLayout(props: {
     leftGroupId: string;
     rightGroupId: string;
     leftSize: number;
+    pairSize: number;
     totalSize: number;
   } | null>(null);
+  const resizeCommit = useCommitOnRelease<EditorGroupResizePreview>((value) =>
+    props.onResizeGroups(value.leftGroupId, value.rightGroupId, value.leftSize),
+  );
+  const groups = props.groups.map((group) => {
+    const preview = resizeCommit.previewValue;
+    if (group.id === preview?.leftGroupId) return { ...group, size: preview.leftSize };
+    if (group.id === preview?.rightGroupId) {
+      return { ...group, size: preview.rightSize };
+    }
+    return group;
+  });
 
   const resizeFromPointer = (event: PointerEvent<HTMLDivElement>) => {
     const state = resize.current;
-    if (!state || state.pointerId !== event.pointerId) return;
-    if ((event.buttons & 1) === 0) {
-      resize.current = null;
-      return;
-    }
+    if (!state || !resizeCommit.isActive(event.pointerId)) return;
     const delta =
       ((event.clientX - state.startX) / state.width) * state.totalSize;
-    props.onResizeGroups(
-      state.leftGroupId,
-      state.rightGroupId,
+    const leftSize = clampEditorGroupPairLeftSize(
+      state.pairSize,
       state.leftSize + delta,
+    );
+    resizeCommit.update(
+      event.pointerId,
+      {
+        leftGroupId: state.leftGroupId,
+        rightGroupId: state.rightGroupId,
+        leftSize,
+        rightSize: state.pairSize - leftSize,
+      },
+      event.buttons,
     );
   };
 
@@ -51,8 +77,8 @@ export function EditorGroupLayout(props: {
       data-testid="editor-group-layout"
       className="flex min-h-0 min-w-0 flex-1"
     >
-      {props.groups.map((group, index) => {
-        const next = props.groups[index + 1];
+      {groups.map((group, index) => {
+        const next = groups[index + 1];
         return (
           <div key={group.id} className="contents">
             <section
@@ -102,6 +128,13 @@ export function EditorGroupLayout(props: {
                   if (width <= 0) return;
                   event.preventDefault();
                   event.currentTarget.setPointerCapture(event.pointerId);
+                  const pairSize = group.size + next.size;
+                  resizeCommit.begin(event.pointerId, {
+                    leftGroupId: group.id,
+                    rightGroupId: next.id,
+                    leftSize: group.size,
+                    rightSize: next.size,
+                  });
                   resize.current = {
                     pointerId: event.pointerId,
                     startX: event.clientX,
@@ -109,22 +142,19 @@ export function EditorGroupLayout(props: {
                     leftGroupId: group.id,
                     rightGroupId: next.id,
                     leftSize: group.size,
-                    totalSize: props.groups.reduce(
+                    pairSize,
+                    totalSize: groups.reduce(
                       (sum, candidate) => sum + candidate.size,
                       0,
                     ),
                   };
                 }}
                 onPointerMove={resizeFromPointer}
-                onPointerUp={() => {
-                  resize.current = null;
-                }}
-                onPointerCancel={() => {
-                  resize.current = null;
-                }}
-                onLostPointerCapture={() => {
-                  resize.current = null;
-                }}
+                onPointerUp={(event) => resizeCommit.commit(event.pointerId)}
+                onPointerCancel={(event) => resizeCommit.commit(event.pointerId)}
+                onLostPointerCapture={(event) =>
+                  resizeCommit.commit(event.pointerId)
+                }
                 className="group/resize relative z-10 w-px shrink-0 cursor-col-resize bg-line outline-none before:absolute before:-left-1 before:inset-y-0 before:w-[9px] focus-visible:bg-ink/50"
               >
                 <span

@@ -10,48 +10,26 @@ Three checks, one discipline. **Orwell** keeps prose alive. **STE** keeps it
 executable. The **AI-tell pass** cuts model habits without erasing the author's
 voice. No one check is enough, because dohc's text is not one kind of text.
 
-## Why a system at all
-
-A controlled-language experiment measured three interventions against a
-baseline, on two models
-([woosal1337/blog ep01](https://github.com/woosal1337/blog/tree/main/videos/ep01-the-cure-for-ai-slop)):
-
-| Intervention | Claude | GPT-5.5 |
-| --- | --- | --- |
-| STE skill | −74% | −50% |
-| Orwell's six rules | −43% | −52% |
-| Banned-words list | −3% | −40% |
-
-A writing *system* cut slop by 43% to 74%. A banned-words list managed 3% to 40%, and
-on Claude it did almost nothing.
-
-Treat this as directional, not settled. It is six tasks and two models, scored
-by a heuristic linter that counts the mechanical violations the STE prompt
-tells the model to avoid. The authors call it "directional, not proof." The
-ordering is the finding. The decimals are not.
-
-The lesson is the whole reason this file exists: **a list of forbidden words
-does not work. A system does.** If this skill ever decays into "never say
-seamless," it has failed. Judge sentences by whether a reader can act on them,
-not by whether they contain a flagged token.
+The lesson that holds it together: **a banned-words list does not work, a
+system does.** A controlled-language experiment
+([woosal1337/blog ep01](https://github.com/woosal1337/blog/tree/main/videos/ep01-the-cure-for-ai-slop))
+found that writing systems cut slop by 43% to 74% while a banned-words list
+managed 3% to 40%. Directional, not proof. If this skill ever decays into
+"never say seamless," it has failed. Judge sentences by whether a reader can
+act on them, not by whether they contain a flagged token.
 
 ## The register decides the rules
 
-This part is dohc-specific. Get it right first. Ask one question before
-writing: **will a reader execute this text, or think about it?**
+This part is dohc-specific. Ask one question before writing: **will a reader
+execute this text, or think about it?**
 
 ### 1. Executable text → strict STE
 
-Error messages, empty states, button labels, procedures, runbooks, skills,
-agent instructions, product invariants, migration steps.
-
-**Writing UI copy? That is the `dohc-interface` skill, not this one.**
-It holds the concrete rules for labels, errors, empty states, toasts, and
-destructive actions, and it is binding for those surfaces.
+Procedures, runbooks, skills, agent instructions, product invariants,
+migration steps. UI copy belongs to the `dohc-interface` skill, not this one.
 
 A reader acts on this text and cannot ask a follow-up question. Ambiguity here
-becomes a real failure. These rules hold unless obeying one would make the text
-wrong or unclear. See the precedence rule under Orwell's six:
+becomes a real failure.
 
 - One instruction per sentence. 20 words or fewer.
 - Active voice, named actor. `The engine rejects the write`, not
@@ -59,24 +37,25 @@ wrong or unclear. See the precedence rule under Orwell's six:
 - No figurative language, no idiom, no irony, no humor.
 - One term per concept, and the same term the surrounding surface uses.
 - State the condition before the action it controls.
+- Put the common case first, exceptions after.
 - Say what the reader must do, not only what went wrong.
+- Never write "simply", "easy", or "quickly" in a procedure.
 
 ### 2. Explanatory text → STE-flavored
 
 Docs, specs, plans, PR bodies, README, code comments, design notes.
 
 A reader thinks about this text and can re-read it. Keep STE's discipline but
-let sentences breathe. Explanatory text can state why something matters, but it
-does not become editorial by default:
+let sentences breathe:
 
-- Prefer short sentences; vary length where it helps the reader.
+- Prefer short sentences and vary length where it helps the reader.
+  Descriptions up to 25 words, one topic per paragraph.
 - Keep contractions where they match the surrounding voice.
-- Descriptions up to 25 words. One topic per paragraph.
-- A fresh, concrete image is allowed when it does real explanatory work.
+- Use a fresh, concrete image only when it does real explanatory work.
 - Technical terms are fine. Define an unfamiliar one at first use.
 - State the motivation once, then explain the product, mechanism, or tradeoff.
-- Use first person only when the author or source already establishes it.
-- Keep memorable lines that carry a real idea. Do not add slogans for tone.
+- Headings carry the point, not just the topic.
+- Link with words that say where the link goes, never "click here".
 
 ### 3. Editorial text → Orwell only
 
@@ -93,17 +72,23 @@ hedging, cut inherited phrasing.
 
 ### Mixed documents
 
-Most real dohc documents mix registers. This file does. The argument above is
-editorial, and the rules below are executable. A spec has a Rationale and a
-Contract. A PR body has an argument and a test plan.
+Most real dohc documents mix registers. This file does. Split the document
+into sections, then let **the strictest register present govern any sentence
+the reader will act on.** A request for "soul" does not change the register.
+Treat a section as editorial only when its job is to persuade. Keep a README,
+design note, or PR body explanatory unless the author supplied an editorial
+passage or asked for one.
 
-Section them. Then let **the strictest register present govern any sentence the
-reader will act on.** A rule, a step, or a warning obeys strict STE even when
-the prose around it is editorial.
+## One document, one job
 
-A request for "soul" does not change the register. Treat a section as editorial
-only when its job is to persuade. Keep a README, design note, or PR body
-explanatory unless the author supplied an editorial passage or asked for one.
+The register governs sentences. A whole document also has a mode, and two
+questions pick the mode: does the document inform action or understanding, and
+does it serve learning or work? Action and learning is a tutorial. Action and work is a
+how-to. Understanding and work is reference. Understanding and learning is
+explanation. (diataxis.fr)
+
+One document, one mode. No reference tables inside a tutorial, no teaching
+inside reference, no persuading inside a how-to. Split and link instead.
 
 ## Orwell's six rules
 
@@ -120,53 +105,54 @@ strength the register allows.
 6. Break any of these rules sooner than say anything outright barbarous.
 
 **Rule 1 and STE genuinely conflict.** Orwell attacks *stale* metaphor and so
-invites fresh metaphor. STE bans figurative language outright, because a
-non-native reader executing a maintenance procedure cannot safely parse it.
-
-The two skills this one draws on leave that unresolved:
+invites fresh metaphor; STE bans figurative language outright. dohc resolves
+it by register: editorial text welcomes fresh metaphor, explanatory text
+allows it where it does real work, executable text bans it. The source skills,
 [orwell-writing](https://github.com/tamdogood/builder-essential-skills/blob/main/skills/orwell-writing/SKILL.md)
-and
-[ste-plain-writing](https://github.com/Ryuketsukami/ste-plain-writing).
-dohc resolves it by register. Editorial text welcomes fresh metaphor.
-Explanatory text allows it where it does real work. Executable text bans it.
-
-**Rule 6 is the anti-flattening clause.** Prose that obeys every rule and reads
-like a compliance document is a failure. If a rule is about to make a sentence
-worse, break it.
+and [ste-plain-writing](https://github.com/Ryuketsukami/ste-plain-writing),
+leave the conflict unresolved.
 
 **Precedence, so this is decidable.** Being accurate outranks everything. In
-executable text, the strict rules then outrank Rule 6: break one only when
+executable text the strict rules then outrank Rule 6: break one only when
 obeying it would make the text wrong or ambiguous, never to make it sound
-better. In explanatory and editorial text, Rule 6 outranks the strict rules.
+better. In explanatory and editorial text Rule 6 outranks the strict rules:
+prose that obeys every rule and reads like a compliance document is a failure.
 
 ## Use one name for one thing
 
-STE's real power is not its sentence rules. It is the controlled dictionary.
-For dohc the equivalent is our own nouns.
-
-Term drift between UI, docs, and agent tools is what makes an agent misfire.
-The agent cannot tell that two words mean the same thing, or that one word
+STE's real power is its controlled dictionary. For dohc the equivalent is our
+own nouns. Term drift between UI, docs, and agent tools is what makes an agent
+misfire: it cannot tell that two words mean the same thing, or that one word
 means two.
 
-Rules:
-
-- Use the word the surrounding surface already uses. Match the UI, the
-  contract, and the neighbouring docs.
+- Use the word the surrounding surface already uses: the UI, the contract, the
+  neighboring docs.
 - Do not swap in a synonym to avoid repetition. Repetition is correct.
 - One term, one meaning, within a document.
 - Check the word against the code before asserting what it means. Several dohc
   nouns mean different things in different layers.
-- When the codebase has not settled a term, say so in the text. Do not pick a
-  winner silently.
+- When the codebase has not settled a term, say so instead of picking a winner
+  silently.
 
-**There is deliberately no term list here yet.** One was drafted for this file
-and removed. It made specific claims about a large, moving codebase, and review
-found it wrong round after round. Some entries would have told an agent to
-avoid a live contract, and one could have excluded direct
-messages from channel-wide authorization. A word list that is subtly wrong is
-worse than no list, because it states things authoritatively to a reader who
-will act on them. Add one when the terms settle, and keep it next to the code
-it describes so it cannot drift.
+**There is deliberately no term list here.** One was drafted and removed:
+review found it wrong round after round, and a subtly wrong list is worse than
+no list, because it speaks authoritatively to a reader who will act on it. Add
+one when the terms settle, and keep it next to the code it describes.
+
+### One reading per sentence
+
+- Keep "only" and "not" next to the word they change. "Only fails on growth"
+  and "fails only on growth" say different things.
+- Break noun strings: "the share-link permission scope check" becomes "the
+  check on a share link's permission scope".
+- Make every "it", "they", and "this" point at one obvious thing. Repeat the
+  noun when in doubt.
+- Give every clause its verb. "Phase 1 moves the converters and Phase 2 the
+  runtime" leaves Phase 2 without one.
+- Keep the small words that force one parse: "that", and the repeated article
+  when "the client and the host" are two things.
+- Write plurals out, never "(s)". No slashes: "a, b, or both", never "a/b" or
+  "and/or".
 
 ## Cut AI tells without flattening the voice
 
@@ -178,19 +164,17 @@ Remove the first failure without causing the second.
 
 - Cut puffery, promotional language, vague attribution, and generic
   conclusions.
-- Name the evidence or source. If none exists, state the claim at its actual
-  level of certainty.
+- Name the evidence or source, or state the claim at its actual level of
+  certainty.
 - Delete trailing `-ing` clauses that only pretend to explain a result.
 - Describe the mechanism, action, or measured result instead of how it feels.
-- Make a sentence specific to dohc or its task. Cut it if it could describe any
-  project unchanged.
+- Cut any sentence that could describe any project unchanged.
 
 ### Break model habits
 
 - Prefer `is` and `has` to decorative substitutes.
 - State the point directly instead of framing it as "not just X, but Y."
 - Use the natural number of examples. Do not force a rule of three.
-- Repeat the established term. Do not cycle through synonyms for variety.
 - Replace abstract project metaphors with the actual component, action, or
   tradeoff.
 - Cut filler, stacked hedges, and adverbs that prop up weak verbs.
@@ -205,95 +189,80 @@ Remove the first failure without causing the second.
 
 Cleaning is not finished when the draft becomes neutral. Voice must come from
 the source, the user's words, or the surrounding document. If none establishes
-a strong voice, use calm specificity instead of inventing one.
-
-For explanatory and editorial text:
+one, use calm specificity instead of inventing it. In executable text that
+calm specificity *is* the voice: no humor, attitude, or filler in a command or
+warning.
 
 - Preserve first person when the author already uses it. Do not invent a
   narrator.
-- Take a position when the source or evidence supports that position.
-- Vary sentence length instead of forcing every paragraph into one rhythm.
+- Take a position when the evidence supports it, and admit real uncertainty
+  instead of smoothing it into balance.
 - Keep the specific detail that makes the point credible or memorable.
-- Admit real uncertainty or tension instead of smoothing it into balance.
 - Match the source's intensity. Do not turn an explanation into a manifesto.
-- Let the structure follow the thought. Do not split one thesis into several
-  slogan-like sections.
 
-Executable text is different. Its voice comes from calm specificity, not
-personality. Do not add humor, attitude, or conversational filler to a command
-or warning.
+## Worked examples
+
+Executable, from a runbook:
+
+> Before: Note that the engine binary may need to be rebuilt in cases where
+> changes have been made to any of the crates.
+>
+> After: If you changed a crate, rebuild the engine binary through the
+> rust-gate skill.
+
+Condition before action, a named actor, a command, one instruction.
+
+Explanatory, from a spec:
+
+> Before: It's important to note that share-link permission scope validation
+> logic is performed server-side, ensuring security.
+>
+> After: The server validates a share link's permission scope. The client
+> never supplies its own.
+
+The hedge goes, the noun string breaks up, "is performed" gains an actor, and
+"ensuring security" becomes the actual guarantee.
+
+Editorial, from a PR body:
+
+> Before: This isn't just a refactor, it's a fundamental shift in how sync
+> works, delivering robust, seamless collaboration.
+>
+> After: The refactor moves conflict resolution from the renderer to the
+> engine. Two devices editing one document no longer race.
+
+"Not just X" becomes the point itself, and puffery becomes a mechanism a
+reviewer can check.
 
 ## Workflow
 
-Drafting:
+Drafting: name the register and the document's mode. Draft in concrete, direct
+English. Apply the register's rules. Check every noun against the code. Remove
+AI tells last.
 
-1. Name the register. Executable, explanatory, or editorial.
-2. Name the audience and what they must be able to do after reading.
-3. Draft in concrete, direct English.
-4. Apply the register's rules.
-5. Check every noun against the surrounding surface and the code.
-6. Remove AI tells, then preserve the voice supported by the source.
-
-Revising:
-
-1. Read the whole source first.
-2. List what must survive: facts, warnings, constraints, commands, links,
-   established voice.
-3. Cut words, clauses, and sentences that do no work.
-4. Replace stale figures of speech and pompous diction.
-5. Make the actor explicit where passive voice hides it.
-6. Scan for formulaic structure, filler, vague claims, and decorative prose.
-7. Preserve supported voice, rhythm, and concrete detail after cutting.
-8. Restore anything the rewrite lost.
-9. Flag necessary jargon and necessary passive voice instead of silently
-   removing the precision they carry.
+Revising: read the whole source first. List what must survive: facts,
+warnings, constraints, commands, links, established voice. Cut what does no
+work, then restore anything the rewrite lost. Flag necessary jargon and
+necessary passive voice instead of silently removing their precision.
 
 ## Do not
 
 - Do not remove a caveat, limitation, or warning to make text shorter.
 - Do not invent evidence, numbers, examples, or sources.
-- Do not invent first person, slogans, or intensity to make prose feel human.
-- Do not flatten a known voice into corporate neutral. See rule 6.
-- Do not add personality where neutral prose is correct. The reverse failure
-  is just as real.
+- Do not flatten a known voice into corporate neutral. Do not add personality
+  where neutral prose is correct. Both failures are real.
 - Do not claim strict ASD-STE100 conformance. We use its discipline, not its
-  certified dictionary, and we have not checked against the current edition.
+  certified dictionary.
 - Do not rewrite code, identifiers, or commands.
 - Do not rewrite an attributed quotation or a verbatim citation. Text the user
   quoted *so that you would rewrite it* is the target, not a quotation.
 
 ## Final pass
 
-- Does each sentence inform or direct? If neither, cut it.
-- Does every pronoun have one clear referent?
-- Could a shorter common word carry the same meaning?
-- Is the actor named wherever the actor matters?
-- Does each noun match what the surrounding surface and the code call it?
-- In executable text: is any sentence over 20 words, or carrying two
-  instructions?
-- Did the rewrite keep every fact and constraint from the source?
-- Does any sentence use an em dash, forced triad, vague attribution, or generic
-  conclusion?
-- Did the draft invent a narrator, slogan, or level of intensity that the
-  source did not establish?
+- Did the rewrite keep every fact, constraint, and warning from the source?
 - Did the cleanup leave the prose sterile or erase the author's point of view?
 - What still makes this look obviously AI-generated?
 - Read it aloud. Does it sound like a person who knows the subject?
 
 This skill improves the form of prose. It cannot make a weak idea true or an
 unsupported claim credible.
-
-## Why this fits dohc
-
-STE was built for aircraft maintenance manuals: many authors, many native
-languages, and one reader who must execute the text exactly, under time
-pressure, with no one to ask.
-
-A dohc workspace has that shape. Many authors, human and agent. Text that
-agents execute rather than merely read. No follow-up question is available at
-the moment of execution. An ambiguous sentence does not only confuse a reader.
-It can make an agent do the wrong thing to real work.
-
-Text is dohc's primitive. A controlled language is that primitive taken
-seriously. Applying it to our own repo first is the honest test of whether it
-is worth offering to a user's workspace later.
