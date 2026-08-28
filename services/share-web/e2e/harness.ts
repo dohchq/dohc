@@ -24,6 +24,7 @@ interface ServiceProcess {
 }
 
 export interface RunningStack {
+  relayDbPath: string;
   relayUrl: string;
   shareWebUrl: string;
   stop: () => Promise<void>;
@@ -260,13 +261,14 @@ async function startStack(): Promise<RunningStack> {
   const shareWebPort = await allocatePort();
   const shareWebUrl = `http://${LOOPBACK_HOST}:${String(shareWebPort)}`;
   const tempRoot = await mkdtemp(join(tmpdir(), "dohc-share-web-browser-"));
+  const relayDbPath = join(tempRoot, "relay.sqlite");
   const relayExchangeKey = randomBytes(32).toString("base64url");
   const relayLinkKey = randomBytes(32).toString("base64url");
   const relayEnv = buildHarnessEnvironment(process.env, {
     NODE_ENV: "test",
     SYNC_RELAY_TEST_AUTH: "1",
     SYNC_RELAY_PORT: "0",
-    SYNC_RELAY_DB_PATH: join(tempRoot, "relay.sqlite"),
+    SYNC_RELAY_DB_PATH: relayDbPath,
     DOHC_RELAY_EXCHANGE_KEY: relayExchangeKey,
     DOHC_RELAY_LINK_KEY: relayLinkKey,
     DOHC_RELAY_SHARE_WEB_ORIGIN: shareWebUrl,
@@ -319,6 +321,7 @@ async function startStack(): Promise<RunningStack> {
     );
     const relayUrl = `http://${relayMatch[1]}:${relayMatch[2]}`;
     shareWebEnv.DOHC_SHARE_WEB_RELAY_URL = relayUrl;
+    shareWebEnv.DOHC_SHARE_WEB_PUBLIC_RELAY_URL = relayUrl;
 
     const shareWeb = spawnService(
       "share-web",
@@ -339,6 +342,7 @@ async function startStack(): Promise<RunningStack> {
     }
 
     return {
+      relayDbPath,
       relayUrl,
       shareWebUrl,
       stop,
