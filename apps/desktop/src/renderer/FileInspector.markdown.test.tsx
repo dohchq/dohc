@@ -1,8 +1,25 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import { FileInspector } from "./FileInspector";
+
+// Keep Vite transforms out of Testing Library's one-second assertion window.
+// Read mode also preloads MarkdownEditor, so await both imports before render.
+beforeAll(async () => {
+  await Promise.all([
+    import("./markdown/IncrementalMarkdownDocument"),
+    import("./editor/MarkdownEditor"),
+  ]);
+});
 
 // The file reader and the plugin README share one markdown component map, so
 // a document reads the same wherever dohc shows it. The map itself is pinned
