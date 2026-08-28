@@ -1044,18 +1044,6 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
         `);
       }
     }
-    const handoffCodeColumns = db
-      .prepare("PRAGMA table_info(sync_relay_link_handoff_codes)")
-      .all()
-      .map((row) => String(row.name));
-    if (!handoffCodeColumns.includes("result_grant_id")) {
-      db.exec(`
-        ALTER TABLE sync_relay_link_handoff_codes
-        ADD COLUMN result_grant_id TEXT
-          REFERENCES sync_relay_share_grants(grant_id) ON DELETE CASCADE
-          DEFERRABLE INITIALLY DEFERRED
-      `);
-    }
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_sync_relay_link_handoff_codes_result_grant
         ON sync_relay_link_handoff_codes(result_grant_id)

@@ -494,7 +494,7 @@ describe("single-use authenticated link handoff", () => {
     expect(codeCount(database)).toBe(2);
   });
 
-  it("upgrades a pre-receipt database without losing a live handoff code", async () => {
+  it("reopens the normalized handoff schema without losing a live code", async () => {
     const state = await setup();
     const minted = await mint(state);
     const codeHash = hashLinkHandoffCode(String(minted.code));
@@ -504,40 +504,8 @@ describe("single-use authenticated link handoff", () => {
     storages.splice(storageIndex, 1);
     state.storage.close();
 
-    const legacy = inspect(state.dbPath);
-    legacy.exec("PRAGMA foreign_keys = OFF");
-    legacy.exec(`
-      DROP INDEX idx_sync_relay_link_handoff_codes_result_grant;
-      DROP INDEX idx_sync_relay_link_handoff_codes_grant;
-      CREATE TABLE sync_relay_link_handoff_codes_legacy (
-        code_id TEXT PRIMARY KEY,
-        code_hash TEXT NOT NULL UNIQUE,
-        grant_id TEXT NOT NULL,
-        generation INTEGER NOT NULL CHECK (generation >= 1),
-        minted_at_ms INTEGER NOT NULL,
-        expires_at_ms INTEGER NOT NULL,
-        CHECK (expires_at_ms > minted_at_ms),
-        FOREIGN KEY (grant_id)
-          REFERENCES sync_relay_share_grants(grant_id) ON DELETE CASCADE
-      ) STRICT;
-      INSERT INTO sync_relay_link_handoff_codes_legacy (
-        code_id, code_hash, grant_id, generation, minted_at_ms, expires_at_ms
-      )
-      SELECT code_id, code_hash, grant_id, generation, minted_at_ms, expires_at_ms
-      FROM sync_relay_link_handoff_codes;
-      DROP TABLE sync_relay_link_handoff_codes;
-      ALTER TABLE sync_relay_link_handoff_codes_legacy
-        RENAME TO sync_relay_link_handoff_codes;
-      CREATE INDEX idx_sync_relay_link_handoff_codes_grant
-        ON sync_relay_link_handoff_codes(grant_id, minted_at_ms);
-    `);
-    const databaseIndex = databases.indexOf(legacy);
-    expect(databaseIndex).toBeGreaterThanOrEqual(0);
-    databases.splice(databaseIndex, 1);
-    legacy.close();
-
-    const upgraded = openSyncRelayStorage(state.dbPath);
-    storages.push(upgraded);
+    const reopened = openSyncRelayStorage(state.dbPath);
+    storages.push(reopened);
     const database = inspect(state.dbPath, true);
     expect(
       database
@@ -555,15 +523,15 @@ describe("single-use authenticated link handoff", () => {
         .get(),
     ).toEqual({ name: "idx_sync_relay_link_handoff_codes_result_grant" });
 
-    const first = upgraded.redeemLinkHandoffCode({
+    const first = reopened.redeemLinkHandoffCode({
       codeHash,
       principalUserId: RECIPIENT,
       redeemedAtMs: state.now.value,
-      mintGrantId: () => "upgraded-dependent-grant",
+      mintGrantId: () => "reopened-dependent-grant",
       guard: () => true,
     });
     expect(first).toMatchObject({ ok: true, grant: { access: "view" } });
-    const retry = upgraded.redeemLinkHandoffCode({
+    const retry = reopened.redeemLinkHandoffCode({
       codeHash,
       principalUserId: RECIPIENT,
       redeemedAtMs: state.now.value,
