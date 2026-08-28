@@ -558,12 +558,12 @@ pub(crate) fn with_armed_gate<T>(f: impl FnOnce() -> T) -> T {
 /// The whole computation is contained by `catch_unwind`: yrs can unwind on some
 /// malformed inputs, and this gate runs inside `store.write_with`, so an escaping
 /// unwind would poison the caller's transaction/mutex and take the workspace
-/// actor down. A contained unwind is mapped to a fail-closed rejection. The
-/// scratch doc is local and dropped on unwind; `base`/`candidate` are read-only
-/// and the durable store is untouched here, so returning `Err` rolls the caller's
-/// transaction back cleanly.
+/// actor down. A contained unwind is mapped to a fail-closed rejection. Cold
+/// scratches are dropped on failure. A cached-local persistent scratch is
+/// marked before mutation so its caller can evict it after the transaction
+/// rolls back. The writer base and durable store remain untouched.
 pub fn validate_replay_parity(base: &Ydoc, candidate: &[u8]) -> Result<(), CollabError> {
-    validate_replay_parity_contained(base, candidate, None).map(drop)
+    validate_replay_parity_contained(base, candidate, None, None, None).map(drop)
 }
 
 /// [`validate_replay_parity`] plus the isolated post-candidate document the
@@ -575,27 +575,45 @@ pub fn validate_replay_parity_with_scratch(
     base: &Ydoc,
     candidate: &[u8],
 ) -> Result<Ydoc, CollabError> {
-    validate_replay_parity_contained(base, candidate, None).map(|validation| validation.scratch)
+    validate_replay_parity_contained(base, candidate, None, None, None).map(|validation| {
+        validation
+            .scratch
+            .expect("a cold gate always builds a fresh scratch")
+    })
 }
 
 pub(crate) struct CachedLocalValidation {
     pub(crate) candidate: IntegratedFrontierDelta,
     pub(crate) rebuilt_frontier: Option<IntegratedFrontier>,
+    /// A fresh post-candidate scratch when the entry had no resident scratch.
+    /// A resident scratch is mutated in place and is never returned as content.
+    pub(crate) rebuilt_scratch: Option<Ydoc>,
 }
 
-/// Cached-local gate form. `Some(frontier)` substitutes only checks 1-3's base
-/// contribution; pending and check 4 remain byte-for-byte on their cold path.
+/// Cached-local gate form. `Some(frontier)` substitutes checks 1-3's base
+/// contribution. `Some(scratch)` serves only check 4's merge-insensitive
+/// state-vector and pending-maxima facts. The scratch is never returned as
+/// content or used for durable bytes.
 pub(crate) fn validate_replay_parity_for_cached_local(
     base: &Ydoc,
     frontier: Option<&IntegratedFrontier>,
+    scratch: Option<&Ydoc>,
+    scratch_mutated: &mut bool,
     candidate: &[u8],
 ) -> Result<CachedLocalValidation, CollabError> {
-    let validation = validate_replay_parity_contained(base, candidate, frontier)?;
+    let validation = validate_replay_parity_contained(
+        base,
+        candidate,
+        frontier,
+        scratch,
+        scratch.is_some().then_some(scratch_mutated),
+    )?;
     Ok(CachedLocalValidation {
         candidate: IntegratedFrontierDelta::from_structure(validation.candidate_structure),
         rebuilt_frontier: validation
             .base_structure
             .map(IntegratedFrontier::from_structure),
+        rebuilt_scratch: validation.scratch,
     })
 }
 
@@ -605,7 +623,7 @@ pub(crate) fn validate_replay_parity_with_delta(
     base: &Ydoc,
     candidate: &[u8],
 ) -> Result<IntegratedFrontierDelta, CollabError> {
-    validate_replay_parity_contained(base, candidate, None)
+    validate_replay_parity_contained(base, candidate, None, None, None)
         .map(|validation| IntegratedFrontierDelta::from_structure(validation.candidate_structure))
 }
 
@@ -615,9 +633,11 @@ pub(crate) fn validate_replay_parity_with_scratch_and_delta(
     base: &Ydoc,
     candidate: &[u8],
 ) -> Result<(Ydoc, IntegratedFrontierDelta, IntegratedFrontier), CollabError> {
-    let validation = validate_replay_parity_contained(base, candidate, None)?;
+    let validation = validate_replay_parity_contained(base, candidate, None, None, None)?;
     Ok((
-        validation.scratch,
+        validation
+            .scratch
+            .expect("a cold gate always builds a fresh scratch"),
         IntegratedFrontierDelta::from_structure(validation.candidate_structure),
         IntegratedFrontier::from_structure(
             validation
@@ -628,7 +648,9 @@ pub(crate) fn validate_replay_parity_with_scratch_and_delta(
 }
 
 struct GateValidation {
-    scratch: Ydoc,
+    /// Present only when check 4 rebuilt a fresh scratch. A resident scratch
+    /// stays owned by the cache and is mutated in place.
+    scratch: Option<Ydoc>,
     candidate_structure: WireStructure,
     /// Present only on the cold path, where the scan can also seed a frontier
     /// without re-scanning the base after commit.
@@ -639,21 +661,36 @@ fn validate_replay_parity_contained(
     base: &Ydoc,
     candidate: &[u8],
     frontier: Option<&IntegratedFrontier>,
+    scratch: Option<&Ydoc>,
+    scratch_mutated: Option<&mut bool>,
 ) -> Result<GateValidation, CollabError> {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        validate_replay_parity_inner(base, frontier, candidate)
+        validate_replay_parity_inner(base, frontier, scratch, scratch_mutated, candidate)
     }));
     match outcome {
         Ok(result) => result,
-        Err(_) => Err(CollabError::ReplayParityViolation {
-            reason: "replay validation failed to complete; rejected fail-closed".to_owned(),
-        }),
+        Err(payload) => {
+            // FR2-VALID is a debug/test oracle over trusted cache state. Keep
+            // its failure loud while still containing every yrs/input panic.
+            #[cfg(any(test, debug_assertions))]
+            if payload
+                .downcast_ref::<&'static str>()
+                .is_some_and(|message| message.starts_with("FR2-VALID"))
+            {
+                std::panic::resume_unwind(payload);
+            }
+            Err(CollabError::ReplayParityViolation {
+                reason: "replay validation failed to complete; rejected fail-closed".to_owned(),
+            })
+        }
     }
 }
 
 fn validate_replay_parity_inner(
     base: &Ydoc,
     frontier: Option<&IntegratedFrontier>,
+    persistent_scratch: Option<&Ydoc>,
+    persistent_scratch_mutated: Option<&mut bool>,
     candidate: &[u8],
 ) -> Result<GateValidation, CollabError> {
     #[cfg(test)]
@@ -671,11 +708,17 @@ fn validate_replay_parity_inner(
     // `Ydoc::validate_update` would report, so no extra pre-decode pass runs
     // on this hot path.
     let candidate_structure = scan_v1(candidate)?;
-    let base_full = base.encode_full_state();
-    let base_structure = if frontier.is_none() {
-        Some(scan_v1(&base_full)?)
+    debug_assert_eq!(
+        persistent_scratch.is_some(),
+        persistent_scratch_mutated.is_some(),
+        "a resident scratch and its mutation probe travel together"
+    );
+    let (base_full, base_structure) = if frontier.is_none() {
+        let bytes = base.encode_full_state();
+        let structure = scan_v1(&bytes)?;
+        (Some(bytes), Some(structure))
     } else {
-        None
+        (None, None)
     };
     let pending_bytes = base.pending_update_v1();
     let pending_structure = match &pending_bytes {
@@ -785,28 +828,56 @@ fn validate_replay_parity_inner(
         });
     }
 
-    // (4) Union-coverage (discard) check: apply base + pending + candidate to
-    // an isolated scratch doc — only a real integration can tell whether a
-    // claimed clock was silently discarded (e.g. an overlap-slice). Every
-    // clock the candidate claims must come out integrated OR parked pending;
-    // a clock covered by neither is wire data yrs silently discarded. This
-    // reads only the scratch doc's state vector and re-encoded pending bytes
-    // (both O(pending), never a full diff against a foreign state vector).
-    let scratch = Ydoc::wire();
-    scratch.apply(&base_full)?;
-    if let Some(pending) = &pending_bytes {
-        scratch.apply(pending)?;
-    }
-    scratch.apply(candidate)?;
-
-    let pending_ends = match scratch.pending_update_v1() {
-        Some(bytes) => scan_v1(&bytes)?.claimed_clocks,
-        None => BTreeMap::new(),
+    // (4) Union-coverage (discard) check: only a real integration can tell
+    // whether a claimed clock was silently discarded (e.g. an overlap-slice).
+    // A cached-local hit applies the candidate to the tuple-keyed persistent
+    // scratch. All cold callers replay base + pending + candidate as before.
+    // The verdict reads ONLY merge-insensitive state-vector and pending-maxima
+    // facts. It never reads content or structural boundaries from the scratch.
+    let mut rebuilt_scratch = None;
+    let scratch = match persistent_scratch {
+        Some(scratch) => {
+            // Checks 1-3 have all returned successfully. From this point an
+            // apply error, check-4 refusal, or later transaction rollback must
+            // evict the mutated resident scratch because yrs has no rollback.
+            *persistent_scratch_mutated.expect("a resident scratch has a mutation probe") = true;
+            scratch.apply(candidate)?;
+            scratch
+        }
+        None => {
+            let scratch = match base_full.as_deref() {
+                Some(bytes) => {
+                    replay_gate_scratch_from_bytes(bytes, pending_bytes.as_deref(), candidate)?
+                }
+                None => replay_gate_scratch(base, pending_bytes.as_deref(), candidate)?,
+            };
+            rebuilt_scratch = Some(scratch);
+            rebuilt_scratch
+                .as_ref()
+                .expect("the cold check-4 scratch was just built")
+        }
     };
-    let scratch_sv = scratch.state_vector();
+
+    let scratch_facts = gate_scratch_facts(scratch)?;
+    #[cfg(any(test, debug_assertions))]
+    if persistent_scratch.is_some() {
+        let fresh = replay_gate_scratch(base, pending_bytes.as_deref(), candidate)?;
+        let fresh_facts = gate_scratch_facts(&fresh)?;
+        if scratch_facts != fresh_facts {
+            std::panic::panic_any(
+                "FR2-VALID violated: persistent scratch state vector or pending maxima diverged from a fresh replay",
+            );
+        }
+    }
+
     for (&client, &claimed_end) in &candidate_structure.claimed_clocks {
-        let integrated = scratch_sv.get(&client);
-        let pending = pending_ends.get(&client).copied().unwrap_or(0);
+        let integrated = scratch_facts.state_vector.get(&client);
+        let pending = scratch_facts
+            .pending_ends
+            .as_ref()
+            .and_then(|ends| ends.get(&client))
+            .copied()
+            .unwrap_or(0);
         if integrated < claimed_end && pending < claimed_end {
             return Err(CollabError::ReplayParityViolation {
                 reason: "a candidate clock was neither integrated nor parked \
@@ -816,10 +887,78 @@ fn validate_replay_parity_inner(
         }
     }
     Ok(GateValidation {
-        scratch,
+        scratch: rebuilt_scratch,
         candidate_structure,
         base_structure,
     })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct GateScratchFacts {
+    state_vector: StateVector,
+    /// `Some` preserves pending presence even when a malformed-but-scannable
+    /// pending wire claims no client maximum.
+    pending_ends: Option<BTreeMap<ClientID, u32>>,
+}
+
+fn gate_scratch_facts(scratch: &Ydoc) -> Result<GateScratchFacts, CollabError> {
+    let pending_ends = scratch
+        .pending_update_v1()
+        .map(|bytes| scan_v1(&bytes).map(|structure| structure.claimed_clocks))
+        .transpose()?;
+    Ok(GateScratchFacts {
+        state_vector: scratch.state_vector(),
+        pending_ends,
+    })
+}
+
+fn replay_gate_scratch(
+    base: &Ydoc,
+    pending: Option<&[u8]>,
+    candidate: &[u8],
+) -> Result<Ydoc, CollabError> {
+    let base_full = base.encode_full_state();
+    replay_gate_scratch_from_bytes(&base_full, pending, candidate)
+}
+
+fn replay_gate_scratch_from_bytes(
+    base_full: &[u8],
+    pending: Option<&[u8]>,
+    candidate: &[u8],
+) -> Result<Ydoc, CollabError> {
+    let scratch = Ydoc::wire();
+    scratch.apply(base_full)?;
+    if let Some(pending) = pending {
+        scratch.apply(pending)?;
+    }
+    scratch.apply(candidate)?;
+    Ok(scratch)
+}
+
+/// Rebuild the tuple-keyed check-4 scratch from an exact replay base. This
+/// helper is only for cache installation/rebasing; callers must never expose
+/// the returned full-state fork as content or use it for durable bytes.
+pub(crate) fn rebuild_persistent_gate_scratch(
+    base_full: &[u8],
+    pending: Option<&[u8]>,
+) -> Result<Ydoc, CollabError> {
+    let scratch = Ydoc::wire();
+    scratch.apply(base_full)?;
+    if let Some(pending) = pending {
+        scratch.apply(pending)?;
+    }
+    Ok(scratch)
+}
+
+#[cfg(any(test, debug_assertions))]
+pub(crate) fn persistent_gate_scratch_matches_base(
+    base: &Ydoc,
+    scratch: &Ydoc,
+) -> Result<bool, CollabError> {
+    let base_full = base.encode_full_state();
+    let pending = base.pending_update_v1();
+    let fresh = rebuild_persistent_gate_scratch(&base_full, pending.as_deref())?;
+    Ok(gate_scratch_facts(scratch)? == gate_scratch_facts(&fresh)?)
 }
 
 /// True when `candidate` redefines a clock the ESTABLISHED side (`base` or a

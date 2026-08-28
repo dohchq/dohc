@@ -492,7 +492,14 @@ pub fn record_local_update_with_origin(
         }
         probe.capture_commit(tx, key);
         Ok(outcome)
-    })?;
+    });
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            cache.finish_local_gate_error(key, &probe);
+            return Err(error);
+        }
+    };
     finalize_local_append(
         store,
         cache,
@@ -855,7 +862,14 @@ where
             probe.capture_commit(tx, key);
             Ok(outcome)
         }
-    })?;
+    });
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            cache.finish_local_gate_error(key, &probe);
+            return Err(error);
+        }
+    };
     finalize_local_append(
         store,
         cache,
@@ -901,10 +915,11 @@ fn append_local_update(
 
 /// [`append_local_update`] with the writer's doc cache serving the gate base.
 /// A cache hit gates against the cached doc (validated against the in-tx
-/// tuple, see [`WriterDocCache::base_for_gate`]); a miss reconstructs exactly
-/// as before and hands the rebuilt PRE-APPEND base out through `probe` so the
-/// caller can warm the cache after the transaction commits. The cache is only
-/// READ here — it is never mutated inside a transaction.
+/// tuple); a miss reconstructs exactly as before and hands the rebuilt
+/// PRE-APPEND artifacts out through `probe` so the caller can warm the cache
+/// after commit. The writer doc and frontier stay read-only here. Check 4 can
+/// apply to its separate persistent scratch; `probe` decides whether that
+/// mutation is retained or evicted after the transaction outcome is known.
 #[allow(clippy::too_many_arguments)]
 fn append_local_update_cached(
     conn: &Connection,
@@ -926,14 +941,17 @@ fn append_local_update_cached(
             emit_outbound: false,
         });
     }
-    match cache.base_and_frontier_for_local_gate(conn, key, marker)? {
-        Some((base, frontier)) => {
+    match cache.base_frontier_and_scratch_for_local_gate(conn, key, marker)? {
+        Some((base, frontier, scratch)) => {
             let validation = crate::replay_parity::validate_replay_parity_for_cached_local(
                 base,
                 Some(frontier),
+                scratch,
+                &mut probe.scratch_mutated,
                 update,
             )?;
             probe.candidate = Some(validation.candidate);
+            probe.rebuilt_scratch = validation.rebuilt_scratch;
             probe.served = Some(ServedGateBase {
                 source: GateBaseSource::Hit,
                 observed: marker.clone(),
@@ -941,9 +959,15 @@ fn append_local_update_cached(
         }
         None => {
             let base = load_for_replay_gate(conn, key)?;
-            let validation =
-                crate::replay_parity::validate_replay_parity_for_cached_local(&base, None, update)?;
+            let validation = crate::replay_parity::validate_replay_parity_for_cached_local(
+                &base,
+                None,
+                None,
+                &mut probe.scratch_mutated,
+                update,
+            )?;
             probe.candidate = Some(validation.candidate);
+            probe.rebuilt_scratch = validation.rebuilt_scratch;
             probe.served = Some(ServedGateBase {
                 source: GateBaseSource::Rebuilt {
                     doc: base,
