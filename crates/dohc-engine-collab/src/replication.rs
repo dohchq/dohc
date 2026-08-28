@@ -111,8 +111,8 @@ pub fn apply_remote_update(
 }
 
 /// Drain-only outer wrapper that keeps an already-resident writer-cache entry
-/// aligned after the remote append commits. The remote replay gate itself
-/// remains cold; serving it is PR4 scope.
+/// aligned after the remote append commits. The deferred replay gate remains
+/// cold because its transaction boundary cannot satisfy #943's cache proof.
 pub fn apply_remote_update_for_deferred_drain(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
@@ -289,9 +289,9 @@ pub fn apply_remote_update_in_transaction_with_projection(
 }
 
 /// Cache-backed form of [`apply_remote_update_in_transaction_with_projection`].
-/// The cache serves only the read-only integration base. The returned document
-/// is the gate's scratch, while `probe` carries the byte-replay-identical base
-/// to post-commit cache maintenance.
+/// The frontier and persistent scratch serve only the parity verdict. The
+/// returned projection remains a separate fresh full-content document, while
+/// `probe` carries cache advancement evidence out of the transaction.
 pub fn apply_remote_update_in_transaction_cached_with_projection(
     tx: &Transaction<'_>,
     cache: &WriterDocCache,
@@ -329,25 +329,37 @@ pub fn apply_remote_update_in_transaction_cached_with_projection(
         });
     }
 
-    let (projection, candidate, source) = match cache.base_for_gate(tx, key, &marker)? {
-        Some(base) => {
-            let (projection, candidate, _cold_frontier) =
-                crate::replay_parity::validate_replay_parity_with_scratch_and_delta(
-                    base,
-                    &remote.bytes,
-                )?;
-            (projection, candidate, GateBaseSource::Hit)
+    let (projection, validation, source) = match cache
+        .base_frontier_and_scratch_for_gate(tx, key, &marker)?
+    {
+        Some((base, frontier, scratch)) => {
+            let validation = crate::replay_parity::validate_replay_parity_for_cached_gate(
+                base,
+                Some(frontier),
+                scratch,
+                &mut probe.scratch_mutated,
+                &remote.bytes,
+            )?;
+            let projection = crate::replay_parity::build_remote_projection(base, &remote.bytes)?;
+            (projection, validation, GateBaseSource::Hit)
         }
         None => {
             let base = load_for_replay_gate(tx, key)?;
-            let (projection, candidate, frontier) =
-                crate::replay_parity::validate_replay_parity_with_scratch_and_delta(
-                    &base,
-                    &remote.bytes,
-                )?;
+            let mut validation = crate::replay_parity::validate_replay_parity_for_cached_gate(
+                &base,
+                None,
+                None,
+                &mut probe.scratch_mutated,
+                &remote.bytes,
+            )?;
+            let projection = crate::replay_parity::build_remote_projection(&base, &remote.bytes)?;
+            let frontier = validation
+                .rebuilt_frontier
+                .take()
+                .expect("a cold cached-remote gate rebuilds its frontier");
             (
                 projection,
-                candidate,
+                validation,
                 GateBaseSource::Rebuilt {
                     doc: base,
                     frontier,
@@ -362,7 +374,8 @@ pub fn apply_remote_update_in_transaction_cached_with_projection(
         observed: marker.clone(),
     });
     probe.applied_seq = Some(seq);
-    probe.candidate = Some(candidate);
+    probe.candidate = Some(validation.candidate);
+    probe.rebuilt_scratch = validation.rebuilt_scratch;
     Ok(RemoteApplyProjection {
         outcome: ReplicationApplyOutcome::Applied {
             seq,

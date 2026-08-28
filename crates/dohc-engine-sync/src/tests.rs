@@ -23,6 +23,12 @@ use sha2::{Digest, Sha256};
 use crate::apply::apply_chat_tx;
 use crate::*;
 
+/// A skip claims client 12 clocks `[0, 3)` but carries no integrable content.
+/// Against `clock_collision_pair()`'s first `[0, 2)` update it passes checks
+/// 1-3, reaches the persistent apply, then check 4 observes that clock 2 was
+/// neither integrated nor parked.
+const CHECK4_DISCARDED_SKIP_HEX: &str = "01010c000a0300";
+
 macro_rules! assert_invalid_refusal {
     ($result:expr) => {
         assert!(matches!(
@@ -63,6 +69,22 @@ fn decode_hex(encoded: &str) -> Vec<u8> {
             u8::from_str_radix(pair, 16).expect("hex byte")
         })
         .collect()
+}
+
+fn flip_payload_byte(update: &[u8], from: u8, to: u8) -> Vec<u8> {
+    let positions: Vec<usize> = update
+        .iter()
+        .enumerate()
+        .filter_map(|(index, byte)| (*byte == from).then_some(index))
+        .collect();
+    assert_eq!(
+        positions.len(),
+        1,
+        "payload byte must be unambiguous in the wire bytes"
+    );
+    let mut hostile = update.to_vec();
+    hostile[positions[0]] = to;
+    hostile
 }
 
 fn clock_collision_pair() -> (Vec<u8>, Vec<u8>) {
@@ -9466,6 +9488,703 @@ fn seed_warm_and_cold_remote_lineage(
     (key, warm_claim)
 }
 
+#[derive(Clone, Copy)]
+struct RemoteDeltaTarget<'a> {
+    object_id: &'a str,
+    path: &'a str,
+    content_kind: &'a str,
+    claim: &'a str,
+}
+
+fn remote_delta_operation(
+    store: &mut EngineStore,
+    target: RemoteDeltaTarget<'_>,
+    origin: &str,
+    origin_seq: i64,
+    bytes: &[u8],
+) -> ReplicationEnvelope {
+    let update_sha = store.put_binary_blob(bytes).expect("remote update blob");
+    envelope(
+        origin,
+        origin_seq,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": target.object_id,
+            "path": target.path,
+            "contentKind": target.content_kind,
+            "updateBlobSha256": update_sha,
+            "lineageClaimId": target.claim,
+            "isBaseState": false
+        }),
+    )
+}
+
+fn apply_remote_cache_pair(
+    warm_store: &mut EngineStore,
+    warm_cache: &mut dohc_engine_collab::WriterDocCache,
+    cold_store: &mut EngineStore,
+    target: RemoteDeltaTarget<'_>,
+    origin: &str,
+    origin_seq: i64,
+    bytes: &[u8],
+) -> ApplyOutcome<YdocApplyResult> {
+    let operation = remote_delta_operation(warm_store, target, origin, origin_seq, bytes);
+    let cold_sha = cold_store
+        .put_binary_blob(bytes)
+        .expect("cold remote update blob");
+    assert_eq!(
+        operation.payload["updateBlobSha256"],
+        json!(cold_sha),
+        "paired stores address the same remote bytes"
+    );
+    let warm =
+        apply_ydoc_envelope_cached(warm_store, warm_cache, &operation, &NoFaults, &NoLiveLeases)
+            .expect("warm remote apply");
+    let cold = apply_ydoc_envelope(cold_store, &operation, &NoFaults, &NoLiveLeases)
+        .expect("cold remote apply");
+    assert_eq!(warm, cold, "cached and cold remote verdicts");
+    assert!(
+        matches!(&warm, ApplyOutcome::Applied(_)),
+        "ordinary remote candidate must apply: {warm:?}"
+    );
+    warm
+}
+
+fn assert_remote_cache_matches_cold(
+    warm_store: &EngineStore,
+    warm_cache: &dohc_engine_collab::WriterDocCache,
+    cold_store: &EngineStore,
+    key: &dohc_engine_collab::DocKey,
+) {
+    let warm = dohc_engine_collab::load_persisted(warm_store, key)
+        .expect("warm persisted")
+        .expect("warm lineage");
+    let cold = dohc_engine_collab::load_persisted(cold_store, key)
+        .expect("cold persisted")
+        .expect("cold lineage");
+    assert!(
+        dohc_engine_collab::replay_parity::structurally_equal_v2_for_test(&warm.doc, &cold.doc)
+            .expect("warm/cold remote structure")
+    );
+    assert_eq!(
+        warm_cache
+            .frontier_matches_doc_for_test(key)
+            .expect("remote frontier comparison"),
+        Some(true)
+    );
+    assert_eq!(
+        warm_cache
+            .gate_scratch_matches_doc_for_test(key)
+            .expect("remote scratch comparison"),
+        Some(true)
+    );
+}
+
+#[test]
+fn remote_frontier_fold_retires_a_live_identity_covered_by_delete() {
+    let (_warm_scratch, _warm_path, mut warm_store) = store();
+    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
+    let object_id = "object-remote-retire-identity";
+    let path = "cache/remote-retire-identity.md";
+    let (key, claim) = seed_warm_and_cold_remote_lineage(
+        &mut warm_store,
+        &mut warm_cache,
+        &mut cold_store,
+        object_id,
+        path,
+        "plaintext",
+    );
+    let target = RemoteDeltaTarget {
+        object_id,
+        path,
+        content_kind: "plaintext",
+        claim: &claim,
+    };
+    let producer = dohc_engine_collab::Ydoc::wire();
+    let insert = producer.plaintext_insert(0, "ab");
+    apply_remote_cache_pair(
+        &mut warm_store,
+        &mut warm_cache,
+        &mut cold_store,
+        target,
+        "remote-retire-identity",
+        0,
+        &insert,
+    );
+    assert_eq!(
+        warm_cache.frontier_fact_counts_for_test(&key),
+        Some((2, 0, 0))
+    );
+
+    let delete = producer.plaintext_delete(0, 1);
+    apply_remote_cache_pair(
+        &mut warm_store,
+        &mut warm_cache,
+        &mut cold_store,
+        target,
+        "remote-retire-identity",
+        1,
+        &delete,
+    );
+    assert_eq!(
+        warm_cache.frontier_fact_counts_for_test(&key),
+        Some((1, 0, 2))
+    );
+    assert_remote_cache_matches_cold(&warm_store, &warm_cache, &cold_store, &key);
+}
+
+#[test]
+fn remote_frontier_fold_splits_a_string_run_around_a_mid_run_delete() {
+    let (_warm_scratch, _warm_path, mut warm_store) = store();
+    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
+    let object_id = "object-remote-split-run";
+    let path = "cache/remote-split-run.md";
+    let (key, claim) = seed_warm_and_cold_remote_lineage(
+        &mut warm_store,
+        &mut warm_cache,
+        &mut cold_store,
+        object_id,
+        path,
+        "plaintext",
+    );
+    let target = RemoteDeltaTarget {
+        object_id,
+        path,
+        content_kind: "plaintext",
+        claim: &claim,
+    };
+    let producer = dohc_engine_collab::Ydoc::wire();
+    let insert = producer.plaintext_insert(0, "abcde");
+    apply_remote_cache_pair(
+        &mut warm_store,
+        &mut warm_cache,
+        &mut cold_store,
+        target,
+        "remote-split-run",
+        0,
+        &insert,
+    );
+    let delete = producer.plaintext_delete(2, 1);
+    apply_remote_cache_pair(
+        &mut warm_store,
+        &mut warm_cache,
+        &mut cold_store,
+        target,
+        "remote-split-run",
+        1,
+        &delete,
+    );
+    assert_eq!(
+        warm_cache.frontier_fact_counts_for_test(&key),
+        Some((4, 0, 2))
+    );
+    assert_remote_cache_matches_cold(&warm_store, &warm_cache, &cold_store, &key);
+}
+
+#[test]
+fn remote_frontier_fold_retires_a_deleted_scalar_interior() {
+    let (_warm_scratch, _warm_path, mut warm_store) = store();
+    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
+    let object_id = "object-remote-retire-interior";
+    let path = "cache/remote-retire-interior.md";
+    let (key, claim) = seed_warm_and_cold_remote_lineage(
+        &mut warm_store,
+        &mut warm_cache,
+        &mut cold_store,
+        object_id,
+        path,
+        "plaintext",
+    );
+    let target = RemoteDeltaTarget {
+        object_id,
+        path,
+        content_kind: "plaintext",
+        claim: &claim,
+    };
+    let producer = dohc_engine_collab::Ydoc::wire();
+    let insert = producer.plaintext_insert(0, "😀");
+    apply_remote_cache_pair(
+        &mut warm_store,
+        &mut warm_cache,
+        &mut cold_store,
+        target,
+        "remote-retire-interior",
+        0,
+        &insert,
+    );
+    assert_eq!(
+        warm_cache.frontier_fact_counts_for_test(&key),
+        Some((2, 1, 0))
+    );
+
+    let delete = producer.plaintext_delete(0, 2);
+    apply_remote_cache_pair(
+        &mut warm_store,
+        &mut warm_cache,
+        &mut cold_store,
+        target,
+        "remote-retire-interior",
+        1,
+        &delete,
+    );
+    assert_eq!(
+        warm_cache.frontier_fact_counts_for_test(&key),
+        Some((0, 0, 2))
+    );
+    assert_remote_cache_matches_cold(&warm_store, &warm_cache, &cold_store, &key);
+}
+
+#[test]
+fn remote_frontier_delete_endpoints_canonicalize_across_pending_integration() {
+    let (_warm_scratch, _warm_path, mut warm_store) = store();
+    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
+    let object_id = "object-remote-pending-delete";
+    let path = "cache/remote-pending-delete.md";
+    let (key, claim) = seed_warm_and_cold_remote_lineage(
+        &mut warm_store,
+        &mut warm_cache,
+        &mut cold_store,
+        object_id,
+        path,
+        "plaintext",
+    );
+    let target = RemoteDeltaTarget {
+        object_id,
+        path,
+        content_kind: "plaintext",
+        claim: &claim,
+    };
+    let producer = dohc_engine_collab::Ydoc::wire();
+    let dependency = producer.plaintext_insert(0, "abc");
+    let delete_first = producer.plaintext_delete(0, 1);
+    let delete_second = producer.plaintext_delete(0, 1);
+
+    for (origin_seq, update) in [(0, &delete_second), (1, &delete_first)] {
+        apply_remote_cache_pair(
+            &mut warm_store,
+            &mut warm_cache,
+            &mut cold_store,
+            target,
+            "remote-pending-delete",
+            origin_seq,
+            update,
+        );
+        assert_eq!(
+            warm_cache
+                .frontier_fact_counts_for_test(&key)
+                .map(|facts| facts.2),
+            Some(2),
+            "adjacent remote coverage emits one canonical endpoint pair"
+        );
+    }
+    assert_eq!(
+        dohc_engine_collab::load_persisted(&warm_store, &key)
+            .expect("parked load")
+            .expect("parked lineage")
+            .doc
+            .plaintext_string(),
+        ""
+    );
+
+    apply_remote_cache_pair(
+        &mut warm_store,
+        &mut warm_cache,
+        &mut cold_store,
+        target,
+        "remote-pending-delete",
+        2,
+        &dependency,
+    );
+    assert_eq!(
+        dohc_engine_collab::load_persisted(&warm_store, &key)
+            .expect("integrated load")
+            .expect("integrated lineage")
+            .doc
+            .plaintext_string(),
+        "c"
+    );
+    assert_eq!(
+        warm_cache.frontier_fact_counts_for_test(&key),
+        Some((1, 0, 2))
+    );
+    assert_remote_cache_matches_cold(&warm_store, &warm_cache, &cold_store, &key);
+}
+
+#[test]
+fn cached_remote_frontier_refusal_leaves_the_persistent_scratch_untouched() {
+    let (_warm_scratch, _warm_path, mut warm_store) = store();
+    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
+    let object_id = "object-remote-frontier-refusal";
+    let path = "cache/remote-frontier-refusal.md";
+    let (key, claim) = seed_warm_and_cold_remote_lineage(
+        &mut warm_store,
+        &mut warm_cache,
+        &mut cold_store,
+        object_id,
+        path,
+        "plaintext",
+    );
+    let target = RemoteDeltaTarget {
+        object_id,
+        path,
+        content_kind: "plaintext",
+        claim: &claim,
+    };
+    let base = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "z");
+    apply_remote_cache_pair(
+        &mut warm_store,
+        &mut warm_cache,
+        &mut cold_store,
+        target,
+        "remote-frontier-refusal",
+        0,
+        &base,
+    );
+    assert!(warm_cache.gate_scratch_is_resident_for_test(&key));
+
+    let hostile = flip_payload_byte(&base, b'z', b'y');
+    let operation = remote_delta_operation(
+        &mut warm_store,
+        target,
+        "remote-frontier-refusal",
+        1,
+        &hostile,
+    );
+    cold_store
+        .put_binary_blob(&hostile)
+        .expect("cold hostile blob");
+    let warm = apply_ydoc_envelope_cached(
+        &mut warm_store,
+        &mut warm_cache,
+        &operation,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("warm frontier refusal");
+    let cold = apply_ydoc_envelope(&mut cold_store, &operation, &NoFaults, &NoLiveLeases)
+        .expect("cold frontier refusal");
+    assert_eq!(warm, cold);
+    assert!(matches!(warm, ApplyOutcome::Refused(_)));
+    assert!(
+        warm_cache.gate_scratch_is_resident_for_test(&key),
+        "checks 1-3 refuse before mutating the remote scratch"
+    );
+    assert_remote_cache_matches_cold(&warm_store, &warm_cache, &cold_store, &key);
+}
+
+#[test]
+fn cached_remote_check4_refusal_evicts_only_scratch_and_a_valid_gate_rebuilds_it() {
+    let (_warm_scratch, _warm_path, mut warm_store) = store();
+    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
+    let object_id = "object-remote-check4-refusal";
+    let path = "cache/remote-check4-refusal.md";
+    let (key, claim) = seed_warm_and_cold_remote_lineage(
+        &mut warm_store,
+        &mut warm_cache,
+        &mut cold_store,
+        object_id,
+        path,
+        "plaintext",
+    );
+    let target = RemoteDeltaTarget {
+        object_id,
+        path,
+        content_kind: "plaintext",
+        claim: &claim,
+    };
+    let (u1, _) = clock_collision_pair();
+    apply_remote_cache_pair(
+        &mut warm_store,
+        &mut warm_cache,
+        &mut cold_store,
+        target,
+        "remote-check4-refusal",
+        0,
+        &u1,
+    );
+    assert!(warm_cache.gate_scratch_is_resident_for_test(&key));
+
+    let hostile = decode_hex(CHECK4_DISCARDED_SKIP_HEX);
+    let operation = remote_delta_operation(
+        &mut warm_store,
+        target,
+        "remote-check4-refusal",
+        1,
+        &hostile,
+    );
+    cold_store
+        .put_binary_blob(&hostile)
+        .expect("cold check4 blob");
+    let warm = apply_ydoc_envelope_cached(
+        &mut warm_store,
+        &mut warm_cache,
+        &operation,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("warm check4 refusal");
+    let cold = apply_ydoc_envelope(&mut cold_store, &operation, &NoFaults, &NoLiveLeases)
+        .expect("cold check4 refusal");
+    assert_eq!(warm, cold);
+    assert!(matches!(warm, ApplyOutcome::Refused(_)));
+    assert!(
+        warm_cache.contains_for_test(&key),
+        "check4 refusal preserves the writer doc and frontier"
+    );
+    assert_eq!(
+        warm_cache
+            .frontier_matches_doc_for_test(&key)
+            .expect("frontier after check4 refusal"),
+        Some(true)
+    );
+    assert!(
+        !warm_cache.gate_scratch_is_resident_for_test(&key),
+        "the mutated check4 scratch has no rollback and must be evicted"
+    );
+
+    let valid = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "valid-after-refusal");
+    apply_remote_cache_pair(
+        &mut warm_store,
+        &mut warm_cache,
+        &mut cold_store,
+        target,
+        "remote-check4-refusal",
+        2,
+        &valid,
+    );
+    assert_remote_cache_matches_cold(&warm_store, &warm_cache, &cold_store, &key);
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn cached_remote_scratch_apply_error_evicts_only_scratch_and_a_valid_gate_rebuilds_it() {
+    let (_warm_scratch, _warm_path, mut warm_store) = store();
+    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
+    let object_id = "object-remote-scratch-apply-error";
+    let path = "cache/remote-scratch-apply-error.md";
+    let (key, claim) = seed_warm_and_cold_remote_lineage(
+        &mut warm_store,
+        &mut warm_cache,
+        &mut cold_store,
+        object_id,
+        path,
+        "plaintext",
+    );
+    let target = RemoteDeltaTarget {
+        object_id,
+        path,
+        content_kind: "plaintext",
+        claim: &claim,
+    };
+    let base = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "base");
+    apply_remote_cache_pair(
+        &mut warm_store,
+        &mut warm_cache,
+        &mut cold_store,
+        target,
+        "remote-scratch-apply-error",
+        0,
+        &base,
+    );
+    assert!(warm_cache.gate_scratch_is_resident_for_test(&key));
+
+    let rejected = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "rejected");
+    let operation = remote_delta_operation(
+        &mut warm_store,
+        target,
+        "remote-scratch-apply-error",
+        1,
+        &rejected,
+    );
+    let outcome =
+        dohc_engine_collab::replay_parity::with_armed_scratch_apply_error_for_test(|| {
+            apply_ydoc_envelope_cached(
+                &mut warm_store,
+                &mut warm_cache,
+                &operation,
+                &NoFaults,
+                &NoLiveLeases,
+            )
+        })
+        .expect("scratch apply error is a contained refusal");
+    assert!(matches!(outcome, ApplyOutcome::Refused(_)));
+    assert!(warm_cache.contains_for_test(&key));
+    assert_eq!(
+        warm_cache
+            .frontier_matches_doc_for_test(&key)
+            .expect("frontier after scratch apply error"),
+        Some(true)
+    );
+    assert!(!warm_cache.gate_scratch_is_resident_for_test(&key));
+
+    let valid = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "valid-after-error");
+    apply_remote_cache_pair(
+        &mut warm_store,
+        &mut warm_cache,
+        &mut cold_store,
+        target,
+        "remote-scratch-rebuild",
+        0,
+        &valid,
+    );
+    assert_remote_cache_matches_cold(&warm_store, &warm_cache, &cold_store, &key);
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "FR1-VALID")]
+fn remote_frontier_oracle_catches_a_poisoned_identity() {
+    let (_warm_scratch, _warm_path, mut warm_store) = store();
+    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
+    let object_id = "object-remote-frontier-poison";
+    let path = "cache/remote-frontier-poison.md";
+    let (key, claim) = seed_warm_and_cold_remote_lineage(
+        &mut warm_store,
+        &mut warm_cache,
+        &mut cold_store,
+        object_id,
+        path,
+        "plaintext",
+    );
+    let target = RemoteDeltaTarget {
+        object_id,
+        path,
+        content_kind: "plaintext",
+        claim: &claim,
+    };
+    let u1 = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "a");
+    apply_remote_cache_pair(
+        &mut warm_store,
+        &mut warm_cache,
+        &mut cold_store,
+        target,
+        "remote-frontier-poison",
+        0,
+        &u1,
+    );
+    warm_cache.poison_frontier_for_test(&key);
+
+    let u2 = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "b");
+    let operation =
+        remote_delta_operation(&mut warm_store, target, "remote-frontier-poison", 1, &u2);
+    let _ = apply_ydoc_envelope_cached(
+        &mut warm_store,
+        &mut warm_cache,
+        &operation,
+        &NoFaults,
+        &NoLiveLeases,
+    );
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "FR1-VALID")]
+fn remote_frontier_oracle_catches_a_poisoned_multi_unit_string_run() {
+    let (_warm_scratch, _warm_path, mut warm_store) = store();
+    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
+    let object_id = "object-remote-frontier-run-poison";
+    let path = "cache/remote-frontier-run-poison.md";
+    let (key, claim) = seed_warm_and_cold_remote_lineage(
+        &mut warm_store,
+        &mut warm_cache,
+        &mut cold_store,
+        object_id,
+        path,
+        "plaintext",
+    );
+    let target = RemoteDeltaTarget {
+        object_id,
+        path,
+        content_kind: "plaintext",
+        claim: &claim,
+    };
+    let producer = dohc_engine_collab::Ydoc::wire();
+    let u1 = producer.plaintext_insert(0, "a😀b");
+    apply_remote_cache_pair(
+        &mut warm_store,
+        &mut warm_cache,
+        &mut cold_store,
+        target,
+        "remote-frontier-run-poison",
+        0,
+        &u1,
+    );
+    warm_cache.poison_frontier_for_test(&key);
+
+    let u2 = producer.plaintext_insert(4, "c");
+    let operation = remote_delta_operation(
+        &mut warm_store,
+        target,
+        "remote-frontier-run-poison",
+        1,
+        &u2,
+    );
+    let _ = apply_ydoc_envelope_cached(
+        &mut warm_store,
+        &mut warm_cache,
+        &operation,
+        &NoFaults,
+        &NoLiveLeases,
+    );
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "FR2-VALID")]
+fn remote_scratch_oracle_catches_a_poisoned_scratch() {
+    let (_warm_scratch, _warm_path, mut warm_store) = store();
+    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
+    let object_id = "object-remote-scratch-poison";
+    let path = "cache/remote-scratch-poison.md";
+    let (key, claim) = seed_warm_and_cold_remote_lineage(
+        &mut warm_store,
+        &mut warm_cache,
+        &mut cold_store,
+        object_id,
+        path,
+        "plaintext",
+    );
+    let target = RemoteDeltaTarget {
+        object_id,
+        path,
+        content_kind: "plaintext",
+        claim: &claim,
+    };
+    let u1 = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "a");
+    apply_remote_cache_pair(
+        &mut warm_store,
+        &mut warm_cache,
+        &mut cold_store,
+        target,
+        "remote-scratch-poison",
+        0,
+        &u1,
+    );
+    warm_cache.poison_gate_scratch_for_test(&key);
+
+    let u2 = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "b");
+    let operation =
+        remote_delta_operation(&mut warm_store, target, "remote-scratch-poison", 1, &u2);
+    let _ = apply_ydoc_envelope_cached(
+        &mut warm_store,
+        &mut warm_cache,
+        &operation,
+        &NoFaults,
+        &NoLiveLeases,
+    );
+}
+
 #[derive(Deserialize)]
 struct RemoteCacheFixtureCorpus {
     scenarios: Vec<RemoteCacheScenario>,
@@ -9730,6 +10449,13 @@ fn refused_remote_projection_retains_and_advances_the_warmed_cache() {
     assert!(warm_cache.contains_for_test(&key));
     assert_eq!(
         warm_cache
+            .frontier_matches_doc_for_test(&key)
+            .expect("retained-refusal frontier comparison"),
+        Some(true),
+        "a committed projection refusal advances the frontier"
+    );
+    assert_eq!(
+        warm_cache
             .gate_scratch_matches_doc_for_test(&key)
             .expect("retained-refusal scratch comparison"),
         Some(true),
@@ -9937,10 +10663,33 @@ fn assert_remote_cache_crash_seam(point: FaultPoint, committed: bool) {
         assert_eq!(warm_cache.stats().misses, before_rebuild.misses + 1);
         assert_eq!(warm_cache.stats().installs, before_rebuild.installs + 1);
         assert!(warm_cache.contains_for_test(&key));
+        assert_eq!(
+            warm_cache
+                .frontier_matches_doc_for_test(&key)
+                .expect("post-crash rebuilt frontier"),
+            Some(true)
+        );
+        assert_eq!(
+            warm_cache
+                .gate_scratch_matches_doc_for_test(&key)
+                .expect("post-crash rebuilt scratch"),
+            Some(true)
+        );
     } else {
         assert!(
             warm_cache.contains_for_test(&key),
             "a rolled-back transaction preserves the validated cache entry"
+        );
+        assert_eq!(
+            warm_cache
+                .frontier_matches_doc_for_test(&key)
+                .expect("frontier after remote rollback"),
+            Some(true),
+            "the read-only writer doc and frontier survive rollback"
+        );
+        assert!(
+            !warm_cache.gate_scratch_is_resident_for_test(&key),
+            "the accepted candidate mutated the rollback-less scratch"
         );
         let retry_before = warm_cache.stats();
         let warm_retry = apply_ydoc_envelope_cached(
@@ -9957,6 +10706,19 @@ fn assert_remote_cache_crash_seam(point: FaultPoint, committed: bool) {
         assert!(matches!(warm_retry, ApplyOutcome::Applied(_)));
         assert_eq!(warm_cache.stats().hits, retry_before.hits + 1);
         assert_eq!(warm_cache.stats().advances, retry_before.advances + 1);
+        assert_eq!(
+            warm_cache
+                .frontier_matches_doc_for_test(&key)
+                .expect("frontier after remote rollback retry"),
+            Some(true)
+        );
+        assert_eq!(
+            warm_cache
+                .gate_scratch_matches_doc_for_test(&key)
+                .expect("scratch after remote rollback retry"),
+            Some(true),
+            "the retry rebuilds the missing scratch and commits it"
+        );
     }
 }
 
