@@ -494,27 +494,39 @@ async function readRemainingBytes(
 }
 
 describe("LinkEgressRateLimiter", () => {
+  const emit = (
+    limiter: LinkEgressRateLimiter,
+    grantId: string,
+    byteLength: number,
+    nowMs: number,
+  ): boolean => {
+    const settle = limiter.reserve(grantId, byteLength, nowMs);
+    if (!settle) return false;
+    settle(byteLength, nowMs);
+    return true;
+  };
+
   it("evicts a fully refilled bucket without resetting active grant debt", () => {
     const limiter = new LinkEgressRateLimiter(10, 1, 2);
 
-    expect(limiter.charge("target", 10, 0)).toBe(true);
-    expect(limiter.charge("refilled", 1, 1_000)).toBe(true);
-    expect(limiter.charge("newcomer", 1, 2_000)).toBe(true);
+    expect(emit(limiter, "target", 10, 0)).toBe(true);
+    expect(emit(limiter, "refilled", 1, 1_000)).toBe(true);
+    expect(emit(limiter, "newcomer", 1, 2_000)).toBe(true);
 
-    expect(limiter.charge("target", 10, 2_000)).toBe(false);
-    expect(limiter.charge("target", 2, 2_000)).toBe(true);
+    expect(emit(limiter, "target", 10, 2_000)).toBe(false);
+    expect(emit(limiter, "target", 2, 2_000)).toBe(true);
   });
 
   it("refuses a new grant while every tracked bucket carries debt", () => {
     const limiter = new LinkEgressRateLimiter(10, 1, 2);
 
-    expect(limiter.charge("target", 10, 0)).toBe(true);
-    expect(limiter.charge("other", 10, 1_000)).toBe(true);
+    expect(emit(limiter, "target", 10, 0)).toBe(true);
+    expect(emit(limiter, "other", 10, 1_000)).toBe(true);
 
-    expect(limiter.charge("newcomer", 1, 2_000)).toBe(false);
-    expect(limiter.charge("target", 10, 2_000)).toBe(false);
-    expect(limiter.charge("target", 2, 2_000)).toBe(true);
-    expect(limiter.charge("other", 1, 2_000)).toBe(true);
+    expect(emit(limiter, "newcomer", 1, 2_000)).toBe(false);
+    expect(emit(limiter, "target", 10, 2_000)).toBe(false);
+    expect(emit(limiter, "target", 2, 2_000)).toBe(true);
+    expect(emit(limiter, "other", 1, 2_000)).toBe(true);
   });
 });
 
@@ -1756,6 +1768,11 @@ describe("relay capability reads", () => {
         linkRequest(link.capability, `/sync/link/blobs/${smallSha}`),
       );
       opened.push(small);
+      const current = await h(
+        linkRequest(link.capability, "/sync/link/current"),
+      );
+      opened.push(current);
+      expect(await current.text()).toContain("docs/large.bin");
 
       await overBudget.body?.cancel();
       await small.body?.cancel();
@@ -1769,11 +1786,13 @@ describe("relay capability reads", () => {
         held: held.map((response) => response.status),
         overBudget: overBudget.status,
         small: small.status,
+        current: current.status,
         restored: restored.status,
       }).toEqual({
         held: [200, 200, 200],
         overBudget: 429,
         small: 200,
+        current: 200,
         restored: 200,
       });
     } finally {
@@ -1844,7 +1863,7 @@ describe("relay capability reads", () => {
         );
         expect(terminated).toEqual({
           kind: "terminated",
-          message: "link grant changed during blob stream",
+          message: "link grant changed during stream",
         });
         await reader.cancel().catch(() => undefined);
         const exchange = await json(
@@ -1881,6 +1900,126 @@ describe("relay capability reads", () => {
       expect(await json(completionRefunded)).toMatchObject({
         code: "link_read_rate_limited",
       });
+    },
+  );
+
+  it.each(["cancel", "complete", "rotate"] as const)(
+    "settles emitted UTF-8 link JSON bytes after stream %s",
+    async (interruption) => {
+      const chunkBytes = 64 * 1024;
+      const storage = await newStorage();
+      const setupHandler = handler(storage);
+      const seeded = await seed(setupHandler);
+      const content = "streamed JSON 界\n";
+      await putBlob(setupHandler, content);
+      await appendMoments(
+        setupHandler,
+        Array.from({ length: 450 }, (_, index) =>
+          moment(
+            index + 3,
+            `docs/${String(index).padStart(3, "0")}-${"界".repeat(64)}.md`,
+            content,
+            1_300 + index,
+            { objectId: `object-json-stream-${index}` },
+          ),
+        ),
+      );
+      const route = interruption === "complete"
+        ? "/sync/link/log?since=0&limit=500"
+        : "/sync/link/current";
+
+      const measuringHandler = handler(storage, {
+        linkGrantEgressRateLimiter: new LinkEgressRateLimiter(
+          LINK_GRANT_EGRESS_BUCKET_CAPACITY_BYTES,
+          0.000_001,
+          10,
+        ),
+      });
+      const measured = await measuringHandler(
+        linkRequest(seeded.capability, route),
+      );
+      expect(measured.status).toBe(200);
+      const expectedBody = await measured.text();
+      const exactBodyBytes = Buffer.byteLength(expectedBody);
+      expect(exactBodyBytes).toBeGreaterThan(2 * chunkBytes);
+      expect(expectedBody).toContain("界");
+
+      const egress = new LinkEgressRateLimiter(
+        exactBodyBytes,
+        0.000_001,
+        10,
+      );
+      const originalReserve = egress.reserve.bind(egress);
+      const settlements: Array<[number, number]> = [];
+      const reserve = vi.spyOn(egress, "reserve").mockImplementation(
+        (grantId, byteLength, reservedAtMs) => {
+          const settle = originalReserve(grantId, byteLength, reservedAtMs);
+          if (!settle) return null;
+          return (emittedByteLength, settledAtMs) => {
+            settlements.push([emittedByteLength, settledAtMs]);
+            settle(emittedByteLength, settledAtMs);
+          };
+        },
+      );
+      const h = handler(storage, { linkGrantEgressRateLimiter: egress });
+      const response = await h(linkRequest(seeded.capability, route));
+      expect(response.status).toBe(200);
+      expect(reserve).toHaveBeenNthCalledWith(
+        1,
+        seeded.grantId,
+        exactBodyBytes,
+        2_000,
+      );
+      expect(egress.reserve(seeded.grantId, 1, 2_000)).toBeNull();
+
+      if (interruption === "complete") {
+        expect(await response.text()).toBe(expectedBody);
+        expect(settlements).toEqual([[exactBodyBytes, 2_000]]);
+        expect(egress.reserve(seeded.grantId, 1, 2_000)).toBeNull();
+        return;
+      }
+
+      const reader = response.body!.getReader();
+      const first = await reader.read();
+      expect(first.done).toBe(false);
+      if (first.done) return;
+      expect(first.value.byteLength).toBe(chunkBytes);
+
+      if (interruption === "cancel") {
+        await reader.cancel();
+        await reader.cancel();
+      } else {
+        const rotation = await h(
+          request(
+            OWNER,
+            `/sync/shares/share-0/links/${seeded.grantId}/rotate`,
+            jsonBody({ workspaceId: WORKSPACE, expectedDependentGrantIds: [] }),
+          ),
+        );
+        expect(rotation.status).toBe(200);
+        const terminated = await reader.read().then(
+          () => ({ kind: "delivered" as const }),
+          (error: unknown) => ({
+            kind: "terminated" as const,
+            message: error instanceof Error ? error.message : String(error),
+          }),
+        );
+        expect(terminated).toEqual({
+          kind: "terminated",
+          message: "link grant changed during stream",
+        });
+        await reader.cancel().catch(() => undefined);
+      }
+
+      expect(settlements).toEqual([[chunkBytes, 2_000]]);
+      const refunded = egress.reserve(
+        seeded.grantId,
+        exactBodyBytes - chunkBytes,
+        2_000,
+      );
+      expect(refunded).not.toBeNull();
+      refunded?.(exactBodyBytes - chunkBytes, 2_000);
+      expect(egress.reserve(seeded.grantId, 1, 2_000)).toBeNull();
     },
   );
 
@@ -2012,7 +2151,7 @@ describe("relay capability reads", () => {
       );
       expect(targetOutcome).toEqual({
         kind: "terminated",
-        message: "link grant changed during blob stream",
+        message: "link grant changed during stream",
       });
       const untouchedBytes = await readRemainingBytes(
         untouchedReader,
@@ -4111,10 +4250,10 @@ describe("relay capability reads", () => {
     expect(await refilled.text()).toBe("# shared\n");
   });
 
-  it("charges exact metadata and log response bytes to the same grant", async () => {
+  it("reserves exact metadata and log response bytes on the same grant", async () => {
     const storage = await newStorage();
     const budget = new LinkEgressRateLimiter(10_000, 1, 10);
-    const charge = vi.spyOn(budget, "charge");
+    const reserve = vi.spyOn(budget, "reserve");
     const h = handler(storage, { linkGrantEgressRateLimiter: budget });
     const seeded = await seed(h);
 
@@ -4128,7 +4267,7 @@ describe("relay capability reads", () => {
     expect(log.status).toBe(200);
     const logBody = await log.text();
 
-    expect(charge.mock.calls).toEqual([
+    expect(reserve.mock.calls).toEqual([
       [seeded.grantId, Buffer.byteLength(metadataBody), 2_000],
       [seeded.grantId, Buffer.byteLength(currentBody), 2_000],
       [seeded.grantId, Buffer.byteLength(logBody), 2_000],
@@ -4148,7 +4287,7 @@ describe("relay capability reads", () => {
       vi.spyOn(grantReadLimiter, "allow"),
       vi.spyOn(logLimiter, "allow"),
       vi.spyOn(grantLogLimiter, "allow"),
-      vi.spyOn(egressLimiter, "charge"),
+      vi.spyOn(egressLimiter, "reserve"),
     ];
     const storage = await newStorage();
     const h = handler(storage, {

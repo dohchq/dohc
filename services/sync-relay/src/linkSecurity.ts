@@ -165,10 +165,6 @@ export class LinkEgressRateLimiter {
     }
   }
 
-  charge(grantId: string, byteLength: number, nowMs: number): boolean {
-    return this.take(grantId, byteLength, nowMs) !== null;
-  }
-
   reserve(
     grantId: string,
     byteLength: number,

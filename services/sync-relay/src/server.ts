@@ -217,7 +217,7 @@ type SyncRelayRoute =
 // (crates/dohc-engine-sync-http/tests/relay_http.rs) reads this line and fails
 // if the two drift.
 export const MAX_BLOB_BYTES = 20 * 1024 * 1024;
-const LINK_BLOB_STREAM_CHUNK_BYTES = 64 * 1024;
+const LINK_STREAM_CHUNK_BYTES = 64 * 1024;
 export const LINK_BLOB_INFLIGHT_BYTES_PER_GRANT = 64 * 1024 * 1024;
 export const MAX_KEY_ENVELOPE_BYTES = 16 * 1024;
 // One PAGE of the continuous replication lane, for the two log routes. It is
@@ -366,13 +366,14 @@ export function createSyncRelayHandler({
     return verifyRelayExchangeKey(presented, relayExchangeKeyHash);
   };
 
-  type ActiveLinkBlobStream = {
+  type ActiveLinkStream = {
     shareId: string;
     terminate: () => void;
   };
   // The relay runs as one process and main.ts creates one handler, so this
-  // intentionally per-process registry reaches every open link-blob response.
-  const activeLinkBlobStreams = new Map<string, Set<ActiveLinkBlobStream>>();
+  // intentionally per-process registry reaches every open accountless link
+  // response.
+  const activeLinkStreams = new Map<string, Set<ActiveLinkStream>>();
   const activeLinkBlobBytes = new Map<string, number>();
   const admitLinkBlobBytes = (
     grantId: string,
@@ -392,41 +393,42 @@ export function createSyncRelayHandler({
       else activeLinkBlobBytes.delete(grantId);
     };
   };
-  const registerLinkBlobStream = (
+  const registerLinkStream = (
     grantId: string,
-    stream: ActiveLinkBlobStream,
+    stream: ActiveLinkStream,
   ): (() => void) => {
-    let streams = activeLinkBlobStreams.get(grantId);
+    let streams = activeLinkStreams.get(grantId);
     if (!streams) {
       streams = new Set();
-      activeLinkBlobStreams.set(grantId, streams);
+      activeLinkStreams.set(grantId, streams);
     }
     streams.add(stream);
     return () => {
-      const registered = activeLinkBlobStreams.get(grantId);
+      const registered = activeLinkStreams.get(grantId);
       if (!registered) return;
       registered.delete(stream);
-      if (registered.size === 0) activeLinkBlobStreams.delete(grantId);
+      if (registered.size === 0) activeLinkStreams.delete(grantId);
     };
   };
-  const terminateLinkBlobStreamsForGrant = (grantId: string): void => {
-    const streams = activeLinkBlobStreams.get(grantId);
+  const terminateLinkStreamsForGrant = (grantId: string): void => {
+    const streams = activeLinkStreams.get(grantId);
     if (!streams) return;
-    activeLinkBlobStreams.delete(grantId);
+    activeLinkStreams.delete(grantId);
     for (const stream of streams) stream.terminate();
   };
-  const terminateLinkBlobStreamsForShare = (shareId: string): void => {
-    const grantIds = [...activeLinkBlobStreams]
+  const terminateLinkStreamsForShare = (shareId: string): void => {
+    const grantIds = [...activeLinkStreams]
       .filter(([, streams]) => [...streams].some((stream) => stream.shareId === shareId))
       .map(([grantId]) => grantId);
-    for (const grantId of grantIds) terminateLinkBlobStreamsForGrant(grantId);
+    for (const grantId of grantIds) terminateLinkStreamsForGrant(grantId);
   };
-  const respondWithLinkBlob = (
+  const respondWithLinkBytes = (
     bytes: Uint8Array,
     shareId: string,
     grantId: string,
-    releaseBytes: () => void,
+    releaseRetainedBytes: () => void,
     settleEgress: (emittedByteLength: number, settledAtMs: number) => void,
+    headers: Record<string, string>,
   ): Response => {
     let offset = 0;
     let active = true;
@@ -435,21 +437,21 @@ export function createSyncRelayHandler({
       if (!active) return;
       active = false;
       unregister();
-      releaseBytes();
+      releaseRetainedBytes();
       settleEgress(offset, nowMs());
     };
     const body = new ReadableStream<Uint8Array>(
       {
         start(controller) {
-          const stream: ActiveLinkBlobStream = {
+          const stream: ActiveLinkStream = {
             shareId,
             terminate: () => {
               if (!active) return;
               release();
-              controller.error(new Error("link grant changed during blob stream"));
+              controller.error(new Error("link grant changed during stream"));
             },
           };
-          unregister = registerLinkBlobStream(grantId, stream);
+          unregister = registerLinkStream(grantId, stream);
         },
         pull(controller) {
           if (!active) return;
@@ -458,7 +460,7 @@ export function createSyncRelayHandler({
             controller.close();
             return;
           }
-          const end = Math.min(offset + LINK_BLOB_STREAM_CHUNK_BYTES, bytes.byteLength);
+          const end = Math.min(offset + LINK_STREAM_CHUNK_BYTES, bytes.byteLength);
           controller.enqueue(bytes.subarray(offset, end));
           offset = end;
         },
@@ -468,15 +470,12 @@ export function createSyncRelayHandler({
         },
       },
       // Pull only when the transport asks for another chunk. This keeps one
-      // bounded view, rather than the full blob, queued ahead of backpressure.
+      // bounded view, rather than the full response, queued ahead of backpressure.
       { highWaterMark: 0 },
     );
     return new Response(body, {
       status: 200,
-      headers: {
-        "content-length": String(bytes.byteLength),
-        "content-type": "application/octet-stream",
-      },
+      headers,
     });
   };
 
@@ -1196,21 +1195,26 @@ export function createSyncRelayHandler({
     return fresh;
   };
 
-  const linkJsonResponse = (grantId: string, body: unknown): Response => {
-    const serialized = JSON.stringify(body);
-    if (
-      !linkGrantEgressRateLimiter.charge(
-        grantId,
-        Buffer.byteLength(serialized),
-        nowMs(),
-      )
-    ) {
-      throw linkReadRateLimited();
-    }
-    return new Response(serialized, {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
+  const linkJsonResponse = (
+    shareId: string,
+    grantId: string,
+    body: unknown,
+  ): Response => {
+    const bytes = new TextEncoder().encode(JSON.stringify(body));
+    const settleEgress = linkGrantEgressRateLimiter.reserve(
+      grantId,
+      bytes.byteLength,
+      nowMs(),
+    );
+    if (!settleEgress) throw linkReadRateLimited();
+    return respondWithLinkBytes(
+      bytes,
+      shareId,
+      grantId,
+      () => undefined,
+      settleEgress,
+      { "content-type": "application/json" },
+    );
   };
 
   const requireRefreshableLinkSession = (request: Request, refreshedAtMs: number) => {
@@ -1583,7 +1587,7 @@ export function createSyncRelayHandler({
           const presentation = createAccountlessPathProjection(
             capability.effectiveSelector,
           );
-          return linkJsonResponse(capability.grantId, {
+          return linkJsonResponse(capability.shareId, capability.grantId, {
             ok: true,
             effectiveSelector: presentation.selector,
             access: capability.access,
@@ -1617,7 +1621,7 @@ export function createSyncRelayHandler({
             snapshot.epochLogFloor,
           );
           requireFreshLinkRead(capabilityToken, capability);
-          return linkJsonResponse(capability.grantId, {
+          return linkJsonResponse(capability.shareId, capability.grantId, {
             ok: true,
             effectiveSelector: presentation.selector,
             access: capability.access,
@@ -1642,7 +1646,7 @@ export function createSyncRelayHandler({
             "accountless",
           );
           requireFreshLinkRead(capabilityToken, capability);
-          return linkJsonResponse(capability.grantId, {
+          return linkJsonResponse(capability.shareId, capability.grantId, {
             ok: true,
             ...page,
             epochLogFloor,
@@ -1675,12 +1679,16 @@ export function createSyncRelayHandler({
           releaseBytes();
           throw linkReadRateLimited();
         }
-        return respondWithLinkBlob(
+        return respondWithLinkBytes(
           blob,
           capability.shareId,
           capability.grantId,
           releaseBytes,
           settleEgress,
+          {
+            "content-length": String(blob.byteLength),
+            "content-type": "application/octet-stream",
+          },
         );
       }
       const actor = await resolveActor(request, "workspaceId" in route ? route.workspaceId : "");
@@ -1817,7 +1825,7 @@ export function createSyncRelayHandler({
           throw notFound();
         }
         if (!secret) throw notFound();
-        terminateLinkBlobStreamsForGrant(result.grant.grantId);
+        terminateLinkStreamsForGrant(result.grant.grantId);
         return jsonResponse({
           ok: true,
           ...linkGrantBody(result.grant),
@@ -1854,7 +1862,7 @@ export function createSyncRelayHandler({
           }
           throw notFound();
         }
-        terminateLinkBlobStreamsForGrant(result.grant.grantId);
+        terminateLinkStreamsForGrant(result.grant.grantId);
         return jsonResponse({
           ok: true,
           ...linkGrantBody(result.grant),
@@ -1902,11 +1910,11 @@ export function createSyncRelayHandler({
             }
             throw notFound();
           }
-          terminateLinkBlobStreamsForGrant(result.grant.grantId);
+          terminateLinkStreamsForGrant(result.grant.grantId);
           return jsonResponse({ ok: true, ...linkGrantBody(result.grant) });
         }
         if (storage.revokeShare(route.shareId, nowMs())) {
-          terminateLinkBlobStreamsForShare(route.shareId);
+          terminateLinkStreamsForShare(route.shareId);
         }
         return jsonResponse({ ok: true, shareId: route.shareId });
       }
