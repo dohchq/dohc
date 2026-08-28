@@ -1595,7 +1595,7 @@ export function createSyncRelayHandler({
       throw linkReadRateLimited();
     }
     const codeHash = hashLinkHandoffCode(code, linkKey);
-    if (!storage.findLinkHandoffCodeByCodeHash(codeHash)) return refused();
+    if (!storage.hasLinkHandoffCode(codeHash)) return refused();
 
     const result = storage.redeemLinkHandoffCode({
       codeHash,

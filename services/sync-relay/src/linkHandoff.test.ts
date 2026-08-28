@@ -261,13 +261,13 @@ function countHandoffStorageCalls(storage: SyncRelayStorage): {
   return {
     storage: new Proxy(storage, {
       get(target, property, receiver) {
-        if (property === "findLinkHandoffCodeByCodeHash") {
-          return (codeHash: string): unknown => {
+        if (property === "hasLinkHandoffCode") {
+          return (codeHash: string): boolean => {
             probes.push(codeHash);
-            const find = Reflect.get(target, property, receiver) as
-              | ((codeHash: string) => unknown)
+            const has = Reflect.get(target, property, receiver) as
+              | ((codeHash: string) => boolean)
               | undefined;
-            return find?.call(target, codeHash) ?? null;
+            return has?.call(target, codeHash) ?? false;
           };
         }
         if (property === "redeemLinkHandoffCode") {
