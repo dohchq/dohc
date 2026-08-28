@@ -12133,6 +12133,10 @@ fn map_relay_code(error: RelayError) -> ErrorCode {
         // it, because the share-view pull records it as a skipped op instead.
         | RelayError::ShareBlobOverCeiling { .. } => ErrorCode::PayloadTooLarge,
         RelayError::QuotaExceeded => ErrorCode::QuotaExceeded,
+        // A 429 on link reads asks the caller to back off and retry, which is
+        // exactly Overloaded's wire contract (Retryability::AfterBackoff) —
+        // unlike QuotaExceeded, which reads as a persistent ceiling.
+        RelayError::LinkReadRateLimited => ErrorCode::Overloaded,
         RelayError::NoProgress => ErrorCode::RelayNoProgress,
         RelayError::BlobMissing => ErrorCode::BlobMissing,
         RelayError::BlobReferenceMissing => ErrorCode::BlobReferenceMissing,
