@@ -159,6 +159,103 @@ export const UPDATE_STATUSES = [
 
 export type UpdateStatusId = (typeof UPDATE_STATUSES)[number];
 
+export const SHARE_HANDOFF_STATUSES = [
+  "idle",
+  "waiting-for-sign-in",
+  "waiting-for-acceptance",
+  "redeeming",
+  "failed-wrong-server",
+  "failed-refused",
+  "failed-busy",
+  "failed-network",
+  "done",
+] as const;
+
+export type ShareHandoffStatusEvent =
+  | { status: "idle" }
+  | {
+      status: Exclude<
+        (typeof SHARE_HANDOFF_STATUSES)[number],
+        "idle" | "done" | "waiting-for-acceptance" | "failed-wrong-server"
+      >;
+      statusId: string;
+    }
+  | { status: "waiting-for-acceptance"; statusId: string; email: string }
+  | { status: "failed-wrong-server"; statusId: string; linkRelayUrl: string }
+  | { status: "done"; statusId: string; shareId: string };
+
+export function parseShareHandoffStatus(
+  value: unknown,
+): ShareHandoffStatusEvent | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  if (!Object.hasOwn(value, "status")) return null;
+  const raw = value as Record<string, unknown>;
+  const status = raw.status;
+  if (
+    typeof status !== "string" ||
+    !(SHARE_HANDOFF_STATUSES as readonly string[]).includes(status)
+  ) {
+    return null;
+  }
+  if (status === "idle") {
+    return Reflect.ownKeys(value).length === 1 ? { status } : null;
+  }
+  if (
+    !Object.hasOwn(value, "statusId") ||
+    typeof raw.statusId !== "string" ||
+    raw.statusId.length === 0 ||
+    raw.statusId.length > 200
+  ) {
+    return null;
+  }
+  if (status === "done") {
+    if (
+      Reflect.ownKeys(value).length !== 3 ||
+      !Object.hasOwn(value, "shareId") ||
+      typeof raw.shareId !== "string" ||
+      raw.shareId.length === 0 ||
+      raw.shareId.length > 200
+    ) {
+      return null;
+    }
+    return { status, statusId: raw.statusId, shareId: raw.shareId };
+  }
+  if (status === "waiting-for-acceptance") {
+    if (
+      Reflect.ownKeys(value).length !== 3 ||
+      !Object.hasOwn(value, "email") ||
+      typeof raw.email !== "string" ||
+      raw.email.length === 0 ||
+      raw.email.length > 320
+    ) {
+      return null;
+    }
+    return { status, statusId: raw.statusId, email: raw.email };
+  }
+  if (status === "failed-wrong-server") {
+    if (
+      Reflect.ownKeys(value).length !== 3 ||
+      !Object.hasOwn(value, "linkRelayUrl") ||
+      typeof raw.linkRelayUrl !== "string" ||
+      raw.linkRelayUrl.length === 0 ||
+      raw.linkRelayUrl.length > 2048
+    ) {
+      return null;
+    }
+    return { status, statusId: raw.statusId, linkRelayUrl: raw.linkRelayUrl };
+  }
+  if (Reflect.ownKeys(value).length !== 2) return null;
+  return {
+    status: status as Exclude<
+      (typeof SHARE_HANDOFF_STATUSES)[number],
+      "idle" | "done" | "waiting-for-acceptance" | "failed-wrong-server"
+    >,
+    statusId: raw.statusId,
+  };
+}
+
 export const UPDATE_CHANNELS = ["latest", "nightly"] as const;
 export type UpdateChannelId = (typeof UPDATE_CHANNELS)[number];
 
@@ -698,11 +795,21 @@ export const CHANNELS = {
   cloudLoginPoll: "desktop:cloud-login-poll",
   cloudStatus: "desktop:cloud-status",
   cloudLogout: "desktop:cloud-logout",
+  getShareHandoffStatus: "desktop:get-share-handoff-status",
+  acceptShareHandoff: "desktop:accept-share-handoff",
+  retryShareHandoff: "desktop:retry-share-handoff",
+  dismissShareHandoff: "desktop:dismiss-share-handoff",
+  shareHandoffStatus: "desktop:share-handoff-status",
   cloudEnableSync: "desktop:cloud-enable-sync",
   cloudJoinWorkspace: "desktop:cloud-join-workspace",
   createRelayShare: "desktop:create-relay-share",
   listRelayShares: "desktop:list-relay-shares",
+  getRelayReceivedShare: "desktop:get-relay-received-share",
   revokeRelayShare: "desktop:revoke-relay-share",
+  createRelayShareLink: "desktop:create-relay-share-link",
+  listRelayShareLinks: "desktop:list-relay-share-links",
+  rotateRelayShareLink: "desktop:rotate-relay-share-link",
+  revokeRelayShareLink: "desktop:revoke-relay-share-link",
   shareChatChannel: "desktop:share-chat-channel",
   listChatChannelShares: "desktop:list-chat-channel-shares",
   listJoinedSharedChannels: "desktop:list-joined-shared-channels",

@@ -16,9 +16,11 @@ const DEFAULT_MAX_SESSIONS = 10_000;
 export const MAX_SESSIONS_PER_GRANT = 512;
 const MAX_BLOB_PROXIES_PER_SESSION = 8;
 const MAX_BLOB_PROXIES_PER_GRANT = 24;
+const DEFAULT_HANDOFF_RELAY_TIMEOUT_MS = 10_000;
 const LINK_REFRESH_WINDOW_MS = 5 * 60 * 1_000;
 export const LINK_SESSION_RENEWAL_GRACE_MS = 7 * 24 * 60 * 60 * 1_000;
 const RASTER_SIGNATURE_BYTES = 12;
+const HANDOFF_CODE = /^[A-Za-z0-9_-]{43}$/u;
 const SESSION_DISCRIMINATOR = /^[A-Za-z0-9_-]{12}$/u;
 const SHA256_HEX = /^[a-f0-9]{64}$/u;
 
@@ -44,6 +46,7 @@ interface ExchangeBucket {
 
 export interface CreateShareWebHandlerOptions {
   relayUrl: string;
+  publicRelayUrl: string;
   relayExchangeKey?: string;
   publicHosts: ReadonlySet<string>;
   fetchRelay?: RelayFetch;
@@ -51,6 +54,7 @@ export interface CreateShareWebHandlerOptions {
   newSessionToken?: () => string;
   maxSessions?: number;
   viewerAssetsDir?: string;
+  handoffRelayTimeoutMs?: number;
 }
 
 class ShareWebSessionStore {
@@ -302,6 +306,32 @@ function relayRequest(relayUrl: string, path: string, init: RequestInit = {}): R
   return new Request(new URL(path, `${relayUrl.replace(/\/+$/u, "")}/`), init);
 }
 
+function boundedHandoffRelayRequest(
+  clientRequest: Request,
+  relayUrl: string,
+  init: RequestInit,
+  timeoutMs: number,
+): { request: Request; dispose: () => void } {
+  const relayAbort = new AbortController();
+  const abortFromClient = (): void => relayAbort.abort(clientRequest.signal.reason);
+  if (clientRequest.signal.aborted) {
+    abortFromClient();
+  } else {
+    clientRequest.signal.addEventListener("abort", abortFromClient, { once: true });
+  }
+  const deadline = setTimeout(() => relayAbort.abort(), timeoutMs);
+  return {
+    request: relayRequest(relayUrl, "/sync/link-handoff", {
+      ...init,
+      signal: relayAbort.signal,
+    }),
+    dispose: () => {
+      clearTimeout(deadline);
+      clientRequest.signal.removeEventListener("abort", abortFromClient);
+    },
+  };
+}
+
 function sessionCookie(
   discriminator: string,
   token: string,
@@ -341,6 +371,25 @@ function parsedRelaySession(
     return null;
   }
   return { grantId, capabilityToken, expiresAtMs };
+}
+
+function parsedRelayHandoff(
+  value: unknown,
+  nowMs: number,
+): { code: string; expiresAtMs: number } | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const handoff = value as Record<string, unknown>;
+  if (
+    handoff.ok !== true ||
+    typeof handoff.code !== "string" ||
+    !HANDOFF_CODE.test(handoff.code) ||
+    typeof handoff.expiresAtMs !== "number" ||
+    !Number.isSafeInteger(handoff.expiresAtMs) ||
+    handoff.expiresAtMs <= nowMs
+  ) {
+    return null;
+  }
+  return { code: handoff.code, expiresAtMs: handoff.expiresAtMs };
 }
 
 function contentTypeForAsset(path: string): string {
@@ -486,6 +535,7 @@ async function streamingBlobResponse(
 
 export function createShareWebHandler({
   relayUrl,
+  publicRelayUrl,
   relayExchangeKey,
   publicHosts,
   fetchRelay = (request) => fetch(request),
@@ -493,6 +543,7 @@ export function createShareWebHandler({
   newSessionToken = () => randomBytes(32).toString("base64url"),
   maxSessions = DEFAULT_MAX_SESSIONS,
   viewerAssetsDir,
+  handoffRelayTimeoutMs = DEFAULT_HANDOFF_RELAY_TIMEOUT_MS,
 }: CreateShareWebHandlerOptions): (request: Request) => Promise<Response> {
   const sessions = new ShareWebSessionStore(maxSessions);
   const exchangeRateLimiter = new ShareWebExchangeRateLimiter();
@@ -682,6 +733,66 @@ export function createShareWebHandler({
         );
       } catch {
         return refused();
+      }
+    }
+
+    if (pathname === "/api/handoff" && request.method === "POST") {
+      if (!request.headers.has(LINK_SESSION_HEADER)) return refused();
+      const authenticated = await readSession(request);
+      if (!authenticated) return refused();
+      const refreshed = await refreshSession(authenticated);
+      if (!refreshed.ok) return refused(refreshed.status);
+      const refreshedCookieHeaders: Record<string, string> = refreshed.setCookie
+        ? { "set-cookie": refreshed.setCookie }
+        : {};
+      const capabilityToken = authenticated.session.capabilityToken;
+      const boundedRelayRequest = boundedHandoffRelayRequest(
+        request,
+        relayUrl,
+        {
+          method: "POST",
+          headers: {
+            authorization: `LinkCapability ${capabilityToken}`,
+            ...(relayExchangeKey
+              ? { "x-dohc-relay-exchange-key": relayExchangeKey }
+              : {}),
+          },
+        },
+        handoffRelayTimeoutMs,
+      );
+      try {
+        const relayResponse = await fetchRelay(boundedRelayRequest.request);
+        if (relayResponse.status === 429) {
+          return refused(429, refreshedCookieHeaders);
+        }
+        if (relayResponse.status !== 200) {
+          if (relayResponse.status === 401) {
+            sessions.deleteIfCapability(
+              authenticated.discriminator,
+              authenticated.token,
+              capabilityToken,
+            );
+          }
+          return refused(
+            relayResponse.status === 401 || relayResponse.status === 404 ? 404 : 503,
+            refreshedCookieHeaders,
+          );
+        }
+        const handoff = parsedRelayHandoff(await relayResponse.json(), nowMs());
+        if (!handoff) return refused(503, refreshedCookieHeaders);
+        return jsonResponse(
+          {
+            ok: true,
+            code: handoff.code,
+            relayUrl: publicRelayUrl,
+            expiresAtMs: handoff.expiresAtMs,
+          },
+          { headers: refreshedCookieHeaders },
+        );
+      } catch {
+        return refused(503, refreshedCookieHeaders);
+      } finally {
+        boundedRelayRequest.dispose();
       }
     }
 

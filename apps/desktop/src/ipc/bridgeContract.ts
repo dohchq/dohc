@@ -3386,6 +3386,75 @@ export const CloudStatusResult = z.object({
 });
 export type CloudStatusResult = z.infer<typeof CloudStatusResult>;
 
+const SHARE_HANDOFF_STATUS_ID = z.string().min(1).max(200);
+
+export const ShareHandoffStatus = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("idle") }).strict(),
+  z
+    .object({
+      status: z.literal("waiting-for-sign-in"),
+      statusId: SHARE_HANDOFF_STATUS_ID,
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("waiting-for-acceptance"),
+      statusId: SHARE_HANDOFF_STATUS_ID,
+      email: z.string().min(1).max(320),
+    })
+    .strict(),
+  z
+    .object({ status: z.literal("redeeming"), statusId: SHARE_HANDOFF_STATUS_ID })
+    .strict(),
+  z
+    .object({
+      status: z.literal("failed-wrong-server"),
+      statusId: SHARE_HANDOFF_STATUS_ID,
+      linkRelayUrl: z.string().min(1).max(2048),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("failed-refused"),
+      statusId: SHARE_HANDOFF_STATUS_ID,
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("failed-busy"),
+      statusId: SHARE_HANDOFF_STATUS_ID,
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("failed-network"),
+      statusId: SHARE_HANDOFF_STATUS_ID,
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("done"),
+      statusId: SHARE_HANDOFF_STATUS_ID,
+      shareId: z.string().min(1).max(200),
+    })
+    .strict(),
+]);
+export type ShareHandoffStatus = z.infer<typeof ShareHandoffStatus>;
+
+export const AcceptShareHandoffPayload = z
+  .object({ statusId: SHARE_HANDOFF_STATUS_ID })
+  .strict();
+export type AcceptShareHandoffPayload = z.infer<
+  typeof AcceptShareHandoffPayload
+>;
+
+export const DismissShareHandoffPayload = z
+  .object({ statusId: SHARE_HANDOFF_STATUS_ID })
+  .strict();
+export type DismissShareHandoffPayload = z.infer<
+  typeof DismissShareHandoffPayload
+>;
+
 export const CloudEnableSyncPayload = z.object({
   workspaceId: WORKSPACE_ID,
   passphrase: z.string().optional(),
@@ -3476,6 +3545,28 @@ export const RelayShareReceivedRow = z.union([
 ]);
 export type RelayShareReceivedRow = z.infer<typeof RelayShareReceivedRow>;
 
+export const GetRelayReceivedSharePayload = z
+  .object({
+    shareId: SHARE_ID,
+  })
+  .strict();
+export type GetRelayReceivedSharePayload = z.infer<
+  typeof GetRelayReceivedSharePayload
+>;
+
+export const GetRelayReceivedShareResult = z.discriminatedUnion("found", [
+  z.object({ found: z.literal(false) }).strict(),
+  z
+    .object({
+      found: z.literal(true),
+      share: RelayShareReceivedRow,
+    })
+    .strict(),
+]);
+export type GetRelayReceivedShareResult = z.infer<
+  typeof GetRelayReceivedShareResult
+>;
+
 export const ListRelaySharesResult = z.object({
   granted: z.array(RelayShareGrantedRow).max(1000),
   // Path/version shares addressed to this account (chat-channel grants are
@@ -3508,6 +3599,170 @@ export const RevokeRelaySharePayload = z.object({
   shareId: SHARE_ID,
 });
 export type RevokeRelaySharePayload = z.infer<typeof RevokeRelaySharePayload>;
+
+// Phase 2 owner links are workspace-scoped View capabilities. The renderer
+// supplies exactly one selector and never supplies an access level.
+export const CreateRelayShareLinkPayload = z.union([
+  z
+    .object({
+      workspaceId: WORKSPACE_ID,
+      paths: z.array(PATH_STRING).min(1).max(100),
+      versionId: z.never().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      workspaceId: WORKSPACE_ID,
+      paths: z.never().optional(),
+      versionId: z.string().min(1).max(128),
+    })
+    .strict(),
+]);
+export type CreateRelayShareLinkPayload = z.infer<
+  typeof CreateRelayShareLinkPayload
+>;
+
+const RELAY_SHARE_LINK_URL = z.url().max(4096);
+
+export const CreateRelayShareLinkResult = z.object({
+  shareId: SHARE_ID,
+  grantId: SHARE_ID,
+  url: RELAY_SHARE_LINK_URL,
+});
+export type CreateRelayShareLinkResult = z.infer<
+  typeof CreateRelayShareLinkResult
+>;
+
+const RELAY_SHARE_LINK_CURSOR = z.string().min(1).max(1024);
+
+export const ListRelayShareLinksPayload = z
+  .object({
+    workspaceId: WORKSPACE_ID,
+    cursor: RELAY_SHARE_LINK_CURSOR.optional(),
+  })
+  .strict();
+export type ListRelayShareLinksPayload = z.infer<
+  typeof ListRelayShareLinksPayload
+>;
+
+export const RelayShareLinkDependent = z.object({
+  grantId: SHARE_ID,
+  recipientUserId: z.string().min(1).max(256).nullable(),
+  recipientEmail: EMAIL_STRING.nullable(),
+  access: SHARE_ACCESS,
+  generation: z.number().int().min(1),
+  createdAtMs: z.number().int().nonnegative(),
+});
+export type RelayShareLinkDependent = z.infer<
+  typeof RelayShareLinkDependent
+>;
+
+const RelayShareLinkRowBase = z.object({
+  shareId: SHARE_ID,
+  grantId: SHARE_ID,
+  generation: z.number().int().min(1),
+  status: z.enum(["active", "revoked"]),
+  createdAtMs: z.number().int().nonnegative(),
+  revokedAtMs: z.number().int().nonnegative().nullable(),
+  lastUsedAtMs: z.number().int().nonnegative().nullable(),
+  urlIssuedAtMs: z.number().int().nonnegative().nullable(),
+  dependents: z.array(RelayShareLinkDependent).max(1000),
+});
+
+export const RelayShareLinkRow = z.union([
+  RelayShareLinkRowBase.extend({
+    selector: RelayShareSelector,
+    access: SHARE_ACCESS,
+    damaged: z.never().optional(),
+  }),
+  RelayShareLinkRowBase.extend({
+    selector: z.null(),
+    access: z.string().max(64),
+    damaged: z.literal(true),
+  }),
+]);
+export type RelayShareLinkRow = z.infer<typeof RelayShareLinkRow>;
+
+export const ListRelayShareLinksResult = z.object({
+  links: z.array(RelayShareLinkRow).max(1000),
+  nextCursor: RELAY_SHARE_LINK_CURSOR.optional(),
+});
+export type ListRelayShareLinksResult = z.infer<
+  typeof ListRelayShareLinksResult
+>;
+
+const RelayShareLinkMutationPayload = z
+  .object({
+    workspaceId: WORKSPACE_ID,
+    shareId: SHARE_ID,
+    grantId: SHARE_ID,
+    expectedDependentGrantIds: z.array(SHARE_ID).max(1000),
+  })
+  .strict();
+
+export const RotateRelayShareLinkPayload = RelayShareLinkMutationPayload;
+export type RotateRelayShareLinkPayload = z.infer<
+  typeof RotateRelayShareLinkPayload
+>;
+
+export const RevokeRelayShareLinkPayload = RelayShareLinkMutationPayload;
+export type RevokeRelayShareLinkPayload = z.infer<
+  typeof RevokeRelayShareLinkPayload
+>;
+
+export const RelayShareLinkDependentConflict = z.object({
+  ok: z.literal(false),
+  code: z.literal("dependents_changed"),
+  dependents: z.array(RelayShareLinkDependent).max(1000),
+});
+export type RelayShareLinkDependentConflict = z.infer<
+  typeof RelayShareLinkDependentConflict
+>;
+
+export const RelayShareLinkCreateResponse = CreateRelayShareLinkResult.extend({
+  ok: z.literal(true),
+});
+
+export const RelayShareLinkListResponse = ListRelayShareLinksResult.extend({
+  ok: z.literal(true),
+});
+
+export const RelayShareLinkRotateResponse = z.object({
+  ok: z.literal(true),
+  url: RELAY_SHARE_LINK_URL,
+});
+
+export const RelayShareLinkEndResponse = z.object({
+  ok: z.literal(true),
+});
+
+const RelayShareLinkDependentsChangedOutcome = z
+  .object({
+    outcome: z.literal("dependents-changed"),
+    dependents: z.array(RelayShareLinkDependent).max(1000),
+  })
+  .strict();
+
+export const RotateRelayShareLinkResult = z.discriminatedUnion("outcome", [
+  z
+    .object({
+      outcome: z.literal("rotated"),
+      url: RELAY_SHARE_LINK_URL,
+    })
+    .strict(),
+  RelayShareLinkDependentsChangedOutcome,
+]);
+export type RotateRelayShareLinkResult = z.infer<
+  typeof RotateRelayShareLinkResult
+>;
+
+export const RevokeRelayShareLinkResult = z.discriminatedUnion("outcome", [
+  z.object({ outcome: z.literal("ended") }).strict(),
+  RelayShareLinkDependentsChangedOutcome,
+]);
+export type RevokeRelayShareLinkResult = z.infer<
+  typeof RevokeRelayShareLinkResult
+>;
 
 // ---- Share changes (#646 PR3a) ----
 // An edit-level recipient edits its own share view and SENDS the result. The
@@ -4947,6 +5202,13 @@ export interface DohcDesktopBridge {
   cloudLoginPoll(): Promise<CloudLoginPollResult>;
   cloudStatus(payload?: CloudStatusPayload): Promise<CloudStatusResult>;
   cloudLogout(): Promise<void>;
+  getShareHandoffStatus(): Promise<ShareHandoffStatus>;
+  acceptShareHandoff(payload: AcceptShareHandoffPayload): Promise<void>;
+  retryShareHandoff(): Promise<void>;
+  dismissShareHandoff(payload: DismissShareHandoffPayload): Promise<void>;
+  onShareHandoffStatus(
+    listener: (status: ShareHandoffStatus) => void,
+  ): () => void;
   cloudEnableSync(payload: CloudEnableSyncPayload): Promise<SyncStatusResult>;
   cloudJoinWorkspace(
     payload: CloudJoinWorkspacePayload,
@@ -4954,7 +5216,22 @@ export interface DohcDesktopBridge {
   // Relay shares (PR 18): grant side.
   createRelayShare(payload: CreateRelaySharePayload): Promise<CreateRelayShareResult>;
   listRelayShares(): Promise<ListRelaySharesResult>;
+  getRelayReceivedShare(
+    payload: GetRelayReceivedSharePayload,
+  ): Promise<GetRelayReceivedShareResult>;
   revokeRelayShare(payload: RevokeRelaySharePayload): Promise<void>;
+  createRelayShareLink(
+    payload: CreateRelayShareLinkPayload,
+  ): Promise<CreateRelayShareLinkResult>;
+  listRelayShareLinks(
+    payload: ListRelayShareLinksPayload,
+  ): Promise<ListRelayShareLinksResult>;
+  rotateRelayShareLink(
+    payload: RotateRelayShareLinkPayload,
+  ): Promise<RotateRelayShareLinkResult>;
+  revokeRelayShareLink(
+    payload: RevokeRelayShareLinkPayload,
+  ): Promise<RevokeRelayShareLinkResult>;
   shareChatChannel(payload: ShareChatChannelPayload): Promise<ShareChatChannelResult>;
   listChatChannelShares(
     payload: ListChatChannelSharesPayload,

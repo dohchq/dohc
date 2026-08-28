@@ -112,6 +112,10 @@ fileAssociations:
     description: Open with dohc
     role: Editor
 
+protocols:
+  - name: dohc share link
+    schemes: [dohc]
+
 # Auto-update feed baked into packaged app-update.yml. GitHub Releases is the
 # first dogfood update host because it is available immediately from the
 # release workflow. DOHC_UPDATE_URL remains an explicit packaged/mock override

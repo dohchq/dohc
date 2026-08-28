@@ -258,6 +258,7 @@ async function startStack(): Promise<RunningStack> {
   }
 
   const shareWebPort = await allocatePort();
+  const shareWebUrl = `http://${LOOPBACK_HOST}:${String(shareWebPort)}`;
   const tempRoot = await mkdtemp(join(tmpdir(), "dohc-share-web-browser-"));
   const relayExchangeKey = randomBytes(32).toString("base64url");
   const relayLinkKey = randomBytes(32).toString("base64url");
@@ -268,6 +269,7 @@ async function startStack(): Promise<RunningStack> {
     SYNC_RELAY_DB_PATH: join(tempRoot, "relay.sqlite"),
     DOHC_RELAY_EXCHANGE_KEY: relayExchangeKey,
     DOHC_RELAY_LINK_KEY: relayLinkKey,
+    DOHC_RELAY_SHARE_WEB_ORIGIN: shareWebUrl,
     FORCE_COLOR: "0",
   });
   const shareWebEnv = buildHarnessEnvironment(process.env, {
@@ -338,7 +340,7 @@ async function startStack(): Promise<RunningStack> {
 
     return {
       relayUrl,
-      shareWebUrl: `http://${LOOPBACK_HOST}:${String(shareWebPort)}`,
+      shareWebUrl,
       stop,
     };
   } catch (error) {
@@ -480,7 +482,8 @@ export async function seedShare(options: SeedShareOptions): Promise<SeededShare>
     }),
     "create link grant",
   );
-  const secret = requiredString(link.secret, "secret", "create link grant");
+  const publicUrl = new URL(requiredString(link.url, "url", "create link grant"));
+  const secret = publicUrl.hash.slice(1);
   if (!/^[A-Za-z0-9_-]{43}$/u.test(secret)) {
     throw new Error(
       `create link grant returned an invalid fragment value (length=${String(secret.length)})`,

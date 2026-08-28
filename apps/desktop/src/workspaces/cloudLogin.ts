@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
-import type { CloudCredentials } from "./cloudCredentialStore";
+import {
+  isCloudCredentialEmail,
+  type CloudCredentials,
+} from "./cloudCredentialStore";
 
 // Desktop side of the OAuth device-authorization flow against dohc Cloud (or
 // a self-host server): start() asks the server for a short user code, the
@@ -303,7 +306,10 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
       if (typeof userId !== "string" || userId.length === 0) {
         failCloudLoginIdentity(attempt);
       }
-      const email = typeof body?.user?.email === "string" ? body.user.email : "";
+      const email = body?.user?.email;
+      if (!isCloudCredentialEmail(email)) {
+        failCloudLoginIdentity(attempt);
+      }
       const credentials = {
         serverUrl,
         ...(relayUrl ? { relayUrl } : {}),

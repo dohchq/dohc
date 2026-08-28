@@ -174,6 +174,15 @@ if (config) {
   for (const ext of ["md", "markdown", "txt", "csv", "json"]) {
     check(fileExtensions.includes(ext), `Open with dohc association includes .${ext}`);
   }
+  check(
+    Array.isArray(config.protocols) &&
+      config.protocols.length === 1 &&
+      config.protocols[0]?.name === "dohc share link" &&
+      Array.isArray(config.protocols[0]?.schemes) &&
+      config.protocols[0].schemes.length === 1 &&
+      config.protocols[0].schemes[0] === "dohc",
+    "packaged protocol is the single dohc share-link scheme",
+  );
 }
 
 // --- signing labeling ------------------------------------------------------

@@ -74,7 +74,7 @@ async function body(response: Response): Promise<Record<string, unknown>> {
 }
 
 describe("share-web e2e-lite", () => {
-  it("exchanges a real link and reads a real relay Markdown blob", async () => {
+  it("completes a real viewer-session handoff to a named relay recipient", async () => {
     vi.stubEnv("DOHC_RELAY_EXCHANGE_KEY", RELAY_EXCHANGE_KEY);
     const root = await mkdtemp(join(tmpdir(), "dohc-share-web-e2e-"));
     roots.push(root);
@@ -93,6 +93,7 @@ describe("share-web e2e-lite", () => {
       newGrantId: () => `grant-${id++}`,
       newId: () => `id-${id++}`,
       linkKey: "e2e-link-key-with-at-least-thirty-two-bytes",
+      shareWebOrigin: "https://share.example.test",
       relayExchangeKey: process.env.DOHC_RELAY_EXCHANGE_KEY,
     });
     const relayUrl = await listen(relayHandler);
@@ -153,28 +154,18 @@ describe("share-web e2e-lite", () => {
         })
       ).status,
     ).toBe(200);
-    const share = await body(
-      await fetch(`${relayUrl}/sync/workspace-e2e/shares`, {
-        method: "POST",
-        headers: ownerHeaders,
-        body: JSON.stringify({
-          recipientUserId: "recipient",
-          paths: ["docs"],
-          access: "view",
-        }),
-      }),
-    );
-    const link = await body(
-      await fetch(`${relayUrl}/sync/workspace-e2e/shares/${String(share.shareId)}/links`, {
-        method: "POST",
-        headers: ownerHeaders,
-        body: JSON.stringify({ access: "view" }),
-      }),
-    );
+    const linkResponse = await fetch(`${relayUrl}/sync/workspace-e2e/shares/links`, {
+      method: "POST",
+      headers: ownerHeaders,
+      body: JSON.stringify({ paths: ["docs"] }),
+    });
+    expect(linkResponse.status).toBe(200);
+    const link = await body(linkResponse);
 
     const publicHosts = new Set<string>();
     const shareWebHandler = createShareWebHandler({
       relayUrl,
+      publicRelayUrl: relayUrl,
       relayExchangeKey: RELAY_EXCHANGE_KEY,
       publicHosts,
     });
@@ -184,7 +175,7 @@ describe("share-web e2e-lite", () => {
     const exchanged = await fetch(`${shareWebUrl}/api/exchange`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ secret: link.secret }),
+      body: JSON.stringify({ secret: new URL(String(link.url)).hash.slice(1) }),
     });
     expect(exchanged.status).toBe(200);
     const session = (await body(exchanged)).session;
@@ -193,6 +184,82 @@ describe("share-web e2e-lite", () => {
       cookie,
       "x-dohc-link-session": String(session),
     };
+
+    const inventoryBefore = await body(
+      await fetch(`${relayUrl}/sync/workspace-e2e/shares/links`, {
+        headers: { authorization: "Bearer user:owner" },
+      }),
+    );
+    const linkBefore = (inventoryBefore.links as Array<Record<string, unknown>>).find(
+      (candidate) => candidate.grantId === link.grantId,
+    );
+    expect(linkBefore?.dependents).toEqual([]);
+    expect(JSON.stringify(inventoryBefore)).not.toContain("handoff-recipient");
+
+    const handedOff = await fetch(`${shareWebUrl}/api/handoff`, {
+      method: "POST",
+      headers: sessionHeaders,
+    });
+    expect(handedOff.status).toBe(200);
+    const handoff = await body(handedOff);
+    expect(Object.keys(handoff).sort()).toEqual([
+      "code",
+      "expiresAtMs",
+      "ok",
+      "relayUrl",
+    ]);
+    expect(handoff.ok).toBe(true);
+    expect(String(handoff.code)).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+    expect(handoff.relayUrl).toBe(relayUrl.replace(/\/$/u, ""));
+    expect(Number.isSafeInteger(handoff.expiresAtMs)).toBe(true);
+    expect(Number(handoff.expiresAtMs)).toBeGreaterThan(Date.now());
+
+    const redeemPayload = { code: handoff.code };
+    expect(Object.keys(redeemPayload)).toEqual(["code"]);
+    const redeemed = await fetch(`${relayUrl}/sync/link-redeem`, {
+      method: "POST",
+      headers: {
+        authorization: "Bearer user:handoff-recipient",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(redeemPayload),
+    });
+    expect(redeemed.status).toBe(200);
+    const namedGrant = await body(redeemed);
+    expect(namedGrant).toMatchObject({
+      ok: true,
+      shareId: link.shareId,
+      access: "view",
+    });
+
+    const inventoryAfter = await body(
+      await fetch(`${relayUrl}/sync/workspace-e2e/shares/links`, {
+        headers: { authorization: "Bearer user:owner" },
+      }),
+    );
+    const linkAfter = (inventoryAfter.links as Array<Record<string, unknown>>).find(
+      (candidate) => candidate.grantId === link.grantId,
+    );
+    expect(linkAfter?.dependents).toEqual([
+      expect.objectContaining({
+        grantId: namedGrant.grantId,
+        recipientUserId: "handoff-recipient",
+        recipientEmail: "handoff-recipient@example.test",
+        access: "view",
+      }),
+    ]);
+
+    const namedLog = await body(
+      await fetch(`${relayUrl}/sync/shares/${String(link.shareId)}/log?since=0&limit=100`, {
+        headers: { authorization: "Bearer user:handoff-recipient" },
+      }),
+    );
+    expect(namedLog.ops).toEqual([
+      expect.objectContaining({
+        opKind: "moment.append",
+        payload: expect.objectContaining({ path: "docs/readme.md" }),
+      }),
+    ]);
 
     const log = await body(
       await fetch(`${shareWebUrl}/api/view/log?since=0&limit=100`, {

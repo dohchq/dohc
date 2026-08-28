@@ -60,8 +60,24 @@ import {
   CloudJoinWorkspacePayload,
   CreateRelaySharePayload,
   CreateRelayShareResult,
+  GetRelayReceivedSharePayload,
+  GetRelayReceivedShareResult,
   ListRelaySharesResult,
+  RelayShareReceivedRow,
   RevokeRelaySharePayload,
+  CreateRelayShareLinkPayload,
+  CreateRelayShareLinkResult,
+  ListRelayShareLinksPayload,
+  ListRelayShareLinksResult,
+  RelayShareLinkCreateResponse,
+  RelayShareLinkDependentConflict,
+  RelayShareLinkEndResponse,
+  RelayShareLinkListResponse,
+  RelayShareLinkRotateResponse,
+  RotateRelayShareLinkPayload,
+  RotateRelayShareLinkResult,
+  RevokeRelayShareLinkPayload,
+  RevokeRelayShareLinkResult,
   ShareChatChannelPayload,
   ShareChatChannelResult,
   ListChatChannelSharesPayload,
@@ -248,6 +264,9 @@ import {
   UpdateActionResult,
   UpdateCheckResult,
   UpdateStateEvent,
+  AcceptShareHandoffPayload,
+  DismissShareHandoffPayload,
+  ShareHandoffStatus as ShareHandoffStatusContract,
 } from "./ipc/bridgeContract";
 import { CHANNELS } from "./ipc/channels";
 import { createSitesIpcHandlers } from "./ipc/sitesIpc";
@@ -738,6 +757,18 @@ import {
 import { ensureAgentsChatBlock } from "./cli/agentsChatBlock";
 import { createWorkspaceChatLifecycle } from "./workspaces/workspaceChatLifecycle";
 import { makeProcessDiagnosticsNonFatal } from "./process/stdioResilience";
+import {
+  classifyShareHandoffArguments,
+  createShareHandoffIntentSlot,
+  focusShareHandoffWindow,
+  focusShareHandoffWindowWhenReady,
+  receiveShareHandoffArguments,
+  registerShareHandoffProtocol,
+} from "./shareHandoffIngress";
+import {
+  createShareHandoffRedemptionCoordinator,
+  type ShareHandoffStatus,
+} from "./shareHandoffRedemption";
 
 // A launcher that exited leaves main's stdout/stderr a pipe with no reader, and
 // a pipe write throws synchronously. Diagnostics must never be able to crash the
@@ -745,6 +776,9 @@ import { makeProcessDiagnosticsNonFatal } from "./process/stdioResilience";
 // logging in the imports above is still unguarded, which is why this stays a
 // top-level statement rather than moving inside app.whenReady.
 makeProcessDiagnosticsNonFatal();
+
+const shareHandoffIntentSlot = createShareHandoffIntentSlot();
+registerShareHandoffProtocol(app, process);
 
 // Custom scheme that serves a workspace file's bytes to the renderer:
 //   dohc-file://<workspaceId>/<relative/path>
@@ -1595,6 +1629,7 @@ const credentialSessionCache =
   new CredentialSessionCache<CloudSessionCredentials>((snapshot) => {
     cachedCredentials = snapshot.credentials;
     credentialCacheGeneration = snapshot.generation;
+    shareHandoffRedemption.credentialsChanged();
   });
 function refreshCredentialCache(): Promise<void> {
   return credentialSessionCache.refresh(() => cloudLogin().credentials());
@@ -1624,6 +1659,34 @@ function clearCachedCredentials(): void {
     }
   }
 }
+
+function publishShareHandoffStatus(status: ShareHandoffStatus): void {
+  const publicStatus = ShareHandoffStatusContract.parse(status);
+  if (!app.isReady()) return;
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send(CHANNELS.shareHandoffStatus, publicStatus);
+  }
+}
+
+const SHARE_HANDOFF_REDEMPTION_FETCH_TIMEOUT_MS = 15_000;
+const shareHandoffRedemption = createShareHandoffRedemptionCoordinator({
+  intent: shareHandoffIntentSlot,
+  createStatusId: randomUUID,
+  credentialSnapshot: () => credentialSessionCache.snapshot(),
+  fetch: relayFetchWithTimeout(SHARE_HANDOFF_REDEMPTION_FETCH_TIMEOUT_MS),
+  handleUnauthorized: (requestCredentials) =>
+    handleRelayUnauthorized({
+      requestCredentials,
+      currentCredentials: cachedCredentials,
+      clearCachedCredentials: () => clearCachedCredentials(),
+      notifySessionChanging: () => notifyCloudSessionChanged("changing"),
+      notifyCloudSessionChanged: () => notifyCloudSessionChanged("ready"),
+      invalidatePersistedSessionIf: (expected) =>
+        cloudLogin().invalidateSessionIf(expected),
+    }),
+  publishStatus: publishShareHandoffStatus,
+});
+
 async function loadAndCacheCurrentCredentials(): Promise<CloudSessionCredentials | null> {
   const loaded = await credentialSessionCache.adoptCurrent(() =>
     cloudLogin().credentials(),
@@ -1683,18 +1746,55 @@ function relayShareErrorCopy(
   }
 }
 
+type RelayShareRetainedDependentSetResult<T> =
+  | { kind: "success"; body: T }
+  | { kind: "dependents-changed"; body: unknown; status: number };
+
+type RelayShareRetainedNotFoundResult<T> =
+  | { kind: "success"; body: T }
+  | { kind: "missing" };
+
+type RelayShareJsonOptions =
+  | { retainDependentSetConflict: true }
+  | { retainNotFound: true };
+
+const RELAY_SHARE_FETCH_TIMEOUT_MS = 15_000;
+const relayShareFetch = relayFetchWithTimeout(RELAY_SHARE_FETCH_TIMEOUT_MS);
+
 async function relayShareJsonWithCredentials<T>(
   credentials: CloudSessionCredentials,
   path: string,
   init?: RequestInit,
-): Promise<T> {
+): Promise<T>;
+async function relayShareJsonWithCredentials<T>(
+  credentials: CloudSessionCredentials,
+  path: string,
+  init: RequestInit | undefined,
+  options: { retainDependentSetConflict: true },
+): Promise<RelayShareRetainedDependentSetResult<T>>;
+async function relayShareJsonWithCredentials<T>(
+  credentials: CloudSessionCredentials,
+  path: string,
+  init: RequestInit | undefined,
+  options: { retainNotFound: true },
+): Promise<RelayShareRetainedNotFoundResult<T>>;
+async function relayShareJsonWithCredentials<T>(
+  credentials: CloudSessionCredentials,
+  path: string,
+  init?: RequestInit,
+  options?: RelayShareJsonOptions,
+): Promise<
+  | T
+  | RelayShareRetainedDependentSetResult<T>
+  | RelayShareRetainedNotFoundResult<T>
+> {
   if (!credentials.relayUrl) {
     throw new Error("Reconnect dohc Cloud with a sync relay URL, then try again.");
   }
   const headers = new Headers(init?.headers);
   if (init?.body) headers.set("content-type", "application/json");
   headers.set("authorization", `Bearer ${credentials.token}`);
-  const response = await fetch(
+  const response = await relayShareFetch(
     `${normalizeServerUrl(credentials.relayUrl)}${path}`,
     { ...init, headers },
   );
@@ -1716,11 +1816,36 @@ async function relayShareJsonWithCredentials<T>(
       { sessionWasCurrent },
     );
   }
-  const data = (await response.json().catch(() => null)) as { ok?: boolean; error?: string; code?: string;
+  const data = (await response.json().catch(() => null)) as {
+    ok?: boolean;
+    error?: string;
+    code?: string;
+    [key: string]: unknown;
   }
     | null;
   if (!response.ok || data?.ok === false) {
+    if (
+      options &&
+      "retainDependentSetConflict" in options &&
+      response.status === 409 &&
+      data?.ok === false &&
+      data.code === "dependents_changed"
+    ) {
+      return { kind: "dependents-changed", body: data, status: response.status };
+    }
+    if (
+      options &&
+      "retainNotFound" in options &&
+      response.status === 404 &&
+      data?.ok === false &&
+      data.code === "not_found"
+    ) {
+      return { kind: "missing" };
+    }
     throw new Error(relayShareErrorCopy(response.status, data));
+  }
+  if (options) {
+    return { kind: "success", body: data as T };
   }
   return data as T;
 }
@@ -4904,19 +5029,17 @@ function dispatchTrayIcon() {
   return icon;
 }
 
-async function showOrCreateMainWindow(): Promise<void> {
+async function showOrCreateMainWindow(): Promise<BrowserWindow> {
   const existing = targetWindow(undefined);
   if (existing) {
-    if (existing.isMinimized()) existing.restore();
-    existing.show();
-    existing.focus();
-    return;
+    focusShareHandoffWindow(existing);
+    return existing;
   }
   const window = trackWorkspaceWindow(
     createMainWindow({ beforeRendererReload: prepareAfterRendererCrash }),
   );
-  window.show();
-  window.focus();
+  focusShareHandoffWindowWhenReady(window);
+  return window;
 }
 
 function rebuildDispatchTrayMenu(): void {
@@ -7084,6 +7207,42 @@ function registerIpcHandlers(
     await shell.openExternal(input.url);
   });
 
+  function assertNoShareHandoffArguments(args: unknown[]): void {
+    if (args.length !== 0) {
+      throw new Error("Share handoff actions do not accept arguments.");
+    }
+  }
+
+  ipcMain.handle(CHANNELS.getShareHandoffStatus, (event, ...args: unknown[]) => {
+    assertTrustedSender(event);
+    assertNoShareHandoffArguments(args);
+    return ShareHandoffStatusContract.parse(shareHandoffRedemption.status());
+  });
+
+  ipcMain.handle(CHANNELS.acceptShareHandoff, (event, ...args: unknown[]) => {
+    assertTrustedSender(event);
+    if (args.length !== 1) {
+      throw new Error("Share handoff acceptance requires one status identity.");
+    }
+    const input = AcceptShareHandoffPayload.parse(args[0]);
+    shareHandoffRedemption.accept(input.statusId);
+  });
+
+  ipcMain.handle(CHANNELS.retryShareHandoff, (event, ...args: unknown[]) => {
+    assertTrustedSender(event);
+    assertNoShareHandoffArguments(args);
+    shareHandoffRedemption.retry();
+  });
+
+  ipcMain.handle(CHANNELS.dismissShareHandoff, (event, ...args: unknown[]) => {
+    assertTrustedSender(event);
+    if (args.length !== 1) {
+      throw new Error("Share handoff dismissal requires one status identity.");
+    }
+    const input = DismissShareHandoffPayload.parse(args[0]);
+    shareHandoffRedemption.dismiss(input.statusId);
+  });
+
   ipcMain.handle(CHANNELS.cloudLoginStart, async (event, payload) => {
     assertTrustedSender(event);
     const input = CloudLoginStartPayload.parse(payload ?? {});
@@ -7514,6 +7673,43 @@ function registerIpcHandlers(
     return ListRelaySharesResult.parse({ granted, received });
   });
 
+  ipcMain.handle(CHANNELS.getRelayReceivedShare, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = GetRelayReceivedSharePayload.parse(payload);
+    await warmCredentialCache();
+    const credentials = cachedCredentials;
+    const credentialGeneration = credentialCacheGeneration;
+    if (!credentials) throw new RelaySessionError("Sign in to dohc Cloud first.");
+    const result = await awaitCredentialGeneration({
+      capturedGeneration: credentialGeneration,
+      currentGeneration: () => credentialCacheGeneration,
+      run: () =>
+        relayShareJsonWithCredentials<unknown>(
+          credentials,
+          `/sync/shares/${encodeURIComponent(input.shareId)}`,
+          undefined,
+          { retainNotFound: true },
+        ),
+    });
+    if (result.kind === "missing") {
+      return GetRelayReceivedShareResult.parse({ found: false });
+    }
+    const body = result.body;
+    const received = RelayShareReceivedRow.parse({
+      ...(body !== null && typeof body === "object" && !Array.isArray(body)
+        ? body
+        : {}),
+      shareCode: buildShareCode({
+        shareId: input.shareId,
+        relayUrl: credentials.relayUrl!,
+      }),
+    });
+    if (received.shareId !== input.shareId) {
+      throw new Error("Invalid exact received share response.");
+    }
+    return GetRelayReceivedShareResult.parse({ found: true, share: received });
+  });
+
   ipcMain.handle(CHANNELS.revokeRelayShare, async (event, payload) => {
     assertTrustedSender(event);
     const input = RevokeRelaySharePayload.parse(payload);
@@ -7521,6 +7717,196 @@ function registerIpcHandlers(
       method: "POST",
     });
     return undefined;
+  });
+
+  ipcMain.handle(CHANNELS.createRelayShareLink, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = CreateRelayShareLinkPayload.parse(payload);
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Sharing stopped because this window changed workspaces.",
+      async (operation) => {
+        operation.assertCurrent();
+        if (shareViewIsPresent(operation.workspace.shareView)) {
+          throw new Error(
+            "This is a shared view — only the original workspace can be shared.",
+          );
+        }
+        const { credentials, credentialGeneration } =
+          await remoteForWorkspace(operation.workspace);
+        operation.assertCurrent();
+        const relayResult = await awaitCredentialGeneration({
+          capturedGeneration: credentialGeneration,
+          currentGeneration: () => credentialCacheGeneration,
+          run: () => {
+            operation.assertCurrent();
+            return relayShareJsonWithCredentials<unknown>(
+              credentials,
+              `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/shares/links`,
+              {
+                method: "POST",
+                body: JSON.stringify(
+                  "paths" in input
+                    ? { paths: input.paths }
+                    : { versionId: input.versionId },
+                ),
+              },
+            );
+          },
+        });
+        operation.assertCurrent();
+        const parsed = RelayShareLinkCreateResponse.safeParse(relayResult);
+        if (!parsed.success) {
+          throw new Error(relayShareErrorCopy(500, null));
+        }
+        return CreateRelayShareLinkResult.parse(parsed.data);
+      },
+    );
+  });
+
+  ipcMain.handle(CHANNELS.listRelayShareLinks, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListRelayShareLinksPayload.parse(payload);
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Sharing stopped because this window changed workspaces.",
+      async (operation) => {
+        operation.assertCurrent();
+        const { credentials, credentialGeneration } =
+          await remoteForWorkspace(operation.workspace);
+        operation.assertCurrent();
+        const relayResult = await awaitCredentialGeneration({
+          capturedGeneration: credentialGeneration,
+          currentGeneration: () => credentialCacheGeneration,
+          run: () => {
+            operation.assertCurrent();
+            const path = `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/shares/links`;
+            return relayShareJsonWithCredentials<unknown>(
+              credentials,
+              `${path}${input.cursor ? `?cursor=${encodeURIComponent(input.cursor)}` : ""}`,
+            );
+          },
+        });
+        operation.assertCurrent();
+        const parsed = RelayShareLinkListResponse.safeParse(relayResult);
+        if (!parsed.success) {
+          throw new Error(relayShareErrorCopy(500, null));
+        }
+        return ListRelayShareLinksResult.parse(parsed.data);
+      },
+    );
+  });
+
+  ipcMain.handle(CHANNELS.rotateRelayShareLink, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = RotateRelayShareLinkPayload.parse(payload);
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Sharing stopped because this window changed workspaces.",
+      async (operation) => {
+        operation.assertCurrent();
+        const { credentials, credentialGeneration } =
+          await remoteForWorkspace(operation.workspace);
+        operation.assertCurrent();
+        const relayResult = await awaitCredentialGeneration({
+          capturedGeneration: credentialGeneration,
+          currentGeneration: () => credentialCacheGeneration,
+          run: () => {
+            operation.assertCurrent();
+            return relayShareJsonWithCredentials<unknown>(
+              credentials,
+              `/sync/shares/${encodeURIComponent(input.shareId)}/links/${encodeURIComponent(input.grantId)}/rotate`,
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  workspaceId: operation.workspace.workspaceId,
+                  expectedDependentGrantIds: input.expectedDependentGrantIds,
+                }),
+              },
+              { retainDependentSetConflict: true },
+            );
+          },
+        });
+        operation.assertCurrent();
+        if (relayResult.kind === "dependents-changed") {
+          const conflict = RelayShareLinkDependentConflict.safeParse(
+            relayResult.body,
+          );
+          if (!conflict.success) {
+            throw new Error(relayShareErrorCopy(relayResult.status, null));
+          }
+          return RotateRelayShareLinkResult.parse({
+            outcome: "dependents-changed",
+            dependents: conflict.data.dependents,
+          });
+        }
+        const rotated = RelayShareLinkRotateResponse.safeParse(relayResult.body);
+        if (!rotated.success) {
+          throw new Error(relayShareErrorCopy(500, null));
+        }
+        return RotateRelayShareLinkResult.parse({
+          outcome: "rotated",
+          url: rotated.data.url,
+        });
+      },
+    );
+  });
+
+  ipcMain.handle(CHANNELS.revokeRelayShareLink, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = RevokeRelayShareLinkPayload.parse(payload);
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Sharing stopped because this window changed workspaces.",
+      async (operation) => {
+        operation.assertCurrent();
+        const { credentials, credentialGeneration } =
+          await remoteForWorkspace(operation.workspace);
+        operation.assertCurrent();
+        const relayResult = await awaitCredentialGeneration({
+          capturedGeneration: credentialGeneration,
+          currentGeneration: () => credentialCacheGeneration,
+          run: () => {
+            operation.assertCurrent();
+            return relayShareJsonWithCredentials<unknown>(
+              credentials,
+              `/sync/shares/${encodeURIComponent(input.shareId)}/revoke`,
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  grantId: input.grantId,
+                  workspaceId: operation.workspace.workspaceId,
+                  expectedDependentGrantIds: input.expectedDependentGrantIds,
+                }),
+              },
+              { retainDependentSetConflict: true },
+            );
+          },
+        });
+        operation.assertCurrent();
+        if (relayResult.kind === "dependents-changed") {
+          const conflict = RelayShareLinkDependentConflict.safeParse(
+            relayResult.body,
+          );
+          if (!conflict.success) {
+            throw new Error(relayShareErrorCopy(relayResult.status, null));
+          }
+          return RevokeRelayShareLinkResult.parse({
+            outcome: "dependents-changed",
+            dependents: conflict.data.dependents,
+          });
+        }
+        const ended = RelayShareLinkEndResponse.safeParse(relayResult.body);
+        if (!ended.success) {
+          throw new Error(relayShareErrorCopy(500, null));
+        }
+        return RevokeRelayShareLinkResult.parse({ outcome: "ended" });
+      },
+    );
   });
 
   // --- Shared channels (MU-C4) --------------------------------------------
@@ -12218,6 +12604,20 @@ async function startRustEngineDaemon(): Promise<boolean> {
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
+  if (process.platform !== "darwin") {
+    if (receiveShareHandoffArguments(process.argv, shareHandoffIntentSlot)) {
+      shareHandoffRedemption.pendingCodeChanged();
+    }
+  }
+
+  app.on("open-url", (event, rawArgument) => {
+    event.preventDefault();
+    const accepted = receiveShareHandoffArguments([rawArgument], shareHandoffIntentSlot);
+    if (accepted) shareHandoffRedemption.pendingCodeChanged();
+    if (!accepted || !bootstrapComplete) return;
+    void showOrCreateMainWindow();
+  });
+
   app.on("open-file", (event, path) => {
     event.preventDefault();
     pendingOpenPaths.push(path);
@@ -12226,31 +12626,25 @@ if (!app.requestSingleInstanceLock()) {
     if (window) {
       void flushPendingOpenPaths(window);
     } else {
-      void showOrCreateMainWindow().then(() =>
-        flushPendingOpenPaths(targetWindow(undefined)),
+      void showOrCreateMainWindow().then((createdWindow) =>
+        flushPendingOpenPaths(createdWindow),
       );
     }
   });
 
   app.on("second-instance", (_event, argv) => {
+    const handoffIntent = classifyShareHandoffArguments(argv);
+    const accepted = receiveShareHandoffArguments(argv, shareHandoffIntentSlot);
+    if (accepted) shareHandoffRedemption.pendingCodeChanged();
+    const workspacePaths = collectOpenWorkspaceArgs(argv);
     if (!bootstrapComplete) {
-      pendingOpenPaths.push(...collectOpenWorkspaceArgs(argv));
+      pendingOpenPaths.push(...workspacePaths);
       return;
     }
-    const window = targetWindow(undefined);
-    if (window) {
-      if (window.isMinimized()) window.restore();
-      window.show();
-      window.focus();
-      void openWorkspacePaths(collectOpenWorkspaceArgs(argv), window);
-    } else {
-      void showOrCreateMainWindow().then(() =>
-        openWorkspacePaths(
-          collectOpenWorkspaceArgs(argv),
-          targetWindow(undefined),
-        ),
-      );
-    }
+    if (handoffIntent === "rejected" && workspacePaths.length === 0) return;
+    void showOrCreateMainWindow().then((window) =>
+      openWorkspacePaths(workspacePaths, window),
+    );
   });
 
   // Quit interception (#567 / #579 review, r10): a set-aside draft storage

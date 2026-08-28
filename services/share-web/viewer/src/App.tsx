@@ -22,6 +22,7 @@ import {
 
 const SESSION_HEADER = "x-dohc-link-session";
 const SESSION_PATH = /^\/s\/([A-Za-z0-9_-]{12})\/?$/u;
+const HANDOFF_CODE = /^[A-Za-z0-9_-]{43}$/u;
 const VIEW_HEARTBEAT_INTERVAL_MS = 4 * 60_000;
 const TERMINAL_HEARTBEAT_STATUSES = new Set([401, 403, 404]);
 export const MAX_LOG_PAGES = 200;
@@ -53,6 +54,55 @@ class ViewResponseError extends Error {
     super("refused");
   }
 }
+
+interface HandoffResponse {
+  ok: true;
+  code: string;
+  relayUrl: string;
+  expiresAtMs: number;
+}
+
+type HandoffState =
+  | "idle"
+  | "confirming"
+  | "opening"
+  | "opened"
+  | "not-found"
+  | "rate-limited"
+  | "retryable";
+
+function isCurrentHandoffResponse(
+  value: unknown,
+  nowMs: number,
+): value is HandoffResponse {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const response = value as Record<string, unknown>;
+  return Object.keys(response).sort().join(",") === "code,expiresAtMs,ok,relayUrl" &&
+    response.ok === true &&
+    typeof response.code === "string" &&
+    HANDOFF_CODE.test(response.code) &&
+    typeof response.relayUrl === "string" &&
+    response.relayUrl.length > 0 &&
+    response.relayUrl.length <= 2048 &&
+    typeof response.expiresAtMs === "number" &&
+    Number.isSafeInteger(response.expiresAtMs) &&
+    response.expiresAtMs > nowMs;
+}
+
+export const dohcNavigation = {
+  urlForCode(code: string, relayUrl: string): string {
+    if (!HANDOFF_CODE.test(code)) throw new Error("invalid handoff code");
+    if (relayUrl.length === 0 || relayUrl.length > 2048) {
+      throw new Error("invalid handoff relay coordinate");
+    }
+    return `dohc://open/${code}?relay=${encodeURIComponent(relayUrl)}`;
+  },
+  openCode(code: string, relayUrl: string): void {
+    location.assign(dohcNavigation.urlForCode(code, relayUrl));
+  },
+};
 
 type MarkdownPreview =
   | { status: "ready"; markdown: string }
@@ -575,6 +625,175 @@ function Unavailable() {
   return <main className="state"><p>This link isn't available.</p></main>;
 }
 
+function OpenInDohc(props: { session: string }) {
+  const [handoffState, setHandoffState] = useState<HandoffState>("idle");
+  const requestRef = useRef<AbortController | null>(null);
+  const attemptRef = useRef(0);
+
+  useEffect(() => () => {
+    attemptRef.current += 1;
+    requestRef.current?.abort();
+    requestRef.current = null;
+  }, [props.session]);
+
+  const mintAndOpen = useCallback(async () => {
+    const attempt = attemptRef.current + 1;
+    attemptRef.current = attempt;
+    requestRef.current?.abort();
+    const controller = new AbortController();
+    requestRef.current = controller;
+    const isCurrent = () =>
+      attemptRef.current === attempt && !controller.signal.aborted;
+    setHandoffState("opening");
+
+    let response: Response;
+    try {
+      response = await fetch("/api/handoff", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { [SESSION_HEADER]: props.session },
+        signal: controller.signal,
+      });
+    } catch {
+      if (isCurrent()) setHandoffState("retryable");
+      return;
+    }
+    if (!isCurrent()) return;
+    if (response.status === 404) {
+      setHandoffState("not-found");
+      return;
+    }
+    if (response.status === 429) {
+      setHandoffState("rate-limited");
+      return;
+    }
+    if (!response.ok) {
+      setHandoffState("retryable");
+      return;
+    }
+
+    let handoff: unknown;
+    try {
+      handoff = await response.json();
+    } catch {
+      if (isCurrent()) setHandoffState("retryable");
+      return;
+    }
+    if (!isCurrent()) return;
+    if (!isCurrentHandoffResponse(handoff, Date.now())) {
+      setHandoffState("retryable");
+      return;
+    }
+
+    requestRef.current = null;
+    setHandoffState("opened");
+    dohcNavigation.openCode(handoff.code, handoff.relayUrl);
+  }, [props.session]);
+
+  const cancelOpening = useCallback(() => {
+    requestRef.current?.abort();
+    requestRef.current = null;
+    setHandoffState("idle");
+  }, []);
+
+  if (handoffState === "idle") {
+    return (
+      <button
+        className="handoff-button primary"
+        type="button"
+        onClick={() => setHandoffState("confirming")}
+      >
+        Open in dohc
+      </button>
+    );
+  }
+  if (handoffState === "confirming") {
+    return (
+      <div className="handoff-panel">
+        <p>This opens the share in the dohc app on this computer.</p>
+        <p>
+          The person who shared it will see the email of the dohc account that
+          opens it. dohc asks that account to agree first.
+        </p>
+        <div className="handoff-buttons">
+          <button
+            className="handoff-button primary"
+            type="button"
+            onClick={() => void mintAndOpen()}
+          >
+            Agree and open
+          </button>
+          <button
+            className="handoff-button secondary"
+            type="button"
+            onClick={() => setHandoffState("idle")}
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
+  if (handoffState === "opening") {
+    return (
+      <div className="handoff-panel" aria-live="polite">
+        <p className="handoff-title">Opening in dohc…</p>
+        <p>Your browser may ask for permission to open dohc.</p>
+        <button
+          className="handoff-button secondary"
+          type="button"
+          onClick={cancelOpening}
+        >
+          Cancel
+        </button>
+      </div>
+    );
+  }
+  if (handoffState === "not-found") {
+    return (
+      <div className="handoff-panel" role="alert">
+        <p>
+          This link can't open in dohc right now. Reload the page to check the
+          share.
+        </p>
+      </div>
+    );
+  }
+  if (handoffState === "rate-limited") {
+    return (
+      <div className="handoff-panel" role="alert">
+        <p>Too many attempts. Wait a minute, then choose Open in dohc again.</p>
+        <button
+          className="handoff-button secondary"
+          type="button"
+          onClick={() => void mintAndOpen()}
+        >
+          Open in dohc
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div
+      className="handoff-panel"
+      {...(handoffState === "retryable" ? { role: "alert" } : {})}
+    >
+      <p>
+        {handoffState === "opened"
+          ? "If dohc didn't open, install it, then choose Try again."
+          : "dohc couldn't prepare the app handoff. Check your connection, then choose Try again."}
+      </p>
+      <button
+        className="handoff-button secondary"
+        type="button"
+        onClick={() => void mintAndOpen()}
+      >
+        Try again
+      </button>
+    </div>
+  );
+}
+
 export function App() {
   const [state, setState] = useState<ViewerState>({ status: "loading" });
   const [selectedPath, setSelectedPath] = useState("");
@@ -731,7 +950,10 @@ export function App() {
           <p className="eyebrow">Shared by a dohc user</p>
           <h1>{selected?.path ?? "Shared files"}</h1>
         </div>
-        <span className="badge">View</span>
+        <div className="header-actions">
+          <span className="badge">View</span>
+          <OpenInDohc key={state.session} session={state.session} />
+        </div>
       </header>
       <Freshness
         lastSettledAtMs={state.meta.lastSettledAtMs}

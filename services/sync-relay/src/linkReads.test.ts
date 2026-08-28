@@ -8,8 +8,9 @@ import {
   type FileAccumulator,
   type RelayOp,
 } from "../../share-web/viewer/src/model";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  hashLinkBearer,
   LinkReadRateLimiter,
   LINK_GRANT_LOG_READ_BUCKET_CAPACITY,
   LINK_GRANT_READ_BUCKET_CAPACITY,
@@ -17,6 +18,7 @@ import {
   LINK_READ_BUCKET_CAPACITY,
   LINK_SESSION_TTL_MS,
 } from "./linkSecurity";
+import { linkSecret } from "./linkTestHelpers";
 import { filterOpForShare, type ShareSelector } from "./shareFilter";
 import {
   createSyncRelayHandler,
@@ -92,6 +94,7 @@ function handler(
     linkLogReadRateLimiter?: LinkReadRateLimiter;
     linkGrantLogReadRateLimiter?: LinkReadRateLimiter;
     linkCapabilityReadFallbackPageSize?: number;
+    newLinkBearer?: () => string;
   } = {},
 ): SyncRelayHandler {
   let id = 0;
@@ -107,12 +110,14 @@ function handler(
     newGrantId: () => `grant-${id++}`,
     newId: () => `id-${id++}`,
     linkKey: LINK_KEY,
+    shareWebOrigin: "https://share.example.test",
     linkReadRateLimiter: options.linkReadRateLimiter,
     linkGrantReadRateLimiter: options.linkGrantReadRateLimiter,
     linkLogReadRateLimiter: options.linkLogReadRateLimiter,
     linkGrantLogReadRateLimiter: options.linkGrantLogReadRateLimiter,
     linkCapabilityReadFallbackPageSize:
       options.linkCapabilityReadFallbackPageSize,
+    newLinkBearer: options.newLinkBearer,
   };
   return createSyncRelayHandler(handlerOptions);
 }
@@ -141,6 +146,28 @@ function jsonBody(body: unknown): RequestInit {
 async function json(response: Response): Promise<Record<string, unknown>> {
   return (await response.json()) as Record<string, unknown>;
 }
+
+describe("linkSecret", () => {
+  const secret = "a".repeat(43);
+
+  it("returns the fragment from a canonical minted URL", () => {
+    expect(linkSecret(`https://share.example.test/s/#${secret}`)).toBe(secret);
+  });
+
+  it.each([
+    ["a non-string", null],
+    ["a path without the trailing slash", `https://share.example.test/s#${secret}`],
+    ["a nested path", `https://share.example.test/s/more/#${secret}`],
+    ["an empty query marker", `https://share.example.test/s/?#${secret}`],
+    ["a query value", `https://share.example.test/s/?source=test#${secret}`],
+    ["a missing fragment", "https://share.example.test/s/"],
+    ["a short fragment", `https://share.example.test/s/#${"a".repeat(42)}`],
+    ["a long fragment", `https://share.example.test/s/#${"a".repeat(44)}`],
+    ["a non-base64url fragment", `https://share.example.test/s/#${"a".repeat(42)}+`],
+  ])("rejects %s", (_shape, value) => {
+    expect(() => linkSecret(value)).toThrow();
+  });
+});
 
 function sha256(content: string): string {
   return createHash("sha256").update(content).digest("hex");
@@ -283,14 +310,15 @@ async function createLink(
       ),
     ),
   );
+  const secret = linkSecret(link.url);
   const exchange = await json(
-    await h(request(null, "/sync/link-exchange", jsonBody({ secret: link.secret }))),
+    await h(request(null, "/sync/link-exchange", jsonBody({ secret }))),
   );
   return {
     capability: String(exchange.capabilityToken),
     exchange,
     grantId: String(link.grantId),
-    secret: String(link.secret),
+    secret,
     shareId: String(share.shareId),
   };
 }
@@ -400,6 +428,21 @@ async function denialBytes(response: Response): Promise<string> {
   return `${response.status}:${await response.text()}`;
 }
 
+async function ownerLinkUsage(
+  h: SyncRelayHandler,
+  grantId: string,
+): Promise<{ lastUsedAtMs: unknown; urlIssuedAtMs: unknown }> {
+  const response = await h(request(OWNER, `/sync/${WORKSPACE}/shares/links`));
+  expect(response.status).toBe(200);
+  const links = (await json(response)).links as Array<Record<string, unknown>>;
+  const row = links.find((candidate) => candidate.grantId === grantId);
+  expect(row).toBeDefined();
+  return {
+    lastUsedAtMs: row!.lastUsedAtMs,
+    urlIssuedAtMs: row!.urlIssuedAtMs,
+  };
+}
+
 async function capabilityRefusalBody(response: Response): Promise<string> {
   expect(response.status).toBe(401);
   const body = await response.text();
@@ -434,6 +477,35 @@ describe("relay capability reads", () => {
     expect(LINK_GRANT_LOG_READ_BUCKET_CAPACITY).toBe(
       LINK_LOG_READ_BUCKET_CAPACITY * 4,
     );
+  });
+
+  it("does not update durable link usage on metadata, log, or blob reads", async () => {
+    const storage = await newStorage();
+    let now = 2_000;
+    const h = handler(storage, { nowMs: () => now });
+    const seeded = await seed(h);
+    expect(await ownerLinkUsage(h, seeded.grantId)).toEqual({
+      lastUsedAtMs: 2_000,
+      urlIssuedAtMs: 2_000,
+    });
+
+    now = 5_000;
+    const metadata = await h(linkRequest(seeded.capability, "/sync/link/share"));
+    expect(metadata.status).toBe(200);
+    await metadata.text();
+    const log = await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100"));
+    expect(log.status).toBe(200);
+    await log.text();
+    const blob = await h(
+      linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`),
+    );
+    expect(blob.status).toBe(200);
+    await blob.text();
+
+    expect(await ownerLinkUsage(h, seeded.grantId)).toEqual({
+      lastUsedAtMs: 2_000,
+      urlIssuedAtMs: 2_000,
+    });
   });
 
   it("bounds retained link blob bytes per grant and releases every stream charge", async () => {
@@ -504,41 +576,80 @@ describe("relay capability reads", () => {
   it.each([
     [
       "keyed revocation",
-      async (h: SyncRelayHandler, shareId: string, grantId: string) =>
+      async (
+        h: SyncRelayHandler,
+        shareId: string,
+        grantId: string,
+        _storage: SyncRelayStorage,
+      ) =>
         await h(
           request(
             OWNER,
             `/sync/shares/${shareId}/revoke`,
-            jsonBody({ grantId }),
+            jsonBody({
+              grantId,
+              workspaceId: WORKSPACE,
+              expectedDependentGrantIds: [],
+            }),
           ),
         ),
     ],
     [
       "whole-share revocation",
-      async (h: SyncRelayHandler, shareId: string) =>
+      async (
+        h: SyncRelayHandler,
+        shareId: string,
+        _grantId: string,
+        _storage: SyncRelayStorage,
+      ) =>
         await h(request(OWNER, `/sync/shares/${shareId}/revoke`, { method: "POST" })),
     ],
     [
       "rotation",
-      async (h: SyncRelayHandler, shareId: string, grantId: string) =>
+      async (
+        h: SyncRelayHandler,
+        shareId: string,
+        grantId: string,
+        _storage: SyncRelayStorage,
+      ) =>
         await h(
           request(
             OWNER,
             `/sync/shares/${shareId}/links/${grantId}/rotate`,
-            { method: "POST" },
+            jsonBody({ workspaceId: WORKSPACE, expectedDependentGrantIds: [] }),
           ),
         ),
     ],
     [
       "retuning",
-      async (h: SyncRelayHandler, shareId: string, grantId: string) =>
-        await h(
+      async (
+        h: SyncRelayHandler,
+        shareId: string,
+        grantId: string,
+        storage: SyncRelayStorage,
+      ) => {
+        expect(
+          storage.retuneShareGrant({
+            shareId,
+            grantId,
+            access: "comment",
+            changedAtMs: 2_001,
+            expectedDependentGrantIds: [],
+            guard: () => undefined,
+            mintCredential: () => ({
+              credentialId: "storage-seeded-comment-stream-credential",
+              secretHash: "storage-seeded-comment-stream-hash",
+            }),
+          }),
+        ).toMatchObject({ ok: true, grant: { access: "comment" } });
+        return await h(
           request(
             OWNER,
             `/sync/shares/${shareId}/links/${grantId}/retune`,
-            jsonBody({ access: "comment" }),
+            jsonBody({ access: "view", expectedDependentGrantIds: [] }),
           ),
-        ),
+        );
+      },
     ],
   ] as const)(
     "terminates an open link blob stream after %s without affecting another grant",
@@ -578,7 +689,7 @@ describe("relay capability reads", () => {
       expect(targetFirst.value.byteLength).toBe(64 * 1024);
       expect(untouchedFirst.value.byteLength).toBe(64 * 1024);
 
-      const changed = await transition(h, target.shareId, target.grantId);
+      const changed = await transition(h, target.shareId, target.grantId, storage);
       expect(changed.status).toBe(200);
 
       const targetOutcome = await targetReader.read().then(
@@ -597,6 +708,150 @@ describe("relay capability reads", () => {
         untouchedFirst.value,
       );
       expect(new TextDecoder().decode(untouchedBytes)).toBe(content);
+    },
+  );
+
+  it.each(["rotate", "retune"] as const)(
+    "refuses %s when owner standing changes before commit without writes or terminated reads",
+    async (operation) => {
+      const storage = await newStorage();
+      let ownershipAnswers: boolean[] | null = null;
+      const ownershipStorage = new Proxy(storage, {
+        get(target, property, receiver) {
+          if (property === "workspaceIsOwnedBy") {
+            return (workspaceId: string, ownerUserId: string) =>
+              ownershipAnswers === null
+                ? target.workspaceIsOwnedBy(workspaceId, ownerUserId)
+                : (ownershipAnswers.shift() ?? false);
+          }
+          const value = Reflect.get(target, property, receiver) as unknown;
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      let bearerByte = 1;
+      const newLinkBearer = vi.fn(() =>
+        Buffer.alloc(32, bearerByte++).toString("base64url"),
+      );
+      const h = createSyncRelayHandler({
+        storage: ownershipStorage,
+        resolveActor(request: Request, workspaceId: string) {
+          const match = /^Bearer user:([^ ]+)$/u.exec(
+            request.headers.get("authorization") ?? "",
+          );
+          if (!match) {
+            throw Object.assign(new Error("unauthorized"), { statusCode: 401 });
+          }
+          return { userId: match[1]!, workspaceId };
+        },
+        nowMs: () => 2_000,
+        newShareId: () => "share-owner-race",
+        newGrantId: (() => {
+          let id = 0;
+          return () => `grant-owner-race-${id++}`;
+        })(),
+        newId: (() => {
+          let id = 0;
+          return () => `id-owner-race-${id++}`;
+        })(),
+        linkKey: LINK_KEY,
+        shareWebOrigin: "https://share.example.test",
+        newLinkBearer,
+      });
+      const content = `${"a".repeat(64 * 1024)}${"b".repeat(64 * 1024)}${"c".repeat(64 * 1024)}`;
+      expect(
+        (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
+      ).toBe(200);
+      const blobSha = await putBlob(h, content);
+      await appendMoments(h, [moment(0, "docs/large.bin", content, 1_100)]);
+      const target = await createLink(h, { paths: ["docs"], access: "view" });
+      let capability = target.capability;
+
+      if (operation === "retune") {
+        expect(
+          storage.retuneShareGrant({
+            shareId: target.shareId,
+            grantId: target.grantId,
+            access: "comment",
+            changedAtMs: 1_900,
+            expectedDependentGrantIds: [],
+            guard: () => undefined,
+            mintCredential: () => ({
+              credentialId: "credential-owner-race-comment",
+              secretHash: hashLinkBearer("comment-owner-race-secret", LINK_KEY),
+            }),
+          }),
+        ).toMatchObject({ ok: true, grant: { access: "comment", generation: 2 } });
+        capability = Buffer.alloc(32, 200).toString("base64url");
+        expect(
+          storage.mintLinkSession({
+            session: {
+              sessionId: "session-owner-race-comment",
+              capabilityHash: hashLinkBearer(capability, LINK_KEY),
+              grantId: target.grantId,
+              generation: 2,
+              mintedAtMs: 1_901,
+              expiresAtMs: 2_000 + LINK_SESSION_TTL_MS,
+            },
+          }),
+        ).toBe(true);
+      }
+
+      const blobResponse = await h(
+        linkRequest(capability, `/sync/link/blobs/${blobSha}`),
+      );
+      expect(blobResponse.status).toBe(200);
+      const reader = blobResponse.body!.getReader();
+      try {
+        const first = await reader.read();
+        expect(first.done).toBe(false);
+        if (first.done) return;
+        expect(first.value.byteLength).toBe(64 * 1024);
+
+        const beforeGrant = storage.getShareGrant(target.grantId);
+        const beforeCredential = storage.getCurrentLinkCredential(target.grantId);
+        const capabilityHash = hashLinkBearer(capability, LINK_KEY);
+        const beforeSession = storage.findLinkSessionByCapabilityHash(capabilityHash);
+        const bearerCalls = newLinkBearer.mock.calls.length;
+        const route = `/sync/shares/${target.shareId}/links/${target.grantId}/${operation}`;
+        const missingRoute = `/sync/shares/share-missing/links/grant-missing/${operation}`;
+        const body =
+          operation === "rotate"
+            ? { workspaceId: WORKSPACE, expectedDependentGrantIds: [] }
+            : { access: "view", expectedDependentGrantIds: [] };
+        const missing = await denialBytes(
+          await h(request(OWNER, missingRoute, jsonBody(body))),
+        );
+
+        ownershipAnswers = [true, false];
+        const refused = await h(request(OWNER, route, jsonBody(body)));
+        expect(await denialBytes(refused)).toBe(missing);
+        expect(ownershipAnswers).toEqual([]);
+        ownershipAnswers = null;
+
+        expect(storage.getShareGrant(target.grantId)).toEqual(beforeGrant);
+        expect(storage.getCurrentLinkCredential(target.grantId)).toEqual(
+          beforeCredential,
+        );
+        expect(storage.findLinkSessionByCapabilityHash(capabilityHash)).toEqual(
+          beforeSession,
+        );
+        expect(newLinkBearer).toHaveBeenCalledTimes(bearerCalls);
+        expect((await h(linkRequest(capability, "/sync/link/share"))).status).toBe(200);
+        expect(new TextDecoder().decode(await readRemainingBytes(reader, first.value))).toBe(
+          content,
+        );
+
+        ownershipAnswers = [true, true];
+        expect((await h(request(OWNER, route, jsonBody(body)))).status).toBe(200);
+        expect(ownershipAnswers).toEqual([]);
+        ownershipAnswers = null;
+      } finally {
+        try {
+          await reader.cancel();
+        } catch {
+          // A successful transition can terminate an already-consumed stream.
+        }
+      }
     },
   );
 
@@ -1913,7 +2168,7 @@ describe("relay capability reads", () => {
           request(
             OWNER,
             `/sync/shares/share-0/links/${first.grantId}/rotate`,
-            { method: "POST" },
+            jsonBody({ workspaceId: WORKSPACE, expectedDependentGrantIds: [] }),
           ),
         )
       ).status,
@@ -1932,7 +2187,11 @@ describe("relay capability reads", () => {
       ),
     );
     const secondExchange = await json(
-      await h(request(null, "/sync/link-exchange", jsonBody({ secret: secondLink.secret }))),
+      await h(
+        request(null, "/sync/link-exchange", {
+          ...jsonBody({ secret: linkSecret(secondLink.url) }),
+        }),
+      ),
     );
     expect(
       (
@@ -1940,7 +2199,11 @@ describe("relay capability reads", () => {
           request(
             OWNER,
             "/sync/shares/share-0/revoke",
-            jsonBody({ grantId: secondLink.grantId }),
+            jsonBody({
+              grantId: secondLink.grantId,
+              workspaceId: WORKSPACE,
+              expectedDependentGrantIds: [],
+            }),
           ),
         )
       ).status,
@@ -1961,7 +2224,11 @@ describe("relay capability reads", () => {
       ),
     );
     const thirdExchange = await json(
-      await h(request(null, "/sync/link-exchange", jsonBody({ secret: thirdLink.secret }))),
+      await h(
+        request(null, "/sync/link-exchange", {
+          ...jsonBody({ secret: linkSecret(thirdLink.url) }),
+        }),
+      ),
     );
     now += LINK_SESSION_TTL_MS;
     expect(

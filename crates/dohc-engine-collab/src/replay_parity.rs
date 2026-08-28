@@ -216,6 +216,285 @@ impl WireStructure {
     }
 }
 
+/// Append-stable base facts consumed by replay-parity checks 1-3.
+///
+/// This is the cache companion to the byte-replay-identical writer document.
+/// Although called the integrated frontier, it deliberately includes every
+/// accepted candidate, including one still parked by yrs: `encode_full_state`
+/// includes those facts, while the separately re-encoded pending scan supplies
+/// their current partition membership to the gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IntegratedFrontier {
+    identities: BTreeMap<ClientID, BTreeMap<u32, ClockIdentity>>,
+    unsafe_boundaries: BTreeSet<ID>,
+    delete_coverage: IdSet,
+    /// A valid admitted lineage cannot have this intersection. Retaining the
+    /// derived bit keeps the hot check exact without re-walking every historic
+    /// delete range on each append.
+    has_unsafe_deletion_endpoint: bool,
+}
+
+/// The append-stable subset of an accepted candidate's already-computed v1
+/// scan. It is carried through the transaction probe and folded only after the
+/// durable append commits.
+pub(crate) struct IntegratedFrontierDelta {
+    identities: BTreeMap<ClientID, BTreeMap<u32, ClockIdentity>>,
+    unsafe_boundaries: BTreeSet<ID>,
+    delete_coverage: IdSet,
+}
+
+impl IntegratedFrontier {
+    fn from_structure(structure: WireStructure) -> Self {
+        let delete_coverage = id_set_from_ranges(&structure.deleted_ranges);
+        let deletion_boundaries = canonical_deletion_boundaries(&delete_coverage);
+        let has_unsafe_deletion_endpoint = deletion_boundaries
+            .iter()
+            .any(|boundary| structure.unsafe_boundaries.contains(boundary));
+        IntegratedFrontier {
+            identities: structure.identities,
+            unsafe_boundaries: structure.unsafe_boundaries,
+            delete_coverage,
+            has_unsafe_deletion_endpoint,
+        }
+    }
+
+    pub(crate) fn from_full_state_bytes(bytes: &[u8]) -> Result<Self, CollabError> {
+        scan_v1(bytes).map(Self::from_structure)
+    }
+
+    /// Advance from one accepted candidate in work proportional to the
+    /// candidate facts (plus the identities/interiors the candidate retires).
+    pub(crate) fn fold(&mut self, delta: IntegratedFrontierDelta) {
+        // An older dangling delete may already cover newly delivered content.
+        // Never resurrect those facts while the dependency integrates.
+        for (client, identities) in delta.identities {
+            let established = self.identities.entry(client).or_default();
+            for (clock, identity) in identities {
+                let id = ID::new(client, clock);
+                if !self.delete_coverage.contains(&id) {
+                    established.insert(clock, identity);
+                }
+            }
+        }
+        self.identities
+            .retain(|_, identities| !identities.is_empty());
+        for boundary in delta.unsafe_boundaries {
+            if !self.delete_coverage.contains(&boundary) {
+                self.unsafe_boundaries.insert(boundary);
+            }
+        }
+
+        // A newly accepted delete retires established facts by clock range.
+        // Range queries avoid a document-wide `retain` for a small deletion.
+        for (client, ranges) in delta.delete_coverage.iter() {
+            if let Some(identities) = self.identities.get_mut(client) {
+                for range in ranges.iter() {
+                    let retired: Vec<u32> = identities
+                        .range(range.clone())
+                        .map(|(&clock, _)| clock)
+                        .collect();
+                    for clock in retired {
+                        identities.remove(&clock);
+                    }
+                }
+            }
+            for range in ranges.iter() {
+                let retired: Vec<ID> = self
+                    .unsafe_boundaries
+                    .range(ID::new(*client, range.start)..ID::new(*client, range.end))
+                    .copied()
+                    .collect();
+                for boundary in retired {
+                    self.unsafe_boundaries.remove(&boundary);
+                }
+            }
+        }
+        self.identities
+            .retain(|_, identities| !identities.is_empty());
+        self.delete_coverage.merge_with(delta.delete_coverage);
+
+        // The gate admitted the pre-delete union against every raw endpoint.
+        // Canonical union endpoints are a subset of those outer endpoints, and
+        // covered unsafe points have just been retired.
+        self.has_unsafe_deletion_endpoint = false;
+    }
+
+    /// Candidate-oriented equivalent of [`content_parity_conflict`]. Ordinary
+    /// appends probe only the clocks they claim instead of traversing every
+    /// established live identity.
+    fn content_parity_conflict(&self, candidate: &WireStructure) -> bool {
+        for (client, candidate_identities) in &candidate.identities {
+            let Some(established) = self.identities.get(client) else {
+                continue;
+            };
+            for (clock, candidate_identity) in candidate_identities {
+                if established
+                    .get(clock)
+                    .is_some_and(|identity| identity != candidate_identity)
+                {
+                    return true;
+                }
+            }
+        }
+
+        // The cold predicate gives a live identity priority if a malformed wire
+        // claims both live content and a tombstone at the same clock. Preserve
+        // that order exactly here.
+        for (client, tombstones) in &candidate.tombstone_ranges {
+            let Some(established) = self.identities.get(client) else {
+                continue;
+            };
+            for &(start, end) in tombstones {
+                for (&clock, _) in established.range(start..end) {
+                    if candidate
+                        .identities
+                        .get(client)
+                        .is_some_and(|identities| identities.contains_key(&clock))
+                    {
+                        continue;
+                    }
+                    if !candidate.delete_set_covers(*client, clock) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn deletion_endpoint_contains(&self, id: &ID) -> bool {
+        self.delete_coverage.get(&id.client).is_some_and(|ranges| {
+            ranges
+                .iter()
+                .any(|(range, ())| range.start == id.clock || range.end == id.clock)
+        })
+    }
+
+    fn deletion_boundaries(&self) -> Vec<ID> {
+        canonical_deletion_boundaries(&self.delete_coverage)
+    }
+
+    pub(crate) fn approx_bytes(&self) -> usize {
+        let identities = self
+            .identities
+            .values()
+            .flat_map(BTreeMap::values)
+            .map(|identity| {
+                std::mem::size_of::<u32>()
+                    + std::mem::size_of::<ClockIdentity>()
+                    + match identity {
+                        ClockIdentity::StringUnit(_) => 0,
+                        ClockIdentity::Typed { payload, .. } => payload.len(),
+                    }
+            })
+            .sum::<usize>();
+        let identity_clients = self.identities.len() * std::mem::size_of::<ClientID>();
+        let unsafe_boundaries = self.unsafe_boundaries.len() * std::mem::size_of::<ID>();
+        let delete_ranges = self
+            .delete_coverage
+            .iter()
+            .map(|(_, ranges)| {
+                std::mem::size_of::<ClientID>()
+                    + ranges.len() * std::mem::size_of::<std::ops::Range<u32>>()
+            })
+            .sum::<usize>();
+        std::mem::size_of::<Self>()
+            .saturating_add(identity_clients)
+            .saturating_add(identities)
+            .saturating_add(unsafe_boundaries)
+            .saturating_add(delete_ranges)
+    }
+
+    /// FR1-VALID: fail loudly outside the gate's unwind containment on every
+    /// cached-local serve in test/debug builds.
+    #[cfg(any(test, debug_assertions))]
+    pub(crate) fn assert_matches_doc(&self, doc: &Ydoc) -> Result<(), CollabError> {
+        let fresh = scan_v1(&doc.encode_full_state())?;
+        assert_eq!(
+            self.identities, fresh.identities,
+            "FR1-VALID violated: frontier identities diverge from fresh base scan"
+        );
+        assert_eq!(
+            self.unsafe_boundaries, fresh.unsafe_boundaries,
+            "FR1-VALID violated: frontier unsafe interiors diverge from fresh base scan"
+        );
+        assert_eq!(
+            self.deletion_boundaries(),
+            fresh.deletion_boundaries,
+            "FR1-VALID violated: frontier deletion endpoints diverge from fresh base scan"
+        );
+        Ok(())
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub(crate) fn matches_doc(&self, doc: &Ydoc) -> Result<bool, CollabError> {
+        let fresh = scan_v1(&doc.encode_full_state())?;
+        Ok(self.identities == fresh.identities
+            && self.unsafe_boundaries == fresh.unsafe_boundaries
+            && self.deletion_boundaries() == fresh.deletion_boundaries)
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub(crate) fn fact_counts(&self) -> (usize, usize, usize) {
+        (
+            self.identities.values().map(BTreeMap::len).sum(),
+            self.unsafe_boundaries.len(),
+            self.deletion_boundaries().len(),
+        )
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub(crate) fn poison_identity_for_test(&mut self) {
+        let Some((_, identities)) = self.identities.iter_mut().next() else {
+            panic!("frontier poison seam requires at least one live identity");
+        };
+        let clock = *identities
+            .keys()
+            .next()
+            .expect("frontier poison seam requires at least one live identity");
+        identities.remove(&clock);
+    }
+}
+
+impl IntegratedFrontierDelta {
+    fn from_structure(structure: WireStructure) -> Self {
+        let mut delete_coverage = id_set_from_ranges(&structure.deleted_ranges);
+        // Integrating `ContentDeleted` itself marks that clock range deleted in
+        // the store, even when a previously unknown bare tombstone was not also
+        // listed in the candidate wire's delete set. A later full-state encode
+        // therefore emits both sources as canonical delete coverage.
+        delete_coverage.merge_with(id_set_from_ranges(&structure.tombstone_ranges));
+        IntegratedFrontierDelta {
+            identities: structure.identities,
+            unsafe_boundaries: structure.unsafe_boundaries,
+            delete_coverage,
+        }
+    }
+}
+
+fn id_set_from_ranges(ranges: &BTreeMap<ClientID, Vec<(u32, u32)>>) -> IdSet {
+    let mut coverage = IdSet::new();
+    for (&client, ranges) in ranges {
+        for &(start, end) in ranges {
+            if start < end {
+                coverage.insert(ID::new(client, start), end - start);
+            }
+        }
+    }
+    coverage
+}
+
+fn canonical_deletion_boundaries(coverage: &IdSet) -> Vec<ID> {
+    let mut boundaries = Vec::new();
+    for (client, ranges) in coverage.iter() {
+        for range in ranges.iter() {
+            boundaries.push(ID::new(*client, range.start));
+            boundaries.push(ID::new(*client, range.end));
+        }
+    }
+    boundaries
+}
+
 /// Sort and coalesce half-open `[start, end)` ranges in place: drop empty
 /// ranges (they cover nothing), sort by start, and merge overlapping or
 /// adjacent ranges. Membership ("does any range cover this clock") is EXACTLY
@@ -284,7 +563,7 @@ pub(crate) fn with_armed_gate<T>(f: impl FnOnce() -> T) -> T {
 /// and the durable store is untouched here, so returning `Err` rolls the caller's
 /// transaction back cleanly.
 pub fn validate_replay_parity(base: &Ydoc, candidate: &[u8]) -> Result<(), CollabError> {
-    validate_replay_parity_with_scratch(base, candidate).map(drop)
+    validate_replay_parity_contained(base, candidate, None).map(drop)
 }
 
 /// [`validate_replay_parity`] plus the isolated post-candidate document the
@@ -296,8 +575,81 @@ pub fn validate_replay_parity_with_scratch(
     base: &Ydoc,
     candidate: &[u8],
 ) -> Result<Ydoc, CollabError> {
+    validate_replay_parity_contained(base, candidate, None).map(|validation| validation.scratch)
+}
+
+pub(crate) struct CachedLocalValidation {
+    pub(crate) scratch: Ydoc,
+    pub(crate) candidate: IntegratedFrontierDelta,
+    pub(crate) rebuilt_frontier: Option<IntegratedFrontier>,
+}
+
+/// Cached-local gate form. `Some(frontier)` substitutes only checks 1-3's base
+/// contribution; pending and check 4 remain byte-for-byte on their cold path.
+pub(crate) fn validate_replay_parity_for_cached_local(
+    base: &Ydoc,
+    frontier: Option<&IntegratedFrontier>,
+    candidate: &[u8],
+) -> Result<CachedLocalValidation, CollabError> {
+    let GateValidation {
+        scratch,
+        candidate_structure,
+        base_structure,
+    } = validate_replay_parity_contained(base, candidate, frontier)?;
+    Ok(CachedLocalValidation {
+        scratch,
+        candidate: IntegratedFrontierDelta::from_structure(candidate_structure),
+        rebuilt_frontier: base_structure.map(IntegratedFrontier::from_structure),
+    })
+}
+
+/// Cold gate form used only to keep a resident cache companion aligned after a
+/// non-local commit. It returns the gate's existing scratch for same-envelope
+/// projection or indexing, but does not build or serve a frontier.
+pub(crate) fn validate_replay_parity_with_delta(
+    base: &Ydoc,
+    candidate: &[u8],
+) -> Result<(Ydoc, IntegratedFrontierDelta), CollabError> {
+    let validation = validate_replay_parity_contained(base, candidate, None)?;
+    Ok((
+        validation.scratch,
+        IntegratedFrontierDelta::from_structure(validation.candidate_structure),
+    ))
+}
+
+/// Cold with-scratch counterpart for ordinary remote projection. The scratch
+/// remains the projection document and is never promoted into the writer cache.
+pub(crate) fn validate_replay_parity_with_scratch_and_delta(
+    base: &Ydoc,
+    candidate: &[u8],
+) -> Result<(Ydoc, IntegratedFrontierDelta, IntegratedFrontier), CollabError> {
+    let validation = validate_replay_parity_contained(base, candidate, None)?;
+    Ok((
+        validation.scratch,
+        IntegratedFrontierDelta::from_structure(validation.candidate_structure),
+        IntegratedFrontier::from_structure(
+            validation
+                .base_structure
+                .expect("a cold gate always scans its base"),
+        ),
+    ))
+}
+
+struct GateValidation {
+    scratch: Ydoc,
+    candidate_structure: WireStructure,
+    /// Present only on the cold path, where the scan can also seed a frontier
+    /// without re-scanning the base after commit.
+    base_structure: Option<WireStructure>,
+}
+
+fn validate_replay_parity_contained(
+    base: &Ydoc,
+    candidate: &[u8],
+    frontier: Option<&IntegratedFrontier>,
+) -> Result<GateValidation, CollabError> {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        validate_replay_parity_inner(base, candidate)
+        validate_replay_parity_inner(base, frontier, candidate)
     }));
     match outcome {
         Ok(result) => result,
@@ -307,7 +659,11 @@ pub fn validate_replay_parity_with_scratch(
     }
 }
 
-fn validate_replay_parity_inner(base: &Ydoc, candidate: &[u8]) -> Result<Ydoc, CollabError> {
+fn validate_replay_parity_inner(
+    base: &Ydoc,
+    frontier: Option<&IntegratedFrontier>,
+    candidate: &[u8],
+) -> Result<GateValidation, CollabError> {
     #[cfg(test)]
     if PANIC_INJECT.with(std::cell::Cell::get) {
         panic!("injected replay-gate unwind for fail-closed test");
@@ -324,7 +680,11 @@ fn validate_replay_parity_inner(base: &Ydoc, candidate: &[u8]) -> Result<Ydoc, C
     // on this hot path.
     let candidate_structure = scan_v1(candidate)?;
     let base_full = base.encode_full_state();
-    let base_structure = scan_v1(&base_full)?;
+    let base_structure = if frontier.is_none() {
+        Some(scan_v1(&base_full)?)
+    } else {
+        None
+    };
     let pending_bytes = base.pending_update_v1();
     let pending_structure = match &pending_bytes {
         Some(bytes) => scan_v1(bytes)?,
@@ -346,7 +706,17 @@ fn validate_replay_parity_inner(base: &Ydoc, candidate: &[u8]) -> Result<Ydoc, C
     // candidate's delete-set) is a hostile redefinition. No honest peer ever
     // redefines a `(client, clock)` it has already used as LIVE content, so
     // this can only reject a hostile/corrupt input.
-    if content_parity_conflict(&candidate_structure, &base_structure.identities)
+    let base_content_conflict = match frontier {
+        Some(frontier) => frontier.content_parity_conflict(&candidate_structure),
+        None => content_parity_conflict(
+            &candidate_structure,
+            &base_structure
+                .as_ref()
+                .expect("a cold gate scans its base")
+                .identities,
+        ),
+    };
+    if base_content_conflict
         || content_parity_conflict(&candidate_structure, &pending_structure.identities)
     {
         return Err(CollabError::ReplayParityViolation {
@@ -360,9 +730,14 @@ fn validate_replay_parity_inner(base: &Ydoc, candidate: &[u8]) -> Result<Ydoc, C
     // deleting a unit drops the whole scalar from a post-delete scan, so this
     // union must be taken from each wire's own isolated content, not from the
     // integrated (and possibly already-deleted) result.
-    let mut pre_delete_unsafe = base_structure.unsafe_boundaries.clone();
-    pre_delete_unsafe.extend(candidate_structure.unsafe_boundaries.iter().copied());
-    pre_delete_unsafe.extend(pending_structure.unsafe_boundaries.iter().copied());
+    let boundary_is_unsafe = |boundary: &ID| {
+        frontier.is_some_and(|frontier| frontier.unsafe_boundaries.contains(boundary))
+            || base_structure
+                .as_ref()
+                .is_some_and(|base| base.unsafe_boundaries.contains(boundary))
+            || candidate_structure.unsafe_boundaries.contains(boundary)
+            || pending_structure.unsafe_boundaries.contains(boundary)
+    };
 
     // (2) DELETE boundaries: the candidate's own claims, base's FULL current
     // delete-set (Yjs/yrs always (re-)encode the whole delete-set on a
@@ -374,13 +749,30 @@ fn validate_replay_parity_inner(base: &Ydoc, candidate: &[u8]) -> Result<Ydoc, C
     // dangling delete's target may only now be forming a multi-unit scalar
     // because THIS candidate delivers the dependency that completes it,
     // which was invisible when the delete was first accepted in isolation.
-    if base_structure
-        .deletion_boundaries
-        .iter()
-        .chain(candidate_structure.deletion_boundaries.iter())
-        .chain(pending_structure.deletion_boundaries.iter())
-        .any(|boundary| pre_delete_unsafe.contains(boundary))
-    {
+    let delete_boundary_conflict = match frontier {
+        Some(frontier) => {
+            frontier.has_unsafe_deletion_endpoint
+                || candidate_structure
+                    .deletion_boundaries
+                    .iter()
+                    .chain(pending_structure.deletion_boundaries.iter())
+                    .any(&boundary_is_unsafe)
+                || candidate_structure
+                    .unsafe_boundaries
+                    .iter()
+                    .chain(pending_structure.unsafe_boundaries.iter())
+                    .any(|boundary| frontier.deletion_endpoint_contains(boundary))
+        }
+        None => base_structure
+            .as_ref()
+            .expect("a cold gate scans its base")
+            .deletion_boundaries
+            .iter()
+            .chain(candidate_structure.deletion_boundaries.iter())
+            .chain(pending_structure.deletion_boundaries.iter())
+            .any(&boundary_is_unsafe),
+    };
+    if delete_boundary_conflict {
         return Err(CollabError::ReplayParityViolation {
             reason: "a delete endpoint lands inside a multi-unit Unicode scalar".to_owned(),
         });
@@ -394,7 +786,7 @@ fn validate_replay_parity_inner(base: &Ydoc, candidate: &[u8]) -> Result<Ydoc, C
         .insertion_boundaries
         .iter()
         .chain(pending_structure.insertion_boundaries.iter())
-        .any(|boundary| pre_delete_unsafe.contains(boundary))
+        .any(boundary_is_unsafe)
     {
         return Err(CollabError::ReplayParityViolation {
             reason: "an insert boundary lands inside a multi-unit Unicode scalar".to_owned(),
@@ -420,7 +812,7 @@ fn validate_replay_parity_inner(base: &Ydoc, candidate: &[u8]) -> Result<Ydoc, C
         None => BTreeMap::new(),
     };
     let scratch_sv = scratch.state_vector();
-    for (client, claimed_end) in candidate_structure.claimed_clocks {
+    for (&client, &claimed_end) in &candidate_structure.claimed_clocks {
         let integrated = scratch_sv.get(&client);
         let pending = pending_ends.get(&client).copied().unwrap_or(0);
         if integrated < claimed_end && pending < claimed_end {
@@ -431,7 +823,11 @@ fn validate_replay_parity_inner(base: &Ydoc, candidate: &[u8]) -> Result<Ydoc, C
             });
         }
     }
-    Ok(scratch)
+    Ok(GateValidation {
+        scratch,
+        candidate_structure,
+        base_structure,
+    })
 }
 
 /// True when `candidate` redefines a clock the ESTABLISHED side (`base` or a

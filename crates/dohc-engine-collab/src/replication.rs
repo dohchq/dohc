@@ -24,8 +24,9 @@ use rusqlite::Transaction;
 
 use crate::doc_cache::{GateBaseSource, RemoteAppendProbe, ServedGateBase};
 use crate::durable::{
-    append_and_index_update, blob_seq_in_log, load_for_replay_gate, maybe_compact, query_marker,
-    validate_update_bytes, CompactOutcome, Regime,
+    append_and_index_update, append_validated_and_index_update, blob_seq_in_log,
+    load_for_replay_gate, maybe_compact, query_marker, validate_update_bytes, CompactOutcome,
+    Regime,
 };
 use crate::error::CollabError;
 use crate::limits::DEFAULT_COMPACTION_THRESHOLD;
@@ -132,11 +133,19 @@ fn apply_remote_update_outer(
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<ReplicationApplyOutcome>, CollabError> {
+    let maintain_frontier = cache.is_some();
+    let mut candidate = None;
     let outcome = store.write_with(faults, |tx| {
-        apply_remote_update_in_transaction(tx, key, remote, now_ms)
+        apply_remote_update_in_transaction_inner(
+            tx,
+            key,
+            remote,
+            now_ms,
+            maintain_frontier.then_some(&mut candidate),
+        )
     })?;
     if let Some(cache) = cache.as_deref_mut() {
-        cache.finish_deferred_remote_append(store, key, &outcome, &remote.bytes);
+        cache.finish_deferred_remote_append(store, key, &outcome, &remote.bytes, candidate);
     }
     // Self-bound the log: a genuinely-applied remote update folds the log once it
     // grows past the threshold (a replicated fold keeps a full-state snapshot,
@@ -178,6 +187,16 @@ pub fn apply_remote_update_in_transaction(
     remote: &RemoteUpdate,
     now_ms: i64,
 ) -> Result<ReplicationApplyOutcome, CollabError> {
+    apply_remote_update_in_transaction_inner(tx, key, remote, now_ms, None)
+}
+
+fn apply_remote_update_in_transaction_inner(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    remote: &RemoteUpdate,
+    now_ms: i64,
+    candidate_probe: Option<&mut Option<crate::replay_parity::IntegratedFrontierDelta>>,
+) -> Result<ReplicationApplyOutcome, CollabError> {
     validate_update_bytes(&remote.bytes)?;
     if remote.origin_id.is_empty()
         || remote.origin_id.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES
@@ -202,11 +221,21 @@ pub fn apply_remote_update_in_transaction(
         return Ok(ReplicationApplyOutcome::Deduped { seq: existing });
     }
     let base = load_for_replay_gate(tx, key)?;
-    let (_, seq) = append_and_index_update(
+    let projection = match candidate_probe {
+        Some(probe) => {
+            let (projection, candidate) =
+                crate::replay_parity::validate_replay_parity_with_delta(&base, &remote.bytes)?;
+            *probe = Some(candidate);
+            projection
+        }
+        None => crate::validate_replay_parity_with_scratch(&base, &remote.bytes)?,
+    };
+    let seq = append_validated_and_index_update(
         tx,
         key,
         marker.content_kind,
         &base,
+        &projection,
         &remote.bytes,
         &sha,
         true,
@@ -319,35 +348,55 @@ pub fn apply_remote_update_in_transaction_cached_with_projection(
         });
     }
 
-    let (projection, source, seq) = match cache.base_for_gate(tx, key, &marker)? {
+    let (projection, candidate, source, seq) = match cache.base_for_gate(tx, key, &marker)? {
         Some(base) => {
-            let (projection, seq) = append_and_index_update(
+            let (projection, candidate, _cold_frontier) =
+                crate::replay_parity::validate_replay_parity_with_scratch_and_delta(
+                    base,
+                    &remote.bytes,
+                )?;
+            let seq = append_validated_and_index_update(
                 tx,
                 key,
                 marker.content_kind,
                 base,
+                &projection,
                 &remote.bytes,
                 &sha,
                 true,
                 origin.actor_id(),
                 now_ms,
             )?;
-            (projection, GateBaseSource::Hit, seq)
+            (projection, candidate, GateBaseSource::Hit, seq)
         }
         None => {
             let base = load_for_replay_gate(tx, key)?;
-            let (projection, seq) = append_and_index_update(
+            let (projection, candidate, frontier) =
+                crate::replay_parity::validate_replay_parity_with_scratch_and_delta(
+                    &base,
+                    &remote.bytes,
+                )?;
+            let seq = append_validated_and_index_update(
                 tx,
                 key,
                 marker.content_kind,
                 &base,
+                &projection,
                 &remote.bytes,
                 &sha,
                 true,
                 origin.actor_id(),
                 now_ms,
             )?;
-            (projection, GateBaseSource::Rebuilt(base), seq)
+            (
+                projection,
+                candidate,
+                GateBaseSource::Rebuilt {
+                    doc: base,
+                    frontier,
+                },
+                seq,
+            )
         }
     };
     probe.served = Some(ServedGateBase {
@@ -355,6 +404,7 @@ pub fn apply_remote_update_in_transaction_cached_with_projection(
         observed: marker.clone(),
     });
     probe.applied_seq = Some(seq);
+    probe.candidate = Some(candidate);
     Ok(RemoteApplyProjection {
         outcome: ReplicationApplyOutcome::Applied {
             seq,

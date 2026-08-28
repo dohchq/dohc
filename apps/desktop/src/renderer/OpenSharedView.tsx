@@ -26,6 +26,11 @@ type Gate =
 export function OpenSharedView(props: {
   onWorkspaceReady: (workspace: Workspace) => void;
   onBack: () => void;
+  onOpened?: () => void;
+  resolvedShare?: {
+    shareId: string;
+    shareCode: string;
+  };
   // Present when opened from inside a workspace: enables the default
   // "Add to this workspace" mode (a shared-with-me/ mount). Absent on
   // first-run, where there is no workspace to mount into yet.
@@ -34,7 +39,11 @@ export function OpenSharedView(props: {
     onMounted: (label: string) => void;
   };
 }) {
-  const [gate, setGate] = useState<Gate>({ kind: "checking" });
+  const [gate, setGate] = useState<Gate>(
+    props.resolvedShare
+      ? { kind: "signed-in", email: "" }
+      : { kind: "checking" },
+  );
   const [code, setCode] = useState("");
   const [folder, setFolder] = useState<string | null>(null);
   const [mode, setMode] = useState<"mount" | "separate">(
@@ -43,6 +52,7 @@ export function OpenSharedView(props: {
   const [opening, setOpening] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const sessionRef = useRef(0);
+  const folderRequestRef = useRef(0);
   const cancelledRef = useRef(false);
 
   function checkSession() {
@@ -65,9 +75,10 @@ export function OpenSharedView(props: {
 
   useEffect(() => {
     cancelledRef.current = false;
-    checkSession();
+    if (!props.resolvedShare) checkSession();
     return () => {
       sessionRef.current += 1;
+      folderRequestRef.current += 1;
       cancelledRef.current = true;
     };
     // Session check runs once on mount; CloudLogin's onConnected re-runs it.
@@ -75,14 +86,22 @@ export function OpenSharedView(props: {
   }, []);
 
   async function chooseFolder() {
+    const request = ++folderRequestRef.current;
     const picked = await bridge().pickWorkspaceRoot();
-    if (picked) setFolder(picked);
+    if (
+      picked &&
+      !cancelledRef.current &&
+      request === folderRequestRef.current
+    ) {
+      setFolder(picked);
+    }
   }
 
   const mounting = mode === "mount" && !!props.mountInto;
+  const shareCode = props.resolvedShare?.shareCode ?? code.trim();
 
   async function open() {
-    if (opening || code.trim().length === 0) return;
+    if (opening || shareCode.length === 0) return;
     if (!mounting && !folder) return;
     setOpening(true);
     setError(null);
@@ -90,16 +109,18 @@ export function OpenSharedView(props: {
       if (mounting && props.mountInto) {
         const result = await bridge().mountShare({
           workspaceId: props.mountInto.workspaceId,
-          shareCode: code.trim(),
+          shareCode,
         });
         if (cancelledRef.current) return;
+        props.onOpened?.();
         props.mountInto.onMounted(result.mount.label);
       } else {
         const result = await bridge().openSharedView({
-          shareCode: code.trim(),
+          shareCode,
           rootPath: folder!,
         });
         if (cancelledRef.current) return;
+        props.onOpened?.();
         props.onWorkspaceReady(result.workspace);
       }
     } catch (cause) {
@@ -113,7 +134,7 @@ export function OpenSharedView(props: {
   const canOpen =
     gate.kind === "signed-in" &&
     !opening &&
-    code.trim().length > 0 &&
+    shareCode.length > 0 &&
     (mounting || folder !== null);
 
   return (
@@ -124,7 +145,6 @@ export function OpenSharedView(props: {
       <div className="flex items-center gap-2">
         <IconButton
           aria-label="Back"
-          disabled={opening}
           onClick={props.onBack}
           className="shrink-0"
         >
@@ -152,21 +172,25 @@ export function OpenSharedView(props: {
           <p className="m-0 text-xs leading-relaxed text-muted">
             {/* No level claim here: the share states its own level, and this
                 screen has not read it yet. The banner says it after open. */}
-            {mounting
-              ? "Paste the share code you received. The shared files appear in this workspace under shared-with-me/."
-              : "Paste the share code you received. You get a separate view of the shared files."}
+            {props.resolvedShare
+              ? "Choose where to open this share."
+              : mounting
+                ? "Paste the share code you received. The shared files appear in this workspace under shared-with-me/."
+                : "Paste the share code you received. You get a separate view of the shared files."}
           </p>
-          <label className="block text-[11px] font-medium text-subtle">
-            Share code
-            <input
-              data-testid="open-share-code"
-              value={code}
-              onChange={(event) => setCode(event.currentTarget.value)}
-              placeholder="dohc-share:…"
-              spellCheck={false}
-              className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink outline-none placeholder:text-subtle focus:border-ink"
-            />
-          </label>
+          {props.resolvedShare ? null : (
+            <label className="block text-[11px] font-medium text-subtle">
+              Share code
+              <input
+                data-testid="open-share-code"
+                value={code}
+                onChange={(event) => setCode(event.currentTarget.value)}
+                placeholder="dohc-share:…"
+                spellCheck={false}
+                className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink placeholder:text-subtle focus:border-ink"
+              />
+            </label>
+          )}
           {props.mountInto ? (
             <div className="flex flex-col gap-1">
               <span className="text-[11px] font-medium text-subtle">How to open it</span>
@@ -243,6 +267,13 @@ export function OpenSharedView(props: {
                 ? "Add share"
                 : "Open share"}
           </PrimaryButton>
+          {opening ? (
+            <p className="m-0 text-[12px] leading-relaxed text-muted">
+              {mounting
+                ? "If you go back, dohc keeps adding the share to shared-with-me/."
+                : "If you go back, dohc keeps opening the share into the folder you chose."}
+            </p>
+          ) : null}
           {error ? (
             <p data-testid="open-share-error" role="alert" className="m-0 text-xs text-danger">
               {error}

@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   DesktopUserSettingsResult,
+  ShareHandoffStatus,
   WorkspaceRegistryResult,
   type DesktopUserSettingsResult as DesktopUserSettingsSnapshot,
+  type ShareHandoffStatus as ShareHandoffStatusSnapshot,
 } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { DesktopFirstRun } from "./DesktopFirstRun";
@@ -16,9 +18,12 @@ export function DesktopRoot() {
   const [userSettings, setUserSettings] = useState<DesktopUserSettingsSnapshot | null>(
     null,
   );
+  const [shareHandoffStatus, setShareHandoffStatus] =
+    useState<ShareHandoffStatusSnapshot>({ status: "idle" });
   const registryRequest = useRef(0);
   const committedRegistryRequest = useRef(0);
   const userSettingsRequest = useRef(0);
+  const shareHandoffRevision = useRef(0);
 
   const refreshWorkspaceRegistry = useCallback(async (): Promise<Workspace[]> => {
     const request = ++registryRequest.current;
@@ -45,6 +50,49 @@ export function DesktopRoot() {
     const result = DesktopUserSettingsResult.parse(await bridge().getUserSettings());
     if (request === userSettingsRequest.current) setUserSettings(result);
     return result;
+  }, []);
+
+  const dismissShareHandoff = useCallback(() => {
+    if (shareHandoffStatus.status === "idle") return;
+    const { statusId } = shareHandoffStatus;
+    shareHandoffRevision.current += 1;
+    setShareHandoffStatus((current) =>
+      current.status !== "idle" && current.statusId === statusId
+        ? { status: "idle" }
+        : current,
+    );
+    void bridge().dismissShareHandoff({ statusId }).catch(() => undefined);
+  }, [shareHandoffStatus]);
+
+  useEffect(() => {
+    let active = true;
+    const api = bridge();
+    const unsubscribe = api.onShareHandoffStatus((rawStatus) => {
+      const status = ShareHandoffStatus.safeParse(rawStatus);
+      if (!active || !status.success) return;
+      shareHandoffRevision.current += 1;
+      setShareHandoffStatus(status.data);
+    });
+    const snapshotRevision = shareHandoffRevision.current;
+    void api
+      .getShareHandoffStatus()
+      .then((rawStatus) => {
+        const status = ShareHandoffStatus.safeParse(rawStatus);
+        if (
+          !active ||
+          !status.success ||
+          shareHandoffRevision.current !== snapshotRevision
+        ) {
+          return;
+        }
+        setShareHandoffStatus(status.data);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+      shareHandoffRevision.current += 1;
+      unsubscribe();
+    };
   }, []);
 
   useEffect(() => {
@@ -142,6 +190,9 @@ export function DesktopRoot() {
   if (!workspace) {
     return (
       <DesktopFirstRun
+        handoffStatus={shareHandoffStatus}
+        onDismissShareHandoff={dismissShareHandoff}
+        onShareHandoffOpened={dismissShareHandoff}
         onWorkspaceReady={(created) => {
           setWorkspaces([created]);
           setWorkspace(created);
@@ -157,6 +208,9 @@ export function DesktopRoot() {
       workspace={workspace}
       workspaces={workspaces}
       userSettings={userSettings}
+      handoffStatus={shareHandoffStatus}
+      onDismissShareHandoff={dismissShareHandoff}
+      onShareHandoffOpened={dismissShareHandoff}
       refreshWorkspaceRegistry={refreshWorkspaceRegistry}
       onSwitchWorkspace={(next) => {
         // File ▸ Open Workspace… can hand us a workspace the registry list

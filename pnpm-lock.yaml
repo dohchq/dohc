@@ -675,6 +675,9 @@ importers:
 
   services/share-web:
     dependencies:
+      '@dohc/workspace-contracts':
+        specifier: workspace:*
+        version: link:../../packages/workspace-contracts
       dompurify:
         specifier: 3.4.13
         version: 3.4.13

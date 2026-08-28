@@ -301,9 +301,9 @@ impl RelayError {
             | RelayError::ShareReadOnly
             | RelayError::ShareOperationRejected
             | RelayError::PayloadTooLarge
-            | RelayError::LinkReadRateLimited
             | RelayError::PresenceCapacity
             | RelayError::QuotaExceeded
+            | RelayError::LinkReadRateLimited
             | RelayError::SelfShare
             | RelayError::AmbiguousSelector
             | RelayError::InvalidChannel
@@ -406,12 +406,12 @@ pub enum RelayError {
     ShareOperationRejected,
     #[error("relay payload is too large")]
     PayloadTooLarge,
-    #[error("relay link read rate limit was exceeded")]
-    LinkReadRateLimited,
     #[error("relay presence capacity was exceeded")]
     PresenceCapacity,
     #[error("relay quota was exceeded")]
     QuotaExceeded,
+    #[error("relay rate-limited link reads")]
+    LinkReadRateLimited,
     #[error("self-sharing is not allowed")]
     SelfShare,
     #[error("share selector is ambiguous")]

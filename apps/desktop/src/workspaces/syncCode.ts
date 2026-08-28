@@ -1,3 +1,10 @@
+import {
+  canonicalRelayUrl,
+  relayUrlsMatch,
+} from "@dohc/workspace-contracts/relay-values";
+
+export { canonicalRelayUrl, relayUrlsMatch };
+
 // The copyable "sync code" — the join handle for adding a synced workspace
 // on another machine. One human-readable line carrying exactly the two facts
 // a second machine needs: which workspace, and which relay it syncs through.
@@ -17,7 +24,6 @@
 
 const SYNC_CODE_PREFIX = "dohc-sync";
 const MAX_WORKSPACE_ID_LENGTH = 200;
-const MAX_RELAY_URL_LENGTH = 2048;
 
 export interface SyncCodeParts {
   workspaceId: string;
@@ -35,31 +41,11 @@ function isValidWorkspaceId(value: string): boolean {
   );
 }
 
-// Canonical relay identity, or null when the value is not an acceptable
-// relay URL (0P-C gate fix). Beyond scheme/length checks this REJECTS
-// credentials, query strings, and fragments outright: buildSyncCode would
-// otherwise expose secrets in a copyable/screenshot-readable code,
-// parseSyncCode would accept them from pasted input, and relayUrlsMatch is
-// an authz gate that must compare relay identities, not secret carriers.
-function normalizeRelayUrl(value: string): string | null {
-  const raw = value.trim();
-  if (raw.length === 0 || raw.length > MAX_RELAY_URL_LENGTH) return null;
-  try {
-    const url = new URL(raw);
-    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-    if (url.username || url.password || url.search || url.hash) return null;
-    url.pathname = url.pathname.replace(/\/+$/u, "");
-    return url.toString().replace(/\/$/u, "");
-  } catch {
-    return null;
-  }
-}
-
 export function buildSyncCode(parts: SyncCodeParts): string {
   if (!isValidWorkspaceId(parts.workspaceId)) {
     throw new Error("Workspace id cannot be encoded as a sync code.");
   }
-  const relayUrl = normalizeRelayUrl(parts.relayUrl);
+  const relayUrl = canonicalRelayUrl(parts.relayUrl);
   if (relayUrl === null) {
     throw new Error("Relay URL cannot be encoded as a sync code.");
   }
@@ -75,19 +61,9 @@ export function parseSyncCode(code: string): SyncCodeParts | null {
   const separator = rest.indexOf(":");
   if (separator <= 0) return null;
   const workspaceId = rest.slice(0, separator);
-  const relayUrl = normalizeRelayUrl(rest.slice(separator + 1));
+  const relayUrl = canonicalRelayUrl(rest.slice(separator + 1));
   if (!isValidWorkspaceId(workspaceId) || relayUrl === null) return null;
   return { workspaceId, relayUrl };
-}
-
-// Canonical relay-identity compare: the token only ever goes to the relay
-// the user signed in with, so equality here is a security gate, not
-// cosmetics. Either side failing canonicalization (credentials, query,
-// fragment, non-http(s)) can never "match".
-export function relayUrlsMatch(left: string, right: string): boolean {
-  const normalizedLeft = normalizeRelayUrl(left);
-  const normalizedRight = normalizeRelayUrl(right);
-  return normalizedLeft !== null && normalizedLeft === normalizedRight;
 }
 
 // The copyable "share code" (PR 18) — the receive handle for an external
@@ -121,7 +97,7 @@ export function buildShareCode(parts: ShareCodeParts): string {
   if (!isValidShareId(parts.shareId)) {
     throw new Error("Share id cannot be encoded as a share code.");
   }
-  const relayUrl = normalizeRelayUrl(parts.relayUrl);
+  const relayUrl = canonicalRelayUrl(parts.relayUrl);
   if (relayUrl === null) {
     throw new Error("Relay URL cannot be encoded as a share code.");
   }
@@ -137,7 +113,7 @@ export function parseShareCode(code: string): ShareCodeParts | null {
   const separator = rest.indexOf(":");
   if (separator <= 0) return null;
   const shareId = rest.slice(0, separator);
-  const relayUrl = normalizeRelayUrl(rest.slice(separator + 1));
+  const relayUrl = canonicalRelayUrl(rest.slice(separator + 1));
   if (!isValidShareId(shareId) || relayUrl === null) return null;
   return { shareId, relayUrl };
 }

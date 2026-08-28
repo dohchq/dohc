@@ -1612,6 +1612,7 @@ fn local_and_remote_different_field_edits_converge_in_both_collection_indexes() 
     committed(
         record_local_update_with_origin(
             &mut a.store,
+            &mut a.cache,
             &key,
             &alice,
             Some("alice"),
@@ -1621,8 +1622,16 @@ fn local_and_remote_different_field_edits_converge_in_both_collection_indexes() 
         .expect("Alice local edit"),
     );
     committed(
-        record_local_update_with_origin(&mut b.store, &key, &bob, Some("bob"), &NoFaults, 1_100)
-            .expect("Bob local edit"),
+        record_local_update_with_origin(
+            &mut b.store,
+            &mut b.cache,
+            &key,
+            &bob,
+            Some("bob"),
+            &NoFaults,
+            1_100,
+        )
+        .expect("Bob local edit"),
     );
     committed(
         apply_remote_update(
@@ -1689,6 +1698,7 @@ fn same_field_concurrent_edits_converge_and_keep_both_authored_writes() {
     committed(
         record_local_update_with_origin(
             &mut a.store,
+            &mut a.cache,
             &key,
             &alice,
             Some("alice"),
@@ -1698,8 +1708,16 @@ fn same_field_concurrent_edits_converge_and_keep_both_authored_writes() {
         .expect("Alice local edit"),
     );
     committed(
-        record_local_update_with_origin(&mut b.store, &key, &bob, Some("bob"), &NoFaults, 1_100)
-            .expect("Bob local edit"),
+        record_local_update_with_origin(
+            &mut b.store,
+            &mut b.cache,
+            &key,
+            &bob,
+            Some("bob"),
+            &NoFaults,
+            1_100,
+        )
+        .expect("Bob local edit"),
     );
     committed(
         apply_remote_update(
@@ -1774,6 +1792,7 @@ fn later_same_field_edit_wins_on_both_devices_and_keeps_earlier_history() {
     committed(
         record_local_update_with_origin(
             &mut a.store,
+            &mut a.cache,
             &key,
             &alice,
             Some("alice"),
@@ -1802,8 +1821,16 @@ fn later_same_field_edit_wins_on_both_devices_and_keeps_earlier_history() {
     peer_b.apply(&alice).expect("peer B receives Alice edit");
     let bob = peer_b.frontmatter_set("title", "Bob title");
     committed(
-        record_local_update_with_origin(&mut b.store, &key, &bob, Some("bob"), &NoFaults, 1_300)
-            .expect("Bob later local edit"),
+        record_local_update_with_origin(
+            &mut b.store,
+            &mut b.cache,
+            &key,
+            &bob,
+            Some("bob"),
+            &NoFaults,
+            1_300,
+        )
+        .expect("Bob later local edit"),
     );
     committed(
         apply_remote_update(

@@ -2674,7 +2674,7 @@ describe("EngineWorkspaceSessions", () => {
       const first = new MockClient("handle-churn-c");
       const second = new MockClient("handle-churn-d");
       let reads = 0;
-      let sleeping: (() => void) | null = null;
+      const backoffStarted = deferred<void>();
       const sessions = new EngineWorkspaceSessions(
         {
           currentClient: () => {
@@ -2683,10 +2683,10 @@ describe("EngineWorkspaceSessions", () => {
           },
         },
         {
-          sleep: () =>
-            new Promise<void>((resolveSleep) => {
-              sleeping = () => resolveSleep();
-            }),
+          sleep: () => {
+            backoffStarted.resolve(undefined);
+            return new Promise<void>(() => {});
+          },
         },
       );
 
@@ -2694,12 +2694,11 @@ describe("EngineWorkspaceSessions", () => {
         ABANDONABLE,
         async () => await sessions.run(workspace, async () => "unreachable"),
       );
-      await vi.waitFor(() => {
-        expect(sleeping).not.toBeNull();
-      });
+      await backoffStarted.promise;
       sessions.beginShutdown();
       await expect(run).rejects.toBeInstanceOf(EngineWorkspaceRebindError);
-    });
+      expect(reads).toBe(2);
+    }, 30_000);
 
     it("stops an OPEN that keeps refusing with afterReconnect", async () => {
       const workspace = await tempWorkspace("workspace-open-reconnect-quit");

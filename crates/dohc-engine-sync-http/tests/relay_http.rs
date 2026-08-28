@@ -1072,7 +1072,7 @@ fn expected_relay_error(code: &str) -> RelayError {
         | "invalid_version" | "secret_path" | "too_many_paths" => RelayError::BadRequest,
         "blob_missing" => RelayError::BlobReferenceMissing,
         "blob_not_found" => RelayError::BlobMissing,
-        "conflict" => RelayError::Conflict,
+        "conflict" | "dependents_changed" => RelayError::Conflict,
         "epoch_superseded" => RelayError::EpochSuperseded,
         "identity_not_recognized" => RelayError::IdentityNotRecognized,
         "identity_required" => RelayError::IdentityRequired,

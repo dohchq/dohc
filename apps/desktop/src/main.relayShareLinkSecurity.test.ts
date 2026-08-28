@@ -1,0 +1,181 @@
+import { readFileSync } from "node:fs";
+import { describe, expect, it, vi } from "vitest";
+
+const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8").replaceAll(
+  "\r\n",
+  "\n",
+);
+
+function handlerSource(channel: string): string {
+  const marker = `CHANNELS.${channel},`;
+  const markerAt = mainSource.indexOf(marker);
+  if (markerAt < 0) throw new Error(`Missing IPC handler for ${channel}`);
+  const start = mainSource.lastIndexOf("ipcMain.handle(", markerAt);
+  if (start < 0) throw new Error(`Missing IPC handler for ${channel}`);
+  const next = mainSource.indexOf("ipcMain.handle(", markerAt + marker.length);
+  return mainSource.slice(start, next < 0 ? undefined : next);
+}
+
+const ownerLinkChannels = [
+  "createRelayShareLink",
+  "listRelayShareLinks",
+  "rotateRelayShareLink",
+  "revokeRelayShareLink",
+] as const;
+
+describe("main-process owner relay link authorization", () => {
+  it("refuses a missing channel marker before searching backwards", () => {
+    const channel = "definitelyAbsentRelayShareLinkHandler";
+    let thrown: unknown;
+    let reverseSearchCalls = -1;
+    const lastIndexOf = vi.spyOn(String.prototype, "lastIndexOf");
+
+    try {
+      try {
+        handlerSource(channel);
+      } catch (error) {
+        thrown = error;
+      }
+      reverseSearchCalls = lastIndexOf.mock.calls.length;
+    } finally {
+      lastIndexOf.mockRestore();
+    }
+
+    expect(thrown).toEqual(new Error(`Missing IPC handler for ${channel}`));
+    expect(reverseSearchCalls).toBe(0);
+  });
+
+  it("admits every request through one exact physical workspace operation", () => {
+    for (const channel of ownerLinkChannels) {
+      const handler = handlerSource(channel);
+      expect(handler, channel).toContain("assertTrustedSender(event);");
+      expect(handler, channel).toContain("withRendererWorkspaceOperation(");
+      expect(handler, channel).toContain("operation.workspace");
+      expect(handler, channel).toContain("remoteForWorkspace(operation.workspace)");
+      expect(handler, channel).not.toContain("requireWorkspace(input.workspaceId)");
+      expect(handler, channel).not.toContain("findWorkspace(input.workspaceId)");
+      expect(handler, channel).not.toContain("requireEngineCapture(input.workspaceId");
+    }
+  });
+
+  it("bounds every owner link request through the shared relay helper", () => {
+    for (const channel of ownerLinkChannels) {
+      expect(handlerSource(channel), channel).toContain(
+        "relayShareJsonWithCredentials",
+      );
+    }
+
+    const helperStart = mainSource.indexOf(
+      "type RelayShareRetainedDependentSetResult",
+    );
+    const helperEnd = mainSource.indexOf(
+      "async function relayShareJson<T>",
+      helperStart,
+    );
+    expect(helperStart).toBeGreaterThan(-1);
+    expect(helperEnd).toBeGreaterThan(helperStart);
+    const helper = mainSource.slice(helperStart, helperEnd);
+    expect(helper).toContain(
+      "relayFetchWithTimeout(RELAY_SHARE_FETCH_TIMEOUT_MS)",
+    );
+    expect(helper).toContain("const response = await relayShareFetch(");
+    expect(helper).not.toContain("const response = await fetch(");
+  });
+
+  it("refuses shared-view link creation before credentials or a relay request", () => {
+    const handler = handlerSource("createRelayShareLink");
+    const operationAt = handler.indexOf("async (operation) => {");
+    const guardAt =
+      /if \(shareViewIsPresent\(operation\.workspace\.shareView\)\) \{\s*throw new Error\(\s*"This is a shared view — only the original workspace can be shared\.",\s*\);\s*\}/u.exec(
+        handler,
+      )?.index ?? -1;
+    const credentialsAt = handler.indexOf(
+      "remoteForWorkspace(operation.workspace)",
+    );
+    const relayAt = handler.indexOf("relayShareJsonWithCredentials");
+
+    expect(operationAt).toBeGreaterThan(-1);
+    expect(
+      guardAt,
+      "the shared-view presence refusal must be inside the physical workspace operation",
+    ).toBeGreaterThan(operationAt);
+    expect(credentialsAt).toBeGreaterThan(guardAt);
+    expect(relayAt).toBeGreaterThan(credentialsAt);
+    expect(handler).not.toMatch(
+      /if\s*\(\s*operation\.workspace\.shareView\s*\)/u,
+    );
+  });
+
+  it("addresses workspace routes and injects share-route workspace bodies from the operation", () => {
+    for (const channel of ["createRelayShareLink", "listRelayShareLinks"]) {
+      expect(handlerSource(channel), channel).toContain(
+        "/sync/${encodeURIComponent(operation.workspace.workspaceId)}/shares/links",
+      );
+    }
+    for (const channel of ["rotateRelayShareLink", "revokeRelayShareLink"]) {
+      const handler = handlerSource(channel);
+      expect(handler, channel).toContain(
+        "workspaceId: operation.workspace.workspaceId",
+      );
+      expect(handler, channel).not.toContain("workspaceId: input.workspaceId");
+    }
+  });
+
+  it("forwards only the bounded parsed inventory cursor", () => {
+    const handler = handlerSource("listRelayShareLinks");
+    expect(handler).toContain("input.cursor");
+    expect(handler).toContain("encodeURIComponent(input.cursor)");
+    expect(handler).not.toContain("payload.cursor");
+  });
+
+  it("pins workspace currency and credential generation around every relay call", () => {
+    for (const channel of ownerLinkChannels) {
+      const handler = handlerSource(channel);
+      expect(handler, channel).toContain("awaitCredentialGeneration({");
+      expect(handler, channel).toContain(
+        "capturedGeneration: credentialGeneration",
+      );
+      expect(handler, channel).toContain(
+        "currentGeneration: () => credentialCacheGeneration",
+      );
+      expect(handler.match(/operation\.assertCurrent\(\);/gu)?.length ?? 0, channel)
+        .toBeGreaterThanOrEqual(4);
+      const relayAt = handler.indexOf("relayShareJsonWithCredentials");
+      expect(relayAt, channel).toBeGreaterThan(-1);
+      expect(handler.lastIndexOf("operation.assertCurrent();", relayAt), channel)
+        .toBeGreaterThan(-1);
+      expect(handler.indexOf("operation.assertCurrent();", relayAt), channel)
+        .toBeGreaterThan(relayAt);
+    }
+  });
+
+  it("returns only typed dependent conflicts from reset and end", () => {
+    for (const channel of ["rotateRelayShareLink", "revokeRelayShareLink"]) {
+      const handler = handlerSource(channel);
+      expect(handler, channel).toContain("retainDependentSetConflict: true");
+      expect(handler, channel).toContain("RelayShareLinkDependentConflict.safeParse(");
+      expect(handler, channel).toContain('outcome: "dependents-changed"');
+      expect(handler, channel).toContain("throw new Error(relayShareErrorCopy(");
+    }
+  });
+
+  it("parses every relay success before returning it over IPC", () => {
+    const schemas = {
+      createRelayShareLink: "RelayShareLinkCreateResponse.safeParse(",
+      listRelayShareLinks: "RelayShareLinkListResponse.safeParse(",
+      rotateRelayShareLink: "RelayShareLinkRotateResponse.safeParse(",
+      revokeRelayShareLink: "RelayShareLinkEndResponse.safeParse(",
+    } as const;
+    for (const [channel, parse] of Object.entries(schemas)) {
+      expect(handlerSource(channel), channel).toContain(parse);
+    }
+  });
+
+  it("never logs or throws a minted URL", () => {
+    for (const channel of ownerLinkChannels) {
+      const handler = handlerSource(channel);
+      expect(handler, channel).not.toMatch(/console\.(?:error|warn|log)/u);
+      expect(handler, channel).not.toMatch(/throw[^;]*(?:\.url|\["url"\])/u);
+    }
+  });
+});

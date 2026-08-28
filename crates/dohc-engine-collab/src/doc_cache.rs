@@ -38,6 +38,7 @@ use crate::durable::{
     binary_blob_for_gate, latest_snapshot, map_sql, query_marker, AppendOutcome, Marker,
 };
 use crate::error::CollabError;
+use crate::replay_parity::{IntegratedFrontier, IntegratedFrontierDelta};
 use crate::ydoc::Ydoc;
 use crate::DocKey;
 
@@ -117,6 +118,7 @@ fn head_row_sha(conn: &Connection, key: &DocKey, seq: i64) -> Result<Option<Stri
 
 struct CacheEntry {
     doc: Ydoc,
+    frontier: IntegratedFrontier,
     tuple: CacheTuple,
     approx_bytes: usize,
     last_used: Cell<u64>,
@@ -138,6 +140,7 @@ pub struct CacheStats {
 #[derive(Default)]
 pub(crate) struct GateBaseProbe {
     pub(crate) served: Option<ServedGateBase>,
+    pub(crate) candidate: Option<IntegratedFrontierDelta>,
     commit: Option<CacheCommitToken>,
 }
 
@@ -160,8 +163,12 @@ pub(crate) struct ServedGateBase {
 pub(crate) enum GateBaseSource {
     Hit,
     /// The rebuilt PRE-APPEND base doc, read inside the append transaction and
-    /// handed out for a post-commit install.
-    Rebuilt(Ydoc),
+    /// handed out with the frontier derived from that gate's exact base scan
+    /// for a post-commit install.
+    Rebuilt {
+        doc: Ydoc,
+        frontier: IntegratedFrontier,
+    },
 }
 
 /// Proof carried from an ordinary remote admission transaction to post-commit
@@ -172,6 +179,7 @@ pub(crate) enum GateBaseSource {
 pub struct RemoteAppendProbe {
     pub(crate) served: Option<ServedGateBase>,
     pub(crate) applied_seq: Option<i64>,
+    pub(crate) candidate: Option<IntegratedFrontierDelta>,
     commit: Option<CacheCommitToken>,
 }
 
@@ -245,7 +253,28 @@ impl WriterDocCache {
         key: &DocKey,
         marker: &Marker,
     ) -> Result<Option<&Ydoc>, CollabError> {
-        self.validated_entry(conn, key, marker)
+        Ok(self
+            .validated_entry(conn, key, marker)?
+            .map(|entry| &entry.doc))
+    }
+
+    /// Tuple-validated base plus its FR1 companion for the cached LOCAL append
+    /// path. No other gate caller is allowed to serve checks 1-3 from it.
+    pub(crate) fn base_and_frontier_for_local_gate(
+        &self,
+        conn: &Connection,
+        key: &DocKey,
+        marker: &Marker,
+    ) -> Result<Option<(&Ydoc, &IntegratedFrontier)>, CollabError> {
+        let Some(entry) = self.validated_entry(conn, key, marker)? else {
+            return Ok(None);
+        };
+        // This assertion deliberately sits outside replay_parity's
+        // catch_unwind so a poisoned frontier fails the debug/test process
+        // loudly instead of being mapped to an ordinary gate refusal.
+        #[cfg(any(test, debug_assertions))]
+        entry.frontier.assert_matches_doc(&entry.doc)?;
+        Ok(Some((&entry.doc, &entry.frontier)))
     }
 
     /// Serve a read-only PR3 consumer after validating the entry against the
@@ -260,7 +289,9 @@ impl WriterDocCache {
             self.misses.set(self.misses.get() + 1);
             return Ok(None);
         };
-        self.validated_entry(conn, key, &marker)
+        Ok(self
+            .validated_entry(conn, key, &marker)?
+            .map(|entry| &entry.doc))
     }
 
     fn validated_entry(
@@ -268,7 +299,7 @@ impl WriterDocCache {
         conn: &Connection,
         key: &DocKey,
         marker: &Marker,
-    ) -> Result<Option<&Ydoc>, CollabError> {
+    ) -> Result<Option<&CacheEntry>, CollabError> {
         let Some(entry) = self.entries.get(key) else {
             self.misses.set(self.misses.get() + 1);
             return Ok(None);
@@ -302,7 +333,7 @@ impl WriterDocCache {
 
         self.hits.set(self.hits.get() + 1);
         self.touch(entry);
-        Ok(Some(&entry.doc))
+        Ok(Some(entry))
     }
 
     /// Advance a resident entry after a deferred remote delta committed.
@@ -312,18 +343,23 @@ impl WriterDocCache {
     /// drain's final read-only projection can reuse it. The post-commit marker
     /// tuple must prove that exactly this one row advanced the lineage; a fold,
     /// reset, crash-after-commit, or any surprising side effect evicts.
-    pub fn finish_deferred_remote_append(
+    pub(crate) fn finish_deferred_remote_append(
         &mut self,
         store: &EngineStore,
         key: &DocKey,
         outcome: &TxnOutcome<crate::replication::ReplicationApplyOutcome>,
         update: &[u8],
+        candidate: Option<IntegratedFrontierDelta>,
     ) {
         use crate::replication::ReplicationApplyOutcome;
 
         match outcome {
             TxnOutcome::Committed(ReplicationApplyOutcome::Deduped { .. }) => {}
             TxnOutcome::Committed(ReplicationApplyOutcome::Applied { seq, .. }) => {
+                let Some(candidate) = candidate else {
+                    self.remove(key);
+                    return;
+                };
                 let Some(observed) = self.entries.get(key).map(|entry| entry.tuple.clone()) else {
                     return;
                 };
@@ -336,7 +372,7 @@ impl WriterDocCache {
                 expected.head_update_seq = *seq;
                 expected.head_row_sha = Some(update_sha);
                 if *seq == observed.head_update_seq + 1 && current.as_ref() == Some(&expected) {
-                    self.advance_committed(key, update, expected);
+                    self.advance_committed(key, update, candidate, expected);
                 } else {
                     self.remove(key);
                 }
@@ -355,12 +391,15 @@ impl WriterDocCache {
         let RemoteAppendProbe {
             served,
             applied_seq,
+            candidate,
             commit,
         } = probe;
         let Some(served) = served else {
             return;
         };
-        let (Some(seq), Some(CacheCommitToken(Some(fresh)))) = (applied_seq, commit) else {
+        let (Some(seq), Some(candidate), Some(CacheCommitToken(Some(fresh)))) =
+            (applied_seq, candidate, commit)
+        else {
             self.remove(key);
             return;
         };
@@ -371,8 +410,10 @@ impl WriterDocCache {
             return;
         }
         match served.source {
-            GateBaseSource::Hit => self.advance_committed(key, update, fresh),
-            GateBaseSource::Rebuilt(doc) => self.install_committed(key, doc, update, fresh),
+            GateBaseSource::Hit => self.advance_committed(key, update, candidate, fresh),
+            GateBaseSource::Rebuilt { doc, frontier } => {
+                self.install_committed(key, doc, frontier, update, candidate, fresh)
+            }
         }
     }
 
@@ -395,7 +436,11 @@ impl WriterDocCache {
                 // A dedupe changed nothing: the entry (if any) is still valid.
             }
             TxnOutcome::Committed(app) => {
-                let GateBaseProbe { served, commit } = probe;
+                let GateBaseProbe {
+                    served,
+                    candidate,
+                    commit,
+                } = probe;
                 let Some(served) = served else {
                     // A non-deduped append that never reached the gate is
                     // unexpected; fail safe.
@@ -403,6 +448,10 @@ impl WriterDocCache {
                     return;
                 };
                 let Some(CacheCommitToken(Some(fresh))) = commit else {
+                    self.remove(key);
+                    return;
+                };
+                let Some(candidate) = candidate else {
                     self.remove(key);
                     return;
                 };
@@ -415,8 +464,10 @@ impl WriterDocCache {
                     return;
                 }
                 match served.source {
-                    GateBaseSource::Hit => self.advance_committed(key, update, fresh),
-                    GateBaseSource::Rebuilt(doc) => self.install_committed(key, doc, update, fresh),
+                    GateBaseSource::Hit => self.advance_committed(key, update, candidate, fresh),
+                    GateBaseSource::Rebuilt { doc, frontier } => {
+                        self.install_committed(key, doc, frontier, update, candidate, fresh)
+                    }
                 }
             }
             // Durable-but-unacked: the head advanced without a verified
@@ -429,7 +480,13 @@ impl WriterDocCache {
     }
 
     /// Apply exactly the committed candidate bytes to the cached doc.
-    fn advance_committed(&mut self, key: &DocKey, applied: &[u8], tuple: CacheTuple) {
+    fn advance_committed(
+        &mut self,
+        key: &DocKey,
+        applied: &[u8],
+        candidate: IntegratedFrontierDelta,
+        tuple: CacheTuple,
+    ) {
         let Some(entry) = self.entries.get_mut(key) else {
             return;
         };
@@ -439,8 +496,14 @@ impl WriterDocCache {
             self.remove(key);
             return;
         }
+        let previous_frontier_bytes = entry.frontier.approx_bytes();
+        entry.frontier.fold(candidate);
         entry.tuple = tuple;
-        entry.approx_bytes = entry.approx_bytes.saturating_add(applied.len());
+        entry.approx_bytes = entry
+            .approx_bytes
+            .saturating_sub(previous_frontier_bytes)
+            .saturating_add(applied.len())
+            .saturating_add(entry.frontier.approx_bytes());
         self.advances += 1;
         let entry = &self.entries[key];
         self.touch(entry);
@@ -449,19 +512,32 @@ impl WriterDocCache {
 
     /// Warm the cache from the base doc rebuilt INSIDE the just-committed
     /// transaction, advanced with the committed candidate.
-    fn install_committed(&mut self, key: &DocKey, doc: Ydoc, applied: &[u8], tuple: CacheTuple) {
+    fn install_committed(
+        &mut self,
+        key: &DocKey,
+        doc: Ydoc,
+        mut frontier: IntegratedFrontier,
+        applied: &[u8],
+        candidate: IntegratedFrontierDelta,
+        tuple: CacheTuple,
+    ) {
         if doc.apply(applied).is_err() {
             self.remove(key);
             return;
         }
-        let approx_bytes =
-            doc.encode_full_state().len() + doc.pending_update_v1().map_or(0, |bytes| bytes.len());
+        frontier.fold(candidate);
+        let approx_bytes = doc
+            .encode_full_state()
+            .len()
+            .saturating_add(doc.pending_update_v1().map_or(0, |bytes| bytes.len()))
+            .saturating_add(frontier.approx_bytes());
         if approx_bytes > self.max_total_bytes() {
             self.remove(key);
             return;
         }
         let entry = CacheEntry {
             doc,
+            frontier,
             tuple,
             approx_bytes,
             last_used: Cell::new(0),
@@ -506,14 +582,21 @@ impl WriterDocCache {
             self.remove(key);
             return;
         }
+        // Rebuild the companion from the exact snapshot bytes that now define
+        // the replay path, never from a later re-encode of the applied doc.
+        let Ok(frontier) = IntegratedFrontier::from_full_state_bytes(&bytes) else {
+            self.remove(key);
+            return;
+        };
         let doc = Ydoc::wire();
         if doc.apply(&bytes).is_err() {
             self.remove(key);
             return;
         }
-        let approx_bytes = bytes.len();
+        let approx_bytes = bytes.len().saturating_add(frontier.approx_bytes());
         let entry = CacheEntry {
             doc,
+            frontier,
             tuple,
             approx_bytes,
             last_used: Cell::new(0),
@@ -572,6 +655,35 @@ impl WriterDocCache {
         if let Some(entry) = self.entries.get_mut(key) {
             entry.doc = doc;
         }
+    }
+
+    /// Corrupt one retained live identity without changing the doc or tuple.
+    /// The next cached-local serve must trip the FR1-VALID oracle.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn poison_frontier_for_test(&mut self, key: &DocKey) {
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.frontier.poison_identity_for_test();
+        }
+    }
+
+    /// Differential frontier evidence for mutation tests.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn frontier_matches_doc_for_test(&self, key: &DocKey) -> Result<Option<bool>, CollabError> {
+        self.entries
+            .get(key)
+            .map(|entry| entry.frontier.matches_doc(&entry.doc))
+            .transpose()
+    }
+
+    /// `(live identities, unsafe interiors, canonical deletion endpoints)`.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn frontier_fact_counts_for_test(&self, key: &DocKey) -> Option<(usize, usize, usize)> {
+        self.entries
+            .get(key)
+            .map(|entry| entry.frontier.fact_counts())
     }
 
     /// Whether an entry is resident (test evidence for eviction/removal).

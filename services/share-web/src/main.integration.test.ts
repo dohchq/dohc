@@ -637,6 +637,7 @@ async function startShareWeb(
         ...env,
         NODE_ENV: "test",
         DOHC_SHARE_WEB_RELAY_URL: relayUrl,
+        DOHC_SHARE_WEB_PUBLIC_RELAY_URL: relayUrl,
         DOHC_SHARE_WEB_PUBLIC_HOSTS: PUBLIC_HOST,
         DOHC_SHARE_WEB_PORT: "0",
         DOHC_SHARE_WEB_BIND: "127.0.0.1",

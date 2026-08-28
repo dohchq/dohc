@@ -1,5 +1,8 @@
+import { canonicalRelayUrl } from "@dohc/workspace-contracts/relay-values";
+
 export interface ShareWebConfig {
   relayUrl: string;
+  publicRelayUrl: string;
   relayExchangeKey?: string;
   publicHosts: Set<string>;
   trustedProxies: Set<string>;
@@ -36,6 +39,15 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
     relayUrl.password
   ) {
     throw new Error("DOHC_SHARE_WEB_RELAY_URL must be an absolute HTTP or HTTPS URL without credentials.");
+  }
+
+  const publicRelayUrl = canonicalRelayUrl(
+    required(env, "DOHC_SHARE_WEB_PUBLIC_RELAY_URL"),
+  );
+  if (publicRelayUrl === null) {
+    throw new Error(
+      "DOHC_SHARE_WEB_PUBLIC_RELAY_URL must be an absolute HTTP or HTTPS URL of at most 2048 characters without credentials, query, or fragment.",
+    );
   }
 
   const hostValue = required(env, "DOHC_SHARE_WEB_PUBLIC_HOSTS");
@@ -79,6 +91,7 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
 
   return {
     relayUrl: relayUrl.href,
+    publicRelayUrl,
     relayExchangeKey,
     publicHosts: new Set(hosts),
     trustedProxies,

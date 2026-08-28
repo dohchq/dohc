@@ -38,6 +38,55 @@ function fatal(message: string): never {
   process.exit(1);
 }
 
+function isLoopbackHostname(hostname: string): boolean {
+  return (
+    hostname === "localhost" ||
+    hostname.endsWith(".localhost") ||
+    /^127(?:\.\d{1,3}){3}$/u.test(hostname) ||
+    hostname === "[::1]"
+  );
+}
+
+function validateShareWebOrigin(value: string | undefined): string | undefined {
+  if (value === undefined) {
+    if (!isDevOrTest) {
+      fatal("FATAL: DOHC_RELAY_SHARE_WEB_ORIGIN must be set outside development/test.");
+    }
+    return undefined;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    fatal("FATAL: DOHC_RELAY_SHARE_WEB_ORIGIN must be an absolute HTTP(S) origin.");
+  }
+  if (
+    value.trim() !== value ||
+    (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    value.includes("@") ||
+    parsed.pathname !== "/" ||
+    value.includes("?") ||
+    value.includes("#")
+  ) {
+    fatal(
+      "FATAL: DOHC_RELAY_SHARE_WEB_ORIGIN must be an origin without credentials, a path, a query, or a fragment.",
+    );
+  }
+  if (!isDevOrTest && parsed.protocol !== "https:") {
+    fatal("FATAL: DOHC_RELAY_SHARE_WEB_ORIGIN must use HTTPS outside development/test.");
+  }
+  if (isDevOrTest && parsed.protocol === "http:" && !isLoopbackHostname(parsed.hostname)) {
+    fatal(
+      "FATAL: DOHC_RELAY_SHARE_WEB_ORIGIN must use HTTPS unless its HTTP hostname is loopback in development/test.",
+    );
+  }
+  return parsed.origin;
+}
+
+const shareWebOrigin = validateShareWebOrigin(process.env.DOHC_RELAY_SHARE_WEB_ORIGIN);
+
 // Reject an unparseable SYNC_RELAY_PORT up front: Number("abc") is NaN and
 // server.listen(NaN) fails with an obscure downstream error. Port 0 is
 // allowed (bind an ephemeral port, used by the integration harness).
@@ -176,6 +225,7 @@ const relayHandler = createSyncRelayHandler({
   lookupUserEmail: (userId) => lookupUserEmail(userId),
   presence,
   linkKey,
+  shareWebOrigin,
   relayExchangeKey,
 });
 const fetchHandler = async (request: Request): Promise<Response> => {

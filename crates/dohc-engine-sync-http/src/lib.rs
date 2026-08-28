@@ -795,6 +795,7 @@ define_server_error_codes! {
     "blob_missing" => |_| RelayError::BlobReferenceMissing,
     "blob_not_found" => |_| RelayError::BlobMissing,
     "conflict" => |_| RelayError::Conflict,
+    "dependents_changed" => |_| RelayError::Conflict,
     "empty_selector" => |_| RelayError::BadRequest,
     "epoch_superseded" => |_| RelayError::EpochSuperseded,
     "identity_not_recognized" => |_| RelayError::IdentityNotRecognized,
@@ -1121,6 +1122,14 @@ mod tests {
                 "recordedAtMs",
             ]),
             "MUTATION: a new field on ShareProposalChange must not silently join the wire",
+        );
+    }
+
+    #[test]
+    fn dependents_changed_maps_to_conflict_for_share_requests() {
+        assert_eq!(
+            map_server_code("dependents_changed", RequestContext::Share),
+            RelayError::Conflict
         );
     }
 

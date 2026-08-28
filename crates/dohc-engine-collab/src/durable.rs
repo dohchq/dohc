@@ -453,7 +453,7 @@ pub fn record_local_update(
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<AppendOutcome>, CollabError> {
-    record_local_update_with_origin_cached(store, cache, key, update, None, faults, now_ms)
+    record_local_update_with_origin(store, cache, key, update, None, faults, now_ms)
 }
 
 /// [`record_local_update`] with the requesting client's actor origin id
@@ -461,25 +461,6 @@ pub fn record_local_update(
 /// provenance/echo-filter parity with the TS driver, which stores the
 /// caller-supplied origin rather than dropping it.
 pub fn record_local_update_with_origin(
-    store: &mut EngineStore,
-    key: &DocKey,
-    update: &[u8],
-    actor_origin_id: Option<&str>,
-    faults: &dyn FaultInjector,
-    now_ms: i64,
-) -> Result<TxnOutcome<AppendOutcome>, CollabError> {
-    record_local_update_with_origin_cached(
-        store,
-        &mut WriterDocCache::new(),
-        key,
-        update,
-        actor_origin_id,
-        faults,
-        now_ms,
-    )
-}
-
-fn record_local_update_with_origin_cached(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
     key: &DocKey,
@@ -910,6 +891,34 @@ pub(crate) fn append_and_index_update(
     now_ms: i64,
 ) -> Result<(Ydoc, i64), CollabError> {
     let projection = crate::validate_replay_parity_with_scratch(base, update)?;
+    let seq = append_validated_and_index_update(
+        conn,
+        key,
+        content_kind,
+        base,
+        &projection,
+        update,
+        sha,
+        index_frontmatter,
+        actor_origin_id,
+        now_ms,
+    )?;
+    Ok((projection, seq))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn append_validated_and_index_update(
+    conn: &Connection,
+    key: &DocKey,
+    content_kind: ContentKind,
+    base: &Ydoc,
+    projection: &Ydoc,
+    update: &[u8],
+    sha: &str,
+    index_frontmatter: bool,
+    actor_origin_id: Option<&str>,
+    now_ms: i64,
+) -> Result<i64, CollabError> {
     put_binary_blob_with_sha(conn, update, sha)?;
     let seq = append_row(conn, key, sha, actor_origin_id, now_ms)?;
     if index_frontmatter {
@@ -918,13 +927,13 @@ pub(crate) fn append_and_index_update(
             key,
             content_kind,
             base,
-            &projection,
+            projection,
             update,
             actor_origin_id,
             now_ms,
         )?;
     }
-    Ok((projection, seq))
+    Ok(seq)
 }
 
 fn append_local_update(
@@ -965,11 +974,11 @@ fn append_local_update(
 }
 
 /// [`append_local_update`] with the writer's doc cache serving the gate base.
-/// A cache hit gates against the cached doc (validated against the in-tx
-/// tuple, see [`WriterDocCache::base_for_gate`]); a miss reconstructs exactly
-/// as before and hands the rebuilt PRE-APPEND base out through `probe` so the
-/// caller can warm the cache after the transaction commits. The cache is only
-/// READ here — it is never mutated inside a transaction.
+/// A cache hit gates against the cached doc and its integrated frontier
+/// (validated against the in-tx tuple); a miss reconstructs exactly as before
+/// and hands the rebuilt PRE-APPEND base and frontier out through `probe` so
+/// the caller can warm the cache after the transaction commits. The cache is
+/// only READ here — it is never mutated inside a transaction.
 #[allow(clippy::too_many_arguments)]
 fn append_local_update_cached(
     conn: &Connection,
@@ -992,19 +1001,26 @@ fn append_local_update_cached(
             emit_outbound: false,
         });
     }
-    let seq = match cache.base_for_gate(conn, key, marker)? {
-        Some(base) => {
-            let (_, seq) = append_and_index_update(
+    let seq = match cache.base_and_frontier_for_local_gate(conn, key, marker)? {
+        Some((base, frontier)) => {
+            let validation = crate::replay_parity::validate_replay_parity_for_cached_local(
+                base,
+                Some(frontier),
+                update,
+            )?;
+            let seq = append_validated_and_index_update(
                 conn,
                 key,
                 marker.content_kind,
                 base,
+                &validation.scratch,
                 update,
                 sha,
                 index_frontmatter,
                 actor_origin_id,
                 now_ms,
             )?;
+            probe.candidate = Some(validation.candidate);
             probe.served = Some(ServedGateBase {
                 source: GateBaseSource::Hit,
                 observed: marker.clone(),
@@ -1013,19 +1029,28 @@ fn append_local_update_cached(
         }
         None => {
             let base = load_for_replay_gate(conn, key)?;
-            let (_, seq) = append_and_index_update(
+            let validation =
+                crate::replay_parity::validate_replay_parity_for_cached_local(&base, None, update)?;
+            let seq = append_validated_and_index_update(
                 conn,
                 key,
                 marker.content_kind,
                 &base,
+                &validation.scratch,
                 update,
                 sha,
                 index_frontmatter,
                 actor_origin_id,
                 now_ms,
             )?;
+            probe.candidate = Some(validation.candidate);
             probe.served = Some(ServedGateBase {
-                source: GateBaseSource::Rebuilt(base),
+                source: GateBaseSource::Rebuilt {
+                    doc: base,
+                    frontier: validation
+                        .rebuilt_frontier
+                        .expect("a cold cached-local gate rebuilds its frontier"),
+                },
                 observed: marker.clone(),
             });
             seq

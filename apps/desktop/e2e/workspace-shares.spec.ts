@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -6,7 +7,12 @@ import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { RelayFilePeer } from "../src/testing/relayFilePeer";
 import { claimRelayWorkspace, relayJson } from "./helpers/relayPeer";
 import { launchDesktopApp } from "./helpers/desktopApp";
-import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
+import {
+  relayAdoptedIdentity,
+  spawnSyncRelay,
+  type RelayWorkspaceIdentity,
+  type SyncRelayHandle,
+} from "./helpers/syncRelay";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
@@ -37,6 +43,60 @@ const GRANTER_TOKEN = "test:e2e-granter";
 const UNUSED_CONTENT_HASH = "0".repeat(64);
 const RECIPIENT_TOKEN = "test:e2e-recipient";
 const RECIPIENT_EMAIL = "e2e-recipient@dohc.test";
+
+type RawRelayResponse = { status: number; body: string };
+
+async function publicRelayRequest(
+  baseUrl: string,
+  path: string,
+  init: RequestInit,
+): Promise<RawRelayResponse> {
+  const response = await fetch(`${baseUrl}${path}`, {
+    ...init,
+    signal: AbortSignal.timeout(15_000),
+  });
+  return { status: response.status, body: await response.text() };
+}
+
+async function exchangeViewLink(
+  baseUrl: string,
+  relayExchangeKey: string,
+  secret: string,
+): Promise<RawRelayResponse> {
+  return publicRelayRequest(baseUrl, "/sync/link-exchange", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-dohc-relay-exchange-key": relayExchangeKey,
+    },
+    body: JSON.stringify({ secret }),
+  });
+}
+
+async function readViewLink(
+  baseUrl: string,
+  capability: string,
+  path: string,
+): Promise<RawRelayResponse> {
+  return publicRelayRequest(baseUrl, path, {
+    method: "GET",
+    headers: { authorization: `LinkCapability ${capability}` },
+  });
+}
+
+async function mintLinkHandoff(
+  baseUrl: string,
+  relayExchangeKey: string,
+  capability: string,
+): Promise<RawRelayResponse> {
+  return publicRelayRequest(baseUrl, "/sync/link-handoff", {
+    method: "POST",
+    headers: {
+      authorization: `LinkCapability ${capability}`,
+      "x-dohc-relay-exchange-key": relayExchangeKey,
+    },
+  });
+}
 
 // The granter's only open proposal, listed then opened — the shape the
 // granter's own review takes. The listing is a summary (#808); its count is
@@ -185,6 +245,403 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     if (desktop) await cleanupDesktopWorkspace(desktop, temp);
     else await temp.cleanup();
   }
+});
+
+const confidentialTest = test.extend({});
+confidentialTest.use({ screenshot: "off", trace: "off" });
+
+confidentialTest.describe("View link lifecycle", () => {
+  // A failed lifecycle run must not retain its one-time URL in Playwright
+  // diagnostics. The assertions below report only status, copy, and UI state.
+  confidentialTest("creates, resets, and ends a link while dependent named access follows the warnings", async () => {
+    confidentialTest.setTimeout(300_000);
+    const temp = await createTempWorkspace();
+    const workspaceId = "share-view-link-lifecycle-e2e";
+    const selectedText = "# Shared\n\nThe lantern route.\n";
+    const privateText = "The private harbor ledger stays private.\n";
+    const linkKey = randomBytes(32).toString("base64url");
+    const relayExchangeKey = randomBytes(32).toString("base64url");
+    const publicViewerOrigin = "http://127.0.0.1:4173";
+    const neverValidCredential = "A".repeat(43);
+    let relay: SyncRelayHandle | null = null;
+    let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+
+    try {
+      await seedWorkspaceManifest(temp, workspaceId);
+      await seedWorkspaceSettings(temp, { experimental: { workspaceEngineAlpha: true } });
+      await writeWorkspaceFiles(temp, [
+        { path: "docs/shared.md", contents: selectedText },
+        { path: "private/hidden.md", contents: privateText },
+      ]);
+
+      relay = await spawnSyncRelay({
+        dbPath: join(temp.baseDir, "relay.sqlite"),
+        linkBoundary: { linkKey, relayExchangeKey, publicViewerOrigin },
+      });
+      await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
+      await seedWorkspaceRegistry(temp, [
+        {
+          workspaceId,
+          rootPath: temp.rootPath,
+          remote: {
+            serverUrl: relay.baseUrl,
+            ownerUserId: "e2e-granter",
+          },
+        },
+      ]);
+      await seedCloudCredentials(temp, {
+        serverUrl: relay.baseUrl,
+        relayUrl: relay.baseUrl,
+        email: "e2e-granter@dohc.test",
+        userId: "e2e-granter",
+        token: GRANTER_TOKEN,
+      });
+
+      desktop = await launchDesktopApp({
+        workspace: temp,
+        env: {
+          DOHC_TEST_SYNC_DEBOUNCE_MS: "150",
+          DOHC_TEST_SYNC_BACKOFF_MS: "250",
+          DOHC_TEST_EXPLORER_MENU_CHOICE: "share",
+        },
+      });
+      const page = desktop.page;
+      await openWorkspaceFromFirstRun(page, temp);
+
+      // The walkthrough starts only after both selected and private local
+      // files reached the owned relay workspace.
+      let identity: RelayWorkspaceIdentity | null = null;
+      await expect
+        .poll(
+          async () => {
+            identity ??= relayAdoptedIdentity(relay!.dbPath, workspaceId);
+            if (identity === null) return false;
+            const query = new URLSearchParams({
+              since: "0",
+              limit: "500",
+              replicationEpoch: identity.replicationEpoch,
+              streamIdentity: identity.streamIdentity,
+            });
+            const response = await fetch(
+              `${relay!.baseUrl}/sync/${encodeURIComponent(workspaceId)}/log?${query.toString()}`,
+              { headers: { authorization: `Bearer ${GRANTER_TOKEN}` } },
+            );
+            if (response.status === 409) {
+              identity = null;
+              return false;
+            }
+            if (!response.ok) return false;
+            const body = (await response.json()) as {
+              ops: Array<{ payload?: { path?: string; payloadAfterPath?: string } }>;
+            };
+            const paths = body.ops.flatMap((op) => [
+              op.payload?.path,
+              op.payload?.payloadAfterPath,
+            ]);
+            return paths.includes("docs/shared.md") && paths.includes("private/hidden.md");
+          },
+          { timeout: 90_000, intervals: [1_000] },
+        )
+        .toBe(true);
+
+      await revealExplorerPath(page, "docs/shared.md");
+      await explorerRow(page, "docs/shared.md").click({ button: "right" });
+      let dialog = page.getByTestId("share-dialog");
+      await expect(dialog).toBeVisible();
+      await expect(dialog).toContainText("docs/shared.md");
+
+      const linkScope = dialog.getByRole("radio", { name: "Anyone with the link" });
+      await linkScope.click();
+      await expect(linkScope).toHaveAttribute("aria-checked", "true");
+      await expect(dialog.getByText("Links are view-only for now.")).toBeVisible();
+      await expect(dialog.getByText("View", { exact: true })).toBeVisible();
+      await expect(dialog).toContainText(
+        "If files are added to this selection later, the link includes them.",
+      );
+      await expect(dialog).toContainText(
+        "The sync relay serves the link, so it can read this content.",
+      );
+      await expect(dialog).toContainText(
+        "Ending it stops future access, but can't take back copies people already made.",
+      );
+
+      await dialog.getByRole("button", { name: "Create link", exact: true }).click();
+      const oneTimeUrl = await dialog.getByTestId("share-link-url").textContent();
+      if (oneTimeUrl === null) throw new Error("The Share dialog did not expose the link.");
+      const oldUrl = new URL(oneTimeUrl);
+      expect(oldUrl.origin === publicViewerOrigin).toBe(true);
+      const oldSecret = oldUrl.hash.slice(1);
+      expect(/^[A-Za-z0-9_-]{43}$/u.test(oldSecret)).toBe(true);
+      const copyButton = dialog.getByRole("button", { name: "Copy", exact: true });
+      await copyButton.click();
+      await expect(dialog.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
+
+      const firstExchange = await exchangeViewLink(
+        relay.baseUrl,
+        relayExchangeKey,
+        oldSecret,
+      );
+      expect(firstExchange.status).toBe(200);
+      const exchanged = JSON.parse(firstExchange.body) as {
+        shareId?: unknown;
+        grantId?: unknown;
+        access?: unknown;
+        capabilityToken?: unknown;
+      };
+      if (
+        typeof exchanged.shareId !== "string" ||
+        typeof exchanged.grantId !== "string" ||
+        typeof exchanged.capabilityToken !== "string"
+      ) {
+        throw new Error("The relay returned an incomplete View link exchange.");
+      }
+      expect(exchanged.access).toBe("view");
+      const shareId = exchanged.shareId;
+      const linkGrantId = exchanged.grantId;
+      const oldCapability = exchanged.capabilityToken;
+
+      const shippedRoute = await readViewLink(
+        relay.baseUrl,
+        oldCapability,
+        "/sync/link/share",
+      );
+      expect(shippedRoute.status).toBe(200);
+      const shippedShare = JSON.parse(shippedRoute.body) as {
+        access?: unknown;
+        effectiveSelector?: { paths?: unknown };
+      };
+      expect(shippedShare.access).toBe("view");
+      expect(shippedShare.effectiveSelector?.paths).toEqual(["shared.md"]);
+
+      const linkLogResponse = await readViewLink(
+        relay.baseUrl,
+        oldCapability,
+        "/sync/link/log?since=0&limit=500",
+      );
+      expect(linkLogResponse.status).toBe(200);
+      const linkLog = JSON.parse(linkLogResponse.body) as {
+        ops?: Array<{ opKind?: unknown; payload?: Record<string, unknown> }>;
+      };
+      const selectedOp = linkLog.ops?.find(
+        (op) =>
+          op.opKind === "moment.append" &&
+          (op.payload?.payloadAfterPath === "shared.md" || op.payload?.path === "shared.md"),
+      );
+      if (selectedOp === undefined) {
+        throw new Error("The shipped link log did not include the selected file.");
+      }
+      const selectedDigest = selectedOp.payload?.payloadAfterBlobSha256;
+      if (typeof selectedDigest !== "string") {
+        throw new Error("The selected file operation did not name its content.");
+      }
+      expect(JSON.stringify(linkLog).includes("hidden.md")).toBe(false);
+      const selectedBlob = await readViewLink(
+        relay.baseUrl,
+        oldCapability,
+        `/sync/link/blobs/${selectedDigest}`,
+      );
+      expect(selectedBlob.status).toBe(200);
+      expect(selectedBlob.body).toBe(selectedText);
+      const privateDigest = createHash("sha256").update(privateText).digest("hex");
+      const privateBlob = await readViewLink(
+        relay.baseUrl,
+        oldCapability,
+        `/sync/link/blobs/${privateDigest}`,
+      );
+      expect(privateBlob.status).toBe(404);
+
+      const handoffResponse = await mintLinkHandoff(
+        relay.baseUrl,
+        relayExchangeKey,
+        oldCapability,
+      );
+      expect(handoffResponse.status).toBe(200);
+      const handoff = JSON.parse(handoffResponse.body) as { code?: unknown };
+      if (typeof handoff.code !== "string") {
+        throw new Error("The relay did not mint a handoff code.");
+      }
+      const redeemed = await relayJson(relay.baseUrl, RECIPIENT_TOKEN, "/sync/link-redeem", {
+        method: "POST",
+        body: JSON.stringify({ code: handoff.code }),
+      });
+      expect(redeemed.status).toBe(200);
+      const namedGrant = JSON.parse(redeemed.body) as {
+        shareId?: unknown;
+        grantId?: unknown;
+        access?: unknown;
+      };
+      expect(namedGrant.shareId === shareId).toBe(true);
+      expect(typeof namedGrant.grantId === "string").toBe(true);
+      expect(namedGrant.access).toBe("view");
+      const namedBeforeReset = await relayJson(
+        relay.baseUrl,
+        RECIPIENT_TOKEN,
+        `/sync/shares/${shareId}/log?since=0&limit=500`,
+      );
+      expect(namedBeforeReset.status).toBe(200);
+      expect(namedBeforeReset.body.includes("docs/shared.md")).toBe(true);
+      expect(namedBeforeReset.body.includes("private/hidden.md")).toBe(false);
+
+      await dialog.getByRole("button", { name: "Close" }).click();
+      await expect(dialog).not.toBeVisible();
+      await explorerRow(page, "docs/shared.md").click({ button: "right" });
+      dialog = page.getByTestId("share-dialog");
+      await expect(dialog).toBeVisible();
+      await dialog.getByRole("radio", { name: "Anyone with the link" }).click();
+      const linkRows = dialog.locator('article[data-testid^="share-link-row-"]');
+      await expect(linkRows).toHaveCount(1);
+      const linkRow = linkRows.first();
+      const linkRowTestId = await linkRow.getAttribute("data-testid");
+      expect(linkRowTestId === `share-link-row-${linkGrantId}`).toBe(true);
+      await expect(linkRow).toContainText("Used as recently as");
+      await expect(dialog.getByText("Links are view-only for now.")).toBeVisible();
+      await expect(dialog.getByText("View", { exact: true })).toBeVisible();
+      const reachableRetuneTargets = await dialog
+        .getByRole("button", { name: /^(?:View|Comment|Edit)$/u })
+        .allTextContents();
+      expect(reachableRetuneTargets).toEqual([]);
+
+      await linkRow.getByRole("button", { name: "Reset link" }).click();
+      let confirmation = dialog.getByTestId("share-link-confirmation");
+      await expect(confirmation).toContainText(RECIPIENT_EMAIL);
+      await expect(confirmation).toContainText("keep access");
+      await confirmation.getByRole("button", { name: "Cancel" }).click();
+      await expect(confirmation).not.toBeVisible();
+      const afterResetCancel = await exchangeViewLink(
+        relay.baseUrl,
+        relayExchangeKey,
+        oldSecret,
+      );
+      expect(afterResetCancel.status).toBe(200);
+      const afterResetCancelBody = JSON.parse(afterResetCancel.body) as {
+        capabilityToken?: unknown;
+      };
+      if (typeof afterResetCancelBody.capabilityToken !== "string") {
+        throw new Error("The canceled reset left no usable link exchange.");
+      }
+      expect(
+        (
+          await readViewLink(
+            relay.baseUrl,
+            afterResetCancelBody.capabilityToken,
+            "/sync/link/share",
+          )
+        ).status,
+      ).toBe(200);
+
+      await linkRow.getByRole("button", { name: "Reset link" }).click();
+      confirmation = dialog.getByTestId("share-link-confirmation");
+      await confirmation.getByRole("button", { name: "Reset link" }).click();
+      const resetUrlText = await dialog.getByTestId("share-link-url").textContent();
+      if (resetUrlText === null) throw new Error("Reset did not expose the replacement link.");
+      const resetUrl = new URL(resetUrlText);
+      const currentSecret = resetUrl.hash.slice(1);
+      expect(resetUrl.origin === publicViewerOrigin).toBe(true);
+      expect(/^[A-Za-z0-9_-]{43}$/u.test(currentSecret)).toBe(true);
+      expect(currentSecret === oldSecret).toBe(false);
+
+      const neverValidExchange = await exchangeViewLink(
+        relay.baseUrl,
+        relayExchangeKey,
+        neverValidCredential,
+      );
+      expect(neverValidExchange.status).toBe(404);
+      const oldSecretAfterReset = await exchangeViewLink(
+        relay.baseUrl,
+        relayExchangeKey,
+        oldSecret,
+      );
+      expect(oldSecretAfterReset).toEqual(neverValidExchange);
+      const neverValidRead = await readViewLink(
+        relay.baseUrl,
+        neverValidCredential,
+        "/sync/link/share",
+      );
+      expect(neverValidRead.status).toBe(401);
+      const oldCapabilityAfterReset = await readViewLink(
+        relay.baseUrl,
+        oldCapability,
+        "/sync/link/share",
+      );
+      expect(oldCapabilityAfterReset).toEqual(neverValidRead);
+
+      const currentExchange = await exchangeViewLink(
+        relay.baseUrl,
+        relayExchangeKey,
+        currentSecret,
+      );
+      expect(currentExchange.status).toBe(200);
+      const currentExchangeBody = JSON.parse(currentExchange.body) as {
+        capabilityToken?: unknown;
+      };
+      if (typeof currentExchangeBody.capabilityToken !== "string") {
+        throw new Error("The replacement link exchange was incomplete.");
+      }
+      const currentCapability = currentExchangeBody.capabilityToken;
+      const namedAfterReset = await relayJson(
+        relay.baseUrl,
+        RECIPIENT_TOKEN,
+        `/sync/shares/${shareId}/log?since=0&limit=500`,
+      );
+      expect(namedAfterReset.status).toBe(200);
+
+      await linkRow.getByRole("button", { name: "End link" }).click();
+      confirmation = dialog.getByTestId("share-link-confirmation");
+      await expect(confirmation).toContainText(RECIPIENT_EMAIL);
+      await expect(confirmation).toContainText("lose access");
+      await expect(confirmation).toContainText("Copies they already made stay with them.");
+      await confirmation.getByRole("button", { name: "Cancel" }).click();
+      await expect(confirmation).not.toBeVisible();
+      expect(
+        (await readViewLink(relay.baseUrl, currentCapability, "/sync/link/share"))
+          .status,
+      ).toBe(200);
+      expect(
+        (
+          await relayJson(
+            relay.baseUrl,
+            RECIPIENT_TOKEN,
+            `/sync/shares/${shareId}/log?since=0&limit=500`,
+          )
+        ).status,
+      ).toBe(200);
+
+      await linkRow.getByRole("button", { name: "End link" }).click();
+      confirmation = dialog.getByTestId("share-link-confirmation");
+      await confirmation.getByRole("button", { name: "End link" }).click();
+      await expect(confirmation).not.toBeVisible();
+      await expect(linkRow).toContainText("Ended");
+
+      const currentSecretAfterEnd = await exchangeViewLink(
+        relay.baseUrl,
+        relayExchangeKey,
+        currentSecret,
+      );
+      expect(currentSecretAfterEnd).toEqual(neverValidExchange);
+      const currentCapabilityAfterEnd = await readViewLink(
+        relay.baseUrl,
+        currentCapability,
+        "/sync/link/share",
+      );
+      expect(currentCapabilityAfterEnd).toEqual(neverValidRead);
+      const namedAfterEnd = await relayJson(
+        relay.baseUrl,
+        RECIPIENT_TOKEN,
+        `/sync/shares/${shareId}/log?since=0&limit=500`,
+      );
+      const missingNamedShare = await relayJson(
+        relay.baseUrl,
+        RECIPIENT_TOKEN,
+        "/sync/shares/never-valid/log?since=0&limit=500",
+      );
+      expect(missingNamedShare.status).toBe(404);
+      expect(namedAfterEnd).toEqual(missingNamedShare);
+    } finally {
+      await relay?.stop();
+      if (desktop) await cleanupDesktopWorkspace(desktop, temp);
+      else await temp.cleanup();
+    }
+  });
 });
 
 test("receive side: open a share read-only, follow the granter's edits, and see the honest end", async () => {
