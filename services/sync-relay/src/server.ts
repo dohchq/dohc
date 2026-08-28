@@ -2,7 +2,6 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   isChatShareAccessValue,
   isShareAccessValue,
-  shareAccessRank,
   type LinkExchangeResult,
 } from "@dohc/security-contract";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
@@ -1880,9 +1879,6 @@ export function createSyncRelayHandler({
           "expectedDependentGrantIds",
         ]);
         const access = validatePhase2LinkAccess(input.access);
-        const widening = shareAccessRank(access) > shareAccessRank(grant.access);
-        let secret: string | null = null;
-        if (widening && (!linkKey || !shareWebOrigin)) throw notFound();
         const result = storage.retuneShareGrant({
           shareId: share.shareId,
           grantId: grant.grantId,
@@ -1892,17 +1888,6 @@ export function createSyncRelayHandler({
           guard: () => {
             requireOwnedLinkGrant(share.shareId, grant.grantId, actor);
           },
-          ...(widening && linkKey
-            ? {
-                mintCredential: () => {
-                  secret = newLinkBearer();
-                  return {
-                    credentialId: newId(),
-                    secretHash: hashLinkBearer(secret, linkKey),
-                  };
-                },
-              }
-            : {}),
         });
         if (!result.ok) {
           if ("reason" in result && result.reason === "dependents-changed") {
@@ -1914,7 +1899,6 @@ export function createSyncRelayHandler({
         return jsonResponse({
           ok: true,
           ...linkGrantBody(result.grant),
-          ...(secret ? { url: composePublicLinkUrl(shareWebOrigin!, secret) } : {}),
         });
       }
       if (route.route === "share-link-retune") throw methodNotAllowed();
