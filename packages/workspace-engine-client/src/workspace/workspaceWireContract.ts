@@ -400,6 +400,7 @@ const CollectionSchemaReasonSchema = mutableStruct({
   code: Schema.Literals([
     "invalid-yaml",
     "root-not-mapping",
+    "root-collection-unsupported",
     "unknown-property",
     "expected-text",
     "expected-mapping",

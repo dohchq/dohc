@@ -53,6 +53,34 @@ function expectStableMarkdownRoundTrip(
 }
 
 describe('Y.Doc markdown import/export', () => {
+  it('round-trips CRLF richdoc frontmatter through the internal line-ending hint', () => {
+    const input = [
+      '---',
+      'id: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa',
+      'done: false',
+      'priority: 3',
+      'status: open',
+      '---',
+      '',
+      '# Body',
+      '',
+      'body text',
+    ].join('\r\n')
+    const doc = markdownToYDoc(input)
+
+    expect(doc.getMap('meta').get('dohcMarkdownCrlf')).toBe(true)
+    expect(getDohcYDocMeta(doc)).toEqual({
+      schemaVersion: 1,
+      contentKind: undefined,
+    })
+    expect(getDohcYDocFrontmatter(doc)).toMatchObject({
+      done: false,
+      priority: 3,
+      status: 'open',
+    })
+    expect(yDocToMarkdown(doc)).toBe(input)
+  })
+
   it('keeps comment-only frontmatter empty under the js-yaml 5 parser', () => {
     const input = ['---', '# metadata', '', '---', '# Body'].join('\n')
     const doc = markdownToYDoc(input)

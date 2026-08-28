@@ -53,6 +53,8 @@ pub const ROOT_FRONTMATTER: &str = "frontmatter";
 pub const ROOT_META: &str = "meta";
 /// Reserved engine metadata that identifies one immutable lineage epoch.
 pub const LINEAGE_EPOCH_META_KEY: &str = "dohcLineageEpoch";
+/// Reserved engine metadata that preserves a CRLF Markdown artifact's line endings.
+const MARKDOWN_CRLF_META_KEY: &str = "dohcMarkdownCrlf";
 /// The rich-document body: a ProseMirror `XmlFragment`.
 pub const ROOT_BODY: &str = "body";
 /// The plaintext-document body: a single `Y.Text`.
@@ -676,8 +678,13 @@ impl Ydoc {
         // takes the store lock, so calling one while a transaction is live
         // deadlocks (spike harness note).
         let frontmatter = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
+        let meta = self.doc.get_or_insert_map(ROOT_META);
         let body = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
         let txn = self.doc.transact();
+        let uses_crlf = matches!(
+            meta.get(&txn, MARKDOWN_CRLF_META_KEY),
+            Some(Out::Any(Any::Bool(true)))
+        );
         let mut has_frontmatter = false;
         let mut remaining_nodes = projection_node_budget;
         let mut source_text_bytes = 0usize;
@@ -712,7 +719,12 @@ impl Ydoc {
             })?;
         }
         out.push_str(&body_markdown)?;
-        Ok(out.into_string())
+        let projected = out.into_string();
+        if uses_crlf {
+            ensure_projection_string(projected.replace('\n', "\r\n"))
+        } else {
+            Ok(projected)
+        }
     }
 
     // ---- Rust-side edit helpers (used to build lineages in unit tests without
@@ -782,9 +794,17 @@ impl Ydoc {
             ContentKind::Richdoc => {
                 let frag = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
                 let map = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
+                let meta = self.doc.get_or_insert_map(ROOT_META);
                 let (frontmatter, body) = split_markdown_frontmatter(markdown);
-                let blocks = parse_markdown_blocks(body);
+                let uses_crlf = markdown.contains("\r\n");
+                let normalized_body = uses_crlf.then(|| body.replace("\r\n", "\n"));
+                let blocks = parse_markdown_blocks(normalized_body.as_deref().unwrap_or(body));
                 self.with_delta(|txn| {
+                    if uses_crlf {
+                        meta.insert(txn, MARKDOWN_CRLF_META_KEY, true);
+                    } else {
+                        meta.remove(txn, MARKDOWN_CRLF_META_KEY);
+                    }
                     let keys: Vec<String> = map.iter(txn).map(|(key, _)| key.to_string()).collect();
                     for key in keys {
                         map.remove(txn, &key);
@@ -916,20 +936,29 @@ enum MdBlock {
 /// Values use the collection indexer's YAML parser so a richdoc seed and its
 /// index agree on scalar, sequence, and mapping types.
 fn split_markdown_frontmatter(markdown: &str) -> (serde_json::Map<String, Value>, &str) {
-    let Some(rest) = markdown.strip_prefix("---\n") else {
+    let mut lines = markdown.split_inclusive('\n');
+    let Some(opener) = lines.next() else {
         return (serde_json::Map::new(), markdown);
     };
-    let Some(end) = rest.find("\n---") else {
-        return (serde_json::Map::new(), markdown);
-    };
-    let after = &rest[end + "\n---".len()..];
-    let body = after
-        .strip_prefix("\n\n")
-        .or_else(|| after.strip_prefix('\n'))
-        .unwrap_or(after);
-    if !after.is_empty() && !after.starts_with('\n') {
+    if opener.trim_end_matches(['\r', '\n']) != "---" {
         return (serde_json::Map::new(), markdown);
     }
+    let mut offset = opener.len();
+    let mut after = None;
+    for line in lines {
+        offset += line.len();
+        if line.trim_end_matches(['\r', '\n']) == "---" {
+            after = Some(&markdown[offset..]);
+            break;
+        }
+    }
+    let Some(after) = after else {
+        return (serde_json::Map::new(), markdown);
+    };
+    let body = after
+        .strip_prefix("\r\n")
+        .or_else(|| after.strip_prefix('\n'))
+        .unwrap_or(after);
     match dohc_engine_domain::collections::markdown_frontmatter_json(markdown) {
         Some(Value::Object(frontmatter)) => (frontmatter, body),
         _ => (serde_json::Map::new(), markdown),
@@ -4833,6 +4862,33 @@ fn main() {}
         assert!(
             frontmatter.contains("owner") && frontmatter.contains("ice"),
             "the nested map is real metadata, not body text: {frontmatter}"
+        );
+    }
+
+    #[test]
+    fn richdoc_rewrite_adopts_crlf_frontmatter_as_typed_fields() {
+        let doc = Ydoc::wire();
+        let chosen = "---\r\ndone: false\r\npriority: 3\r\nstatus: open\r\n---\r\n\r\nbody text";
+
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
+            .expect("richdoc rewrite");
+
+        assert_eq!(doc.frontmatter_json()["status"], json!("open"));
+        assert_eq!(doc.frontmatter_json()["priority"], json!(3));
+        assert_eq!(doc.frontmatter_json()["done"], json!(false));
+        let body =
+            serde_json::to_string(&doc.canonical_content()["body"]).expect("canonical body json");
+        assert_eq!(body.matches("body text").count(), 1);
+        assert!(
+            !body.contains("status"),
+            "frontmatter must not become body: {body}"
+        );
+        assert_eq!(
+            doc.project(ContentKind::Richdoc)
+                .expect("richdoc projection")
+                .content,
+            chosen,
+            "the fold must retain the source's CRLF byte shape"
         );
     }
 

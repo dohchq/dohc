@@ -638,6 +638,12 @@ struct YdocSessionView {
 }
 
 impl OpenWorkspace {
+    fn request_collection_reconcile(&self) {
+        if let Some(driver) = lock(&self.capture).as_ref() {
+            driver.status().request_collection_reconcile();
+        }
+    }
+
     /// Take the driver and cancel it SYNCHRONOUSLY (no await point, so an
     /// aborted RPC future can never leave a driver un-cancelled), returning
     /// the join handle for callers that must await the full drain.
@@ -2187,6 +2193,19 @@ impl EngineService {
                 "sync.pull",
             )
             .await?;
+        // The bounded sync outcome does not expose which applied op kinds
+        // were conflict resolutions. Any applied pull may therefore carry a
+        // conflict transition; fail toward one queued reconciliation instead
+        // of polling collections on every idle watcher tick.
+        if matches!(
+            &outcome,
+            RelayOperationOutcome::Sync(
+                SyncPassOutcome::Complete { applied, .. }
+                    | SyncPassOutcome::CrashedAfterApply { applied, .. }
+            ) if *applied > 0
+        ) {
+            open.request_collection_reconcile();
+        }
         let pending = match &outcome {
             RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
                 pending_cursor: Some(cursor),
@@ -3597,6 +3616,7 @@ impl EngineService {
                     {
                         // The switch is durable. The capture driver already retries
                         // collection reconciliation on its next pass.
+                        capture_status.request_collection_reconcile();
                         capture_status.mark_degraded();
                         eprintln!(
                             "engine: version switch committed but collection reconciliation \
@@ -8364,6 +8384,9 @@ impl EngineService {
                 )
                 .await
                 .map_err(map_runtime)?;
+            if matches!(&result, ApplyOutcome::Applied(_)) {
+                open.request_collection_reconcile();
+            }
             return Ok(replicated_conflict_json(result));
         }
         let conflict = params
@@ -8376,6 +8399,9 @@ impl EngineService {
             .conflict_open(Box::new(conflict), Arc::new(NoFaults), cancellation.token())
             .await
             .map_err(map_runtime)?;
+        if inserted {
+            open.request_collection_reconcile();
+        }
         Ok(json!({ "inserted": inserted }))
     }
 
@@ -8410,6 +8436,9 @@ impl EngineService {
                 )
                 .await
                 .map_err(map_runtime)?;
+            if matches!(&result, ApplyOutcome::Applied(_)) {
+                open.request_collection_reconcile();
+            }
             return Ok(replicated_conflict_json(result));
         }
         let local = params.local.ok_or_else(|| {
@@ -8493,7 +8522,7 @@ impl EngineService {
             .actor
             .conflict_resolve_indexed(
                 ResolveTextConflict {
-                    workspace_id: open.workspace_id,
+                    workspace_id: open.workspace_id.clone(),
                     conflict_id: local.conflict_id,
                     resolution,
                     object_id: local.object_id,
@@ -8508,12 +8537,13 @@ impl EngineService {
                     conflict_answer_budget_bytes,
                 },
                 scoped_leases,
-                open.root,
+                open.root.clone(),
                 Arc::new(NoFaults),
                 cancellation.token(),
             )
             .await
             .map_err(map_runtime)?;
+        open.request_collection_reconcile();
         let mut answer = json!({
             "conflict": settled_conflict_json(&result.conflict),
             "write": result.write.as_ref().map(|write| json!({

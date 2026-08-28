@@ -26,9 +26,9 @@ use crate::capture_sink::{CaptureProvenance, SelfWriteSuppression, StoreCaptureS
 use crate::{CAPTURE_MOMENT_RECORDED_EVENT, EngineEvents};
 use dohc_engine_collab::LeaseRegistry;
 use dohc_engine_files::{
-    CancellationToken, CaptureApplyResult, FilesActor, FilesError, FilesHandle, ManifestEntry,
-    NativeWatcher, ReconcilePlan, ReconcileRun, ScanBounds, ScanGeneration, ScanManifest,
-    apply_reconcile_plan,
+    CancellationToken, CaptureApplyResult, CaptureOp, FilesActor, FilesError, FilesHandle,
+    IngestReason, ManifestEntry, NativeWatcher, ReconcilePlan, ReconcileRun, ScanBounds,
+    ScanGeneration, ScanManifest, apply_reconcile_plan,
 };
 use dohc_engine_runtime::{ActorHandle, NoFaults, RuntimeError};
 use std::path::{Path, PathBuf};
@@ -443,6 +443,11 @@ const STATUS_TERMINAL: u8 = 1 << 2;
 /// loop's unknown-fingerprint tracking so the policy-recovery rebuild fires
 /// even when the blip was visible only inside the apply window.
 const STATUS_POLICY_HOLD: u8 = 1 << 3;
+/// Collection state may need reconciliation without a membership op in the
+/// current file plan (startup, conflict, or version transition). The driver
+/// consumes this bit before attempting reconciliation and re-arms it on
+/// failure, so a transition racing the attempt remains pending.
+const STATUS_COLLECTION_RECONCILE_PENDING: u8 = 1 << 4;
 
 /// A consistent point-in-time view of the driver, decoded from ONE atomic
 /// load. Any consumer that needs MORE THAN ONE flag must go through this —
@@ -528,6 +533,21 @@ impl DriverStatus {
     /// Consume the hold (test-and-clear in one atomic op).
     fn take_policy_hold(&self) -> bool {
         self.bits.fetch_and(!STATUS_POLICY_HOLD, Ordering::AcqRel) & STATUS_POLICY_HOLD != 0
+    }
+    pub(crate) fn request_collection_reconcile(&self) {
+        self.update(|bits| bits | STATUS_COLLECTION_RECONCILE_PENDING);
+    }
+    #[cfg(test)]
+    fn collection_reconcile_pending(&self) -> bool {
+        self.bits.load(Ordering::Acquire) & STATUS_COLLECTION_RECONCILE_PENDING != 0
+    }
+    /// Take the current request before starting the actor call. A concurrent
+    /// transition then sets a fresh bit that this attempt cannot erase.
+    fn take_collection_reconcile_request(&self) -> bool {
+        self.bits
+            .fetch_and(!STATUS_COLLECTION_RECONCILE_PENDING, Ordering::AcqRel)
+            & STATUS_COLLECTION_RECONCILE_PENDING
+            != 0
     }
 }
 
@@ -1874,6 +1894,47 @@ fn policy_excludes(
         .tracked
 }
 
+/// Whether a settled file plan can change collection detection or membership.
+fn collection_reconcile_required(root: &Path, plan: &ReconcilePlan) -> bool {
+    plan.ops.iter().any(|op| {
+        let path = op.path();
+        if path.rsplit('/').next() == Some("collection.yaml") {
+            return true;
+        }
+        if !matches!(
+            op,
+            CaptureOp::Ingest {
+                reason: IngestReason::Added,
+                ..
+            } | CaptureOp::Retire { .. }
+        ) {
+            // Changed record content is already indexed by capture/Y.Doc;
+            // only added or retired Markdown can change membership.
+            return false;
+        }
+        let Some((parent, name)) = path.rsplit_once('/') else {
+            // v1 does not admit the workspace root as a collection.
+            return false;
+        };
+        if parent.is_empty() || !name.ends_with(".md") {
+            return false;
+        }
+        match std::fs::symlink_metadata(root.join(parent).join("collection.yaml")) {
+            Ok(metadata) => metadata.file_type().is_file(),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                false
+            }
+            // Permission/lock/other uncertainty fails toward reconciliation.
+            Err(_) => true,
+        }
+    })
+}
+
 fn wall_now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2393,7 +2454,10 @@ impl DriverEnv for RealEnv {
         // The startup baseline is the offline-reconcile pass (TS parity):
         // ONE correlation id and the "Reconciled offline edits" summary tie
         // its per-file moments together, retries included — they finish the
-        // same pass.
+        // same pass. A new layer also performs one collection reconciliation:
+        // its in-memory retry bit cannot preserve a failed request across a
+        // daemon restart, and a rehydrated manifest may make this plan empty.
+        self.status.request_collection_reconcile();
         let provenance = reconcile_provenance();
         let mut settled =
             apply_run(self.apply_context_with(provenance.clone()), &fresh, initial).await;
@@ -2693,7 +2757,7 @@ struct CaptureThreadOutcome {
     plan: ReconcilePlan,
     result: CaptureApplyResult,
     policy_held: bool,
-    collections: Result<Vec<String>, RuntimeError>,
+    collections: Option<Result<Vec<String>, RuntimeError>>,
 }
 
 /// TS parity (`reconcile-${createId()}` + "Reconciled offline edits"): one
@@ -2769,36 +2833,44 @@ async fn apply_run_with_handle(
         events,
     } = context;
     let now_ms = wall_now_ms();
-    let plan = match run {
-        ReconcileRun::Completed(plan) => plan,
+    let (plan, collection_reconcile_requested) = match run {
+        ReconcileRun::Completed(plan) => {
+            let requested = status.take_collection_reconcile_request()
+                || collection_reconcile_required(root, &plan);
+            (plan, requested)
+        }
         ReconcileRun::Converged => {
-            let adopted_paths = match actor.active_version_id(workspace_id.to_owned()).await {
-                Ok(version_id) => match actor
-                    .reconcile_collections(
-                        workspace_id.to_owned(),
-                        version_id,
-                        root.to_path_buf(),
-                        leases.clone(),
-                        Arc::new(self_writes.clone()),
-                        now_ms,
-                        Arc::new(NoFaults),
-                        CancellationToken::new(),
-                    )
-                    .await
-                {
+            let adopted_paths = if status.take_collection_reconcile_request() {
+                let result = match actor.active_version_id(workspace_id.to_owned()).await {
+                    Ok(version_id) => {
+                        actor
+                            .reconcile_collections(
+                                workspace_id.to_owned(),
+                                version_id,
+                                root.to_path_buf(),
+                                leases.clone(),
+                                Arc::new(self_writes.clone()),
+                                now_ms,
+                                Arc::new(NoFaults),
+                                CancellationToken::new(),
+                            )
+                            .await
+                    }
+                    Err(RuntimeError::Domain(
+                        dohc_engine_domain::DomainError::WorkspaceNotFound,
+                    )) => Ok(Vec::new()),
+                    Err(error) => Err(error),
+                };
+                match result {
                     Ok(paths) => paths,
                     Err(_) => {
+                        status.request_collection_reconcile();
                         status.mark_degraded();
                         return false;
                     }
-                },
-                Err(RuntimeError::Domain(dohc_engine_domain::DomainError::WorkspaceNotFound)) => {
-                    Vec::new()
                 }
-                Err(_) => {
-                    status.mark_degraded();
-                    return false;
-                }
+            } else {
+                Vec::new()
             };
             return match repair_and_materialize_ydoc_recoveries(
                 root,
@@ -2838,6 +2910,9 @@ async fn apply_run_with_handle(
             dohc_engine_domain::DomainError::WorkspaceNotFound,
         )) => "main".to_owned(),
         Err(_) => {
+            if collection_reconcile_requested {
+                status.request_collection_reconcile();
+            }
             status.mark_degraded();
             ack_all_failed(files, plan, status).await;
             return false;
@@ -2880,12 +2955,15 @@ async fn apply_run_with_handle(
                 apply_provenance,
             );
             let result = apply_reconcile_plan(&apply_plan, &mut sink, &NoFaults);
-            let collections =
-                if result.failed_applies.is_empty() && !result.degraded && result.completed() {
-                    sink.reconcile_collections()
-                } else {
-                    Ok(Vec::new())
-                };
+            let collections = if collection_reconcile_requested
+                && result.failed_applies.is_empty()
+                && !result.degraded
+                && result.completed()
+            {
+                Some(sink.reconcile_collections())
+            } else {
+                None
+            };
             let _ = done_tx.send(CaptureThreadOutcome {
                 plan: apply_plan,
                 result,
@@ -2909,15 +2987,27 @@ async fn apply_run_with_handle(
     }) = applied
     else {
         // Spawn failure or apply-thread panic: the plan must still resolve.
+        if collection_reconcile_requested {
+            status.request_collection_reconcile();
+        }
         status.mark_degraded();
         ack_all_failed(files, plan, status).await;
         return false;
     };
     let collection_paths = match collection_result {
-        Ok(paths) => paths,
-        Err(_) => {
+        Some(Ok(paths)) => paths,
+        Some(Err(_)) => {
+            status.request_collection_reconcile();
             result.degraded = true;
             status.mark_degraded();
+            Vec::new()
+        }
+        None => {
+            if collection_reconcile_requested {
+                // The file apply did not settle, so the relevant transition
+                // has not reached collection reconciliation yet.
+                status.request_collection_reconcile();
+            }
             Vec::new()
         }
     };
@@ -3127,6 +3217,172 @@ async fn ack_all_failed(files: &FilesHandle, plan: ReconcilePlan, status: &Arc<D
     };
     if files.acknowledge_capture(plan, receipt).await.is_err() {
         status.mark_degraded();
+    }
+}
+
+#[cfg(test)]
+mod collection_reconcile_scheduling_tests {
+    use super::*;
+    use dohc_engine_files::CaptureSink;
+    use dohc_engine_runtime::WorkspaceSupervisor;
+    use dohc_engine_testkit::ScratchDir;
+
+    const WORKSPACE_ID: &str = "ws-idle-collection-reconcile";
+
+    fn plan_with(op: CaptureOp) -> ReconcilePlan {
+        ReconcilePlan {
+            from_generation: ScanGeneration(0),
+            to_generation: ScanGeneration(1),
+            ops: vec![op],
+            retained_over_cap: Vec::new(),
+            unconfirmed_removed: Vec::new(),
+            degraded: false,
+            degraded_paths: Vec::new(),
+            prepared_from_dirty: true,
+            dirty_epoch: 1,
+        }
+    }
+
+    fn ingest(path: &str, reason: IngestReason) -> CaptureOp {
+        CaptureOp::Ingest {
+            path: path.to_owned(),
+            size: 1,
+            sha256: "advisory-sha".to_owned(),
+            mtime_ms: 0,
+            media_type: "text/markdown",
+            reason,
+        }
+    }
+
+    #[test]
+    fn collection_reconcile_predicate_tracks_only_detection_and_membership_changes() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let collection_dir = scratch.path().join("tasks");
+        std::fs::create_dir_all(&collection_dir).expect("collection directory");
+        std::fs::write(collection_dir.join("collection.yaml"), b"name: Tasks\n")
+            .expect("collection schema");
+
+        assert!(collection_reconcile_required(
+            scratch.path(),
+            &plan_with(ingest("collection.yaml", IngestReason::Changed)),
+        ));
+        assert!(collection_reconcile_required(
+            scratch.path(),
+            &plan_with(ingest("tasks/collection.yaml", IngestReason::Changed)),
+        ));
+        assert!(collection_reconcile_required(
+            scratch.path(),
+            &plan_with(ingest("tasks/alpha.md", IngestReason::Added)),
+        ));
+        assert!(collection_reconcile_required(
+            scratch.path(),
+            &plan_with(CaptureOp::Retire {
+                path: "tasks/alpha.md".to_owned(),
+            }),
+        ));
+        assert!(!collection_reconcile_required(
+            scratch.path(),
+            &plan_with(ingest("tasks/alpha.md", IngestReason::Changed)),
+        ));
+        assert!(!collection_reconcile_required(
+            scratch.path(),
+            &plan_with(ingest("notes/alpha.md", IngestReason::Added)),
+        ));
+        assert!(!collection_reconcile_required(
+            scratch.path(),
+            &plan_with(ingest("root.md", IngestReason::Added)),
+        ));
+    }
+
+    #[test]
+    fn collection_reconcile_request_take_preserves_a_concurrent_request() {
+        let status = DriverStatus::default();
+        assert!(!status.collection_reconcile_pending());
+        status.request_collection_reconcile();
+        assert!(status.take_collection_reconcile_request());
+        assert!(!status.collection_reconcile_pending());
+
+        // Model a new conflict/version transition racing an in-flight actor
+        // call after the old request has been consumed.
+        status.request_collection_reconcile();
+        assert!(status.collection_reconcile_pending());
+        assert!(status.take_collection_reconcile_request());
+        assert!(!status.collection_reconcile_pending());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_converged_watcher_scan_does_not_rewrite_collection_state() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let collection_dir = scratch.path().join("tasks");
+        std::fs::create_dir_all(&collection_dir).expect("collection directory");
+        std::fs::write(collection_dir.join("collection.yaml"), b"name: Tasks\n")
+            .expect("collection schema");
+        std::fs::write(collection_dir.join("alpha.md"), b"Alpha task\n")
+            .expect("collection record");
+
+        let db = scratch.engine_db_path().expect("engine database path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        let seed_actor = actor.clone();
+        let seed_root = scratch.path().to_path_buf();
+        std::thread::spawn(move || {
+            let mut sink =
+                StoreCaptureSink::new(seed_actor, WORKSPACE_ID, "main", seed_root, 2, None);
+            for path in ["tasks/collection.yaml", "tasks/alpha.md"] {
+                sink.ingest(
+                    path,
+                    0,
+                    "advisory-sha",
+                    "text/markdown",
+                    IngestReason::Added,
+                )
+                .unwrap_or_else(|_| panic!("capture {path}"));
+            }
+            sink.reconcile_collections().expect("adopt record");
+        })
+        .join()
+        .expect("collection seed thread");
+
+        let observer = rusqlite::Connection::open(&db).expect("open database observer");
+        let data_version = |connection: &rusqlite::Connection| {
+            connection
+                .query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))
+                .expect("database version")
+        };
+        let before = data_version(&observer);
+
+        let files = FilesActor::spawn_async(scratch.path().to_path_buf(), ScanBounds::default())
+            .await
+            .expect("files actor");
+        let files = FilesActorCloseGuard::new(files);
+        let status = Arc::new(DriverStatus::default());
+        let self_writes = SelfWriteSuppression::default();
+        let leases = LeaseRegistry::new();
+        let clean = apply_run_with_handle(
+            ApplyRunContext {
+                root: scratch.path(),
+                actor: &actor,
+                workspace_id: WORKSPACE_ID,
+                leases: &leases,
+                status: &status,
+                self_writes: &self_writes,
+                author_json: None,
+                provenance: CaptureProvenance::default(),
+                events: EngineEvents::default(),
+            },
+            &files.handle(),
+            ReconcileRun::Converged,
+        )
+        .await;
+        assert!(clean, "an idle converged pass stays healthy");
+        assert_eq!(
+            data_version(&observer),
+            before,
+            "an idle converged pass must not schedule collection writes"
+        );
+
+        files.close().await;
+        supervisor.close(&db).expect("close actor");
     }
 }
 

@@ -16,6 +16,7 @@ use serde_json::Value;
 use crate::chats::{base32_lowercase_no_padding, is_js_trim_ws};
 
 pub const COLLECTION_SCHEMA_FILENAME: &str = "collection.yaml";
+const ROOT_COLLECTION_DIAGNOSTIC_PATH: &str = ".";
 pub const RECORD_ID_FRONTMATTER_KEY: &str = "id";
 pub const RECORD_ID_PREFIX: &str = "rec_";
 pub const RECORD_ID_RANDOM_BASE32_LENGTH: usize = 26;
@@ -178,6 +179,7 @@ pub enum CollectionSchemaStatus {
 pub enum CollectionSchemaReasonCode {
     InvalidYaml,
     RootNotMapping,
+    RootCollectionUnsupported,
     UnknownProperty,
     ExpectedText,
     ExpectedMapping,
@@ -1444,6 +1446,7 @@ fn revalidate_collection_index_in_tx(
     conn: &Connection,
     workspace_id: &str,
     version_id: &str,
+    collection_schemas: &HashMap<&str, &CollectionSchema>,
 ) -> Result<(), crate::DomainError> {
     let mut statement = conn
         .prepare(
@@ -1480,13 +1483,15 @@ fn revalidate_collection_index_in_tx(
         }
     }
     for ((record_id, collection_path), values) in records {
-        let schema = load_collection_schema(conn, workspace_id, version_id, &collection_path)?;
+        let Some(schema) = collection_schemas.get(collection_path.as_str()).copied() else {
+            continue;
+        };
         replace_index_for_record(
             conn,
             workspace_id,
             version_id,
             &record_id,
-            &schema,
+            schema,
             &Value::Object(values),
         )?;
     }
@@ -1621,13 +1626,32 @@ pub fn reconcile_collections_in_tx(
     let snapshots = load_collection_snapshots(tx, workspace_id, version_id)?;
     let existing = load_record_bindings(tx, workspace_id, version_id)?;
 
-    let schema_snapshots: Vec<&CollectionSnapshot> = snapshots
+    let snapshots_by_path: HashMap<&str, &CollectionSnapshot> = snapshots
+        .iter()
+        .map(|snapshot| (snapshot.path.as_str(), snapshot))
+        .collect();
+    let parsed_schemas: Vec<(&CollectionSnapshot, String, CollectionSchemaParseResult)> = snapshots
         .iter()
         .filter(|snapshot| path_basename(&snapshot.path) == COLLECTION_SCHEMA_FILENAME)
+        .map(|snapshot| {
+            let collection_path = parent_path(&snapshot.path).to_owned();
+            let parsed = if collection_path.is_empty() {
+                degraded_document(CollectionSchemaReasonCode::RootCollectionUnsupported)
+            } else {
+                parse_collection_schema(&snapshot.text)
+            };
+            (snapshot, collection_path, parsed)
+        })
         .collect();
-    let collection_paths: HashSet<String> = schema_snapshots
+    let collection_paths: HashSet<String> = parsed_schemas
         .iter()
-        .map(|snapshot| parent_path(&snapshot.path).to_owned())
+        .filter(|(_, collection_path, _)| !collection_path.is_empty())
+        .map(|(_, collection_path, _)| collection_path.clone())
+        .collect();
+    let collection_schemas: HashMap<&str, &CollectionSchema> = parsed_schemas
+        .iter()
+        .filter(|(_, collection_path, _)| !collection_path.is_empty())
+        .map(|(_, collection_path, parsed)| (collection_path.as_str(), &parsed.schema))
         .collect();
     let records: Vec<&CollectionSnapshot> = snapshots
         .iter()
@@ -1702,7 +1726,10 @@ pub fn reconcile_collections_in_tx(
                 .or_else(|| {
                     parsed_id
                         .as_ref()
-                        .filter(|record_id| absent_owners.contains(*record_id))
+                        .filter(|record_id| {
+                            absent_owners.contains(*record_id)
+                                && !claimed_ids.contains_key(record_id.as_str())
+                        })
                         .cloned()
                 });
             if let Some(record_id) = record_id.as_ref() {
@@ -1805,8 +1832,7 @@ pub fn reconcile_collections_in_tx(
         params![workspace_id, version_id],
     )
     .map_err(crate::DomainError::sql_persist)?;
-    for snapshot in &schema_snapshots {
-        let parsed = parse_collection_schema(&snapshot.text);
+    for (snapshot, collection_path, parsed) in &parsed_schemas {
         let status = match parsed.status {
             CollectionSchemaStatus::Valid => "valid",
             CollectionSchemaStatus::Degraded => "degraded",
@@ -1820,7 +1846,11 @@ pub fn reconcile_collections_in_tx(
             params![
                 workspace_id,
                 version_id,
-                parent_path(&snapshot.path),
+                if collection_path.is_empty() {
+                    ROOT_COLLECTION_DIAGNOSTIC_PATH
+                } else {
+                    collection_path
+                },
                 snapshot.path,
                 status,
                 reasons
@@ -1853,23 +1883,24 @@ pub fn reconcile_collections_in_tx(
         if binding.index_initialized {
             continue;
         }
-        let Some(snapshot) = snapshots
-            .iter()
-            .find(|snapshot| snapshot.path == binding.file_path)
-        else {
+        let Some(snapshot) = snapshots_by_path.get(binding.file_path.as_str()).copied() else {
             continue;
         };
         let Some(frontmatter) = markdown_frontmatter_json(&snapshot.text) else {
             continue;
         };
-        let schema =
-            load_collection_schema(tx, workspace_id, version_id, &binding.collection_path)?;
+        let Some(schema) = collection_schemas
+            .get(binding.collection_path.as_str())
+            .copied()
+        else {
+            continue;
+        };
         replace_index_for_record(
             tx,
             workspace_id,
             version_id,
             record_id,
-            &schema,
+            schema,
             &frontmatter,
         )?;
     }
@@ -1893,7 +1924,7 @@ pub fn reconcile_collections_in_tx(
         params![workspace_id, version_id],
     )
     .map_err(crate::DomainError::sql_persist)?;
-    revalidate_collection_index_in_tx(tx, workspace_id, version_id)?;
+    revalidate_collection_index_in_tx(tx, workspace_id, version_id, &collection_schemas)?;
     let relation_cleanups = dangling_relation_cleanups(tx, workspace_id, version_id)?;
     Ok(CollectionReconcileResult {
         adoptions,
@@ -2018,6 +2049,9 @@ pub fn get_collection(
     workspace_id: &str,
     collection_path: &str,
 ) -> Result<Option<CollectionDetails>, crate::DomainError> {
+    if !is_workspace_relative_collection_path(collection_path) {
+        return Ok(None);
+    }
     let version_id = active_version_id(conn, workspace_id)?;
     let Some(summary) =
         collection_summary_for_version(conn, workspace_id, &version_id, collection_path)?
@@ -2141,47 +2175,10 @@ fn filename_label(path: &str) -> String {
         .to_owned()
 }
 
-fn relation_target_label(
-    conn: &Connection,
-    workspace_id: &str,
-    version_id: &str,
-    target_collection_path: &str,
-    target_record_id: &str,
-) -> Result<String, crate::DomainError> {
-    let Some(file_path) = conn
-        .query_row(
-            "SELECT file_path FROM collection_records \
-             WHERE workspace_id=?1 AND version_id=?2 AND collection_path=?3 \
-               AND record_id=?4",
-            params![
-                workspace_id,
-                version_id,
-                target_collection_path,
-                target_record_id
-            ],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(crate::DomainError::sql_corrupt)?
-    else {
-        return Ok(target_record_id.to_owned());
-    };
-    let mut statement = conn
-        .prepare(
-            "SELECT field_name,value_json FROM collection_record_fields \
-             WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3",
-        )
-        .map_err(crate::DomainError::sql_corrupt)?;
-    let rows = statement
-        .query_map(params![workspace_id, version_id, target_record_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(crate::DomainError::sql_corrupt)?
-        .collect::<Result<HashMap<_, _>, _>>()
-        .map_err(crate::DomainError::sql_corrupt)?;
+fn relation_target_label(file_path: &str, fields: &HashMap<String, String>) -> String {
     let mut label_fields: Vec<&str> = Vec::new();
     for preferred in ["title", "name"] {
-        if let Some(field) = rows
+        if let Some(field) = fields
             .keys()
             .find(|field| field.eq_ignore_ascii_case(preferred))
         {
@@ -2189,16 +2186,16 @@ fn relation_target_label(
         }
     }
     for field in label_fields {
-        if let Some(label) = rows
+        if let Some(label) = fields
             .get(field)
             .and_then(|value| serde_json::from_str::<Value>(value).ok())
             .and_then(|value| value.as_str().map(str::trim).map(str::to_owned))
             .filter(|value| !value.is_empty())
         {
-            return Ok(label);
+            return label;
         }
     }
-    Ok(filename_label(&file_path))
+    filename_label(file_path)
 }
 
 fn resolve_record_relations(
@@ -2232,24 +2229,55 @@ fn resolve_record_relations(
         .collect::<Result<Vec<_>, _>>()
         .map_err(crate::DomainError::sql_corrupt)?;
     drop(statement);
-    let mut labels = HashMap::<(String, String), String>::new();
+    let mut statement = conn
+        .prepare(
+            "SELECT DISTINCT e.target_collection_path,e.target_record_id,target.file_path,\
+                    f.field_name,f.value_json \
+             FROM collection_relation_edges e \
+             JOIN collection_records source ON source.workspace_id=e.workspace_id \
+               AND source.version_id=e.version_id AND source.record_id=e.source_record_id \
+             JOIN collection_records target ON target.workspace_id=e.workspace_id \
+               AND target.version_id=e.version_id AND target.record_id=e.target_record_id \
+               AND target.collection_path=e.target_collection_path \
+             LEFT JOIN collection_record_fields f ON f.workspace_id=target.workspace_id \
+               AND f.version_id=target.version_id AND f.record_id=target.record_id \
+               AND (f.field_name='title' COLLATE NOCASE \
+                    OR f.field_name='name' COLLATE NOCASE) \
+             WHERE e.workspace_id=?1 AND e.version_id=?2 AND source.collection_path=?3",
+        )
+        .map_err(crate::DomainError::sql_corrupt)?;
+    let target_rows = statement
+        .query_map(params![workspace_id, version_id, collection_path], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })
+        .map_err(crate::DomainError::sql_corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(crate::DomainError::sql_corrupt)?;
+    let mut target_fields = HashMap::<(String, String), (String, HashMap<String, String>)>::new();
+    for (target_collection, target_record_id, file_path, field, value) in target_rows {
+        let (_, fields) = target_fields
+            .entry((target_collection, target_record_id))
+            .or_insert_with(|| (file_path, HashMap::new()));
+        if let (Some(field), Some(value)) = (field, value) {
+            fields.insert(field, value);
+        }
+    }
+    let labels: HashMap<(String, String), String> = target_fields
+        .into_iter()
+        .map(|(target, (file_path, fields))| (target, relation_target_label(&file_path, &fields)))
+        .collect();
     let mut resolved = HashMap::<(String, String, String), String>::new();
     for (source, field, target, target_collection) in edges {
-        let cache_key = (target_collection.clone(), target.clone());
-        let label = match labels.get(&cache_key) {
-            Some(label) => label.clone(),
-            None => {
-                let label = relation_target_label(
-                    conn,
-                    workspace_id,
-                    version_id,
-                    &target_collection,
-                    &target,
-                )?;
-                labels.insert(cache_key, label.clone());
-                label
-            }
-        };
+        let label = labels
+            .get(&(target_collection, target.clone()))
+            .cloned()
+            .unwrap_or_else(|| target.clone());
         resolved.insert((source, field, target), label);
     }
     for record in records {
@@ -2378,6 +2406,9 @@ pub fn query_collection_records(
     collection_path: &str,
     query: &CollectionQuery,
 ) -> Result<Option<CollectionQueryResult>, crate::DomainError> {
+    if !is_workspace_relative_collection_path(collection_path) {
+        return Ok(None);
+    }
     let version_id = active_version_id(conn, workspace_id)?;
     let Some(collection) =
         collection_summary_for_version(conn, workspace_id, &version_id, collection_path)?
@@ -2453,6 +2484,9 @@ pub fn get_collection_record(
     record_id: &str,
     history_limit: usize,
 ) -> Result<Option<CollectionRecordDetails>, crate::DomainError> {
+    if !is_workspace_relative_collection_path(collection_path) {
+        return Ok(None);
+    }
     let version_id = active_version_id(conn, workspace_id)?;
     let Some(collection) =
         collection_summary_for_version(conn, workspace_id, &version_id, collection_path)?
@@ -2474,9 +2508,12 @@ pub fn get_collection_record(
              ORDER BY recorded_at_ms DESC,history_id DESC LIMIT ?4",
         )
         .map_err(crate::DomainError::sql_corrupt)?;
+    let history_limit = i64::try_from(history_limit)
+        .unwrap_or(i64::MAX)
+        .min(i64::try_from(MAX_COLLECTION_HISTORY_LIMIT).unwrap_or(i64::MAX));
     let rows = statement
         .query_map(
-            params![workspace_id, version_id, record_id, history_limit as i64],
+            params![workspace_id, version_id, record_id, history_limit],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,

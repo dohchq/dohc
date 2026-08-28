@@ -62,6 +62,7 @@ export interface CollectionSchema {
 export type CollectionSchemaReasonCode =
   | "invalid-yaml"
   | "root-not-mapping"
+  | "root-collection-unsupported"
   | "unknown-property"
   | "expected-text"
   | "expected-mapping"

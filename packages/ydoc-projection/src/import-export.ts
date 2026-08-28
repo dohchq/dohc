@@ -34,6 +34,7 @@ const FRONTMATTER_FIELD = 'frontmatter'
 const META_FIELD = 'meta'
 const FRONTMATTER_PRIORITY_KEYS = ['id', 'title', 'icon'] as const
 const DOHC_SCHEMA_VERSION = 1
+const MARKDOWN_CRLF_META_KEY = 'dohcMarkdownCrlf'
 const FM_RE = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n)?([\s\S]*)$/
 const PLAIN_TEXT_CONTENT_KIND = 'plain-text'
 // GFM forbids block nodes inside table cells but permits inline raw HTML, so a
@@ -98,12 +99,18 @@ type DohcMeta = { schemaVersion: number; contentKind?: 'plain-text' }
 export function markdownToYDoc(markdown: string): Y.Doc {
   const { meta, body } = parseFrontmatter(markdown)
   const doc = new Y.Doc()
+  const usesCrlf = markdown.includes('\r\n')
 
   writeMap(doc.getMap(FRONTMATTER_FIELD), meta)
-  writeMap(doc.getMap(META_FIELD), { schemaVersion: DOHC_SCHEMA_VERSION })
+  writeMap(doc.getMap(META_FIELD), {
+    schemaVersion: DOHC_SCHEMA_VERSION,
+    ...(usesCrlf ? { [MARKDOWN_CRLF_META_KEY]: true } : {}),
+  })
 
   const bodyFragment = doc.getXmlFragment(BODY_FIELD)
-  const tiptapJson = parseRichdocMarkdown(body)
+  const tiptapJson = parseRichdocMarkdown(
+    usesCrlf ? body.replaceAll('\r\n', '\n') : body,
+  )
   prosemirrorJSONToYXmlFragment(schema, tiptapJson, bodyFragment)
 
   return doc
@@ -308,15 +315,23 @@ export function plainTextToYDoc(markdown: string): Y.Doc {
 export function yDocToMarkdown(doc: Y.Doc): string {
   const body = yDocBodyToMarkdown(doc).trimEnd()
   const frontmatter = orderFrontmatter(getDohcYDocFrontmatter(doc))
+  const internalMeta = doc.getMap(META_FIELD)
+  const usesCrlf = internalMeta.get(MARKDOWN_CRLF_META_KEY) === true
+    && internalMeta.get('contentKind') !== PLAIN_TEXT_CONTENT_KIND
+  const restoreLineEndings = (markdown: string): string => (
+    usesCrlf ? markdown.replaceAll('\n', '\r\n') : markdown
+  )
 
-  if (Object.keys(frontmatter).length === 0) return body
+  if (Object.keys(frontmatter).length === 0) return restoreLineEndings(body)
 
   const yamlFrontmatter = yaml.dump(frontmatter, {
     lineWidth: -1,
     sortKeys: false,
   })
 
-  return `---\n${yamlFrontmatter}---${body.startsWith('\n') ? '\n' : '\n\n'}${body}`
+  return restoreLineEndings(
+    `---\n${yamlFrontmatter}---${body.startsWith('\n') ? '\n' : '\n\n'}${body}`,
+  )
 }
 
 export function getDohcYDocFrontmatter(doc: Y.Doc): Record<string, unknown> {

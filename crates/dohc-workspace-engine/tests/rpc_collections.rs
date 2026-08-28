@@ -81,6 +81,26 @@ fn seed_valid_collection_schema(scratch: &ScratchDir) {
     std::fs::write(collection_dir.join("collection.yaml"), schema).expect("schema file");
 }
 
+fn seed_crlf_collection_schema(scratch: &ScratchDir) {
+    let db = scratch.engine_db_path().expect("engine db path");
+    let mut store = EngineStore::open(&db, 1).expect("open store");
+    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
+        .expect("main version");
+    let schema = "name: Tasks\nfields:\n  done:\n    type: checkbox\n  priority:\n    type: number\n  status:\n    type: text\n";
+    seed_text(&mut store, "tasks/collection.yaml", schema, 2);
+    let reconciled = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, "main")
+        })
+        .expect("reconcile collection state");
+    assert!(matches!(reconciled, TxnOutcome::Committed(_)));
+    let collection_dir = scratch.path().join("tasks");
+    std::fs::create_dir_all(&collection_dir).expect("collection directory");
+    std::fs::write(collection_dir.join("collection.yaml"), schema).expect("schema file");
+}
+
 fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
     Request {
         id,
@@ -331,4 +351,68 @@ async fn capture_authored_record_edit_keeps_the_agent_in_field_history() {
         .find(|entry| entry["field"] == json!("status") && entry["next"]["value"] == json!("done"))
         .expect("captured status edit in history");
     assert_eq!(authored_edit["authorOriginId"], json!(agent_id));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn capture_adopts_crlf_record_without_rewriting_its_frontmatter_shape() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    seed_crlf_collection_schema(&scratch);
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+
+    let record_path = scratch.path().join("tasks/crlf.md");
+    let original = b"---\r\ndone: false\r\npriority: 3\r\nstatus: open\r\n---\r\n\r\nbody text";
+    std::fs::write(&record_path, original).expect("CRLF record file");
+    reconcile_capture(&transport, &handle, 10).await;
+
+    let query = call(
+        &transport,
+        &handle,
+        40,
+        "collections.query",
+        json!({ "collectionPath": "tasks" }),
+    )
+    .await;
+    let record = &query["records"][0];
+    let record_id = record["id"].as_str().expect("adopted record id");
+    for (field, expected) in [
+        ("done", json!(false)),
+        ("priority", json!(3)),
+        ("status", json!("open")),
+    ] {
+        let value = record["values"]
+            .as_array()
+            .expect("indexed values")
+            .iter()
+            .find(|value| value["field"] == field)
+            .unwrap_or_else(|| panic!("missing indexed field {field}"));
+        assert_eq!(value["value"], expected, "typed value for {field}");
+        assert_eq!(value["validation"]["status"], json!("valid"), "{field}");
+    }
+
+    let expected = format!(
+        "---\r\ndone: false\r\nid: {record_id}\r\npriority: 3\r\nstatus: open\r\n---\r\n\r\nbody text"
+    );
+    assert_eq!(
+        std::fs::read(&record_path).expect("adopted record bytes"),
+        expected.as_bytes(),
+        "adoption may insert the id but must retain the CRLF byte shape"
+    );
 }
