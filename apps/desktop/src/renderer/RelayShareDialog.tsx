@@ -242,19 +242,38 @@ export function RelayShareDialog(props: {
     setLinksLoading(true);
     setLinksError(null);
     try {
-      const result = await bridge().listRelayShareLinks({
-        workspaceId: props.workspaceId,
-      });
-      if (
-        !isCurrentLinkScope(scopeGeneration) ||
-        latestInventoryRequest.current !== requestId
-      ) {
-        return;
+      const inventory: RelayShareLinkRow[] = [];
+      const seenCursors = new Set<string>();
+      let cursor: string | undefined;
+      while (true) {
+        if (
+          !isCurrentLinkScope(scopeGeneration) ||
+          latestInventoryRequest.current !== requestId
+        ) {
+          return;
+        }
+        const result = await bridge().listRelayShareLinks({
+          workspaceId: props.workspaceId,
+          ...(cursor ? { cursor } : {}),
+        });
+        if (
+          !isCurrentLinkScope(scopeGeneration) ||
+          latestInventoryRequest.current !== requestId
+        ) {
+          return;
+        }
+        inventory.push(...result.links);
+        if (result.nextCursor === undefined) break;
+        if (seenCursors.has(result.nextCursor)) {
+          throw new Error("dohc could not load all links.");
+        }
+        seenCursors.add(result.nextCursor);
+        cursor = result.nextCursor;
       }
-      setLinks(result.links);
+      setLinks(inventory);
       setConfirmation((current) =>
         current !== null &&
-        !result.links.some(
+        !inventory.some(
           (row) =>
             row.status === "active" &&
             row.shareId === current.shareId &&

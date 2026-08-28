@@ -178,6 +178,7 @@ describe("owner relay share link IPC contract", () => {
   it("parses readable and damaged inventory rows while stripping bearer fields", () => {
     const parsed = ListRelayShareLinksResult.parse({
       ok: true,
+      nextCursor: "next-page",
       links: [
         {
           ...readable,
@@ -195,16 +196,36 @@ describe("owner relay share link IPC contract", () => {
       ],
     });
 
-    expect(parsed).toEqual({ links: [readable, damaged] });
+    expect(parsed).toEqual({ links: [readable, damaged], nextCursor: "next-page" });
     for (const row of parsed.links) {
       expect(row).not.toHaveProperty("url");
       expect(row).not.toHaveProperty("secret");
       expect(row).not.toHaveProperty("credential");
       expect(row).not.toHaveProperty("credentialId");
     }
-    expect(ListRelayShareLinksPayload.parse({ workspaceId: "workspace-1" })).toEqual({
-      workspaceId: "workspace-1",
-    });
+    expect(
+      ListRelayShareLinksPayload.parse({
+        workspaceId: "workspace-1",
+        cursor: "next-page",
+      }),
+    ).toEqual({ workspaceId: "workspace-1", cursor: "next-page" });
+    expect(
+      ListRelayShareLinksPayload.safeParse({
+        workspaceId: "workspace-1",
+        cursor: "x".repeat(1_025),
+      }).success,
+    ).toBe(false);
+    expect(
+      ListRelayShareLinksResult.safeParse({
+        links: Array.from({ length: 1_001 }, () => readable),
+      }).success,
+    ).toBe(false);
+    expect(
+      ListRelayShareLinksResult.safeParse({
+        links: [],
+        nextCursor: "x".repeat(1_025),
+      }).success,
+    ).toBe(false);
   });
 
   it("accepts exactly one file selector and no access choice on create", () => {

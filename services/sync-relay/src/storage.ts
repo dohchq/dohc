@@ -159,6 +159,20 @@ export interface SyncRelayLinkInventoryRow extends SyncRelayShareWithGrantRow {
   urlIssuedAtMs: number | null;
 }
 
+export interface SyncRelayLinkInventoryCursor {
+  shareCreatedAtMs: number;
+  shareId: string;
+  linkCreatedAtMs: number;
+  grantId: string;
+}
+
+export interface SyncRelayLinkInventoryPage {
+  links: SyncRelayLinkInventoryRow[];
+  nextCursor: SyncRelayLinkInventoryCursor | null;
+}
+
+export const LINK_INVENTORY_PAGE_SIZE = 1_000;
+
 export interface SyncRelayLinkCredentialMint {
   credentialId: string;
   secretHash: string;
@@ -423,7 +437,10 @@ export interface SyncRelayStorage {
     recipientUserId: string,
   ): SyncRelayShareGrantRow[];
   listSharesGrantedBy(granterUserId: string): SyncRelayShareWithGrantRow[];
-  listLinkGrantsByWorkspace(workspaceId: string): SyncRelayLinkInventoryRow[];
+  listLinkGrantsByWorkspace(
+    workspaceId: string,
+    cursor?: SyncRelayLinkInventoryCursor,
+  ): SyncRelayLinkInventoryPage;
   // Received listings exclude revoked shares entirely: after revocation the
   // recipient must not be able to read even the share's metadata (paths,
   // version names) — a revoked share is indistinguishable from one that
@@ -3284,10 +3301,33 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       .map(rowToShareWithGrantRow);
   }
 
-  listLinkGrantsByWorkspace(workspaceId: string): SyncRelayLinkInventoryRow[] {
+  listLinkGrantsByWorkspace(
+    workspaceId: string,
+    cursor?: SyncRelayLinkInventoryCursor,
+  ): SyncRelayLinkInventoryPage {
+    const afterCursor = cursor
+      ? `AND (s.created_at_ms, s.share_id, link.created_at_ms, link.grant_id)
+             > (?, ?, ?, ?)`
+      : "";
     const rows = this.db
       .prepare(
-        `SELECT s.share_id, s.workspace_id, s.granter_user_id, s.selector_json,
+        `WITH page_links AS (
+           SELECT s.created_at_ms AS share_created_at_ms, s.share_id,
+                  link.created_at_ms AS link_created_at_ms, link.grant_id
+           FROM sync_relay_shares s
+           JOIN sync_relay_share_grants link
+             ON link.share_id = s.share_id AND link.principal_kind = 'link'
+           WHERE s.workspace_id = ?
+             ${afterCursor}
+           ORDER BY s.created_at_ms, s.share_id, link.created_at_ms, link.grant_id
+           LIMIT ${LINK_INVENTORY_PAGE_SIZE + 1}
+         ), bounded_links AS (
+           SELECT *
+           FROM page_links
+           ORDER BY share_created_at_ms, share_id, link_created_at_ms, grant_id
+           LIMIT ${LINK_INVENTORY_PAGE_SIZE}
+         )
+         SELECT s.share_id, s.workspace_id, s.granter_user_id, s.selector_json,
                 s.created_at_ms AS share_created_at_ms,
                 link.grant_id AS link_grant_id, link.share_id AS link_share_id,
                 link.principal_kind AS link_principal_kind,
@@ -3309,10 +3349,11 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
                 dependent.status AS dependent_status,
                 dependent.created_at_ms AS dependent_created_at_ms,
                 dependent.revoked_at_ms AS dependent_revoked_at_ms,
-                dependent.parent_grant_id AS dependent_parent_grant_id
-         FROM sync_relay_shares s
-         JOIN sync_relay_share_grants link
-           ON link.share_id = s.share_id AND link.principal_kind = 'link'
+                dependent.parent_grant_id AS dependent_parent_grant_id,
+                (SELECT COUNT(*) FROM page_links) AS page_link_count
+         FROM bounded_links page
+         JOIN sync_relay_shares s ON s.share_id = page.share_id
+         JOIN sync_relay_share_grants link ON link.grant_id = page.grant_id
          LEFT JOIN sync_relay_link_usage usage
            ON usage.grant_id = link.grant_id
          LEFT JOIN sync_relay_link_credentials credential
@@ -3323,11 +3364,20 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
            ON dependent.parent_grant_id = link.grant_id
           AND dependent.status = 'active'
           AND link.status = 'active'
-         WHERE s.workspace_id = ?
          ORDER BY s.created_at_ms, s.share_id, link.created_at_ms, link.grant_id,
                   dependent.grant_id`,
       )
-      .all(workspaceId);
+      .all(
+        workspaceId,
+        ...(cursor
+          ? [
+              cursor.shareCreatedAtMs,
+              cursor.shareId,
+              cursor.linkCreatedAtMs,
+              cursor.grantId,
+            ]
+          : []),
+      );
     const links = new Map<string, SyncRelayLinkInventoryRow>();
     for (const row of rows) {
       const grantId = String(row.link_grant_id);
@@ -3381,7 +3431,21 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         );
       }
     }
-    return [...links.values()];
+    const pageLinks = [...links.values()];
+    const last = pageLinks.at(-1);
+    const hasMore = Number(rows[0]?.page_link_count ?? 0) > LINK_INVENTORY_PAGE_SIZE;
+    return {
+      links: pageLinks,
+      nextCursor:
+        hasMore && last
+          ? {
+              shareCreatedAtMs: last.share.createdAtMs,
+              shareId: last.share.shareId,
+              linkCreatedAtMs: last.grant.createdAtMs,
+              grantId: last.grant.grantId,
+            }
+          : null,
+    };
   }
 
   listSharesReceivedBy(recipientUserId: string): SyncRelayShareWithGrantRow[] {

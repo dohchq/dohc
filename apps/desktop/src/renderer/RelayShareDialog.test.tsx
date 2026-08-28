@@ -2,6 +2,7 @@
 import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ListRelayShareLinksResult } from "../ipc/bridgeContract";
 import { RelayShareDialog } from "./RelayShareDialog";
 
 const SHARE_CODE = "dohc-share:share-1:http://relay.test";
@@ -445,6 +446,58 @@ describe("RelayShareDialog", () => {
     expect(screen.queryByText(/No links|Nothing here|No active/)).toBeNull();
   });
 
+  it("stops a repeated inventory cursor and offers Retry", async () => {
+    bridgeMock.listRelayShareLinks
+      .mockResolvedValueOnce({ links: [], nextCursor: "repeated-page" })
+      .mockResolvedValueOnce({ links: [], nextCursor: "repeated-page" });
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+
+    await showLinkPane(user);
+
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "dohc could not load all links.",
+    );
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+    expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
+  });
+
+  it("publishes inventory only after the last page arrives", async () => {
+    const lastPage = controllable<{ links: LinkRow[] }>();
+    bridgeMock.listRelayShareLinks
+      .mockResolvedValueOnce({
+        links: [readableLink("first-page-visible")],
+        nextCursor: "last-page",
+      })
+      .mockReturnValueOnce(lastPage.promise);
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+
+    await showLinkPane(user);
+    await vi.waitFor(() => {
+      expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
+    });
+    expect(screen.queryByTestId("share-link-row-first-page-visible")).toBeNull();
+    expect(screen.getByText("Loading links…")).toBeTruthy();
+
+    await act(async () => {
+      lastPage.resolve({ links: [] });
+    });
+    expect(await screen.findByTestId("share-link-row-first-page-visible")).toBeTruthy();
+  });
+
   it("shows only exact selector matches in lifecycle order and appends active damaged rows", async () => {
     const resetAt = CREATED_MS + 86_400_000;
     const usedAt = CREATED_MS + 172_800_000;
@@ -742,6 +795,61 @@ describe("RelayShareDialog", () => {
     expect(bridgeMock.revokeRelayShareLink).not.toHaveBeenCalled();
   });
 
+  it("loads and ends an active link after 1,000 mixed inventory rows", async () => {
+    const firstRows = Array.from({ length: 1_000 }, (_, index) =>
+      index % 2 === 0
+        ? readableLink(`older-${String(index).padStart(4, "0")}`, {
+            selector: { paths: [`archive/${index}.md`], versionId: null },
+            status: index % 4 === 0 ? "active" : "revoked",
+            revokedAtMs: index % 4 === 0 ? null : CREATED_MS + index,
+          })
+        : damagedLink(`damaged-${String(index).padStart(4, "0")}`, {
+            status: "revoked",
+            revokedAtMs: CREATED_MS + index,
+          }),
+    );
+    const tail = readableLink("active-tail", { shareId: "share-active-tail" });
+    bridgeMock.listRelayShareLinks
+      .mockImplementationOnce(async () =>
+        ListRelayShareLinksResult.parse({
+          links: firstRows,
+          nextCursor: "tail-page",
+        }),
+      )
+      .mockImplementationOnce(async () =>
+        ListRelayShareLinksResult.parse({ links: [tail] }),
+      )
+      .mockResolvedValue({ links: [tail] });
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+
+    await showLinkPane(user);
+    const tailRow = await screen.findByTestId("share-link-row-active-tail");
+    await user.click(within(tailRow).getByRole("button", { name: "End link" }));
+    await user.click(
+      within(screen.getByTestId("share-link-confirmation")).getByRole("button", {
+        name: "End link",
+      }),
+    );
+
+    expect(bridgeMock.revokeRelayShareLink).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      shareId: "share-active-tail",
+      grantId: "active-tail",
+      expectedDependentGrantIds: [],
+    });
+    expect(bridgeMock.listRelayShareLinks).toHaveBeenNthCalledWith(2, {
+      workspaceId: "ws-1",
+      cursor: "tail-page",
+    });
+  });
+
   it("resets with the sorted current dependent ids, replaces the URL, and refreshes", async () => {
     const row = readableLink("grant-link-1", {
       shareId: "share-link-1",
@@ -943,11 +1051,13 @@ describe("RelayShareDialog", () => {
     );
   });
 
-  it("ignores a stale inventory read without clearing the current loading state", async () => {
-    const readA = controllable<{ links: LinkRow[] }>();
+  it("ignores a stale inventory page without clearing the current loading state", async () => {
+    const readAFirst = controllable<{ links: LinkRow[]; nextCursor: string }>();
+    const readASecond = controllable<{ links: LinkRow[] }>();
     const readB = controllable<{ links: LinkRow[] }>();
     bridgeMock.listRelayShareLinks
-      .mockReturnValueOnce(readA.promise)
+      .mockReturnValueOnce(readAFirst.promise)
+      .mockReturnValueOnce(readASecond.promise)
       .mockReturnValueOnce(readB.promise);
     const user = userEvent.setup();
     const view = render(
@@ -959,6 +1069,17 @@ describe("RelayShareDialog", () => {
     );
     await showLinkPane(user);
 
+    await act(async () => {
+      readAFirst.resolve({ links: [], nextCursor: "ws-a-page-2" });
+    });
+    await vi.waitFor(() => {
+      expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
+    });
+    expect(bridgeMock.listRelayShareLinks).toHaveBeenNthCalledWith(2, {
+      workspaceId: "ws-a",
+      cursor: "ws-a-page-2",
+    });
+
     view.rerender(
       <RelayShareDialog
         workspaceId="ws-b"
@@ -967,10 +1088,10 @@ describe("RelayShareDialog", () => {
       />,
     );
     await vi.waitFor(() => {
-      expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
+      expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(3);
     });
     await act(async () => {
-      readA.resolve({
+      readASecond.resolve({
         links: [
           readableLink("stale-a", {
             selector: { paths: ["docs/a.md"], versionId: null },

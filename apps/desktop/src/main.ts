@@ -7708,9 +7708,10 @@ function registerIpcHandlers(
           currentGeneration: () => credentialCacheGeneration,
           run: () => {
             operation.assertCurrent();
+            const path = `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/shares/links`;
             return relayShareJsonWithCredentials<unknown>(
               credentials,
-              `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/shares/links`,
+              `${path}${input.cursor ? `?cursor=${encodeURIComponent(input.cursor)}` : ""}`,
             );
           },
         });

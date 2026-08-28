@@ -66,6 +66,7 @@ import {
   type ShareProposalOpRow,
   type SyncRelayLogInput,
   type SyncRelayLogRow,
+  type SyncRelayLinkInventoryCursor,
   type SyncRelayLinkInventoryRow,
   type SyncRelayShareGrantRow,
   type SyncRelayShareWithGrantRow,
@@ -245,6 +246,7 @@ const ACCOUNTLESS_FILE_REPLAY_OP_KINDS = new Set([
 const FILE_FRESHNESS_OP_KINDS = new Set(["moment.append", "version.create"]);
 const MAX_EMAIL_CHARS = 320;
 const MAX_SHARE_ID_CHARS = 128;
+const LINK_INVENTORY_CURSOR_MAX_CHARS = 1_024;
 // #646 PR3a. A submit's idempotency key is the client's own string, not a
 // share id; it takes the same length because both are one opaque identifier,
 // and its own name so the bound says what it bounds.
@@ -2673,11 +2675,25 @@ export function createSyncRelayHandler({
 
       if (route.route === "share-link-create-atomic" && request.method === "GET") {
         if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
+        const url = new URL(request.url);
+        if (url.searchParams.getAll("cursor").length > 1) {
+          throw badRequest("cursor is invalid");
+        }
+        const page = storage.listLinkGrantsByWorkspace(
+          route.workspaceId,
+          decodeLinkInventoryCursor(url.searchParams.get("cursor")),
+        );
         const links = await Promise.all(
-          storage.listLinkGrantsByWorkspace(route.workspaceId).map(linkInventorySummary),
+          page.links.map(linkInventorySummary),
         );
         if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
-        return jsonResponse({ ok: true, links });
+        return jsonResponse({
+          ok: true,
+          links,
+          ...(page.nextCursor
+            ? { nextCursor: encodeLinkInventoryCursor(page.nextCursor) }
+            : {}),
+        });
       }
 
       if (route.route === "share-link-create-atomic" && request.method === "POST") {
@@ -3337,6 +3353,64 @@ function parseShareId(value: string | undefined): string {
     throw notFound();
   }
   return value;
+}
+
+function encodeLinkInventoryCursor(cursor: SyncRelayLinkInventoryCursor): string {
+  return Buffer.from(JSON.stringify({ version: 1, ...cursor }), "utf8").toString(
+    "base64url",
+  );
+}
+
+function decodeLinkInventoryCursor(
+  value: string | null,
+): SyncRelayLinkInventoryCursor | undefined {
+  if (value === null) return undefined;
+  const invalid = () => badRequest("cursor is invalid");
+  if (
+    value.length === 0 ||
+    value.length > LINK_INVENTORY_CURSOR_MAX_CHARS ||
+    !/^[A-Za-z0-9_-]+$/u.test(value)
+  ) {
+    throw invalid();
+  }
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+  } catch {
+    throw invalid();
+  }
+  if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) {
+    throw invalid();
+  }
+  const row = decoded as Record<string, unknown>;
+  const keys = Object.keys(row).sort();
+  if (
+    keys.join("\0") !==
+      ["grantId", "linkCreatedAtMs", "shareCreatedAtMs", "shareId", "version"]
+        .sort()
+        .join("\0") ||
+    row.version !== 1 ||
+    !Number.isSafeInteger(row.shareCreatedAtMs) ||
+    Number(row.shareCreatedAtMs) < 0 ||
+    !Number.isSafeInteger(row.linkCreatedAtMs) ||
+    Number(row.linkCreatedAtMs) < 0 ||
+    typeof row.shareId !== "string" ||
+    row.shareId.length === 0 ||
+    row.shareId.length > MAX_SHARE_ID_CHARS ||
+    !/^[a-z0-9][a-z0-9-]*$/u.test(row.shareId) ||
+    typeof row.grantId !== "string" ||
+    row.grantId.length === 0 ||
+    row.grantId.length > MAX_SHARE_ID_CHARS ||
+    !/^[a-z0-9][a-z0-9-]*$/u.test(row.grantId)
+  ) {
+    throw invalid();
+  }
+  return {
+    shareCreatedAtMs: Number(row.shareCreatedAtMs),
+    shareId: row.shareId,
+    linkCreatedAtMs: Number(row.linkCreatedAtMs),
+    grantId: row.grantId,
+  };
 }
 
 function parseExpectedDependentGrantIds(

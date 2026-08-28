@@ -121,6 +121,13 @@ describe("main-process owner relay link authorization", () => {
     }
   });
 
+  it("forwards only the bounded parsed inventory cursor", () => {
+    const handler = handlerSource("listRelayShareLinks");
+    expect(handler).toContain("input.cursor");
+    expect(handler).toContain("encodeURIComponent(input.cursor)");
+    expect(handler).not.toContain("payload.cursor");
+  });
+
   it("pins workspace currency and credential generation around every relay call", () => {
     for (const channel of ownerLinkChannels) {
       const handler = handlerSource(channel);
