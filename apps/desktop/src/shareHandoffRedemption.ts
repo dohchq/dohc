@@ -1,12 +1,14 @@
 import type {
-  ShareHandoffCode,
+  ShareHandoffIntent,
   ShareHandoffIntentSlot,
 } from "./shareHandoffIngress";
+import { relayUrlsMatch } from "./workspaces/syncCode";
 
 export type ShareHandoffStatus =
   | { status: "idle" }
   | { status: "waiting-for-sign-in"; statusId: string }
   | { status: "waiting-for-acceptance"; statusId: string; email: string }
+  | { status: "failed-wrong-server"; statusId: string; linkRelayUrl: string }
   | { status: "redeeming"; statusId: string }
   | { status: "failed-refused"; statusId: string }
   | { status: "failed-busy"; statusId: string }
@@ -72,6 +74,12 @@ function sameStatus(
   if (left.status === "waiting-for-acceptance") {
     return (
       right.status === "waiting-for-acceptance" && left.email === right.email
+    );
+  }
+  if (left.status === "failed-wrong-server") {
+    return (
+      right.status === "failed-wrong-server" &&
+      left.linkRelayUrl === right.linkRelayUrl
     );
   }
   return true;
@@ -145,19 +153,20 @@ export function createShareHandoffRedemptionCoordinator(
   }
 
   function currentAttempt(statusId: string): {
-    code: ShareHandoffCode;
+    intent: ShareHandoffIntent;
     pendingGeneration: number;
     statusId: string;
     credentials: ShareHandoffCredentials;
     credentialGeneration: number;
   } | null {
     const pending = options.intent.snapshot();
-    if (pending.code === null) return null;
+    if (pending.intent === null) return null;
     const credentialSnapshot = options.credentialSnapshot();
     const credentials = credentialSnapshot.credentials;
     const identity = visibleIdentity;
     if (
       !credentials?.relayUrl ||
+      !relayUrlsMatch(pending.intent.relayUrl, credentials.relayUrl) ||
       identity?.statusId !== statusId ||
       identity.pendingGeneration !== pending.generation ||
       identity.credentialGeneration !== credentialSnapshot.generation
@@ -165,7 +174,7 @@ export function createShareHandoffRedemptionCoordinator(
       return null;
     }
     return {
-      code: pending.code,
+      intent: pending.intent,
       pendingGeneration: pending.generation,
       statusId,
       credentials,
@@ -187,7 +196,7 @@ export function createShareHandoffRedemptionCoordinator(
 
   function showCurrent(): void {
     const pending = options.intent.snapshot();
-    if (pending.code === null) return;
+    if (pending.intent === null) return;
     const credentialSnapshot = options.credentialSnapshot();
     if (
       visibleIdentity?.pendingGeneration === pending.generation &&
@@ -206,6 +215,14 @@ export function createShareHandoffRedemptionCoordinator(
       publish({ status: "waiting-for-sign-in", statusId });
       return;
     }
+    if (!relayUrlsMatch(pending.intent.relayUrl, credentials.relayUrl)) {
+      publish({
+        status: "failed-wrong-server",
+        statusId,
+        linkRelayUrl: pending.intent.relayUrl,
+      });
+      return;
+    }
     publish({
       status: "waiting-for-acceptance",
       statusId,
@@ -214,7 +231,7 @@ export function createShareHandoffRedemptionCoordinator(
   }
 
   async function redeem(input: {
-    code: ShareHandoffCode;
+    intent: ShareHandoffIntent;
     pendingGeneration: number;
     statusId: string;
     credentials: ShareHandoffCredentials;
@@ -229,7 +246,7 @@ export function createShareHandoffRedemptionCoordinator(
           authorization: `Bearer ${input.credentials.token}`,
           "content-type": "application/json",
         },
-        body: JSON.stringify({ code: input.code }),
+        body: JSON.stringify({ code: input.intent.code }),
       });
     } catch {
       if (
@@ -276,7 +293,7 @@ export function createShareHandoffRedemptionCoordinator(
       return;
     }
     if (response.status >= 400 && response.status < 500) {
-      options.intent.settle(input.code);
+      options.intent.settle(input.intent);
       visibleIdentity = null;
       acceptedIdentity = null;
       publish({ status: "failed-refused", statusId: input.statusId });
@@ -299,7 +316,7 @@ export function createShareHandoffRedemptionCoordinator(
       return;
     }
 
-    options.intent.settle(input.code);
+    options.intent.settle(input.intent);
     visibleIdentity = null;
     acceptedIdentity = null;
     publish({ status: "done", statusId: input.statusId, shareId: success.shareId });
@@ -357,11 +374,11 @@ export function createShareHandoffRedemptionCoordinator(
       }
       const pending = options.intent.snapshot();
       if (
-        pending.code !== null &&
+        pending.intent !== null &&
         visibleIdentity?.pendingGeneration === pending.generation &&
         visibleIdentity.statusId === statusId
       ) {
-        options.intent.settle(pending.code);
+        options.intent.settle(pending.intent);
       }
       visibleIdentity = null;
       acceptedIdentity = null;

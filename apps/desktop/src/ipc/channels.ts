@@ -164,6 +164,7 @@ export const SHARE_HANDOFF_STATUSES = [
   "waiting-for-sign-in",
   "waiting-for-acceptance",
   "redeeming",
+  "failed-wrong-server",
   "failed-refused",
   "failed-busy",
   "failed-network",
@@ -175,11 +176,12 @@ export type ShareHandoffStatusEvent =
   | {
       status: Exclude<
         (typeof SHARE_HANDOFF_STATUSES)[number],
-        "idle" | "done" | "waiting-for-acceptance"
+        "idle" | "done" | "waiting-for-acceptance" | "failed-wrong-server"
       >;
       statusId: string;
     }
   | { status: "waiting-for-acceptance"; statusId: string; email: string }
+  | { status: "failed-wrong-server"; statusId: string; linkRelayUrl: string }
   | { status: "done"; statusId: string; shareId: string };
 
 export function parseShareHandoffStatus(
@@ -232,11 +234,23 @@ export function parseShareHandoffStatus(
     }
     return { status, statusId: raw.statusId, email: raw.email };
   }
+  if (status === "failed-wrong-server") {
+    if (
+      Reflect.ownKeys(value).length !== 3 ||
+      !Object.hasOwn(value, "linkRelayUrl") ||
+      typeof raw.linkRelayUrl !== "string" ||
+      raw.linkRelayUrl.length === 0 ||
+      raw.linkRelayUrl.length > 2048
+    ) {
+      return null;
+    }
+    return { status, statusId: raw.statusId, linkRelayUrl: raw.linkRelayUrl };
+  }
   if (Reflect.ownKeys(value).length !== 2) return null;
   return {
     status: status as Exclude<
       (typeof SHARE_HANDOFF_STATUSES)[number],
-      "idle" | "done" | "waiting-for-acceptance"
+      "idle" | "done" | "waiting-for-acceptance" | "failed-wrong-server"
     >,
     statusId: raw.statusId,
   };

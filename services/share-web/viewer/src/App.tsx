@@ -58,6 +58,7 @@ class ViewResponseError extends Error {
 interface HandoffResponse {
   ok: true;
   code: string;
+  relayUrl: string;
   expiresAtMs: number;
 }
 
@@ -78,22 +79,28 @@ function isCurrentHandoffResponse(
     return false;
   }
   const response = value as Record<string, unknown>;
-  return Object.keys(response).sort().join(",") === "code,expiresAtMs,ok" &&
+  return Object.keys(response).sort().join(",") === "code,expiresAtMs,ok,relayUrl" &&
     response.ok === true &&
     typeof response.code === "string" &&
     HANDOFF_CODE.test(response.code) &&
+    typeof response.relayUrl === "string" &&
+    response.relayUrl.length > 0 &&
+    response.relayUrl.length <= 2048 &&
     typeof response.expiresAtMs === "number" &&
     Number.isSafeInteger(response.expiresAtMs) &&
     response.expiresAtMs > nowMs;
 }
 
 export const dohcNavigation = {
-  urlForCode(code: string): string {
+  urlForCode(code: string, relayUrl: string): string {
     if (!HANDOFF_CODE.test(code)) throw new Error("invalid handoff code");
-    return `dohc://open/${code}`;
+    if (relayUrl.length === 0 || relayUrl.length > 2048) {
+      throw new Error("invalid handoff relay coordinate");
+    }
+    return `dohc://open/${code}?relay=${encodeURIComponent(relayUrl)}`;
   },
-  openCode(code: string): void {
-    location.assign(dohcNavigation.urlForCode(code));
+  openCode(code: string, relayUrl: string): void {
+    location.assign(dohcNavigation.urlForCode(code, relayUrl));
   },
 };
 
@@ -680,7 +687,7 @@ function OpenInDohc(props: { session: string }) {
 
     requestRef.current = null;
     setHandoffState("opened");
-    dohcNavigation.openCode(handoff.code);
+    dohcNavigation.openCode(handoff.code, handoff.relayUrl);
   }, [props.session]);
 
   const cancelOpening = useCallback(() => {

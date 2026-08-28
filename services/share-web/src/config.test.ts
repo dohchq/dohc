@@ -1,12 +1,68 @@
 import { describe, expect, it } from "vitest";
+import { MAX_RELAY_URL_LENGTH } from "@dohc/workspace-contracts/relay-values";
 import { loadShareWebConfig } from "./config";
 
 describe("share-web configuration", () => {
+  it("requires and canonicalizes the public relay coordinate separately", () => {
+    expect(() =>
+      loadShareWebConfig({
+        NODE_ENV: "test",
+        DOHC_SHARE_WEB_RELAY_URL: "http://sync-relay:1788",
+        DOHC_SHARE_WEB_PUBLIC_HOSTS: "share.example.test",
+      }),
+    ).toThrow("DOHC_SHARE_WEB_PUBLIC_RELAY_URL must be set.");
+
+    const config = loadShareWebConfig({
+      NODE_ENV: "test",
+      DOHC_SHARE_WEB_RELAY_URL: "http://sync-relay:1788",
+      DOHC_SHARE_WEB_PUBLIC_RELAY_URL: "https://Relay.Example.Test///",
+      DOHC_SHARE_WEB_PUBLIC_HOSTS: "share.example.test",
+    });
+
+    expect(config.relayUrl).toBe("http://sync-relay:1788/");
+    expect(config.publicRelayUrl).toBe("https://relay.example.test");
+  });
+
+  it.each([
+    ["credentials", "https://user:pass@relay.example.test"],
+    ["query", "https://relay.example.test?token=secret"],
+    ["fragment", "https://relay.example.test#secret"],
+    ["non-HTTP scheme", "file:///relay"],
+    ["over 2048 characters", `https://relay.example.test/${"x".repeat(2048)}`],
+  ])("rejects a public relay URL with %s", (_label, publicRelayUrl) => {
+    expect(() =>
+      loadShareWebConfig({
+        NODE_ENV: "test",
+        DOHC_SHARE_WEB_RELAY_URL: "http://sync-relay:1788",
+        DOHC_SHARE_WEB_PUBLIC_RELAY_URL: publicRelayUrl,
+        DOHC_SHARE_WEB_PUBLIC_HOSTS: "share.example.test",
+      }),
+    ).toThrow(/DOHC_SHARE_WEB_PUBLIC_RELAY_URL/u);
+  });
+
+  it("rejects a public relay URL that serialization expands past the bound", () => {
+    const publicRelayUrl = `https://relay.example.test/${"é".repeat(400)}`;
+
+    expect(publicRelayUrl.length).toBeLessThanOrEqual(MAX_RELAY_URL_LENGTH);
+    expect(new URL(publicRelayUrl).toString().length).toBeGreaterThan(
+      MAX_RELAY_URL_LENGTH,
+    );
+    expect(() =>
+      loadShareWebConfig({
+        NODE_ENV: "test",
+        DOHC_SHARE_WEB_RELAY_URL: "http://sync-relay:1788",
+        DOHC_SHARE_WEB_PUBLIC_RELAY_URL: publicRelayUrl,
+        DOHC_SHARE_WEB_PUBLIC_HOSTS: "share.example.test",
+      }),
+    ).toThrow(/DOHC_SHARE_WEB_PUBLIC_RELAY_URL/u);
+  });
+
   it("parses exact public hosts and development defaults", () => {
     const config = loadShareWebConfig({
       NODE_ENV: "development",
       DOHC_SHARE_WEB_DEV: "1",
       DOHC_SHARE_WEB_RELAY_URL: "http://127.0.0.1:1788",
+      DOHC_SHARE_WEB_PUBLIC_RELAY_URL: "http://127.0.0.1:1788",
       DOHC_SHARE_WEB_PUBLIC_HOSTS: "localhost:1790,Share.Example.Test",
       DOHC_SHARE_WEB_TRUSTED_PROXIES: "127.0.0.1,10.0.0.2",
       DOHC_SHARE_WEB_PORT: "0",
@@ -21,6 +77,7 @@ describe("share-web configuration", () => {
     const config = loadShareWebConfig({
       NODE_ENV: "test",
       DOHC_SHARE_WEB_RELAY_URL: "https://relay.example.test",
+      DOHC_SHARE_WEB_PUBLIC_RELAY_URL: "https://relay.example.test",
       DOHC_SHARE_WEB_PUBLIC_HOSTS: "share.example.test",
     });
 
@@ -33,6 +90,7 @@ describe("share-web configuration", () => {
       loadShareWebConfig({
         NODE_ENV: "production",
         DOHC_SHARE_WEB_RELAY_URL: "https://relay.example.test",
+        DOHC_SHARE_WEB_PUBLIC_RELAY_URL: "https://relay.example.test",
         DOHC_SHARE_WEB_PUBLIC_HOSTS: "share.example.test",
       }),
     ).toThrow(
@@ -45,6 +103,7 @@ describe("share-web configuration", () => {
       loadShareWebConfig({
         NODE_ENV: "test",
         DOHC_SHARE_WEB_RELAY_URL: "https://relay.example.test",
+        DOHC_SHARE_WEB_PUBLIC_RELAY_URL: "https://relay.example.test",
         DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: relayExchangeKey,
         DOHC_SHARE_WEB_PUBLIC_HOSTS: "share.example.test",
       });
@@ -60,6 +119,7 @@ describe("share-web configuration", () => {
       loadShareWebConfig({
         NODE_ENV: "test",
         DOHC_SHARE_WEB_RELAY_URL: "https://relay.example.test",
+        DOHC_SHARE_WEB_PUBLIC_RELAY_URL: "https://relay.example.test",
         DOHC_SHARE_WEB_PUBLIC_HOSTS: "share.example.test, other.example.test",
       }),
     ).toThrow(/exact comma-separated Host/u);
@@ -67,6 +127,7 @@ describe("share-web configuration", () => {
       loadShareWebConfig({
         NODE_ENV: "test",
         DOHC_SHARE_WEB_RELAY_URL: "https://relay.example.test",
+        DOHC_SHARE_WEB_PUBLIC_RELAY_URL: "https://relay.example.test",
         DOHC_SHARE_WEB_PUBLIC_HOSTS: "share.example.test",
         DOHC_SHARE_WEB_TRUSTED_PROXIES: "127.0.0.1, 10.0.0.2",
       }),
@@ -76,6 +137,7 @@ describe("share-web configuration", () => {
         NODE_ENV: "production",
         DOHC_SHARE_WEB_DEV: "1",
         DOHC_SHARE_WEB_RELAY_URL: "https://relay.example.test",
+        DOHC_SHARE_WEB_PUBLIC_RELAY_URL: "https://relay.example.test",
         DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: "production-relay-exchange-key-at-least-32",
         DOHC_SHARE_WEB_PUBLIC_HOSTS: "share.example.test",
       }),

@@ -3408,6 +3408,13 @@ export const ShareHandoffStatus = z.discriminatedUnion("status", [
     .strict(),
   z
     .object({
+      status: z.literal("failed-wrong-server"),
+      statusId: SHARE_HANDOFF_STATUS_ID,
+      linkRelayUrl: z.string().min(1).max(2048),
+    })
+    .strict(),
+  z
+    .object({
       status: z.literal("failed-refused"),
       statusId: SHARE_HANDOFF_STATUS_ID,
     })

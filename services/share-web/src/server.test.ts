@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadShareWebConfig } from "./config";
 import {
-  createShareWebHandler,
+  createShareWebHandler as createRawShareWebHandler,
+  type CreateShareWebHandlerOptions,
   EXCHANGE_BUCKET_CAPACITY,
   LINK_SESSION_RENEWAL_GRACE_MS,
   MAX_SESSIONS_PER_GRANT,
@@ -18,6 +19,15 @@ const SECRET_ALPHA_ROTATED = Buffer.alloc(32, 12).toString("base64url");
 const SECRET_BETA = Buffer.alloc(32, 13).toString("base64url");
 const HANDOFF_CODE = Buffer.alloc(32, 31).toString("base64url");
 const HANDOFF_EXCHANGE_KEY = "share-web-to-relay-handoff-exchange-key";
+const PUBLIC_RELAY_URL = "https://relay.public.test";
+
+function createShareWebHandler(
+  options: Omit<CreateShareWebHandlerOptions, "publicRelayUrl"> & {
+    publicRelayUrl?: string;
+  },
+): ReturnType<typeof createRawShareWebHandler> {
+  return createRawShareWebHandler({ publicRelayUrl: PUBLIC_RELAY_URL, ...options });
+}
 
 function request(path: string, init: RequestInit = {}): Request {
   const headers = new Headers(init.headers);
@@ -104,6 +114,7 @@ describe("share-web sessions", () => {
     const { publicHosts } = loadShareWebConfig({
       NODE_ENV: "test",
       DOHC_SHARE_WEB_RELAY_URL: "http://relay.test",
+      DOHC_SHARE_WEB_PUBLIC_RELAY_URL: PUBLIC_RELAY_URL,
       DOHC_SHARE_WEB_PUBLIC_HOSTS: configuredHost,
     });
     const fetchRelay = vi.fn(async () =>
@@ -1365,6 +1376,7 @@ describe("share-web handoff adapter", () => {
     capabilityExpiresAtMs?: number;
     sessionTokenByte?: number;
     handoffRelayTimeoutMs?: number;
+    publicRelayUrl?: string;
   }): Promise<{
     handler: ReturnType<typeof createShareWebHandler>;
     discriminator: string;
@@ -1390,6 +1402,9 @@ describe("share-web handoff adapter", () => {
       newSessionToken: () =>
         Buffer.alloc(32, options.sessionTokenByte ?? 41).toString("base64url"),
       handoffRelayTimeoutMs: options.handoffRelayTimeoutMs,
+      ...(options.publicRelayUrl
+        ? { publicRelayUrl: options.publicRelayUrl }
+        : {}),
     });
     const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
     expect(exchanged.status).toBe(200);
@@ -1531,6 +1546,7 @@ describe("share-web handoff adapter", () => {
       expect(await retry.json()).toEqual({
         ok: true,
         code: HANDOFF_CODE,
+        relayUrl: PUBLIC_RELAY_URL,
         expiresAtMs: 301_000,
       });
       expect(mintCalls).toBe(2);
@@ -1603,6 +1619,8 @@ describe("share-web handoff adapter", () => {
 
   it("forwards only the current capability and exchange key with an empty body", async () => {
     const completeUrl = `https://${HOST}/s#${SECRET_ALPHA}`;
+    const upstreamRelayUrl = "https://relay-response.example?secret=upstream";
+    const configuredPublicRelayUrl = "https://relay-for-desktop.example";
     const cookieToken = Buffer.alloc(32, 41).toString("base64url");
     const diagnostics: string[] = [];
     const logSpy = vi.spyOn(console, "log").mockImplementation((...values) => {
@@ -1616,6 +1634,7 @@ describe("share-web handoff adapter", () => {
     let capturedBody = "not-called";
     let capturedHeaders: Record<string, string> = {};
     const state = await exchangedSession({
+      publicRelayUrl: configuredPublicRelayUrl,
       fetchRelay: async (relayRequest) => {
         expect(new URL(relayRequest.url).pathname).toBe("/sync/link-handoff");
         expect(relayRequest.method).toBe("POST");
@@ -1630,6 +1649,7 @@ describe("share-web handoff adapter", () => {
           grantId: "private-grant",
           shareId: "private-share",
           viewerCookieToken: cookieToken,
+          relayUrl: upstreamRelayUrl,
         });
       },
     });
@@ -1652,6 +1672,7 @@ describe("share-web handoff adapter", () => {
     expect(JSON.parse(responseText)).toEqual({
       ok: true,
       code: HANDOFF_CODE,
+      relayUrl: configuredPublicRelayUrl,
       expiresAtMs: 301_000,
     });
     expect(capturedHeaders).toEqual({
@@ -1666,7 +1687,14 @@ describe("share-web handoff adapter", () => {
       ...stdout,
       ...stderr,
     ].join("\n");
-    for (const secret of [CAP_ALPHA_1, CAP_ALPHA_2, SECRET_ALPHA, completeUrl, cookieToken]) {
+    for (const secret of [
+      CAP_ALPHA_1,
+      CAP_ALPHA_2,
+      SECRET_ALPHA,
+      completeUrl,
+      cookieToken,
+      upstreamRelayUrl,
+    ]) {
       expect(secretSurfaces).not.toContain(secret);
     }
   });
@@ -1714,6 +1742,7 @@ describe("share-web handoff adapter", () => {
     expect(await response.json()).toEqual({
       ok: true,
       code: HANDOFF_CODE,
+      relayUrl: PUBLIC_RELAY_URL,
       expiresAtMs: now + 300_000,
     });
     expect(relayPaths).toEqual(["/sync/link-refresh", "/sync/link-handoff"]);

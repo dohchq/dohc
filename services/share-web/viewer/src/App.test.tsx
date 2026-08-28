@@ -16,6 +16,7 @@ const SESSION = "abcdefghijkl";
 const SECOND_SESSION = "mnopqrstuvwx";
 const FIRST_HANDOFF_CODE = "A".repeat(43);
 const SECOND_HANDOFF_CODE = "B".repeat(43);
+const PUBLIC_RELAY_URL = "https://relay.example.test";
 const SETTLE_TURN_LIMIT = 200;
 
 const DEFAULT_META: ViewMeta = {
@@ -215,10 +216,22 @@ describe("App", () => {
     });
   }
 
+  it("builds the browser handoff coordinate with the canonical issuer relay", () => {
+    expect(
+      dohcNavigation.urlForCode(
+        FIRST_HANDOFF_CODE,
+        PUBLIC_RELAY_URL,
+      ),
+    ).toBe(
+      `dohc://open/${FIRST_HANDOFF_CODE}?relay=https%3A%2F%2Frelay.example.test`,
+    );
+  });
+
   it("requires explicit consent before the first handoff request", async () => {
     const fetchMock = viewerFetch(() => jsonResponse({
       ok: true,
       code: FIRST_HANDOFF_CODE,
+      relayUrl: PUBLIC_RELAY_URL,
       expiresAtMs: Date.now() + 60_000,
     }));
     vi.stubGlobal("fetch", fetchMock);
@@ -255,7 +268,7 @@ describe("App", () => {
     await settle(() => navigate.mock.calls.length === 1);
   });
 
-  it("posts only the current viewer contract and navigates with only the handoff code", async () => {
+  it("posts only the current viewer contract and navigates with the handoff coordinate", async () => {
     const secrets = [
       SESSION,
       "cookie-sentinel",
@@ -268,6 +281,7 @@ describe("App", () => {
     const fetchMock = viewerFetch(() => jsonResponse({
       ok: true,
       code: FIRST_HANDOFF_CODE,
+      relayUrl: PUBLIC_RELAY_URL,
       expiresAtMs: Date.now() + 60_000,
     }));
     vi.stubGlobal("fetch", fetchMock);
@@ -289,23 +303,28 @@ describe("App", () => {
     expect(init?.headers).toEqual({ "x-dohc-link-session": SESSION });
     expect(Object.keys(init?.headers ?? {})).toEqual(["x-dohc-link-session"]);
 
-    expect(navigate).toHaveBeenCalledWith(FIRST_HANDOFF_CODE);
+    expect(navigate).toHaveBeenCalledWith(FIRST_HANDOFF_CODE, PUBLIC_RELAY_URL);
     const launchedCode = String(navigate.mock.calls[0]?.[0]);
-    const launchUrl = dohcNavigation.urlForCode(launchedCode);
-    expect(launchUrl).toBe(`dohc://open/${FIRST_HANDOFF_CODE}`);
+    const launchedRelay = String(navigate.mock.calls[0]?.[1]);
+    const launchUrl = dohcNavigation.urlForCode(launchedCode, launchedRelay);
+    expect(launchUrl).toBe(
+      `dohc://open/${FIRST_HANDOFF_CODE}?relay=https%3A%2F%2Frelay.example.test`,
+    );
     for (const secret of secrets) expect(launchUrl).not.toContain(secret);
-    expect(launchUrl).not.toContain("?");
     expect(launchUrl).not.toContain("#");
-    expect(() => dohcNavigation.urlForCode("bad/code"))
+    expect(() => dohcNavigation.urlForCode("bad/code", PUBLIC_RELAY_URL))
       .toThrow("invalid handoff code");
   });
 
   it.each([
-    ["a response without ok true", { code: FIRST_HANDOFF_CODE, expiresAtMs: Date.now() + 60_000 }],
-    ["a malformed code", { ok: true, code: "short", expiresAtMs: Date.now() + 60_000 }],
-    ["an expired code", { ok: true, code: FIRST_HANDOFF_CODE, expiresAtMs: Date.now() }],
-    ["a non-integer expiry", { ok: true, code: FIRST_HANDOFF_CODE, expiresAtMs: Date.now() + 60_000.5 }],
-    ["an unexpected response field", { ok: true, code: FIRST_HANDOFF_CODE, expiresAtMs: Date.now() + 60_000, extra: true }],
+    ["a response without ok true", { code: FIRST_HANDOFF_CODE, relayUrl: PUBLIC_RELAY_URL, expiresAtMs: Date.now() + 60_000 }],
+    ["a malformed code", { ok: true, code: "short", relayUrl: PUBLIC_RELAY_URL, expiresAtMs: Date.now() + 60_000 }],
+    ["a missing relay coordinate", { ok: true, code: FIRST_HANDOFF_CODE, expiresAtMs: Date.now() + 60_000 }],
+    ["an empty relay coordinate", { ok: true, code: FIRST_HANDOFF_CODE, relayUrl: "", expiresAtMs: Date.now() + 60_000 }],
+    ["an oversized relay coordinate", { ok: true, code: FIRST_HANDOFF_CODE, relayUrl: "x".repeat(2049), expiresAtMs: Date.now() + 60_000 }],
+    ["an expired code", { ok: true, code: FIRST_HANDOFF_CODE, relayUrl: PUBLIC_RELAY_URL, expiresAtMs: Date.now() }],
+    ["a non-integer expiry", { ok: true, code: FIRST_HANDOFF_CODE, relayUrl: PUBLIC_RELAY_URL, expiresAtMs: Date.now() + 60_000.5 }],
+    ["an unexpected response field", { ok: true, code: FIRST_HANDOFF_CODE, relayUrl: PUBLIC_RELAY_URL, expiresAtMs: Date.now() + 60_000, extra: true }],
   ])("rejects %s", async (_label, body) => {
     const fetchMock = viewerFetch(() => jsonResponse(body));
     vi.stubGlobal("fetch", fetchMock);
@@ -348,6 +367,7 @@ describe("App", () => {
         : jsonResponse({
             ok: true,
             code: SECOND_HANDOFF_CODE,
+            relayUrl: PUBLIC_RELAY_URL,
             expiresAtMs: Date.now() + 60_000,
           });
     });
@@ -369,7 +389,7 @@ describe("App", () => {
     await settle(() => navigate.mock.calls.length === 1);
 
     expect(handoffCalls(fetchMock)).toHaveLength(2);
-    expect(navigate).toHaveBeenCalledWith(SECOND_HANDOFF_CODE);
+    expect(navigate).toHaveBeenCalledWith(SECOND_HANDOFF_CODE, PUBLIC_RELAY_URL);
   });
 
   it.each([
@@ -384,6 +404,7 @@ describe("App", () => {
         : jsonResponse({
             ok: true,
             code: SECOND_HANDOFF_CODE,
+            relayUrl: PUBLIC_RELAY_URL,
             expiresAtMs: Date.now() + 60_000,
           });
     });
@@ -403,7 +424,7 @@ describe("App", () => {
     await settle(() => navigate.mock.calls.length === 1);
 
     expect(handoffCalls(fetchMock)).toHaveLength(2);
-    expect(navigate).toHaveBeenCalledWith(SECOND_HANDOFF_CODE);
+    expect(navigate).toHaveBeenCalledWith(SECOND_HANDOFF_CODE, PUBLIC_RELAY_URL);
   });
 
   it("keeps post-navigation recovery visible and retries with a fresh code", async () => {
@@ -412,6 +433,7 @@ describe("App", () => {
     const fetchMock = viewerFetch(() => jsonResponse({
       ok: true,
       code: codes[handoffRequests++],
+      relayUrl: PUBLIC_RELAY_URL,
       expiresAtMs: Date.now() + 60_000,
     }));
     vi.stubGlobal("fetch", fetchMock);
@@ -431,8 +453,8 @@ describe("App", () => {
 
     expect(handoffCalls(fetchMock)).toHaveLength(2);
     expect(navigate.mock.calls).toEqual([
-      [FIRST_HANDOFF_CODE],
-      [SECOND_HANDOFF_CODE],
+      [FIRST_HANDOFF_CODE, PUBLIC_RELAY_URL],
+      [SECOND_HANDOFF_CODE, PUBLIC_RELAY_URL],
     ]);
   });
 
@@ -464,6 +486,7 @@ describe("App", () => {
     resolveHandoff?.(jsonResponse({
       ok: true,
       code: FIRST_HANDOFF_CODE,
+      relayUrl: PUBLIC_RELAY_URL,
       expiresAtMs: Date.now() + 60_000,
     }));
     await settle(() => handoffSignal?.aborted === true);
@@ -518,6 +541,7 @@ describe("App", () => {
       resolveFirstHandoff?.(jsonResponse({
         ok: true,
         code: FIRST_HANDOFF_CODE,
+        relayUrl: PUBLIC_RELAY_URL,
         expiresAtMs: Date.now() + 60_000,
       }));
       await firstHandoff;
@@ -544,12 +568,15 @@ describe("App", () => {
     resolveSecondHandoff?.(jsonResponse({
       ok: true,
       code: SECOND_HANDOFF_CODE,
+      relayUrl: PUBLIC_RELAY_URL,
       expiresAtMs: Date.now() + 60_000,
     }));
     await settle(() => navigate.mock.calls.length === 1);
 
     expect(handoffCalls(fetchMock)).toHaveLength(2);
-    expect(navigate.mock.calls).toEqual([[SECOND_HANDOFF_CODE]]);
+    expect(navigate.mock.calls).toEqual([
+      [SECOND_HANDOFF_CODE, PUBLIC_RELAY_URL],
+    ]);
   });
 
   it("does not navigate or repaint a replacement ready session", async () => {
@@ -585,6 +612,7 @@ describe("App", () => {
     resolveFirstHandoff?.(jsonResponse({
       ok: true,
       code: FIRST_HANDOFF_CODE,
+      relayUrl: PUBLIC_RELAY_URL,
       expiresAtMs: Date.now() + 60_000,
     }));
     await settle(() => firstHandoffSignal?.aborted === true);
@@ -638,6 +666,7 @@ describe("App", () => {
     resolveHandoff?.(jsonResponse({
       ok: true,
       code: FIRST_HANDOFF_CODE,
+      relayUrl: PUBLIC_RELAY_URL,
       expiresAtMs: Date.now() + 60_000,
     }));
     await settle(() => handoffSignal?.aborted === true);

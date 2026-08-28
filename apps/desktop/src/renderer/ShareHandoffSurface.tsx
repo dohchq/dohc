@@ -141,6 +141,18 @@ export function ShareHandoffSurface(props: {
     return <HandoffCard title="Opening share…" onBack={props.onBack} />;
   }
 
+  if (props.status.status === "failed-wrong-server") {
+    return (
+      <HandoffCard title="Open a share" onBack={props.onBack}>
+        <p role="alert" className="m-0 text-xs leading-relaxed text-danger">
+          This share link belongs to a different server ({props.status.linkRelayUrl})
+          than the one you're signed in to. Sign in to that server, then choose Open
+          in dohc again.
+        </p>
+      </HandoffCard>
+    );
+  }
+
   if (props.status.status === "failed-refused") {
     return (
       <HandoffCard title="Open a share" onBack={props.onBack}>

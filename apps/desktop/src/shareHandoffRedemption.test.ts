@@ -2,11 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createShareHandoffIntentSlot,
   parseShareHandoffUrl,
-  type ShareHandoffCode,
+  type ShareHandoffIntent,
 } from "./shareHandoffIngress";
 
 const CODE_A = "A".repeat(43);
 const CODE_B = `${"b".repeat(42)}_`;
+const RELAY_A = "https://relay-a.example";
+const RELAY_B = "https://relay-b.example";
 interface TestCredentials {
   serverUrl: string;
   relayUrl?: string;
@@ -29,9 +31,15 @@ const CREDENTIALS_B: TestCredentials = {
   token: "bearer-b",
   userId: "user-b",
 };
+const CREDENTIALS_SAME_RELAY_B: TestCredentials = {
+  ...CREDENTIALS_B,
+  relayUrl: "https://relay-a.example",
+};
 
-function code(value: string): ShareHandoffCode {
-  const parsed = parseShareHandoffUrl(`dohc://open/${value}`);
+function intentFor(value: string, relayUrl = RELAY_A): ShareHandoffIntent {
+  const parsed = parseShareHandoffUrl(
+    `dohc://open/${value}?relay=${encodeURIComponent(relayUrl)}`,
+  );
   if (!parsed) throw new Error("test handoff code is invalid");
   return parsed;
 }
@@ -57,12 +65,12 @@ async function harness(options?: {
 }) {
   const module = await import("./shareHandoffRedemption");
   const intentSlot = createShareHandoffIntentSlot();
-  const settledCodes: ShareHandoffCode[] = [];
+  const settledCodes: string[] = [];
   const intent = {
     ...intentSlot,
-    settle(value: ShareHandoffCode) {
+    settle(value: ShareHandoffIntent) {
       const settled = intentSlot.settle(value);
-      if (settled) settledCodes.push(value);
+      if (settled) settledCodes.push(value.code);
       return settled;
     },
   };
@@ -103,8 +111,8 @@ async function harness(options?: {
     settledCodes,
     statuses,
     handleUnauthorized,
-    offer(value: string) {
-      intent.offer(code(value));
+    offer(value: string, relayUrl = RELAY_A) {
+      intent.offer(intentFor(value, relayUrl));
       coordinator.pendingCodeChanged();
     },
     setCredentials(next: TestCredentials | null) {
@@ -126,6 +134,42 @@ function success(shareId = "share-redeemed"): Response {
 }
 
 describe("share handoff redemption coordinator", () => {
+  it("refuses a different issuer relay before acceptance without fetching", async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    const h = await harness({ credentials: CREDENTIALS_B, fetch: fetchImpl });
+
+    h.offer(CODE_A, RELAY_A);
+
+    expect(h.coordinator.status()).toEqual({
+      status: "failed-wrong-server",
+      statusId: "status-1",
+      linkRelayUrl: RELAY_A,
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    h.coordinator.accept("status-1");
+    h.coordinator.retry();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("moves signed-out ingress to wrong-server only after credentials arrive", async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    const h = await harness({ fetch: fetchImpl });
+
+    h.offer(CODE_A, RELAY_A);
+    expect(h.coordinator.status()).toEqual({
+      status: "waiting-for-sign-in",
+      statusId: "status-1",
+    });
+
+    h.setCredentials(CREDENTIALS_B);
+    expect(h.coordinator.status()).toEqual({
+      status: "failed-wrong-server",
+      statusId: "status-2",
+      linkRelayUrl: RELAY_A,
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("waits for the signed-in account to accept identity disclosure", async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(success());
     const h = await harness({ credentials: CREDENTIALS_A, fetch: fetchImpl });
@@ -233,9 +277,28 @@ describe("share handoff redemption coordinator", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it("replaces acceptance when only the issuer relay changes and ignores stale dismissal", async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    const h = await harness({ credentials: CREDENTIALS_A, fetch: fetchImpl });
+
+    h.offer(CODE_A, RELAY_A);
+    h.offer(CODE_A, RELAY_B);
+    h.coordinator.dismiss("status-1");
+
+    expect(h.coordinator.status()).toEqual({
+      status: "failed-wrong-server",
+      statusId: "status-2",
+      linkRelayUrl: RELAY_B,
+    });
+    expect(h.intent.pending()).toEqual(intentFor(CODE_A, RELAY_B));
+    h.coordinator.accept("status-1");
+    h.coordinator.accept("status-2");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["token rotation", { ...CREDENTIALS_A, token: "bearer-a-rotated" }],
-    ["account switch", CREDENTIALS_B],
+    ["account switch", CREDENTIALS_SAME_RELAY_B],
   ])("rejects an acceptance identity after a %s", async (_label, nextCredentials) => {
     const fetchImpl = vi.fn<typeof fetch>();
     const h = await harness({ credentials: CREDENTIALS_A, fetch: fetchImpl });
@@ -268,7 +331,7 @@ describe("share handoff redemption coordinator", () => {
     });
 
     expect(h.intent.pending()).toBeNull();
-    h.intent.offer(code(CODE_A));
+    h.intent.offer(intentFor(CODE_A));
     const refusedStatus = h.coordinator.status();
     h.coordinator.retry();
     expect(fetchImpl).toHaveBeenCalledTimes(1);
@@ -305,7 +368,7 @@ describe("share handoff redemption coordinator", () => {
     await vi.waitFor(() =>
       expect(h.coordinator.status().status).not.toBe("redeeming"),
     );
-    expect(h.intent.pending()).toBe(CODE_A);
+    expect(h.intent.pending()).toEqual(intentFor(CODE_A));
     expect(h.coordinator.status()).toEqual({
       status: "failed-busy",
       statusId: "status-1",
@@ -338,7 +401,7 @@ describe("share handoff redemption coordinator", () => {
       });
     });
 
-    h.setCredentials(CREDENTIALS_B);
+    h.setCredentials(CREDENTIALS_SAME_RELAY_B);
     expect(h.coordinator.status()).toEqual({
       status: "waiting-for-acceptance",
       statusId: "status-2",
@@ -383,7 +446,7 @@ describe("share handoff redemption coordinator", () => {
         statusId: "status-1",
       });
     });
-    expect(h.intent.pending()).toBe(CODE_A);
+    expect(h.intent.pending()).toEqual(intentFor(CODE_A));
 
     h.coordinator.retry();
     await vi.waitFor(() => {
@@ -414,9 +477,9 @@ describe("share handoff redemption coordinator", () => {
     expect(h.handleUnauthorized).toHaveBeenCalledTimes(1);
     expect(h.handleUnauthorized).toHaveBeenNthCalledWith(1, CREDENTIALS_A);
     expect(h.credentials()).toBeNull();
-    expect(h.intent.pending()).toBe(CODE_A);
+    expect(h.intent.pending()).toEqual(intentFor(CODE_A));
 
-    h.setCredentials(CREDENTIALS_B);
+    h.setCredentials(CREDENTIALS_SAME_RELAY_B);
     expect(h.coordinator.status()).toEqual({
       status: "waiting-for-acceptance",
       statusId: "status-3",
@@ -433,7 +496,7 @@ describe("share handoff redemption coordinator", () => {
     });
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(fetchImpl.mock.calls[1]?.[0]).toBe(
-      "https://relay-b.example/sync/link-redeem",
+      "https://relay-a.example/sync/link-redeem",
     );
     expect(fetchImpl.mock.calls[1]?.[1]?.headers).toEqual({
       authorization: "Bearer bearer-b",
@@ -620,7 +683,7 @@ describe("share handoff redemption coordinator", () => {
     h.coordinator.dismiss(visible.statusId);
     expect(h.coordinator.status()).toEqual({ status: "idle" });
     expect(h.intent.pending()).toBeNull();
-    h.intent.offer(code(CODE_A));
+    h.intent.offer(intentFor(CODE_A));
     h.coordinator.retry();
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(h.coordinator.status()).toEqual({ status: "idle" });
@@ -642,7 +705,7 @@ describe("share handoff redemption coordinator", () => {
       statusId: "status-2",
       email: "account-a@dohc.test",
     });
-    expect(h.intent.pending()).toBe(CODE_B);
+    expect(h.intent.pending()).toEqual(intentFor(CODE_B));
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 

@@ -110,6 +110,7 @@ services:
         condition: service_healthy
     environment:
       DOHC_SHARE_WEB_RELAY_URL: http://sync-relay:1788
+      DOHC_SHARE_WEB_PUBLIC_RELAY_URL: ${DOHC_SHARE_WEB_PUBLIC_RELAY_URL:?Set DOHC_SHARE_WEB_PUBLIC_RELAY_URL in .env.self-host}
       DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: ${DOHC_RELAY_EXCHANGE_KEY:?Set DOHC_RELAY_EXCHANGE_KEY in .env.self-host}
       DOHC_SHARE_WEB_PUBLIC_HOSTS: ${DOHC_SHARE_WEB_PUBLIC_HOST:?Set DOHC_SHARE_WEB_PUBLIC_HOST in .env.self-host}
       DOHC_SHARE_WEB_BIND: "0.0.0.0"

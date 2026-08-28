@@ -46,6 +46,7 @@ interface ExchangeBucket {
 
 export interface CreateShareWebHandlerOptions {
   relayUrl: string;
+  publicRelayUrl: string;
   relayExchangeKey?: string;
   publicHosts: ReadonlySet<string>;
   fetchRelay?: RelayFetch;
@@ -534,6 +535,7 @@ async function streamingBlobResponse(
 
 export function createShareWebHandler({
   relayUrl,
+  publicRelayUrl,
   relayExchangeKey,
   publicHosts,
   fetchRelay = (request) => fetch(request),
@@ -779,7 +781,12 @@ export function createShareWebHandler({
         const handoff = parsedRelayHandoff(await relayResponse.json(), nowMs());
         if (!handoff) return refused(503, refreshedCookieHeaders);
         return jsonResponse(
-          { ok: true, code: handoff.code, expiresAtMs: handoff.expiresAtMs },
+          {
+            ok: true,
+            code: handoff.code,
+            relayUrl: publicRelayUrl,
+            expiresAtMs: handoff.expiresAtMs,
+          },
           { headers: refreshedCookieHeaders },
         );
       } catch {

@@ -165,6 +165,7 @@ describe("share-web e2e-lite", () => {
     const publicHosts = new Set<string>();
     const shareWebHandler = createShareWebHandler({
       relayUrl,
+      publicRelayUrl: relayUrl,
       relayExchangeKey: RELAY_EXCHANGE_KEY,
       publicHosts,
     });
@@ -201,9 +202,15 @@ describe("share-web e2e-lite", () => {
     });
     expect(handedOff.status).toBe(200);
     const handoff = await body(handedOff);
-    expect(Object.keys(handoff).sort()).toEqual(["code", "expiresAtMs", "ok"]);
+    expect(Object.keys(handoff).sort()).toEqual([
+      "code",
+      "expiresAtMs",
+      "ok",
+      "relayUrl",
+    ]);
     expect(handoff.ok).toBe(true);
     expect(String(handoff.code)).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+    expect(handoff.relayUrl).toBe(relayUrl.replace(/\/$/u, ""));
     expect(Number.isSafeInteger(handoff.expiresAtMs)).toBe(true);
     expect(Number(handoff.expiresAtMs)).toBeGreaterThan(Date.now());
 

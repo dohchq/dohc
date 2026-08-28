@@ -31,6 +31,12 @@ describe("share handoff status bridge", () => {
                 statusId: "status-1",
                 email: "current@dohc.test",
               }
+          : status === "failed-wrong-server"
+            ? {
+                status,
+                statusId: "status-1",
+                linkRelayUrl: "https://relay-a.example",
+              }
           : status === "done"
             ? { status, statusId: "status-1", shareId: "share-1" }
             : { status, statusId: "status-1" };
@@ -39,7 +45,10 @@ describe("share handoff status bridge", () => {
     }
 
     for (const status of SHARE_HANDOFF_STATUSES.filter(
-      (value) => value !== "idle" && value !== "done",
+      (value) =>
+        value !== "idle" &&
+        value !== "done" &&
+        value !== "failed-wrong-server",
     )) {
       expect(parseShareHandoffStatus({ status })).toBeNull();
       expect(ShareHandoffStatus.safeParse({ status }).success).toBe(false);
@@ -75,6 +84,34 @@ describe("share handoff status bridge", () => {
       ShareHandoffStatus.safeParse({ status: "done", statusId: "status-1" })
         .success,
     ).toBe(false);
+    for (const linkRelayUrl of ["", "x".repeat(2049)]) {
+      expect(
+        parseShareHandoffStatus({
+          status: "failed-wrong-server",
+          statusId: "status-1",
+          linkRelayUrl,
+        }),
+      ).toBeNull();
+      expect(
+        ShareHandoffStatus.safeParse({
+          status: "failed-wrong-server",
+          statusId: "status-1",
+          linkRelayUrl,
+        }).success,
+      ).toBe(false);
+    }
+    expect(
+      parseShareHandoffStatus({
+        status: "failed-wrong-server",
+        statusId: "status-1",
+      }),
+    ).toBeNull();
+    expect(
+      ShareHandoffStatus.safeParse({
+        status: "failed-wrong-server",
+        statusId: "status-1",
+      }).success,
+    ).toBe(false);
   });
 
   it.each(["code", "token", "grantId", "relayUrl", "response"])(
@@ -93,6 +130,29 @@ describe("share handoff status bridge", () => {
       expect(ShareHandoffStatus.safeParse(acceptance).success).toBe(false);
     },
   );
+
+  it("permits linkRelayUrl only on the wrong-server status", () => {
+    const mismatch = {
+      status: "failed-wrong-server",
+      statusId: "status-1",
+      linkRelayUrl: "https://relay-a.example",
+    };
+    expect(parseShareHandoffStatus(mismatch)).toEqual(mismatch);
+    expect(ShareHandoffStatus.parse(mismatch)).toEqual(mismatch);
+
+    for (const status of ["idle", "waiting-for-sign-in", "redeeming"] as const) {
+      const raw = {
+        status,
+        ...(status === "idle" ? {} : { statusId: "status-1" }),
+        linkRelayUrl: "https://relay-a.example",
+      };
+      expect(parseShareHandoffStatus(raw)).toBeNull();
+      expect(ShareHandoffStatus.safeParse(raw).success).toBe(false);
+    }
+    const genericRelay = { ...mismatch, relayUrl: mismatch.linkRelayUrl };
+    expect(parseShareHandoffStatus(genericRelay)).toBeNull();
+    expect(ShareHandoffStatus.safeParse(genericRelay).success).toBe(false);
+  });
 
   it("rejects unknown fields, states, inherited fields, and malformed share ids", () => {
     expect(parseShareHandoffStatus({ status: "idle", extra: true })).toBeNull();

@@ -170,6 +170,10 @@ test('self-host compose starts the public share viewer with one external origin'
     'DOHC_SHARE_WEB_PUBLIC_ORIGIN',
   )
   const publicHost = environmentValue(envExample, 'DOHC_SHARE_WEB_PUBLIC_HOST')
+  const publicRelayUrl = environmentValue(
+    envExample,
+    'DOHC_SHARE_WEB_PUBLIC_RELAY_URL',
+  )
   const shareWebService = mappingBlockAtPath(compose, ['services', 'share-web'])
   const shareWebCommand = mappingBlockAtPath(compose, [
     'services',
@@ -200,6 +204,15 @@ test('self-host compose starts the public share viewer with one external origin'
       'DOHC_SHARE_WEB_RELAY_URL',
     ]),
     'http://sync-relay:1788',
+  )
+  assert.equal(
+    mappingValueAtPath(compose, [
+      'services',
+      'share-web',
+      'environment',
+      'DOHC_SHARE_WEB_PUBLIC_RELAY_URL',
+    ]),
+    '${DOHC_SHARE_WEB_PUBLIC_RELAY_URL:?Set DOHC_SHARE_WEB_PUBLIC_RELAY_URL in .env.self-host}',
   )
   assert.equal(
     mappingValueAtPath(compose, [
@@ -246,6 +259,8 @@ test('self-host compose starts the public share viewer with one external origin'
     /pnpm --filter @dohc\/share-web build &&\n      pnpm --filter @dohc\/share-web start"/,
   )
   assert.equal(publicOrigin, 'https://share.example.com')
+  assert.equal(publicRelayUrl, 'https://relay.example.com')
+  assert.notEqual(publicRelayUrl, 'http://sync-relay:1788')
   assert.equal(publicHost, 'share.example.com')
   assert.equal(publicHost, new URL(publicOrigin).hostname)
   assert.match(envExample, /^DOHC_SHARE_WEB_PORT=1790$/m)

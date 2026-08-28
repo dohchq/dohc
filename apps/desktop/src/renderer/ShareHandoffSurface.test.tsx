@@ -12,6 +12,8 @@ const BUSY_COPY =
   "dohc Cloud is busy right now. Wait a moment, then choose Try again.";
 const MISSING_COPY =
   "dohc couldn't find this share in your account. The person who shared it may have ended it.";
+const WRONG_SERVER_COPY =
+  "This share link belongs to a different server (https://relay-a.example) than the one you're signed in to. Sign in to that server, then choose Open in dohc again.";
 
 const bridgeMock = {
   cloudStatus: vi.fn(),
@@ -170,6 +172,37 @@ describe("ShareHandoffSurface", () => {
 
       await user.click(screen.getByRole("button", { name: "Cancel" }));
       expect(onBack).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(["first-run", "workspace"] as const)(
+    "shows the exact wrong-server refusal with only Back in the %s placement",
+    async (placement) => {
+      const onBack = vi.fn();
+      render(
+        <ShareHandoffSurface
+          status={{
+            status: "failed-wrong-server",
+            statusId: "wrong-server-current",
+            linkRelayUrl: "https://relay-a.example",
+          }}
+          onWorkspaceReady={() => {}}
+          onBack={onBack}
+          onOpened={() => {}}
+          {...placementProps(placement)}
+        />,
+      );
+
+      expect(screen.getByRole("heading", { name: "Open a share" })).toBeTruthy();
+      expect(screen.getByRole("alert").textContent).toBe(WRONG_SERVER_COPY);
+      expect(
+        screen.getAllByRole("button").map((button) => button.getAttribute("aria-label")),
+      ).toEqual(["Back"]);
+
+      await userEvent.setup().click(screen.getByRole("button", { name: "Back" }));
+      expect(onBack).toHaveBeenCalledOnce();
+      expect(bridgeMock.acceptShareHandoff).not.toHaveBeenCalled();
+      expect(bridgeMock.retryShareHandoff).not.toHaveBeenCalled();
     },
   );
 
