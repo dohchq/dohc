@@ -169,10 +169,15 @@ export const SHARE_HANDOFF_STATUSES = [
 ] as const;
 
 export type ShareHandoffStatusEvent =
+  | { status: "idle" }
   | {
-      status: Exclude<(typeof SHARE_HANDOFF_STATUSES)[number], "done">;
+      status: Exclude<
+        (typeof SHARE_HANDOFF_STATUSES)[number],
+        "idle" | "done"
+      >;
+      statusId: string;
     }
-  | { status: "done"; shareId: string };
+  | { status: "done"; statusId: string; shareId: string };
 
 export function parseShareHandoffStatus(
   value: unknown,
@@ -189,9 +194,20 @@ export function parseShareHandoffStatus(
   ) {
     return null;
   }
+  if (status === "idle") {
+    return Reflect.ownKeys(value).length === 1 ? { status } : null;
+  }
+  if (
+    !Object.hasOwn(value, "statusId") ||
+    typeof raw.statusId !== "string" ||
+    raw.statusId.length === 0 ||
+    raw.statusId.length > 200
+  ) {
+    return null;
+  }
   if (status === "done") {
     if (
-      Reflect.ownKeys(value).length !== 2 ||
+      Reflect.ownKeys(value).length !== 3 ||
       !Object.hasOwn(value, "shareId") ||
       typeof raw.shareId !== "string" ||
       raw.shareId.length === 0 ||
@@ -199,14 +215,15 @@ export function parseShareHandoffStatus(
     ) {
       return null;
     }
-    return { status, shareId: raw.shareId };
+    return { status, statusId: raw.statusId, shareId: raw.shareId };
   }
-  if (Reflect.ownKeys(value).length !== 1) return null;
+  if (Reflect.ownKeys(value).length !== 2) return null;
   return {
     status: status as Exclude<
       (typeof SHARE_HANDOFF_STATUSES)[number],
-      "done"
+      "idle" | "done"
     >,
+    statusId: raw.statusId,
   };
 }
 

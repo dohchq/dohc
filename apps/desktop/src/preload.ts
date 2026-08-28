@@ -323,8 +323,8 @@ const bridge: DohcDesktopBridge = {
     return status;
   },
   retryShareHandoff: () => ipcRenderer.invoke(CHANNELS.retryShareHandoff),
-  dismissShareHandoff: () =>
-    ipcRenderer.invoke(CHANNELS.dismissShareHandoff),
+  dismissShareHandoff: (payload) =>
+    ipcRenderer.invoke(CHANNELS.dismissShareHandoff, payload),
   onShareHandoffStatus: (listener) => {
     const handler = (_event: unknown, raw: unknown) => {
       const status = parseShareHandoffStatus(raw);

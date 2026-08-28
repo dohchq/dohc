@@ -46,7 +46,10 @@ describe("first run", () => {
     render(
       <DesktopFirstRun
         onWorkspaceReady={() => {}}
-        handoffStatus={{ status: "waiting-for-sign-in" }}
+        handoffStatus={{
+          status: "waiting-for-sign-in",
+          statusId: "status-test",
+        }}
         onDismissShareHandoff={onDismissShareHandoff}
         onShareHandoffOpened={() => {}}
       />,

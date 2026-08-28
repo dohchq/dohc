@@ -1,6 +1,9 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { ShareHandoffStatus } from "./ipc/bridgeContract";
+import {
+  DismissShareHandoffPayload,
+  ShareHandoffStatus,
+} from "./ipc/bridgeContract";
 import {
   parseShareHandoffStatus,
   SHARE_HANDOFF_STATUSES,
@@ -16,22 +19,41 @@ const preloadSource = readFileSync(
 ).replaceAll("\r\n", "\n");
 
 describe("share handoff status bridge", () => {
-  it("accepts only the closed status union and permits shareId only on done", () => {
+  it("accepts only the closed status union with a bounded identity while visible", () => {
     for (const status of SHARE_HANDOFF_STATUSES) {
       const value =
-        status === "done" ? { status, shareId: "share-1" } : { status };
+        status === "idle"
+          ? { status }
+          : status === "done"
+            ? { status, statusId: "status-1", shareId: "share-1" }
+            : { status, statusId: "status-1" };
       expect(parseShareHandoffStatus(value)).toEqual(value);
       expect(ShareHandoffStatus.parse(value)).toEqual(value);
     }
 
-    for (const status of SHARE_HANDOFF_STATUSES.filter((value) => value !== "done")) {
-      expect(parseShareHandoffStatus({ status, shareId: "share-1" })).toBeNull();
-      expect(ShareHandoffStatus.safeParse({ status, shareId: "share-1" }).success).toBe(
-        false,
-      );
+    for (const status of SHARE_HANDOFF_STATUSES.filter(
+      (value) => value !== "idle" && value !== "done",
+    )) {
+      expect(parseShareHandoffStatus({ status })).toBeNull();
+      expect(ShareHandoffStatus.safeParse({ status }).success).toBe(false);
     }
-    expect(parseShareHandoffStatus({ status: "done" })).toBeNull();
-    expect(ShareHandoffStatus.safeParse({ status: "done" }).success).toBe(false);
+    expect(
+      parseShareHandoffStatus({ status: "idle", statusId: "status-1" }),
+    ).toBeNull();
+    expect(
+      ShareHandoffStatus.safeParse({ status: "idle", statusId: "status-1" })
+        .success,
+    ).toBe(false);
+    expect(
+      parseShareHandoffStatus({
+        status: "done",
+        statusId: "status-1",
+      }),
+    ).toBeNull();
+    expect(
+      ShareHandoffStatus.safeParse({ status: "done", statusId: "status-1" })
+        .success,
+    ).toBe(false);
   });
 
   it.each(["code", "token", "grantId", "relayUrl", "response"])(
@@ -48,34 +70,65 @@ describe("share handoff status bridge", () => {
     expect(parseShareHandoffStatus({ status: "unknown" })).toBeNull();
     expect(parseShareHandoffStatus(Object.create({ status: "idle" }))).toBeNull();
     expect(parseShareHandoffStatus({ status: new String("idle") })).toBeNull();
-    expect(parseShareHandoffStatus({ status: "done", shareId: "" })).toBeNull();
     expect(
-      parseShareHandoffStatus({ status: "done", shareId: "x".repeat(201) }),
+      parseShareHandoffStatus({
+        status: "redeeming",
+        statusId: "x".repeat(201),
+      }),
+    ).toBeNull();
+    expect(
+      parseShareHandoffStatus({
+        status: "done",
+        statusId: "status-1",
+        shareId: "",
+      }),
+    ).toBeNull();
+    expect(
+      parseShareHandoffStatus({
+        status: "done",
+        statusId: "status-1",
+        shareId: "x".repeat(201),
+      }),
     ).toBeNull();
   });
 
-  it("validates both snapshot and event in preload and invokes retry/dismiss without payloads", () => {
+  it("requires only the captured status identity in the dismissal payload", () => {
+    expect(DismissShareHandoffPayload.parse({ statusId: "status-1" })).toEqual({
+      statusId: "status-1",
+    });
+    for (const payload of [
+      undefined,
+      {},
+      { statusId: "" },
+      { statusId: "x".repeat(201) },
+      { statusId: "status-1", code: "secret" },
+      { statusId: "status-1", token: "secret" },
+    ]) {
+      expect(DismissShareHandoffPayload.safeParse(payload).success).toBe(false);
+    }
+  });
+
+  it("validates both snapshot and event in preload and forwards only the dismissal identity", () => {
     expect(preloadSource).toContain("parseShareHandoffStatus(result)");
     expect(preloadSource).toContain("parseShareHandoffStatus(raw)");
     expect(preloadSource).toContain(
       "ipcRenderer.invoke(CHANNELS.retryShareHandoff)",
     );
     expect(preloadSource).toContain(
-      "ipcRenderer.invoke(CHANNELS.dismissShareHandoff)",
+      "ipcRenderer.invoke(CHANNELS.dismissShareHandoff, payload)",
     );
     expect(preloadSource).not.toContain(
       "ipcRenderer.invoke(CHANNELS.retryShareHandoff,",
     );
-    expect(preloadSource).not.toContain(
-      "ipcRenderer.invoke(CHANNELS.dismissShareHandoff,",
-    );
   });
 
-  it("registers strict parameterless handlers and publishes the current snapshot", () => {
+  it("registers strict handlers, binds dismissal to the identity, and publishes the current snapshot", () => {
     expect(mainSource).toContain("CHANNELS.getShareHandoffStatus");
     expect(mainSource).toContain("CHANNELS.retryShareHandoff");
     expect(mainSource).toContain("CHANNELS.dismissShareHandoff");
     expect(mainSource).toContain("assertNoShareHandoffArguments(args)");
+    expect(mainSource).toContain("DismissShareHandoffPayload.parse(args[0])");
+    expect(mainSource).toContain("shareHandoffRedemption.dismiss(input.statusId)");
     expect(mainSource).toContain("shareHandoffRedemption.status()");
   });
 });

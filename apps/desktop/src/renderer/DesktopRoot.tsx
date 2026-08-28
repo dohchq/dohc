@@ -53,10 +53,16 @@ export function DesktopRoot() {
   }, []);
 
   const dismissShareHandoff = useCallback(() => {
+    if (shareHandoffStatus.status === "idle") return;
+    const { statusId } = shareHandoffStatus;
     shareHandoffRevision.current += 1;
-    setShareHandoffStatus({ status: "idle" });
-    void bridge().dismissShareHandoff().catch(() => undefined);
-  }, []);
+    setShareHandoffStatus((current) =>
+      current.status !== "idle" && current.statusId === statusId
+        ? { status: "idle" }
+        : current,
+    );
+    void bridge().dismissShareHandoff({ statusId }).catch(() => undefined);
+  }, [shareHandoffStatus]);
 
   useEffect(() => {
     let active = true;

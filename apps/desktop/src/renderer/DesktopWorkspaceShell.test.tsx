@@ -803,7 +803,7 @@ describe("workspace share handoff placement", () => {
         workspaces={[WORKSPACE]}
         {...shellBootstrapProps(bridge)}
         onSwitchWorkspace={() => {}}
-        handoffStatus={{ status: "failed-network" }}
+        handoffStatus={{ status: "failed-network", statusId: "status-test" }}
         onDismissShareHandoff={onDismissShareHandoff}
         onShareHandoffOpened={() => {}}
       />,

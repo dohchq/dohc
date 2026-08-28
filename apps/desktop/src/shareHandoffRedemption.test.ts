@@ -58,9 +58,11 @@ async function harness(options?: {
   let credentialGeneration = 0;
   const statuses: Array<{ status: string; shareId?: string }> = [];
   const unauthorizedTransitions: string[] = [];
+  let nextStatusId = 0;
   const fetchImpl = options?.fetch ?? vi.fn<typeof fetch>();
   const coordinator = module.createShareHandoffRedemptionCoordinator({
     intent,
+    createStatusId: () => `status-${++nextStatusId}`,
     credentialSnapshot: () => ({ credentials, generation: credentialGeneration }),
     fetch: fetchImpl,
     handleUnauthorized: async (requestCredentials) => {
@@ -133,7 +135,10 @@ describe("share handoff redemption coordinator", () => {
 
     h.offer(CODE_A);
 
-    expect(h.coordinator.status()).toEqual({ status: "waiting-for-sign-in" });
+    expect(h.coordinator.status()).toEqual({
+      status: "waiting-for-sign-in",
+      statusId: "status-1",
+    });
     expect(fetchImpl).not.toHaveBeenCalled();
 
     h.setCredentials(CREDENTIALS_A);
@@ -141,6 +146,7 @@ describe("share handoff redemption coordinator", () => {
     await vi.waitFor(() => {
       expect(h.coordinator.status()).toEqual({
         status: "done",
+        statusId: "status-1",
         shareId: "share-redeemed",
       });
     });
@@ -177,7 +183,10 @@ describe("share handoff redemption coordinator", () => {
 
     h.offer(CODE_A);
 
-    expect(h.coordinator.status()).toEqual({ status: "waiting-for-sign-in" });
+    expect(h.coordinator.status()).toEqual({
+      status: "waiting-for-sign-in",
+      statusId: "status-1",
+    });
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
@@ -189,7 +198,10 @@ describe("share handoff redemption coordinator", () => {
 
     h.offer(CODE_A);
     await vi.waitFor(() => {
-      expect(h.coordinator.status()).toEqual({ status: "failed-refused" });
+      expect(h.coordinator.status()).toEqual({
+        status: "failed-refused",
+        statusId: "status-1",
+      });
     });
 
     expect(h.intent.pending()).toBeNull();
@@ -206,7 +218,10 @@ describe("share handoff redemption coordinator", () => {
 
     h.offer(CODE_A);
     await vi.waitFor(() => {
-      expect(h.coordinator.status()).toEqual({ status: "failed-refused" });
+      expect(h.coordinator.status()).toEqual({
+        status: "failed-refused",
+        statusId: "status-1",
+      });
     });
     expect(h.intent.pending()).toBeNull();
     expect(JSON.stringify(h.statuses)).not.toContain("relay-controlled detail");
@@ -236,7 +251,10 @@ describe("share handoff redemption coordinator", () => {
 
     h.offer(CODE_A);
     await vi.waitFor(() => {
-      expect(h.coordinator.status()).toEqual({ status: "failed-network" });
+      expect(h.coordinator.status()).toEqual({
+        status: "failed-network",
+        statusId: "status-1",
+      });
     });
     expect(h.intent.pending()).toBe(CODE_A);
 
@@ -244,6 +262,7 @@ describe("share handoff redemption coordinator", () => {
     await vi.waitFor(() => {
       expect(h.coordinator.status()).toEqual({
         status: "done",
+        statusId: "status-1",
         shareId: "share-redeemed",
       });
     });
@@ -259,7 +278,10 @@ describe("share handoff redemption coordinator", () => {
 
     h.offer(CODE_A);
     await vi.waitFor(() => {
-      expect(h.coordinator.status()).toEqual({ status: "waiting-for-sign-in" });
+      expect(h.coordinator.status()).toEqual({
+        status: "waiting-for-sign-in",
+        statusId: "status-1",
+      });
     });
     expect(h.unauthorizedTransitions).toEqual([
       "clear-memory",
@@ -273,6 +295,7 @@ describe("share handoff redemption coordinator", () => {
     await vi.waitFor(() => {
       expect(h.coordinator.status()).toEqual({
         status: "done",
+        statusId: "status-1",
         shareId: "share-after-login",
       });
     });
@@ -293,6 +316,7 @@ describe("share handoff redemption coordinator", () => {
     await vi.waitFor(() => {
       expect(h.coordinator.status()).toEqual({
         status: "done",
+        statusId: "status-1",
         shareId: "share-new-session",
       });
     });
@@ -303,6 +327,7 @@ describe("share handoff redemption coordinator", () => {
     expect(h.unauthorizedTransitions).toEqual([]);
     expect(h.coordinator.status()).toEqual({
       status: "done",
+      statusId: "status-1",
       shareId: "share-new-session",
     });
   });
@@ -325,12 +350,16 @@ describe("share handoff redemption coordinator", () => {
     expect(h.unauthorizedTransitions).toEqual([]);
     expect(h.credentials()).toEqual(CREDENTIALS_A);
     expect(h.intent.pending()).toBe(CODE_B);
-    expect(h.coordinator.status()).toEqual({ status: "redeeming" });
+    expect(h.coordinator.status()).toEqual({
+      status: "redeeming",
+      statusId: "status-2",
+    });
 
     newAnswer.resolve(success("share-new"));
     await vi.waitFor(() => {
       expect(h.coordinator.status()).toEqual({
         status: "done",
+        statusId: "status-2",
         shareId: "share-new",
       });
     });
@@ -351,13 +380,17 @@ describe("share handoff redemption coordinator", () => {
 
     oldAnswer.resolve(immediateSuccess("share-old"));
     await flushMicrotasks();
-    expect(h.coordinator.status()).toEqual({ status: "redeeming" });
+    expect(h.coordinator.status()).toEqual({
+      status: "redeeming",
+      statusId: "status-2",
+    });
     expect(h.intent.pending()).toBe(CODE_B);
 
     newAnswer.resolve(success("share-new"));
     await vi.waitFor(() => {
       expect(h.coordinator.status()).toEqual({
         status: "done",
+        statusId: "status-2",
         shareId: "share-new",
       });
     });
@@ -383,15 +416,38 @@ describe("share handoff redemption coordinator", () => {
 
     h.offer(CODE_A);
     await vi.waitFor(() => {
-      expect(h.coordinator.status()).toEqual({ status: "failed-network" });
+      expect(h.coordinator.status()).toEqual({
+        status: "failed-network",
+        statusId: "status-1",
+      });
     });
 
-    h.coordinator.dismiss();
+    const visible = h.coordinator.status();
+    if (visible.status === "idle") throw new Error("handoff was not visible");
+    h.coordinator.dismiss(visible.statusId);
     expect(h.coordinator.status()).toEqual({ status: "idle" });
     expect(h.intent.pending()).toBeNull();
     h.coordinator.retry();
     await Promise.resolve();
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a newer handoff current when an older visible dismissal arrives late", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(() => new Promise(() => {}));
+    const h = await harness({ credentials: CREDENTIALS_A, fetch: fetchImpl });
+
+    h.offer(CODE_A);
+    const visibleA = h.coordinator.status();
+    if (visibleA.status === "idle") throw new Error("handoff A was not visible");
+
+    h.offer(CODE_B);
+    h.coordinator.dismiss(visibleA.statusId);
+
+    expect(h.coordinator.status()).toEqual({
+      status: "redeeming",
+      statusId: "status-2",
+    });
+    expect(h.intent.pending()).toBe(CODE_B);
   });
 
   it("publishes only the bounded status union, never relay detail or authority", async () => {

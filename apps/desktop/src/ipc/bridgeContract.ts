@@ -3386,20 +3386,47 @@ export const CloudStatusResult = z.object({
 });
 export type CloudStatusResult = z.infer<typeof CloudStatusResult>;
 
+const SHARE_HANDOFF_STATUS_ID = z.string().min(1).max(200);
+
 export const ShareHandoffStatus = z.discriminatedUnion("status", [
   z.object({ status: z.literal("idle") }).strict(),
-  z.object({ status: z.literal("waiting-for-sign-in") }).strict(),
-  z.object({ status: z.literal("redeeming") }).strict(),
-  z.object({ status: z.literal("failed-refused") }).strict(),
-  z.object({ status: z.literal("failed-network") }).strict(),
+  z
+    .object({
+      status: z.literal("waiting-for-sign-in"),
+      statusId: SHARE_HANDOFF_STATUS_ID,
+    })
+    .strict(),
+  z
+    .object({ status: z.literal("redeeming"), statusId: SHARE_HANDOFF_STATUS_ID })
+    .strict(),
+  z
+    .object({
+      status: z.literal("failed-refused"),
+      statusId: SHARE_HANDOFF_STATUS_ID,
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("failed-network"),
+      statusId: SHARE_HANDOFF_STATUS_ID,
+    })
+    .strict(),
   z
     .object({
       status: z.literal("done"),
+      statusId: SHARE_HANDOFF_STATUS_ID,
       shareId: z.string().min(1).max(200),
     })
     .strict(),
 ]);
 export type ShareHandoffStatus = z.infer<typeof ShareHandoffStatus>;
+
+export const DismissShareHandoffPayload = z
+  .object({ statusId: SHARE_HANDOFF_STATUS_ID })
+  .strict();
+export type DismissShareHandoffPayload = z.infer<
+  typeof DismissShareHandoffPayload
+>;
 
 export const CloudEnableSyncPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -5122,7 +5149,7 @@ export interface DohcDesktopBridge {
   cloudLogout(): Promise<void>;
   getShareHandoffStatus(): Promise<ShareHandoffStatus>;
   retryShareHandoff(): Promise<void>;
-  dismissShareHandoff(): Promise<void>;
+  dismissShareHandoff(payload: DismissShareHandoffPayload): Promise<void>;
   onShareHandoffStatus(
     listener: (status: ShareHandoffStatus) => void,
   ): () => void;

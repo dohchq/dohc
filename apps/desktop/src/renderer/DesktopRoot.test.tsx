@@ -113,9 +113,9 @@ describe("DesktopRoot", () => {
     render(<DesktopRoot />);
     expect(calls).toEqual(["subscribe", "snapshot"]);
 
-    act(() => handoffEvent?.({ status: "redeeming" }));
+    act(() => handoffEvent?.({ status: "redeeming", statusId: "status-new" }));
     await act(async () => {
-      snapshot.resolve({ status: "failed-refused" });
+      snapshot.resolve({ status: "failed-refused", statusId: "status-old" });
     });
 
     expect((await screen.findByTestId("handoff-active")).textContent).toBe(
@@ -144,7 +144,7 @@ describe("DesktopRoot", () => {
     expect(screen.queryByTestId("handoff-active")).toBeNull();
   });
 
-  it("dismisses a handoff without a payload and returns to the ordinary surface", async () => {
+  it("dismisses a handoff by its visible identity and returns to the ordinary surface", async () => {
     const dismissShareHandoff = vi.fn(async () => undefined);
     vi.stubGlobal("dohcDesktop", {
       getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [] })),
@@ -158,6 +158,7 @@ describe("DesktopRoot", () => {
       onShareHandoffStatus: vi.fn(() => () => undefined),
       getShareHandoffStatus: vi.fn(async () => ({
         status: "failed-refused" as const,
+        statusId: "status-refused",
       })),
       dismissShareHandoff,
     });
@@ -167,12 +168,14 @@ describe("DesktopRoot", () => {
     fireEvent.click(screen.getByRole("button", { name: "Dismiss handoff" }));
 
     expect(dismissShareHandoff).toHaveBeenCalledOnce();
-    expect(dismissShareHandoff.mock.calls[0]).toEqual([]);
+    expect(dismissShareHandoff.mock.calls[0]).toEqual([
+      { statusId: "status-refused" },
+    ]);
     expect(screen.queryByTestId("handoff-active")).toBeNull();
     expect(screen.getByTestId("first-run")).toBeTruthy();
   });
 
-  it("acknowledges a completed handoff once and without a payload", async () => {
+  it("acknowledges a completed handoff once by its visible identity", async () => {
     const dismissShareHandoff = vi.fn(async () => undefined);
     vi.stubGlobal("dohcDesktop", {
       getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [] })),
@@ -186,6 +189,7 @@ describe("DesktopRoot", () => {
       onShareHandoffStatus: vi.fn(() => () => undefined),
       getShareHandoffStatus: vi.fn(async () => ({
         status: "done" as const,
+        statusId: "status-done",
         shareId: "share-exact",
       })),
       dismissShareHandoff,
@@ -196,8 +200,50 @@ describe("DesktopRoot", () => {
     fireEvent.click(screen.getByRole("button", { name: "Complete handoff" }));
 
     expect(dismissShareHandoff).toHaveBeenCalledOnce();
-    expect(dismissShareHandoff.mock.calls[0]).toEqual([]);
+    expect(dismissShareHandoff.mock.calls[0]).toEqual([
+      { statusId: "status-done" },
+    ]);
     expect(screen.queryByTestId("handoff-active")).toBeNull();
+  });
+
+  it("keeps handoff B visible while dismissal captured from A is still pending", async () => {
+    const dismissal = deferred<void>();
+    const dismissShareHandoff = vi.fn(() => dismissal.promise);
+    let handoffEvent: ((status: ShareHandoffStatus) => void) | null = null;
+    vi.stubGlobal("dohcDesktop", {
+      getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [] })),
+      getUserSettings: vi.fn(async () => ({
+        settings: DEFAULT_USER_SETTINGS,
+        source: "default" as const,
+      })),
+      onUserSettingsChanged: vi.fn(() => () => undefined),
+      onWorkspaceActivity: vi.fn(() => () => undefined),
+      onWorkspaceActivated: vi.fn(() => () => undefined),
+      onShareHandoffStatus: vi.fn(
+        (callback: (status: ShareHandoffStatus) => void) => {
+          handoffEvent = callback;
+          return () => undefined;
+        },
+      ),
+      getShareHandoffStatus: vi.fn(async () => ({
+        status: "failed-network" as const,
+        statusId: "status-a",
+      })),
+      dismissShareHandoff,
+    });
+
+    render(<DesktopRoot />);
+    await screen.findByTestId("handoff-active");
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss handoff" }));
+
+    expect(dismissShareHandoff).toHaveBeenCalledWith({ statusId: "status-a" });
+    act(() =>
+      handoffEvent?.({ status: "redeeming", statusId: "status-b" }),
+    );
+    expect(screen.getByTestId("handoff-active").textContent).toBe("redeeming");
+
+    await act(async () => dismissal.resolve());
+    expect(screen.getByTestId("handoff-active").textContent).toBe("redeeming");
   });
 
   it("does not let a delayed registry load clobber an activated workspace", async () => {

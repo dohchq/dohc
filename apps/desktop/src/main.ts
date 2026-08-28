@@ -261,6 +261,7 @@ import {
   UpdateActionResult,
   UpdateCheckResult,
   UpdateStateEvent,
+  DismissShareHandoffPayload,
   ShareHandoffStatus as ShareHandoffStatusContract,
 } from "./ipc/bridgeContract";
 import { CHANNELS } from "./ipc/channels";
@@ -1663,6 +1664,7 @@ function publishShareHandoffStatus(status: ShareHandoffStatus): void {
 
 const shareHandoffRedemption = createShareHandoffRedemptionCoordinator({
   intent: shareHandoffIntentSlot,
+  createStatusId: randomUUID,
   credentialSnapshot: () => credentialSessionCache.snapshot(),
   fetch: (input, init) => fetch(input, init),
   handleUnauthorized: (requestCredentials) =>
@@ -7187,8 +7189,11 @@ function registerIpcHandlers(
 
   ipcMain.handle(CHANNELS.dismissShareHandoff, (event, ...args: unknown[]) => {
     assertTrustedSender(event);
-    assertNoShareHandoffArguments(args);
-    shareHandoffRedemption.dismiss();
+    if (args.length !== 1) {
+      throw new Error("Share handoff dismissal requires one status identity.");
+    }
+    const input = DismissShareHandoffPayload.parse(args[0]);
+    shareHandoffRedemption.dismiss(input.statusId);
   });
 
   ipcMain.handle(CHANNELS.cloudLoginStart, async (event, payload) => {

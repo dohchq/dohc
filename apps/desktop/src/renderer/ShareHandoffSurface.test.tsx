@@ -131,7 +131,7 @@ describe("ShareHandoffSurface", () => {
       const props = placementProps(placement);
       const { rerender } = render(
         <ShareHandoffSurface
-          status={{ status: "waiting-for-sign-in" }}
+          status={{ status: "waiting-for-sign-in", statusId: "status-test" }}
           onWorkspaceReady={() => {}}
           onBack={() => {}}
           onOpened={() => {}}
@@ -146,7 +146,7 @@ describe("ShareHandoffSurface", () => {
 
       rerender(
         <ShareHandoffSurface
-          status={{ status: "redeeming" }}
+          status={{ status: "redeeming", statusId: "status-test" }}
           onWorkspaceReady={() => {}}
           onBack={() => {}}
           onOpened={() => {}}
@@ -158,7 +158,7 @@ describe("ShareHandoffSurface", () => {
 
       rerender(
         <ShareHandoffSurface
-          status={{ status: "failed-refused" }}
+          status={{ status: "failed-refused", statusId: "status-test" }}
           onWorkspaceReady={() => {}}
           onBack={() => {}}
           onOpened={() => {}}
@@ -170,7 +170,7 @@ describe("ShareHandoffSurface", () => {
 
       rerender(
         <ShareHandoffSurface
-          status={{ status: "failed-network" }}
+          status={{ status: "failed-network", statusId: "status-test" }}
           onWorkspaceReady={() => {}}
           onBack={() => {}}
           onOpened={() => {}}
@@ -188,7 +188,7 @@ describe("ShareHandoffSurface", () => {
     const user = userEvent.setup();
     render(
       <ShareHandoffSurface
-        status={{ status: "waiting-for-sign-in" }}
+        status={{ status: "waiting-for-sign-in", statusId: "status-test" }}
         onWorkspaceReady={() => {}}
         onBack={() => {}}
         onOpened={() => {}}
@@ -226,7 +226,11 @@ describe("ShareHandoffSurface", () => {
 
     render(
       <ShareHandoffSurface
-        status={{ status: "done", shareId: "share-exact" }}
+        status={{
+          status: "done",
+          statusId: "status-test",
+          shareId: "share-exact",
+        }}
         onWorkspaceReady={() => {}}
         onBack={() => {}}
         onOpened={onOpened}
@@ -271,7 +275,11 @@ describe("ShareHandoffSurface", () => {
 
     render(
       <ShareHandoffSurface
-        status={{ status: "done", shareId: "share-exact" }}
+        status={{
+          status: "done",
+          statusId: "status-test",
+          shareId: "share-exact",
+        }}
         onWorkspaceReady={() => {}}
         onBack={() => {}}
         onOpened={onOpened}
@@ -322,7 +330,11 @@ describe("ShareHandoffSurface", () => {
 
     render(
       <ShareHandoffSurface
-        status={{ status: "done", shareId: "share-exact" }}
+        status={{
+          status: "done",
+          statusId: "status-test",
+          shareId: "share-exact",
+        }}
         onWorkspaceReady={() => {}}
         onBack={() => {}}
         onOpened={() => {}}
@@ -355,7 +367,11 @@ describe("ShareHandoffSurface", () => {
     const onMounted = vi.fn();
     const { rerender } = render(
       <ShareHandoffSurface
-        status={{ status: "done", shareId: "share-first" }}
+        status={{
+          status: "done",
+          statusId: "status-first",
+          shareId: "share-first",
+        }}
         onWorkspaceReady={() => {}}
         onBack={() => {}}
         onOpened={() => {}}
@@ -365,7 +381,11 @@ describe("ShareHandoffSurface", () => {
 
     rerender(
       <ShareHandoffSurface
-        status={{ status: "done", shareId: "share-second" }}
+        status={{
+          status: "done",
+          statusId: "status-second",
+          shareId: "share-second",
+        }}
         onWorkspaceReady={() => {}}
         onBack={() => {}}
         onOpened={() => {}}
@@ -401,7 +421,11 @@ describe("ShareHandoffSurface", () => {
     bridgeMock.listRelayShares.mockReturnValueOnce(third.promise);
     rerender(
       <ShareHandoffSurface
-        status={{ status: "done", shareId: "share-third" }}
+        status={{
+          status: "done",
+          statusId: "status-third",
+          shareId: "share-third",
+        }}
         onWorkspaceReady={() => {}}
         onBack={() => {}}
         onOpened={() => {}}
@@ -409,7 +433,7 @@ describe("ShareHandoffSurface", () => {
     );
     rerender(
       <ShareHandoffSurface
-        status={{ status: "failed-refused" }}
+        status={{ status: "failed-refused", statusId: "status-refused" }}
         onWorkspaceReady={() => {}}
         onBack={() => {}}
         onOpened={() => {}}
@@ -433,7 +457,11 @@ describe("ShareHandoffSurface", () => {
     bridgeMock.listRelayShares.mockReturnValue(inventory.promise);
     const { unmount } = render(
       <ShareHandoffSurface
-        status={{ status: "done", shareId: "share-exact" }}
+        status={{
+          status: "done",
+          statusId: "status-test",
+          shareId: "share-exact",
+        }}
         onWorkspaceReady={() => {}}
         onBack={() => {}}
         onOpened={() => {}}
@@ -457,9 +485,11 @@ describe("ShareHandoffSurface", () => {
     const user = userEvent.setup();
     render(
       <ShareHandoffSurface
-        status={{ status: "failed-refused" }}
+        status={{ status: "failed-refused", statusId: "status-refused" }}
         onWorkspaceReady={() => {}}
-        onBack={() => void bridgeMock.dismissShareHandoff()}
+        onBack={() =>
+          void bridgeMock.dismissShareHandoff({ statusId: "status-refused" })
+        }
         onOpened={() => {}}
       />,
     );
@@ -467,7 +497,9 @@ describe("ShareHandoffSurface", () => {
     await user.click(screen.getByRole("button", { name: "Back" }));
 
     expect(bridgeMock.dismissShareHandoff).toHaveBeenCalledOnce();
-    expect(bridgeMock.dismissShareHandoff.mock.calls[0]).toEqual([]);
+    expect(bridgeMock.dismissShareHandoff.mock.calls[0]).toEqual([
+      { statusId: "status-refused" },
+    ]);
     expect(bridgeMock.mountShare).not.toHaveBeenCalled();
     expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
   });
@@ -496,7 +528,11 @@ describe("ShareHandoffSurface", () => {
 
     const { container } = render(
       <ShareHandoffSurface
-        status={{ status: "done", shareId: "share-exact" }}
+        status={{
+          status: "done",
+          statusId: "status-test",
+          shareId: "share-exact",
+        }}
         onWorkspaceReady={() => {}}
         onBack={() => {}}
         onOpened={() => {}}
