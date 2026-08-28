@@ -9,6 +9,7 @@ import {
   LinkReadRateLimiter,
   type ValidatedLinkCapability,
 } from "./linkSecurity";
+import { linkSecret } from "./linkTestHelpers";
 import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
 import { openSyncRelayStorage, type SyncRelayStorage } from "./storage";
 
@@ -69,13 +70,6 @@ function request(userId: string | null, path: string, init: RequestInit = {}): R
 
 async function json(response: Response): Promise<Record<string, unknown>> {
   return (await response.json()) as Record<string, unknown>;
-}
-
-function linkSecret(url: unknown): string {
-  expect(typeof url).toBe("string");
-  const parsed = new URL(String(url));
-  expect(parsed.hash).toMatch(/^#[A-Za-z0-9_-]{43}$/u);
-  return parsed.hash.slice(1);
 }
 
 function hashLinkHandoffCode(code: string): string {

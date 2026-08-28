@@ -14,6 +14,7 @@ import {
   validateLinkCapability,
   verifyRelayExchangeKey,
 } from "./linkSecurity";
+import { linkSecret } from "./linkTestHelpers";
 import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
 import { authorizeShareAction } from "./shareAuthorization";
 import {
@@ -350,14 +351,6 @@ type RaceStorage = SyncRelayStorage & {
 
 function hmac(secret: string): string {
   return createHmac("sha256", LINK_KEY).update(secret).digest("base64url");
-}
-
-function linkSecret(url: unknown): string {
-  const parsed = new URL(String(url));
-  expect(parsed.pathname).toBe("/s/");
-  expect(parsed.search).toBe("");
-  expect(parsed.hash).toMatch(/^#[A-Za-z0-9_-]{43}$/u);
-  return parsed.hash.slice(1);
 }
 
 describe("link grant test fixtures", () => {
