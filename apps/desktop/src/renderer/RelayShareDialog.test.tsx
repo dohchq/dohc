@@ -788,7 +788,7 @@ describe("RelayShareDialog", () => {
     await user.click(within(row).getByRole("button", { name: "End link" }));
     confirmation = screen.getByTestId("share-link-confirmation");
     expect(confirmation.querySelector("p")?.textContent).toBe(
-      "End this link? It stops working right away, and these people lose access: avery.long.address@example.test, server-user-id-0000000002. Copies they already made stay with them.",
+      "End this link? It stops working right away, and these people lose access through it: avery.long.address@example.test, server-user-id-0000000002. Copies they already made stay with them.",
     );
     await user.click(within(confirmation).getByRole("button", { name: "Cancel" }));
 

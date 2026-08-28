@@ -802,7 +802,7 @@ export function RelayShareDialog(props: {
                   ) : (
                     <>
                       End this link? It stops working right away, and these people lose
-                      access: <DependentNames dependents={confirmationRow.dependents} />.
+                      access through it: <DependentNames dependents={confirmationRow.dependents} />.
                       Copies they already made stay with them.
                     </>
                   )}
