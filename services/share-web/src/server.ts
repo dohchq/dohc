@@ -245,6 +245,7 @@ function securityHeaders(): Headers {
     "content-security-policy": SHARE_WEB_CSP,
     "referrer-policy": "no-referrer",
     "x-content-type-options": "nosniff",
+    "x-robots-tag": "noindex, nofollow, noarchive",
     "cache-control": "private, no-store",
   });
 }
