@@ -3,7 +3,9 @@ import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { AGENT_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
+import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import { shareAccessRank } from "@dohc/security-contract/share-selector";
+import { validateUserWritePath } from "@dohc/workspace-core";
 import {
   conflictResolveBlobShas,
   type ConflictResolveEnvelopeContext,
@@ -41,6 +43,19 @@ export interface FetchLogPageResult {
   rows: SyncRelayLogRow[];
   nextCursor: number;
   hasMore: boolean;
+}
+
+export interface CurrentFileStateRow {
+  path: string;
+  blobSha256: string;
+  contentKind: "text" | "binary";
+}
+
+export interface CurrentFileStateSnapshot {
+  files: CurrentFileStateRow[];
+  nextCursor: number;
+  epochLogFloor: number;
+  tooMany: boolean;
 }
 
 export interface PutBlobResult {
@@ -349,6 +364,19 @@ export interface SyncRelayStorage {
     originId: string;
     originSeq: number;
   }): SyncRelayLogRow | null;
+  readCurrentFileState(input: {
+    workspaceId: string;
+    versionId: string;
+    selectorPaths: readonly string[];
+    limit: number;
+  }): CurrentFileStateSnapshot;
+  currentFileBlobIsVisible(input: {
+    workspaceId: string;
+    versionId: string;
+    selectorPaths: readonly string[];
+    sha256: string;
+    epochLogFloor: number;
+  }): boolean;
   createShare(input: {
     share: SyncRelayShareRow;
     grant: SyncRelayShareGrantRow;
@@ -962,6 +990,33 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
           workspace_id, version_id, blob_sha256, relay_seq DESC
         );
 
+      -- The public viewer starts from this accepted current state and uses the
+      -- relay log only for forward changes. This is deliberately keyed by
+      -- version and path: the viewer fold resolves path occupancy and applies
+      -- before-path/hash compare-and-swap rules, so latest raw object moments
+      -- are not an equivalent current-state model.
+      CREATE TABLE IF NOT EXISTS sync_relay_current_files (
+        workspace_id    TEXT NOT NULL,
+        version_id      TEXT NOT NULL,
+        path            TEXT NOT NULL,
+        blob_sha256     TEXT NOT NULL,
+        content_kind    TEXT NOT NULL CHECK (content_kind IN ('text', 'binary')),
+        state_relay_seq INTEGER NOT NULL,
+        PRIMARY KEY (workspace_id, version_id, path),
+        FOREIGN KEY (workspace_id)
+          REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
+        FOREIGN KEY (state_relay_seq)
+          REFERENCES sync_relay_log(relay_seq) ON DELETE CASCADE
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS idx_sync_relay_current_files_path
+        ON sync_relay_current_files(
+          workspace_id, version_id, path, state_relay_seq
+        );
+      CREATE INDEX IF NOT EXISTS idx_sync_relay_current_files_blob
+        ON sync_relay_current_files(
+          workspace_id, version_id, blob_sha256, path, state_relay_seq
+        );
+
       -- #646 PR3a: a recipient's submitted changes, held until the granter
       -- accepts or declines them. Nothing here is in the granter's log: accept
       -- is what releases it, through the same appendLogBatch the chat path
@@ -1134,6 +1189,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
   // crash part-way leaves its migration unrecorded and the next open redoes it.
   seedObjectPaths(db);
   seedVersionSnapshotBlobs(db);
+  seedCurrentFiles(db);
 }
 
 // Where a `moment.append` payload says its object is AFTER the op: the
@@ -1352,6 +1408,230 @@ function seedVersionSnapshotBlobs(db: SqliteDb): void {
     } catch {}
     throw error;
   }
+}
+
+interface CurrentFileStatements {
+  get: ReturnType<SqliteDb["prepare"]>;
+  put: ReturnType<SqliteDb["prepare"]>;
+  remove: ReturnType<SqliteDb["prepare"]>;
+}
+
+function currentFileStatements(db: SqliteDb): CurrentFileStatements {
+  return {
+    get: db.prepare(
+      `SELECT blob_sha256
+       FROM sync_relay_current_files
+       WHERE workspace_id = ? AND version_id = ? AND path = ?`,
+    ),
+    put: db.prepare(
+      `INSERT INTO sync_relay_current_files (
+         workspace_id, version_id, path, blob_sha256, content_kind, state_relay_seq
+       ) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(workspace_id, version_id, path) DO UPDATE SET
+         blob_sha256 = excluded.blob_sha256,
+         content_kind = excluded.content_kind,
+         state_relay_seq = excluded.state_relay_seq`,
+    ),
+    remove: db.prepare(
+      `DELETE FROM sync_relay_current_files
+       WHERE workspace_id = ? AND version_id = ? AND path = ?`,
+    ),
+  };
+}
+
+function trackedPath(value: unknown): string | null {
+  if (typeof value !== "string" || value.length === 0) return null;
+  const validation = validateUserWritePath(value);
+  if (!validation.ok) return null;
+  return classifyEngineFilePath(validation.normalized).kind === "tracked"
+    ? validation.normalized
+    : null;
+}
+
+function digest(value: unknown): string | null {
+  return typeof value === "string" && /^[a-f0-9]{64}$/u.test(value)
+    ? value
+    : null;
+}
+
+function applyCurrentFileOp(
+  statements: CurrentFileStatements,
+  workspaceId: string,
+  opKind: string,
+  payloadJson: string,
+  relaySeq: number,
+): void {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payloadJson);
+  } catch {
+    return;
+  }
+  const payload = asObject(parsed);
+  if (!payload) return;
+
+  if (opKind === "version.create") {
+    const versionId = readableString(payload.versionId);
+    if (!versionId || !Array.isArray(payload.forkSnapshots)) return;
+    for (const rawSnapshot of payload.forkSnapshots) {
+      const snapshot = asObject(rawSnapshot);
+      if (!snapshot) continue;
+      const path = trackedPath(snapshot.path);
+      const blobSha256 = digest(snapshot.blobSha256);
+      if (!path || !blobSha256) continue;
+      statements.put.run(
+        workspaceId,
+        versionId,
+        path,
+        blobSha256,
+        snapshot.contentKind === "binary" ? "binary" : "text",
+        relaySeq,
+      );
+    }
+    return;
+  }
+
+  if (opKind !== "moment.append") return;
+  const versionId = readableString(payload.versionId);
+  if (!versionId) return;
+  const operation = payload.operation;
+  if (operation !== "write" && operation !== "rename" && operation !== "delete") return;
+  const hasNoBefore =
+    (payload.payloadBeforePath === null || payload.payloadBeforePath === undefined) &&
+    (payload.payloadBeforeBlobSha256 === null ||
+      payload.payloadBeforeBlobSha256 === undefined);
+  const beforePath = trackedPath(payload.payloadBeforePath);
+  const beforeBlobSha256 = digest(payload.payloadBeforeBlobSha256);
+  const before = beforePath && beforeBlobSha256
+    ? { path: beforePath, blobSha256: beforeBlobSha256 }
+    : null;
+  if (!hasNoBefore && !before) return;
+
+  if (operation === "delete") {
+    if (!before) return;
+    const current = statements.get.get(workspaceId, versionId, before.path);
+    if (current?.blob_sha256 !== before.blobSha256) return;
+    statements.remove.run(workspaceId, versionId, before.path);
+    return;
+  }
+
+  const afterPath = trackedPath(payload.payloadAfterPath);
+  const afterBlobSha256 = digest(payload.payloadAfterBlobSha256);
+  if (!afterPath || !afterBlobSha256) return;
+  if (hasNoBefore) {
+    if (statements.get.get(workspaceId, versionId, afterPath) !== undefined) return;
+  } else {
+    if (!before) return;
+    const current = statements.get.get(workspaceId, versionId, before.path);
+    if (current !== undefined) {
+      if (current.blob_sha256 !== before.blobSha256) return;
+      if (
+        before.path !== afterPath &&
+        statements.get.get(workspaceId, versionId, afterPath) !== undefined
+      ) {
+        return;
+      }
+      if (before.path !== afterPath) {
+        statements.remove.run(workspaceId, versionId, before.path);
+      }
+    } else if (statements.get.get(workspaceId, versionId, afterPath) !== undefined) {
+      return;
+    }
+  }
+  statements.put.run(
+    workspaceId,
+    versionId,
+    afterPath,
+    afterBlobSha256,
+    payload.payloadAfterContentKind === "binary" ? "binary" : "text",
+    relaySeq,
+  );
+}
+
+function seedCurrentFiles(db: SqliteDb): void {
+  const migrationId = "current-files-seed-v1";
+  const seeded = db
+    .prepare("SELECT EXISTS(SELECT 1 FROM sync_relay_migrations WHERE migration_id=?) AS complete")
+    .get(migrationId);
+  if (Number(seeded?.complete ?? 0) !== 0) return;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const claimed = db
+      .prepare(
+        "SELECT EXISTS(SELECT 1 FROM sync_relay_migrations WHERE migration_id=?) AS complete",
+      )
+      .get(migrationId);
+    if (Number(claimed?.complete ?? 0) !== 0) {
+      db.exec("COMMIT");
+      return;
+    }
+    const statements = currentFileStatements(db);
+    const rows = db
+      .prepare(
+        `SELECT log.workspace_id, log.op_kind, log.payload_json, log.relay_seq
+         FROM sync_relay_log log
+         JOIN sync_relay_workspaces workspace
+           ON workspace.workspace_id = log.workspace_id
+         WHERE log.op_kind IN ('version.create', 'moment.append')
+           AND log.relay_seq > COALESCE(workspace.epoch_log_floor, 0)
+         ORDER BY log.relay_seq`,
+      )
+      .all();
+    for (const row of rows) {
+      applyCurrentFileOp(
+        statements,
+        String(row.workspace_id),
+        String(row.op_kind),
+        String(row.payload_json),
+        Number(row.relay_seq),
+      );
+    }
+    db.prepare("INSERT INTO sync_relay_migrations (migration_id,completed_at_ms) VALUES (?,?)").run(
+      migrationId,
+      Date.now(),
+    );
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {}
+    throw error;
+  }
+}
+
+function currentFileSelectorClause(selectorPaths: readonly string[]): {
+  sql: string;
+  params: string[];
+} {
+  if (selectorPaths.length === 0) return { sql: "", params: [] };
+  const params: string[] = [];
+  const ranges = selectorPaths.map((root) => {
+    const descendantPrefix = `${root}/`;
+    // Normalized roots never end in slash. Under SQLite BINARY collation,
+    // replacing the descendant slash (0x2f) with `0` (0x30) is the exact
+    // exclusive upper bound, including descendants that start with a
+    // supplementary Unicode code point.
+    params.push(root, descendantPrefix, `${root}0`);
+    return "(path = ? OR (path >= ? AND path < ?))";
+  });
+  return { sql: ` AND (${ranges.join(" OR ")})`, params };
+}
+
+export function currentFileStateQuery(selectorPaths: readonly string[]): {
+  sql: string;
+  selectorParams: string[];
+} {
+  const selector = currentFileSelectorClause(selectorPaths);
+  return {
+    sql:
+      `SELECT path, blob_sha256, content_kind
+       FROM sync_relay_current_files INDEXED BY idx_sync_relay_current_files_path
+       WHERE workspace_id = ? AND version_id = ?
+         AND state_relay_seq > ? AND state_relay_seq <= ?${selector.sql}
+       ORDER BY path
+       LIMIT ?`,
+    selectorParams: selector.params,
+  };
 }
 
 // Latest-wins: a rename is a later fact about the same object, and the share
@@ -1721,6 +2001,12 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
            WHERE workspace_id = ?`,
         )
         .run(input.replicationEpoch, input.streamIdentity, floor, input.workspaceId);
+      this.db
+        .prepare(
+          `DELETE FROM sync_relay_current_files
+           WHERE workspace_id = ?`,
+        )
+        .run(input.workspaceId);
       this.db.exec("COMMIT");
       return "rotated";
     } catch (error) {
@@ -2206,6 +2492,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       const objectPathStmt = this.db.prepare(OBJECT_PATH_UPSERT_SQL);
       const objectMomentStmt = this.db.prepare(OBJECT_MOMENT_INSERT_SQL);
       const versionSnapshotBlobStmt = this.db.prepare(VERSION_SNAPSHOT_BLOB_INSERT_SQL);
+      const currentFileStmt = currentFileStatements(this.db);
       for (const op of newOps) {
         const result = insertStmt.run(
           input.workspaceId,
@@ -2267,6 +2554,13 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
             }
           }
         }
+        applyCurrentFileOp(
+          currentFileStmt,
+          input.workspaceId,
+          op.opKind,
+          op.payloadJson,
+          Number(result.lastInsertRowid),
+        );
       }
 
       this.db.exec("COMMIT");
@@ -4046,6 +4340,90 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       nextCursor: last?.relaySeq ?? input.sinceRelaySeq,
       hasMore: rows.length > input.limit,
     };
+  }
+
+  readCurrentFileState(input: {
+    workspaceId: string;
+    versionId: string;
+    selectorPaths: readonly string[];
+    limit: number;
+  }): CurrentFileStateSnapshot {
+    if (!Number.isSafeInteger(input.limit) || input.limit <= 0) {
+      throw new Error("current file limit must be a positive safe integer");
+    }
+    this.db.exec("BEGIN");
+    try {
+      const workspace = this.db
+        .prepare(
+          `SELECT COALESCE(epoch_log_floor, 0) AS epoch_log_floor
+           FROM sync_relay_workspaces
+           WHERE workspace_id = ?`,
+        )
+        .get(input.workspaceId);
+      const cursor = this.db
+        .prepare(
+          `SELECT relay_seq
+           FROM sync_relay_log INDEXED BY idx_sync_relay_log_page
+           WHERE workspace_id = ?
+           ORDER BY relay_seq DESC
+           LIMIT 1`,
+        )
+        .get(input.workspaceId);
+      const epochLogFloor = Number(workspace?.epoch_log_floor ?? 0);
+      const nextCursor = Number(cursor?.relay_seq ?? 0);
+      const query = currentFileStateQuery(input.selectorPaths);
+      const rows = this.db
+        .prepare(query.sql)
+        .all(
+          input.workspaceId,
+          input.versionId,
+          epochLogFloor,
+          nextCursor,
+          ...query.selectorParams,
+          input.limit + 1,
+        );
+      this.db.exec("COMMIT");
+      return {
+        files: rows.slice(0, input.limit).map((row) => ({
+          path: String(row.path),
+          blobSha256: String(row.blob_sha256),
+          contentKind: row.content_kind === "binary" ? "binary" : "text",
+        })),
+        nextCursor,
+        epochLogFloor,
+        tooMany: rows.length > input.limit,
+      };
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    }
+  }
+
+  currentFileBlobIsVisible(input: {
+    workspaceId: string;
+    versionId: string;
+    selectorPaths: readonly string[];
+    sha256: string;
+    epochLogFloor: number;
+  }): boolean {
+    const selector = currentFileSelectorClause(input.selectorPaths);
+    return this.db
+      .prepare(
+        `SELECT 1 AS ok
+         FROM sync_relay_current_files INDEXED BY idx_sync_relay_current_files_blob
+         WHERE workspace_id = ? AND version_id = ? AND blob_sha256 = ?
+           AND state_relay_seq > ?${selector.sql}
+         LIMIT 1`,
+      )
+      .get(
+        input.workspaceId,
+        input.versionId,
+        input.sha256,
+        input.epochLogFloor,
+        ...selector.params,
+      ) !== undefined;
   }
 
   fetchLogPageDescending(input: {

@@ -805,6 +805,8 @@ export function createShareWebHandler({
       let relayPath: string | null = null;
       if (request.method === "GET" && pathname === "/api/view/meta") {
         relayPath = "/sync/link/share";
+      } else if (request.method === "GET" && pathname === "/api/view/current") {
+        relayPath = "/sync/link/current";
       } else if (request.method === "GET" && pathname === "/api/view/log") {
         relayPath = `/sync/link/log${search}`;
       } else if (request.method === "GET" && pathname.startsWith("/api/view/blob/")) {

@@ -52,6 +52,17 @@ function storedFile(value: unknown): SharedFile | null {
   };
 }
 
+export function accumulatorFromCurrentFiles(value: unknown): FileAccumulator | null {
+  if (!Array.isArray(value)) return null;
+  const files: FileAccumulator = new Map();
+  for (const rawFile of value) {
+    const file = storedFile(rawFile);
+    if (!file || files.has(file.path)) return null;
+    files.set(file.path, file);
+  }
+  return files;
+}
+
 function path(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }

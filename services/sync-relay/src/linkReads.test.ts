@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -32,10 +33,26 @@ import {
   type SyncRelayHandler,
 } from "./server";
 import {
+  currentFileStateQuery,
   openSyncRelayStorage,
   SHARED_BLOB_CANDIDATE_LIMIT,
   type SyncRelayStorage,
 } from "./storage";
+
+interface InspectionDatabase {
+  close(): void;
+  exec(sql: string): void;
+  prepare(sql: string): {
+    all(...params: unknown[]): Array<Record<string, unknown>>;
+    run(...params: unknown[]): unknown;
+  };
+}
+
+const { DatabaseSync: InspectionDatabaseSync } = createRequire(import.meta.url)(
+  "node:sqlite",
+) as {
+  DatabaseSync: new (path: string, options?: { readOnly?: boolean }) => InspectionDatabase;
+};
 
 const OWNER = "owner";
 const RECIPIENT = "recipient";
@@ -55,6 +72,7 @@ type TestWorkspaceIdentity = {
 
 const roots: string[] = [];
 const storages: SyncRelayStorage[] = [];
+const storagePaths = new WeakMap<SyncRelayStorage, string>();
 
 afterEach(async () => {
   for (const storage of storages.splice(0)) storage.close();
@@ -64,29 +82,11 @@ afterEach(async () => {
 async function newStorage(): Promise<SyncRelayStorage> {
   const root = await mkdtemp(join(tmpdir(), "dohc-link-reads-"));
   roots.push(root);
-  const storage = openSyncRelayStorage(join(root, "relay.sqlite"));
+  const dbPath = join(root, "relay.sqlite");
+  const storage = openSyncRelayStorage(dbPath);
+  storagePaths.set(storage, dbPath);
   storages.push(storage);
   return storage;
-}
-
-function forceBlobFallback(
-  storage: SyncRelayStorage,
-  onFetchLogPage: () => void = () => {},
-): SyncRelayStorage {
-  return new Proxy(storage, {
-    get(target, property, receiver) {
-      if (property === "latestLogRowForObjectInVersion") return () => null;
-      if (property === "objectIdAtPathInVersion") return () => undefined;
-      if (property === "fetchLogPage") {
-        return (input: Parameters<SyncRelayStorage["fetchLogPage"]>[0]) => {
-          onFetchLogPage();
-          return target.fetchLogPage(input);
-        };
-      }
-      const value = Reflect.get(target, property, receiver) as unknown;
-      return typeof value === "function" ? value.bind(target) : value;
-    },
-  });
 }
 
 function handler(
@@ -100,6 +100,7 @@ function handler(
     linkGrantLogReadRateLimiter?: LinkReadRateLimiter;
     linkGrantEgressRateLimiter?: LinkEgressRateLimiter;
     linkCapabilityReadFallbackPageSize?: number;
+    linkCurrentFileLimit?: number;
     newLinkBearer?: () => string;
   } = {},
 ): SyncRelayHandler {
@@ -125,6 +126,7 @@ function handler(
     linkGrantEgressRateLimiter: options.linkGrantEgressRateLimiter,
     linkCapabilityReadFallbackPageSize:
       options.linkCapabilityReadFallbackPageSize,
+    linkCurrentFileLimit: options.linkCurrentFileLimit,
     newLinkBearer: options.newLinkBearer,
   };
   return createSyncRelayHandler(handlerOptions);
@@ -486,6 +488,357 @@ async function readRemainingBytes(
 }
 
 describe("relay capability reads", () => {
+  it("projects only the selected current files from a fresh view capability", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h);
+
+    const response = await h(
+      linkRequest(seeded.capability, "/sync/link/current"),
+    );
+
+    expect(response.status).toBe(200);
+    const projection = await json(response);
+    expect(projection).toMatchObject({
+      ok: true,
+      access: "view",
+      effectiveSelector: {
+        paths: ["docs"],
+        versionId: null,
+        access: "view",
+      },
+      files: [{
+        path: "docs/shared.md",
+        blobSha256: seeded.sharedSha,
+        contentKind: "text",
+      }],
+      nextCursor: 3,
+      epochLogFloor: 0,
+      lastSettledAtMs: 1_100,
+      lastSettledKnown: true,
+    });
+    expect(Object.keys(projection).sort()).toEqual([
+      "access",
+      "effectiveSelector",
+      "epochLogFloor",
+      "files",
+      "lastSettledAtMs",
+      "lastSettledKnown",
+      "nextCursor",
+      "ok",
+    ]);
+    expect(Object.keys((projection.files as Array<Record<string, unknown>>)[0]!).sort())
+      .toEqual(["blobSha256", "contentKind", "path"]);
+    const serialized = JSON.stringify(projection);
+    for (const privateValue of [
+      "private/hidden.md",
+      seeded.hiddenSha,
+      "object-shared",
+      "moment-1",
+      "owner",
+    ]) {
+      expect(serialized).not.toContain(privateValue);
+    }
+  });
+
+  it("materializes the viewer CAS fold per version and uses the selected path index", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h);
+    const acceptedContent = "accepted\n";
+    const staleContent = "stale\n";
+    const neighborContent = "neighbor\n";
+    const sideContent = "side version\n";
+    const acceptedSha = await putBlob(h, acceptedContent);
+    const staleSha = await putBlob(h, staleContent);
+    const neighborSha = await putBlob(h, neighborContent);
+    const sideSha = await putBlob(h, sideContent);
+    await appendMoments(h, [
+      moment(3, "docs/shared.md", acceptedContent, 1_300, {
+        objectId: "object-shared",
+        beforePath: "docs/shared.md",
+        beforeContent: "# shared\n",
+      }),
+      moment(4, "docs/shared.md", staleContent, 1_400, {
+        objectId: "object-shared",
+        beforePath: "docs/shared.md",
+        beforeContent: "# shared\n",
+      }),
+      moment(5, "docs/😀.md", acceptedContent, 1_500, {
+        objectId: "object-shared",
+        operation: "rename",
+        beforePath: "docs/shared.md",
+        beforeContent: acceptedContent,
+      }),
+      moment(6, "docs-private/neighbor.md", neighborContent, 1_600, {
+        objectId: "object-neighbor",
+      }),
+      moment(7, "docs/😀.md", sideContent, 1_700, {
+        versionId: "side-version",
+        objectId: "object-side",
+      }),
+    ]);
+
+    const response = await h(linkRequest(seeded.capability, "/sync/link/current"));
+    expect(response.status).toBe(200);
+    const current = await json(response);
+    expect(current.files).toEqual([{
+      path: "docs/😀.md",
+      blobSha256: acceptedSha,
+      contentKind: "text",
+    }]);
+    expect(JSON.stringify(current)).not.toContain(staleSha);
+    expect(JSON.stringify(current)).not.toContain(neighborSha);
+    expect(JSON.stringify(current)).not.toContain(sideSha);
+
+    const historical = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100")),
+    );
+    const replayed: FileAccumulator = new Map();
+    foldLogOps(replayed, historical.ops as RelayOp[]);
+    expect(filesFromAccumulator(replayed)).toEqual(current.files);
+
+    const dbPath = storagePaths.get(storage);
+    if (!dbPath) throw new Error("missing inspection path");
+    const inspection = new InspectionDatabaseSync(dbPath, { readOnly: true });
+    try {
+      const query = currentFileStateQuery(["docs"]);
+      const plan = inspection.prepare(`EXPLAIN QUERY PLAN ${query.sql}`).all(
+        WORKSPACE,
+        "main",
+        0,
+        Number.MAX_SAFE_INTEGER,
+        ...query.selectorParams,
+        5_001,
+      );
+      const details = plan.map((row) => String(row.detail)).join("\n");
+      expect(details).toMatch(
+        /SEARCH sync_relay_current_files USING INDEX idx_sync_relay_current_files_path/u,
+      );
+      expect(details).not.toContain("sync_relay_log");
+      expect(details).not.toContain("sync_relay_object_moments");
+    } finally {
+      inspection.close();
+    }
+  });
+
+  it("applies the current-file cap after selector filtering and refuses overflow generically", async () => {
+    const storage = await newStorage();
+    const h = handler(storage, { linkCurrentFileLimit: 1 });
+    const seeded = await seed(h);
+
+    const oneSelected = await h(linkRequest(seeded.capability, "/sync/link/current"));
+    expect(oneSelected.status).toBe(200);
+    expect((await json(oneSelected)).files).toEqual([{
+      path: "docs/shared.md",
+      blobSha256: seeded.sharedSha,
+      contentKind: "text",
+    }]);
+
+    const secondContent = "second selected\n";
+    await putBlob(h, secondContent);
+    await appendMoments(h, [
+      moment(3, "docs/second.md", secondContent, 1_300, {
+        objectId: "object-second",
+      }),
+    ]);
+    const overflow = await denialBytes(
+      await h(linkRequest(seeded.capability, "/sync/link/current")),
+    );
+    const missing = await denialBytes(
+      await h(
+        linkRequest(seeded.capability, `/sync/link/blobs/${"f".repeat(64)}`),
+      ),
+    );
+    expect(overflow).toBe(missing);
+  });
+
+  it("keeps current-state freshness equal to metadata after a selected delete", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h);
+    await appendMoments(h, [
+      moment(3, "docs/shared.md", "# shared\n", 1_300, {
+        objectId: "object-shared",
+        operation: "delete",
+        beforePath: "docs/shared.md",
+        beforeContent: "# shared\n",
+        afterContent: null,
+        afterPath: null,
+      }),
+    ]);
+
+    const metadata = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/share")),
+    );
+    const current = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/current")),
+    );
+    expect(current.files).toEqual([]);
+    expect({
+      lastSettledAtMs: current.lastSettledAtMs,
+      lastSettledKnown: current.lastSettledKnown,
+    }).toEqual({
+      lastSettledAtMs: metadata.lastSettledAtMs,
+      lastSettledKnown: metadata.lastSettledKnown,
+    });
+    expect(current.lastSettledAtMs).toBe(1_300);
+  });
+
+  it("revalidates the capability generation after reading current state", async () => {
+    const storage = await newStorage();
+    let revokeOnRead = false;
+    let grantId = "";
+    const storageWithRace = new Proxy(storage, {
+      get(target, property, receiver) {
+        if (property === "readCurrentFileState") {
+          return (input: Parameters<SyncRelayStorage["readCurrentFileState"]>[0]) => {
+            const snapshot = target.readCurrentFileState(input);
+            if (revokeOnRead) {
+              target.revokeShareGrant({
+                shareId: "share-0",
+                grantId,
+                revokedAtMs: 2_000,
+                expectedDependentGrantIds: [],
+              });
+            }
+            return snapshot;
+          };
+        }
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const h = handler(storageWithRace);
+    const seeded = await seed(h);
+    grantId = seeded.grantId;
+    revokeOnRead = true;
+
+    const response = await h(
+      linkRequest(seeded.capability, "/sync/link/current"),
+    );
+    expect(await capabilityRefusalBody(response)).toBe(
+      await capabilityRefusalBody(
+        await h(linkRequest(UNKNOWN_CAPABILITY, "/sync/link/current")),
+      ),
+    );
+  });
+
+  it("backfills the accepted current fold once when reopening a pre-table database", async () => {
+    const originalStorage = await newStorage();
+    const originalHandler = handler(originalStorage);
+    const seeded = await seed(originalHandler);
+    const acceptedContent = "accepted before migration\n";
+    const staleContent = "stale before migration\n";
+    const acceptedSha = await putBlob(originalHandler, acceptedContent);
+    await putBlob(originalHandler, staleContent);
+    await appendMoments(originalHandler, [
+      moment(3, "docs/shared.md", acceptedContent, 1_300, {
+        objectId: "object-shared",
+        beforePath: "docs/shared.md",
+        beforeContent: "# shared\n",
+      }),
+      moment(4, "docs/shared.md", staleContent, 1_400, {
+        objectId: "object-shared",
+        beforePath: "docs/shared.md",
+        beforeContent: "# shared\n",
+      }),
+    ]);
+    const dbPath = storagePaths.get(originalStorage);
+    if (!dbPath) throw new Error("missing inspection path");
+    originalStorage.close();
+    storages.splice(storages.indexOf(originalStorage), 1);
+
+    const legacy = new InspectionDatabaseSync(dbPath);
+    legacy.exec("DROP TABLE sync_relay_current_files");
+    legacy.prepare(
+      "DELETE FROM sync_relay_migrations WHERE migration_id = ?",
+    ).run("current-files-seed-v1");
+    legacy.close();
+
+    const reopened = openSyncRelayStorage(dbPath);
+    storages.push(reopened);
+    storagePaths.set(reopened, dbPath);
+    const reopenedHandler = handler(reopened);
+    const firstProjection = await json(
+      await reopenedHandler(
+        linkRequest(seeded.capability, "/sync/link/current"),
+      ),
+    );
+    expect(firstProjection.files).toEqual([{
+      path: "docs/shared.md",
+      blobSha256: acceptedSha,
+      contentKind: "text",
+    }]);
+    reopened.close();
+    storages.splice(storages.indexOf(reopened), 1);
+
+    const openedAgain = openSyncRelayStorage(dbPath);
+    storages.push(openedAgain);
+    storagePaths.set(openedAgain, dbPath);
+    const secondProjection = await json(
+      await handler(openedAgain)(
+        linkRequest(seeded.capability, "/sync/link/current"),
+      ),
+    );
+    expect(secondProjection.files).toEqual(firstProjection.files);
+    const inspection = new InspectionDatabaseSync(dbPath, { readOnly: true });
+    try {
+      expect(inspection.prepare(
+        `SELECT migration_id FROM sync_relay_migrations
+         WHERE migration_id = 'current-files-seed-v1'`,
+      ).all()).toHaveLength(1);
+    } finally {
+      inspection.close();
+    }
+  });
+
+  it("backfills only rows above a preexisting epoch floor", async () => {
+    const originalStorage = await newStorage();
+    const originalHandler = handler(originalStorage);
+    const seeded = await seedThenRotate(originalHandler);
+    const recreatedContent = "recreated before migration\n";
+    const recreatedSha = await putBlob(originalHandler, recreatedContent);
+    await appendMoments(
+      originalHandler,
+      [
+        moment(0, "docs/shared.md", recreatedContent, 1_300, {
+          objectId: "object-recreated-before-migration",
+        }),
+      ],
+      {
+        originId: "origin-b",
+        identity: { replicationEpoch: EPOCH_2, streamIdentity: STREAM_2 },
+      },
+    );
+    const dbPath = storagePaths.get(originalStorage);
+    if (!dbPath) throw new Error("missing inspection path");
+    originalStorage.close();
+    storages.splice(storages.indexOf(originalStorage), 1);
+
+    const legacy = new InspectionDatabaseSync(dbPath);
+    legacy.exec("DROP TABLE sync_relay_current_files");
+    legacy.prepare(
+      "DELETE FROM sync_relay_migrations WHERE migration_id = ?",
+    ).run("current-files-seed-v1");
+    legacy.close();
+
+    const reopened = openSyncRelayStorage(dbPath);
+    storages.push(reopened);
+    storagePaths.set(reopened, dbPath);
+    const projection = await json(
+      await handler(reopened)(
+        linkRequest(seeded.capability, "/sync/link/current"),
+      ),
+    );
+    expect(projection.files).toEqual([{
+      path: "docs/shared.md",
+      blobSha256: recreatedSha,
+      contentKind: "text",
+    }]);
+    expect(JSON.stringify(projection)).not.toContain(seeded.sharedSha);
+  });
+
   it("gives each grant four capability buckets of read capacity", () => {
     expect(LINK_GRANT_READ_BUCKET_CAPACITY).toBe(LINK_READ_BUCKET_CAPACITY * 4);
     expect(LINK_GRANT_LOG_READ_BUCKET_CAPACITY).toBe(
@@ -1715,6 +2068,47 @@ describe("relay capability reads", () => {
     expect(await currentBlob.text()).toBe("# after rotation\n");
   });
 
+  it("recreates a pre-reset path from empty current state after epoch rotation", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seedThenRotate(h);
+    const recreatedContent = "# recreated after reset\n";
+    const recreatedSha = await putBlob(h, recreatedContent);
+    await appendMoments(
+      h,
+      [
+        moment(0, "docs/shared.md", recreatedContent, 1_300, {
+          objectId: "object-recreated",
+        }),
+      ],
+      {
+        originId: "origin-b",
+        identity: { replicationEpoch: EPOCH_2, streamIdentity: STREAM_2 },
+      },
+    );
+
+    const current = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/current")),
+    );
+    expect(current.files).toEqual([{
+      path: "docs/shared.md",
+      blobSha256: recreatedSha,
+      contentKind: "text",
+    }]);
+    const recreatedBlob = await h(
+      linkRequest(seeded.capability, `/sync/link/blobs/${recreatedSha}`),
+    );
+    expect(recreatedBlob.status).toBe(200);
+    expect(await recreatedBlob.text()).toBe(recreatedContent);
+    expect(
+      await denialBytes(
+        await h(
+          linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`),
+        ),
+      ),
+    ).toBe(`404:${LINK_REFUSAL_BODY}`);
+  });
+
   it("refuses a path-shared blob after a later delete supersedes its file", async () => {
     const storage = await newStorage();
     const h = handler(storage);
@@ -2025,6 +2419,14 @@ describe("relay capability reads", () => {
     );
     expect(covered.status).toBe(200);
     expect(await covered.text()).toBe(snapshotContent);
+    const current = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/current")),
+    );
+    expect(current.files).toEqual([{
+      path: "docs/snapshot-only.md",
+      blobSha256: snapshotSha,
+      contentKind: "text",
+    }]);
     expect(
       await denialBytes(
         await h(
@@ -2232,7 +2634,7 @@ describe("relay capability reads", () => {
       ).status,
     ).toBe(200);
     expect(
-      await capabilityRefusalBody(await h(linkRequest(first.capability, "/sync/link/share"))),
+      await capabilityRefusalBody(await h(linkRequest(first.capability, "/sync/link/current"))),
     ).toBe(unknown);
 
     const secondLink = await json(
@@ -2268,7 +2670,7 @@ describe("relay capability reads", () => {
     ).toBe(200);
     expect(
       await capabilityRefusalBody(
-        await h(linkRequest(String(secondExchange.capabilityToken), "/sync/link/log")),
+        await h(linkRequest(String(secondExchange.capabilityToken), "/sync/link/current")),
       ),
     ).toBe(unknown);
 
@@ -2364,10 +2766,10 @@ describe("relay capability reads", () => {
     expect(metadata.lastSettledKnown).toBe(false);
   });
 
-  it("refuses a fallback blob when the forward walk exceeds the page budget", async () => {
+  it("serves a current blob without walking forward history", async () => {
     const pageSize = 2;
     const storage = await newStorage();
-    const h = handler(forceBlobFallback(storage), {
+    const h = handler(storage, {
       linkCapabilityReadFallbackPageSize: pageSize,
     });
     const seeded = await seed(h);
@@ -2385,70 +2787,16 @@ describe("relay capability reads", () => {
       ),
     );
 
-    expect(
-      await denialBytes(
-        await h(
-          linkRequest(
-            seeded.capability,
-            `/sync/link/blobs/${seeded.sharedSha}`,
-          ),
-        ),
-      ),
-    ).toBe(`404:${LINK_REFUSAL_BODY}`);
-  });
-
-  it("shares one fallback page budget across all blob candidates", async () => {
-    const pageSize = 2;
-    const storage = await newStorage();
-    let fallbackPages = 0;
-    const h = handler(
-      forceBlobFallback(storage, () => {
-        fallbackPages += 1;
-      }),
-      { linkCapabilityReadFallbackPageSize: pageSize },
-    );
-    const seeded = await seed(h);
-    const prefixNoise = Array.from({ length: 8 }, (_, index) =>
-      moment(
-        index + 3,
-        `private/blob-prefix-noise-${index}.md`,
-        "hidden\n",
-        1_300 + index,
-      ),
-    );
-    const suffixNoise = Array.from({ length: 19 }, (_, index) =>
-      moment(
-        index + 13,
-        `private/blob-suffix-noise-${index}.md`,
-        "hidden\n",
-        2_300 + index,
-      ),
-    );
-    await appendMoments(h, [
-      ...prefixNoise,
-      moment(11, "docs/decoy.md", "# shared\n", 2_100, {
-        objectId: "object-decoy-a",
-      }),
-      moment(12, "docs/decoy.md", "hidden\n", 2_200, {
-        objectId: "object-decoy-b",
-        beforePath: "docs/decoy.md",
-        beforeContent: "# shared\n",
-      }),
-      ...suffixNoise,
-    ]);
-    fallbackPages = 0;
-
     const response = await h(
       linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`),
     );
-
-    expect.soft(fallbackPages).toBe(LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET);
-    expect(await denialBytes(response)).toBe(`404:${LINK_REFUSAL_BODY}`);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("# shared\n");
   });
 
-  it("keeps freshness and fallback blobs unchanged when the log fits the page budget", async () => {
+  it("keeps freshness and materialized blobs unchanged when the log fits the page budget", async () => {
     const storage = await newStorage();
-    const h = handler(forceBlobFallback(storage), {
+    const h = handler(storage, {
       linkCapabilityReadFallbackPageSize: 2,
     });
     const seeded = await seed(h);
@@ -2798,12 +3146,16 @@ describe("relay capability reads", () => {
     const metadata = await h(linkRequest(seeded.capability, "/sync/link/share"));
     expect(metadata.status).toBe(200);
     const metadataBody = await metadata.text();
+    const current = await h(linkRequest(seeded.capability, "/sync/link/current"));
+    expect(current.status).toBe(200);
+    const currentBody = await current.text();
     const log = await h(linkRequest(seeded.capability, "/sync/link/log"));
     expect(log.status).toBe(200);
     const logBody = await log.text();
 
     expect(charge.mock.calls).toEqual([
       [seeded.grantId, Buffer.byteLength(metadataBody), 2_000],
+      [seeded.grantId, Buffer.byteLength(currentBody), 2_000],
       [seeded.grantId, Buffer.byteLength(logBody), 2_000],
     ]);
   });

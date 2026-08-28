@@ -139,6 +139,7 @@ export interface CreateSyncRelayHandlerOptions {
   linkGrantLogReadRateLimiter?: LinkReadRateLimiter;
   linkGrantEgressRateLimiter?: LinkEgressRateLimiter;
   linkCapabilityReadFallbackPageSize?: number;
+  linkCurrentFileLimit?: number;
   newLinkBearer?: () => string;
   newLinkHandoffCode?: () => string;
 }
@@ -149,6 +150,7 @@ type SyncRelayRoute =
   | { route: "link-handoff" }
   | { route: "link-redeem" }
   | { route: "link-share" }
+  | { route: "link-current" }
   | { route: "link-log" }
   | { route: "link-blob"; sha256: string }
   | { route: "workspaces" }
@@ -225,6 +227,7 @@ export const MAX_KEY_ENVELOPE_BYTES = 16 * 1024;
 export const MAX_OPS_PER_REQUEST = 500;
 export const DEFAULT_LOG_PAGE_SIZE = 100;
 export const MAX_LOG_PAGE_SIZE = 500;
+const MAX_LINK_CURRENT_FILES = 5_000;
 // One accountless response may scan this many raw log rows for admitted ops.
 export const MAX_RAW_ROWS_PER_LINK_PAGE = 10_000;
 // Capability reads may synchronously inspect at most 10,000 fallback rows.
@@ -289,10 +292,6 @@ interface SettledMomentIdentity {
   deleted: boolean;
 }
 
-interface LinkCapabilityReadFallbackAllowance {
-  pagesRemaining: number;
-}
-
 function settledMomentIdentity(row: SyncRelayLogRow): SettledMomentIdentity | null {
   if (row.opKind !== "moment.append") return null;
   const parsed = parseShareOpPayloadWithReferencedPaths(row.payloadJson);
@@ -351,6 +350,7 @@ export function createSyncRelayHandler({
   ),
   linkGrantEgressRateLimiter = new LinkEgressRateLimiter(),
   linkCapabilityReadFallbackPageSize = MAX_LOG_PAGE_SIZE,
+  linkCurrentFileLimit = MAX_LINK_CURRENT_FILES,
   newLinkBearer = () => mintLinkBearer(),
   newLinkHandoffCode = () => mintLinkHandoffCode(),
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler {
@@ -1087,112 +1087,10 @@ export function createSyncRelayHandler({
     return { lastSettledAtMs: null, lastSettledKnown: false };
   };
 
-  const latestPathRelatedMoment = (
-    workspaceId: string,
-    versionId: string,
-    candidate: SyncRelayLogRow,
-    candidateIdentity: SettledMomentIdentity,
-    allowance: LinkCapabilityReadFallbackAllowance,
-  ): SyncRelayLogRow | null => {
-    let latest = candidateIdentity.versionId === versionId ? candidate : null;
-    let trackedObjectId = candidateIdentity.objectId;
-    let trackedPath =
-      candidateIdentity.settledPath ?? candidateIdentity.referencedPaths[0] ?? null;
-    let cursor = candidate.relaySeq;
-    while (allowance.pagesRemaining > 0) {
-      allowance.pagesRemaining -= 1;
-      const page = storage.fetchLogPage({
-        workspaceId,
-        sinceRelaySeq: cursor,
-        limit: linkCapabilityReadFallbackPageSize,
-      });
-      for (const row of page.rows) {
-        const identity = settledMomentIdentity(row);
-        if (!identity || identity.versionId !== versionId) continue;
-        const sameObject =
-          trackedObjectId !== null && identity.objectId === trackedObjectId;
-        const samePath =
-          trackedPath !== null && identity.referencedPaths.includes(trackedPath);
-        if (!sameObject && !samePath) continue;
-        latest = row;
-        trackedObjectId = identity.objectId ?? trackedObjectId;
-        if (!identity.deleted) trackedPath = identity.settledPath ?? trackedPath;
-      }
-      if (!page.hasMore) return latest;
-      cursor = page.nextCursor;
-    }
-    return null;
-  };
-
-  const currentSettledBlobMoment = (
-    workspaceId: string,
-    versionId: string,
-    candidate: SyncRelayLogRow,
-    allowance: LinkCapabilityReadFallbackAllowance,
-  ): SyncRelayLogRow | null => {
-    const candidateIdentity = settledMomentIdentity(candidate);
-    if (!candidateIdentity) return null;
-
-    let current = candidateIdentity.objectId
-      ? storage.latestLogRowForObjectInVersion({
-          workspaceId,
-          objectId: candidateIdentity.objectId,
-          versionId,
-        })
-      : null;
-    if (!current) {
-      const candidatePath =
-        candidateIdentity.settledPath ?? candidateIdentity.referencedPaths[0] ?? null;
-      const currentObjectId = candidatePath
-        ? storage.objectIdAtPathInVersion({ workspaceId, versionId, path: candidatePath })
-        : undefined;
-      current = currentObjectId
-        ? storage.latestLogRowForObjectInVersion({
-            workspaceId,
-            objectId: currentObjectId,
-            versionId,
-          })
-        : latestPathRelatedMoment(
-            workspaceId,
-            versionId,
-            candidate,
-            candidateIdentity,
-            allowance,
-          );
-    }
-    if (!current) return null;
-
-    let currentIdentity = settledMomentIdentity(current);
-    if (!currentIdentity || currentIdentity.deleted) return null;
-
-    if (currentIdentity.objectId && currentIdentity.settledPath) {
-      const occupyingObjectId = storage.objectIdAtPathInVersion({
-        workspaceId,
-        versionId,
-        path: currentIdentity.settledPath,
-      });
-      if (occupyingObjectId && occupyingObjectId !== currentIdentity.objectId) {
-        const occupyingMoment = storage.latestLogRowForObjectInVersion({
-          workspaceId,
-          objectId: occupyingObjectId,
-          versionId,
-        });
-        if (!occupyingMoment) return null;
-        current = occupyingMoment;
-        currentIdentity = settledMomentIdentity(current);
-        if (!currentIdentity || currentIdentity.deleted) return null;
-      }
-    }
-    return current;
-  };
-
   const filteredSharedBlob = (
     workspaceId: string,
     selector: AnyShareSelector,
     sha256: string,
-    semantics:
-      | { kind: "historical-log" }
-      | { kind: "current-state"; epochLogFloor: number },
   ): Uint8Array | null => {
     if (isChatChannelSelector(selector)) return null;
     const versionId = targetVersionId(selector);
@@ -1201,10 +1099,7 @@ export function createSyncRelayHandler({
         workspaceId,
         versionId,
         sha256,
-        semantics:
-          semantics.kind === "current-state" && selector.versionId === null
-            ? "current-state"
-            : "historical-log",
+        semantics: "historical-log",
         ...(selector.paths.length > 0
           ? { selectorPaths: selector.paths }
           : {}),
@@ -1214,30 +1109,11 @@ export function createSyncRelayHandler({
       .sort((left, right) => right.relaySeq - left.relaySeq)
       .slice(0, SHARED_BLOB_CANDIDATE_LIMIT);
     const chatResolver = chatResolverFor(workspaceId);
-    const fallbackAllowance: LinkCapabilityReadFallbackAllowance = {
-      pagesRemaining: LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET,
-    };
     const reachable = candidates.some((row) => {
-      const establishingRow =
-        semantics.kind === "current-state" && selector.versionId === null
-          ? currentSettledBlobMoment(
-              workspaceId,
-              versionId,
-              row,
-              fallbackAllowance,
-            )
-          : row;
-      if (
-        !establishingRow ||
-        (semantics.kind === "current-state" &&
-          establishingRow.relaySeq <= semantics.epochLogFloor)
-      ) {
-        return false;
-      }
       const decision = filterOpForShare(
         selector,
-        establishingRow.opKind,
-        establishingRow.payloadJson,
+        row.opKind,
+        row.payloadJson,
         chatResolver,
       );
       return decision.allowed && decision.blobSha256s.includes(sha256);
@@ -1249,19 +1125,7 @@ export function createSyncRelayHandler({
     workspaceId: string,
     selector: AnyShareSelector,
     sha256: string,
-  ): Uint8Array | null =>
-    filteredSharedBlob(workspaceId, selector, sha256, { kind: "historical-log" });
-
-  const currentSharedBlob = (
-    workspaceId: string,
-    selector: AnyShareSelector,
-    sha256: string,
-    epochLogFloor: number,
-  ): Uint8Array | null =>
-    filteredSharedBlob(workspaceId, selector, sha256, {
-      kind: "current-state",
-      epochLogFloor,
-    });
+  ): Uint8Array | null => filteredSharedBlob(workspaceId, selector, sha256);
 
   const requireLinkRead = (
     request: Request,
@@ -1672,6 +1536,7 @@ export function createSyncRelayHandler({
       }
       if (
         route.route === "link-share" ||
+        route.route === "link-current" ||
         route.route === "link-log" ||
         route.route === "link-blob"
       ) {
@@ -1689,9 +1554,9 @@ export function createSyncRelayHandler({
         if (request.method !== "GET") throw methodNotAllowed();
         const share = storage.getShare(capability.shareId);
         if (!share) throw notFound();
-        const epochLogFloor = storage.getEpochLogFloor(share.workspaceId);
 
         if (route.route === "link-share") {
+          const epochLogFloor = storage.getEpochLogFloor(share.workspaceId);
           const freshness = newestFilteredOpFreshness(
             share.workspaceId,
             capability.effectiveSelector,
@@ -1709,6 +1574,44 @@ export function createSyncRelayHandler({
           });
         }
 
+        if (route.route === "link-current") {
+          const snapshot = storage.readCurrentFileState({
+            workspaceId: share.workspaceId,
+            versionId: targetVersionId(capability.effectiveSelector),
+            selectorPaths: capability.effectiveSelector.paths,
+            limit: linkCurrentFileLimit,
+          });
+          if (snapshot.tooMany) throw notFound();
+          const presentation = createAccountlessPathProjection(
+            capability.effectiveSelector,
+          );
+          const files = snapshot.files.map((file) => {
+            const path = presentation.projectPath(file.path);
+            if (path === null) throw notFound();
+            return {
+              path,
+              blobSha256: file.blobSha256,
+              contentKind: file.contentKind,
+            };
+          });
+          const freshness = newestFilteredOpFreshness(
+            share.workspaceId,
+            capability.effectiveSelector,
+            snapshot.epochLogFloor,
+          );
+          requireFreshLinkRead(capabilityToken, capability);
+          return linkJsonResponse(capability.grantId, {
+            ok: true,
+            effectiveSelector: presentation.selector,
+            access: capability.access,
+            files,
+            nextCursor: snapshot.nextCursor,
+            epochLogFloor: snapshot.epochLogFloor,
+            ...freshness,
+          });
+        }
+
+        const epochLogFloor = storage.getEpochLogFloor(share.workspaceId);
         if (route.route === "link-log") {
           const url = new URL(request.url);
           const requestedSince = parseCursor(url.searchParams.get("since"));
@@ -1730,12 +1633,15 @@ export function createSyncRelayHandler({
         }
 
         assertSha256(route.sha256);
-        const blob = currentSharedBlob(
-          share.workspaceId,
-          capability.effectiveSelector,
-          route.sha256,
+        const blob = storage.currentFileBlobIsVisible({
+          workspaceId: share.workspaceId,
+          versionId: targetVersionId(capability.effectiveSelector),
+          selectorPaths: capability.effectiveSelector.paths,
+          sha256: route.sha256,
           epochLogFloor,
-        );
+        })
+          ? storage.getBlob(share.workspaceId, route.sha256)
+          : null;
         if (!blob) throw notFound();
         requireFreshLinkRead(capabilityToken, capability);
         const releaseBytes = admitLinkBlobBytes(
@@ -3236,6 +3142,7 @@ function parseRoute(request: Request): SyncRelayRoute {
   }
   if (parts.length === 3 && parts[0] === "sync" && parts[1] === "link") {
     if (parts[2] === "share") return { route: "link-share" };
+    if (parts[2] === "current") return { route: "link-current" };
     if (parts[2] === "log") return { route: "link-log" };
   }
   if (
