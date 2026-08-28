@@ -131,6 +131,7 @@ export interface CreateSyncRelayHandlerOptions {
   shareWebOrigin?: string;
   relayExchangeKey?: string;
   linkExchangeRateLimiter?: LinkExchangeRateLimiter;
+  linkRedeemRateLimiter?: LinkReadRateLimiter;
   linkReadRateLimiter?: LinkReadRateLimiter;
   linkGrantReadRateLimiter?: LinkReadRateLimiter;
   linkLogReadRateLimiter?: LinkReadRateLimiter;
@@ -331,6 +332,7 @@ export function createSyncRelayHandler({
   shareWebOrigin,
   relayExchangeKey,
   linkExchangeRateLimiter = new LinkExchangeRateLimiter(),
+  linkRedeemRateLimiter = new LinkReadRateLimiter(),
   linkReadRateLimiter = new LinkReadRateLimiter(),
   linkGrantReadRateLimiter = new LinkReadRateLimiter(
     LINK_GRANT_READ_BUCKET_CAPACITY,
@@ -1589,10 +1591,17 @@ export function createSyncRelayHandler({
       return refused();
     }
 
+    const admittedAtMs = nowMs();
+    if (!linkRedeemRateLimiter.allow(principalUserId, admittedAtMs)) {
+      throw linkReadRateLimited();
+    }
+    const codeHash = hashLinkHandoffCode(code, linkKey);
+    if (!storage.findLinkHandoffCodeByCodeHash(codeHash)) return refused();
+
     const result = storage.redeemLinkHandoffCode({
-      codeHash: hashLinkHandoffCode(code, linkKey),
+      codeHash,
       principalUserId,
-      redeemedAtMs: nowMs(),
+      redeemedAtMs: admittedAtMs,
       mintGrantId: newGrantId,
       guard: (storedCode) => {
         try {
@@ -1638,7 +1647,7 @@ export function createSyncRelayHandler({
       if (route.route === "link-redeem") {
         if (request.method !== "POST") throw methodNotAllowed();
         const actor = await resolveActor(request, "");
-        return respondToLinkRedeem(request, actor.userId);
+        return await respondToLinkRedeem(request, actor.userId);
       }
       if (
         route.route === "link-share" ||

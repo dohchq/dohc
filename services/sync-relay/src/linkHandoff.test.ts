@@ -90,8 +90,10 @@ type HandlerOverrides = {
   nowMs?: () => number;
   relayExchangeKey?: string;
   shareWebOrigin?: string;
+  linkRedeemRateLimiter?: LinkReadRateLimiter;
   linkReadRateLimiter?: LinkReadRateLimiter;
   linkGrantReadRateLimiter?: LinkReadRateLimiter;
+  newGrantId?: () => string;
   newLinkHandoffCode?: () => string;
 };
 
@@ -113,7 +115,7 @@ function handler(
     },
     nowMs: overrides.nowMs ?? (() => 10_000),
     newShareId: () => SHARE_ID,
-    newGrantId: () => `grant-handoff-${id++}`,
+    newGrantId: overrides.newGrantId ?? (() => `grant-handoff-${id++}`),
     newId: () => `id-handoff-${id++}`,
     resolveUserIdByEmail: () => null,
     lookupUserEmail: (userId: string) => `${userId}@example.test`,
@@ -124,6 +126,7 @@ function handler(
     relayExchangeKey: Object.hasOwn(overrides, "relayExchangeKey")
       ? overrides.relayExchangeKey
       : RELAY_EXCHANGE_KEY,
+    linkRedeemRateLimiter: overrides.linkRedeemRateLimiter,
     linkReadRateLimiter: overrides.linkReadRateLimiter,
     linkGrantReadRateLimiter: overrides.linkGrantReadRateLimiter,
     newLinkHandoffCode: overrides.newLinkHandoffCode,
@@ -245,6 +248,42 @@ async function expectGeneric(response: Response): Promise<void> {
   expect(await serialized(response)).toEqual(GENERIC_REFUSAL);
 }
 
+function countHandoffStorageCalls(storage: SyncRelayStorage): {
+  storage: SyncRelayStorage;
+  probes: string[];
+  redeems: string[];
+} {
+  const probes: string[] = [];
+  const redeems: string[] = [];
+  return {
+    storage: new Proxy(storage, {
+      get(target, property, receiver) {
+        if (property === "findLinkHandoffCodeByCodeHash") {
+          return (codeHash: string): unknown => {
+            probes.push(codeHash);
+            const find = Reflect.get(target, property, receiver) as
+              | ((codeHash: string) => unknown)
+              | undefined;
+            return find?.call(target, codeHash) ?? null;
+          };
+        }
+        if (property === "redeemLinkHandoffCode") {
+          return (input: { codeHash: string }): unknown => {
+            redeems.push(input.codeHash);
+            return target.redeemLinkHandoffCode(input as Parameters<
+              SyncRelayStorage["redeemLinkHandoffCode"]
+            >[0]);
+          };
+        }
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }),
+    probes,
+    redeems,
+  };
+}
+
 function codeCount(database: SqliteDatabase, grantId?: string): number {
   const row = grantId
     ? database
@@ -287,6 +326,54 @@ async function ownerInventory(setupState: Setup): Promise<Array<Record<string, u
 }
 
 describe("single-use authenticated link handoff", () => {
+  it("probes handoff codes without a write transaction and rechecks present rows in the transaction", async () => {
+    const state = await setup();
+    const minted = await mint(state);
+    const counted = countHandoffStorageCalls(state.storage);
+    const h = handler(state.storage, {
+      storage: counted.storage,
+      newGrantId: () => "preflight-dependent-grant",
+    });
+    const unknownCode = "u".repeat(43);
+
+    await expectGeneric(await h(redeemRequest(RECIPIENT, unknownCode)));
+    expect(counted.probes).toEqual([hashLinkHandoffCode(unknownCode)]);
+    expect(counted.redeems).toEqual([]);
+
+    expect((await h(redeemRequest(RECIPIENT, minted.code))).status).toBe(200);
+    expect(counted.probes).toEqual([
+      hashLinkHandoffCode(unknownCode),
+      hashLinkHandoffCode(String(minted.code)),
+    ]);
+    expect(counted.redeems).toEqual([hashLinkHandoffCode(String(minted.code))]);
+  });
+
+  it("rate-limits redemption per authenticated actor before handoff storage", async () => {
+    const state = await setup();
+    const codes = [await mint(state), await mint(state), await mint(state)];
+    const counted = countHandoffStorageCalls(state.storage);
+    let grantId = 0;
+    const h = handler(state.storage, {
+      storage: counted.storage,
+      linkRedeemRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
+      newGrantId: () => `admitted-dependent-grant-${grantId++}`,
+    });
+
+    expect((await h(redeemRequest(RECIPIENT, codes[0]!.code))).status).toBe(200);
+    expect(counted.redeems).toHaveLength(1);
+
+    expect(await serialized(await h(redeemRequest(RECIPIENT, codes[1]!.code)))).toEqual({
+      status: 429,
+      body: '{"ok":false,"error":"too many link reads","code":"link_read_rate_limited"}',
+    });
+    expect(counted.probes).toHaveLength(1);
+    expect(counted.redeems).toHaveLength(1);
+
+    expect((await h(redeemRequest(OTHER_ACCOUNT, codes[2]!.code))).status).toBe(200);
+    expect(counted.probes).toHaveLength(2);
+    expect(counted.redeems).toHaveLength(2);
+  });
+
   it("mints only with capability and exchange-key auth, with five-minute domain-separated state", async () => {
     const state = await setup();
     const database = inspect(state.dbPath, true);

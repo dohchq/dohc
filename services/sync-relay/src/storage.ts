@@ -404,6 +404,9 @@ export interface SyncRelayStorage {
     code: SyncRelayLinkHandoffCodeRow;
     guard: () => boolean;
   }): boolean;
+  findLinkHandoffCodeByCodeHash(
+    codeHash: string,
+  ): SyncRelayLinkHandoffCodeRow | null;
   redeemLinkHandoffCode(input: {
     codeHash: string;
     principalUserId: string;
@@ -2980,6 +2983,22 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         );
       return true;
     });
+  }
+
+  findLinkHandoffCodeByCodeHash(
+    codeHash: string,
+  ): SyncRelayLinkHandoffCodeRow | null {
+    if (!codeHash) return null;
+    const row = this.db
+      .prepare(
+        `SELECT code_id, code_hash, grant_id, generation, minted_at_ms, expires_at_ms,
+                result_grant_id
+         FROM sync_relay_link_handoff_codes
+         WHERE code_hash = ?
+         LIMIT 1`,
+      )
+      .get(codeHash);
+    return row ? rowToLinkHandoffCodeRow(row) : null;
   }
 
   redeemLinkHandoffCode(input: {
