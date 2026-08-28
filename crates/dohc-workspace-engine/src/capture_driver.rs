@@ -499,7 +499,7 @@ impl DriverStatus {
             }
         });
     }
-    fn mark_degraded(&self) {
+    pub(crate) fn mark_degraded(&self) {
         self.update(|bits| bits | STATUS_DEGRADED);
     }
     /// A failure: not running, degraded, terminal iff the streak says so —

@@ -315,8 +315,8 @@ fn differential_check_catches_a_prune_aba_that_matches_the_tuple() {
     let outcome = ts
         .store
         .write_with(&NoFaults, |tx| -> Result<(), CollabError> {
-            record_update_in_tx(tx, &key, &u1b, 1_003)?;
-            record_update_in_tx(tx, &key, &u2, 1_004)?;
+            record_update_in_tx(tx, &key, &u1b, None, 1_003)?;
+            record_update_in_tx(tx, &key, &u2, None, 1_004)?;
             Ok(())
         })
         .expect("re-append");
@@ -475,7 +475,7 @@ fn the_commit_token_observes_updates_appended_by_the_post_append_hook() {
             &NoFaults,
             1_002,
             |tx, _outcome| {
-                let appended = record_update_in_tx(tx, &key, &extra, 1_003)?;
+                let appended = record_update_in_tx(tx, &key, &extra, None, 1_003)?;
                 assert!(!appended.deduped, "the hook must append another row");
                 Ok(())
             },

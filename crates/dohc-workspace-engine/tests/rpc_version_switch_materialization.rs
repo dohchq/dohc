@@ -151,6 +151,71 @@ async fn switching_versions_rewrites_different_plaintext() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn post_commit_collection_reconcile_failure_does_not_mask_committed_switch() {
+    let (scratch, transport, handle, workspace_id) = fixture("collection-reconcile-failure").await;
+    let schema = "name: Tasks\nfields: {}\n";
+    write_text(
+        &transport,
+        &handle,
+        2,
+        "main",
+        "tasks/collection.yaml",
+        schema,
+    )
+    .await;
+    std::fs::create_dir_all(scratch.path().join("tasks")).expect("collection directory");
+    std::fs::write(scratch.path().join("tasks/collection.yaml"), schema)
+        .expect("collection schema");
+    let feature = create_feature(&transport, &handle, 3, &workspace_id).await;
+
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    connection
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .expect("sqlite busy timeout");
+    connection
+        .execute_batch(&format!(
+            "CREATE TRIGGER fail_post_switch_collection_reconcile \
+             BEFORE INSERT ON collections \
+             WHEN NEW.version_id = '{feature}' \
+             BEGIN \
+               SELECT RAISE(FAIL, 'injected post-switch collection reconcile failure'); \
+             END;"
+        ))
+        .expect("install post-switch reconcile failure");
+
+    let switched = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                4,
+                "versions.setActive",
+                Some(handle.clone()),
+                json!({ "workspaceId": workspace_id, "versionId": feature }),
+            ),
+        )
+        .await;
+    connection
+        .execute_batch("DROP TRIGGER fail_post_switch_collection_reconcile")
+        .expect("remove post-switch reconcile failure");
+
+    let active = call(
+        &transport,
+        &handle,
+        5,
+        "versions.active",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    assert_eq!(
+        active["id"], feature,
+        "the active-version transaction committed before reconciliation failed"
+    );
+    let switched = switched.expect("post-commit work must not mask the committed switch");
+    assert_eq!(switched.result["id"], feature);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ordinary_binary_write_after_switch_is_not_superseded_by_switch_timestamp() {
     let (scratch, transport, handle, workspace_id) = fixture("post-switch-write").await;
     write_text(&transport, &handle, 2, "main", "notes.md", "main").await;

@@ -1257,7 +1257,7 @@ pub(crate) fn reconcile_conflict_parent_resulting_head_in_tx(
     let complete = ensure_ydoc_lineage_complete_in_tx(tx, key)?;
     match resulting {
         ResultingHead::Text { path, text } => {
-            fold_complete_ydoc_lineage_in_tx(tx, &complete, path, text, now_ms, false)
+            fold_complete_ydoc_lineage_in_tx(tx, &complete, path, text, None, now_ms, false)
         }
         ResultingHead::BinaryOrAbsent => retire_complete_ydoc_lineage_in_tx(tx, &complete),
     }
@@ -1272,6 +1272,7 @@ pub fn reconcile_local_resulting_head_in_tx(
     version_id: &str,
     object_id: &str,
     resulting: ResultingHead<'_>,
+    actor_origin_id: Option<&str>,
     now_ms: i64,
 ) -> Result<(), SyncError> {
     let key =
@@ -1280,9 +1281,15 @@ pub fn reconcile_local_resulting_head_in_tx(
         })?;
     let complete = ensure_ydoc_lineage_complete_in_tx(tx, &key)?;
     match resulting {
-        ResultingHead::Text { path, text } => {
-            fold_complete_ydoc_lineage_in_tx(tx, &complete, path, text, now_ms, true)
-        }
+        ResultingHead::Text { path, text } => fold_complete_ydoc_lineage_in_tx(
+            tx,
+            &complete,
+            path,
+            text,
+            actor_origin_id,
+            now_ms,
+            true,
+        ),
         ResultingHead::BinaryOrAbsent => retire_complete_ydoc_lineage_in_tx(tx, &complete),
     }
 }
@@ -1397,7 +1404,7 @@ pub fn fold_resolution_into_ydoc_in_tx(
         key,
         state: complete,
     };
-    fold_complete_ydoc_lineage_in_tx(tx, &complete, path, chosen_text, now_ms, true)
+    fold_complete_ydoc_lineage_in_tx(tx, &complete, path, chosen_text, None, now_ms, true)
 }
 
 pub(crate) fn fold_complete_ydoc_lineage_in_tx(
@@ -1405,6 +1412,7 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
     complete: &CompleteYdocLineage,
     path: &str,
     chosen_text: &str,
+    actor_origin_id: Option<&str>,
     now_ms: i64,
     journal: bool,
 ) -> Result<(), SyncError> {
@@ -1476,9 +1484,13 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
             });
         }
         let outcome =
-            dohc_engine_collab::record_update_in_tx(tx, key, &update, now_ms).map_err(|error| {
-                map_collab_payload_error(error, "conflict resolution fold could not be appended")
-            })?;
+            dohc_engine_collab::record_update_in_tx(tx, key, &update, actor_origin_id, now_ms)
+                .map_err(|error| {
+                    map_collab_payload_error(
+                        error,
+                        "conflict resolution fold could not be appended",
+                    )
+                })?;
         // Journal only when this workspace actually replicates: a receiver
         // that never enrolled has no sync identity, and its choice needs no
         // peer. `emit_outbound` alone cannot gate this — a claimed lineage

@@ -3581,7 +3581,8 @@ impl EngineService {
                         )
                         .await
                         .map_err(map_runtime)?;
-                    open.actor
+                    if let Err(error) = open
+                        .actor
                         .reconcile_collections(
                             open.workspace_id.clone(),
                             version.version_id.clone(),
@@ -3593,7 +3594,15 @@ impl EngineService {
                             token,
                         )
                         .await
-                        .map_err(map_runtime)?;
+                    {
+                        // The switch is durable. The capture driver already retries
+                        // collection reconciliation on its next pass.
+                        capture_status.mark_degraded();
+                        eprintln!(
+                            "engine: version switch committed but collection reconciliation \
+                             failed; capture will retry: {error}"
+                        );
+                    }
                     version
                 }
             };

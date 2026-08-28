@@ -1137,7 +1137,9 @@ fn open_no_follow(absolute: &Path) -> NoFollowOpen {
 mod tests {
     use super::*;
     use dohc_engine_domain::{
-        SecretDiskIntent, SecretFileStore, SecretWrite, VersionedTextStore, is_record_id,
+        CollectionQuery, CollectionQueryResult, CollectionRecordDetails, SecretDiskIntent,
+        SecretFileStore, SecretWrite, VersionedTextStore, get_collection_record, is_record_id,
+        query_collection_records,
     };
     use dohc_engine_files::{CaptureOp, ReconcilePlan, ScanGeneration, apply_reconcile_plan};
     use dohc_engine_runtime::WorkspaceSupervisor;
@@ -1277,6 +1279,34 @@ mod tests {
         let record_id = record_id.expect("adopted record id");
         assert!(is_record_id(&record_id), "WP1 record id format");
         record_id
+    }
+
+    fn query_collection(db: &Path, path: &str, resolve_relations: bool) -> CollectionQueryResult {
+        let store = EngineStore::open(db, 100).expect("reopen store");
+        store
+            .read_with(|conn| {
+                query_collection_records(
+                    conn,
+                    WORKSPACE_ID,
+                    path,
+                    &CollectionQuery {
+                        resolve_relations,
+                        ..CollectionQuery::default()
+                    },
+                )
+            })
+            .expect("query collection")
+            .expect("collection exists")
+    }
+
+    fn get_record(db: &Path, collection_path: &str, record_id: &str) -> CollectionRecordDetails {
+        let store = EngineStore::open(db, 100).expect("reopen store");
+        store
+            .read_with(|conn| {
+                get_collection_record(conn, WORKSPACE_ID, collection_path, record_id, 100)
+            })
+            .expect("get collection record")
+            .expect("record exists")
     }
 
     fn collection_status(db: &Path, path: &str) -> Option<(String, String)> {
@@ -1476,6 +1506,121 @@ mod tests {
     }
 
     #[test]
+    fn collection_adoption_seeds_typed_frontmatter_and_multi_relation_edges() {
+        const FIRST_TARGET_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const SECOND_TARGET_ID: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        write_file(
+            scratch.path(),
+            "tasks/collection.yaml",
+            b"name: Tasks\nfields:\n  estimate:\n    type: number\n  done:\n    type: checkbox\n  related:\n    type: relation\n    collection: tasks\n    many: true\n",
+        );
+        write_file(
+            scratch.path(),
+            "tasks/alpha.md",
+            format!(
+                "---\nestimate: 3\ndone: true\nrelated: [{FIRST_TARGET_ID}, {SECOND_TARGET_ID}]\n---\n\nAlpha\n"
+            )
+            .as_bytes(),
+        );
+        write_file(
+            scratch.path(),
+            "tasks/first.md",
+            format!("---\nid: {FIRST_TARGET_ID}\n---\n\nFirst\n").as_bytes(),
+        );
+        write_file(
+            scratch.path(),
+            "tasks/second.md",
+            format!("---\nid: {SECOND_TARGET_ID}\n---\n\nSecond\n").as_bytes(),
+        );
+        for path in [
+            "tasks/collection.yaml",
+            "tasks/alpha.md",
+            "tasks/first.md",
+            "tasks/second.md",
+        ] {
+            ingest(&mut sink, path).unwrap_or_else(|_| panic!("capture {path}"));
+        }
+
+        sink.reconcile_collections().expect("adopt typed record");
+        assert_eq!(
+            indexed_collection_field(&db, "tasks/alpha.md", "estimate"),
+            Some(("3".to_owned(), "valid".to_owned(), None))
+        );
+        assert_eq!(
+            indexed_collection_field(&db, "tasks/alpha.md", "done"),
+            Some(("true".to_owned(), "valid".to_owned(), None))
+        );
+        assert_eq!(
+            indexed_collection_field(&db, "tasks/alpha.md", "related"),
+            Some((
+                format!("[\"{FIRST_TARGET_ID}\",\"{SECOND_TARGET_ID}\"]"),
+                "valid".to_owned(),
+                None,
+            ))
+        );
+        for target in [FIRST_TARGET_ID, SECOND_TARGET_ID] {
+            assert_eq!(
+                relation_edge_count(&db, "tasks/alpha.md", "related", target),
+                1,
+                "adoption must preserve the edge to {target}"
+            );
+        }
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+    }
+
+    #[test]
+    fn imported_collection_record_with_an_existing_id_tracks_later_capture_edits() {
+        const RECORD_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        write_file(
+            scratch.path(),
+            "tasks/collection.yaml",
+            b"name: Tasks\nfields:\n  status:\n    type: text\n",
+        );
+        write_file(
+            scratch.path(),
+            "tasks/imported.md",
+            format!("---\nid: {RECORD_ID}\nstatus: todo\n---\n\nImported").as_bytes(),
+        );
+        ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
+        ingest(&mut sink, "tasks/imported.md").expect("capture imported record");
+        sink.reconcile_collections().expect("adopt imported record");
+        assert_eq!(adopted_record_id(&db, "tasks/imported.md"), RECORD_ID);
+
+        let adopted = std::fs::read_to_string(scratch.path().join("tasks/imported.md"))
+            .expect("read adopted record");
+        let edited = adopted.replace("status: todo", "status: done");
+        assert_ne!(edited, adopted, "the fixture must edit the status field");
+        write_file(scratch.path(), "tasks/imported.md", edited.as_bytes());
+        ingest(&mut sink, "tasks/imported.md").expect("capture imported record edit");
+        sink.reconcile_collections()
+            .expect("reconcile imported record edit");
+
+        let queried = query_collection(&db, "tasks", false);
+        let record = queried
+            .records
+            .iter()
+            .find(|record| record.id == RECORD_ID)
+            .expect("imported record in collection query");
+        let status = record
+            .values
+            .iter()
+            .find(|value| value.field == "status")
+            .expect("edited status in collection query");
+        assert_eq!(status.value, serde_json::Value::String("done".to_owned()));
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+    }
+
+    #[test]
     fn invalid_collection_value_roundtrips_and_schema_edit_only_revalidates() {
         const RECORD_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
         let scratch = ScratchDir::new().expect("scratch");
@@ -1639,6 +1784,127 @@ mod tests {
         let copy_text = std::fs::read_to_string(scratch.path().join("tasks/copy.md"))
             .expect("read copied record");
         assert!(copy_text.contains(&copy_id));
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+    }
+
+    #[test]
+    fn re_adopting_the_same_file_without_an_id_preserves_identity_history_and_relations() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        write_file(
+            scratch.path(),
+            "tasks/collection.yaml",
+            b"name: Tasks\nfields:\n  title:\n    type: text\n  related:\n    type: relation\n    collection: tasks\n    many: false\n",
+        );
+        write_file(scratch.path(), "tasks/source.md", b"Source\n");
+        write_file(scratch.path(), "tasks/target.md", b"Target\n");
+        for path in [
+            "tasks/collection.yaml",
+            "tasks/source.md",
+            "tasks/target.md",
+        ] {
+            ingest(&mut sink, path).unwrap_or_else(|_| panic!("capture {path}"));
+        }
+        sink.reconcile_collections().expect("adopt records");
+        let source_id = adopted_record_id(&db, "tasks/source.md");
+        let target_id = adopted_record_id(&db, "tasks/target.md");
+
+        let adopted_source = std::fs::read_to_string(scratch.path().join("tasks/source.md"))
+            .expect("read adopted source");
+        let edited_source = adopted_source.replace(
+            &format!("id: {source_id}\n---"),
+            &format!("id: {source_id}\nrelated: {target_id}\n---"),
+        );
+        assert_ne!(
+            edited_source, adopted_source,
+            "the fixture must add the inbound relation"
+        );
+        write_file(scratch.path(), "tasks/source.md", edited_source.as_bytes());
+        let adopted_target = std::fs::read_to_string(scratch.path().join("tasks/target.md"))
+            .expect("read adopted target");
+        let edited_target = adopted_target.replace(
+            &format!("id: {target_id}\n---"),
+            &format!("id: {target_id}\ntitle: Edited\n---"),
+        );
+        assert_ne!(
+            edited_target, adopted_target,
+            "the fixture must edit the target title"
+        );
+        write_file(scratch.path(), "tasks/target.md", edited_target.as_bytes());
+        ingest(&mut sink, "tasks/source.md").expect("capture inbound relation");
+        ingest(&mut sink, "tasks/target.md").expect("capture target edit");
+        assert!(
+            get_record(&db, "tasks", &target_id)
+                .history
+                .iter()
+                .any(|entry| entry.field == "title"),
+            "the fixture must create target history before re-adoption"
+        );
+        let related_before = query_collection(&db, "tasks", true)
+            .records
+            .into_iter()
+            .find(|record| record.id == source_id)
+            .expect("source before re-adoption")
+            .values
+            .into_iter()
+            .find(|value| value.field == "related")
+            .expect("inbound relation before re-adoption");
+        assert_eq!(
+            related_before.resolved_relations[0].record_id, target_id,
+            "the fixture must create an inbound relation edge"
+        );
+
+        let target_with_id = std::fs::read_to_string(scratch.path().join("tasks/target.md"))
+            .expect("read target before stripping id");
+        let stripped_target = target_with_id.replace(&format!("id: {target_id}\n"), "");
+        assert_ne!(
+            stripped_target, target_with_id,
+            "the fixture must strip the target id"
+        );
+        write_file(
+            scratch.path(),
+            "tasks/target.md",
+            stripped_target.as_bytes(),
+        );
+        ingest(&mut sink, "tasks/target.md").expect("capture stripped record id");
+        sink.reconcile_collections()
+            .expect("re-adopt record after id removal");
+
+        assert_eq!(
+            adopted_record_id(&db, "tasks/target.md"),
+            target_id,
+            "the same file object keeps its bound record id"
+        );
+        let repaired_target = std::fs::read_to_string(scratch.path().join("tasks/target.md"))
+            .expect("read re-adopted target");
+        assert!(
+            repaired_target.contains(&format!("id: {target_id}\n")),
+            "re-adoption must restore the bound id to the artifact"
+        );
+        assert!(
+            get_record(&db, "tasks", &target_id)
+                .history
+                .iter()
+                .any(|entry| entry.field == "title"),
+            "the original record history stays addressable"
+        );
+        let related_after = query_collection(&db, "tasks", true)
+            .records
+            .into_iter()
+            .find(|record| record.id == source_id)
+            .expect("source after re-adoption")
+            .values
+            .into_iter()
+            .find(|value| value.field == "related")
+            .expect("inbound relation after re-adoption");
+        assert_eq!(
+            related_after.value,
+            serde_json::Value::String(target_id.clone())
+        );
+        assert_eq!(related_after.resolved_relations[0].record_id, target_id);
 
         drop(sink);
         supervisor.close(&db).expect("close actor");

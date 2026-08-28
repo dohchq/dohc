@@ -501,6 +501,7 @@ fn record_local_update_with_origin_cached(
             &marker,
             update,
             &sha,
+            true,
             actor_origin_id,
             now_ms,
             cache,
@@ -823,12 +824,19 @@ where
             }
         };
         {
+            // Collection reconciliation already indexed the captured artifact.
+            // Its declared first seed establishes the lineage without inventing
+            // an absent-to-value field edit; later appends use the normal hook.
+            let index_frontmatter = seed_source_sha256.is_none()
+                || marker.head_update_seq > 0
+                || marker.head_snapshot_seq > 0;
             let outcome = append_local_update_cached(
                 tx,
                 key,
                 &marker,
                 update,
                 &update_sha,
+                index_frontmatter,
                 actor_origin_id,
                 now_ms,
                 cache,
@@ -897,22 +905,25 @@ pub(crate) fn append_and_index_update(
     base: &Ydoc,
     update: &[u8],
     sha: &str,
+    index_frontmatter: bool,
     actor_origin_id: Option<&str>,
     now_ms: i64,
 ) -> Result<(Ydoc, i64), CollabError> {
     let projection = crate::validate_replay_parity_with_scratch(base, update)?;
     put_binary_blob_with_sha(conn, update, sha)?;
     let seq = append_row(conn, key, sha, actor_origin_id, now_ms)?;
-    index_applied_frontmatter(
-        conn,
-        key,
-        content_kind,
-        base,
-        &projection,
-        update,
-        actor_origin_id,
-        now_ms,
-    )?;
+    if index_frontmatter {
+        index_applied_frontmatter(
+            conn,
+            key,
+            content_kind,
+            base,
+            &projection,
+            update,
+            actor_origin_id,
+            now_ms,
+        )?;
+    }
     Ok((projection, seq))
 }
 
@@ -941,6 +952,7 @@ fn append_local_update(
         &base,
         update,
         sha,
+        true,
         actor_origin_id,
         now_ms,
     )?;
@@ -965,6 +977,7 @@ fn append_local_update_cached(
     marker: &Marker,
     update: &[u8],
     sha: &str,
+    index_frontmatter: bool,
     actor_origin_id: Option<&str>,
     now_ms: i64,
     cache: &WriterDocCache,
@@ -988,6 +1001,7 @@ fn append_local_update_cached(
                 base,
                 update,
                 sha,
+                index_frontmatter,
                 actor_origin_id,
                 now_ms,
             )?;
@@ -1006,6 +1020,7 @@ fn append_local_update_cached(
                 &base,
                 update,
                 sha,
+                index_frontmatter,
                 actor_origin_id,
                 now_ms,
             )?;
@@ -2125,12 +2140,13 @@ pub fn record_update_in_tx(
     tx: &Transaction<'_>,
     key: &DocKey,
     update: &[u8],
+    actor_origin_id: Option<&str>,
     now_ms: i64,
 ) -> Result<AppendOutcome, CollabError> {
     validate_update_bytes(update)?;
     let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
     let sha = crate::hex_sha256(update);
-    append_local_update(tx, key, &marker, update, &sha, None, now_ms)
+    append_local_update(tx, key, &marker, update, &sha, actor_origin_id, now_ms)
 }
 
 /// Append only if the active claim matches the lineage an open session bound
@@ -2699,7 +2715,7 @@ pub(crate) fn seed_only_lineage_source(
 
 /// Store-level [`seed_only_lineage_source`].
 pub fn read_seed_only_lineage_source(
-    store: &mut EngineStore,
+    store: &EngineStore,
     key: &DocKey,
 ) -> Result<Option<String>, CollabError> {
     store.read_with(|conn| seed_only_lineage_source(conn, key))

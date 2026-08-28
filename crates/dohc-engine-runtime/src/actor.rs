@@ -9812,7 +9812,11 @@ fn ydoc_version_unsettled_content_kind_on_store(
             .map_err(StorageError::corrupt_public)
             .map(Option::flatten)
         })?;
-        if materialized_sha.as_deref() != Some(projected_sha.as_str()) {
+        let seed_source = dohc_engine_collab::read_seed_only_lineage_source(store, &key)?;
+        let covered_by_seed = seed_source
+            .as_deref()
+            .is_some_and(|source| materialized_sha.as_deref() == Some(source));
+        if materialized_sha.as_deref() != Some(projected_sha.as_str()) && !covered_by_seed {
             return Ok(Some(content_kind));
         }
     }
@@ -11484,6 +11488,7 @@ fn versioned_text_write_on_store(
                     path: &result.snapshot.path,
                     text: &result.snapshot.text,
                 },
+                None,
                 input.now_ms,
             )?;
         }
@@ -11543,6 +11548,7 @@ fn versioned_binary_write_on_store(
                 &input.version_id,
                 &result.object_id,
                 dohc_engine_sync::ResultingHead::BinaryOrAbsent,
+                None,
                 input.now_ms,
             )?;
             delete_file_search_index(
@@ -11838,6 +11844,7 @@ fn versioned_text_rename_on_store(
                     &input.version_id,
                     &result.object.object_id,
                     resulting,
+                    None,
                     input.now_ms,
                 )
                 .map_err(map_fold_error)?;
@@ -12338,6 +12345,7 @@ fn versioned_text_rollback_on_store(
                 &input.version_id,
                 object_id,
                 resulting,
+                None,
                 recorded_at_ms,
             )
             .map_err(map_fold_error)?;
@@ -12967,6 +12975,7 @@ fn versioned_text_merge_on_store(
                                 path: &write.snapshot.path,
                                 text: &write.snapshot.text,
                             },
+                            None,
                             input.now_ms,
                         )
                         .map_err(map_fold_error)?;
@@ -12997,6 +13006,7 @@ fn versioned_text_merge_on_store(
                             &input.target_version_id,
                             &delete.object.object_id,
                             dohc_engine_sync::ResultingHead::BinaryOrAbsent,
+                            None,
                             input.now_ms,
                         )
                         .map_err(map_fold_error)?;
@@ -13014,6 +13024,7 @@ fn versioned_text_merge_on_store(
                             &input.target_version_id,
                             &write.object.object_id,
                             dohc_engine_sync::ResultingHead::BinaryOrAbsent,
+                            None,
                             input.now_ms,
                         )
                         .map_err(map_fold_error)?;
@@ -13154,6 +13165,10 @@ fn adoption_conflict(error: &RuntimeError) -> bool {
     )
 }
 
+struct CollectionAdoptionExecution {
+    changed_path: Option<String>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn adopt_collection_record_on_store(
     store: &mut EngineStore,
@@ -13167,7 +13182,7 @@ fn adopt_collection_record_on_store(
     now_ms: i64,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
-) -> Result<Option<String>, RuntimeError> {
+) -> Result<Option<CollectionAdoptionExecution>, RuntimeError> {
     let probe = ydoc_open_state_on_store(
         store,
         doc_cache,
@@ -13214,25 +13229,36 @@ fn adopt_collection_record_on_store(
 
     let doc = Ydoc::wire();
     doc.apply(&state.initial_update)?;
-    let append = if state.lineage_existing {
-        let update = doc.frontmatter_set(RECORD_ID_FRONTMATTER_KEY, &candidate.record_id);
-        ydoc_record_update_on_store(
-            store,
-            doc_cache,
-            &state.key,
-            &candidate.file_path,
-            ContentKind::Richdoc,
-            state.regime,
-            &update,
-            Some("engine".to_owned()),
-            state.lineage_claim_id,
-            false,
-            None,
-            None,
-            now_ms,
-            faults,
-            token,
-        )?
+    let (lineage_claim_id, should_settle) = if state.lineage_existing {
+        let id_already_present = doc
+            .frontmatter_json()
+            .get(RECORD_ID_FRONTMATTER_KEY)
+            .and_then(serde_json::Value::as_str)
+            == Some(candidate.record_id.as_str());
+        let lineage_claim_id = if id_already_present {
+            state.lineage_claim_id.clone()
+        } else {
+            let update = doc.frontmatter_set(RECORD_ID_FRONTMATTER_KEY, &candidate.record_id);
+            ydoc_record_update_on_store(
+                store,
+                doc_cache,
+                &state.key,
+                &candidate.file_path,
+                ContentKind::Richdoc,
+                state.regime,
+                &update,
+                Some("engine".to_owned()),
+                state.lineage_claim_id,
+                false,
+                None,
+                None,
+                now_ms,
+                faults,
+                token,
+            )?
+            .lineage_claim_id
+        };
+        (lineage_claim_id, true)
     } else {
         let seed = state
             .seed_content
@@ -13241,6 +13267,11 @@ fn adopt_collection_record_on_store(
                 reason: "collection record adoption has no Markdown artifact seed",
             })?;
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, seed)?;
+        let id_already_present = doc
+            .frontmatter_json()
+            .get(RECORD_ID_FRONTMATTER_KEY)
+            .and_then(serde_json::Value::as_str)
+            == Some(candidate.record_id.as_str());
         let seed_update = doc.encode_full_state();
         let seed_append = ydoc_record_update_on_store(
             store,
@@ -13259,41 +13290,54 @@ fn adopt_collection_record_on_store(
             faults,
             token,
         )?;
-        let id_update = doc.frontmatter_set(RECORD_ID_FRONTMATTER_KEY, &candidate.record_id);
-        ydoc_record_update_on_store(
-            store,
-            doc_cache,
-            &state.key,
-            &candidate.file_path,
-            ContentKind::Richdoc,
-            state.regime,
-            &id_update,
-            Some("engine".to_owned()),
-            seed_append.lineage_claim_id,
-            false,
-            None,
-            None,
-            now_ms,
-            faults,
-            token,
-        )?
+        let lineage_claim_id = if id_already_present {
+            seed_append.lineage_claim_id
+        } else {
+            let id_update = doc.frontmatter_set(RECORD_ID_FRONTMATTER_KEY, &candidate.record_id);
+            ydoc_record_update_on_store(
+                store,
+                doc_cache,
+                &state.key,
+                &candidate.file_path,
+                ContentKind::Richdoc,
+                state.regime,
+                &id_update,
+                Some("engine".to_owned()),
+                seed_append.lineage_claim_id,
+                false,
+                None,
+                None,
+                now_ms,
+                faults,
+                token,
+            )?
+            .lineage_claim_id
+        };
+        (lineage_claim_id, !id_already_present)
     };
-    let settlement = ydoc_settle_on_store(
-        store,
-        doc_cache,
-        root_dir,
-        &state.key,
-        &candidate.file_path,
-        ContentKind::Richdoc,
-        append.lineage_claim_id.as_deref(),
-        state.head_blob_sha256,
-        &format!("collection-adoption:{}", candidate.record_id),
-        self_writes,
-        now_ms,
-        faults,
-        token,
-    )?;
-    Ok(Some(settlement.path))
+    let changed_path = if should_settle {
+        Some(
+            ydoc_settle_on_store(
+                store,
+                doc_cache,
+                root_dir,
+                &state.key,
+                &candidate.file_path,
+                ContentKind::Richdoc,
+                lineage_claim_id.as_deref(),
+                state.head_blob_sha256,
+                &format!("collection-adoption:{}", candidate.record_id),
+                self_writes,
+                now_ms,
+                faults,
+                token,
+            )?
+            .path,
+        )
+    } else {
+        None
+    };
+    Ok(Some(CollectionAdoptionExecution { changed_path }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -13483,7 +13527,7 @@ fn reconcile_collections_on_store(
             faults,
             token,
         ) {
-            Ok(Some(path)) => {
+            Ok(Some(execution)) => {
                 persist_collection_adoption_state(
                     store,
                     &candidate,
@@ -13492,7 +13536,9 @@ fn reconcile_collections_on_store(
                     "adopted",
                     faults,
                 )?;
-                if !changed_paths.contains(&path) {
+                if let Some(path) = execution.changed_path
+                    && !changed_paths.contains(&path)
+                {
                     changed_paths.push(path);
                 }
             }
@@ -13540,6 +13586,29 @@ fn reconcile_collections_on_store(
     Ok(changed_paths)
 }
 
+fn capture_agent_origin_id(author_json: Option<&str>) -> Option<String> {
+    let author = serde_json::from_str::<serde_json::Value>(author_json?).ok()?;
+    let object = author.as_object()?;
+    if object.get("kind").and_then(serde_json::Value::as_str) != Some("agent") {
+        return None;
+    }
+    let agent_id = object
+        .get("agentId")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())?;
+    object
+        .get("onBehalfOf")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())?;
+    if object
+        .get("agentRunId")
+        .is_some_and(|value| value.as_str().is_none_or(str::is_empty))
+    {
+        return None;
+    }
+    Some(agent_id.to_owned())
+}
+
 fn capture_ingest_on_store(
     store: &mut EngineStore,
     input: &CaptureIngest,
@@ -13561,6 +13630,7 @@ fn capture_ingest_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
+    let actor_origin_id = capture_agent_origin_id(input.author_json.as_deref());
     let outcome = store.write_with(faults, |tx| {
         let mut admitted = false;
         let result = capture_ingest_with_admission_in_tx(
@@ -13582,6 +13652,7 @@ fn capture_ingest_on_store(
                     path: &result.snapshot.path,
                     text: &result.snapshot.text,
                 },
+                actor_origin_id.as_deref(),
                 input.now_ms,
             )?;
         }
@@ -13652,6 +13723,7 @@ fn capture_ingest_binary_on_store(
                 &input.version_id,
                 &result.object_id,
                 dohc_engine_sync::ResultingHead::BinaryOrAbsent,
+                None,
                 input.now_ms,
             )?;
         }

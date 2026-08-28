@@ -209,6 +209,7 @@ pub fn apply_remote_update_in_transaction(
         &base,
         &remote.bytes,
         &sha,
+        true,
         origin.actor_id(),
         now_ms,
     )?;
@@ -263,6 +264,7 @@ pub fn apply_remote_update_in_transaction_with_projection(
         &base,
         &remote.bytes,
         &sha,
+        true,
         origin.actor_id(),
         now_ms,
     )?;
@@ -326,6 +328,7 @@ pub fn apply_remote_update_in_transaction_cached_with_projection(
                 base,
                 &remote.bytes,
                 &sha,
+                true,
                 origin.actor_id(),
                 now_ms,
             )?;
@@ -340,6 +343,7 @@ pub fn apply_remote_update_in_transaction_cached_with_projection(
                 &base,
                 &remote.bytes,
                 &sha,
+                true,
                 origin.actor_id(),
                 now_ms,
             )?;

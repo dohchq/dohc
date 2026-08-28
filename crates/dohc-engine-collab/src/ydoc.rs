@@ -790,18 +790,7 @@ impl Ydoc {
                         map.remove(txn, &key);
                     }
                     for (key, value) in &frontmatter {
-                        match value {
-                            MdFrontmatter::Scalar(value) => {
-                                map.insert(txn, key.as_str(), value.as_str());
-                            }
-                            MdFrontmatter::Map(children) => {
-                                let nested: std::collections::HashMap<String, Any> = children
-                                    .iter()
-                                    .map(|(k, v)| (k.clone(), Any::from(v.as_str())))
-                                    .collect();
-                                map.insert(txn, key.as_str(), Any::from(nested));
-                            }
-                        }
+                        map.insert(txn, key.as_str(), json_to_any(value));
                     }
                     let len = frag.len(txn);
                     if len > 0 {
@@ -923,23 +912,15 @@ enum MdBlock {
     Rule,
 }
 
-/// Split a leading `---` frontmatter block of flat `key: value` scalars off
-/// the chosen markdown. Only the exact shape the projector emits is claimed;
-/// anything else stays in the body and parses as blocks.
-/// A parsed frontmatter entry: the scalar and one-level-map shapes the
-/// projector itself emits (`scalar_line`). Anything else bails to the body
-/// parser rather than guessing at YAML.
-enum MdFrontmatter {
-    Scalar(String),
-    Map(Vec<(String, String)>),
-}
-
-fn split_markdown_frontmatter(markdown: &str) -> (Vec<(String, MdFrontmatter)>, &str) {
+/// Split a leading `---` YAML frontmatter block off the chosen markdown.
+/// Values use the collection indexer's YAML parser so a richdoc seed and its
+/// index agree on scalar, sequence, and mapping types.
+fn split_markdown_frontmatter(markdown: &str) -> (serde_json::Map<String, Value>, &str) {
     let Some(rest) = markdown.strip_prefix("---\n") else {
-        return (Vec::new(), markdown);
+        return (serde_json::Map::new(), markdown);
     };
     let Some(end) = rest.find("\n---") else {
-        return (Vec::new(), markdown);
+        return (serde_json::Map::new(), markdown);
     };
     let after = &rest[end + "\n---".len()..];
     let body = after
@@ -947,55 +928,12 @@ fn split_markdown_frontmatter(markdown: &str) -> (Vec<(String, MdFrontmatter)>, 
         .or_else(|| after.strip_prefix('\n'))
         .unwrap_or(after);
     if !after.is_empty() && !after.starts_with('\n') {
-        return (Vec::new(), markdown);
+        return (serde_json::Map::new(), markdown);
     }
-    let lines: Vec<&str> = rest[..end].lines().collect();
-    let mut entries: Vec<(String, MdFrontmatter)> = Vec::new();
-    let mut index = 0usize;
-    while index < lines.len() {
-        let line = lines[index];
-        if line.starts_with(' ') || line.trim().is_empty() {
-            return (Vec::new(), markdown);
-        }
-        if let Some((key, value)) = line.split_once(": ") {
-            if key.trim().is_empty() {
-                return (Vec::new(), markdown);
-            }
-            entries.push((key.to_string(), MdFrontmatter::Scalar(value.to_string())));
-            index += 1;
-            continue;
-        }
-        // `key:` alone opens the projector's one-level nested map: two-space
-        // indented `child: value` scalars, sorted on projection.
-        let Some(key) = line.strip_suffix(':') else {
-            return (Vec::new(), markdown);
-        };
-        if key.trim().is_empty() || key.contains(':') {
-            return (Vec::new(), markdown);
-        }
-        index += 1;
-        let mut children = Vec::new();
-        while index < lines.len() {
-            let Some(child) = lines[index].strip_prefix("  ") else {
-                break;
-            };
-            // Deeper nesting than the projector emits: bail to the body
-            // parser rather than mangling metadata.
-            if child.starts_with(' ') {
-                return (Vec::new(), markdown);
-            }
-            let Some((child_key, child_value)) = child.split_once(": ") else {
-                return (Vec::new(), markdown);
-            };
-            if child_key.trim().is_empty() {
-                return (Vec::new(), markdown);
-            }
-            children.push((child_key.to_string(), child_value.to_string()));
-            index += 1;
-        }
-        entries.push((key.to_string(), MdFrontmatter::Map(children)));
+    match dohc_engine_domain::collections::markdown_frontmatter_json(markdown) {
+        Some(Value::Object(frontmatter)) => (frontmatter, body),
+        _ => (serde_json::Map::new(), markdown),
     }
-    (entries, body)
 }
 
 fn parse_markdown_blocks(body: &str) -> Vec<MdBlock> {
@@ -1899,38 +1837,59 @@ fn project_frontmatter(key: &str, value: &Value) -> ProjectionResult<String> {
 
 fn scalar_line(key: &str, value: &Value) -> ProjectionResult<String> {
     let mut output = ProjectionBuffer::new();
+    write_yaml_mapping_entry(&mut output, key, value, 0)?;
+    Ok(output.into_string())
+}
+
+fn write_yaml_mapping_entry(
+    output: &mut ProjectionBuffer,
+    key: &str,
+    value: &Value,
+    indent: usize,
+) -> ProjectionResult<()> {
+    output.push_repeat(' ', indent)?;
+    let key = yaml_string_if_plain(key)?;
+    output.push_str(&key)?;
     match value {
         Value::String(value) => {
-            output.push_str(key)?;
             output.push_str(": ")?;
-            output.push_str(value)?;
+            let value = yaml_string_if_plain(value)?;
+            output.push_str(&value)?;
             output.push('\n')?;
         }
         Value::Object(map) => {
-            // Nested map: emit sorted `key:` block (constraint 2 — keys already
-            // sorted by `any_to_json`'s BTreeMap).
-            output.push_str(key)?;
             output.push_str(":\n")?;
             for (k, v) in map {
-                let child = scalar_line(k, v)?;
-                output.push_str("  ")?;
-                output.push_str(child.trim_end())?;
-                output.push('\n')?;
+                write_yaml_mapping_entry(output, k, v, indent + 2)?;
             }
         }
         Value::Null => {
-            output.push_str(key)?;
             output.push_str(": null\n")?;
         }
         other => {
-            output.push_str(key)?;
             output.push_str(": ")?;
             let value = ensure_projection_string(serde_json::to_string(other).unwrap_or_default())?;
             output.push_str(&value)?;
             output.push('\n')?;
         }
     }
-    Ok(output.into_string())
+    Ok(())
+}
+
+fn yaml_string_if_plain(value: &str) -> ProjectionResult<String> {
+    let candidate = format!("---\nvalue: {value}\n---\n");
+    let remains_the_same_string =
+        match dohc_engine_domain::collections::markdown_frontmatter_json(&candidate) {
+            Some(Value::Object(frontmatter)) if frontmatter.len() == 1 => {
+                frontmatter.get("value").and_then(Value::as_str) == Some(value)
+            }
+            _ => false,
+        };
+    if remains_the_same_string {
+        ensure_projection_string(value.to_owned())
+    } else {
+        ensure_projection_string(serde_json::to_string(value).unwrap_or_default())
+    }
 }
 
 #[derive(Debug)]
@@ -4875,6 +4834,19 @@ fn main() {}
             frontmatter.contains("owner") && frontmatter.contains("ice"),
             "the nested map is real metadata, not body text: {frontmatter}"
         );
+    }
+
+    #[test]
+    fn richdoc_projection_quotes_strings_that_yaml_would_retype_or_reject() {
+        let doc = Ydoc::wire();
+        let chosen = "---\ndone: \"true\"\nsummary: \"TODO: call Bob\"\n---\n\nbody text";
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
+            .expect("richdoc rewrite");
+
+        let projected = doc.project(ContentKind::Richdoc).expect("projection");
+        assert_eq!(projected.content, chosen);
+        assert_eq!(doc.frontmatter_json()["done"], json!("true"));
+        assert_eq!(doc.frontmatter_json()["summary"], json!("TODO: call Bob"));
     }
 
     #[test]

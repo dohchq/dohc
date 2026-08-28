@@ -245,6 +245,7 @@ struct CollectionSnapshot {
 struct ExistingRecordBinding {
     record_id: Option<String>,
     file_path: String,
+    object_id: String,
     adoption_state: String,
     index_initialized: bool,
 }
@@ -1080,7 +1081,7 @@ fn yaml_to_json(value: &YamlOwned) -> Value {
     }
 }
 
-fn markdown_frontmatter_json(markdown: &str) -> Option<Value> {
+pub fn markdown_frontmatter_json(markdown: &str) -> Option<Value> {
     let mut lines = markdown.split_inclusive('\n');
     let first = lines.next()?;
     if first.trim_end_matches(['\r', '\n']) != "---" {
@@ -1561,7 +1562,7 @@ fn load_record_bindings(
 ) -> Result<Vec<ExistingRecordBinding>, crate::DomainError> {
     let mut statement = conn
         .prepare(
-            "SELECT record_id, file_path, adoption_state, index_initialized \
+            "SELECT record_id, file_path, object_id, adoption_state, index_initialized \
              FROM collection_records WHERE workspace_id = ?1 AND version_id = ?2 \
              ORDER BY file_path",
         )
@@ -1571,8 +1572,9 @@ fn load_record_bindings(
             Ok(ExistingRecordBinding {
                 record_id: row.get(0)?,
                 file_path: row.get(1)?,
-                adoption_state: row.get(2)?,
-                index_initialized: row.get(3)?,
+                object_id: row.get(2)?,
+                adoption_state: row.get(3)?,
+                index_initialized: row.get(4)?,
             })
         })
         .map_err(crate::DomainError::sql_corrupt)?
@@ -1634,6 +1636,10 @@ pub fn reconcile_collections_in_tx(
         })
         .collect();
     let current_paths: HashSet<&str> = records.iter().map(|record| record.path.as_str()).collect();
+    let current_objects: HashMap<&str, &str> = records
+        .iter()
+        .map(|record| (record.path.as_str(), record.object_id.as_str()))
+        .collect();
     let current_ids: HashMap<&str, String> = records
         .iter()
         .filter_map(|record| {
@@ -1664,7 +1670,7 @@ pub fn reconcile_collections_in_tx(
             continue;
         };
         used_ids.insert(record_id.clone());
-        if current_ids.get(binding.file_path.as_str()) == Some(record_id) {
+        if current_objects.get(binding.file_path.as_str()) == Some(&binding.object_id.as_str()) {
             current_owners.insert(record_id.clone(), binding);
         } else if !current_paths.contains(binding.file_path.as_str())
             && binding.adoption_state == "adopted"
@@ -1680,6 +1686,8 @@ pub fn reconcile_collections_in_tx(
         let collection_path = parent_path(&record.path).to_owned();
         let parsed_id = current_ids.get(record.path.as_str()).cloned();
         let existing_at_path = existing_by_path.get(record.path.as_str()).copied();
+        let existing_same_object =
+            existing_at_path.filter(|binding| binding.object_id == record.object_id);
         let conflicted = has_open_file_conflict(
             tx,
             workspace_id,
@@ -1739,27 +1747,33 @@ pub fn reconcile_collections_in_tx(
             } else {
                 used_ids.insert(record_id.clone());
                 claimed_ids.insert(record_id.clone(), record.path.clone());
+                let needs_adoption =
+                    existing_at_path.is_none_or(|binding| binding.adoption_state != "adopted");
                 let index_initialized = existing_at_path
                     .or_else(|| existing_by_record_id.get(record_id.as_str()).copied())
                     .is_some_and(|binding| binding.index_initialized);
                 desired.push(DesiredRecordBinding {
-                    record_id: Some(record_id),
-                    collection_path,
+                    record_id: Some(record_id.clone()),
+                    collection_path: collection_path.clone(),
                     file_path: record.path.clone(),
                     object_id: record.object_id.clone(),
-                    adoption_state: "adopted",
+                    adoption_state: if needs_adoption { "pending" } else { "adopted" },
                     index_initialized,
                 });
+                if needs_adoption {
+                    adoptions.push(CollectionAdoptionCandidate {
+                        record_id,
+                        collection_path,
+                        file_path: record.path.clone(),
+                        object_id: record.object_id.clone(),
+                    });
+                }
             }
             continue;
         }
 
-        let pending_id = existing_at_path.and_then(|binding| {
-            (binding.adoption_state == "pending" || binding.adoption_state == "deferred-conflict")
-                .then(|| binding.record_id.clone())
-                .flatten()
-        });
-        let record_id = match pending_id {
+        let bound_id = existing_same_object.and_then(|binding| binding.record_id.clone());
+        let record_id = match bound_id {
             Some(record_id) if !claimed_ids.contains_key(&record_id) => record_id,
             _ => mint_unused_record_id(&mut used_ids)?,
         };
@@ -1770,7 +1784,8 @@ pub fn reconcile_collections_in_tx(
             file_path: record.path.clone(),
             object_id: record.object_id.clone(),
             adoption_state: "pending",
-            index_initialized: existing_at_path.is_some_and(|binding| binding.index_initialized),
+            index_initialized: existing_same_object
+                .is_some_and(|binding| binding.index_initialized),
         });
         adoptions.push(CollectionAdoptionCandidate {
             record_id,

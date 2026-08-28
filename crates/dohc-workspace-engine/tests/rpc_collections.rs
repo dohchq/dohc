@@ -1,7 +1,7 @@
 //! Collection reads through the real in-process daemon request path.
 
 use dohc_engine_domain::{
-    NoFaults, TxnOutcome, VersionedTextStore, WriteText, reconcile_collections_in_tx,
+    CaptureIngest, NoFaults, TxnOutcome, VersionedTextStore, reconcile_collections_in_tx,
 };
 use dohc_engine_protocol::{
     transport::{EngineTransport, InProcessTransport, RequestContext},
@@ -19,20 +19,19 @@ const RECORD_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 fn seed_text(store: &mut EngineStore, path: &str, text: &str, sequence: i64) {
     VersionedTextStore::new(store)
-        .write_text(
-            &WriteText {
+        .capture_ingest(
+            &CaptureIngest {
                 workspace_id: WORKSPACE_ID.to_owned(),
                 version_id: "main".to_owned(),
-                object_id: format!("collection-object-{sequence}"),
                 path: path.to_owned(),
                 text: text.to_owned(),
-                moment_id: format!("collection-moment-{sequence}"),
-                metadata_origin: "test".to_owned(),
+                metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
                 metadata_summary: None,
                 metadata_correlation_id: None,
                 author_json: None,
                 now_ms: sequence,
                 request_id: None,
+                claim_foreign_head: false,
             },
             &NoFaults,
         )
@@ -62,6 +61,26 @@ fn seed_collection_state(scratch: &ScratchDir) {
     std::fs::write(collection_dir.join("record.md"), record).expect("record file");
 }
 
+fn seed_valid_collection_schema(scratch: &ScratchDir) {
+    let db = scratch.engine_db_path().expect("engine db path");
+    let mut store = EngineStore::open(&db, 1).expect("open store");
+    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
+        .expect("main version");
+    let schema = "name: Tasks\nfields:\n  status:\n    type: text\n";
+    seed_text(&mut store, "tasks/collection.yaml", schema, 2);
+    let reconciled = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, "main")
+        })
+        .expect("reconcile collection state");
+    assert!(matches!(reconciled, TxnOutcome::Committed(_)));
+    let collection_dir = scratch.path().join("tasks");
+    std::fs::create_dir_all(&collection_dir).expect("collection directory");
+    std::fs::write(collection_dir.join("collection.yaml"), schema).expect("schema file");
+}
+
 fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
     Request {
         id,
@@ -88,6 +107,22 @@ async fn call(
         .await
         .unwrap_or_else(|error| panic!("{method} failed: {error:?}"))
         .result
+}
+
+async fn reconcile_capture(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    mut id: u64,
+) {
+    let mut status = call(transport, handle, id, "capture.reconcile", json!({})).await;
+    for _ in 0..20 {
+        if status["settled"] == json!(true) {
+            return;
+        }
+        id += 1;
+        status = call(transport, handle, id, "capture.flush", json!({})).await;
+    }
+    panic!("capture did not settle: {status}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -205,4 +240,95 @@ async fn every_collection_request_answers_for_a_degraded_schema() {
     )
     .await;
     assert_eq!(switched_query["records"][0]["id"], json!(RECORD_ID));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn capture_authored_record_edit_keeps_the_agent_in_field_history() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    seed_valid_collection_schema(&scratch);
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+
+    let collection_dir = scratch.path().join("tasks");
+    let collections = call(&transport, &handle, 30, "collections.list", json!({})).await;
+    assert_eq!(collections["collections"][0]["path"], json!("tasks"));
+
+    std::fs::write(
+        collection_dir.join("alpha.md"),
+        "---\nstatus: open\n---\n\nAlpha",
+    )
+    .expect("record file");
+    reconcile_capture(&transport, &handle, 40).await;
+    let query = call(
+        &transport,
+        &handle,
+        60,
+        "collections.query",
+        json!({ "collectionPath": "tasks" }),
+    )
+    .await;
+    let record_id = query["records"][0]["id"]
+        .as_str()
+        .expect("adopted record id")
+        .to_owned();
+
+    let agent_id = "agent-collection-capture";
+    call(
+        &transport,
+        &handle,
+        61,
+        "capture.setAuthor",
+        json!({
+            "author": {
+                "kind": "agent",
+                "agentId": agent_id,
+                "onBehalfOf": "local",
+                "agentRunId": "run-collection-capture",
+            }
+        }),
+    )
+    .await;
+    let record_path = collection_dir.join("alpha.md");
+    let edited = std::fs::read_to_string(&record_path)
+        .expect("read adopted record")
+        .replace("status: open", "status: done");
+    std::fs::write(&record_path, edited).expect("agent edits record file");
+    reconcile_capture(&transport, &handle, 70).await;
+
+    let record = call(
+        &transport,
+        &handle,
+        100,
+        "collections.getRecord",
+        json!({
+            "collectionPath": "tasks",
+            "recordId": record_id,
+            "historyLimit": 20,
+        }),
+    )
+    .await;
+    let authored_edit = record["history"]
+        .as_array()
+        .expect("field history")
+        .iter()
+        .find(|entry| entry["field"] == json!("status") && entry["next"]["value"] == json!("done"))
+        .expect("captured status edit in history");
+    assert_eq!(authored_edit["authorOriginId"], json!(agent_id));
 }
