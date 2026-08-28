@@ -2882,7 +2882,7 @@ describe("relay link grants", () => {
     await createLink(h);
   });
 
-  it("keeps legacy whole-share revoke for the granter after ownership transfer", async () => {
+  it("refuses whole-share revocation by the former owner after ownership transfer", async () => {
     const storage = await newStorage();
     const h = handler(storage);
     await seedFileShare(h);
@@ -2898,57 +2898,46 @@ describe("relay link grants", () => {
       }),
     ).toMatchObject({ ok: true });
 
+    const before = {
+      share: storage.getShare("share-existing"),
+      grants: storage.listSharesGrantedBy(OWNER),
+      linkGrant: storage.getShareGrant(grantId),
+      dependentGrant: storage.getShareGrant("grant-dependent-after-owner-loss"),
+      links: storage.listLinkGrantsByWorkspace(WORKSPACE),
+      credential: storage.getCurrentLinkCredential(grantId),
+    };
+    const revokeShare = vi.fn(storage.revokeShare.bind(storage));
     const transferredStorage = new Proxy(storage, {
       get(target, property, receiver) {
         if (property === "workspaceIsOwnedBy") return () => false;
+        if (property === "revokeShare") return revokeShare;
         const value = Reflect.get(target, property, receiver) as unknown;
         return typeof value === "function" ? value.bind(target) : value;
       },
     });
     const transferredHandler = handler(transferredStorage);
-    expect(
-      (
-        await transferredHandler(
-          request(
-            OWNER,
-            `/sync/shares/share-existing/links/${grantId}/rotate`,
-            jsonBody({ workspaceId: WORKSPACE, expectedDependentGrantIds: [] }),
-          ),
-        )
-      ).status,
-    ).toBe(404);
-    expect(
-      (
-        await transferredHandler(
-          request(
-            OWNER,
-            `/sync/shares/share-existing/links/${grantId}/retune`,
-            jsonBody({ access: "view" }),
-          ),
-        )
-      ).status,
-    ).toBe(404);
-
-    const revokedResponse = await transferredHandler(
+    const missing = await denialBytes(
+      await transferredHandler(
+        request(OWNER, "/sync/shares/share-missing/revoke", { method: "POST" }),
+      ),
+    );
+    const formerOwner = await transferredHandler(
       request(
         OWNER,
         "/sync/shares/share-existing/revoke",
         { method: "POST" },
       ),
     );
-    expect(revokedResponse.status).toBe(200);
-    expect(storage.getShareGrant(grantId)).toMatchObject({
-      status: "revoked",
-      generation: 2,
-      revokedAtMs: 2_000,
-    });
-    expect(storage.getCurrentLinkCredential(grantId)).toBeNull();
-    expect(storage.findLinkGrantByCredentialHash(hmac(linkSecret(created.url)))).toBeNull();
-    expect(storage.getShareGrant("grant-dependent-after-owner-loss")).toMatchObject({
-      status: "revoked",
-      generation: 2,
-      revokedAtMs: 2_000,
-    });
+    expect(await denialBytes(formerOwner)).toBe(missing);
+    expect(revokeShare).not.toHaveBeenCalled();
+    expect({
+      share: storage.getShare("share-existing"),
+      grants: storage.listSharesGrantedBy(OWNER),
+      linkGrant: storage.getShareGrant(grantId),
+      dependentGrant: storage.getShareGrant("grant-dependent-after-owner-loss"),
+      links: storage.listLinkGrantsByWorkspace(WORKSPACE),
+      credential: storage.getCurrentLinkCredential(grantId),
+    }).toEqual(before);
   });
 
   it("bumps every dependent generation when a link narrows", async () => {

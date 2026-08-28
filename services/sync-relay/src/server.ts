@@ -1912,9 +1912,9 @@ export function createSyncRelayHandler({
         if (!share || share.granterUserId !== actor.userId) {
           throw notFound();
         }
+        if (!storage.workspaceIsOwnedBy(share.workspaceId, actor.userId)) throw notFound();
         const input = await readOptionalJsonObject(request);
         if (input !== null) {
-          if (!storage.workspaceIsOwnedBy(share.workspaceId, actor.userId)) throw notFound();
           const grantId = parseShareId(
             typeof input.grantId === "string" ? input.grantId : undefined,
           );
