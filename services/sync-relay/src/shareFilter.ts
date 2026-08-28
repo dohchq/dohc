@@ -377,11 +377,17 @@ export function parseStoredAnyShareSelectorJson(
 }
 
 // Gate #2 for secrets (and gate #1 for everything else): a path is visible
-// through a share only when it is BOTH inside the selector and classified
-// engine-tracked right now. Even a selector that somehow contained a secret
-// path (bug, hand-edited row) cannot leak secret ops through this check.
+// through a share only when it is canonical, inside the selector, and
+// classified engine-tracked right now. The current-state fold rejects path
+// aliases, so replay must reject the same rows instead of serving a spelling
+// the current endpoint will never contain.
 function pathVisibleThroughShare(selector: ShareSelector, path: string): boolean {
-  return visibleSharePath(selector, path) !== null;
+  return isCanonicalSharePath(path) && visibleSharePath(selector, path) !== null;
+}
+
+function isCanonicalSharePath(path: string): boolean {
+  const validated = validateUserWritePath(path);
+  return validated.ok && validated.normalized === path;
 }
 
 // The same gate, answering with the NORMALIZED path it proved. A caller that
@@ -520,6 +526,70 @@ function collectString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+function collectReferencedMomentPaths(record: Record<string, unknown>): string[] {
+  return [
+    collectString(record.path),
+    collectString(record.payloadBeforePath),
+    collectString(record.payloadAfterPath),
+    collectString(record.beforePath),
+  ].filter((path): path is string => path !== null);
+}
+
+const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/u;
+
+function isSha256(value: unknown): value is string {
+  return typeof value === "string" && SHA256_HEX_PATTERN.test(value);
+}
+
+// This is the engine-recognized moment shape at the share boundary. It keeps
+// the path aliases, content pairs, and operation label on one interpretation
+// before replay or blob reachability can consume any of them.
+export function hasValidShareMomentShape(record: Record<string, unknown>): boolean {
+  const operation = record.operation;
+  if (operation !== "write" && operation !== "rename" && operation !== "delete") {
+    return false;
+  }
+  const referencedPaths = collectReferencedMomentPaths(record);
+  if (!referencedPaths.every(isCanonicalSharePath)) return false;
+
+  const beforePathRaw = record.payloadBeforePath;
+  const beforeShaRaw = record.payloadBeforeBlobSha256;
+  const hasBefore =
+    (beforePathRaw !== null && beforePathRaw !== undefined) ||
+    (beforeShaRaw !== null && beforeShaRaw !== undefined);
+  const beforePath = hasBefore ? collectString(beforePathRaw) : null;
+  if (
+    hasBefore &&
+    (beforePath === null || !isSha256(beforeShaRaw))
+  ) {
+    return false;
+  }
+  if (operation === "delete" && beforePath === null) return false;
+
+  const afterPath = collectString(record.payloadAfterPath);
+  if (operation === "write" || operation === "rename") {
+    if (
+      afterPath === null ||
+      !isSha256(record.payloadAfterBlobSha256)
+    ) {
+      return false;
+    }
+  }
+  const matches = (alias: unknown, expected: string | null) =>
+    alias === null || alias === undefined || alias === expected;
+  const aliasesMatch =
+    matches(record.beforePath, beforePath) &&
+    matches(record.path, operation === "delete" ? beforePath : afterPath) &&
+    (operation !== "delete" || matches(record.payloadAfterPath, beforePath));
+  if (!aliasesMatch) return false;
+  return (
+    beforePath === null ||
+    afterPath === null ||
+    beforePath === afterPath ||
+    operation === "rename"
+  );
+}
+
 export function parseShareOpPayloadWithReferencedPaths(
   payloadJson: string,
 ): { payload: unknown; referencedPaths: string[] } | null {
@@ -530,14 +600,7 @@ export function parseShareOpPayloadWithReferencedPaths(
     return null;
   }
   const record = asRecord(payload);
-  const referencedPaths = record
-    ? [
-        collectString(record.path),
-        collectString(record.payloadBeforePath),
-        collectString(record.payloadAfterPath),
-        collectString(record.beforePath),
-      ].filter((path): path is string => path !== null)
-    : [];
+  const referencedPaths = record ? collectReferencedMomentPaths(record) : [];
   return { payload, referencedPaths };
 }
 
@@ -845,6 +908,7 @@ export function filterOpForShare(
   if (opKind === "moment.append") {
     const record = asRecord(payload);
     if (!record) return { allowed: false };
+    if (!hasValidShareMomentShape(record)) return { allowed: false };
     const claimedVersionId = collectString(record.versionId);
     if (claimedVersionId !== targetVersionId(selector)) return { allowed: false };
     if (referencedPaths.length === 0) return { allowed: false };
@@ -892,7 +956,10 @@ export function filterOpForShare(
     }
     // Only the after-blob is ever fetched by the recipient (before-blobs are
     // never replayed), so the lineage hash does not make its blob reachable.
-    const blobSha256s = afterSha ? [afterSha] : [];
+    const blobSha256s =
+      (record.operation === "write" || record.operation === "rename") && afterSha
+        ? [afterSha]
+        : [];
     return { allowed: true, payload: served, blobSha256s };
   }
 
@@ -995,8 +1062,6 @@ export interface ProposedChange {
 export type ProposedChangeDecision =
   | { allowed: false }
   | { allowed: true; change: ProposedChange };
-
-const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/u;
 
 // The single decision point for what a recipient may PROPOSE. It is a third
 // question, next to "may this recipient see this op?" (`filterOpForShare`) and

@@ -41,6 +41,7 @@ import {
   filterOpForShare,
   filterOpForShareAppend,
   filterProposedChangeForShare,
+  hasValidShareMomentShape,
   isChatChannelSelector,
   parseShareOpPayloadWithReferencedPaths,
   parseStoredAnyShareSelectorJson,
@@ -425,6 +426,7 @@ export function createSyncRelayHandler({
     shareId: string,
     grantId: string,
     releaseBytes: () => void,
+    settleEgress: (emittedByteLength: number, settledAtMs: number) => void,
   ): Response => {
     let offset = 0;
     let active = true;
@@ -434,6 +436,7 @@ export function createSyncRelayHandler({
       active = false;
       unregister();
       releaseBytes();
+      settleEgress(offset, nowMs());
     };
     const body = new ReadableStream<Uint8Array>(
       {
@@ -899,18 +902,11 @@ export function createSyncRelayHandler({
       return null;
     }
     const record = payload as Record<string, unknown>;
+    if (!hasValidShareMomentShape(record)) return null;
     if (record.operation !== "rename") return null;
     const beforePath = record.payloadBeforePath;
     const afterPath = record.payloadAfterPath;
     if (typeof beforePath !== "string" || typeof afterPath !== "string") {
-      return null;
-    }
-    if (record.path !== afterPath) return null;
-    if (
-      record.beforePath !== undefined &&
-      record.beforePath !== null &&
-      record.beforePath !== beforePath
-    ) {
       return null;
     }
     const projectedBeforePath = projection.projectPath(beforePath);
@@ -1670,13 +1666,12 @@ export function createSyncRelayHandler({
           blob.byteLength,
         );
         if (!releaseBytes) throw linkReadRateLimited();
-        if (
-          !linkGrantEgressRateLimiter.charge(
-            capability.grantId,
-            blob.byteLength,
-            nowMs(),
-          )
-        ) {
+        const settleEgress = linkGrantEgressRateLimiter.reserve(
+          capability.grantId,
+          blob.byteLength,
+          nowMs(),
+        );
+        if (!settleEgress) {
           releaseBytes();
           throw linkReadRateLimited();
         }
@@ -1685,6 +1680,7 @@ export function createSyncRelayHandler({
           capability.shareId,
           capability.grantId,
           releaseBytes,
+          settleEgress,
         );
       }
       const actor = await resolveActor(request, "workspaceId" in route ? route.workspaceId : "");

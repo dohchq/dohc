@@ -57,7 +57,7 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
   ).map((host) => host.toLowerCase());
   const trustedProxyValue = env.DOHC_SHARE_WEB_TRUSTED_PROXIES;
   const trustedProxies = new Set(
-    trustedProxyValue === undefined
+    trustedProxyValue === undefined || trustedProxyValue === ""
       ? []
       : exactList(
           trustedProxyValue,

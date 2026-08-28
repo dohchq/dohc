@@ -166,6 +166,37 @@ export class LinkEgressRateLimiter {
   }
 
   charge(grantId: string, byteLength: number, nowMs: number): boolean {
+    return this.take(grantId, byteLength, nowMs) !== null;
+  }
+
+  reserve(
+    grantId: string,
+    byteLength: number,
+    nowMs: number,
+  ): ((emittedByteLength: number, settledAtMs: number) => void) | null {
+    const bucket = this.take(grantId, byteLength, nowMs);
+    if (!bucket) return null;
+    let settled = false;
+    return (emittedByteLength, settledAtMs) => {
+      if (settled) return;
+      if (
+        !Number.isSafeInteger(emittedByteLength) ||
+        emittedByteLength < 0 ||
+        emittedByteLength > byteLength
+      ) {
+        throw new Error("link egress emitted byte length is outside the reservation");
+      }
+      settled = true;
+      if (this.buckets.get(grantId) !== bucket) return;
+      this.refill(bucket, settledAtMs);
+      bucket.tokens = Math.min(
+        this.capacityBytes,
+        bucket.tokens + byteLength - emittedByteLength,
+      );
+    };
+  }
+
+  private take(grantId: string, byteLength: number, nowMs: number): Bucket | null {
     if (!Number.isSafeInteger(byteLength) || byteLength < 0) {
       throw new Error("link egress byte length must be a non-negative integer");
     }
@@ -175,11 +206,18 @@ export class LinkEgressRateLimiter {
         this.buckets.size >= this.maxGrants &&
         !this.evictRefilled(nowMs)
       ) {
-        return false;
+        return null;
       }
       bucket = { tokens: this.capacityBytes, updatedAtMs: nowMs };
       this.buckets.set(grantId, bucket);
     }
+    this.refill(bucket, nowMs);
+    if (bucket.tokens < byteLength) return null;
+    bucket.tokens -= byteLength;
+    return bucket;
+  }
+
+  private refill(bucket: Bucket, nowMs: number): void {
     const nextUpdatedAtMs = Math.max(bucket.updatedAtMs, nowMs);
     const elapsedSeconds = (nextUpdatedAtMs - bucket.updatedAtMs) / 1_000;
     bucket.tokens = Math.min(
@@ -187,9 +225,6 @@ export class LinkEgressRateLimiter {
       bucket.tokens + elapsedSeconds * this.refillBytesPerSecond,
     );
     bucket.updatedAtMs = nextUpdatedAtMs;
-    if (bucket.tokens < byteLength) return false;
-    bucket.tokens -= byteLength;
-    return true;
   }
 
   private evictRefilled(nowMs: number): boolean {

@@ -1534,6 +1534,7 @@ function applyCurrentFileOp(
   const afterBlobSha256 = digest(payload.payloadAfterBlobSha256);
   if (!afterPath || !afterBlobSha256) return;
   if (!optionalPathAliasMatches(payload.path, afterPath)) return;
+  if (before && before.path !== afterPath && operation !== "rename") return;
   if (hasNoBefore) {
     if (statements.get.get(workspaceId, versionId, afterPath) !== undefined) return;
   } else {
