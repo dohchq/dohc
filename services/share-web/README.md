@@ -5,10 +5,18 @@ fragment secret with the sync relay, stores the returned relay capability in a
 bounded in-memory session, and sends only an HttpOnly session cookie to the
 browser.
 
-Operators must set `DOHC_SHARE_WEB_RELAY_URL` and
-`DOHC_SHARE_WEB_PUBLIC_HOSTS`. The host list contains exact comma-separated
-HTTP `Host` values, including ports where required. `DOHC_SHARE_WEB_PORT`
-defaults to `1790`.
+Production operators must set four values:
+
+- `DOHC_SHARE_WEB_RELAY_URL`: the internal relay origin that `share-web` calls.
+- `DOHC_SHARE_WEB_PUBLIC_RELAY_URL`: the relay origin a desktop client can
+  reach after an accepted handoff.
+- `DOHC_SHARE_WEB_PUBLIC_HOSTS`: exact comma-separated HTTP `Host` values,
+  including ports where required.
+- `DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY`: the same workload secret configured as
+  `DOHC_RELAY_EXCHANGE_KEY` on the relay, with at least 32 characters. Never
+  expose it to the browser.
+
+`DOHC_SHARE_WEB_PORT` defaults to `1790`.
 
 ## Public origin and proxy
 
@@ -53,11 +61,14 @@ backup or restore. Back up the complete volume, not only one SQLite file.
 Restore into an empty relay volume, then start the relay before `share-web`.
 Test the restore on a separate deployment before relying on the backup.
 
-The relay does not persist viewer IP addresses. It keeps share, grant, link
-credential, usage, and audit records until the owner deletes their containing
-share or grant. Backups retain those rows until the operator expires the
-backup. The relay reads shared content in plaintext. A link secret hides the
-work from other people, not from the relay operator.
+The relay does not persist viewer IP addresses. It keeps share and grant rows
+until the owner deletes their containing share or grant. Retired link
+credential history is bounded and older rows are pruned during rotation and
+widening. Rotation and widening reset link usage; narrowing and revocation keep
+the latest usage until the grant or share is deleted. Backups retain the rows
+present when they were taken until the operator expires the backup. The relay
+reads shared content in plaintext. A link secret hides the work from other
+people, not from the relay operator.
 
 ## Reserved later-phase deployment work
 
