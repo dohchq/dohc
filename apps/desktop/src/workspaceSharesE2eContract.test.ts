@@ -227,8 +227,12 @@ describe("workspace shares E2E source contract", () => {
     );
     const outsideLifecycle = `${harmlessFormattingVariant}\nconfidentialTest("outside", () => {});`;
 
-    expect(() => expectConfidentialLifecycle(duplicateDiagnostics)).toThrow();
-    expect(() => expectConfidentialLifecycle(outsideLifecycle)).toThrow();
+    expect(() => expectConfidentialLifecycle(duplicateDiagnostics)).toThrow(
+      "confidentialTest must have one diagnostics registration",
+    );
+    expect(() => expectConfidentialLifecycle(outsideLifecycle)).toThrow(
+      "confidential tests must stay inside the View link lifecycle",
+    );
   });
 
   test("keeps confidential diagnostics within the dedicated lifecycle", () => {
