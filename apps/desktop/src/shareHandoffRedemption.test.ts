@@ -57,30 +57,26 @@ async function harness(options?: {
   let credentials = options?.credentials ?? null;
   let credentialGeneration = 0;
   const statuses: Array<{ status: string; shareId?: string }> = [];
-  const unauthorizedTransitions: string[] = [];
   let nextStatusId = 0;
   const fetchImpl = options?.fetch ?? vi.fn<typeof fetch>();
+  const handleUnauthorized = vi.fn(async (requestCredentials: TestCredentials) => {
+    if (
+      credentials?.serverUrl !== requestCredentials.serverUrl ||
+      credentials.userId !== requestCredentials.userId ||
+      credentials.token !== requestCredentials.token
+    ) {
+      return false;
+    }
+    credentials = null;
+    credentialGeneration += 1;
+    return true;
+  });
   const coordinator = module.createShareHandoffRedemptionCoordinator({
     intent,
     createStatusId: () => `status-${++nextStatusId}`,
     credentialSnapshot: () => ({ credentials, generation: credentialGeneration }),
     fetch: fetchImpl,
-    handleUnauthorized: async (requestCredentials) => {
-      if (
-        credentials?.serverUrl !== requestCredentials.serverUrl ||
-        credentials.userId !== requestCredentials.userId ||
-        credentials.token !== requestCredentials.token
-      ) {
-        return false;
-      }
-      unauthorizedTransitions.push("clear-memory");
-      credentials = null;
-      credentialGeneration += 1;
-      unauthorizedTransitions.push("notify-changing");
-      unauthorizedTransitions.push("invalidate-persisted-session");
-      unauthorizedTransitions.push("notify-ready");
-      return true;
-    },
+    handleUnauthorized,
     publishStatus: (status) => statuses.push(status),
   });
   return {
@@ -88,7 +84,7 @@ async function harness(options?: {
     fetchImpl,
     intent,
     statuses,
-    unauthorizedTransitions,
+    handleUnauthorized,
     offer(value: string) {
       intent.offer(code(value));
       coordinator.pendingCodeChanged();
@@ -109,23 +105,6 @@ function success(shareId = "share-redeemed"): Response {
     grantId: "grant-redeemed",
     access: "view",
   });
-}
-
-function immediateSuccess(shareId: string): Response {
-  return {
-    status: 200,
-    ok: true,
-    json: async () => ({
-      ok: true,
-      shareId,
-      grantId: "grant-redeemed",
-      access: "view",
-    }),
-  } as Response;
-}
-
-async function flushMicrotasks(): Promise<void> {
-  for (let index = 0; index < 5; index += 1) await Promise.resolve();
 }
 
 describe("share handoff redemption coordinator", () => {
@@ -205,9 +184,11 @@ describe("share handoff redemption coordinator", () => {
     });
 
     expect(h.intent.pending()).toBeNull();
+    h.intent.offer(code(CODE_A));
+    const refusedStatus = h.coordinator.status();
     h.coordinator.retry();
-    await Promise.resolve();
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(h.coordinator.status()).toEqual(refusedStatus);
   });
 
   it("treats an unexpected non-auth 4xx as the same generic refusal", async () => {
@@ -311,12 +292,9 @@ describe("share handoff redemption coordinator", () => {
         statusId: "status-1",
       });
     });
-    expect(h.unauthorizedTransitions).toEqual([
-      "clear-memory",
-      "notify-changing",
-      "invalidate-persisted-session",
-      "notify-ready",
-    ]);
+    expect(h.handleUnauthorized).toHaveBeenCalledTimes(1);
+    expect(h.handleUnauthorized).toHaveBeenNthCalledWith(1, CREDENTIALS_A);
+    expect(h.credentials()).toBeNull();
     expect(h.intent.pending()).toBe(CODE_A);
 
     h.setCredentials(CREDENTIALS_B);
@@ -328,6 +306,13 @@ describe("share handoff redemption coordinator", () => {
       });
     });
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(fetchImpl.mock.calls[1]?.[0]).toBe(
+      "https://relay-b.example/sync/link-redeem",
+    );
+    expect(fetchImpl.mock.calls[1]?.[1]?.headers).toEqual({
+      authorization: "Bearer bearer-b",
+      "content-type": "application/json",
+    });
   });
 
   it("does not let a stale 401 clear newer credentials or repaint newer status", async () => {
@@ -350,9 +335,9 @@ describe("share handoff redemption coordinator", () => {
     });
 
     oldAnswer.resolve(response(401, { ok: false }));
-    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2));
+    await oldAnswer.promise.then(() => undefined);
     expect(h.credentials()).toEqual(CREDENTIALS_A);
-    expect(h.unauthorizedTransitions).toEqual([]);
+    expect(h.handleUnauthorized).not.toHaveBeenCalled();
     expect(h.coordinator.status()).toEqual({
       status: "done",
       statusId: "status-1",
@@ -374,8 +359,8 @@ describe("share handoff redemption coordinator", () => {
     await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2));
 
     oldAnswer.resolve(response(401, { ok: false }));
-    await flushMicrotasks();
-    expect(h.unauthorizedTransitions).toEqual([]);
+    await oldAnswer.promise.then(() => undefined);
+    expect(h.handleUnauthorized).not.toHaveBeenCalled();
     expect(h.credentials()).toEqual(CREDENTIALS_A);
     expect(h.intent.pending()).toBe(CODE_B);
     expect(h.coordinator.status()).toEqual({
@@ -406,8 +391,8 @@ describe("share handoff redemption coordinator", () => {
     h.offer(CODE_B);
     await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2));
 
-    oldAnswer.resolve(immediateSuccess("share-old"));
-    await flushMicrotasks();
+    oldAnswer.resolve(success("share-old"));
+    await oldAnswer.promise.then(() => undefined);
     expect(h.coordinator.status()).toEqual({
       status: "redeeming",
       statusId: "status-2",
@@ -455,9 +440,10 @@ describe("share handoff redemption coordinator", () => {
     h.coordinator.dismiss(visible.statusId);
     expect(h.coordinator.status()).toEqual({ status: "idle" });
     expect(h.intent.pending()).toBeNull();
+    h.intent.offer(code(CODE_A));
     h.coordinator.retry();
-    await Promise.resolve();
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(h.coordinator.status()).toEqual({ status: "idle" });
   });
 
   it("keeps a newer handoff current when an older visible dismissal arrives late", async () => {
