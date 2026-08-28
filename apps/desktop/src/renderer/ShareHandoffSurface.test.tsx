@@ -550,77 +550,82 @@ describe("ShareHandoffSurface", () => {
     expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
   });
 
-  it("dismisses from Back without mounting and sends no payload", async () => {
+  it("calls the supplied Back callback without mounting or opening", async () => {
     const user = userEvent.setup();
+    const onBack = vi.fn();
     render(
       <ShareHandoffSurface
         status={{ status: "failed-refused", statusId: "status-refused" }}
         onWorkspaceReady={() => {}}
-        onBack={() =>
-          void bridgeMock.dismissShareHandoff({ statusId: "status-refused" })
-        }
+        onBack={onBack}
         onOpened={() => {}}
       />,
     );
 
     await user.click(screen.getByRole("button", { name: "Back" }));
 
-    expect(bridgeMock.dismissShareHandoff).toHaveBeenCalledOnce();
-    expect(bridgeMock.dismissShareHandoff.mock.calls[0]).toEqual([
-      { statusId: "status-refused" },
-    ]);
+    expect(onBack).toHaveBeenCalledOnce();
     expect(bridgeMock.mountShare).not.toHaveBeenCalled();
     expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
   });
 
-  it("does not expose forbidden handoff or granted-row values", async () => {
-    const forbidden = [
-      "handoff-code-secret",
-      "bearer-token-secret",
-      "grant-id-secret",
-      "https://relay.secret.test",
-      "raw-response-secret",
-      "https://share.secret.test/open/complete-link",
+  it("does not expose granted- or received-row secrets", async () => {
+    const grantedShareCode = "granted-row-share-code-secret";
+    const grantedGrantId = "granted-row-grant-id-secret";
+    const receivedShareCode = "received-row-share-code-secret";
+    const receivedGrantId = "received-row-grant-id-secret";
+    const inventorySecrets = [
+      grantedShareCode,
+      grantedGrantId,
+      receivedShareCode,
+      receivedGrantId,
     ];
-    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const consoleLog = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    bridgeMock.listRelayShares.mockResolvedValue({
-      granted: [
-        grantedShare(
-          "share-exact",
-          `${forbidden[3]}:${forbidden[5]}`,
-          forbidden[2]!,
-        ),
-      ],
-      received: [receivedShare("share-exact", "ordinary-exact-share-code")],
-    });
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    const consoleLog = vi
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+    try {
+      bridgeMock.listRelayShares.mockResolvedValue({
+        granted: [
+          grantedShare("share-exact", grantedShareCode, grantedGrantId),
+        ],
+        received: [
+          receivedShare("share-exact", receivedShareCode, receivedGrantId),
+        ],
+      });
 
-    const { container } = render(
-      <ShareHandoffSurface
-        status={{
-          status: "done",
-          statusId: "status-test",
-          shareId: "share-exact",
-        }}
-        onWorkspaceReady={() => {}}
-        onBack={() => {}}
-        onOpened={() => {}}
-      />,
-    );
-    expect(await screen.findByTestId("open-shared-view")).toBeTruthy();
+      const { container } = render(
+        <ShareHandoffSurface
+          status={{
+            status: "done",
+            statusId: "status-test",
+            shareId: "share-exact",
+          }}
+          onWorkspaceReady={() => {}}
+          onBack={() => {}}
+          onOpened={() => {}}
+        />,
+      );
+      expect(await screen.findByTestId("open-shared-view")).toBeTruthy();
 
-    const rendered = container.textContent ?? "";
-    const bridgeCalls = JSON.stringify(
-      Object.values(bridgeMock).flatMap((mock) => mock.mock.calls),
-    );
-    const consoleCalls = JSON.stringify([
-      ...consoleError.mock.calls,
-      ...consoleLog.mock.calls,
-    ]);
-    for (const secret of forbidden) {
-      expect(rendered).not.toContain(secret);
-      expect(bridgeCalls).not.toContain(secret);
-      expect(consoleCalls).not.toContain(secret);
+      const rendered = container.textContent ?? "";
+      const bridgeCalls = JSON.stringify(
+        Object.values(bridgeMock).flatMap((mock) => mock.mock.calls),
+      );
+      const consoleCalls = JSON.stringify([
+        ...consoleError.mock.calls,
+        ...consoleLog.mock.calls,
+      ]);
+      for (const secret of inventorySecrets) {
+        expect(rendered).not.toContain(secret);
+        expect(bridgeCalls).not.toContain(secret);
+        expect(consoleCalls).not.toContain(secret);
+      }
+    } finally {
+      consoleError.mockRestore();
+      consoleLog.mockRestore();
     }
   });
 });
