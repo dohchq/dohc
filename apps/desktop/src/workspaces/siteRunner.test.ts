@@ -20,7 +20,6 @@ import { createTestScratch } from "./testTemp";
 import { buildOutputSiteRoot } from "./sitePackage";
 import {
   assertLoopbackOnlyDevServerCommand,
-  BUILD_HARD_KILL_GRACE_MS,
   buildSite,
   detectBuildOutput,
   detectDevUrl,
@@ -1171,14 +1170,21 @@ describe("startSiteDevServer", () => {
     }
 
     // And the child is confirmed down by the time the rejection surfaces.
-    // The child writes its pid file asynchronously after spawn, and nothing in
-    // the reject path waits for it — on a loaded machine the read below can
-    // outrun the child and fail ENOENT. Wait for the file the assertion needs.
-    await expect
-      .poll(() => existsSync(pidFile), { timeout: 10_000 })
-      .toBe(true);
-    const pid = Number((await readFile(pidFile, "utf8")).trim());
-    expect(pid).toBeGreaterThan(0);
+    // The child writes its pid file asynchronously after spawn. File creation
+    // can become visible before the PID bytes do, so wait for the value this
+    // assertion needs instead of stopping at directory-entry existence.
+    let pid = 0;
+    await vi.waitFor(
+      async () => {
+        try {
+          pid = Number((await readFile(pidFile, "utf8")).trim());
+        } catch {
+          pid = 0;
+        }
+        expect(pid).toBeGreaterThan(0);
+      },
+      { timeout: 10_000 },
+    );
     let alive = true;
     try {
       process.kill(pid, 0);
@@ -1294,10 +1300,7 @@ describe("buildSite", () => {
   // so by the time the test starts polling, that subprocess has already
   // finished — it does not race a still-running taskkill. Measured
   // 2026-08-23 under combined desktop+mcp 8-worker load (N=29 successful
-  // captures, one separate run's buildSite call itself hit its own
-  // BUILD_TIMEOUT_MS under the same load and never reached this wait — a
-  // different, unaddressed failure mode, not this one): the target process
-  // was confirmed absent on the very first check every time,
+  // captures): the target process was confirmed absent on the first check,
   // min/median/p95/max all 0-1ms. 500ms is 500x that observed maximum, real
   // headroom over the measured range and not a growing pad chasing a flake
   // this wait was never the cause of — it does not claim the OS has
@@ -1307,21 +1310,11 @@ describe("buildSite", () => {
   const CAPTURE_INTERVAL_MS = 100;
   const WRAPPER_LIFETIME_MS = 2_000;
   const PROCESS_DEATH_TIMEOUT_MS = 500;
-  const BUILD_TIMEOUT_MS = 15_000;
-  // Real-process spawn/kill overhead none of the numbers above cover:
-  // process creation, PowerShell startup, and OS scheduling jitter under an
-  // already-loaded suite.
-  const SPAWN_OVERHEAD_MS = 5_000;
-  // The worst case isn't the happy path (WRAPPER_LIFETIME_MS then a
-  // near-instant kill) — it's buildSite's own timeout path: BUILD_TIMEOUT_MS
-  // to fire, then stopChild's SIGTERM-then-SIGKILL sequence taking up to
-  // BUILD_HARD_KILL_GRACE_MS to finish, before buildSite even returns and
-  // this test reaches its own PROCESS_DEATH_TIMEOUT_MS wait.
-  const WIN32_DESCENDANT_TEST_TIMEOUT_MS =
-    BUILD_TIMEOUT_MS +
-    BUILD_HARD_KILL_GRACE_MS +
-    PROCESS_DEATH_TIMEOUT_MS +
-    SPAWN_OVERHEAD_MS;
+  // This test needs a successful wrapper exit before it can inspect descendant
+  // cleanup. A shorter build timeout changed the scenario under machine load.
+  // Keep buildSite's production timeout as the deadlock guard, and give Vitest
+  // enough time to report buildSite's own result plus teardown.
+  const WIN32_DESCENDANT_TEST_TIMEOUT_MS = 150_000;
 
   it.runIf(process.platform === "win32")(
     "stops a descendant a successful build wrapper backgrounds and leaves behind (win32)",
@@ -1346,7 +1339,6 @@ describe("buildSite", () => {
         siteRoot: "site",
         command: "powershell.exe",
         args: ["-NoProfile", "-NonInteractive", "-Command", script],
-        timeoutMs: BUILD_TIMEOUT_MS,
         descendantCaptureIntervalMs: CAPTURE_INTERVAL_MS,
       });
       expect(result.exitCode).toBe(0);

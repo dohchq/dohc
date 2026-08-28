@@ -3889,8 +3889,16 @@ describe("markdown editor unmount flush", () => {
     const view = render(
       <FileInspector workspaceId="ws-1" path="notes/plain.txt" />,
     );
-    const firstEditor = await screen.findByTestId("view-text-editor");
-    expect(firstEditor.textContent).toContain("Workspace A");
+    await waitFor(
+      () => {
+        const content = screen
+          .getByTestId("view-text-editor")
+          .querySelector(".cm-content");
+        expect(content).toBeInstanceOf(HTMLElement);
+        expect(content!.textContent).toContain("Workspace A");
+      },
+      { timeout: 10_000 },
+    );
 
     view.rerender(
       <FileInspector workspaceId="ws-2" path="notes/plain.txt" />,
@@ -3902,9 +3910,17 @@ describe("markdown editor unmount flush", () => {
       resolveSecondRead();
       await heldSecondRead;
     });
-    const secondEditor = await screen.findByTestId("view-text-editor");
-    const content = await textEditorContent(secondEditor);
-    expect(content.textContent).toContain("Workspace B");
+    const content = await waitFor(
+      () => {
+        const next = screen
+          .getByTestId("view-text-editor")
+          .querySelector(".cm-content");
+        expect(next).toBeInstanceOf(HTMLElement);
+        expect(next!.textContent).toContain("Workspace B");
+        return next as HTMLElement;
+      },
+      { timeout: 10_000 },
+    );
     await user.click(content);
     await user.keyboard("{End} edit");
     view.unmount();
@@ -3914,7 +3930,7 @@ describe("markdown editor unmount flush", () => {
       text: "Workspace B edit",
       expectedContentHash: secondHash,
     });
-  });
+  }, 30_000);
 
   it("serializes overlapping plain-text autosaves and writes the newest draft last", async () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({

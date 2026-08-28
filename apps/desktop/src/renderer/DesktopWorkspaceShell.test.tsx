@@ -5181,11 +5181,21 @@ describe("ui-state merge-on-load", () => {
     });
     renderShell(bridge);
 
-    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1));
+    await waitFor(
+      () => {
+        expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1);
+        expect(bridge.workspaceActivitySubscriberCount()).toBe(2);
+        expect(screen.getByTestId("tab-pulled.md")).toBeTruthy();
+      },
+      { timeout: 10_000 },
+    );
     act(() => {
       bridge.emitWorkspaceActivity();
     });
-    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2));
+    await waitFor(
+      () => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2),
+      { timeout: 10_000 },
+    );
 
     // The pre-pull snapshot commits; it predates the file coming back.
     await act(async () => {
@@ -15756,8 +15766,12 @@ describe("workbench render cost", () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.listWorkspaceFiles = vi.fn(() => pending.promise);
     renderShell(bridge);
-    await waitFor(() =>
-      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1),
+    await waitFor(
+      () => {
+        expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1);
+        expect(bridge.workspaceActivitySubscriberCount()).toBe(2);
+      },
+      { timeout: 10_000 },
     );
 
     vi.useFakeTimers();
