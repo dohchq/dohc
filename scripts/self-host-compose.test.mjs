@@ -132,6 +132,15 @@ test('self-host share viewer waits for relay HTTP readiness', () => {
     '20',
   )
   assert.equal(
+    mappingValueAtPath(compose, [
+      'services',
+      'sync-relay',
+      'healthcheck',
+      'start_period',
+    ]),
+    '300s',
+  )
+  assert.equal(
     shareWebDependsOn,
     '    depends_on:\n      sync-relay:\n        condition: service_healthy',
   )

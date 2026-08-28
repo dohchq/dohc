@@ -95,6 +95,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+      start_period: 300s
     ports:
       - "${SYNC_RELAY_BIND:-127.0.0.1}:${SYNC_RELAY_PORT:-1788}:1788"
     volumes:
