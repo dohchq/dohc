@@ -9366,6 +9366,13 @@ fn cached_defer_and_drain_match_the_cold_path() {
         Some(true),
         "deferred commits keep the companion frontier aligned"
     );
+    assert_eq!(
+        warm_cache
+            .gate_scratch_matches_doc_for_test(&key)
+            .expect("deferred scratch comparison"),
+        Some(true),
+        "deferred commits keep the check-4 scratch aligned"
+    );
     let warm_head = VersionedTextStore::new(&mut warm_store)
         .read_text("ws", "main", "notes/cache-pair.md")
         .expect("warm head")
@@ -9614,6 +9621,14 @@ fn cross_engine_replay_fixtures_match_cold_through_a_warmed_remote_cache() {
             "{} remote commits keep the companion frontier aligned",
             scenario.name
         );
+        assert_eq!(
+            warm_cache
+                .gate_scratch_matches_doc_for_test(&key)
+                .expect("remote scratch comparison"),
+            Some(true),
+            "{} remote commits keep the check-4 scratch aligned",
+            scenario.name
+        );
         let warm_head = VersionedTextStore::new(&mut warm_store)
             .read_text("ws", "main", &path)
             .expect("warm visible head")
@@ -9713,6 +9728,13 @@ fn refused_remote_projection_retains_and_advances_the_warmed_cache() {
         "the retained domain mutation advances the cache"
     );
     assert!(warm_cache.contains_for_test(&key));
+    assert_eq!(
+        warm_cache
+            .gate_scratch_matches_doc_for_test(&key)
+            .expect("retained-refusal scratch comparison"),
+        Some(true),
+        "a committed projection refusal advances the check-4 scratch"
+    );
 
     let warm_descendant_sha = warm_store
         .put_binary_blob(&descendant_bytes)

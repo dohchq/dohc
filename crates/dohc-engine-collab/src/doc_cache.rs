@@ -21,8 +21,10 @@
 //! drain projection. Forced compaction, close, `claim_base`, origination, and
 //! lineage successor always fully reconstruct. Durable lineage bytes are never
 //! derived from the cache.
-//! The cache is never mutated inside a transaction: `base_for_gate` takes
-//! `&self`; advancement happens only after `TxnOutcome::Committed`.
+//! The byte-replay document, frontier, tuple, map, and accounting are never
+//! mutated inside a transaction. The check-4-only persistent scratch applies a
+//! gated candidate in place; the transaction probe retains it only after an
+//! exact commit and evicts it after any rollback or post-mutation refusal.
 //!
 //! Single writer: one workspace store has one writer thread (`worker_main`),
 //! and the cache is a plain local of that thread. The head-row sha probe is
@@ -119,9 +121,39 @@ fn head_row_sha(conn: &Connection, key: &DocKey, seq: i64) -> Result<Option<Stri
 struct CacheEntry {
     doc: Ydoc,
     frontier: IntegratedFrontier,
+    /// Full-state fork used only for replay-parity check 4. It is never served
+    /// as content, promoted to `doc`, or used to produce durable bytes.
+    gate_scratch: Option<PersistentGateScratch>,
     tuple: CacheTuple,
     approx_bytes: usize,
     last_used: Cell<u64>,
+}
+
+type LocalGateArtifacts<'a> = (&'a Ydoc, &'a IntegratedFrontier, Option<&'a Ydoc>);
+
+struct CacheInstall {
+    doc: Ydoc,
+    frontier: IntegratedFrontier,
+    gate_scratch: Option<Ydoc>,
+    candidate: IntegratedFrontierDelta,
+}
+
+struct PersistentGateScratch {
+    doc: Ydoc,
+    approx_bytes: usize,
+}
+
+impl PersistentGateScratch {
+    fn new(doc: Ydoc) -> Self {
+        let approx_bytes = approx_doc_bytes(&doc);
+        PersistentGateScratch { doc, approx_bytes }
+    }
+}
+
+fn approx_doc_bytes(doc: &Ydoc) -> usize {
+    doc.encode_full_state()
+        .len()
+        .saturating_add(doc.pending_update_v1().map_or(0, |bytes| bytes.len()))
 }
 
 /// Hit/miss/maintenance counters (test evidence; negligible cost).
@@ -141,6 +173,10 @@ pub struct CacheStats {
 pub(crate) struct GateBaseProbe {
     pub(crate) served: Option<ServedGateBase>,
     pub(crate) candidate: Option<IntegratedFrontierDelta>,
+    /// Fresh post-candidate scratch when the entry had none at gate time.
+    pub(crate) rebuilt_scratch: Option<Ydoc>,
+    /// Set immediately before a resident scratch applies the candidate.
+    pub(crate) scratch_mutated: bool,
     commit: Option<CacheCommitToken>,
 }
 
@@ -198,6 +234,15 @@ impl RemoteAppendProbe {
 /// The final replay coordinates observed after all in-transaction append work.
 /// Only a normally committed outcome may consume this token.
 struct CacheCommitToken(Option<CacheTuple>);
+
+enum GateScratchAdvance {
+    /// The cached-local gate already applied this candidate in-transaction.
+    AlreadyApplied,
+    /// A cold check-4 replay produced the exact post-candidate scratch.
+    Replace(Ydoc),
+    /// A non-local gate stayed cold; advance any resident companion now.
+    ApplyAfterCommit,
+}
 
 /// The single-writer-thread cache. `!Send` on purpose (it caches `Ydoc`s); it
 /// lives and dies with the workspace store's worker thread.
@@ -258,14 +303,14 @@ impl WriterDocCache {
             .map(|entry| &entry.doc))
     }
 
-    /// Tuple-validated base plus its FR1 companion for the cached LOCAL append
-    /// path. No other gate caller is allowed to serve checks 1-3 from it.
-    pub(crate) fn base_and_frontier_for_local_gate(
+    /// Tuple-validated base plus both parity companions for the cached LOCAL
+    /// append path. No other gate caller may serve checks 1-4 from them.
+    pub(crate) fn base_frontier_and_scratch_for_local_gate(
         &self,
         conn: &Connection,
         key: &DocKey,
         marker: &Marker,
-    ) -> Result<Option<(&Ydoc, &IntegratedFrontier)>, CollabError> {
+    ) -> Result<Option<LocalGateArtifacts<'_>>, CollabError> {
         let Some(entry) = self.validated_entry(conn, key, marker)? else {
             return Ok(None);
         };
@@ -274,7 +319,20 @@ impl WriterDocCache {
         // loudly instead of being mapped to an ordinary gate refusal.
         #[cfg(any(test, debug_assertions))]
         entry.frontier.assert_matches_doc(&entry.doc)?;
-        Ok(Some((&entry.doc, &entry.frontier)))
+        Ok(Some((
+            &entry.doc,
+            &entry.frontier,
+            entry.gate_scratch.as_ref().map(|scratch| &scratch.doc),
+        )))
+    }
+
+    /// A cached-local gate can fail after mutating the resident check-4
+    /// scratch. The database transaction rolls back, but yrs cannot, so drop
+    /// only that companion and rebuild it cold on the next gate.
+    pub(crate) fn finish_local_gate_error(&mut self, key: &DocKey, probe: &GateBaseProbe) {
+        if probe.scratch_mutated {
+            self.evict_gate_scratch(key);
+        }
     }
 
     /// Serve a read-only PR3 consumer after validating the entry against the
@@ -372,7 +430,13 @@ impl WriterDocCache {
                 expected.head_update_seq = *seq;
                 expected.head_row_sha = Some(update_sha);
                 if *seq == observed.head_update_seq + 1 && current.as_ref() == Some(&expected) {
-                    self.advance_committed(key, update, candidate, expected);
+                    self.advance_committed(
+                        key,
+                        update,
+                        candidate,
+                        expected,
+                        GateScratchAdvance::ApplyAfterCommit,
+                    );
                 } else {
                     self.remove(key);
                 }
@@ -410,9 +474,27 @@ impl WriterDocCache {
             return;
         }
         match served.source {
-            GateBaseSource::Hit => self.advance_committed(key, update, candidate, fresh),
+            GateBaseSource::Hit => self.advance_committed(
+                key,
+                update,
+                candidate,
+                fresh,
+                GateScratchAdvance::ApplyAfterCommit,
+            ),
             GateBaseSource::Rebuilt { doc, frontier } => {
-                self.install_committed(key, doc, frontier, update, candidate, fresh)
+                // The remote projection scratch remains content-facing and is
+                // never promoted into this check-4 companion.
+                self.install_committed(
+                    key,
+                    CacheInstall {
+                        doc,
+                        frontier,
+                        gate_scratch: None,
+                        candidate,
+                    },
+                    update,
+                    fresh,
+                )
             }
         }
     }
@@ -439,6 +521,8 @@ impl WriterDocCache {
                 let GateBaseProbe {
                     served,
                     candidate,
+                    rebuilt_scratch,
+                    scratch_mutated,
                     commit,
                 } = probe;
                 let Some(served) = served else {
@@ -463,19 +547,48 @@ impl WriterDocCache {
                     self.remove(key);
                     return;
                 }
+                let scratch_advance = match (scratch_mutated, rebuilt_scratch) {
+                    (true, None) => GateScratchAdvance::AlreadyApplied,
+                    (false, Some(scratch)) => GateScratchAdvance::Replace(scratch),
+                    _ => {
+                        self.remove(key);
+                        return;
+                    }
+                };
                 match served.source {
-                    GateBaseSource::Hit => self.advance_committed(key, update, candidate, fresh),
+                    GateBaseSource::Hit => {
+                        self.advance_committed(key, update, candidate, fresh, scratch_advance)
+                    }
                     GateBaseSource::Rebuilt { doc, frontier } => {
-                        self.install_committed(key, doc, frontier, update, candidate, fresh)
+                        let GateScratchAdvance::Replace(scratch) = scratch_advance else {
+                            self.remove(key);
+                            return;
+                        };
+                        self.install_committed(
+                            key,
+                            CacheInstall {
+                                doc,
+                                frontier,
+                                gate_scratch: Some(scratch),
+                                candidate,
+                            },
+                            update,
+                            fresh,
+                        )
                     }
                 }
             }
             // Durable-but-unacked: the head advanced without a verified
             // advancement path. Fail safe.
             TxnOutcome::Crashed { committed: true } => self.remove(key),
-            // Rolled back: durable state is unchanged, so the entry (validated
-            // by the tuple probe on its next use anyway) stays.
-            TxnOutcome::Crashed { committed: false } => {}
+            // The writer doc/frontier stay valid across rollback. A resident
+            // scratch already applied the candidate and has no rollback, so
+            // evict only that companion.
+            TxnOutcome::Crashed { committed: false } => {
+                if probe.scratch_mutated {
+                    self.evict_gate_scratch(key);
+                }
+            }
         }
     }
 
@@ -486,6 +599,7 @@ impl WriterDocCache {
         applied: &[u8],
         candidate: IntegratedFrontierDelta,
         tuple: CacheTuple,
+        scratch_advance: GateScratchAdvance,
     ) {
         let Some(entry) = self.entries.get_mut(key) else {
             return;
@@ -504,6 +618,47 @@ impl WriterDocCache {
             .saturating_sub(previous_frontier_bytes)
             .saturating_add(applied.len())
             .saturating_add(entry.frontier.approx_bytes());
+
+        let scratch_valid = match scratch_advance {
+            GateScratchAdvance::AlreadyApplied => {
+                if let Some(scratch) = entry.gate_scratch.as_mut() {
+                    scratch.approx_bytes = scratch.approx_bytes.saturating_add(applied.len());
+                    entry.approx_bytes = entry.approx_bytes.saturating_add(applied.len());
+                    true
+                } else {
+                    false
+                }
+            }
+            GateScratchAdvance::Replace(doc) => {
+                if let Some(previous) = entry.gate_scratch.take() {
+                    entry.approx_bytes = entry.approx_bytes.saturating_sub(previous.approx_bytes);
+                }
+                let replacement = PersistentGateScratch::new(doc);
+                entry.approx_bytes = entry.approx_bytes.saturating_add(replacement.approx_bytes);
+                entry.gate_scratch = Some(replacement);
+                true
+            }
+            GateScratchAdvance::ApplyAfterCommit => {
+                if let Some(scratch) = entry.gate_scratch.as_mut() {
+                    if scratch.doc.apply(applied).is_err() {
+                        let discarded = entry
+                            .gate_scratch
+                            .take()
+                            .expect("the failed resident scratch still exists");
+                        entry.approx_bytes =
+                            entry.approx_bytes.saturating_sub(discarded.approx_bytes);
+                    } else {
+                        scratch.approx_bytes = scratch.approx_bytes.saturating_add(applied.len());
+                        entry.approx_bytes = entry.approx_bytes.saturating_add(applied.len());
+                    }
+                }
+                true
+            }
+        };
+        if !scratch_valid {
+            self.remove(key);
+            return;
+        }
         self.advances += 1;
         let entry = &self.entries[key];
         self.touch(entry);
@@ -515,22 +670,29 @@ impl WriterDocCache {
     fn install_committed(
         &mut self,
         key: &DocKey,
-        doc: Ydoc,
-        mut frontier: IntegratedFrontier,
+        install: CacheInstall,
         applied: &[u8],
-        candidate: IntegratedFrontierDelta,
         tuple: CacheTuple,
     ) {
+        let CacheInstall {
+            doc,
+            mut frontier,
+            gate_scratch,
+            candidate,
+        } = install;
         if doc.apply(applied).is_err() {
             self.remove(key);
             return;
         }
         frontier.fold(candidate);
-        let approx_bytes = doc
-            .encode_full_state()
-            .len()
-            .saturating_add(doc.pending_update_v1().map_or(0, |bytes| bytes.len()))
-            .saturating_add(frontier.approx_bytes());
+        let gate_scratch = gate_scratch.map(PersistentGateScratch::new);
+        let approx_bytes = approx_doc_bytes(&doc)
+            .saturating_add(frontier.approx_bytes())
+            .saturating_add(
+                gate_scratch
+                    .as_ref()
+                    .map_or(0, |scratch| scratch.approx_bytes),
+            );
         if approx_bytes > self.max_total_bytes() {
             self.remove(key);
             return;
@@ -538,6 +700,7 @@ impl WriterDocCache {
         let entry = CacheEntry {
             doc,
             frontier,
+            gate_scratch,
             tuple,
             approx_bytes,
             last_used: Cell::new(0),
@@ -593,10 +756,24 @@ impl WriterDocCache {
             self.remove(key);
             return;
         }
-        let approx_bytes = bytes.len().saturating_add(frontier.approx_bytes());
+        // Rebuild both Y.Docs from the exact snapshot replay base. The
+        // persistent scratch remains a full-state fork used only by check 4.
+        let pending = doc.pending_update_v1();
+        let Ok(gate_scratch) =
+            crate::replay_parity::rebuild_persistent_gate_scratch(&bytes, pending.as_deref())
+        else {
+            self.remove(key);
+            return;
+        };
+        let gate_scratch = PersistentGateScratch::new(gate_scratch);
+        let approx_bytes = bytes
+            .len()
+            .saturating_add(frontier.approx_bytes())
+            .saturating_add(gate_scratch.approx_bytes);
         let entry = CacheEntry {
             doc,
             frontier,
+            gate_scratch: Some(gate_scratch),
             tuple,
             approx_bytes,
             last_used: Cell::new(0),
@@ -612,6 +789,15 @@ impl WriterDocCache {
     pub fn remove(&mut self, key: &DocKey) {
         if self.entries.remove(key).is_some() {
             self.removes += 1;
+        }
+    }
+
+    fn evict_gate_scratch(&mut self, key: &DocKey) {
+        let Some(entry) = self.entries.get_mut(key) else {
+            return;
+        };
+        if let Some(scratch) = entry.gate_scratch.take() {
+            entry.approx_bytes = entry.approx_bytes.saturating_sub(scratch.approx_bytes);
         }
     }
 
@@ -667,6 +853,26 @@ impl WriterDocCache {
         }
     }
 
+    /// Replace the check-4 scratch with an empty document without changing its
+    /// tuple. The next cached-local gate must trip FR2-VALID.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn poison_gate_scratch_for_test(&mut self, key: &DocKey) {
+        if let Some(entry) = self.entries.get_mut(key) {
+            let replacement = PersistentGateScratch::new(Ydoc::wire());
+            if let Some(previous) = entry.gate_scratch.replace(replacement) {
+                entry.approx_bytes = entry.approx_bytes.saturating_sub(previous.approx_bytes);
+            }
+            entry.approx_bytes = entry.approx_bytes.saturating_add(
+                entry
+                    .gate_scratch
+                    .as_ref()
+                    .expect("the poison scratch was just installed")
+                    .approx_bytes,
+            );
+        }
+    }
+
     /// Differential frontier evidence for mutation tests.
     #[cfg(any(test, debug_assertions))]
     #[doc(hidden)]
@@ -684,6 +890,48 @@ impl WriterDocCache {
         self.entries
             .get(key)
             .map(|entry| entry.frontier.fact_counts())
+    }
+
+    /// Whether the check-4-only scratch is resident for this entry.
+    #[doc(hidden)]
+    pub fn gate_scratch_is_resident_for_test(&self, key: &DocKey) -> bool {
+        self.entries
+            .get(key)
+            .is_some_and(|entry| entry.gate_scratch.is_some())
+    }
+
+    /// FR2's exact observation comparison against the writer replay base.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn gate_scratch_matches_doc_for_test(
+        &self,
+        key: &DocKey,
+    ) -> Result<Option<bool>, CollabError> {
+        self.entries
+            .get(key)
+            .and_then(|entry| {
+                entry
+                    .gate_scratch
+                    .as_ref()
+                    .map(|scratch| (&entry.doc, &scratch.doc))
+            })
+            .map(|(doc, scratch)| {
+                crate::replay_parity::persistent_gate_scratch_matches_base(doc, scratch)
+            })
+            .transpose()
+    }
+
+    /// `(writer doc + frontier, check-4 scratch)` approximate bytes.
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn entry_byte_breakdown_for_test(&self, key: &DocKey) -> Option<(usize, usize)> {
+        self.entries.get(key).map(|entry| {
+            let scratch = entry
+                .gate_scratch
+                .as_ref()
+                .map_or(0, |scratch| scratch.approx_bytes);
+            (entry.approx_bytes.saturating_sub(scratch), scratch)
+        })
     }
 
     /// Whether an entry is resident (test evidence for eviction/removal).

@@ -14,6 +14,13 @@ use dohc_engine_collab::{
 };
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
 
+const OVERLAP_U1_HEX: &str = "01010c00040109706c61696e546578740461efbfbd00";
+/// A skip claims client 12 clocks `[0, 3)` but carries no integrable content.
+/// Against `OVERLAP_U1_HEX`'s `[0, 2)` base it passes checks 1-3, reaches the
+/// persistent apply, then check 4 observes that clock 2 was neither integrated
+/// nor parked.
+const CHECK4_DISCARDED_SKIP_HEX: &str = "01010c000a0300";
+
 fn committed<T>(o: TxnOutcome<T>) -> T {
     match o {
         TxnOutcome::Committed(v) => v,
@@ -44,6 +51,17 @@ fn setup(tag: &str, regime: Regime) -> (TempStore, DocKey) {
 /// base (no origin dependencies), so appends can be sequenced freely.
 fn independent_insert(text: &str) -> Vec<u8> {
     Ydoc::wire().plaintext_insert(0, text)
+}
+
+fn decode_hex(encoded: &str) -> Vec<u8> {
+    encoded
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let pair = std::str::from_utf8(pair).expect("hex utf8");
+            u8::from_str_radix(pair, 16).expect("hex byte")
+        })
+        .collect()
 }
 
 /// Redefine an update's payload in place (same client, same clocks, different
@@ -532,6 +550,111 @@ fn frontier_oracle_catches_a_poisoned_identity() {
     let _ = record_local_update(&mut ts.store, &mut ts.cache, &key, &u2, &NoFaults, 1_002);
 }
 
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "FR2-VALID")]
+fn scratch_oracle_catches_a_poisoned_scratch() {
+    let (mut ts, key) = setup("scratch-oracle-poison", Regime::LocalOnly);
+    let u1 = independent_insert("a");
+    committed(
+        record_local_update(&mut ts.store, &mut ts.cache, &key, &u1, &NoFaults, 1_001).expect("u1"),
+    );
+    assert!(ts.cache.gate_scratch_is_resident_for_test(&key));
+    ts.cache.poison_gate_scratch_for_test(&key);
+
+    let u2 = independent_insert("b");
+    let _ = record_local_update(&mut ts.store, &mut ts.cache, &key, &u2, &NoFaults, 1_002);
+}
+
+#[test]
+fn frontier_refusal_leaves_the_persistent_scratch_untouched() {
+    let (mut ts, key) = setup("scratch-frontier-refusal", Regime::LocalOnly);
+    let base = independent_insert("z");
+    committed(
+        record_local_update(&mut ts.store, &mut ts.cache, &key, &base, &NoFaults, 1_001)
+            .expect("base"),
+    );
+    assert!(ts.cache.gate_scratch_is_resident_for_test(&key));
+
+    let hostile = flip_payload_byte(&base, b'z', b'y');
+    let error = record_local_update(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &hostile,
+        &NoFaults,
+        1_002,
+    )
+    .expect_err("a clock redefinition must fail before check 4");
+    assert!(matches!(error, CollabError::ReplayParityViolation { .. }));
+    assert!(
+        ts.cache.gate_scratch_is_resident_for_test(&key),
+        "checks 1-3 must refuse before mutating or evicting the scratch"
+    );
+    assert_eq!(
+        ts.cache
+            .gate_scratch_matches_doc_for_test(&key)
+            .expect("scratch comparison"),
+        Some(true)
+    );
+}
+
+#[test]
+fn check4_refusal_evicts_the_scratch_and_the_next_gate_rebuilds_cold() {
+    let (mut ts, key) = setup("scratch-check4-refusal", Regime::LocalOnly);
+    let u1 = decode_hex(OVERLAP_U1_HEX);
+    committed(
+        record_local_update(&mut ts.store, &mut ts.cache, &key, &u1, &NoFaults, 1_001).expect("u1"),
+    );
+    assert!(ts.cache.contains_for_test(&key));
+    assert!(ts.cache.gate_scratch_is_resident_for_test(&key));
+
+    let hostile = decode_hex(CHECK4_DISCARDED_SKIP_HEX);
+    let warm_error = record_local_update(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &hostile,
+        &NoFaults,
+        1_002,
+    )
+    .expect_err("a discarded skip must fail check 4");
+    assert!(matches!(
+        &warm_error,
+        CollabError::ReplayParityViolation { .. }
+    ));
+    assert!(
+        ts.cache.contains_for_test(&key),
+        "the writer doc and frontier remain valid"
+    );
+    assert!(
+        !ts.cache.gate_scratch_is_resident_for_test(&key),
+        "a post-mutation refusal evicts the scratch"
+    );
+
+    let cold_base = load_persisted(&ts.store, &key).expect("load").expect("doc");
+    let fresh_error = dohc_engine_collab::validate_replay_parity(&cold_base.doc, &hostile)
+        .expect_err("fresh replay must reject the same discarded skip");
+    assert_eq!(warm_error.to_string(), fresh_error.to_string());
+
+    let before_retry = ts.cache.stats();
+    let rebuilt_error = record_local_update(
+        &mut ts.store,
+        &mut ts.cache,
+        &key,
+        &hostile,
+        &NoFaults,
+        1_003,
+    )
+    .expect_err("the scratch-miss replay must agree");
+    assert_eq!(rebuilt_error.to_string(), fresh_error.to_string());
+    assert_eq!(ts.cache.stats().hits, before_retry.hits + 1);
+    assert!(
+        !ts.cache.gate_scratch_is_resident_for_test(&key),
+        "a refused cold rebuild is not installed"
+    );
+}
+
 #[test]
 fn a_pruned_lineage_with_the_reset_hook_rejects_a_hostile_re_encode() {
     // The healed counterpart of the ABA test: the prune calls the remove
@@ -577,15 +700,16 @@ fn a_pruned_lineage_with_the_reset_hook_rejects_a_hostile_re_encode() {
 // ---- T3: rollback and crash semantics ---------------------------------------
 
 #[test]
-fn a_guarded_error_after_the_gate_leaves_the_entry_valid() {
+fn a_guarded_error_after_the_gate_evicts_only_the_mutated_scratch() {
     // (a) The guarded closure fails AFTER the gate passed: the transaction
-    // rolls back, the cache must not advance, and the untouched entry still
-    // matches the durable state (the retry hits it).
+    // rolls back. The writer doc/frontier must not advance, while the scratch
+    // that already applied the candidate must be evicted.
     let (mut ts, key) = setup("cache-t3-guarded-err", Regime::LocalOnly);
     let u1 = independent_insert("a");
     committed(
         record_local_update(&mut ts.store, &mut ts.cache, &key, &u1, &NoFaults, 1_001).expect("u1"),
     );
+    assert!(ts.cache.gate_scratch_is_resident_for_test(&key));
 
     let u2 = independent_insert("b");
     let before = ts.cache.stats();
@@ -623,6 +747,11 @@ fn a_guarded_error_after_the_gate_leaves_the_entry_valid() {
         1,
         "the append rolled back"
     );
+    assert!(ts.cache.contains_for_test(&key), "the writer entry remains");
+    assert!(
+        !ts.cache.gate_scratch_is_resident_for_test(&key),
+        "rollback evicts the already-mutated scratch"
+    );
 
     let retry = committed(
         record_local_update(&mut ts.store, &mut ts.cache, &key, &u2, &NoFaults, 1_003)
@@ -634,6 +763,13 @@ fn a_guarded_error_after_the_gate_leaves_the_entry_valid() {
         before.hits + 2,
         "the entry stayed valid: the rolled-back attempt and the retry both hit"
     );
+    assert!(ts.cache.gate_scratch_is_resident_for_test(&key));
+    assert_eq!(
+        ts.cache
+            .gate_scratch_matches_doc_for_test(&key)
+            .expect("scratch comparison"),
+        Some(true)
+    );
 }
 
 #[test]
@@ -643,6 +779,7 @@ fn the_commit_token_observes_updates_appended_by_the_post_append_hook() {
     committed(
         record_local_update(&mut ts.store, &mut ts.cache, &key, &u1, &NoFaults, 1_001).expect("u1"),
     );
+    assert!(ts.cache.gate_scratch_is_resident_for_test(&key));
     let u2 = independent_insert("b");
     let extra = independent_insert("c");
     let before = ts.cache.stats();
@@ -701,6 +838,7 @@ fn a_pre_persist_crash_keeps_the_entry_valid() {
     committed(
         record_local_update(&mut ts.store, &mut ts.cache, &key, &u1, &NoFaults, 1_001).expect("u1"),
     );
+    assert!(ts.cache.gate_scratch_is_resident_for_test(&key));
 
     let u2 = independent_insert("b");
     let faults = OneShotCrash::at(FaultPoint::StorageBeforePersist);
@@ -708,6 +846,10 @@ fn a_pre_persist_crash_keeps_the_entry_valid() {
         .expect("crash surfaces as an outcome");
     assert!(matches!(outcome, TxnOutcome::Crashed { committed: false }));
     assert!(ts.cache.contains_for_test(&key), "rollback keeps the entry");
+    assert!(
+        !ts.cache.gate_scratch_is_resident_for_test(&key),
+        "rollback evicts the mutated scratch"
+    );
 
     let before = ts.cache.stats();
     let retry = committed(
@@ -720,6 +862,7 @@ fn a_pre_persist_crash_keeps_the_entry_valid() {
         before.hits + 1,
         "the retry hit the surviving entry"
     );
+    assert!(ts.cache.gate_scratch_is_resident_for_test(&key));
 }
 
 #[cfg(feature = "fault-injection")]
@@ -739,6 +882,7 @@ fn a_post_commit_crash_removes_the_entry_and_a_rebuild_matches_the_durable_head(
     committed(
         record_local_update(&mut ts.store, &mut ts.cache, &key, &u1, &NoFaults, 1_001).expect("u1"),
     );
+    assert!(ts.cache.gate_scratch_is_resident_for_test(&key));
 
     let faults = OneShotCrash::at(FaultPoint::StorageAfterCommitBeforeAck);
     let outcome = record_local_update(&mut ts.store, &mut ts.cache, &key, &u2, &faults, 1_002)
@@ -767,6 +911,13 @@ fn a_post_commit_crash_removes_the_entry_and_a_rebuild_matches_the_durable_head(
         ts.cache.doc_full_state_for_test(&key),
         Some(cold.doc.encode_full_state()),
         "the rebuilt entry matches the durable head byte-for-byte"
+    );
+    assert!(ts.cache.gate_scratch_is_resident_for_test(&key));
+    assert_eq!(
+        ts.cache
+            .gate_scratch_matches_doc_for_test(&key)
+            .expect("rebuilt scratch comparison"),
+        Some(true)
     );
 }
 
@@ -809,6 +960,16 @@ fn compaction_rebases_the_entry_to_the_snapshot_byte_for_byte() {
         Some(true),
         "compaction rebuilds the frontier from the exact snapshot bytes"
     );
+    assert!(
+        ts.cache.gate_scratch_is_resident_for_test(&key),
+        "compaction rebuilds the persistent scratch"
+    );
+    assert_eq!(
+        ts.cache
+            .gate_scratch_matches_doc_for_test(&key)
+            .expect("compacted scratch comparison"),
+        Some(true)
+    );
 
     // The re-based entry serves the next append as a hit.
     let before = ts.cache.stats();
@@ -825,6 +986,12 @@ fn compaction_rebases_the_entry_to_the_snapshot_byte_for_byte() {
         .expect("append"),
     );
     assert_eq!(ts.cache.stats().hits, before.hits + 1);
+    assert_eq!(
+        ts.cache
+            .gate_scratch_matches_doc_for_test(&key)
+            .expect("advanced scratch comparison"),
+        Some(true)
+    );
 }
 
 #[test]
@@ -892,6 +1059,49 @@ fn the_byte_budget_bounds_residency_without_affecting_appends() {
     assert!(content.contains('a') && content.contains('b'));
 }
 
+#[test]
+fn the_byte_budget_charges_the_persistent_scratch() {
+    let (mut measured, key) = setup("cache-t4-scratch-budget-measure", Regime::LocalOnly);
+    let update = independent_insert("scratch-accounting");
+    committed(
+        record_local_update(
+            &mut measured.store,
+            &mut measured.cache,
+            &key,
+            &update,
+            &NoFaults,
+            1_001,
+        )
+        .expect("measure install"),
+    );
+    let (without_scratch, scratch) = measured
+        .cache
+        .entry_byte_breakdown_for_test(&key)
+        .expect("resident byte breakdown");
+    assert!(scratch > 0);
+
+    let (mut bounded, bounded_key) = setup("cache-t4-scratch-budget-bound", Regime::LocalOnly);
+    let mut cache = WriterDocCache::with_limits_for_test(
+        16,
+        without_scratch.saturating_add(scratch).saturating_sub(1),
+    );
+    committed(
+        record_local_update(
+            &mut bounded.store,
+            &mut cache,
+            &bounded_key,
+            &update,
+            &NoFaults,
+            1_001,
+        )
+        .expect("bounded append"),
+    );
+    assert!(
+        !cache.contains_for_test(&bounded_key),
+        "the entry must exceed a budget that omits one scratch byte"
+    );
+}
+
 // ---- forced-close containment (#851) ----------------------------------------
 
 #[test]
@@ -906,6 +1116,10 @@ fn a_warmed_cache_does_not_change_forced_close_corruption_detection() {
         record_local_update(&mut ts.store, &mut ts.cache, &key, &u1, &NoFaults, 1_001).expect("u1"),
     );
     assert!(ts.cache.contains_for_test(&key), "the cache is warm");
+    assert!(
+        ts.cache.gate_scratch_is_resident_for_test(&key),
+        "the #851 pin runs with the F2 scratch warm"
+    );
 
     committed(maybe_compact(&mut ts.store, &key, 0, &NoFaults, 1_002).expect("forced fold"));
 
