@@ -13,6 +13,7 @@ import {
   hashLinkBearer,
   hashLinkHandoffCode,
   hashRelayExchangeKey,
+  LinkEgressRateLimiter,
   LinkExchangeRateLimiter,
   LinkReadRateLimiter,
   LINK_GRANT_LOG_READ_BUCKET_CAPACITY,
@@ -136,6 +137,7 @@ export interface CreateSyncRelayHandlerOptions {
   linkGrantReadRateLimiter?: LinkReadRateLimiter;
   linkLogReadRateLimiter?: LinkReadRateLimiter;
   linkGrantLogReadRateLimiter?: LinkReadRateLimiter;
+  linkGrantEgressRateLimiter?: LinkEgressRateLimiter;
   linkCapabilityReadFallbackPageSize?: number;
   newLinkBearer?: () => string;
   newLinkHandoffCode?: () => string;
@@ -347,6 +349,7 @@ export function createSyncRelayHandler({
     LINK_GRANT_LOG_READ_BUCKET_CAPACITY,
     LINK_GRANT_LOG_READ_REFILL_PER_SECOND,
   ),
+  linkGrantEgressRateLimiter = new LinkEgressRateLimiter(),
   linkCapabilityReadFallbackPageSize = MAX_LOG_PAGE_SIZE,
   newLinkBearer = () => mintLinkBearer(),
   newLinkHandoffCode = () => mintLinkHandoffCode(),
@@ -1312,6 +1315,23 @@ export function createSyncRelayHandler({
     return fresh;
   };
 
+  const linkJsonResponse = (grantId: string, body: unknown): Response => {
+    const serialized = JSON.stringify(body);
+    if (
+      !linkGrantEgressRateLimiter.charge(
+        grantId,
+        Buffer.byteLength(serialized),
+        nowMs(),
+      )
+    ) {
+      throw linkReadRateLimited();
+    }
+    return new Response(serialized, {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
   const requireRefreshableLinkSession = (request: Request, refreshedAtMs: number) => {
     if (!linkKey) throw invalidLinkCapability();
     const match = /^LinkCapability ([A-Za-z0-9_-]{43})$/u.exec(
@@ -1681,7 +1701,7 @@ export function createSyncRelayHandler({
           const presentation = createAccountlessPathProjection(
             capability.effectiveSelector,
           );
-          return jsonResponse({
+          return linkJsonResponse(capability.grantId, {
             ok: true,
             effectiveSelector: presentation.selector,
             access: capability.access,
@@ -1702,7 +1722,11 @@ export function createSyncRelayHandler({
             "accountless",
           );
           requireFreshLinkRead(capabilityToken, capability);
-          return jsonResponse({ ok: true, ...page, epochLogFloor });
+          return linkJsonResponse(capability.grantId, {
+            ok: true,
+            ...page,
+            epochLogFloor,
+          });
         }
 
         assertSha256(route.sha256);
@@ -1719,6 +1743,16 @@ export function createSyncRelayHandler({
           blob.byteLength,
         );
         if (!releaseBytes) throw linkReadRateLimited();
+        if (
+          !linkGrantEgressRateLimiter.charge(
+            capability.grantId,
+            blob.byteLength,
+            nowMs(),
+          )
+        ) {
+          releaseBytes();
+          throw linkReadRateLimited();
+        }
         return respondWithLinkBlob(
           blob,
           capability.shareId,

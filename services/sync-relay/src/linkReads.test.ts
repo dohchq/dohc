@@ -11,7 +11,10 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   hashLinkBearer,
+  LinkEgressRateLimiter,
   LinkReadRateLimiter,
+  LINK_GRANT_EGRESS_BUCKET_CAPACITY_BYTES,
+  LINK_GRANT_EGRESS_REFILL_BYTES_PER_SECOND,
   LINK_GRANT_LOG_READ_BUCKET_CAPACITY,
   LINK_GRANT_READ_BUCKET_CAPACITY,
   LINK_LOG_READ_BUCKET_CAPACITY,
@@ -93,6 +96,7 @@ function handler(
     linkGrantReadRateLimiter?: LinkReadRateLimiter;
     linkLogReadRateLimiter?: LinkReadRateLimiter;
     linkGrantLogReadRateLimiter?: LinkReadRateLimiter;
+    linkGrantEgressRateLimiter?: LinkEgressRateLimiter;
     linkCapabilityReadFallbackPageSize?: number;
     newLinkBearer?: () => string;
   } = {},
@@ -115,6 +119,7 @@ function handler(
     linkGrantReadRateLimiter: options.linkGrantReadRateLimiter,
     linkLogReadRateLimiter: options.linkLogReadRateLimiter,
     linkGrantLogReadRateLimiter: options.linkGrantLogReadRateLimiter,
+    linkGrantEgressRateLimiter: options.linkGrantEgressRateLimiter,
     linkCapabilityReadFallbackPageSize:
       options.linkCapabilityReadFallbackPageSize,
     newLinkBearer: options.newLinkBearer,
@@ -2717,5 +2722,80 @@ describe("relay capability reads", () => {
       error: "too many link reads",
       code: "link_read_rate_limited",
     });
+  });
+
+  it("keeps total blob egress on the grant across rotation and refills it", async () => {
+    expect(LINK_GRANT_EGRESS_BUCKET_CAPACITY_BYTES).toBe(5 * MAX_BLOB_BYTES);
+    expect(LINK_GRANT_EGRESS_REFILL_BYTES_PER_SECOND).toBe(
+      LINK_GRANT_EGRESS_BUCKET_CAPACITY_BYTES / (24 * 60 * 60),
+    );
+    let now = 2_000;
+    const storage = await newStorage();
+    const h = handler(storage, {
+      nowMs: () => now,
+      linkGrantEgressRateLimiter: new LinkEgressRateLimiter(18, 9, 10),
+    });
+    const seeded = await seed(h);
+    const blobPath = `/sync/link/blobs/${seeded.sharedSha}`;
+
+    for (let reads = 0; reads < 2; reads += 1) {
+      const response = await h(linkRequest(seeded.capability, blobPath));
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("# shared\n");
+    }
+    const exhausted = await h(linkRequest(seeded.capability, blobPath));
+    expect(exhausted.status).toBe(429);
+    expect(await json(exhausted)).toMatchObject({ code: "link_read_rate_limited" });
+
+    const rotation = await json(
+      await h(
+        request(
+          OWNER,
+          `/sync/shares/share-0/links/${seeded.grantId}/rotate`,
+          jsonBody({ workspaceId: WORKSPACE, expectedDependentGrantIds: [] }),
+        ),
+      ),
+    );
+    const exchange = await json(
+      await h(
+        request(
+          null,
+          "/sync/link-exchange",
+          jsonBody({ secret: linkSecret(rotation.url) }),
+        ),
+      ),
+    );
+    expect(exchange.grantId).toBe(seeded.grantId);
+    const rotatedCapability = String(exchange.capabilityToken);
+    const stillExhausted = await h(linkRequest(rotatedCapability, blobPath));
+    expect(stillExhausted.status).toBe(429);
+    expect(await json(stillExhausted)).toMatchObject({
+      code: "link_read_rate_limited",
+    });
+
+    now += 1_000;
+    const refilled = await h(linkRequest(rotatedCapability, blobPath));
+    expect(refilled.status).toBe(200);
+    expect(await refilled.text()).toBe("# shared\n");
+  });
+
+  it("charges exact metadata and log response bytes to the same grant", async () => {
+    const storage = await newStorage();
+    const budget = new LinkEgressRateLimiter(10_000, 1, 10);
+    const charge = vi.spyOn(budget, "charge");
+    const h = handler(storage, { linkGrantEgressRateLimiter: budget });
+    const seeded = await seed(h);
+
+    const metadata = await h(linkRequest(seeded.capability, "/sync/link/share"));
+    expect(metadata.status).toBe(200);
+    const metadataBody = await metadata.text();
+    const log = await h(linkRequest(seeded.capability, "/sync/link/log"));
+    expect(log.status).toBe(200);
+    const logBody = await log.text();
+
+    expect(charge.mock.calls).toEqual([
+      [seeded.grantId, Buffer.byteLength(metadataBody), 2_000],
+      [seeded.grantId, Buffer.byteLength(logBody), 2_000],
+    ]);
   });
 });

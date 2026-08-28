@@ -33,6 +33,14 @@ export const LINK_GRANT_LOG_READ_BUCKET_CAPACITY =
   LINK_LOG_READ_BUCKET_CAPACITY * 4;
 export const LINK_GRANT_LOG_READ_REFILL_PER_SECOND =
   LINK_LOG_READ_REFILL_PER_SECOND * 4;
+// A grant may burst through five maximum-size (20 MiB) blobs. Its refill adds
+// the same allowance over 24 hours, so a sustained viewer can reopen a maximum
+// blob several times per day without giving an accountless grant unlimited
+// relay egress.
+export const LINK_GRANT_EGRESS_BUCKET_CAPACITY_BYTES = 100 * 1024 * 1024;
+export const LINK_GRANT_EGRESS_REFILL_BYTES_PER_SECOND =
+  LINK_GRANT_EGRESS_BUCKET_CAPACITY_BYTES / (24 * 60 * 60);
+export const LINK_GRANT_EGRESS_MAX_GRANTS = 10_000;
 
 type TimingSafeComparator = (left: Uint8Array, right: Uint8Array) => boolean;
 
@@ -140,6 +148,55 @@ export class LinkReadRateLimiter extends LinkExchangeRateLimiter {
     maxCapabilities = LINK_READ_MAX_CAPABILITIES,
   ) {
     super(capacity, refillPerSecond, maxCapabilities);
+  }
+}
+
+export class LinkEgressRateLimiter {
+  private readonly buckets = new Map<string, Bucket>();
+
+  constructor(
+    private readonly capacityBytes = LINK_GRANT_EGRESS_BUCKET_CAPACITY_BYTES,
+    private readonly refillBytesPerSecond =
+      LINK_GRANT_EGRESS_REFILL_BYTES_PER_SECOND,
+    private readonly maxGrants = LINK_GRANT_EGRESS_MAX_GRANTS,
+  ) {
+    if (capacityBytes <= 0 || refillBytesPerSecond <= 0 || maxGrants <= 0) {
+      throw new Error("link egress limits must be positive");
+    }
+  }
+
+  charge(grantId: string, byteLength: number, nowMs: number): boolean {
+    if (!Number.isSafeInteger(byteLength) || byteLength < 0) {
+      throw new Error("link egress byte length must be a non-negative integer");
+    }
+    let bucket = this.buckets.get(grantId);
+    if (!bucket) {
+      if (this.buckets.size >= this.maxGrants) this.evictOldest();
+      bucket = { tokens: this.capacityBytes, updatedAtMs: nowMs };
+      this.buckets.set(grantId, bucket);
+    }
+    const nextUpdatedAtMs = Math.max(bucket.updatedAtMs, nowMs);
+    const elapsedSeconds = (nextUpdatedAtMs - bucket.updatedAtMs) / 1_000;
+    bucket.tokens = Math.min(
+      this.capacityBytes,
+      bucket.tokens + elapsedSeconds * this.refillBytesPerSecond,
+    );
+    bucket.updatedAtMs = nextUpdatedAtMs;
+    if (bucket.tokens < byteLength) return false;
+    bucket.tokens -= byteLength;
+    return true;
+  }
+
+  private evictOldest(): void {
+    let oldestKey: string | null = null;
+    let oldestMs = Number.POSITIVE_INFINITY;
+    for (const [key, bucket] of this.buckets) {
+      if (bucket.updatedAtMs < oldestMs) {
+        oldestKey = key;
+        oldestMs = bucket.updatedAtMs;
+      }
+    }
+    if (oldestKey !== null) this.buckets.delete(oldestKey);
   }
 }
 
