@@ -146,6 +146,48 @@ async function json(response: Response): Promise<Record<string, unknown>> {
   return (await response.json()) as Record<string, unknown>;
 }
 
+function linkSecret(value: unknown): string {
+  if (typeof value !== "string") {
+    throw new TypeError("Minted link URL must be a string");
+  }
+  const url = new URL(value);
+  if (url.pathname !== "/s/") {
+    throw new TypeError("Minted link URL must use the /s/ path");
+  }
+  const fragmentMarker = value.indexOf("#");
+  const queryEnd = fragmentMarker === -1 ? value.length : fragmentMarker;
+  if (value.slice(0, queryEnd).includes("?")) {
+    throw new TypeError("Minted link URL must not include a query");
+  }
+  const secret = url.hash.slice(1);
+  if (!/^[A-Za-z0-9_-]{43}$/u.test(secret)) {
+    throw new TypeError("Minted link URL must have a 43-character base64url fragment");
+  }
+  return secret;
+}
+
+describe("linkSecret", () => {
+  const secret = "a".repeat(43);
+
+  it("returns the fragment from a canonical minted URL", () => {
+    expect(linkSecret(`https://share.example.test/s/#${secret}`)).toBe(secret);
+  });
+
+  it.each([
+    ["a non-string", null],
+    ["a path without the trailing slash", `https://share.example.test/s#${secret}`],
+    ["a nested path", `https://share.example.test/s/more/#${secret}`],
+    ["an empty query marker", `https://share.example.test/s/?#${secret}`],
+    ["a query value", `https://share.example.test/s/?source=test#${secret}`],
+    ["a missing fragment", "https://share.example.test/s/"],
+    ["a short fragment", `https://share.example.test/s/#${"a".repeat(42)}`],
+    ["a long fragment", `https://share.example.test/s/#${"a".repeat(44)}`],
+    ["a non-base64url fragment", `https://share.example.test/s/#${"a".repeat(42)}+`],
+  ])("rejects %s", (_shape, value) => {
+    expect(() => linkSecret(value)).toThrow();
+  });
+});
+
 function sha256(content: string): string {
   return createHash("sha256").update(content).digest("hex");
 }
@@ -287,7 +329,7 @@ async function createLink(
       ),
     ),
   );
-  const secret = new URL(String(link.url)).hash.slice(1);
+  const secret = linkSecret(link.url);
   const exchange = await json(
     await h(request(null, "/sync/link-exchange", jsonBody({ secret }))),
   );
@@ -2166,7 +2208,7 @@ describe("relay capability reads", () => {
     const secondExchange = await json(
       await h(
         request(null, "/sync/link-exchange", {
-          ...jsonBody({ secret: new URL(String(secondLink.url)).hash.slice(1) }),
+          ...jsonBody({ secret: linkSecret(secondLink.url) }),
         }),
       ),
     );
@@ -2203,7 +2245,7 @@ describe("relay capability reads", () => {
     const thirdExchange = await json(
       await h(
         request(null, "/sync/link-exchange", {
-          ...jsonBody({ secret: new URL(String(thirdLink.url)).hash.slice(1) }),
+          ...jsonBody({ secret: linkSecret(thirdLink.url) }),
         }),
       ),
     );
