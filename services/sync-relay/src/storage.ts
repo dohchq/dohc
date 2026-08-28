@@ -655,6 +655,8 @@ const NORMALIZED_SHARE_SCHEMA_SQL = `
   ) STRICT;
   CREATE INDEX IF NOT EXISTS idx_sync_relay_shares_granter
     ON sync_relay_shares(granter_user_id, created_at_ms);
+  CREATE INDEX IF NOT EXISTS idx_sync_relay_shares_workspace
+    ON sync_relay_shares(workspace_id, created_at_ms, share_id);
 
   CREATE TABLE IF NOT EXISTS sync_relay_share_grants (
     grant_id TEXT PRIMARY KEY,

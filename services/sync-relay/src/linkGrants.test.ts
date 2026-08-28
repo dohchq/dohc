@@ -30,6 +30,7 @@ const roots: string[] = [];
 const storages: SyncRelayStorage[] = [];
 
 interface InspectionStatement {
+  all(...params: unknown[]): Record<string, unknown>[];
   get(...params: unknown[]): Record<string, unknown> | undefined;
   run(...params: unknown[]): { changes: number | bigint };
 }
@@ -107,6 +108,61 @@ async function newStorageWithPath(
 async function newStorage(): Promise<SyncRelayStorage> {
   return (await newStorageWithPath()).storage;
 }
+
+describe("workspace link inventory index", () => {
+  const indexName = "idx_sync_relay_shares_workspace";
+  const workspaceLookup = `
+    SELECT share_id
+    FROM sync_relay_shares
+    WHERE workspace_id = ?
+    ORDER BY created_at_ms, share_id
+  `;
+
+  function expectWorkspaceIndex(database: InspectionDatabase): void {
+    const columns = database
+      .prepare(`PRAGMA index_info('${indexName}')`)
+      .all()
+      .map((row) => String(row.name));
+    expect(columns).toEqual(["workspace_id", "created_at_ms", "share_id"]);
+
+    const queryPlan = database
+      .prepare(`EXPLAIN QUERY PLAN ${workspaceLookup}`)
+      .all(WORKSPACE)
+      .map((row) => String(row.detail));
+    expect(
+      queryPlan.some((detail) => detail.includes(`USING COVERING INDEX ${indexName}`)),
+    ).toBe(true);
+    expect(queryPlan.some((detail) => detail.includes("USE TEMP B-TREE"))).toBe(false);
+  }
+
+  it("installs the index for new and reopened storage", async () => {
+    const { storage, dbPath } = await newStorageWithPath();
+    const initialInspection = new InspectionDatabaseSync(dbPath, { readOnly: true });
+    try {
+      expectWorkspaceIndex(initialInspection);
+    } finally {
+      initialInspection.close();
+    }
+
+    storage.close();
+    storages.splice(storages.indexOf(storage), 1);
+    const writableInspection = new InspectionDatabaseSync(dbPath);
+    try {
+      writableInspection.exec(`DROP INDEX ${indexName}`);
+    } finally {
+      writableInspection.close();
+    }
+
+    const reopened = openSyncRelayStorage(dbPath);
+    storages.push(reopened);
+    const reopenedInspection = new InspectionDatabaseSync(dbPath, { readOnly: true });
+    try {
+      expectWorkspaceIndex(reopenedInspection);
+    } finally {
+      reopenedInspection.close();
+    }
+  });
+});
 
 function handler(
   storage: SyncRelayStorage,
