@@ -1745,6 +1745,9 @@ type RelayShareRetainedDependentSetResult<T> =
   | { kind: "success"; body: T }
   | { kind: "dependents-changed"; body: unknown; status: number };
 
+const RELAY_SHARE_FETCH_TIMEOUT_MS = 15_000;
+const relayShareFetch = relayFetchWithTimeout(RELAY_SHARE_FETCH_TIMEOUT_MS);
+
 async function relayShareJsonWithCredentials<T>(
   credentials: CloudSessionCredentials,
   path: string,
@@ -1768,7 +1771,7 @@ async function relayShareJsonWithCredentials<T>(
   const headers = new Headers(init?.headers);
   if (init?.body) headers.set("content-type", "application/json");
   headers.set("authorization", `Bearer ${credentials.token}`);
-  const response = await fetch(
+  const response = await relayShareFetch(
     `${normalizeServerUrl(credentials.relayUrl)}${path}`,
     { ...init, headers },
   );

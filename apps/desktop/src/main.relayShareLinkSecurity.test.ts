@@ -58,6 +58,30 @@ describe("main-process owner relay link authorization", () => {
     }
   });
 
+  it("bounds every owner link request through the shared relay helper", () => {
+    for (const channel of ownerLinkChannels) {
+      expect(handlerSource(channel), channel).toContain(
+        "relayShareJsonWithCredentials",
+      );
+    }
+
+    const helperStart = mainSource.indexOf(
+      "type RelayShareRetainedDependentSetResult",
+    );
+    const helperEnd = mainSource.indexOf(
+      "async function relayShareJson<T>",
+      helperStart,
+    );
+    expect(helperStart).toBeGreaterThan(-1);
+    expect(helperEnd).toBeGreaterThan(helperStart);
+    const helper = mainSource.slice(helperStart, helperEnd);
+    expect(helper).toContain(
+      "relayFetchWithTimeout(RELAY_SHARE_FETCH_TIMEOUT_MS)",
+    );
+    expect(helper).toContain("const response = await relayShareFetch(");
+    expect(helper).not.toContain("const response = await fetch(");
+  });
+
   it("refuses shared-view link creation before credentials or a relay request", () => {
     const handler = handlerSource("createRelayShareLink");
     const operationAt = handler.indexOf("async (operation) => {");
