@@ -1912,6 +1912,7 @@ export function createSyncRelayHandler({
         }
         const input = await readOptionalJsonObject(request);
         if (input !== null) {
+          if (!storage.workspaceIsOwnedBy(share.workspaceId, actor.userId)) throw notFound();
           const grantId = parseShareId(
             typeof input.grantId === "string" ? input.grantId : undefined,
           );
@@ -1925,26 +1926,19 @@ export function createSyncRelayHandler({
           ) {
             throw notFound();
           }
-          const currentOwner = storage.workspaceIsOwnedBy(share.workspaceId, actor.userId);
-          const expectedDependentGrantIds = currentOwner
-            ? parseExpectedDependentGrantIds(input, [
-                "grantId",
-                "workspaceId",
-                "expectedDependentGrantIds",
-              ])
-            : undefined;
+          const expectedDependentGrantIds = parseExpectedDependentGrantIds(input, [
+            "grantId",
+            "workspaceId",
+            "expectedDependentGrantIds",
+          ]);
           const result = storage.revokeShareGrant({
             shareId: share.shareId,
             grantId,
             revokedAtMs: nowMs(),
-            ...(expectedDependentGrantIds ? { expectedDependentGrantIds } : {}),
+            expectedDependentGrantIds,
           });
           if (!result.ok) {
-            if (
-              currentOwner &&
-              "reason" in result &&
-              result.reason === "dependents-changed"
-            ) {
+            if ("reason" in result && result.reason === "dependents-changed") {
               return dependentSetConflict(result.dependents, share.workspaceId, actor.userId);
             }
             throw notFound();

@@ -1585,7 +1585,7 @@ describe("owner link inventory and impact preconditions", () => {
     expect(storage.getCurrentLinkCredential("link-widening")).toEqual(beforeCredential);
   });
 
-  it("preserves unconditional legacy revoke only for the original granter after ownership loss", async () => {
+  it("refuses link revocation by the former owner after ownership transfer", async () => {
     const storage = await newStorage();
     const h = handler(storage);
     await seedFileShare(h);
@@ -1599,9 +1599,17 @@ describe("owner link inventory and impact preconditions", () => {
         createdAtMs: 2_002,
       }),
     ).toMatchObject({ ok: true });
+    const before = {
+      share: storage.getShare("share-existing"),
+      grants: storage.listSharesGrantedBy(OWNER),
+      links: storage.listLinkGrantsByWorkspace(WORKSPACE),
+      credential: storage.getCurrentLinkCredential(grantId),
+    };
+    const revokeShareGrant = vi.fn(storage.revokeShareGrant.bind(storage));
     const transferredStorage = new Proxy(storage, {
       get(target, property, receiver) {
         if (property === "workspaceIsOwnedBy") return () => false;
+        if (property === "revokeShareGrant") return revokeShareGrant;
         const value = Reflect.get(target, property, receiver) as unknown;
         return typeof value === "function" ? value.bind(target) : value;
       },
@@ -1612,7 +1620,11 @@ describe("owner link inventory and impact preconditions", () => {
         request(
           OWNER,
           "/sync/shares/share-missing/revoke",
-          jsonBody({ grantId, workspaceId: WORKSPACE }),
+          jsonBody({
+            grantId,
+            workspaceId: WORKSPACE,
+            expectedDependentGrantIds: "must-not-be-parsed",
+          }),
         ),
       ),
     );
@@ -1620,25 +1632,49 @@ describe("owner link inventory and impact preconditions", () => {
       request(
         "not-granter",
         "/sync/shares/share-existing/revoke",
-        jsonBody({ grantId, workspaceId: WORKSPACE }),
+        jsonBody({
+          grantId,
+          workspaceId: WORKSPACE,
+          expectedDependentGrantIds: "must-not-be-parsed",
+        }),
       ),
     );
     expect(await denialBytes(nonGranter)).toBe(missing);
-    const revoked = await transferredHandler(
+    const formerOwner = await transferredHandler(
       request(
         OWNER,
         "/sync/shares/share-existing/revoke",
-        jsonBody({ grantId, workspaceId: WORKSPACE }),
+        jsonBody({
+          grantId,
+          workspaceId: WORKSPACE,
+          expectedDependentGrantIds: ["dependent-former-owner"],
+        }),
       ),
     );
-    expect(revoked.status).toBe(200);
-    const serialized = await revoked.text();
-    expect(serialized).not.toContain("dependents");
-    expect(serialized).not.toContain("former-owner-dependent");
-    expect(storage.getShareGrant(grantId)).toMatchObject({ status: "revoked" });
+    expect(await denialBytes(formerOwner)).toBe(missing);
+    const malformedFormerOwner = await transferredHandler(
+      request(
+        OWNER,
+        "/sync/shares/share-existing/revoke",
+        jsonBody({
+          grantId,
+          workspaceId: WORKSPACE,
+          expectedDependentGrantIds: "must-not-be-parsed",
+        }),
+      ),
+    );
+    expect(await denialBytes(malformedFormerOwner)).toBe(missing);
+    expect(revokeShareGrant).not.toHaveBeenCalled();
+    expect(storage.getShareGrant(grantId)).toMatchObject({ status: "active" });
     expect(storage.getShareGrant("dependent-former-owner")).toMatchObject({
-      status: "revoked",
+      status: "active",
     });
+    expect({
+      share: storage.getShare("share-existing"),
+      grants: storage.listSharesGrantedBy(OWNER),
+      links: storage.listLinkGrantsByWorkspace(WORKSPACE),
+      credential: storage.getCurrentLinkCredential(grantId),
+    }).toEqual(before);
   });
 });
 
@@ -2541,7 +2577,7 @@ describe("relay link grants", () => {
     await createLink(h);
   });
 
-  it("lets the granter revoke a link after losing workspace ownership", async () => {
+  it("keeps legacy whole-share revoke for the granter after ownership transfer", async () => {
     const storage = await newStorage();
     const h = handler(storage);
     await seedFileShare(h);
@@ -2592,7 +2628,7 @@ describe("relay link grants", () => {
       request(
         OWNER,
         "/sync/shares/share-existing/revoke",
-        jsonBody({ grantId, workspaceId: WORKSPACE }),
+        { method: "POST" },
       ),
     );
     expect(revokedResponse.status).toBe(200);
