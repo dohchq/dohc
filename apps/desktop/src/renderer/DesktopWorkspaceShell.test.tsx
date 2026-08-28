@@ -15796,7 +15796,12 @@ describe("workbench render cost", () => {
         await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
       });
 
-      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(listings + 1);
+      vi.useRealTimers();
+      await waitFor(
+        () =>
+          expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(listings + 1),
+        { timeout: 10_000 },
+      );
       expect(bridge.listWorkspaceFiles).toHaveBeenLastCalledWith({
         workspaceId: WORKSPACE.workspaceId,
       });
