@@ -123,6 +123,11 @@ export interface SyncRelayLinkHandoffCodeRow {
   expiresAtMs: number;
 }
 
+interface StoredSyncRelayLinkHandoffCodeRow
+  extends SyncRelayLinkHandoffCodeRow {
+  resultGrantId: string | null;
+}
+
 export type LinkHandoffRedeemResult =
   | {
       ok: true;
@@ -731,9 +736,13 @@ const NORMALIZED_SHARE_SCHEMA_SQL = `
     generation INTEGER NOT NULL CHECK (generation >= 1),
     minted_at_ms INTEGER NOT NULL,
     expires_at_ms INTEGER NOT NULL,
+    result_grant_id TEXT,
     CHECK (expires_at_ms > minted_at_ms),
     FOREIGN KEY (grant_id)
+      REFERENCES sync_relay_share_grants(grant_id) ON DELETE CASCADE,
+    FOREIGN KEY (result_grant_id)
       REFERENCES sync_relay_share_grants(grant_id) ON DELETE CASCADE
+      DEFERRABLE INITIALLY DEFERRED
   ) STRICT;
   CREATE INDEX IF NOT EXISTS idx_sync_relay_link_handoff_codes_grant
     ON sync_relay_link_handoff_codes(grant_id, minted_at_ms);
@@ -1031,6 +1040,23 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
         `);
       }
     }
+    const handoffCodeColumns = db
+      .prepare("PRAGMA table_info(sync_relay_link_handoff_codes)")
+      .all()
+      .map((row) => String(row.name));
+    if (!handoffCodeColumns.includes("result_grant_id")) {
+      db.exec(`
+        ALTER TABLE sync_relay_link_handoff_codes
+        ADD COLUMN result_grant_id TEXT
+          REFERENCES sync_relay_share_grants(grant_id) ON DELETE CASCADE
+          DEFERRABLE INITIALLY DEFERRED
+      `);
+    }
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_sync_relay_link_handoff_codes_result_grant
+        ON sync_relay_link_handoff_codes(result_grant_id)
+        WHERE result_grant_id IS NOT NULL
+    `);
     // Lazy additive migration (0P sync-hardening item 4): dbs created before the
     // blob retention window gain created_at_ms on open. Existing rows default to
     // 0, so a legacy unreferenced blob is immediately past any grace window and
@@ -2923,18 +2949,19 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       const codesToDelete =
         currentCount - LINK_HANDOFF_CODES_PER_GRANT_LIMIT + 1;
       if (codesToDelete > 0) {
-        this.db
+        const evicted = this.db
           .prepare(
             `DELETE FROM sync_relay_link_handoff_codes
              WHERE code_id IN (
                SELECT code_id
                FROM sync_relay_link_handoff_codes
-               WHERE grant_id = ?
+               WHERE grant_id = ? AND result_grant_id IS NULL
                ORDER BY minted_at_ms ASC, code_id ASC
                LIMIT ?
              )`,
           )
           .run(code.grantId, codesToDelete);
+        if (Number(evicted.changes ?? 0) !== codesToDelete) return false;
       }
       this.db
         .prepare(
@@ -2971,7 +2998,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return this.tx(() => {
       const storedRow = this.db
         .prepare(
-          `SELECT code_id, code_hash, grant_id, generation, minted_at_ms, expires_at_ms
+          `SELECT code_id, code_hash, grant_id, generation, minted_at_ms, expires_at_ms,
+                  result_grant_id
            FROM sync_relay_link_handoff_codes
            WHERE code_hash = ?
            LIMIT 1`,
@@ -2982,23 +3010,40 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       if (!constantTimeHashEqual(input.codeHash, code.codeHash)) {
         return { ok: false };
       }
-      if (code.expiresAtMs <= input.redeemedAtMs) {
+      const deleteCode = (): void => {
         this.db
           .prepare(
             `DELETE FROM sync_relay_link_handoff_codes
              WHERE code_id = ? AND code_hash = ?`,
           )
           .run(code.codeId, code.codeHash);
+      };
+      if (code.expiresAtMs <= input.redeemedAtMs) {
+        deleteCode();
         return { ok: false };
       }
 
-      const consumed = this.db
-        .prepare(
-          `DELETE FROM sync_relay_link_handoff_codes
-           WHERE code_id = ? AND code_hash = ?`,
-        )
-        .run(code.codeId, code.codeHash);
-      if (Number(consumed.changes ?? 0) !== 1) return { ok: false };
+      if (code.resultGrantId !== null) {
+        const grant = this.getShareGrant(code.resultGrantId);
+        if (grant?.principalUserId !== input.principalUserId) {
+          return { ok: false };
+        }
+        if (
+          grant.principalKind !== "user" ||
+          grant.status !== "active" ||
+          grant.revokedAtMs !== null ||
+          grant.access !== "view"
+        ) {
+          deleteCode();
+          return { ok: false };
+        }
+        return { ok: true, shareId: grant.shareId, grant };
+      }
+
+      const refuseAndConsume = (): LinkHandoffRedeemResult => {
+        deleteCode();
+        return { ok: false };
+      };
 
       let authorized = false;
       try {
@@ -3006,7 +3051,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       } catch {
         authorized = false;
       }
-      if (!authorized) return { ok: false };
+      if (!authorized) return refuseAndConsume();
 
       const parent = this.getShareGrant(code.grantId);
       if (
@@ -3017,11 +3062,11 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         parent.generation !== code.generation ||
         parent.access !== "view"
       ) {
-        return { ok: false };
+        return refuseAndConsume();
       }
       const share = this.getShare(parent.shareId);
       if (!share || share.granterUserId === input.principalUserId) {
-        return { ok: false };
+        return refuseAndConsume();
       }
 
       const dependents = this.db
@@ -3036,12 +3081,20 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         .all(parent.grantId, input.principalUserId)
         .map(rowToShareGrantRow);
       if (dependents.some((dependent) => dependent.status === "revoked")) {
-        return { ok: false };
+        return refuseAndConsume();
       }
       const existing = dependents.find(
         (dependent) => dependent.status === "active",
       );
       if (existing) {
+        const recorded = this.db
+          .prepare(
+            `UPDATE sync_relay_link_handoff_codes
+             SET result_grant_id = ?
+             WHERE code_id = ? AND code_hash = ? AND result_grant_id IS NULL`,
+          )
+          .run(existing.grantId, code.codeId, code.codeHash);
+        if (Number(recorded.changes ?? 0) !== 1) return { ok: false };
         return { ok: true, shareId: share.shareId, grant: existing };
       }
 
@@ -3058,6 +3111,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         revokedAtMs: null,
         parentGrantId: parent.grantId,
       };
+      const recorded = this.db
+        .prepare(
+          `UPDATE sync_relay_link_handoff_codes
+           SET result_grant_id = ?
+           WHERE code_id = ? AND code_hash = ? AND result_grant_id IS NULL`,
+        )
+        .run(grant.grantId, code.codeId, code.codeHash);
+      if (Number(recorded.changes ?? 0) !== 1) return { ok: false };
       this.insertShareGrant(grant);
       return { ok: true, shareId: share.shareId, grant };
     });
@@ -4207,7 +4268,7 @@ function rowToLinkSessionRow(row: Record<string, unknown>): SyncRelayLinkSession
 
 function rowToLinkHandoffCodeRow(
   row: Record<string, unknown>,
-): SyncRelayLinkHandoffCodeRow {
+): StoredSyncRelayLinkHandoffCodeRow {
   return {
     codeId: String(row.code_id),
     codeHash: String(row.code_hash),
@@ -4215,6 +4276,7 @@ function rowToLinkHandoffCodeRow(
     generation: Number(row.generation),
     mintedAtMs: Number(row.minted_at_ms),
     expiresAtMs: Number(row.expires_at_ms),
+    resultGrantId: nullableText(row.result_grant_id),
   };
 }
 

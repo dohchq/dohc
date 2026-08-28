@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  LINK_HANDOFF_CODES_PER_GRANT_LIMIT,
   LinkReadRateLimiter,
   type ValidatedLinkCapability,
 } from "./linkSecurity";
@@ -343,6 +344,7 @@ describe("single-use authenticated link handoff", () => {
       generation: 1,
       minted_at_ms: state.now.value,
       expires_at_ms: state.now.value + HANDOFF_TTL_MS,
+      result_grant_id: null,
     });
     expect(row?.code_hash).not.toBe(code);
     const columns = database
@@ -356,6 +358,7 @@ describe("single-use authenticated link handoff", () => {
       "generation",
       "minted_at_ms",
       "expires_at_ms",
+      "result_grant_id",
     ]);
     expect(columns.some((column) => /user|redeem|identity|session|secret|plain|ip/iu.test(column)))
       .toBe(false);
@@ -391,6 +394,89 @@ describe("single-use authenticated link handoff", () => {
     });
     expect((await withoutPublicOrigin(handoffRequest(state.capability))).status).toBe(200);
     expect(codeCount(database)).toBe(2);
+  });
+
+  it("upgrades a pre-receipt database without losing a live handoff code", async () => {
+    const state = await setup();
+    const minted = await mint(state);
+    const codeHash = hashLinkHandoffCode(String(minted.code));
+
+    const storageIndex = storages.indexOf(state.storage);
+    expect(storageIndex).toBeGreaterThanOrEqual(0);
+    storages.splice(storageIndex, 1);
+    state.storage.close();
+
+    const legacy = inspect(state.dbPath);
+    legacy.exec("PRAGMA foreign_keys = OFF");
+    legacy.exec(`
+      DROP INDEX idx_sync_relay_link_handoff_codes_result_grant;
+      DROP INDEX idx_sync_relay_link_handoff_codes_grant;
+      CREATE TABLE sync_relay_link_handoff_codes_legacy (
+        code_id TEXT PRIMARY KEY,
+        code_hash TEXT NOT NULL UNIQUE,
+        grant_id TEXT NOT NULL,
+        generation INTEGER NOT NULL CHECK (generation >= 1),
+        minted_at_ms INTEGER NOT NULL,
+        expires_at_ms INTEGER NOT NULL,
+        CHECK (expires_at_ms > minted_at_ms),
+        FOREIGN KEY (grant_id)
+          REFERENCES sync_relay_share_grants(grant_id) ON DELETE CASCADE
+      ) STRICT;
+      INSERT INTO sync_relay_link_handoff_codes_legacy (
+        code_id, code_hash, grant_id, generation, minted_at_ms, expires_at_ms
+      )
+      SELECT code_id, code_hash, grant_id, generation, minted_at_ms, expires_at_ms
+      FROM sync_relay_link_handoff_codes;
+      DROP TABLE sync_relay_link_handoff_codes;
+      ALTER TABLE sync_relay_link_handoff_codes_legacy
+        RENAME TO sync_relay_link_handoff_codes;
+      CREATE INDEX idx_sync_relay_link_handoff_codes_grant
+        ON sync_relay_link_handoff_codes(grant_id, minted_at_ms);
+    `);
+    const databaseIndex = databases.indexOf(legacy);
+    expect(databaseIndex).toBeGreaterThanOrEqual(0);
+    databases.splice(databaseIndex, 1);
+    legacy.close();
+
+    const upgraded = openSyncRelayStorage(state.dbPath);
+    storages.push(upgraded);
+    const database = inspect(state.dbPath, true);
+    expect(
+      database
+        .prepare("PRAGMA table_info(sync_relay_link_handoff_codes)")
+        .all()
+        .map((column) => String(column.name)),
+    ).toContain("result_grant_id");
+    expect(
+      database
+        .prepare(
+          `SELECT name FROM sqlite_schema
+           WHERE type = 'index'
+             AND name = 'idx_sync_relay_link_handoff_codes_result_grant'`,
+        )
+        .get(),
+    ).toEqual({ name: "idx_sync_relay_link_handoff_codes_result_grant" });
+
+    const first = upgraded.redeemLinkHandoffCode({
+      codeHash,
+      principalUserId: RECIPIENT,
+      redeemedAtMs: state.now.value,
+      mintGrantId: () => "upgraded-dependent-grant",
+      guard: () => true,
+    });
+    expect(first).toMatchObject({ ok: true, grant: { access: "view" } });
+    const retry = upgraded.redeemLinkHandoffCode({
+      codeHash,
+      principalUserId: RECIPIENT,
+      redeemedAtMs: state.now.value,
+      mintGrantId: () => {
+        throw new Error("receipt retry minted a second grant");
+      },
+      guard: () => {
+        throw new Error("receipt retry re-authorized the bearer code");
+      },
+    });
+    expect(retry).toEqual(first);
   });
 
   it("revalidates the exact capability and generation inside the mint transaction", async () => {
@@ -457,6 +543,59 @@ describe("single-use authenticated link handoff", () => {
     expect(codeCount(database, String(state.link.grantId))).toBe(1);
   });
 
+  it("preserves unexpired receipts under handoff-code cap pressure", async () => {
+    const state = await setup();
+    const database = inspect(state.dbPath, true);
+    const receiptCode = await mint(state);
+    const receipt = await serialized(
+      await state.h(redeemRequest(RECIPIENT, receiptCode.code)),
+    );
+    expect(receipt.status).toBe(200);
+
+    const unredeemed: Array<Record<string, unknown>> = [];
+    for (let index = 1; index < LINK_HANDOFF_CODES_PER_GRANT_LIMIT; index += 1) {
+      state.now.value += 1;
+      unredeemed.push(await mint(state));
+    }
+    expect(codeCount(database, String(state.link.grantId))).toBe(
+      LINK_HANDOFF_CODES_PER_GRANT_LIMIT,
+    );
+
+    state.now.value += 1;
+    const newest = await mint(state);
+    expect(codeCount(database, String(state.link.grantId))).toBe(
+      LINK_HANDOFF_CODES_PER_GRANT_LIMIT,
+    );
+    expect(
+      await serialized(
+        await state.h(redeemRequest(RECIPIENT, receiptCode.code)),
+      ),
+    ).toEqual(receipt);
+
+    for (const code of [...unredeemed.slice(1), newest]) {
+      expect(
+        await serialized(
+          await state.h(redeemRequest(RECIPIENT, code.code)),
+        ),
+      ).toEqual(receipt);
+    }
+
+    state.now.value += 1;
+    const refusedMint = await serialized(
+      await state.h(handoffRequest(state.capability)),
+    );
+    expect(refusedMint.status).toBe(GENERIC_REFUSAL.status);
+    expect(refusedMint).toEqual(GENERIC_REFUSAL);
+    expect(codeCount(database, String(state.link.grantId))).toBe(
+      LINK_HANDOFF_CODES_PER_GRANT_LIMIT,
+    );
+    expect(
+      await serialized(
+        await state.h(redeemRequest(RECIPIENT, receiptCode.code)),
+      ),
+    ).toEqual(receipt);
+  });
+
   it("shows no redeemer identity before redeem and one server-derived View dependent after success", async () => {
     const state = await setup();
     const before = await ownerInventory(state);
@@ -488,30 +627,50 @@ describe("single-use authenticated link handoff", () => {
     ]);
   });
 
-  it("consumes one same-code redeem under replay and concurrent requests", async () => {
+  it("returns the same receipt to the same account and refuses another account", async () => {
     const state = await setup();
     const database = inspect(state.dbPath, true);
     const minted = await mint(state);
-    const responses = await Promise.all([
-      state.h(redeemRequest(RECIPIENT, minted.code)),
-      state.h(redeemRequest(RECIPIENT, minted.code)),
-    ]);
-    expect(responses.map((response) => response.status).sort()).toEqual([200, 404]);
-    const success = responses.find((response) => response.status === 200)!;
-    expect(await json(success)).toMatchObject({ ok: true, access: "view" });
+    const first = await serialized(
+      await state.h(redeemRequest(RECIPIENT, minted.code)),
+    );
+    expect(first.status).toBe(200);
+    const firstBody = JSON.parse(first.body) as Record<string, unknown>;
+    expect(firstBody).toMatchObject({ ok: true, access: "view" });
+
+    const retry = await serialized(
+      await state.h(redeemRequest(RECIPIENT, minted.code)),
+    );
+    expect(retry).toEqual(first);
+    expect(dependentRows(database, String(state.link.grantId), RECIPIENT)).toHaveLength(1);
+    expect(codeCount(database)).toBe(1);
+    expect(
+      database
+        .prepare(
+          "SELECT result_grant_id FROM sync_relay_link_handoff_codes WHERE code_hash = ?",
+        )
+        .get(hashLinkHandoffCode(String(minted.code))),
+    ).toEqual({ result_grant_id: firstBody.grantId });
+
+    expect(
+      await serialized(
+        await state.h(redeemRequest(OTHER_ACCOUNT, minted.code)),
+      ),
+    ).toEqual(GENERIC_REFUSAL);
+
+    state.now.value = Number(minted.expiresAtMs);
     await expectGeneric(await state.h(redeemRequest(RECIPIENT, minted.code)));
     expect(codeCount(database)).toBe(0);
-    expect(dependentRows(database, String(state.link.grantId), RECIPIENT)).toHaveLength(1);
   });
 
-  it("stops a concurrent loser when the conditional code delete changes zero rows", async () => {
+  it("stops a raced redeem when the conditional receipt update changes zero rows", async () => {
     const state = await setup();
     const database = inspect(state.dbPath);
     const minted = await mint(state);
     const codeHash = hashLinkHandoffCode(String(minted.code));
     database.exec(`
       CREATE TRIGGER consume_handoff_before_redeem
-      BEFORE DELETE ON sync_relay_link_handoff_codes
+      BEFORE UPDATE OF result_grant_id ON sync_relay_link_handoff_codes
       WHEN OLD.code_hash = '${codeHash}'
       BEGIN
         DELETE FROM sync_relay_link_handoff_codes WHERE code_id = OLD.code_id;
@@ -547,6 +706,7 @@ describe("single-use authenticated link handoff", () => {
         revokedAtMs: state.now.value + 1,
       }),
     ).toMatchObject({ ok: true });
+    await expectGeneric(await state.h(redeemRequest(RECIPIENT, firstCode.code)));
 
     const freshCode = await mint(state);
     await expectGeneric(await state.h(redeemRequest(RECIPIENT, freshCode.code)));
@@ -701,7 +861,7 @@ describe("single-use authenticated link handoff", () => {
     ]);
 
     await mint(state);
-    expect(codeCount(database, String(state.link.grantId))).toBe(1);
+    expect(codeCount(database, String(state.link.grantId))).toBe(2);
     database
       .prepare("DELETE FROM sync_relay_share_grants WHERE parent_grant_id = ?")
       .run(String(state.link.grantId));
