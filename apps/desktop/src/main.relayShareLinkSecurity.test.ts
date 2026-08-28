@@ -36,6 +36,30 @@ describe("main-process owner relay link authorization", () => {
     }
   });
 
+  it("refuses shared-view link creation before credentials or a relay request", () => {
+    const handler = handlerSource("createRelayShareLink");
+    const operationAt = handler.indexOf("async (operation) => {");
+    const guardAt =
+      /if \(shareViewIsPresent\(operation\.workspace\.shareView\)\) \{\s*throw new Error\(\s*"This is a shared view — only the original workspace can be shared\.",\s*\);\s*\}/u.exec(
+        handler,
+      )?.index ?? -1;
+    const credentialsAt = handler.indexOf(
+      "remoteForWorkspace(operation.workspace)",
+    );
+    const relayAt = handler.indexOf("relayShareJsonWithCredentials");
+
+    expect(operationAt).toBeGreaterThan(-1);
+    expect(
+      guardAt,
+      "the shared-view presence refusal must be inside the physical workspace operation",
+    ).toBeGreaterThan(operationAt);
+    expect(credentialsAt).toBeGreaterThan(guardAt);
+    expect(relayAt).toBeGreaterThan(credentialsAt);
+    expect(handler).not.toMatch(
+      /if\s*\(\s*operation\.workspace\.shareView\s*\)/u,
+    );
+  });
+
   it("addresses workspace routes and injects share-route workspace bodies from the operation", () => {
     for (const channel of ["createRelayShareLink", "listRelayShareLinks"]) {
       expect(handlerSource(channel), channel).toContain(

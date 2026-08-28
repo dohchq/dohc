@@ -7651,6 +7651,11 @@ function registerIpcHandlers(
       "Sharing stopped because this window changed workspaces.",
       async (operation) => {
         operation.assertCurrent();
+        if (shareViewIsPresent(operation.workspace.shareView)) {
+          throw new Error(
+            "This is a shared view — only the original workspace can be shared.",
+          );
+        }
         const { credentials, credentialGeneration } =
           await remoteForWorkspace(operation.workspace);
         operation.assertCurrent();
