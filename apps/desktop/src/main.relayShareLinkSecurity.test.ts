@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8").replaceAll(
   "\r\n",
@@ -9,8 +9,9 @@ const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8").r
 function handlerSource(channel: string): string {
   const marker = `CHANNELS.${channel},`;
   const markerAt = mainSource.indexOf(marker);
+  if (markerAt < 0) throw new Error(`Missing IPC handler for ${channel}`);
   const start = mainSource.lastIndexOf("ipcMain.handle(", markerAt);
-  if (markerAt < 0 || start < 0) throw new Error(`Missing IPC handler for ${channel}`);
+  if (start < 0) throw new Error(`Missing IPC handler for ${channel}`);
   const next = mainSource.indexOf("ipcMain.handle(", markerAt + marker.length);
   return mainSource.slice(start, next < 0 ? undefined : next);
 }
@@ -23,6 +24,27 @@ const ownerLinkChannels = [
 ] as const;
 
 describe("main-process owner relay link authorization", () => {
+  it("refuses a missing channel marker before searching backwards", () => {
+    const channel = "definitelyAbsentRelayShareLinkHandler";
+    let thrown: unknown;
+    let reverseSearchCalls = -1;
+    const lastIndexOf = vi.spyOn(String.prototype, "lastIndexOf");
+
+    try {
+      try {
+        handlerSource(channel);
+      } catch (error) {
+        thrown = error;
+      }
+      reverseSearchCalls = lastIndexOf.mock.calls.length;
+    } finally {
+      lastIndexOf.mockRestore();
+    }
+
+    expect(thrown).toEqual(new Error(`Missing IPC handler for ${channel}`));
+    expect(reverseSearchCalls).toBe(0);
+  });
+
   it("admits every request through one exact physical workspace operation", () => {
     for (const channel of ownerLinkChannels) {
       const handler = handlerSource(channel);
