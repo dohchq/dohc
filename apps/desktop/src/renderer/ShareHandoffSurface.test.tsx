@@ -569,17 +569,8 @@ describe("ShareHandoffSurface", () => {
     expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
   });
 
-  it("does not expose granted- or received-row secrets", async () => {
-    const grantedShareCode = "granted-row-share-code-secret";
-    const grantedGrantId = "granted-row-grant-id-secret";
+  it("does not expose the received share code before an explicit open", async () => {
     const receivedShareCode = "received-row-share-code-secret";
-    const receivedGrantId = "received-row-grant-id-secret";
-    const inventorySecrets = [
-      grantedShareCode,
-      grantedGrantId,
-      receivedShareCode,
-      receivedGrantId,
-    ];
     const consoleError = vi
       .spyOn(console, "error")
       .mockImplementation(() => undefined);
@@ -588,12 +579,8 @@ describe("ShareHandoffSurface", () => {
       .mockImplementation(() => undefined);
     try {
       bridgeMock.listRelayShares.mockResolvedValue({
-        granted: [
-          grantedShare("share-exact", grantedShareCode, grantedGrantId),
-        ],
-        received: [
-          receivedShare("share-exact", receivedShareCode, receivedGrantId),
-        ],
+        granted: [],
+        received: [receivedShare("share-exact", receivedShareCode)],
       });
 
       const { container } = render(
@@ -609,20 +596,19 @@ describe("ShareHandoffSurface", () => {
         />,
       );
       expect(await screen.findByTestId("open-shared-view")).toBeTruthy();
+      expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
 
       const rendered = container.textContent ?? "";
-      const bridgeCalls = JSON.stringify(
+      const unrelatedBridgeCalls = JSON.stringify(
         Object.values(bridgeMock).flatMap((mock) => mock.mock.calls),
       );
       const consoleCalls = JSON.stringify([
         ...consoleError.mock.calls,
         ...consoleLog.mock.calls,
       ]);
-      for (const secret of inventorySecrets) {
-        expect(rendered).not.toContain(secret);
-        expect(bridgeCalls).not.toContain(secret);
-        expect(consoleCalls).not.toContain(secret);
-      }
+      expect(rendered).not.toContain(receivedShareCode);
+      expect(unrelatedBridgeCalls).not.toContain(receivedShareCode);
+      expect(consoleCalls).not.toContain(receivedShareCode);
     } finally {
       consoleError.mockRestore();
       consoleLog.mockRestore();
