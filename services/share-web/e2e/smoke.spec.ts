@@ -27,7 +27,11 @@ async function revokeLink(relayUrl: string, seeded: SeededShare): Promise<void> 
     {
       method: "POST",
       headers: ownerHeaders(seeded.ownerUserId, true),
-      body: JSON.stringify({ grantId: seeded.grantId }),
+      body: JSON.stringify({
+        grantId: seeded.grantId,
+        workspaceId: seeded.workspaceId,
+        expectedDependentGrantIds: [],
+      }),
     },
   );
   expect(response.status, await response.text()).toBe(200);
