@@ -53,7 +53,16 @@ async function harness(options?: {
   fetch?: typeof fetch;
 }) {
   const module = await import("./shareHandoffRedemption");
-  const intent = createShareHandoffIntentSlot();
+  const intentSlot = createShareHandoffIntentSlot();
+  const settledCodes: ShareHandoffCode[] = [];
+  const intent = {
+    ...intentSlot,
+    settle(value: ShareHandoffCode) {
+      const settled = intentSlot.settle(value);
+      if (settled) settledCodes.push(value);
+      return settled;
+    },
+  };
   let credentials = options?.credentials ?? null;
   let credentialGeneration = 0;
   const statuses: Array<{ status: string; shareId?: string }> = [];
@@ -83,6 +92,7 @@ async function harness(options?: {
     coordinator,
     fetchImpl,
     intent,
+    settledCodes,
     statuses,
     handleUnauthorized,
     offer(value: string) {
@@ -317,15 +327,20 @@ describe("share handoff redemption coordinator", () => {
 
   it("does not let a stale 401 clear newer credentials or repaint newer status", async () => {
     const oldAnswer = deferred<Response>();
+    const newAnswer = deferred<Response>();
     const fetchImpl = vi
       .fn<typeof fetch>()
       .mockImplementationOnce(() => oldAnswer.promise)
-      .mockResolvedValueOnce(success("share-new-session"));
+      .mockImplementationOnce(() => newAnswer.promise);
     const h = await harness({ credentials: CREDENTIALS_A, fetch: fetchImpl });
 
     h.offer(CODE_A);
     await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(1));
     h.setCredentials({ ...CREDENTIALS_A });
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2));
+
+    oldAnswer.resolve(response(401, { ok: false }));
+    newAnswer.resolve(success("share-new-session"));
     await vi.waitFor(() => {
       expect(h.coordinator.status()).toEqual({
         status: "done",
@@ -334,8 +349,11 @@ describe("share handoff redemption coordinator", () => {
       });
     });
 
-    oldAnswer.resolve(response(401, { ok: false }));
-    await oldAnswer.promise.then(() => undefined);
+    expect(h.settledCodes).toEqual([CODE_A]);
+    expect(h.statuses).toEqual([
+      { status: "redeeming", statusId: "status-1" },
+      { status: "done", statusId: "status-1", shareId: "share-new-session" },
+    ]);
     expect(h.credentials()).toEqual(CREDENTIALS_A);
     expect(h.handleUnauthorized).not.toHaveBeenCalled();
     expect(h.coordinator.status()).toEqual({
@@ -343,6 +361,7 @@ describe("share handoff redemption coordinator", () => {
       statusId: "status-1",
       shareId: "share-new-session",
     });
+    expect(h.intent.pending()).toBeNull();
   });
 
   it("does not let a stale 401 supersede a distinct newer handoff code", async () => {
@@ -359,15 +378,6 @@ describe("share handoff redemption coordinator", () => {
     await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2));
 
     oldAnswer.resolve(response(401, { ok: false }));
-    await oldAnswer.promise.then(() => undefined);
-    expect(h.handleUnauthorized).not.toHaveBeenCalled();
-    expect(h.credentials()).toEqual(CREDENTIALS_A);
-    expect(h.intent.pending()).toBe(CODE_B);
-    expect(h.coordinator.status()).toEqual({
-      status: "redeeming",
-      statusId: "status-2",
-    });
-
     newAnswer.resolve(success("share-new"));
     await vi.waitFor(() => {
       expect(h.coordinator.status()).toEqual({
@@ -376,6 +386,15 @@ describe("share handoff redemption coordinator", () => {
         shareId: "share-new",
       });
     });
+    expect(h.settledCodes).toEqual([CODE_B]);
+    expect(h.statuses).toEqual([
+      { status: "redeeming", statusId: "status-1" },
+      { status: "redeeming", statusId: "status-2" },
+      { status: "done", statusId: "status-2", shareId: "share-new" },
+    ]);
+    expect(h.handleUnauthorized).not.toHaveBeenCalled();
+    expect(h.credentials()).toEqual(CREDENTIALS_A);
+    expect(h.intent.pending()).toBeNull();
   });
 
   it("keeps the distinct newer code authoritative over an older in-flight completion", async () => {
@@ -392,13 +411,6 @@ describe("share handoff redemption coordinator", () => {
     await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2));
 
     oldAnswer.resolve(success("share-old"));
-    await oldAnswer.promise.then(() => undefined);
-    expect(h.coordinator.status()).toEqual({
-      status: "redeeming",
-      statusId: "status-2",
-    });
-    expect(h.intent.pending()).toBe(CODE_B);
-
     newAnswer.resolve(success("share-new"));
     await vi.waitFor(() => {
       expect(h.coordinator.status()).toEqual({
@@ -407,6 +419,13 @@ describe("share handoff redemption coordinator", () => {
         shareId: "share-new",
       });
     });
+    expect(h.settledCodes).toEqual([CODE_B]);
+    expect(h.statuses).toEqual([
+      { status: "redeeming", statusId: "status-1" },
+      { status: "redeeming", statusId: "status-2" },
+      { status: "done", statusId: "status-2", shareId: "share-new" },
+    ]);
+    expect(h.intent.pending()).toBeNull();
   });
 
   it("never starts a second request for an exact duplicate delivery", async () => {
