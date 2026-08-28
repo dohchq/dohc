@@ -64,6 +64,10 @@ function environmentValue(source, name) {
 
 test('self-host sync relay requires the link grant key', () => {
   const compose = readFileSync('docker-compose.self-host.yml', 'utf8')
+  const envLines = readFileSync('.env.self-host.example', 'utf8').split(/\r?\n/)
+  const linkKeyLine = envLines.findIndex((line) =>
+    line.startsWith('DOHC_RELAY_LINK_KEY='),
+  )
 
   assert.equal(
     mappingValueAtPath(compose, [
@@ -74,6 +78,10 @@ test('self-host sync relay requires the link grant key', () => {
     ]),
     '${DOHC_RELAY_LINK_KEY:?Set DOHC_RELAY_LINK_KEY in .env.self-host}',
   )
+  assert.deepEqual(envLines.slice(linkKeyLine - 2, linkKeyLine), [
+    '# The sync relay serves share links, so it reads shared content in plaintext.',
+    '# A link secret hides the work from other people, not from this relay.',
+  ])
 })
 
 test('self-host sync relay requires and documents the relay exchange key', () => {
