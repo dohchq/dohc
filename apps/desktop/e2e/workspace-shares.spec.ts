@@ -98,9 +98,6 @@ async function mintLinkHandoff(
   });
 }
 
-const confidentialTest = test.extend({});
-confidentialTest.use({ screenshot: "off", trace: "off" });
-
 // The granter's only open proposal, listed then opened — the shape the
 // granter's own review takes. The listing is a summary (#808); its count is
 // the whole answer it owes a timer, enforced at
@@ -249,6 +246,9 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     else await temp.cleanup();
   }
 });
+
+const confidentialTest = test.extend({});
+confidentialTest.use({ screenshot: "off", trace: "off" });
 
 confidentialTest.describe("View link lifecycle", () => {
   // A failed lifecycle run must not retain its one-time URL in Playwright
@@ -545,6 +545,7 @@ confidentialTest.describe("View link lifecycle", () => {
         relayExchangeKey,
         neverValidCredential,
       );
+      expect(neverValidExchange.status).toBe(404);
       const oldSecretAfterReset = await exchangeViewLink(
         relay.baseUrl,
         relayExchangeKey,
@@ -556,6 +557,7 @@ confidentialTest.describe("View link lifecycle", () => {
         neverValidCredential,
         "/sync/link/share",
       );
+      expect(neverValidRead.status).toBe(401);
       const oldCapabilityAfterReset = await readViewLink(
         relay.baseUrl,
         oldCapability,
@@ -632,6 +634,7 @@ confidentialTest.describe("View link lifecycle", () => {
         RECIPIENT_TOKEN,
         "/sync/shares/never-valid/log?since=0&limit=500",
       );
+      expect(missingNamedShare.status).toBe(404);
       expect(namedAfterEnd).toEqual(missingNamedShare);
     } finally {
       await relay?.stop();
