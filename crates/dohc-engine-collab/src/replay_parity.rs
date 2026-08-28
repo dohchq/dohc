@@ -87,24 +87,383 @@ use yrs::{Any, ClientID, IdSet, StateVector};
 
 use crate::{CollabError, Ydoc};
 
-/// The structural identity of one clock's content, for the content-parity
-/// check. Two wires that both hold LIVE (rendering) content at the same
-/// `(client, clock)` must present the identical identity; a hostile re-encode
-/// that changes the KIND or the PAYLOAD at an already-known clock is rejected.
-/// No honest peer ever redefines a clock it (or its dependency) has already
-/// used, so a mismatch can only be hostile/corrupt input.
+/// The structural identity of one live non-string clock. String units are
+/// stored directly in [`IdentitySpan::StringRun`]. The kind tag plus canonical
+/// payload fingerprint covers JSON, binary, embed, format, type, doc, and any.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ClockIdentity {
-    /// A single UTF-16 code unit of a live `String` content block — the
-    /// original surrogate/FFFD-adjacent risk class, kept as the string case of
-    /// the general check.
-    StringUnit(u16),
-    /// A live non-string content item, by structural kind tag (the content-ref
-    /// number) plus a canonical, order-independent payload fingerprint (hex
-    /// sha-256). A different kind never compares equal (the tag differs); a
-    /// same-kind different-payload item never compares equal (the fingerprint
-    /// differs). Covers JSON, binary, embed, format, type, doc, and any.
+struct ClockIdentity {
+    kind: u8,
+    payload: String,
+}
+
+/// A contiguous run of live identities for one client. Contiguous string
+/// clocks keep their UTF-16 units together; every non-string identity remains
+/// a one-clock span so kind and payload probes retain their exact old meaning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum IdentitySpan {
+    StringRun(Vec<u16>),
     Typed { kind: u8, payload: String },
+}
+
+impl IdentitySpan {
+    fn len(&self) -> u32 {
+        match self {
+            IdentitySpan::StringRun(units) => {
+                u32::try_from(units.len()).expect("a scanned string run fits the Yjs clock space")
+            }
+            IdentitySpan::Typed { .. } => 1,
+        }
+    }
+
+    fn approx_bytes(&self) -> usize {
+        std::mem::size_of::<u32>()
+            .saturating_add(std::mem::size_of::<Self>())
+            .saturating_add(match self {
+                IdentitySpan::StringRun(units) => {
+                    units.len().saturating_mul(std::mem::size_of::<u16>())
+                }
+                IdentitySpan::Typed { payload, .. } => payload.len(),
+            })
+    }
+
+    fn identity_at(&self, offset: u32) -> Option<ClockIdentityRef<'_>> {
+        match self {
+            IdentitySpan::StringRun(units) => units
+                .get(usize::try_from(offset).ok()?)
+                .copied()
+                .map(ClockIdentityRef::StringUnit),
+            IdentitySpan::Typed { kind, payload } if offset == 0 => Some(ClockIdentityRef::Typed {
+                kind: *kind,
+                payload,
+            }),
+            IdentitySpan::Typed { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClockIdentityRef<'a> {
+    StringUnit(u16),
+    Typed { kind: u8, payload: &'a str },
+}
+
+/// Per-clock identity facts stored as ordered, non-overlapping spans. The
+/// cached byte charge is updated by each span mutation, so a frontier fold
+/// never walks document-sized identity state for accounting.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ClockIdentityIndex {
+    clients: BTreeMap<ClientID, BTreeMap<u32, IdentitySpan>>,
+    approx_bytes: usize,
+}
+
+impl ClockIdentityIndex {
+    fn span_end(start: u32, span: &IdentitySpan) -> u32 {
+        start
+            .checked_add(span.len())
+            .expect("validated identity span stays inside the Yjs clock space")
+    }
+
+    fn insert_raw(&mut self, client: ClientID, start: u32, span: IdentitySpan) {
+        let client_was_absent = !self.clients.contains_key(&client);
+        let charge = span.approx_bytes();
+        let replaced = self.clients.entry(client).or_default().insert(start, span);
+        assert!(
+            replaced.is_none(),
+            "identity spans must not share a start clock"
+        );
+        if client_was_absent {
+            self.approx_bytes = self
+                .approx_bytes
+                .saturating_add(std::mem::size_of::<ClientID>());
+        }
+        self.approx_bytes = self.approx_bytes.saturating_add(charge);
+    }
+
+    fn remove_raw(&mut self, client: ClientID, start: u32) -> Option<IdentitySpan> {
+        let span = self.clients.get_mut(&client)?.remove(&start)?;
+        self.approx_bytes = self.approx_bytes.saturating_sub(span.approx_bytes());
+        if self.clients.get(&client).is_some_and(BTreeMap::is_empty) {
+            self.clients.remove(&client);
+            self.approx_bytes = self
+                .approx_bytes
+                .saturating_sub(std::mem::size_of::<ClientID>());
+        }
+        Some(span)
+    }
+
+    fn overlapping_starts(&self, client: ClientID, start: u32, end: u32) -> Vec<u32> {
+        let Some(spans) = self.clients.get(&client) else {
+            return Vec::new();
+        };
+        let mut starts = Vec::new();
+        if let Some((&span_start, span)) = spans.range(..=start).next_back() {
+            if Self::span_end(span_start, span) > start {
+                starts.push(span_start);
+            }
+        }
+        for (&span_start, _) in spans.range(start..end) {
+            if starts.last().copied() != Some(span_start) {
+                starts.push(span_start);
+            }
+        }
+        starts
+    }
+
+    fn remove_range(&mut self, client: ClientID, range: std::ops::Range<u32>) {
+        if range.start >= range.end {
+            return;
+        }
+        for span_start in self.overlapping_starts(client, range.start, range.end) {
+            let Some(span) = self.remove_raw(client, span_start) else {
+                continue;
+            };
+            let span_end = Self::span_end(span_start, &span);
+            match span {
+                IdentitySpan::StringRun(mut units) => {
+                    let cut_start = range.start.saturating_sub(span_start);
+                    let cut_end = range.end.min(span_end) - span_start;
+                    let right = units.split_off(cut_end as usize);
+                    units.truncate(cut_start as usize);
+                    if !units.is_empty() {
+                        self.insert_raw(client, span_start, IdentitySpan::StringRun(units));
+                    }
+                    if !right.is_empty() {
+                        self.insert_raw(
+                            client,
+                            span_start + cut_end,
+                            IdentitySpan::StringRun(right),
+                        );
+                    }
+                }
+                IdentitySpan::Typed { .. } => {
+                    debug_assert!(span_start >= range.start && span_start < range.end);
+                }
+            }
+        }
+    }
+
+    fn coalesce_string_span(&mut self, client: ClientID, mut start: u32) {
+        loop {
+            let left_start = self.clients.get(&client).and_then(|spans| {
+                spans
+                    .range(..start)
+                    .next_back()
+                    .and_then(|(&candidate_start, candidate)| {
+                        (matches!(candidate, IdentitySpan::StringRun(_))
+                            && Self::span_end(candidate_start, candidate) == start)
+                            .then_some(candidate_start)
+                    })
+            });
+            let Some(left_start) = left_start else {
+                break;
+            };
+            let Some(IdentitySpan::StringRun(current)) = self.remove_raw(client, start) else {
+                unreachable!("the coalesced span is a string run")
+            };
+            let Some(IdentitySpan::StringRun(mut left)) = self.remove_raw(client, left_start)
+            else {
+                unreachable!("the adjacent left span is a string run")
+            };
+            left.extend(current);
+            self.insert_raw(client, left_start, IdentitySpan::StringRun(left));
+            start = left_start;
+        }
+
+        loop {
+            let end = self
+                .clients
+                .get(&client)
+                .and_then(|spans| spans.get(&start))
+                .map(|span| Self::span_end(start, span))
+                .expect("the coalesced string run remains present");
+            let right_is_string = self
+                .clients
+                .get(&client)
+                .and_then(|spans| spans.get(&end))
+                .is_some_and(|span| matches!(span, IdentitySpan::StringRun(_)));
+            if !right_is_string {
+                break;
+            }
+            let Some(IdentitySpan::StringRun(right)) = self.remove_raw(client, end) else {
+                unreachable!("the adjacent right span is a string run")
+            };
+            let Some(IdentitySpan::StringRun(mut current)) = self.remove_raw(client, start) else {
+                unreachable!("the coalesced span is a string run")
+            };
+            current.extend(right);
+            self.insert_raw(client, start, IdentitySpan::StringRun(current));
+        }
+    }
+
+    fn insert_string_run(&mut self, client: ClientID, start: u32, units: Vec<u16>) {
+        if units.is_empty() {
+            return;
+        }
+        let len = u32::try_from(units.len()).expect("a string run fits the Yjs clock space");
+        let end = start
+            .checked_add(len)
+            .expect("a validated string run cannot overflow its client clock");
+        self.remove_range(client, start..end);
+        self.insert_raw(client, start, IdentitySpan::StringRun(units));
+        self.coalesce_string_span(client, start);
+    }
+
+    fn insert_identity(&mut self, client: ClientID, clock: u32, identity: ClockIdentity) {
+        if let Some(end) = clock.checked_add(1) {
+            self.remove_range(client, clock..end);
+        } else if self
+            .clients
+            .get(&client)
+            .is_some_and(|spans| spans.contains_key(&clock))
+        {
+            self.remove_raw(client, clock);
+        }
+        self.insert_raw(
+            client,
+            clock,
+            IdentitySpan::Typed {
+                kind: identity.kind,
+                payload: identity.payload,
+            },
+        );
+    }
+
+    fn identity_at(&self, client: ClientID, clock: u32) -> Option<ClockIdentityRef<'_>> {
+        let (&start, span) = self.clients.get(&client)?.range(..=clock).next_back()?;
+        span.identity_at(clock - start)
+    }
+
+    fn contains_clock(&self, client: ClientID, clock: u32) -> bool {
+        self.identity_at(client, clock).is_some()
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.clients.is_empty()
+    }
+
+    fn any_identity<F>(&self, mut predicate: F) -> bool
+    where
+        F: FnMut(ClientID, u32, ClockIdentityRef<'_>) -> bool,
+    {
+        for (&client, spans) in &self.clients {
+            for (&start, span) in spans {
+                for offset in 0..span.len() {
+                    if predicate(
+                        client,
+                        start + offset,
+                        span.identity_at(offset).expect("offset is inside the span"),
+                    ) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn any_identity_in_range<F>(
+        &self,
+        client: ClientID,
+        start: u32,
+        end: u32,
+        mut predicate: F,
+    ) -> bool
+    where
+        F: FnMut(u32, ClockIdentityRef<'_>) -> bool,
+    {
+        for span_start in self.overlapping_starts(client, start, end) {
+            let span = &self.clients[&client][&span_start];
+            let from = start.saturating_sub(span_start);
+            let to = (end.min(Self::span_end(span_start, span))) - span_start;
+            for offset in from..to {
+                if predicate(
+                    span_start + offset,
+                    span.identity_at(offset).expect("offset is inside the span"),
+                ) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn fact_count(&self) -> usize {
+        self.clients
+            .values()
+            .flat_map(BTreeMap::values)
+            .map(|span| span.len() as usize)
+            .sum()
+    }
+
+    fn semantically_equal(&self, other: &Self) -> bool {
+        self.fact_count() == other.fact_count()
+            && !self.any_identity(|client, clock, identity| {
+                other.identity_at(client, clock) != Some(identity)
+            })
+    }
+
+    fn approx_bytes(&self) -> usize {
+        self.approx_bytes
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    fn recompute_approx_bytes(&self) -> usize {
+        self.clients
+            .values()
+            .map(|spans| {
+                std::mem::size_of::<ClientID>()
+                    + spans
+                        .values()
+                        .map(IdentitySpan::approx_bytes)
+                        .sum::<usize>()
+            })
+            .sum()
+    }
+
+    #[cfg(test)]
+    fn string_run_count(&self) -> usize {
+        self.clients
+            .values()
+            .flat_map(BTreeMap::values)
+            .filter(|span| matches!(span, IdentitySpan::StringRun(_)))
+            .count()
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    fn poison_string_run_for_test(&mut self) -> bool {
+        for spans in self.clients.values_mut() {
+            for span in spans.values_mut() {
+                if let IdentitySpan::StringRun(units) = span {
+                    if let Some(unit) = units.first_mut() {
+                        *unit ^= 1;
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    #[cfg(test)]
+    fn split_first_string_run_for_test(&mut self, offset: usize) -> Option<ID> {
+        let (client, start) = self.clients.iter().find_map(|(&client, spans)| {
+            spans.iter().find_map(|(&start, span)| match span {
+                IdentitySpan::StringRun(units) if offset > 0 && offset < units.len() => {
+                    Some((client, start))
+                }
+                _ => None,
+            })
+        })?;
+        let Some(IdentitySpan::StringRun(mut units)) = self.remove_raw(client, start) else {
+            unreachable!("the selected span is a string run")
+        };
+        let right = units.split_off(offset);
+        self.insert_raw(client, start, IdentitySpan::StringRun(units));
+        let right_start = start + u32::try_from(offset).expect("test split offset fits u32");
+        self.insert_raw(client, right_start, IdentitySpan::StringRun(right));
+        Some(ID::new(client, right_start))
+    }
 }
 
 /// Derives `PartialEq`/`Debug` for the doc cache's differential check
@@ -127,7 +486,7 @@ struct WireStructure {
     /// clocks in a few wire bytes, so materializing one identity per clock is an
     /// unbounded, attacker-controlled allocation on the untrusted decode path.
     /// They are tracked as O(1) ranges in [`WireStructure::tombstone_ranges`].
-    identities: BTreeMap<ClientID, BTreeMap<u32, ClockIdentity>>,
+    identities: ClockIdentityIndex,
     /// Half-open `[start, end)` clock ranges this wire tombstones via a
     /// `ContentDeleted` item, recorded as O(1) ranges (never one entry per
     /// clock). The content-parity check queries membership here — only for the
@@ -225,20 +584,23 @@ impl WireStructure {
 /// their current partition membership to the gate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IntegratedFrontier {
-    identities: BTreeMap<ClientID, BTreeMap<u32, ClockIdentity>>,
+    identities: ClockIdentityIndex,
     unsafe_boundaries: BTreeSet<ID>,
     delete_coverage: IdSet,
     /// A valid admitted lineage cannot have this intersection. Retaining the
     /// derived bit keeps the hot check exact without re-walking every historic
     /// delete range on each append.
     has_unsafe_deletion_endpoint: bool,
+    /// Complete logical charge for this frontier. Fold updates it alongside
+    /// each run, boundary, and delete-coverage mutation.
+    approx_bytes: usize,
 }
 
 /// The append-stable subset of an accepted candidate's already-computed v1
 /// scan. It is carried through the transaction probe and folded only after the
 /// durable append commits.
 pub(crate) struct IntegratedFrontierDelta {
-    identities: BTreeMap<ClientID, BTreeMap<u32, ClockIdentity>>,
+    identities: ClockIdentityIndex,
     unsafe_boundaries: BTreeSet<ID>,
     delete_coverage: IdSet,
 }
@@ -250,12 +612,15 @@ impl IntegratedFrontier {
         let has_unsafe_deletion_endpoint = deletion_boundaries
             .iter()
             .any(|boundary| structure.unsafe_boundaries.contains(boundary));
-        IntegratedFrontier {
+        let mut frontier = IntegratedFrontier {
             identities: structure.identities,
             unsafe_boundaries: structure.unsafe_boundaries,
             delete_coverage,
             has_unsafe_deletion_endpoint,
-        }
+            approx_bytes: 0,
+        };
+        frontier.approx_bytes = frontier.recompute_approx_bytes();
+        frontier
     }
 
     pub(crate) fn from_full_state_bytes(bytes: &[u8]) -> Result<Self, CollabError> {
@@ -264,98 +629,148 @@ impl IntegratedFrontier {
 
     /// Advance from one accepted candidate in work proportional to the
     /// candidate facts (plus the identities/interiors the candidate retires).
-    pub(crate) fn fold(&mut self, delta: IntegratedFrontierDelta) {
+    pub(crate) fn fold(&mut self, delta: IntegratedFrontierDelta) -> (usize, usize) {
+        let previous_approx_bytes = self.approx_bytes;
+        let identities_before = self.identities.approx_bytes();
+
         // An older dangling delete may already cover newly delivered content.
         // Never resurrect those facts while the dependency integrates.
-        for (client, identities) in delta.identities {
-            let established = self.identities.entry(client).or_default();
-            for (clock, identity) in identities {
-                let id = ID::new(client, clock);
-                if !self.delete_coverage.contains(&id) {
-                    established.insert(clock, identity);
+        for (client, spans) in delta.identities.clients {
+            for (start, span) in spans {
+                match span {
+                    IdentitySpan::StringRun(units) => {
+                        let mut uncovered_start = None;
+                        let mut uncovered = Vec::new();
+                        for (offset, unit) in units.into_iter().enumerate() {
+                            let clock = start
+                                .checked_add(u32::try_from(offset).expect("run offset fits u32"))
+                                .expect("validated run clock cannot overflow");
+                            if self.delete_coverage.contains(&ID::new(client, clock)) {
+                                if let Some(segment_start) = uncovered_start.take() {
+                                    self.identities.insert_string_run(
+                                        client,
+                                        segment_start,
+                                        std::mem::take(&mut uncovered),
+                                    );
+                                }
+                            } else {
+                                uncovered_start.get_or_insert(clock);
+                                uncovered.push(unit);
+                            }
+                        }
+                        if let Some(segment_start) = uncovered_start {
+                            self.identities
+                                .insert_string_run(client, segment_start, uncovered);
+                        }
+                    }
+                    IdentitySpan::Typed { kind, payload } => {
+                        let id = ID::new(client, start);
+                        if !self.delete_coverage.contains(&id) {
+                            self.identities.insert_identity(
+                                client,
+                                start,
+                                ClockIdentity { kind, payload },
+                            );
+                        }
+                    }
                 }
             }
         }
-        self.identities
-            .retain(|_, identities| !identities.is_empty());
+        let identities_after_insert = self.identities.approx_bytes();
+        self.adjust_approx_bytes(identities_before, identities_after_insert);
+
         for boundary in delta.unsafe_boundaries {
-            if !self.delete_coverage.contains(&boundary) {
-                self.unsafe_boundaries.insert(boundary);
+            if !self.delete_coverage.contains(&boundary) && self.unsafe_boundaries.insert(boundary)
+            {
+                self.approx_bytes = self.approx_bytes.saturating_add(std::mem::size_of::<ID>());
             }
         }
 
         // A newly accepted delete retires established facts by clock range.
         // Range queries avoid a document-wide `retain` for a small deletion.
+        let delete_clients: Vec<ClientID> = delta
+            .delete_coverage
+            .iter()
+            .map(|(client, _)| *client)
+            .collect();
+        let delete_coverage_before: usize = delete_clients
+            .iter()
+            .map(|client| Self::delete_coverage_client_bytes(&self.delete_coverage, client))
+            .sum();
+        let identities_before_retirement = self.identities.approx_bytes();
         for (client, ranges) in delta.delete_coverage.iter() {
-            if let Some(identities) = self.identities.get_mut(client) {
-                for range in ranges.iter() {
-                    let retired: Vec<u32> = identities
-                        .range(range.clone())
-                        .map(|(&clock, _)| clock)
-                        .collect();
-                    for clock in retired {
-                        identities.remove(&clock);
-                    }
-                }
-            }
             for range in ranges.iter() {
+                self.identities.remove_range(*client, range.clone());
                 let retired: Vec<ID> = self
                     .unsafe_boundaries
                     .range(ID::new(*client, range.start)..ID::new(*client, range.end))
                     .copied()
                     .collect();
                 for boundary in retired {
-                    self.unsafe_boundaries.remove(&boundary);
+                    if self.unsafe_boundaries.remove(&boundary) {
+                        self.approx_bytes =
+                            self.approx_bytes.saturating_sub(std::mem::size_of::<ID>());
+                    }
                 }
             }
         }
-        self.identities
-            .retain(|_, identities| !identities.is_empty());
+        let identities_after_retirement = self.identities.approx_bytes();
+        self.adjust_approx_bytes(identities_before_retirement, identities_after_retirement);
         self.delete_coverage.merge_with(delta.delete_coverage);
+        let delete_coverage_after: usize = delete_clients
+            .iter()
+            .map(|client| Self::delete_coverage_client_bytes(&self.delete_coverage, client))
+            .sum();
+        self.adjust_approx_bytes(delete_coverage_before, delete_coverage_after);
 
         // The gate admitted the pre-delete union against every raw endpoint.
         // Canonical union endpoints are a subset of those outer endpoints, and
         // covered unsafe points have just been retired.
         self.has_unsafe_deletion_endpoint = false;
+        #[cfg(any(test, debug_assertions))]
+        {
+            debug_assert_eq!(
+                self.identities.approx_bytes(),
+                self.identities.recompute_approx_bytes(),
+                "incremental identity byte accounting diverged"
+            );
+            debug_assert_eq!(
+                self.approx_bytes,
+                self.recompute_approx_bytes(),
+                "incremental frontier byte accounting diverged"
+            );
+        }
+        (previous_approx_bytes, self.approx_bytes)
     }
 
     /// Candidate-oriented equivalent of [`content_parity_conflict`]. Ordinary
     /// appends probe only the clocks they claim instead of traversing every
     /// established live identity.
     fn content_parity_conflict(&self, candidate: &WireStructure) -> bool {
-        for (client, candidate_identities) in &candidate.identities {
-            let Some(established) = self.identities.get(client) else {
-                continue;
-            };
-            for (clock, candidate_identity) in candidate_identities {
-                if established
-                    .get(clock)
+        if candidate
+            .identities
+            .any_identity(|client, clock, candidate_identity| {
+                self.identities
+                    .identity_at(client, clock)
                     .is_some_and(|identity| identity != candidate_identity)
-                {
-                    return true;
-                }
-            }
+            })
+        {
+            return true;
         }
 
         // The cold predicate gives a live identity priority if a malformed wire
         // claims both live content and a tombstone at the same clock. Preserve
         // that order exactly here.
         for (client, tombstones) in &candidate.tombstone_ranges {
-            let Some(established) = self.identities.get(client) else {
-                continue;
-            };
             for &(start, end) in tombstones {
-                for (&clock, _) in established.range(start..end) {
-                    if candidate
-                        .identities
-                        .get(client)
-                        .is_some_and(|identities| identities.contains_key(&clock))
-                    {
-                        continue;
-                    }
-                    if !candidate.delete_set_covers(*client, clock) {
-                        return true;
-                    }
+                if self
+                    .identities
+                    .any_identity_in_range(*client, start, end, |clock, _| {
+                        !candidate.identities.contains_clock(*client, clock)
+                            && !candidate.delete_set_covers(*client, clock)
+                    })
+                {
+                    return true;
                 }
             }
         }
@@ -375,21 +790,19 @@ impl IntegratedFrontier {
     }
 
     pub(crate) fn approx_bytes(&self) -> usize {
-        let identities = self
-            .identities
-            .values()
-            .flat_map(BTreeMap::values)
-            .map(|identity| {
-                std::mem::size_of::<u32>()
-                    + std::mem::size_of::<ClockIdentity>()
-                    + match identity {
-                        ClockIdentity::StringUnit(_) => 0,
-                        ClockIdentity::Typed { payload, .. } => payload.len(),
-                    }
-            })
-            .sum::<usize>();
-        let identity_clients = self.identities.len() * std::mem::size_of::<ClientID>();
-        let unsafe_boundaries = self.unsafe_boundaries.len() * std::mem::size_of::<ID>();
+        self.approx_bytes
+    }
+
+    fn delete_coverage_client_bytes(coverage: &IdSet, client: &ClientID) -> usize {
+        coverage.get(client).map_or(0, |ranges| {
+            std::mem::size_of::<ClientID>()
+                + ranges
+                    .len()
+                    .saturating_mul(std::mem::size_of::<std::ops::Range<u32>>())
+        })
+    }
+
+    fn recompute_approx_bytes(&self) -> usize {
         let delete_ranges = self
             .delete_coverage
             .iter()
@@ -399,10 +812,21 @@ impl IntegratedFrontier {
             })
             .sum::<usize>();
         std::mem::size_of::<Self>()
-            .saturating_add(identity_clients)
-            .saturating_add(identities)
-            .saturating_add(unsafe_boundaries)
+            .saturating_add(self.identities.approx_bytes())
+            .saturating_add(
+                self.unsafe_boundaries
+                    .len()
+                    .saturating_mul(std::mem::size_of::<ID>()),
+            )
             .saturating_add(delete_ranges)
+    }
+
+    fn adjust_approx_bytes(&mut self, before: usize, after: usize) {
+        if after >= before {
+            self.approx_bytes = self.approx_bytes.saturating_add(after - before);
+        } else {
+            self.approx_bytes = self.approx_bytes.saturating_sub(before - after);
+        }
     }
 
     /// FR1-VALID: fail loudly outside the gate's unwind containment on every
@@ -410,8 +834,8 @@ impl IntegratedFrontier {
     #[cfg(any(test, debug_assertions))]
     pub(crate) fn assert_matches_doc(&self, doc: &Ydoc) -> Result<(), CollabError> {
         let fresh = scan_v1(&doc.encode_full_state())?;
-        assert_eq!(
-            self.identities, fresh.identities,
+        assert!(
+            self.identities.semantically_equal(&fresh.identities),
             "FR1-VALID violated: frontier identities diverge from fresh base scan"
         );
         assert_eq!(
@@ -429,7 +853,7 @@ impl IntegratedFrontier {
     #[cfg(any(test, debug_assertions))]
     pub(crate) fn matches_doc(&self, doc: &Ydoc) -> Result<bool, CollabError> {
         let fresh = scan_v1(&doc.encode_full_state())?;
-        Ok(self.identities == fresh.identities
+        Ok(self.identities.semantically_equal(&fresh.identities)
             && self.unsafe_boundaries == fresh.unsafe_boundaries
             && self.deletion_boundaries() == fresh.deletion_boundaries)
     }
@@ -437,7 +861,7 @@ impl IntegratedFrontier {
     #[cfg(any(test, debug_assertions))]
     pub(crate) fn fact_counts(&self) -> (usize, usize, usize) {
         (
-            self.identities.values().map(BTreeMap::len).sum(),
+            self.identities.fact_count(),
             self.unsafe_boundaries.len(),
             self.deletion_boundaries().len(),
         )
@@ -445,14 +869,27 @@ impl IntegratedFrontier {
 
     #[cfg(any(test, debug_assertions))]
     pub(crate) fn poison_identity_for_test(&mut self) {
-        let Some((_, identities)) = self.identities.iter_mut().next() else {
+        if self.identities.poison_string_run_for_test() {
+            return;
+        }
+        let Some((client, clock)) = self
+            .identities
+            .clients
+            .iter()
+            .find_map(|(&client, spans)| spans.keys().next().map(|&clock| (client, clock)))
+        else {
             panic!("frontier poison seam requires at least one live identity");
         };
-        let clock = *identities
-            .keys()
-            .next()
-            .expect("frontier poison seam requires at least one live identity");
-        identities.remove(&clock);
+        self.identities.remove_raw(client, clock);
+    }
+
+    #[cfg(test)]
+    fn split_first_string_run_for_test(&mut self, offset: usize) -> Option<ID> {
+        let before = self.identities.approx_bytes();
+        let boundary = self.identities.split_first_string_run_for_test(offset)?;
+        let after = self.identities.approx_bytes();
+        self.adjust_approx_bytes(before, after);
+        Some(boundary)
     }
 }
 
@@ -978,39 +1415,24 @@ pub(crate) fn persistent_gate_scratch_matches_base(
 ///     units or a different kind/payload) OR a BARE `ContentDeleted` not in
 ///     its delete-set — a hostile redefinition, rejected. No honest peer ever
 ///     redefines an already-used clock's live content without deleting it.
-fn content_parity_conflict(
-    candidate: &WireStructure,
-    established: &BTreeMap<ClientID, BTreeMap<u32, ClockIdentity>>,
-) -> bool {
-    for (client, known) in established {
+fn content_parity_conflict(candidate: &WireStructure, established: &ClockIdentityIndex) -> bool {
+    established.any_identity(|client, clock, established_identity| {
         // Every identity the established side stores is LIVE content
         // (tombstones live in `tombstone_ranges`, not here), so each entry is a
         // clock a conflicting candidate could diverge.
-        for (clock, established_identity) in known {
+        if let Some(candidate_identity) = candidate.identities.identity_at(client, clock) {
             // A candidate LIVE identity at the same clock must match exactly.
-            if let Some(candidate_identity) =
-                candidate.identities.get(client).and_then(|m| m.get(clock))
-            {
-                if candidate_identity == established_identity {
-                    continue; // identical live content: a clean resend
-                }
-                return true; // a different live kind/payload: hostile redefinition
-            }
-            // No candidate LIVE identity here. If the candidate instead
-            // TOMBSTONES this clock, that is a legitimate delete/GC only when
-            // its own delete-set also covers it (the normal reconnect
-            // full-state resend carries a deleted clock this way); a BARE
-            // tombstone not in the delete-set is a hostile redefinition.
-            if candidate.tombstone_covers(*client, *clock) {
-                if candidate.delete_set_covers(*client, *clock) {
-                    continue; // a genuine delete/GC of this clock, not a redefinition
-                }
-                return true;
-            }
-            // The candidate does not claim this clock at all: nothing to compare.
+            return candidate_identity != established_identity;
         }
-    }
-    false
+        // No candidate LIVE identity here. If the candidate instead
+        // TOMBSTONES this clock, that is a legitimate delete/GC only when its
+        // own delete-set also covers it; a bare tombstone is hostile.
+        if candidate.tombstone_covers(client, clock) {
+            return !candidate.delete_set_covers(client, clock);
+        }
+        // The candidate does not claim this clock at all: nothing to compare.
+        false
+    })
 }
 
 /// A canonical, order-independent fingerprint of an `Any` value: the tagged,
@@ -1092,9 +1514,7 @@ fn record_identity(
 ) {
     structure
         .identities
-        .entry(client)
-        .or_default()
-        .insert(clock, identity);
+        .insert_identity(client, clock, identity);
 }
 
 /// The pre-validator [`crate::durable::validate_update_bytes`] (the shared
@@ -1658,7 +2078,7 @@ fn scan_content(
                     structure,
                     id.client,
                     clock,
-                    ClockIdentity::Typed {
+                    ClockIdentity {
                         kind: content_ref,
                         payload: crate::hex_sha256(text.as_bytes()),
                     },
@@ -1672,7 +2092,7 @@ fn scan_content(
                 structure,
                 id.client,
                 id.clock,
-                ClockIdentity::Typed {
+                ClockIdentity {
                     kind: content_ref,
                     payload: crate::hex_sha256(bytes),
                 },
@@ -1682,6 +2102,9 @@ fn scan_content(
         BLOCK_ITEM_STRING_REF_NUMBER => {
             let text = safe_read_string(decoder)?;
             let mut offset = 0u32;
+            // UTF-8 byte length is an upper bound on UTF-16 unit count, so this
+            // allocates once without making a second document-sized pass.
+            let mut code_units = Vec::with_capacity(text.len());
             for scalar in text.chars() {
                 let mut buf = [0u16; 2];
                 let units = scalar.encode_utf16(&mut buf);
@@ -1691,12 +2114,7 @@ fn scan_content(
                         .checked_add(offset)
                         .and_then(|value| value.checked_add(interior as u32))
                         .ok_or_else(parity_clock_overflow)?;
-                    record_identity(
-                        structure,
-                        id.client,
-                        clock,
-                        ClockIdentity::StringUnit(*unit),
-                    );
+                    code_units.push(*unit);
                     if interior > 0 {
                         structure
                             .unsafe_boundaries
@@ -1707,6 +2125,12 @@ fn scan_content(
                     .checked_add(units.len() as u32)
                     .ok_or_else(parity_clock_overflow)?;
             }
+            id.clock
+                .checked_add(offset)
+                .ok_or_else(parity_clock_overflow)?;
+            structure
+                .identities
+                .insert_string_run(id.client, id.clock, code_units);
             Ok(offset)
         }
         BLOCK_ITEM_EMBED_REF_NUMBER => {
@@ -1715,7 +2139,7 @@ fn scan_content(
                 structure,
                 id.client,
                 id.clock,
-                ClockIdentity::Typed {
+                ClockIdentity {
                     kind: content_ref,
                     payload: any_payload(&value),
                 },
@@ -1734,7 +2158,7 @@ fn scan_content(
                 structure,
                 id.client,
                 id.clock,
-                ClockIdentity::Typed {
+                ClockIdentity {
                     kind: content_ref,
                     payload: crate::hex_sha256(&canonical),
                 },
@@ -1747,7 +2171,7 @@ fn scan_content(
                 structure,
                 id.client,
                 id.clock,
-                ClockIdentity::Typed {
+                ClockIdentity {
                     kind: content_ref,
                     payload: crate::hex_sha256(&fingerprint),
                 },
@@ -1763,7 +2187,7 @@ fn scan_content(
                     structure,
                     id.client,
                     clock,
-                    ClockIdentity::Typed {
+                    ClockIdentity {
                         kind: content_ref,
                         payload: any_payload(&value),
                     },
@@ -1777,7 +2201,7 @@ fn scan_content(
                 structure,
                 id.client,
                 id.clock,
-                ClockIdentity::Typed {
+                ClockIdentity {
                     kind: content_ref,
                     payload: crate::hex_sha256(&fingerprint),
                 },
@@ -1825,6 +2249,139 @@ mod tests {
             }
             _ => false,
         }
+    }
+
+    fn assert_frontier_facts_match_fresh(frontier: &IntegratedFrontier, doc: &Ydoc) {
+        let fresh = scan_v1(&doc.encode_full_state()).expect("fresh full state must scan");
+        let clients: BTreeSet<ClientID> = frontier
+            .identities
+            .clients
+            .keys()
+            .chain(fresh.identities.clients.keys())
+            .copied()
+            .collect();
+        for client in clients {
+            let max_clock = fresh.claimed_clocks.get(&client).copied().unwrap_or(0);
+            for clock in 0..=max_clock {
+                assert_eq!(
+                    frontier.identities.identity_at(client, clock),
+                    fresh.identities.identity_at(client, clock),
+                    "identity fact diverged at {client}:{clock}"
+                );
+            }
+        }
+        assert_eq!(frontier.unsafe_boundaries, fresh.unsafe_boundaries);
+        assert_eq!(frontier.deletion_boundaries(), fresh.deletion_boundaries);
+        assert_eq!(
+            frontier.identities.approx_bytes(),
+            frontier.identities.recompute_approx_bytes()
+        );
+        assert_eq!(frontier.approx_bytes(), frontier.recompute_approx_bytes());
+        assert!(frontier.matches_doc(doc).expect("FR1 fresh-scan oracle"));
+    }
+
+    #[test]
+    fn run_frontier_mid_run_delete_splits_and_matches_fresh_facts() {
+        let producer = Ydoc::wire();
+        let insert = producer.plaintext_insert(0, "abcde");
+        let doc = doc_from_update(&insert);
+        let mut frontier =
+            IntegratedFrontier::from_full_state_bytes(&doc.encode_full_state()).expect("frontier");
+        assert_eq!(frontier.identities.string_run_count(), 1);
+
+        let delete = producer.plaintext_delete(2, 1);
+        doc.apply(&delete).expect("delete must apply");
+        let delta = IntegratedFrontierDelta::from_structure(
+            scan_v1(&delete).expect("delete update must scan"),
+        );
+        frontier.fold(delta);
+
+        let (&client, spans) = frontier
+            .identities
+            .clients
+            .iter()
+            .next()
+            .expect("remaining string facts");
+        assert_eq!(spans.keys().copied().collect::<Vec<_>>(), vec![0, 3]);
+        assert_eq!(frontier.identities.string_run_count(), 2);
+        assert!(!frontier.identities.contains_clock(client, 2));
+        assert_frontier_facts_match_fresh(&frontier, &doc);
+    }
+
+    #[test]
+    fn unicode_scalar_can_span_run_boundary_without_changing_facts() {
+        let producer = Ydoc::wire();
+        let insert = producer.plaintext_insert(0, "A😀Z");
+        let doc = doc_from_update(&insert);
+        let mut frontier =
+            IntegratedFrontier::from_full_state_bytes(&doc.encode_full_state()).expect("frontier");
+
+        let boundary = frontier
+            .split_first_string_run_for_test(2)
+            .expect("split between the surrogate units");
+        assert_eq!(frontier.identities.string_run_count(), 2);
+        assert!(
+            frontier.unsafe_boundaries.contains(&boundary),
+            "the low surrogate remains an unsafe interior even at a run boundary"
+        );
+        assert_frontier_facts_match_fresh(&frontier, &doc);
+    }
+
+    #[test]
+    fn probes_on_both_sides_of_a_run_boundary_match_fresh_facts() {
+        let producer = Ydoc::wire();
+        let insert = producer.plaintext_insert(0, "abcd");
+        let doc = doc_from_update(&insert);
+        let mut frontier =
+            IntegratedFrontier::from_full_state_bytes(&doc.encode_full_state()).expect("frontier");
+        let boundary = frontier
+            .split_first_string_run_for_test(2)
+            .expect("interior run split");
+        let fresh = scan_v1(&doc.encode_full_state()).expect("fresh full state must scan");
+
+        for clock in [boundary.clock - 1, boundary.clock, boundary.clock + 1] {
+            assert_eq!(
+                frontier.identities.identity_at(boundary.client, clock),
+                fresh.identities.identity_at(boundary.client, clock)
+            );
+        }
+        assert_frontier_facts_match_fresh(&frontier, &doc);
+    }
+
+    #[test]
+    fn hostile_overlap_at_a_run_boundary_matches_fresh_scan_verdict() {
+        let producer = Ydoc::wire();
+        let insert = producer.plaintext_insert(0, "abcd");
+        let doc = doc_from_update(&insert);
+        let mut frontier =
+            IntegratedFrontier::from_full_state_bytes(&doc.encode_full_state()).expect("frontier");
+        let boundary = frontier
+            .split_first_string_run_for_test(2)
+            .expect("interior run split");
+        let fresh = scan_v1(&doc.encode_full_state()).expect("fresh full state must scan");
+
+        let mut matching = WireStructure::default();
+        matching.identities.insert_string_run(
+            boundary.client,
+            boundary.clock - 1,
+            vec![b'b' as u16, b'c' as u16],
+        );
+        assert!(!frontier.content_parity_conflict(&matching));
+        assert_eq!(
+            frontier.content_parity_conflict(&matching),
+            content_parity_conflict(&matching, &fresh.identities)
+        );
+
+        let mut hostile = WireStructure::default();
+        hostile
+            .identities
+            .insert_string_run(boundary.client, boundary.clock, vec![b'x' as u16]);
+        assert!(frontier.content_parity_conflict(&hostile));
+        assert_eq!(
+            frontier.content_parity_conflict(&hostile),
+            content_parity_conflict(&hostile, &fresh.identities)
+        );
+        assert_frontier_facts_match_fresh(&frontier, &doc);
     }
 
     fn assert_v1_blind_to_wire_v2_difference(left: &[u8], right: &[u8]) {
@@ -2399,9 +2956,10 @@ mod tests {
         const N: u32 = 100_000;
         let client = ClientID::new(9);
         let mut established = WireStructure::default();
-        let known = established.identities.entry(client).or_default();
         for i in 0..N {
-            known.insert(2 * i, ClockIdentity::StringUnit(b'x' as u16));
+            established
+                .identities
+                .insert_string_run(client, 2 * i, vec![b'x' as u16]);
         }
         let mut candidate = WireStructure::default();
         let fragmented: Vec<(u32, u32)> = (0..N).map(|i| (2 * i, 2 * i + 1)).collect();

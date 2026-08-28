@@ -243,6 +243,47 @@ fn frontier_fold_retires_a_live_identity_covered_by_delete() {
 }
 
 #[test]
+fn frontier_fold_splits_a_string_run_around_a_mid_run_delete() {
+    let (mut ts, key) = setup("frontier-split-mid-run-delete", Regime::LocalOnly);
+    let producer = Ydoc::wire();
+    let insert = producer.plaintext_insert(0, "abcde");
+    committed(
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &insert,
+            &NoFaults,
+            1_001,
+        )
+        .expect("insert"),
+    );
+
+    let delete = producer.plaintext_delete(2, 1);
+    committed(
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &delete,
+            &NoFaults,
+            1_002,
+        )
+        .expect("mid-run delete"),
+    );
+    assert_eq!(
+        ts.cache.frontier_fact_counts_for_test(&key),
+        Some((4, 0, 2))
+    );
+    assert_eq!(
+        ts.cache
+            .frontier_matches_doc_for_test(&key)
+            .expect("fresh-scan frontier comparison"),
+        Some(true)
+    );
+}
+
+#[test]
 fn frontier_fold_retires_a_deleted_scalar_interior() {
     // MUTATION: drop unsafe-interior retirement and the retained interior clock
     // survives after the scalar itself is deleted.
@@ -547,6 +588,22 @@ fn frontier_oracle_catches_a_poisoned_identity() {
     ts.cache.poison_frontier_for_test(&key);
 
     let u2 = independent_insert("b");
+    let _ = record_local_update(&mut ts.store, &mut ts.cache, &key, &u2, &NoFaults, 1_002);
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "FR1-VALID")]
+fn frontier_oracle_catches_a_poisoned_multi_unit_string_run() {
+    let (mut ts, key) = setup("frontier-oracle-poison-run", Regime::LocalOnly);
+    let producer = Ydoc::wire();
+    let u1 = producer.plaintext_insert(0, "a😀b");
+    committed(
+        record_local_update(&mut ts.store, &mut ts.cache, &key, &u1, &NoFaults, 1_001).expect("u1"),
+    );
+    ts.cache.poison_frontier_for_test(&key);
+
+    let u2 = producer.plaintext_insert(4, "c");
     let _ = record_local_update(&mut ts.store, &mut ts.cache, &key, &u2, &NoFaults, 1_002);
 }
 

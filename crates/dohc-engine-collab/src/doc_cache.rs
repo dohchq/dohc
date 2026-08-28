@@ -610,14 +610,13 @@ impl WriterDocCache {
             self.remove(key);
             return;
         }
-        let previous_frontier_bytes = entry.frontier.approx_bytes();
-        entry.frontier.fold(candidate);
+        let (previous_frontier_bytes, frontier_bytes) = entry.frontier.fold(candidate);
         entry.tuple = tuple;
         entry.approx_bytes = entry
             .approx_bytes
             .saturating_sub(previous_frontier_bytes)
             .saturating_add(applied.len())
-            .saturating_add(entry.frontier.approx_bytes());
+            .saturating_add(frontier_bytes);
 
         let scratch_valid = match scratch_advance {
             GateScratchAdvance::AlreadyApplied => {
