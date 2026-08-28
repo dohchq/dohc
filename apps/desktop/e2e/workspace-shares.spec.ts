@@ -98,10 +98,6 @@ async function mintLinkHandoff(
   });
 }
 
-function relayResponse(response: RawRelayResponse): RawRelayResponse {
-  return { status: response.status, body: response.body };
-}
-
 const confidentialTest = test.extend({});
 confidentialTest.use({ screenshot: "off", trace: "off" });
 
@@ -554,9 +550,7 @@ confidentialTest.describe("View link lifecycle", () => {
         relayExchangeKey,
         oldSecret,
       );
-      expect(relayResponse(oldSecretAfterReset)).toEqual(
-        relayResponse(neverValidExchange),
-      );
+      expect(oldSecretAfterReset).toEqual(neverValidExchange);
       const neverValidRead = await readViewLink(
         relay.baseUrl,
         neverValidCredential,
@@ -567,9 +561,7 @@ confidentialTest.describe("View link lifecycle", () => {
         oldCapability,
         "/sync/link/share",
       );
-      expect(relayResponse(oldCapabilityAfterReset)).toEqual(
-        relayResponse(neverValidRead),
-      );
+      expect(oldCapabilityAfterReset).toEqual(neverValidRead);
 
       const currentExchange = await exchangeViewLink(
         relay.baseUrl,
@@ -623,17 +615,13 @@ confidentialTest.describe("View link lifecycle", () => {
         relayExchangeKey,
         currentSecret,
       );
-      expect(relayResponse(currentSecretAfterEnd)).toEqual(
-        relayResponse(neverValidExchange),
-      );
+      expect(currentSecretAfterEnd).toEqual(neverValidExchange);
       const currentCapabilityAfterEnd = await readViewLink(
         relay.baseUrl,
         currentCapability,
         "/sync/link/share",
       );
-      expect(relayResponse(currentCapabilityAfterEnd)).toEqual(
-        relayResponse(neverValidRead),
-      );
+      expect(currentCapabilityAfterEnd).toEqual(neverValidRead);
       const namedAfterEnd = await relayJson(
         relay.baseUrl,
         RECIPIENT_TOKEN,
@@ -644,7 +632,7 @@ confidentialTest.describe("View link lifecycle", () => {
         RECIPIENT_TOKEN,
         "/sync/shares/never-valid/log?since=0&limit=500",
       );
-      expect(relayResponse(namedAfterEnd)).toEqual(relayResponse(missingNamedShare));
+      expect(namedAfterEnd).toEqual(missingNamedShare);
     } finally {
       await relay?.stop();
       if (desktop) await cleanupDesktopWorkspace(desktop, temp);
