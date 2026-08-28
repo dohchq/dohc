@@ -134,6 +134,23 @@ describe("share handoff status bridge", () => {
 });
 
 describe("share handoff credential and ingress wiring", () => {
+  it("bounds redemption requests before the coordinator is initialized", () => {
+    const timeoutDeclaration =
+      "const SHARE_HANDOFF_REDEMPTION_FETCH_TIMEOUT_MS = 15_000;";
+    const timeoutAt = mainSource.indexOf(timeoutDeclaration);
+    const creationAt = mainSource.indexOf(
+      "const shareHandoffRedemption = createShareHandoffRedemptionCoordinator({",
+    );
+    const creation = mainSource.slice(creationAt, creationAt + 1400);
+
+    expect(timeoutAt).toBeGreaterThanOrEqual(0);
+    expect(creationAt).toBeGreaterThan(timeoutAt);
+    expect(creation).toContain(
+      "fetch: relayFetchWithTimeout(SHARE_HANDOFF_REDEMPTION_FETCH_TIMEOUT_MS),",
+    );
+    expect(creation).not.toContain("fetch: (input, init) => fetch(input, init)");
+  });
+
   it("schedules redemption after cold, open-url, and second-instance capture", () => {
     expect(mainSource.match(/shareHandoffRedemption\.pendingCodeChanged\(\)/gu)).toHaveLength(
       3,

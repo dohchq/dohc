@@ -1662,11 +1662,12 @@ function publishShareHandoffStatus(status: ShareHandoffStatus): void {
   }
 }
 
+const SHARE_HANDOFF_REDEMPTION_FETCH_TIMEOUT_MS = 15_000;
 const shareHandoffRedemption = createShareHandoffRedemptionCoordinator({
   intent: shareHandoffIntentSlot,
   createStatusId: randomUUID,
   credentialSnapshot: () => credentialSessionCache.snapshot(),
-  fetch: (input, init) => fetch(input, init),
+  fetch: relayFetchWithTimeout(SHARE_HANDOFF_REDEMPTION_FETCH_TIMEOUT_MS),
   handleUnauthorized: (requestCredentials) =>
     handleRelayUnauthorized({
       requestCredentials,
