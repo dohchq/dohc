@@ -31,7 +31,7 @@ Prove the failure cases before committing to implementation shape. Each prototyp
 
 Gate: each prototype has a written pass, or a design revision recorded as an ADR update.
 
-**Status: READY.** Each prototype has a written pass or a phased design revision in ADR 0001, ADR 0005, or ADR 0006. Final closure waits for the exact-head phase gate.
+**Status: DONE.** Each prototype has a written pass or a phased design revision in ADR 0001, ADR 0005, or ADR 0006. The exact-head Phase 1 and Phase 2 gate passed before this disposition was recorded.
 
 ## Phase 2: View slice
 
@@ -54,7 +54,7 @@ Gate:
 - `keeps two View tabs isolated across different and shared selectors`, `blocks a cross-origin handoff mint without disturbing the viewer`, and `renders a representative Excalidraw scene without leaving the viewer origin` pin the real-browser matrix. `keeps valid and garbage viewer entries uniformly unindexable` pins the generic entry shell and unfurl policy; `refuses and closes a streaming request as soon as it crosses the body cap` pins the same noindex contract on adapter refusals.
 - `uses the 32-byte CSPRNG bearer seam for create and rotate` pins credential entropy. The leaked-URL walkthrough matches the owner-facing warning about plaintext relay access and content that recipients already downloaded, cached, or copied.
 
-**Status: READY.** The View slice is complete, but its exact-head gate has not run. Comment, live Edit, and apps remain disabled pending Phases 3, 4, and 5.
+**Status: DONE.** The HTTP View slice and its phase gate are complete. Comment, live Edit, and apps remain disabled pending Phases 3, 4, and 5.
 
 ## Phase 3: Comment
 
