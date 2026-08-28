@@ -4,7 +4,7 @@ import { extname, join } from "node:path";
 
 export const LINK_SESSION_HEADER = "x-dohc-link-session";
 export const SHARE_WEB_CSP =
-  "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; " +
+  "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; " +
   "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 const REFUSAL_BODY = JSON.stringify({ ok: false, error: "not found" });
@@ -403,6 +403,8 @@ function contentTypeForAsset(path: string): string {
       return "text/javascript; charset=utf-8";
     case ".map":
       return "application/json";
+    case ".woff2":
+      return "font/woff2";
     default:
       return "application/octet-stream";
   }

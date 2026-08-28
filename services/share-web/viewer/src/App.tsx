@@ -1,4 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Component,
+  lazy,
+  Suspense,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { parsePublicExcalidrawScene } from "./excalidraw";
 import { useImageRetryHandlers } from "./imageRetry";
 import { MarkdownContent } from "./MarkdownContent";
 import {
@@ -9,6 +20,7 @@ import {
 import {
   filesFromAccumulator,
   foldLogOps,
+  isExcalidraw,
   isMarkdown,
   isRasterImage,
   isSvg,
@@ -19,6 +31,23 @@ import {
   type SharedFile,
   type ViewMeta,
 } from "./model";
+
+const ExcalidrawView = lazy(() => import("./ExcalidrawView"));
+
+class ExcalidrawRenderBoundary extends Component<
+  { children: ReactNode; fallback: ReactNode },
+  { failed: boolean }
+> {
+  state = { failed: false };
+
+  static getDerivedStateFromError(): { failed: true } {
+    return { failed: true };
+  }
+
+  render(): ReactNode {
+    return this.state.failed ? this.props.fallback : this.props.children;
+  }
+}
 
 const SESSION_HEADER = "x-dohc-link-session";
 const SESSION_PATH = /^\/s\/([A-Za-z0-9_-]{12})\/?$/u;
@@ -439,22 +468,25 @@ function FileView(props: {
   onSelect: (path: string) => void;
   onStaleBlob: (path: string, blobSha256: string) => Promise<boolean>;
 }) {
-  const [markdown, setMarkdown] = useState<string | null>(null);
-  const [markdownTooLarge, setMarkdownTooLarge] = useState(false);
+  const [previewText, setPreviewText] = useState<string | null>(null);
+  const [previewTooLarge, setPreviewTooLarge] = useState(false);
   const [fileStatus, setFileStatus] = useState<
     "ready" | "refreshing" | "unavailable"
   >("ready");
   const rendersMarkdown = props.file.contentKind === "text" && isMarkdown(props.file.path);
+  const rendersExcalidraw =
+    props.file.contentKind === "text" && isExcalidraw(props.file.path);
+  const rendersTextPreview = rendersMarkdown || rendersExcalidraw;
   const fileMap = useMemo(
     () => new Map(props.files.map((file) => [file.path, file])),
     [props.files],
   );
   useEffect(() => {
     let current = true;
-    setMarkdown(null);
-    setMarkdownTooLarge(false);
+    setPreviewText(null);
+    setPreviewTooLarge(false);
     setFileStatus("ready");
-    if (!rendersMarkdown) return () => { current = false; };
+    if (!rendersTextPreview) return () => { current = false; };
     const abortController = new AbortController();
     void apiWithThrottleRetry(
       props.session,
@@ -466,9 +498,9 @@ function FileView(props: {
         const preview = await readMarkdownPreview(response);
         if (!current) return;
         if (preview.status === "too-large") {
-          setMarkdownTooLarge(true);
+          setPreviewTooLarge(true);
         } else {
-          setMarkdown(preview.markdown);
+          setPreviewText(preview.markdown);
         }
       })
       .catch(async (error: unknown) => {
@@ -495,7 +527,7 @@ function FileView(props: {
     props.file.path,
     props.onStaleBlob,
     props.session,
-    rendersMarkdown,
+    rendersTextPreview,
   ]);
 
   if (fileStatus !== "ready") {
@@ -508,13 +540,13 @@ function FileView(props: {
     );
   }
   if (rendersMarkdown) {
-    if (markdownTooLarge) {
+    if (previewTooLarge) {
       return <DownloadCard file={props.file} session={props.session} />;
     }
-    if (markdown === null) return <p className="muted">Loading file</p>;
+    if (previewText === null) return <p className="muted">Loading file</p>;
     return (
       <MarkdownContent
-        markdown={markdown}
+        markdown={previewText}
         resolveImage={(href) =>
           resolveSharedImage(href, props.file.path, fileMap, props.session)
         }
@@ -523,6 +555,24 @@ function FileView(props: {
         }
         onNavigate={props.onSelect}
       />
+    );
+  }
+  if (rendersExcalidraw) {
+    if (previewTooLarge) {
+      return <DownloadCard file={props.file} session={props.session} />;
+    }
+    if (previewText === null) return <p className="muted">Loading file</p>;
+    const scene = parsePublicExcalidrawScene(previewText);
+    if (!scene) return <DownloadCard file={props.file} session={props.session} />;
+    return (
+      <ExcalidrawRenderBoundary
+        key={props.file.blobSha256}
+        fallback={<DownloadCard file={props.file} session={props.session} />}
+      >
+        <Suspense fallback={<p className="muted">Loading file</p>}>
+          <ExcalidrawView scene={scene} />
+        </Suspense>
+      </ExcalidrawRenderBoundary>
     );
   }
   if (isRasterImage(props.file.path)) {

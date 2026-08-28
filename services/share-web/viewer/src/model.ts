@@ -142,6 +142,10 @@ export function isMarkdown(path: string): boolean {
   return /\.(?:md|markdown)$/iu.test(path);
 }
 
+export function isExcalidraw(path: string): boolean {
+  return /\.excalidraw$/iu.test(path);
+}
+
 export function isRasterImage(path: string): boolean {
   return /\.(?:gif|jpe?g|png|webp)$/iu.test(path);
 }
