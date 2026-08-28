@@ -705,8 +705,8 @@ function OpenInDohc(props: { session: string }) {
       <div className="handoff-panel">
         <p>This opens the share in the dohc app on this computer.</p>
         <p>
-          When it opens, the person who shared it will see the email on your
-          dohc account.
+          The person who shared it will see the email of the dohc account that
+          opens it. dohc asks that account to agree first.
         </p>
         <div className="handoff-buttons">
           <button

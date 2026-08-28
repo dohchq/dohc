@@ -235,7 +235,7 @@ describe("App", () => {
       "This opens the share in the dohc app on this computer.",
     );
     expect(container.textContent).toContain(
-      "When it opens, the person who shared it will see the email on your dohc account.",
+      "The person who shared it will see the email of the dohc account that opens it. dohc asks that account to agree first.",
     );
     expect(buttonNamed("Agree and open")).toBeDefined();
     expect(buttonNamed("Cancel")).toBeDefined();

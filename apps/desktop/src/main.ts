@@ -261,6 +261,7 @@ import {
   UpdateActionResult,
   UpdateCheckResult,
   UpdateStateEvent,
+  AcceptShareHandoffPayload,
   DismissShareHandoffPayload,
   ShareHandoffStatus as ShareHandoffStatusContract,
 } from "./ipc/bridgeContract";
@@ -7184,6 +7185,15 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     assertNoShareHandoffArguments(args);
     return ShareHandoffStatusContract.parse(shareHandoffRedemption.status());
+  });
+
+  ipcMain.handle(CHANNELS.acceptShareHandoff, (event, ...args: unknown[]) => {
+    assertTrustedSender(event);
+    if (args.length !== 1) {
+      throw new Error("Share handoff acceptance requires one status identity.");
+    }
+    const input = AcceptShareHandoffPayload.parse(args[0]);
+    shareHandoffRedemption.accept(input.statusId);
   });
 
   ipcMain.handle(CHANNELS.retryShareHandoff, (event, ...args: unknown[]) => {

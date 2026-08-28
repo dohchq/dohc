@@ -10,6 +10,7 @@ const CODE_B = `${"b".repeat(42)}_`;
 interface TestCredentials {
   serverUrl: string;
   relayUrl?: string;
+  email: string;
   token: string;
   userId: string;
 }
@@ -17,12 +18,14 @@ interface TestCredentials {
 const CREDENTIALS_A: TestCredentials = {
   serverUrl: "https://cloud.example",
   relayUrl: "https://relay-a.example/",
+  email: "account-a@dohc.test",
   token: "bearer-a",
   userId: "user-a",
 };
 const CREDENTIALS_B: TestCredentials = {
   serverUrl: "https://cloud.example",
   relayUrl: "https://relay-b.example",
+  email: "account-b@dohc.test",
   token: "bearer-b",
   userId: "user-b",
 };
@@ -65,7 +68,12 @@ async function harness(options?: {
   };
   let credentials = options?.credentials ?? null;
   let credentialGeneration = 0;
-  const statuses: Array<{ status: string; shareId?: string }> = [];
+  const statuses: Array<{
+    status: string;
+    statusId?: string;
+    shareId?: string;
+    email?: string;
+  }> = [];
   let nextStatusId = 0;
   const fetchImpl = options?.fetch ?? vi.fn<typeof fetch>();
   const handleUnauthorized = vi.fn(async (requestCredentials: TestCredentials) => {
@@ -118,7 +126,21 @@ function success(shareId = "share-redeemed"): Response {
 }
 
 describe("share handoff redemption coordinator", () => {
-  it("keeps a signed-out capture waiting, then redeems once after sign-in without renderer input", async () => {
+  it("waits for the signed-in account to accept identity disclosure", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(success());
+    const h = await harness({ credentials: CREDENTIALS_A, fetch: fetchImpl });
+
+    h.offer(CODE_A);
+
+    expect(h.coordinator.status()).toEqual({
+      status: "waiting-for-acceptance",
+      statusId: "status-1",
+      email: "account-a@dohc.test",
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("keeps signed-out ingress waiting and requires acceptance after sign-in", async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(success());
     const h = await harness({ fetch: fetchImpl });
 
@@ -132,22 +154,33 @@ describe("share handoff redemption coordinator", () => {
 
     h.setCredentials(CREDENTIALS_A);
 
+    expect(h.coordinator.status()).toEqual({
+      status: "waiting-for-acceptance",
+      statusId: "status-2",
+      email: "account-a@dohc.test",
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    h.coordinator.accept("status-2");
+
     await vi.waitFor(() => {
       expect(h.coordinator.status()).toEqual({
         status: "done",
-        statusId: "status-1",
+        statusId: "status-2",
         shareId: "share-redeemed",
       });
     });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
-  it("posts exactly the code to the current relay under the current bearer", async () => {
-    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(success());
+  it("a current accept posts exactly once to the credential relay", async () => {
+    const answer = deferred<Response>();
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(() => answer.promise);
     const h = await harness({ credentials: CREDENTIALS_A, fetch: fetchImpl });
 
     h.offer(CODE_A);
-    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(1));
+    h.coordinator.accept("status-1");
+    h.coordinator.accept("status-1");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
 
     const [url, init] = fetchImpl.mock.calls[0]!;
     expect(url).toBe("https://relay-a.example/sync/link-redeem");
@@ -161,6 +194,11 @@ describe("share handoff redemption coordinator", () => {
       body: JSON.stringify({ code: CODE_A }),
     });
     expect(Object.keys(JSON.parse(String(init?.body)))).toEqual(["code"]);
+
+    answer.resolve(success());
+    await vi.waitFor(() => expect(h.coordinator.status().status).toBe("done"));
+    h.coordinator.accept("status-1");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it("waits without fetching when signed-in credentials have no relay URL", async () => {
@@ -179,6 +217,41 @@ describe("share handoff redemption coordinator", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it("rejects an acceptance identity after the handoff code changes", async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    const h = await harness({ credentials: CREDENTIALS_A, fetch: fetchImpl });
+
+    h.offer(CODE_A);
+    h.offer(CODE_B);
+
+    expect(h.coordinator.status()).toEqual({
+      status: "waiting-for-acceptance",
+      statusId: "status-2",
+      email: "account-a@dohc.test",
+    });
+    h.coordinator.accept("status-1");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["token rotation", { ...CREDENTIALS_A, token: "bearer-a-rotated" }],
+    ["account switch", CREDENTIALS_B],
+  ])("rejects an acceptance identity after a %s", async (_label, nextCredentials) => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    const h = await harness({ credentials: CREDENTIALS_A, fetch: fetchImpl });
+
+    h.offer(CODE_A);
+    h.setCredentials(nextCredentials);
+
+    expect(h.coordinator.status()).toEqual({
+      status: "waiting-for-acceptance",
+      statusId: "status-2",
+      email: nextCredentials.email,
+    });
+    h.coordinator.accept("status-1");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("clears a refused code and never retries it", async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()
@@ -186,6 +259,7 @@ describe("share handoff redemption coordinator", () => {
     const h = await harness({ credentials: CREDENTIALS_A, fetch: fetchImpl });
 
     h.offer(CODE_A);
+    h.coordinator.accept("status-1");
     await vi.waitFor(() => {
       expect(h.coordinator.status()).toEqual({
         status: "failed-refused",
@@ -208,6 +282,7 @@ describe("share handoff redemption coordinator", () => {
     const h = await harness({ credentials: CREDENTIALS_A, fetch: fetchImpl });
 
     h.offer(CODE_A);
+    h.coordinator.accept("status-1");
     await vi.waitFor(() => {
       expect(h.coordinator.status()).toEqual({
         status: "failed-refused",
@@ -226,6 +301,7 @@ describe("share handoff redemption coordinator", () => {
     const h = await harness({ credentials: CREDENTIALS_A, fetch: fetchImpl });
 
     h.offer(CODE_A);
+    h.coordinator.accept("status-1");
     await vi.waitFor(() =>
       expect(h.coordinator.status().status).not.toBe("redeeming"),
     );
@@ -243,6 +319,37 @@ describe("share handoff redemption coordinator", () => {
         shareId: "share-redeemed",
       });
     });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not carry retry acceptance across a credential change", async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(response(429, { ok: false }))
+      .mockResolvedValueOnce(success());
+    const h = await harness({ credentials: CREDENTIALS_A, fetch: fetchImpl });
+
+    h.offer(CODE_A);
+    h.coordinator.accept("status-1");
+    await vi.waitFor(() => {
+      expect(h.coordinator.status()).toEqual({
+        status: "failed-busy",
+        statusId: "status-1",
+      });
+    });
+
+    h.setCredentials(CREDENTIALS_B);
+    expect(h.coordinator.status()).toEqual({
+      status: "waiting-for-acceptance",
+      statusId: "status-2",
+      email: "account-b@dohc.test",
+    });
+    h.coordinator.retry();
+    h.coordinator.accept("status-1");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    h.coordinator.accept("status-2");
+    await vi.waitFor(() => expect(h.coordinator.status().status).toBe("done"));
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
@@ -269,6 +376,7 @@ describe("share handoff redemption coordinator", () => {
     const h = await harness({ credentials: CREDENTIALS_A, fetch: fetchImpl });
 
     h.offer(CODE_A);
+    h.coordinator.accept("status-1");
     await vi.waitFor(() => {
       expect(h.coordinator.status()).toEqual({
         status: "failed-network",
@@ -296,10 +404,11 @@ describe("share handoff redemption coordinator", () => {
     const h = await harness({ credentials: CREDENTIALS_A, fetch: fetchImpl });
 
     h.offer(CODE_A);
+    h.coordinator.accept("status-1");
     await vi.waitFor(() => {
       expect(h.coordinator.status()).toEqual({
         status: "waiting-for-sign-in",
-        statusId: "status-1",
+        statusId: "status-2",
       });
     });
     expect(h.handleUnauthorized).toHaveBeenCalledTimes(1);
@@ -308,10 +417,17 @@ describe("share handoff redemption coordinator", () => {
     expect(h.intent.pending()).toBe(CODE_A);
 
     h.setCredentials(CREDENTIALS_B);
+    expect(h.coordinator.status()).toEqual({
+      status: "waiting-for-acceptance",
+      statusId: "status-3",
+      email: "account-b@dohc.test",
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    h.coordinator.accept("status-3");
     await vi.waitFor(() => {
       expect(h.coordinator.status()).toEqual({
         status: "done",
-        statusId: "status-1",
+        statusId: "status-3",
         shareId: "share-after-login",
       });
     });
@@ -335,8 +451,10 @@ describe("share handoff redemption coordinator", () => {
     const h = await harness({ credentials: CREDENTIALS_A, fetch: fetchImpl });
 
     h.offer(CODE_A);
+    h.coordinator.accept("status-1");
     await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(1));
     h.setCredentials({ ...CREDENTIALS_A });
+    h.coordinator.accept("status-2");
     await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2));
 
     oldAnswer.resolve(response(401, { ok: false }));
@@ -344,21 +462,32 @@ describe("share handoff redemption coordinator", () => {
     await vi.waitFor(() => {
       expect(h.coordinator.status()).toEqual({
         status: "done",
-        statusId: "status-1",
+        statusId: "status-2",
         shareId: "share-new-session",
       });
     });
 
     expect(h.settledCodes).toEqual([CODE_A]);
     expect(h.statuses).toEqual([
+      {
+        status: "waiting-for-acceptance",
+        statusId: "status-1",
+        email: "account-a@dohc.test",
+      },
       { status: "redeeming", statusId: "status-1" },
-      { status: "done", statusId: "status-1", shareId: "share-new-session" },
+      {
+        status: "waiting-for-acceptance",
+        statusId: "status-2",
+        email: "account-a@dohc.test",
+      },
+      { status: "redeeming", statusId: "status-2" },
+      { status: "done", statusId: "status-2", shareId: "share-new-session" },
     ]);
     expect(h.credentials()).toEqual(CREDENTIALS_A);
     expect(h.handleUnauthorized).not.toHaveBeenCalled();
     expect(h.coordinator.status()).toEqual({
       status: "done",
-      statusId: "status-1",
+      statusId: "status-2",
       shareId: "share-new-session",
     });
     expect(h.intent.pending()).toBeNull();
@@ -374,7 +503,9 @@ describe("share handoff redemption coordinator", () => {
     const h = await harness({ credentials: CREDENTIALS_A, fetch: fetchImpl });
 
     h.offer(CODE_A);
+    h.coordinator.accept("status-1");
     h.offer(CODE_B);
+    h.coordinator.accept("status-2");
     await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2));
 
     oldAnswer.resolve(response(401, { ok: false }));
@@ -388,7 +519,17 @@ describe("share handoff redemption coordinator", () => {
     });
     expect(h.settledCodes).toEqual([CODE_B]);
     expect(h.statuses).toEqual([
+      {
+        status: "waiting-for-acceptance",
+        statusId: "status-1",
+        email: "account-a@dohc.test",
+      },
       { status: "redeeming", statusId: "status-1" },
+      {
+        status: "waiting-for-acceptance",
+        statusId: "status-2",
+        email: "account-a@dohc.test",
+      },
       { status: "redeeming", statusId: "status-2" },
       { status: "done", statusId: "status-2", shareId: "share-new" },
     ]);
@@ -407,7 +548,9 @@ describe("share handoff redemption coordinator", () => {
     const h = await harness({ credentials: CREDENTIALS_A, fetch: fetchImpl });
 
     h.offer(CODE_A);
+    h.coordinator.accept("status-1");
     h.offer(CODE_B);
+    h.coordinator.accept("status-2");
     await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2));
 
     oldAnswer.resolve(success("share-old"));
@@ -421,7 +564,17 @@ describe("share handoff redemption coordinator", () => {
     });
     expect(h.settledCodes).toEqual([CODE_B]);
     expect(h.statuses).toEqual([
+      {
+        status: "waiting-for-acceptance",
+        statusId: "status-1",
+        email: "account-a@dohc.test",
+      },
       { status: "redeeming", statusId: "status-1" },
+      {
+        status: "waiting-for-acceptance",
+        statusId: "status-2",
+        email: "account-a@dohc.test",
+      },
       { status: "redeeming", statusId: "status-2" },
       { status: "done", statusId: "status-2", shareId: "share-new" },
     ]);
@@ -435,7 +588,14 @@ describe("share handoff redemption coordinator", () => {
 
     h.offer(CODE_A);
     h.offer(CODE_A);
+    h.coordinator.accept("status-1");
+    h.offer(CODE_A);
+    h.coordinator.accept("status-1");
     await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(1));
+    expect(h.coordinator.status()).toEqual({
+      status: "redeeming",
+      statusId: "status-1",
+    });
 
     answer.resolve(success());
     await vi.waitFor(() => expect(h.coordinator.status().status).toBe("done"));
@@ -447,6 +607,7 @@ describe("share handoff redemption coordinator", () => {
     const h = await harness({ credentials: CREDENTIALS_A, fetch: fetchImpl });
 
     h.offer(CODE_A);
+    h.coordinator.accept("status-1");
     await vi.waitFor(() => {
       expect(h.coordinator.status()).toEqual({
         status: "failed-network",
@@ -466,7 +627,7 @@ describe("share handoff redemption coordinator", () => {
   });
 
   it("keeps a newer handoff current when an older visible dismissal arrives late", async () => {
-    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(() => new Promise(() => {}));
+    const fetchImpl = vi.fn<typeof fetch>();
     const h = await harness({ credentials: CREDENTIALS_A, fetch: fetchImpl });
 
     h.offer(CODE_A);
@@ -477,10 +638,12 @@ describe("share handoff redemption coordinator", () => {
     h.coordinator.dismiss(visibleA.statusId);
 
     expect(h.coordinator.status()).toEqual({
-      status: "redeeming",
+      status: "waiting-for-acceptance",
       statusId: "status-2",
+      email: "account-a@dohc.test",
     });
     expect(h.intent.pending()).toBe(CODE_B);
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it("publishes only the bounded status union, never relay detail or authority", async () => {
@@ -496,6 +659,7 @@ describe("share handoff redemption coordinator", () => {
     const h = await harness({ credentials: CREDENTIALS_A, fetch: fetchImpl });
 
     h.offer(CODE_A);
+    h.coordinator.accept("status-1");
     await vi.waitFor(() => expect(h.coordinator.status().status).toBe("failed-refused"));
 
     const serialized = JSON.stringify(h.statuses);

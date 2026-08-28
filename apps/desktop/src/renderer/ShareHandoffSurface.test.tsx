@@ -16,6 +16,7 @@ const MISSING_COPY =
 const bridgeMock = {
   cloudStatus: vi.fn(),
   listRelayShares: vi.fn(),
+  acceptShareHandoff: vi.fn(),
   retryShareHandoff: vi.fn(),
   dismissShareHandoff: vi.fn(),
   openSharedView: vi.fn(),
@@ -108,6 +109,7 @@ beforeEach(() => {
     connected: true,
     email: "recipient@dohc.test",
   });
+  bridgeMock.acceptShareHandoff.mockResolvedValue(undefined);
   bridgeMock.retryShareHandoff.mockResolvedValue(undefined);
   bridgeMock.dismissShareHandoff.mockResolvedValue(undefined);
   bridgeMock.pickWorkspaceRoot.mockResolvedValue("/home/ice/dohc/shared");
@@ -128,6 +130,49 @@ afterEach(() => {
 });
 
 describe("ShareHandoffSurface", () => {
+  it.each(["first-run", "workspace"] as const)(
+    "requires acceptance with exact identity copy in the %s placement",
+    async (placement) => {
+      const user = userEvent.setup();
+      const onBack = vi.fn();
+      render(
+        <ShareHandoffSurface
+          status={{
+            status: "waiting-for-acceptance",
+            statusId: "accept-current",
+            email: "current-account@dohc.test",
+          }}
+          onWorkspaceReady={() => {}}
+          onBack={onBack}
+          onOpened={() => {}}
+          {...placementProps(placement)}
+        />,
+      );
+
+      expect(screen.getByRole("heading", { name: "Open a share" })).toBeTruthy();
+      expect(
+        screen.getByText("You're signed in as current-account@dohc.test."),
+      ).toBeTruthy();
+      expect(
+        screen.getByText(
+          "If you open this share, the person who shared it will see that email.",
+        ),
+      ).toBeTruthy();
+      expect(
+        screen.getAllByRole("button").map((button) => button.textContent),
+      ).toEqual(["Agree and open", "Cancel"]);
+
+      await user.click(screen.getByRole("button", { name: "Agree and open" }));
+      expect(bridgeMock.acceptShareHandoff).toHaveBeenCalledOnce();
+      expect(bridgeMock.acceptShareHandoff).toHaveBeenCalledWith({
+        statusId: "accept-current",
+      });
+
+      await user.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(onBack).toHaveBeenCalledOnce();
+    },
+  );
+
   it.each(["first-run", "workspace"] as const)(
     "renders settled status controls and exact copy in the %s placement",
     async (placement) => {

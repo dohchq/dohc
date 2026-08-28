@@ -5,7 +5,7 @@ import { bridge } from "./bridge";
 import { CloudLogin } from "./CloudLogin";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { OpenSharedView } from "./OpenSharedView";
-import { IconButton, SecondaryButton } from "./ui/controls";
+import { IconButton, PrimaryButton, SecondaryButton } from "./ui/controls";
 
 const REFUSED_COPY =
   "dohc couldn't open this share link. It may have expired or already been used. Go back to the share page in your browser and choose Open in dohc again.";
@@ -25,7 +25,7 @@ type InventoryState =
 
 function HandoffCard(props: {
   title: string;
-  onBack: () => void;
+  onBack?: () => void;
   children?: ReactNode;
 }) {
   return (
@@ -34,9 +34,11 @@ function HandoffCard(props: {
       className="dohc-elevated flex w-105 flex-col gap-3 rounded-xl border border-line bg-panel p-5"
     >
       <div className="flex items-center gap-2">
-        <IconButton aria-label="Back" onClick={props.onBack} className="shrink-0">
-          <ArrowLeft size={13} aria-hidden />
-        </IconButton>
+        {props.onBack ? (
+          <IconButton aria-label="Back" onClick={props.onBack} className="shrink-0">
+            <ArrowLeft size={13} aria-hidden />
+          </IconButton>
+        ) : null}
         <h2 className="m-0 text-sm font-semibold text-ink">{props.title}</h2>
       </div>
       {props.children}
@@ -102,6 +104,35 @@ export function ShareHandoffSurface(props: {
           Sign in to open the share from your browser.
         </p>
         <CloudLogin onConnected={() => undefined} embedded />
+      </HandoffCard>
+    );
+  }
+
+  if (props.status.status === "waiting-for-acceptance") {
+    const acceptanceStatus = props.status;
+    return (
+      <HandoffCard title="Open a share">
+        <div className="flex flex-col gap-1 text-xs leading-relaxed text-muted">
+          <p className="m-0">You're signed in as {acceptanceStatus.email}.</p>
+          <p className="m-0">
+            If you open this share, the person who shared it will see that email.
+          </p>
+        </div>
+        <div className="flex items-center justify-end gap-2">
+          <PrimaryButton
+            type="button"
+            onClick={() =>
+              void bridge()
+                .acceptShareHandoff({ statusId: acceptanceStatus.statusId })
+                .catch(() => undefined)
+            }
+          >
+            Agree and open
+          </PrimaryButton>
+          <SecondaryButton type="button" onClick={props.onBack}>
+            Cancel
+          </SecondaryButton>
+        </div>
       </HandoffCard>
     );
   }

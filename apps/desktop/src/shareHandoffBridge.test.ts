@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
+  AcceptShareHandoffPayload,
   DismissShareHandoffPayload,
   ShareHandoffStatus,
 } from "./ipc/bridgeContract";
@@ -24,6 +25,12 @@ describe("share handoff status bridge", () => {
       const value =
         status === "idle"
           ? { status }
+          : status === "waiting-for-acceptance"
+            ? {
+                status,
+                statusId: "status-1",
+                email: "current@dohc.test",
+              }
           : status === "done"
             ? { status, statusId: "status-1", shareId: "share-1" }
             : { status, statusId: "status-1" };
@@ -46,6 +53,20 @@ describe("share handoff status bridge", () => {
     ).toBe(false);
     expect(
       parseShareHandoffStatus({
+        status: "waiting-for-acceptance",
+        statusId: "status-1",
+        email: "",
+      }),
+    ).toBeNull();
+    expect(
+      ShareHandoffStatus.safeParse({
+        status: "waiting-for-acceptance",
+        statusId: "status-1",
+        email: "x".repeat(321),
+      }).success,
+    ).toBe(false);
+    expect(
+      parseShareHandoffStatus({
         status: "done",
         statusId: "status-1",
       }),
@@ -62,6 +83,14 @@ describe("share handoff status bridge", () => {
       const raw = { status: "idle", [field]: "secret" };
       expect(parseShareHandoffStatus(raw)).toBeNull();
       expect(ShareHandoffStatus.safeParse(raw).success).toBe(false);
+      const acceptance = {
+        status: "waiting-for-acceptance",
+        statusId: "status-1",
+        email: "current@dohc.test",
+        [field]: "secret",
+      };
+      expect(parseShareHandoffStatus(acceptance)).toBeNull();
+      expect(ShareHandoffStatus.safeParse(acceptance).success).toBe(false);
     },
   );
 
@@ -92,7 +121,10 @@ describe("share handoff status bridge", () => {
     ).toBeNull();
   });
 
-  it("requires only the captured status identity in the dismissal payload", () => {
+  it("requires only the captured status identity in action payloads", () => {
+    expect(AcceptShareHandoffPayload.parse({ statusId: "status-1" })).toEqual({
+      statusId: "status-1",
+    });
     expect(DismissShareHandoffPayload.parse({ statusId: "status-1" })).toEqual({
       statusId: "status-1",
     });
@@ -104,6 +136,7 @@ describe("share handoff status bridge", () => {
       { statusId: "status-1", code: "secret" },
       { statusId: "status-1", token: "secret" },
     ]) {
+      expect(AcceptShareHandoffPayload.safeParse(payload).success).toBe(false);
       expect(DismissShareHandoffPayload.safeParse(payload).success).toBe(false);
     }
   });
@@ -111,6 +144,9 @@ describe("share handoff status bridge", () => {
   it("validates both snapshot and event in preload and forwards only the dismissal identity", () => {
     expect(preloadSource).toContain("parseShareHandoffStatus(result)");
     expect(preloadSource).toContain("parseShareHandoffStatus(raw)");
+    expect(preloadSource).toContain(
+      "ipcRenderer.invoke(CHANNELS.acceptShareHandoff, payload)",
+    );
     expect(preloadSource).toContain(
       "ipcRenderer.invoke(CHANNELS.retryShareHandoff)",
     );
@@ -124,10 +160,13 @@ describe("share handoff status bridge", () => {
 
   it("registers strict handlers, binds dismissal to the identity, and publishes the current snapshot", () => {
     expect(mainSource).toContain("CHANNELS.getShareHandoffStatus");
+    expect(mainSource).toContain("CHANNELS.acceptShareHandoff");
     expect(mainSource).toContain("CHANNELS.retryShareHandoff");
     expect(mainSource).toContain("CHANNELS.dismissShareHandoff");
     expect(mainSource).toContain("assertNoShareHandoffArguments(args)");
+    expect(mainSource).toContain("AcceptShareHandoffPayload.parse(args[0])");
     expect(mainSource).toContain("DismissShareHandoffPayload.parse(args[0])");
+    expect(mainSource).toContain("shareHandoffRedemption.accept(input.statusId)");
     expect(mainSource).toContain("shareHandoffRedemption.dismiss(input.statusId)");
     expect(mainSource).toContain("shareHandoffRedemption.status()");
   });

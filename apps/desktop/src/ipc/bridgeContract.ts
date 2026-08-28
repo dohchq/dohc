@@ -3397,6 +3397,13 @@ export const ShareHandoffStatus = z.discriminatedUnion("status", [
     })
     .strict(),
   z
+    .object({
+      status: z.literal("waiting-for-acceptance"),
+      statusId: SHARE_HANDOFF_STATUS_ID,
+      email: z.string().min(1).max(320),
+    })
+    .strict(),
+  z
     .object({ status: z.literal("redeeming"), statusId: SHARE_HANDOFF_STATUS_ID })
     .strict(),
   z
@@ -3426,6 +3433,13 @@ export const ShareHandoffStatus = z.discriminatedUnion("status", [
     .strict(),
 ]);
 export type ShareHandoffStatus = z.infer<typeof ShareHandoffStatus>;
+
+export const AcceptShareHandoffPayload = z
+  .object({ statusId: SHARE_HANDOFF_STATUS_ID })
+  .strict();
+export type AcceptShareHandoffPayload = z.infer<
+  typeof AcceptShareHandoffPayload
+>;
 
 export const DismissShareHandoffPayload = z
   .object({ statusId: SHARE_HANDOFF_STATUS_ID })
@@ -5160,6 +5174,7 @@ export interface DohcDesktopBridge {
   cloudStatus(payload?: CloudStatusPayload): Promise<CloudStatusResult>;
   cloudLogout(): Promise<void>;
   getShareHandoffStatus(): Promise<ShareHandoffStatus>;
+  acceptShareHandoff(payload: AcceptShareHandoffPayload): Promise<void>;
   retryShareHandoff(): Promise<void>;
   dismissShareHandoff(payload: DismissShareHandoffPayload): Promise<void>;
   onShareHandoffStatus(

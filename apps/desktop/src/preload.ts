@@ -322,6 +322,8 @@ const bridge: DohcDesktopBridge = {
     if (!status) throw new Error("Invalid share handoff status from main");
     return status;
   },
+  acceptShareHandoff: (payload) =>
+    ipcRenderer.invoke(CHANNELS.acceptShareHandoff, payload),
   retryShareHandoff: () => ipcRenderer.invoke(CHANNELS.retryShareHandoff),
   dismissShareHandoff: (payload) =>
     ipcRenderer.invoke(CHANNELS.dismissShareHandoff, payload),

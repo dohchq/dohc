@@ -162,6 +162,7 @@ export type UpdateStatusId = (typeof UPDATE_STATUSES)[number];
 export const SHARE_HANDOFF_STATUSES = [
   "idle",
   "waiting-for-sign-in",
+  "waiting-for-acceptance",
   "redeeming",
   "failed-refused",
   "failed-busy",
@@ -174,10 +175,11 @@ export type ShareHandoffStatusEvent =
   | {
       status: Exclude<
         (typeof SHARE_HANDOFF_STATUSES)[number],
-        "idle" | "done"
+        "idle" | "done" | "waiting-for-acceptance"
       >;
       statusId: string;
     }
+  | { status: "waiting-for-acceptance"; statusId: string; email: string }
   | { status: "done"; statusId: string; shareId: string };
 
 export function parseShareHandoffStatus(
@@ -218,11 +220,23 @@ export function parseShareHandoffStatus(
     }
     return { status, statusId: raw.statusId, shareId: raw.shareId };
   }
+  if (status === "waiting-for-acceptance") {
+    if (
+      Reflect.ownKeys(value).length !== 3 ||
+      !Object.hasOwn(value, "email") ||
+      typeof raw.email !== "string" ||
+      raw.email.length === 0 ||
+      raw.email.length > 320
+    ) {
+      return null;
+    }
+    return { status, statusId: raw.statusId, email: raw.email };
+  }
   if (Reflect.ownKeys(value).length !== 2) return null;
   return {
     status: status as Exclude<
       (typeof SHARE_HANDOFF_STATUSES)[number],
-      "idle" | "done"
+      "idle" | "done" | "waiting-for-acceptance"
     >,
     statusId: raw.statusId,
   };
@@ -768,6 +782,7 @@ export const CHANNELS = {
   cloudStatus: "desktop:cloud-status",
   cloudLogout: "desktop:cloud-logout",
   getShareHandoffStatus: "desktop:get-share-handoff-status",
+  acceptShareHandoff: "desktop:accept-share-handoff",
   retryShareHandoff: "desktop:retry-share-handoff",
   dismissShareHandoff: "desktop:dismiss-share-handoff",
   shareHandoffStatus: "desktop:share-handoff-status",

@@ -6,6 +6,7 @@ import type {
 export type ShareHandoffStatus =
   | { status: "idle" }
   | { status: "waiting-for-sign-in"; statusId: string }
+  | { status: "waiting-for-acceptance"; statusId: string; email: string }
   | { status: "redeeming"; statusId: string }
   | { status: "failed-refused"; statusId: string }
   | { status: "failed-busy"; statusId: string }
@@ -15,6 +16,7 @@ export type ShareHandoffStatus =
 export interface ShareHandoffCredentials {
   serverUrl: string;
   relayUrl?: string;
+  email: string;
   token: string;
   userId: string;
 }
@@ -28,6 +30,7 @@ export interface ShareHandoffRedemptionCoordinator {
   status(): ShareHandoffStatus;
   pendingCodeChanged(): void;
   credentialsChanged(): void;
+  accept(statusId: string): void;
   retry(): void;
   dismiss(statusId: string): void;
 }
@@ -50,6 +53,12 @@ interface RedeemSuccess {
   shareId: string;
 }
 
+interface VisibleIdentity {
+  pendingGeneration: number;
+  credentialGeneration: number;
+  statusId: string;
+}
+
 function sameStatus(
   left: ShareHandoffStatus,
   right: ShareHandoffStatus,
@@ -57,10 +66,15 @@ function sameStatus(
   if (left.status !== right.status) return false;
   if (left.status === "idle") return true;
   if (right.status === "idle" || left.statusId !== right.statusId) return false;
-  return (
-    left.status !== "done" ||
-    (right.status === "done" && left.shareId === right.shareId)
-  );
+  if (left.status === "done") {
+    return right.status === "done" && left.shareId === right.shareId;
+  }
+  if (left.status === "waiting-for-acceptance") {
+    return (
+      right.status === "waiting-for-acceptance" && left.email === right.email
+    );
+  }
+  return true;
 }
 
 function ordinaryId(value: unknown): value is string {
@@ -91,8 +105,8 @@ export function createShareHandoffRedemptionCoordinator(
   options: ShareHandoffRedemptionOptions,
 ): ShareHandoffRedemptionCoordinator {
   let publicStatus: ShareHandoffStatus = { status: "idle" };
-  let automaticAttemptKey: string | null = null;
-  let visibleIdentity: { pendingGeneration: number; statusId: string } | null = null;
+  let visibleIdentity: VisibleIdentity | null = null;
+  let acceptedIdentity: VisibleIdentity | null = null;
   const activeAttemptKeys = new Set<string>();
 
   function publish(status: ShareHandoffStatus): void {
@@ -101,15 +115,22 @@ export function createShareHandoffRedemptionCoordinator(
     options.publishStatus(status);
   }
 
-  function statusIdFor(pendingGeneration: number): string {
-    if (visibleIdentity?.pendingGeneration === pendingGeneration) {
+  function statusIdFor(
+    pendingGeneration: number,
+    credentialGeneration: number,
+  ): string {
+    if (
+      visibleIdentity?.pendingGeneration === pendingGeneration &&
+      visibleIdentity.credentialGeneration === credentialGeneration
+    ) {
       return visibleIdentity.statusId;
     }
     const statusId = options.createStatusId();
     if (!ordinaryId(statusId)) {
       throw new Error("Share handoff status identity must be 1 to 200 characters.");
     }
-    visibleIdentity = { pendingGeneration, statusId };
+    visibleIdentity = { pendingGeneration, credentialGeneration, statusId };
+    acceptedIdentity = null;
     return statusId;
   }
 
@@ -123,31 +144,72 @@ export function createShareHandoffRedemptionCoordinator(
     );
   }
 
-  function beginCurrent(optionsForAttempt: { retry: boolean }): void {
+  function currentAttempt(statusId: string): {
+    code: ShareHandoffCode;
+    pendingGeneration: number;
+    statusId: string;
+    credentials: ShareHandoffCredentials;
+    credentialGeneration: number;
+  } | null {
     const pending = options.intent.snapshot();
-    if (pending.code === null) return;
-    const statusId = statusIdFor(pending.generation);
+    if (pending.code === null) return null;
     const credentialSnapshot = options.credentialSnapshot();
     const credentials = credentialSnapshot.credentials;
-    if (!credentials?.relayUrl) {
-      publish({ status: "waiting-for-sign-in", statusId });
-      return;
+    const identity = visibleIdentity;
+    if (
+      !credentials?.relayUrl ||
+      identity?.statusId !== statusId ||
+      identity.pendingGeneration !== pending.generation ||
+      identity.credentialGeneration !== credentialSnapshot.generation
+    ) {
+      return null;
     }
-
-    const attemptKey = `${pending.generation}:${credentialSnapshot.generation}`;
-    if (activeAttemptKeys.has(attemptKey)) return;
-    if (!optionsForAttempt.retry && automaticAttemptKey === attemptKey) return;
-    if (!optionsForAttempt.retry) automaticAttemptKey = attemptKey;
-    activeAttemptKeys.add(attemptKey);
-    publish({ status: "redeeming", statusId });
-    void redeem({
+    return {
       code: pending.code,
       pendingGeneration: pending.generation,
       statusId,
       credentials,
       credentialGeneration: credentialSnapshot.generation,
-    }).finally(() => {
+    };
+  }
+
+  function beginRedemption(
+    input: NonNullable<ReturnType<typeof currentAttempt>>,
+  ): void {
+    const attemptKey = `${input.pendingGeneration}:${input.credentialGeneration}`;
+    if (activeAttemptKeys.has(attemptKey)) return;
+    activeAttemptKeys.add(attemptKey);
+    publish({ status: "redeeming", statusId: input.statusId });
+    void redeem(input).finally(() => {
       activeAttemptKeys.delete(attemptKey);
+    });
+  }
+
+  function showCurrent(): void {
+    const pending = options.intent.snapshot();
+    if (pending.code === null) return;
+    const credentialSnapshot = options.credentialSnapshot();
+    if (
+      visibleIdentity?.pendingGeneration === pending.generation &&
+      visibleIdentity.credentialGeneration === credentialSnapshot.generation &&
+      publicStatus.status !== "idle" &&
+      publicStatus.statusId === visibleIdentity.statusId
+    ) {
+      return;
+    }
+    const statusId = statusIdFor(
+      pending.generation,
+      credentialSnapshot.generation,
+    );
+    const credentials = credentialSnapshot.credentials;
+    if (!credentials?.relayUrl) {
+      publish({ status: "waiting-for-sign-in", statusId });
+      return;
+    }
+    publish({
+      status: "waiting-for-acceptance",
+      statusId,
+      email: credentials.email,
     });
   }
 
@@ -198,7 +260,7 @@ export function createShareHandoffRedemptionCoordinator(
         options.intent.snapshot().generation === input.pendingGeneration &&
         options.credentialSnapshot().credentials === null
       ) {
-        publish({ status: "waiting-for-sign-in", statusId: input.statusId });
+        showCurrent();
       }
       return;
     }
@@ -215,6 +277,8 @@ export function createShareHandoffRedemptionCoordinator(
     }
     if (response.status >= 400 && response.status < 500) {
       options.intent.settle(input.code);
+      visibleIdentity = null;
+      acceptedIdentity = null;
       publish({ status: "failed-refused", statusId: input.statusId });
       return;
     }
@@ -236,6 +300,8 @@ export function createShareHandoffRedemptionCoordinator(
     }
 
     options.intent.settle(input.code);
+    visibleIdentity = null;
+    acceptedIdentity = null;
     publish({ status: "done", statusId: input.statusId, shareId: success.shareId });
   }
 
@@ -244,10 +310,28 @@ export function createShareHandoffRedemptionCoordinator(
       return publicStatus;
     },
     pendingCodeChanged() {
-      beginCurrent({ retry: false });
+      showCurrent();
     },
     credentialsChanged() {
-      beginCurrent({ retry: false });
+      visibleIdentity = null;
+      acceptedIdentity = null;
+      showCurrent();
+    },
+    accept(statusId) {
+      if (
+        publicStatus.status !== "waiting-for-acceptance" ||
+        publicStatus.statusId !== statusId
+      ) {
+        return;
+      }
+      const input = currentAttempt(statusId);
+      if (!input || input.credentials.email !== publicStatus.email) return;
+      acceptedIdentity = {
+        pendingGeneration: input.pendingGeneration,
+        credentialGeneration: input.credentialGeneration,
+        statusId: input.statusId,
+      };
+      beginRedemption(input);
     },
     retry() {
       if (
@@ -256,7 +340,16 @@ export function createShareHandoffRedemptionCoordinator(
       ) {
         return;
       }
-      beginCurrent({ retry: true });
+      const input = currentAttempt(publicStatus.statusId);
+      if (
+        !input ||
+        acceptedIdentity?.statusId !== input.statusId ||
+        acceptedIdentity.pendingGeneration !== input.pendingGeneration ||
+        acceptedIdentity.credentialGeneration !== input.credentialGeneration
+      ) {
+        return;
+      }
+      beginRedemption(input);
     },
     dismiss(statusId) {
       if (publicStatus.status === "idle" || publicStatus.statusId !== statusId) {
@@ -265,11 +358,13 @@ export function createShareHandoffRedemptionCoordinator(
       const pending = options.intent.snapshot();
       if (
         pending.code !== null &&
-        visibleIdentity?.pendingGeneration === pending.generation
+        visibleIdentity?.pendingGeneration === pending.generation &&
+        visibleIdentity.statusId === statusId
       ) {
         options.intent.settle(pending.code);
       }
       visibleIdentity = null;
+      acceptedIdentity = null;
       publish({ status: "idle" });
     },
   };
