@@ -2738,7 +2738,7 @@ fn apply_ydoc_envelope_inner(
     };
     let mut sharing_declined = None;
     let mut cache_probe = RemoteAppendProbe::default();
-    let outcome =
+    let outcome_result =
         crate::apply::apply_envelope_with_mutation_outcome(store, envelope, faults, |tx, op| {
             let projected = if let Some(cache) = cache.as_deref() {
                 apply_remote_update_in_transaction_cached_with_projection(
@@ -2829,16 +2829,26 @@ fn apply_ydoc_envelope_inner(
             };
             cache_probe.capture_commit(tx, &key);
             Ok(mutation)
-        })?;
+        });
+    let outcome = match outcome_result {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            if let Some(cache) = cache.as_deref_mut() {
+                cache.finish_remote_gate_error(&key, &cache_probe);
+            }
+            return Err(error);
+        }
+    };
     if let Some(cache) = cache.as_deref_mut() {
         match &outcome {
             ApplyOutcome::Applied(_) | ApplyOutcome::Refused(_) => {
                 cache.finish_remote_append(&key, &remote.bytes, cache_probe);
             }
             ApplyOutcome::Crashed { committed: true } => cache.remove(&key),
-            ApplyOutcome::Skipped
-            | ApplyOutcome::Crashed { committed: false }
-            | ApplyOutcome::WithDiagnostics { .. } => {}
+            ApplyOutcome::Crashed { committed: false } => {
+                cache.finish_remote_gate_error(&key, &cache_probe);
+            }
+            ApplyOutcome::Skipped | ApplyOutcome::WithDiagnostics { .. } => {}
         }
     }
     if matches!(
