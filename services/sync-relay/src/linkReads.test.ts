@@ -44,6 +44,7 @@ interface InspectionDatabase {
   exec(sql: string): void;
   prepare(sql: string): {
     all(...params: unknown[]): Array<Record<string, unknown>>;
+    iterate(...params: unknown[]): IterableIterator<Record<string, unknown>>;
     run(...params: unknown[]): unknown;
   };
 }
@@ -647,6 +648,313 @@ describe("relay capability reads", () => {
     }
   });
 
+  it("preserves a write that reaches a path before a later fork snapshot chunk", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    expect(
+      (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
+    ).toBe(200);
+    const firstSnapshotSha = await putBlob(h, "first snapshot\n");
+    const pendingSnapshotSha = await putBlob(h, "pending snapshot\n");
+    const localWriteSha = await putBlob(h, "local write\n");
+    const versionCreate = (
+      originSeq: number,
+      path: string,
+      blobSha256: string,
+    ) => ({
+      originSeq,
+      opKind: "version.create",
+      payload: {
+        versionId: "chunked-version",
+        forkSnapshots: [{ path, blobSha256 }],
+      },
+      recordedAtMs: 1_100 + originSeq,
+    });
+
+    expect(
+      (
+        await h(
+          request(
+            OWNER,
+            `/sync/${WORKSPACE}/log`,
+            jsonBody({
+              originId: "fork-origin",
+              ops: [versionCreate(0, "docs/first.md", firstSnapshotSha)],
+            }),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    await appendMoments(
+      h,
+      [
+        moment(0, "docs/pending.md", "local write\n", 1_200, {
+          versionId: "chunked-version",
+          objectId: "local-pending-object",
+        }),
+      ],
+      { originId: "local-origin" },
+    );
+    expect(
+      (
+        await h(
+          request(
+            OWNER,
+            `/sync/${WORKSPACE}/log`,
+            jsonBody({
+              originId: "fork-origin",
+              ops: [versionCreate(1, "docs/pending.md", pendingSnapshotSha)],
+            }),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    const link = await createLink(h, {
+      paths: ["docs"],
+      versionId: "chunked-version",
+      access: "view",
+    });
+
+    const forward = await json(
+      await h(linkRequest(link.capability, "/sync/link/current")),
+    );
+    const dbPath = storagePaths.get(storage);
+    if (!dbPath) throw new Error("missing inspection path");
+    storage.close();
+    storages.splice(storages.indexOf(storage), 1);
+    const legacy = new InspectionDatabaseSync(dbPath);
+    legacy.exec("DROP TABLE sync_relay_current_files");
+    legacy.prepare(
+      "DELETE FROM sync_relay_migrations WHERE migration_id = ?",
+    ).run("current-files-seed-v1");
+    legacy.close();
+    const reopened = openSyncRelayStorage(dbPath);
+    storages.push(reopened);
+    storagePaths.set(reopened, dbPath);
+    const replayed = await json(
+      await handler(reopened)(linkRequest(link.capability, "/sync/link/current")),
+    );
+    const expectedFiles = [
+      {
+        path: "docs/first.md",
+        blobSha256: firstSnapshotSha,
+        contentKind: "text",
+      },
+      {
+        path: "docs/pending.md",
+        blobSha256: localWriteSha,
+        contentKind: "text",
+      },
+    ];
+
+    expect({ forward: forward.files, replayed: replayed.files }).toEqual({
+      forward: expectedFiles,
+      replayed: expectedFiles,
+    });
+  });
+
+  it("refuses contradictory path aliases from current state and startup replay", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h);
+    const initialLog = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100")),
+    );
+    const forgedContent = "forged\n";
+    const forgedSha = await putBlob(h, forgedContent);
+    const mismatchedWrite = moment(3, "docs/forged.md", forgedContent, 1_300, {
+      objectId: "object-forged",
+    });
+    mismatchedWrite.payload.path = "private/forged.md";
+    const mismatchedDelete = moment(4, "docs/shared.md", "# shared\n", 1_400, {
+      objectId: "object-shared",
+      operation: "delete",
+      beforePath: "docs/shared.md",
+      beforeContent: "# shared\n",
+      afterPath: null,
+      afterContent: null,
+    });
+    Object.assign(mismatchedDelete.payload, { beforePath: "private/shared.md" });
+
+    for (const malformed of [mismatchedWrite, mismatchedDelete]) {
+      expect(
+        filterOpForShare(
+          { paths: ["docs"], versionId: null, access: "view" },
+          malformed.opKind,
+          JSON.stringify(malformed.payload),
+        ).allowed,
+      ).toBe(false);
+    }
+    await appendMoments(h, [mismatchedWrite, mismatchedDelete]);
+
+    const expectConsistentDenial = async (currentHandler: SyncRelayHandler) => {
+      const delta = await json(
+        await currentHandler(
+          linkRequest(
+            seeded.capability,
+            `/sync/link/log?since=${String(initialLog.nextCursor)}&limit=100`,
+          ),
+        ),
+      );
+      expect(delta).toMatchObject({ ops: [], nextCursor: 5, hasMore: false });
+
+      const current = await json(
+        await currentHandler(linkRequest(seeded.capability, "/sync/link/current")),
+      );
+      const expectedFiles = [{
+        path: "docs/shared.md",
+        blobSha256: seeded.sharedSha,
+        contentKind: "text",
+      }];
+      expect(current).toMatchObject({ files: expectedFiles, nextCursor: 5 });
+
+      const fullReplay = await json(
+        await currentHandler(
+          linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100"),
+        ),
+      );
+      const replayed: FileAccumulator = new Map();
+      foldLogOps(replayed, fullReplay.ops as RelayOp[]);
+      expect(filesFromAccumulator(replayed)).toEqual(expectedFiles);
+
+      const missingSha = sha256("missing");
+      const missing = await denialBytes(
+        await currentHandler(
+          linkRequest(seeded.capability, `/sync/link/blobs/${missingSha}`),
+        ),
+      );
+      expect(
+        await denialBytes(
+          await currentHandler(
+            linkRequest(seeded.capability, `/sync/link/blobs/${forgedSha}`),
+          ),
+        ),
+      ).toBe(missing);
+      const sharedBlob = await currentHandler(
+        linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`),
+      );
+      expect(sharedBlob.status).toBe(200);
+      expect(await sharedBlob.text()).toBe("# shared\n");
+    };
+
+    await expectConsistentDenial(h);
+
+    const dbPath = storagePaths.get(storage);
+    if (!dbPath) throw new Error("missing inspection path");
+    storage.close();
+    storages.splice(storages.indexOf(storage), 1);
+    const legacy = new InspectionDatabaseSync(dbPath);
+    legacy.exec("DROP TABLE sync_relay_current_files");
+    legacy.prepare(
+      "DELETE FROM sync_relay_migrations WHERE migration_id = ?",
+    ).run("current-files-seed-v1");
+    legacy.close();
+
+    const reopened = openSyncRelayStorage(dbPath);
+    storages.push(reopened);
+    storagePaths.set(reopened, dbPath);
+    await expectConsistentDenial(handler(reopened));
+  });
+
+  it.each([
+    ["moment payloadAfterPath", "after"],
+    ["moment payloadBeforePath", "before"],
+    ["version.create snapshot path", "snapshot"],
+  ] as const)(
+    "does not materialize a canonical current file from a noncanonical %s",
+    async (_field, shape) => {
+      const storage = await newStorage();
+      const h = handler(storage);
+      expect(
+        (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
+      ).toBe(200);
+
+      const canonicalPath = `docs/noncanonical-${shape}.md`;
+      const noncanonicalPath = `docs//noncanonical-${shape}.md`;
+      const content = `noncanonical ${shape}\n`;
+      const blobSha256 = await putBlob(h, content);
+      const versionId = shape === "snapshot" ? "snapshot-noncanonical" : "main";
+      const payload = shape === "snapshot"
+        ? {
+            versionId,
+            forkSnapshots: [{ path: noncanonicalPath, blobSha256 }],
+          }
+        : shape === "after"
+          ? moment(0, noncanonicalPath, content, 1_100).payload
+          : moment(0, canonicalPath, content, 1_100, {
+              operation: "rename",
+              beforePath: noncanonicalPath,
+              beforeContent: content,
+            }).payload;
+      expect(
+        (
+          await h(
+            request(
+              OWNER,
+              `/sync/${WORKSPACE}/log`,
+              jsonBody({
+                originId: "origin-a",
+                ops: [{
+                  originSeq: 0,
+                  opKind: shape === "snapshot" ? "version.create" : "moment.append",
+                  payload,
+                  recordedAtMs: 1_100,
+                }],
+              }),
+            ),
+          )
+        ).status,
+      ).toBe(200);
+      const link = await createLink(h, {
+        paths: [canonicalPath],
+        ...(shape === "snapshot" ? { versionId } : {}),
+        access: "view",
+      });
+
+      const assertNoInventedFile = async (readHandler: SyncRelayHandler) => {
+        const fullReplay = await json(
+          await readHandler(
+            linkRequest(link.capability, "/sync/link/log?since=0&limit=100"),
+          ),
+        );
+        const replayed: FileAccumulator = new Map();
+        foldLogOps(replayed, fullReplay.ops as RelayOp[]);
+        const replayedFiles = filesFromAccumulator(replayed);
+        expect(replayedFiles).toEqual([]);
+
+        const current = await json(
+          await readHandler(linkRequest(link.capability, "/sync/link/current")),
+        );
+        expect(current.files).toEqual(replayedFiles);
+        expect(
+          await denialBytes(
+            await readHandler(
+              linkRequest(link.capability, `/sync/link/blobs/${blobSha256}`),
+            ),
+          ),
+        ).toBe(`404:${LINK_REFUSAL_BODY}`);
+      };
+
+      await assertNoInventedFile(h);
+
+      const dbPath = storagePaths.get(storage);
+      if (!dbPath) throw new Error("missing inspection path");
+      storage.close();
+      storages.splice(storages.indexOf(storage), 1);
+      const legacy = new InspectionDatabaseSync(dbPath);
+      legacy.exec("DROP TABLE sync_relay_current_files");
+      legacy.prepare(
+        "DELETE FROM sync_relay_migrations WHERE migration_id = ?",
+      ).run("current-files-seed-v1");
+      legacy.close();
+
+      const reopened = openSyncRelayStorage(dbPath);
+      storages.push(reopened);
+      storagePaths.set(reopened, dbPath);
+      await assertNoInventedFile(handler(reopened));
+    },
+  );
+
   it("applies the current-file cap after selector filtering and refuses overflow generically", async () => {
     const storage = await newStorage();
     const h = handler(storage, { linkCurrentFileLimit: 1 });
@@ -749,7 +1057,7 @@ describe("relay capability reads", () => {
     );
   });
 
-  it("backfills the accepted current fold once when reopening a pre-table database", async () => {
+  it("streams the accepted current fold once when reopening a pre-table database", async () => {
     const originalStorage = await newStorage();
     const originalHandler = handler(originalStorage);
     const seeded = await seed(originalHandler);
@@ -781,7 +1089,44 @@ describe("relay capability reads", () => {
     ).run("current-files-seed-v1");
     legacy.close();
 
-    const reopened = openSyncRelayStorage(dbPath);
+    const databasePrototype = InspectionDatabaseSync.prototype as InspectionDatabase;
+    const nativePrepare = databasePrototype.prepare;
+    const migrationAll = vi.fn(() => {
+      throw new Error("current-files migration materialized its full result set");
+    });
+    let migrationStatement: ReturnType<InspectionDatabase["prepare"]> | undefined;
+    const migrationIterate = vi.fn((...params: unknown[]) => {
+      if (!migrationStatement) throw new Error("migration iterator has no statement");
+      return migrationStatement.iterate(...params);
+    });
+    const prepareSpy = vi
+      .spyOn(databasePrototype, "prepare")
+      .mockImplementation(function (this: InspectionDatabase, sql: string) {
+        const statement = nativePrepare.call(this, sql);
+        if (
+          !sql.includes("FROM sync_relay_log log") ||
+          !sql.includes("ORDER BY log.relay_seq")
+        ) {
+          return statement;
+        }
+        migrationStatement = statement;
+        return new Proxy(statement, {
+          get(target, property) {
+            if (property === "all") return migrationAll;
+            if (property === "iterate") return migrationIterate;
+            const value = Reflect.get(target, property, target) as unknown;
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+      });
+    let reopened: SyncRelayStorage;
+    try {
+      reopened = openSyncRelayStorage(dbPath);
+    } finally {
+      prepareSpy.mockRestore();
+    }
+    expect(migrationAll).not.toHaveBeenCalled();
+    expect(migrationIterate).toHaveBeenCalledOnce();
     storages.push(reopened);
     storagePaths.set(reopened, dbPath);
     const reopenedHandler = handler(reopened);

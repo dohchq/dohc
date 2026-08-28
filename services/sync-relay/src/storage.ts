@@ -635,6 +635,7 @@ interface SqliteRunResult {
 interface SqliteStatement {
   all(...params: unknown[]): Array<Record<string, unknown>>;
   get(...params: unknown[]): Record<string, unknown> | undefined;
+  iterate(...params: unknown[]): IterableIterator<Record<string, unknown>>;
   run(...params: unknown[]): SqliteRunResult;
 }
 
@@ -1442,10 +1443,16 @@ function currentFileStatements(db: SqliteDb): CurrentFileStatements {
 function trackedPath(value: unknown): string | null {
   if (typeof value !== "string" || value.length === 0) return null;
   const validation = validateUserWritePath(value);
-  if (!validation.ok) return null;
+  if (!validation.ok || validation.normalized !== value) return null;
   return classifyEngineFilePath(validation.normalized).kind === "tracked"
     ? validation.normalized
     : null;
+}
+
+function optionalPathAliasMatches(value: unknown, expected: string | null): boolean {
+  if (value === null || value === undefined) return true;
+  const path = trackedPath(value);
+  return path !== null && expected !== null && path === expected;
 }
 
 function digest(value: unknown): string | null {
@@ -1479,6 +1486,7 @@ function applyCurrentFileOp(
       const path = trackedPath(snapshot.path);
       const blobSha256 = digest(snapshot.blobSha256);
       if (!path || !blobSha256) continue;
+      if (statements.get.get(workspaceId, versionId, path) !== undefined) continue;
       statements.put.run(
         workspaceId,
         versionId,
@@ -1506,9 +1514,16 @@ function applyCurrentFileOp(
     ? { path: beforePath, blobSha256: beforeBlobSha256 }
     : null;
   if (!hasNoBefore && !before) return;
+  if (!optionalPathAliasMatches(payload.beforePath, before?.path ?? null)) return;
 
   if (operation === "delete") {
     if (!before) return;
+    if (
+      !optionalPathAliasMatches(payload.path, before.path) ||
+      !optionalPathAliasMatches(payload.payloadAfterPath, before.path)
+    ) {
+      return;
+    }
     const current = statements.get.get(workspaceId, versionId, before.path);
     if (current?.blob_sha256 !== before.blobSha256) return;
     statements.remove.run(workspaceId, versionId, before.path);
@@ -1518,6 +1533,7 @@ function applyCurrentFileOp(
   const afterPath = trackedPath(payload.payloadAfterPath);
   const afterBlobSha256 = digest(payload.payloadAfterBlobSha256);
   if (!afterPath || !afterBlobSha256) return;
+  if (!optionalPathAliasMatches(payload.path, afterPath)) return;
   if (hasNoBefore) {
     if (statements.get.get(workspaceId, versionId, afterPath) !== undefined) return;
   } else {
@@ -1576,7 +1592,7 @@ function seedCurrentFiles(db: SqliteDb): void {
            AND log.relay_seq > COALESCE(workspace.epoch_log_floor, 0)
          ORDER BY log.relay_seq`,
       )
-      .all();
+      .iterate();
     for (const row of rows) {
       applyCurrentFileOp(
         statements,

@@ -83,7 +83,7 @@ export function foldLogOps(
     if (op.opKind === "version.create" && Array.isArray(payload.forkSnapshots)) {
       for (const snapshot of payload.forkSnapshots) {
         const file = storedFile(snapshot);
-        if (file) files.set(file.path, file);
+        if (file && !files.has(file.path)) files.set(file.path, file);
       }
       continue;
     }

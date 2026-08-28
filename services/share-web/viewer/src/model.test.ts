@@ -137,6 +137,50 @@ describe("filesFromLog", () => {
     }]);
   });
 
+  it("preserves a newer path occupant across a later fork snapshot chunk", () => {
+    const files = new Map<string, SharedFile>();
+    const create: RelayOp = {
+      relaySeq: 2,
+      opKind: "moment.append",
+      payload: {
+        operation: "write",
+        path: PATH,
+        payloadBeforePath: null,
+        payloadBeforeBlobSha256: null,
+        payloadAfterPath: PATH,
+        payloadAfterBlobSha256: FAST_FORWARD_SHA,
+        payloadAfterContentKind: "text",
+      },
+      recordedAtMs: 2,
+    };
+    const pendingSnapshot: SharedFile = {
+      path: PATH,
+      blobSha256: ORIGINAL_SHA,
+      contentKind: "text",
+    };
+
+    foldLogOps(files, [snapshotOp({
+      path: "first.txt",
+      blobSha256: DIVERGENT_SHA,
+      contentKind: "text",
+    })]);
+    foldLogOps(files, [create]);
+    foldLogOps(files, [{ ...snapshotOp(pendingSnapshot), relaySeq: 3 }]);
+
+    expect(filesFromAccumulator(files)).toEqual([
+      {
+        path: "first.txt",
+        blobSha256: DIVERGENT_SHA,
+        contentKind: "text",
+      },
+      {
+        path: PATH,
+        blobSha256: FAST_FORWARD_SHA,
+        contentKind: "text",
+      },
+    ]);
+  });
+
   it("applies the next write after a projected inward move left its target absent", () => {
     const arrivedPath = "docs/arrived.md";
     const files = new Map<string, SharedFile>();
