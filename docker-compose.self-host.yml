@@ -90,6 +90,11 @@ services:
       corepack prepare pnpm@11.20.0 --activate &&
       pnpm install --frozen-lockfile &&
       pnpm --filter @dohc/sync-relay dev"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:1788/').then(() => process.exit(0)).catch(() => process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
     ports:
       - "${SYNC_RELAY_BIND:-127.0.0.1}:${SYNC_RELAY_PORT:-1788}:1788"
     volumes:
@@ -101,7 +106,7 @@ services:
     working_dir: /workspace
     depends_on:
       sync-relay:
-        condition: service_started
+        condition: service_healthy
     environment:
       DOHC_SHARE_WEB_RELAY_URL: http://sync-relay:1788
       DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: ${DOHC_RELAY_EXCHANGE_KEY:?Set DOHC_RELAY_EXCHANGE_KEY in .env.self-host}

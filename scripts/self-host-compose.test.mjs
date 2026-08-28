@@ -87,6 +87,56 @@ test('self-host sync relay requires and documents the relay exchange key', () =>
   )
 })
 
+test('self-host share viewer waits for relay HTTP readiness', () => {
+  const compose = readFileSync('docker-compose.self-host.yml', 'utf8')
+  const shareWebDependsOn = mappingBlockAtPath(compose, [
+    'services',
+    'share-web',
+    'depends_on',
+  ])
+
+  assert.equal(
+    mappingValueAtPath(compose, [
+      'services',
+      'sync-relay',
+      'healthcheck',
+      'test',
+    ]),
+    `["CMD", "node", "-e", "fetch('http://127.0.0.1:1788/').then(() => process.exit(0)).catch(() => process.exit(1))"]`,
+  )
+  assert.equal(
+    mappingValueAtPath(compose, [
+      'services',
+      'sync-relay',
+      'healthcheck',
+      'interval',
+    ]),
+    '5s',
+  )
+  assert.equal(
+    mappingValueAtPath(compose, [
+      'services',
+      'sync-relay',
+      'healthcheck',
+      'timeout',
+    ]),
+    '5s',
+  )
+  assert.equal(
+    mappingValueAtPath(compose, [
+      'services',
+      'sync-relay',
+      'healthcheck',
+      'retries',
+    ]),
+    '20',
+  )
+  assert.equal(
+    shareWebDependsOn,
+    '    depends_on:\n      sync-relay:\n        condition: service_healthy',
+  )
+})
+
 test('self-host compose starts the public share viewer with one external origin', () => {
   const compose = readFileSync('docker-compose.self-host.yml', 'utf8')
   const envExample = readFileSync('.env.self-host.example', 'utf8')
