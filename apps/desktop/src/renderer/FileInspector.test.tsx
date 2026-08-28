@@ -11336,8 +11336,12 @@ describe("markdown document opening state", () => {
     captureOrphanedDraft("ws-1", "a.txt", "# Plan\n\nBase paragraph.\nDraft!");
     render(<FileInspector workspaceId="ws-1" path="a.txt" />);
 
+    // The loading branch also renders recovery. Wait for the text editor's
+    // passive effect so this test proves recovery survives the view change.
     // MUTATION (kind coverage): drop {recoveryNotices} from the text branch.
-    // The path still carries the marker, but Copy/Dismiss is gone.
+    // Without this wait, the loading-branch controls let the mutation pass.
+    const content = await findTextEditorContent();
+    await waitFor(() => expect(content.textContent).toContain("Base paragraph."));
     await screen.findByTestId("orphaned-draft-notice");
     await user.click(screen.getByTestId("orphaned-draft-copy"));
     await waitFor(async () =>
