@@ -54,6 +54,14 @@ function mappingBlockAtPath(source, expectedPath) {
   return undefined
 }
 
+function environmentValue(source, name) {
+  const prefix = `${name}=`
+  return source
+    .split(/\r?\n/)
+    .find((line) => line.startsWith(prefix))
+    ?.slice(prefix.length)
+}
+
 test('self-host sync relay requires the link grant key', () => {
   const compose = readFileSync('docker-compose.self-host.yml', 'utf8')
 
@@ -149,6 +157,11 @@ test('self-host share viewer waits for relay HTTP readiness', () => {
 test('self-host compose starts the public share viewer with one external origin', () => {
   const compose = readFileSync('docker-compose.self-host.yml', 'utf8')
   const envExample = readFileSync('.env.self-host.example', 'utf8')
+  const publicOrigin = environmentValue(
+    envExample,
+    'DOHC_SHARE_WEB_PUBLIC_ORIGIN',
+  )
+  const publicHost = environmentValue(envExample, 'DOHC_SHARE_WEB_PUBLIC_HOST')
   const shareWebService = mappingBlockAtPath(compose, ['services', 'share-web'])
   const shareWebCommand = mappingBlockAtPath(compose, [
     'services',
@@ -224,10 +237,8 @@ test('self-host compose starts the public share viewer with one external origin'
     shareWebCommand ?? '',
     /pnpm --filter @dohc\/share-web build &&\n      pnpm --filter @dohc\/share-web start"/,
   )
-  assert.match(
-    envExample,
-    /^DOHC_SHARE_WEB_PUBLIC_ORIGIN=https:\/\/share\.example\.com$/m,
-  )
-  assert.match(envExample, /^DOHC_SHARE_WEB_PUBLIC_HOST=share\.example\.com$/m)
+  assert.equal(publicOrigin, 'https://share.example.com')
+  assert.equal(publicHost, 'share.example.com')
+  assert.equal(publicHost, new URL(publicOrigin).hostname)
   assert.match(envExample, /^DOHC_SHARE_WEB_PORT=1790$/m)
 })
