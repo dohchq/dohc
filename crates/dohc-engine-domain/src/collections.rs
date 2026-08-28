@@ -102,21 +102,6 @@ impl FieldDefinition {
             | Self::Url { name } => name,
         }
     }
-
-    #[must_use]
-    pub fn field_type(&self) -> CollectionFieldType {
-        match self {
-            Self::Text { .. } => CollectionFieldType::Text,
-            Self::Number { .. } => CollectionFieldType::Number,
-            Self::Checkbox { .. } => CollectionFieldType::Checkbox,
-            Self::Date { .. } => CollectionFieldType::Date,
-            Self::Select { .. } => CollectionFieldType::Select,
-            Self::MultiSelect { .. } => CollectionFieldType::MultiSelect,
-            Self::Person { .. } => CollectionFieldType::Person,
-            Self::Relation { .. } => CollectionFieldType::Relation,
-            Self::Url { .. } => CollectionFieldType::Url,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -346,18 +331,11 @@ pub struct CollectionFilter {
     pub value: Value,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum CollectionSortDirection {
-    Asc,
-    Desc,
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CollectionSort {
     pub field: String,
-    pub direction: CollectionSortDirection,
+    pub direction: ViewSortDirection,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -2411,8 +2389,8 @@ pub fn query_collection_records(
                 value_for_field(right, &sort.field),
             );
             let ordering = match sort.direction {
-                CollectionSortDirection::Asc => ordering,
-                CollectionSortDirection::Desc => ordering.reverse(),
+                ViewSortDirection::Asc => ordering,
+                ViewSortDirection::Desc => ordering.reverse(),
             };
             if ordering != Ordering::Equal {
                 return ordering;
@@ -2460,11 +2438,6 @@ pub fn get_collection_record(
     record_id: &str,
     history_limit: usize,
 ) -> Result<Option<CollectionRecordDetails>, crate::DomainError> {
-    if history_limit == 0 || history_limit > MAX_COLLECTION_HISTORY_LIMIT {
-        return Err(crate::DomainError::InvalidInput {
-            reason: "collection history limit is out of range",
-        });
-    }
     let version_id = active_version_id(conn, workspace_id)?;
     let Some(collection) =
         collection_summary_for_version(conn, workspace_id, &version_id, collection_path)?

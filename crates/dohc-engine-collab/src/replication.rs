@@ -19,13 +19,13 @@
 //! per-peer applied cursor is R11b's replication-drain job (the `origin_seq`
 //! carried on [`RemoteUpdate`] is that cursor's input).
 
-use dohc_engine_storage::{put_binary_blob_with_sha, EngineStore, FaultInjector, TxnOutcome};
+use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome};
 use rusqlite::Transaction;
 
 use crate::doc_cache::{GateBaseSource, RemoteAppendProbe, ServedGateBase};
 use crate::durable::{
-    append_row, blob_seq_in_log, index_applied_frontmatter, load_for_replay_gate, maybe_compact,
-    query_marker, validate_update_bytes, CompactOutcome, Regime,
+    append_and_index_update, blob_seq_in_log, load_for_replay_gate, maybe_compact, query_marker,
+    validate_update_bytes, CompactOutcome, Regime,
 };
 use crate::error::CollabError;
 use crate::limits::DEFAULT_COMPACTION_THRESHOLD;
@@ -202,16 +202,13 @@ pub fn apply_remote_update_in_transaction(
         return Ok(ReplicationApplyOutcome::Deduped { seq: existing });
     }
     let base = load_for_replay_gate(tx, key)?;
-    let projection = crate::validate_replay_parity_with_scratch(&base, &remote.bytes)?;
-    put_binary_blob_with_sha(tx, &remote.bytes, &sha)?;
-    let seq = append_row(tx, key, &sha, origin.actor_id(), now_ms)?;
-    index_applied_frontmatter(
+    let (_, seq) = append_and_index_update(
         tx,
         key,
         marker.content_kind,
         &base,
-        &projection,
         &remote.bytes,
+        &sha,
         origin.actor_id(),
         now_ms,
     )?;
@@ -259,16 +256,13 @@ pub fn apply_remote_update_in_transaction_with_projection(
         });
     }
     let base = load_for_replay_gate(tx, key)?;
-    let projection = crate::validate_replay_parity_with_scratch(&base, &remote.bytes)?;
-    put_binary_blob_with_sha(tx, &remote.bytes, &sha)?;
-    let seq = append_row(tx, key, &sha, origin.actor_id(), now_ms)?;
-    index_applied_frontmatter(
+    let (projection, seq) = append_and_index_update(
         tx,
         key,
         marker.content_kind,
         &base,
-        &projection,
         &remote.bytes,
+        &sha,
         origin.actor_id(),
         now_ms,
     )?;
@@ -325,16 +319,13 @@ pub fn apply_remote_update_in_transaction_cached_with_projection(
 
     let (projection, source, seq) = match cache.base_for_gate(tx, key, &marker)? {
         Some(base) => {
-            let projection = crate::validate_replay_parity_with_scratch(base, &remote.bytes)?;
-            put_binary_blob_with_sha(tx, &remote.bytes, &sha)?;
-            let seq = append_row(tx, key, &sha, origin.actor_id(), now_ms)?;
-            index_applied_frontmatter(
+            let (projection, seq) = append_and_index_update(
                 tx,
                 key,
                 marker.content_kind,
                 base,
-                &projection,
                 &remote.bytes,
+                &sha,
                 origin.actor_id(),
                 now_ms,
             )?;
@@ -342,16 +333,13 @@ pub fn apply_remote_update_in_transaction_cached_with_projection(
         }
         None => {
             let base = load_for_replay_gate(tx, key)?;
-            let projection = crate::validate_replay_parity_with_scratch(&base, &remote.bytes)?;
-            put_binary_blob_with_sha(tx, &remote.bytes, &sha)?;
-            let seq = append_row(tx, key, &sha, origin.actor_id(), now_ms)?;
-            index_applied_frontmatter(
+            let (projection, seq) = append_and_index_update(
                 tx,
                 key,
                 marker.content_kind,
                 &base,
-                &projection,
                 &remote.bytes,
+                &sha,
                 origin.actor_id(),
                 now_ms,
             )?;

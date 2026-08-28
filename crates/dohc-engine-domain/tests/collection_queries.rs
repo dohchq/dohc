@@ -1,7 +1,7 @@
 use dohc_engine_domain::{
     CollectionFilter, CollectionFilterOperator, CollectionIndexedValueValidation, CollectionQuery,
-    CollectionSchemaReasonCode, CollectionSchemaStatus, CollectionSort, CollectionSortDirection,
-    DomainError, NoFaults, TxnOutcome, VersionedTextStore, WriteText, get_collection,
+    CollectionSchemaReasonCode, CollectionSchemaStatus, CollectionSort, DomainError, NoFaults,
+    TxnOutcome, VersionedTextStore, ViewSortDirection, WriteText, get_collection,
     get_collection_record, list_collections, query_collection_records, reconcile_collections_in_tx,
 };
 use dohc_engine_storage::{EngineStore, StorageError};
@@ -129,11 +129,11 @@ fn query_uses_indexed_values_flags_filter_sort_group_and_relation_labels() {
                     sort: vec![
                         CollectionSort {
                             field: "Rank".to_owned(),
-                            direction: CollectionSortDirection::Asc,
+                            direction: ViewSortDirection::Asc,
                         },
                         CollectionSort {
                             field: "Title".to_owned(),
-                            direction: CollectionSortDirection::Desc,
+                            direction: ViewSortDirection::Desc,
                         },
                     ],
                     group_by: Some("Status".to_owned()),

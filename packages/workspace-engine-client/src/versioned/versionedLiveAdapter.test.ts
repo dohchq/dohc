@@ -188,29 +188,6 @@ const WORKSPACE_REQUEST_CASES: WorkspaceRequestCase[] = [
   { method: WORKSPACE_METHOD.conflictsList, params: {} },
   { method: WORKSPACE_METHOD.conflictsOpen, params: { conflict: {} } },
   { method: WORKSPACE_METHOD.conflictsResolve, params: { local: {} } },
-  { method: WORKSPACE_METHOD.collectionsList, params: {} },
-  {
-    method: WORKSPACE_METHOD.collectionsGet,
-    params: { collectionPath: "projects" },
-  },
-  {
-    method: WORKSPACE_METHOD.collectionsQuery,
-    params: {
-      collectionPath: "projects",
-      filter: { field: "status", operator: "equals", value: "active" },
-      sort: [{ field: "due", direction: "asc" }],
-      groupBy: "status",
-      resolveRelations: true,
-    },
-  },
-  {
-    method: WORKSPACE_METHOD.collectionsGetRecord,
-    params: {
-      collectionPath: "projects",
-      recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
-      historyLimit: 25,
-    },
-  },
   {
     method: WORKSPACE_METHOD.searchQuery,
     params: { versionId: "main", query: "hello" },

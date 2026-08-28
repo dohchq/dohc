@@ -1,7 +1,5 @@
 export const COLLECTION_SCHEMA_FILENAME = "collection.yaml";
 export const RECORD_ID_FRONTMATTER_KEY = "id";
-export const RECORD_ID_PREFIX = "rec_";
-export const RECORD_ID_RANDOM_BASE32_LENGTH = 26;
 
 export type CollectionFieldType =
   | "text"
@@ -172,8 +170,6 @@ export interface CollectionQuerySort {
   field: string;
   direction: ViewSortDirection;
 }
-
-export type CollectionListParams = Record<string, never>;
 
 export interface CollectionListResult {
   collections: CollectionSummary[];

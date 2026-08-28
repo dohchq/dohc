@@ -13532,10 +13532,8 @@ fn reconcile_collections_on_store(
                     changed_paths.push(path);
                 }
             }
-            Ok(None)
-            | Err(RuntimeError::Domain(DomainError::InvalidInput {
-                reason: "ydoc-conflict-open",
-            })) => {}
+            Ok(None) => {}
+            Err(error) if adoption_conflict(&error) => {}
             Err(error) => return Err(error),
         }
     }

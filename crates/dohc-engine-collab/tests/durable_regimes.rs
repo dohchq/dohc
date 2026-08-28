@@ -1574,9 +1574,9 @@ fn field_history(store: &EngineStore, key: &DocKey, field: &str) -> Vec<(String,
 
 fn collection_base() -> Vec<u8> {
     let doc = Ydoc::wire();
-    doc.frontmatter_set_value("id", &serde_json::json!(INDEX_RECORD_ID));
-    doc.frontmatter_set_value("title", &serde_json::json!("Original"));
-    doc.frontmatter_set_value("status", &serde_json::json!("open"));
+    doc.frontmatter_set("id", INDEX_RECORD_ID);
+    doc.frontmatter_set("title", "Original");
+    doc.frontmatter_set("status", "open");
     doc.encode_full_state()
 }
 
@@ -1606,8 +1606,8 @@ fn local_and_remote_different_field_edits_converge_in_both_collection_indexes() 
     peer_a.apply(&base).expect("peer A base");
     let peer_b = Ydoc::wire();
     peer_b.apply(&base).expect("peer B base");
-    let alice = peer_a.frontmatter_set_value("title", &serde_json::json!("Alice title"));
-    let bob = peer_b.frontmatter_set_value("status", &serde_json::json!("done"));
+    let alice = peer_a.frontmatter_set("title", "Alice title");
+    let bob = peer_b.frontmatter_set("status", "done");
 
     committed(
         record_local_update_with_origin(
@@ -1683,8 +1683,8 @@ fn same_field_concurrent_edits_converge_and_keep_both_authored_writes() {
     peer_a.apply(&base).expect("peer A base");
     let peer_b = Ydoc::wire();
     peer_b.apply(&base).expect("peer B base");
-    let alice = peer_a.frontmatter_set_value("title", &serde_json::json!("Alice title"));
-    let bob = peer_b.frontmatter_set_value("title", &serde_json::json!("Bob title"));
+    let alice = peer_a.frontmatter_set("title", "Alice title");
+    let bob = peer_b.frontmatter_set("title", "Bob title");
 
     committed(
         record_local_update_with_origin(
@@ -1769,7 +1769,7 @@ fn later_same_field_edit_wins_on_both_devices_and_keeps_earlier_history() {
         two_collection_stores("collection-index-later-a", "collection-index-later-b");
     let peer_a = Ydoc::wire();
     peer_a.apply(&base).expect("peer A base");
-    let alice = peer_a.frontmatter_set_value("title", &serde_json::json!("Alice title"));
+    let alice = peer_a.frontmatter_set("title", "Alice title");
 
     committed(
         record_local_update_with_origin(
@@ -1800,7 +1800,7 @@ fn later_same_field_edit_wins_on_both_devices_and_keeps_earlier_history() {
     let peer_b = Ydoc::wire();
     peer_b.apply(&base).expect("peer B base");
     peer_b.apply(&alice).expect("peer B receives Alice edit");
-    let bob = peer_b.frontmatter_set_value("title", &serde_json::json!("Bob title"));
+    let bob = peer_b.frontmatter_set("title", "Bob title");
     committed(
         record_local_update_with_origin(&mut b.store, &key, &bob, Some("bob"), &NoFaults, 1_300)
             .expect("Bob later local edit"),

@@ -842,16 +842,6 @@ impl Ydoc {
         })
     }
 
-    /// Set one top-level frontmatter value with its JSON scalar or sequence
-    /// shape preserved and return the encoded delta.
-    pub fn frontmatter_set_value(&self, key: &str, value: &Value) -> Vec<u8> {
-        let map = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
-        let value = json_to_any(value);
-        self.with_delta(|txn| {
-            map.insert(txn, key, value);
-        })
-    }
-
     /// Remove one target from a relation field. A single relation removes the
     /// key; a many relation keeps the sequence and removes matching entries.
     /// Returns `None` when the applied frontmatter has no such link.

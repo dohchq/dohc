@@ -448,10 +448,6 @@ function isCalendarDate(value: string): boolean {
   return day <= (days[month - 1] ?? 0);
 }
 
-function validateText(value: unknown): FieldValueValidation {
-  return typeof value === "string" ? { status: "valid" } : flag("expected-text");
-}
-
 function validateMany(
   value: unknown,
   validateEntry: (entry: unknown, path: string) => FieldValueValidation,
@@ -476,7 +472,7 @@ export function validateFieldValue(
 
   switch (field.type) {
     case "text":
-      return validateText(value);
+      return typeof value === "string" ? { status: "valid" } : flag("expected-text");
     case "number":
       if (typeof value !== "number") return flag("expected-number");
       return Number.isFinite(value) ? { status: "valid" } : flag("number-not-finite");

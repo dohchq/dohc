@@ -8,7 +8,6 @@ import type {
   CollectionGetRecordParams as CollectionGetRecordContractParams,
   CollectionGetRecordResult as CollectionGetRecordContractResult,
   CollectionGetResult as CollectionGetContractResult,
-  CollectionListParams as CollectionListContractParams,
   CollectionListResult as CollectionListContractResult,
   CollectionQueryParams as CollectionQueryContractParams,
   CollectionQueryResult as CollectionQueryContractResult,
@@ -55,8 +54,6 @@ export type WorkspaceOpenParams = WorkspaceJsonObject & {
   recoverRunningDispatches?: boolean;
 };
 export type WorkspaceEmptyParams = WorkspaceJsonObject;
-export type CollectionListParams =
-  WorkspaceJsonObject & CollectionListContractParams;
 export type CollectionGetParams =
   WorkspaceJsonObject & CollectionGetContractParams;
 export type CollectionQueryParams =
@@ -259,7 +256,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.conflictsList]: ConflictListParams;
   [WORKSPACE_METHOD.conflictsOpen]: ConflictOpenParams;
   [WORKSPACE_METHOD.conflictsResolve]: ConflictResolveParams;
-  [WORKSPACE_METHOD.collectionsList]: CollectionListParams;
+  [WORKSPACE_METHOD.collectionsList]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.collectionsGet]: CollectionGetParams;
   [WORKSPACE_METHOD.collectionsQuery]: CollectionQueryParams;
   [WORKSPACE_METHOD.collectionsGetRecord]: CollectionGetRecordParams;

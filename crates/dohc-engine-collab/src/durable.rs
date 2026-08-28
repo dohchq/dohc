@@ -889,6 +889,33 @@ where
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn append_and_index_update(
+    conn: &Connection,
+    key: &DocKey,
+    content_kind: ContentKind,
+    base: &Ydoc,
+    update: &[u8],
+    sha: &str,
+    actor_origin_id: Option<&str>,
+    now_ms: i64,
+) -> Result<(Ydoc, i64), CollabError> {
+    let projection = crate::validate_replay_parity_with_scratch(base, update)?;
+    put_binary_blob_with_sha(conn, update, sha)?;
+    let seq = append_row(conn, key, sha, actor_origin_id, now_ms)?;
+    index_applied_frontmatter(
+        conn,
+        key,
+        content_kind,
+        base,
+        &projection,
+        update,
+        actor_origin_id,
+        now_ms,
+    )?;
+    Ok((projection, seq))
+}
+
 fn append_local_update(
     conn: &Connection,
     key: &DocKey,
@@ -907,16 +934,13 @@ fn append_local_update(
         });
     }
     let base = load_for_replay_gate(conn, key)?;
-    let projection = crate::validate_replay_parity_with_scratch(&base, update)?;
-    put_binary_blob_with_sha(conn, update, sha)?;
-    let seq = append_row(conn, key, sha, actor_origin_id, now_ms)?;
-    index_applied_frontmatter(
+    let (_, seq) = append_and_index_update(
         conn,
         key,
         marker.content_kind,
         &base,
-        &projection,
         update,
+        sha,
         actor_origin_id,
         now_ms,
     )?;
@@ -957,16 +981,13 @@ fn append_local_update_cached(
     }
     let seq = match cache.base_for_gate(conn, key, marker)? {
         Some(base) => {
-            let projection = crate::validate_replay_parity_with_scratch(base, update)?;
-            put_binary_blob_with_sha(conn, update, sha)?;
-            let seq = append_row(conn, key, sha, actor_origin_id, now_ms)?;
-            index_applied_frontmatter(
+            let (_, seq) = append_and_index_update(
                 conn,
                 key,
                 marker.content_kind,
                 base,
-                &projection,
                 update,
+                sha,
                 actor_origin_id,
                 now_ms,
             )?;
@@ -978,16 +999,13 @@ fn append_local_update_cached(
         }
         None => {
             let base = load_for_replay_gate(conn, key)?;
-            let projection = crate::validate_replay_parity_with_scratch(&base, update)?;
-            put_binary_blob_with_sha(conn, update, sha)?;
-            let seq = append_row(conn, key, sha, actor_origin_id, now_ms)?;
-            index_applied_frontmatter(
+            let (_, seq) = append_and_index_update(
                 conn,
                 key,
                 marker.content_kind,
                 &base,
-                &projection,
                 update,
+                sha,
                 actor_origin_id,
                 now_ms,
             )?;

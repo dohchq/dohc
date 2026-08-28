@@ -2908,7 +2908,6 @@ CREATE TABLE collections (
       CHECK (schema_status IN ('valid', 'degraded')),
     degradation_reasons_json TEXT NOT NULL CHECK (json_valid(degradation_reasons_json)),
     PRIMARY KEY (workspace_id, version_id, collection_path),
-    UNIQUE (workspace_id, version_id, schema_path),
     FOREIGN KEY (workspace_id, version_id)
       REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE
 ) STRICT;
@@ -2988,10 +2987,6 @@ CREATE TABLE collection_relation_edges (
       workspace_id, version_id, source_record_id, field_name, target_record_id
     )
 ) STRICT;
-CREATE INDEX collection_relation_edges_by_target
-    ON collection_relation_edges(
-      workspace_id, version_id, target_record_id, source_record_id, field_name
-    );
 ";
 
 pub(crate) const COLLECTION_INDEX_MIGRATION_ID: &str = "v1-collection-index";
