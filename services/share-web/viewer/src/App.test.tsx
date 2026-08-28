@@ -2,9 +2,9 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import * as AppModule from "./App";
 import {
   App,
+  dohcNavigation,
   fileTree,
   loadLog,
   MARKDOWN_PREVIEW_BYTE_CAP,
@@ -17,16 +17,6 @@ const SECOND_SESSION = "mnopqrstuvwx";
 const FIRST_HANDOFF_CODE = "A".repeat(43);
 const SECOND_HANDOFF_CODE = "B".repeat(43);
 const SETTLE_TURN_LIMIT = 200;
-
-interface DohcNavigation {
-  urlForCode: (code: string) => string;
-  openCode: (code: string) => void;
-}
-
-function dohcNavigation(): DohcNavigation {
-  return (AppModule as unknown as { dohcNavigation: DohcNavigation })
-    .dohcNavigation;
-}
 
 const DEFAULT_META: ViewMeta = {
   access: "view",
@@ -256,7 +246,7 @@ describe("App", () => {
     expect(handoffCalls(fetchMock)).toHaveLength(0);
 
     clickButton("Open in dohc");
-    const navigate = vi.spyOn(dohcNavigation(), "openCode")
+    const navigate = vi.spyOn(dohcNavigation, "openCode")
       .mockImplementation(() => undefined);
     clickButton("Agree and open");
     await settle(() => handoffCalls(fetchMock).length === 1);
@@ -281,7 +271,7 @@ describe("App", () => {
       expiresAtMs: Date.now() + 60_000,
     }));
     vi.stubGlobal("fetch", fetchMock);
-    const navigate = vi.spyOn(dohcNavigation(), "openCode")
+    const navigate = vi.spyOn(dohcNavigation, "openCode")
       .mockImplementation(() => undefined);
 
     await renderApp();
@@ -301,12 +291,12 @@ describe("App", () => {
 
     expect(navigate).toHaveBeenCalledWith(FIRST_HANDOFF_CODE);
     const launchedCode = String(navigate.mock.calls[0]?.[0]);
-    const launchUrl = dohcNavigation().urlForCode(launchedCode);
+    const launchUrl = dohcNavigation.urlForCode(launchedCode);
     expect(launchUrl).toBe(`dohc://open/${FIRST_HANDOFF_CODE}`);
     for (const secret of secrets) expect(launchUrl).not.toContain(secret);
     expect(launchUrl).not.toContain("?");
     expect(launchUrl).not.toContain("#");
-    expect(() => dohcNavigation().urlForCode("bad/code"))
+    expect(() => dohcNavigation.urlForCode("bad/code"))
       .toThrow("invalid handoff code");
   });
 
@@ -319,7 +309,7 @@ describe("App", () => {
   ])("rejects %s", async (_label, body) => {
     const fetchMock = viewerFetch(() => jsonResponse(body));
     vi.stubGlobal("fetch", fetchMock);
-    const navigate = vi.spyOn(dohcNavigation(), "openCode")
+    const navigate = vi.spyOn(dohcNavigation, "openCode")
       .mockImplementation(() => undefined);
 
     await renderApp();
@@ -362,7 +352,7 @@ describe("App", () => {
           });
     });
     vi.stubGlobal("fetch", fetchMock);
-    const navigate = vi.spyOn(dohcNavigation(), "openCode")
+    const navigate = vi.spyOn(dohcNavigation, "openCode")
       .mockImplementation(() => undefined);
 
     await renderApp();
@@ -398,7 +388,7 @@ describe("App", () => {
           });
     });
     vi.stubGlobal("fetch", fetchMock);
-    const navigate = vi.spyOn(dohcNavigation(), "openCode")
+    const navigate = vi.spyOn(dohcNavigation, "openCode")
       .mockImplementation(() => undefined);
 
     await renderApp();
@@ -425,7 +415,7 @@ describe("App", () => {
       expiresAtMs: Date.now() + 60_000,
     }));
     vi.stubGlobal("fetch", fetchMock);
-    const navigate = vi.spyOn(dohcNavigation(), "openCode")
+    const navigate = vi.spyOn(dohcNavigation, "openCode")
       .mockImplementation(() => undefined);
 
     await renderApp();
@@ -457,7 +447,7 @@ describe("App", () => {
       return heldHandoff;
     });
     vi.stubGlobal("fetch", fetchMock);
-    const navigate = vi.spyOn(dohcNavigation(), "openCode")
+    const navigate = vi.spyOn(dohcNavigation, "openCode")
       .mockImplementation(() => undefined);
 
     await renderApp();
@@ -499,7 +489,7 @@ describe("App", () => {
       return handoffSignals.length === 1 ? firstHandoff : secondHandoff;
     });
     vi.stubGlobal("fetch", fetchMock);
-    const navigate = vi.spyOn(dohcNavigation(), "openCode")
+    const navigate = vi.spyOn(dohcNavigation, "openCode")
       .mockImplementation(() => undefined);
 
     await renderApp();
@@ -579,7 +569,7 @@ describe("App", () => {
       throw new Error(`Unexpected request: ${path}`);
     });
     vi.stubGlobal("fetch", fetchMock);
-    const navigate = vi.spyOn(dohcNavigation(), "openCode")
+    const navigate = vi.spyOn(dohcNavigation, "openCode")
       .mockImplementation(() => undefined);
 
     await renderApp();
@@ -632,7 +622,7 @@ describe("App", () => {
       throw new Error(`Unexpected request: ${path}`);
     });
     vi.stubGlobal("fetch", fetchMock);
-    const navigate = vi.spyOn(dohcNavigation(), "openCode")
+    const navigate = vi.spyOn(dohcNavigation, "openCode")
       .mockImplementation(() => undefined);
 
     await renderApp();
