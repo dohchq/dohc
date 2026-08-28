@@ -627,6 +627,81 @@ describe("single-use authenticated link handoff", () => {
     ]);
   });
 
+  it("caps active dependents at the owner mutation boundary without blocking an existing account", async () => {
+    const state = await setup();
+    const database = inspect(state.dbPath);
+    const existingCode = await mint(state);
+    const overflowCode = await mint(state);
+    const parentGrantId = String(state.link.grantId);
+    const dependentIds: string[] = [];
+    const insertDependent = database.prepare(
+      `INSERT INTO sync_relay_share_grants (
+         grant_id, share_id, principal_kind, principal_user_id, principal_email,
+         access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id
+       ) VALUES (?, ?, 'user', ?, NULL, 'view', 1, 'active', ?, NULL, ?)`,
+    );
+    database.exec("BEGIN");
+    try {
+      for (let index = 0; index < 1_000; index += 1) {
+        const suffix = String(index).padStart(4, "0");
+        const grantId = `dependent-grant-${suffix}`;
+        dependentIds.push(grantId);
+        insertDependent.run(
+          grantId,
+          SHARE_ID,
+          index === 0 ? RECIPIENT : `dependent-user-${suffix}`,
+          state.now.value + index,
+          parentGrantId,
+        );
+      }
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+
+    const existingFirst = await serialized(
+      await state.h(redeemRequest(RECIPIENT, existingCode.code)),
+    );
+    expect(existingFirst.status).toBe(200);
+    expect(JSON.parse(existingFirst.body)).toMatchObject({
+      ok: true,
+      grantId: dependentIds[0],
+      access: "view",
+    });
+    expect(
+      await serialized(
+        await state.h(redeemRequest(RECIPIENT, existingCode.code)),
+      ),
+    ).toEqual(existingFirst);
+
+    await expectGeneric(
+      await state.h(redeemRequest(OTHER_ACCOUNT, overflowCode.code)),
+    );
+    expect(dependentRows(database, parentGrantId)).toHaveLength(1_000);
+    expect(dependentRows(database, parentGrantId, OTHER_ACCOUNT)).toEqual([]);
+
+    const inventory = await ownerInventory(state);
+    expect(inventory).toHaveLength(1);
+    const inventoryDependentIds = (
+      inventory[0]?.dependents as Array<Record<string, unknown>>
+    ).map((dependent) => String(dependent.grantId));
+    expect(inventoryDependentIds).toEqual(dependentIds);
+
+    const rotated = await state.h(
+      request(
+        OWNER,
+        `/sync/shares/${SHARE_ID}/links/${parentGrantId}/rotate`,
+        jsonBody({
+          workspaceId: WORKSPACE,
+          expectedDependentGrantIds: inventoryDependentIds,
+        }),
+      ),
+    );
+    expect(rotated.status).toBe(200);
+    expect(dependentRows(database, parentGrantId)).toHaveLength(1_000);
+  });
+
   it("returns the same receipt to the same account and refuses another account", async () => {
     const state = await setup();
     const database = inspect(state.dbPath, true);

@@ -617,6 +617,7 @@ export const DEFAULT_WORKSPACE_QUOTA_BYTES = 2 * 1024 * 1024 * 1024;
 // minutes comfortably covers a slow/retried push.
 export const DEFAULT_BLOB_GRACE_MS = 10 * 60 * 1000;
 const RETIRED_LINK_CREDENTIAL_HISTORY_LIMIT = 10;
+const ACTIVE_LINK_DEPENDENT_GRANT_LIMIT = 1_000;
 
 function dependentGrantIdsMatch(
   dependents: readonly SyncRelayShareGrantRow[],
@@ -3096,6 +3097,19 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           .run(existing.grantId, code.codeId, code.codeHash);
         if (Number(recorded.changes ?? 0) !== 1) return { ok: false };
         return { ok: true, shareId: share.shareId, grant: existing };
+      }
+
+      const activeDependentCount = Number(
+        this.db
+          .prepare(
+            `SELECT COUNT(*) AS count
+             FROM sync_relay_share_grants
+             WHERE parent_grant_id = ? AND status = 'active'`,
+          )
+          .get(parent.grantId)?.count ?? 0,
+      );
+      if (activeDependentCount >= ACTIVE_LINK_DEPENDENT_GRANT_LIMIT) {
+        return refuseAndConsume();
       }
 
       const grant: SyncRelayShareGrantRow = {
