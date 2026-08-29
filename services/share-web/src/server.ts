@@ -16,6 +16,7 @@ export const SHARE_WEB_SECURITY_HEADERS = Object.freeze({
 
 const REFUSAL_BODY = JSON.stringify({ ok: false, error: "not found" });
 const MAX_EXCHANGE_BODY_BYTES = 8 * 1024;
+const MAX_DISCUSSION_BODY_BYTES = 8_000;
 export const EXCHANGE_BUCKET_CAPACITY = 12;
 const EXCHANGE_REFILL_PER_SECOND = 0.2;
 const EXCHANGE_MAX_IPS = 10_000;
@@ -29,6 +30,9 @@ export const LINK_SESSION_RENEWAL_GRACE_MS = 7 * 24 * 60 * 60 * 1_000;
 const RASTER_SIGNATURE_BYTES = 12;
 const HANDOFF_CODE = /^[A-Za-z0-9_-]{43}$/u;
 const SESSION_DISCRIMINATOR = /^[A-Za-z0-9_-]{12}$/u;
+const PROFILE_SECRET = /^[A-Za-z0-9_-]{43}$/u;
+const DISCUSSION_CURSOR = /^[A-Za-z0-9_-]{1,1024}$/u;
+const DISCUSSION_LIMIT = /^[1-9][0-9]{0,2}$/u;
 const SHA256_HEX = /^[a-f0-9]{64}$/u;
 
 type RelayFetch = (request: Request) => Promise<Response>;
@@ -59,6 +63,7 @@ export interface CreateShareWebHandlerOptions {
   fetchRelay?: RelayFetch;
   nowMs?: () => number;
   newSessionToken?: () => string;
+  newProfileSecret?: () => string;
   maxSessions?: number;
   viewerAssetsDir?: string;
   handoffRelayTimeoutMs?: number;
@@ -120,6 +125,15 @@ class ShareWebSessionStore {
     session.capabilityToken = capabilityToken;
     session.expiresAtMs = expiresAtMs;
     return session;
+  }
+
+  isCurrent(
+    discriminator: string,
+    token: string,
+    capabilityToken: string,
+    nowMs: number,
+  ): boolean {
+    return this.get(discriminator, token, nowMs)?.capabilityToken === capabilityToken;
   }
 
   private prune(nowMs: number): void {
@@ -247,6 +261,10 @@ function cookieName(discriminator: string): string {
   return `dohc_share_${discriminator}`;
 }
 
+function profileCookieName(discriminator: string): string {
+  return `dohc_share_profile_${discriminator}`;
+}
+
 function securityHeaders(init: HeadersInit = {}): Headers {
   const headers = new Headers(init);
   for (const [key, value] of Object.entries(SHARE_WEB_SECURITY_HEADERS)) {
@@ -267,9 +285,11 @@ function jsonResponse(
   body: unknown,
   init: { status?: number; headers?: HeadersInit } = {},
 ): Response {
+  const headers = new Headers(init.headers);
+  headers.set("content-type", "application/json");
   return response(JSON.stringify(body), {
     ...init,
-    headers: { "content-type": "application/json", ...Object.fromEntries(new Headers(init.headers)) },
+    headers,
   });
 }
 
@@ -302,6 +322,81 @@ async function exchangeInput(request: Request): Promise<string | null> {
     return typeof secret === "string" && /^[A-Za-z0-9_-]{43}$/u.test(secret)
       ? secret
       : null;
+  } catch {
+    return null;
+  }
+}
+
+async function discussionInput(request: Request): Promise<string | null> {
+  try {
+    const text = await request.text();
+    if (Buffer.byteLength(text, "utf8") > MAX_DISCUSSION_BODY_BYTES) return null;
+    const input: unknown = JSON.parse(text);
+    if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+    const body = input as Record<string, unknown>;
+    if (
+      Object.keys(body).some(
+        (key) => key !== "body" && key !== "idempotencyKey" && key !== "claimedName",
+      ) ||
+      typeof body.body !== "string" ||
+      typeof body.idempotencyKey !== "string" ||
+      (Object.hasOwn(body, "claimedName") && typeof body.claimedName !== "string")
+    ) {
+      return null;
+    }
+    return text;
+  } catch {
+    return null;
+  }
+}
+
+function discussionRelayPath(request: Request): string | null {
+  const url = new URL(request.url);
+  for (const key of url.searchParams.keys()) {
+    if (key !== "session" && key !== "cursor" && key !== "limit") return null;
+  }
+  if (
+    url.searchParams.getAll("session").length > 1 ||
+    url.searchParams.getAll("cursor").length > 1 ||
+    url.searchParams.getAll("limit").length > 1
+  ) {
+    return null;
+  }
+  const cursor = url.searchParams.get("cursor");
+  const limit = url.searchParams.get("limit");
+  if (
+    (cursor !== null && !DISCUSSION_CURSOR.test(cursor)) ||
+    (limit !== null && (!DISCUSSION_LIMIT.test(limit) || Number(limit) > 100))
+  ) {
+    return null;
+  }
+  const relaySearch = new URLSearchParams();
+  if (cursor !== null) relaySearch.set("cursor", cursor);
+  if (limit !== null) relaySearch.set("limit", limit);
+  const serialized = relaySearch.toString();
+  return `/sync/link/discussion${serialized ? `?${serialized}` : ""}`;
+}
+
+function hasOnlySessionQuery(request: Request, discriminator: string): boolean {
+  const params = new URL(request.url).searchParams;
+  const session = params.get("session");
+  return (
+    [...params.keys()].every((key) => key === "session") &&
+    params.getAll("session").length <= 1 &&
+    (session === null || session === discriminator)
+  );
+}
+
+async function discussionState(
+  relayResponse: Response,
+): Promise<"blocked" | "paused" | null> {
+  try {
+    const body: unknown = await relayResponse.json();
+    if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+    const code = (body as Record<string, unknown>).code;
+    if (code === "link_discussion_blocked") return "blocked";
+    if (code === "link_discussion_paused") return "paused";
+    return null;
   } catch {
     return null;
   }
@@ -351,6 +446,13 @@ function sessionCookie(
   );
   return (
     `${cookieName(discriminator)}=${token}; Path=/; Max-Age=${maxAge}; ` +
+    "Secure; HttpOnly; SameSite=Strict"
+  );
+}
+
+function profileCookie(discriminator: string, secret: string): string {
+  return (
+    `${profileCookieName(discriminator)}=${secret}; Path=/; ` +
     "Secure; HttpOnly; SameSite=Strict"
   );
 }
@@ -548,6 +650,7 @@ export function createShareWebHandler({
   fetchRelay = (request) => fetch(request),
   nowMs = () => Date.now(),
   newSessionToken = () => randomBytes(32).toString("base64url"),
+  newProfileSecret = () => randomBytes(32).toString("base64url"),
   maxSessions = DEFAULT_MAX_SESSIONS,
   viewerAssetsDir,
   handoffRelayTimeoutMs = DEFAULT_HANDOFF_RELAY_TIMEOUT_MS,
@@ -714,6 +817,15 @@ export function createShareWebHandler({
         const discriminator = linkDiscriminator(exchanged.grantId);
         const token = newSessionToken();
         if (!/^[A-Za-z0-9_-]{16,}$/u.test(token)) return refused();
+        const cookies = parseCookies(request.headers.get("cookie"));
+        const existingProfile = cookies.get(profileCookieName(discriminator));
+        const allocatedProfile =
+          existingProfile && PROFILE_SECRET.test(existingProfile)
+            ? null
+            : newProfileSecret();
+        if (allocatedProfile !== null && !PROFILE_SECRET.test(allocatedProfile)) {
+          return refused();
+        }
         sessions.set(
           token,
           {
@@ -725,18 +837,20 @@ export function createShareWebHandler({
           },
           nowMs(),
         );
+        const responseHeaders = new Headers();
+        responseHeaders.append(
+          "set-cookie",
+          sessionCookie(discriminator, token, exchanged.expiresAtMs, nowMs()),
+        );
+        if (allocatedProfile !== null) {
+          responseHeaders.append(
+            "set-cookie",
+            profileCookie(discriminator, allocatedProfile),
+          );
+        }
         return jsonResponse(
           { ok: true, session: discriminator },
-          {
-            headers: {
-              "set-cookie": sessionCookie(
-                discriminator,
-                token,
-                exchanged.expiresAtMs,
-                nowMs(),
-              ),
-            },
-          },
+          { headers: responseHeaders },
         );
       } catch {
         return refused();
@@ -800,6 +914,106 @@ export function createShareWebHandler({
         return refused(503, refreshedCookieHeaders);
       } finally {
         boundedRelayRequest.dispose();
+      }
+    }
+
+    if (pathname === "/api/view/discussion") {
+      if (request.method !== "GET" && request.method !== "POST") return refused();
+      const authenticated = await readSession(request);
+      if (!authenticated) return refused();
+
+      let relayPath: string;
+      let appendBody: string | null = null;
+      let profileSecret: string | null = null;
+      if (request.method === "GET") {
+        const parsedPath = discussionRelayPath(request);
+        if (!parsedPath) return refused();
+        relayPath = parsedPath;
+      } else {
+        if (
+          !relayExchangeKey ||
+          !hasOnlySessionQuery(request, authenticated.discriminator)
+        ) {
+          return refused();
+        }
+        profileSecret = parseCookies(request.headers.get("cookie")).get(
+          profileCookieName(authenticated.discriminator),
+        ) ?? null;
+        if (!profileSecret || !PROFILE_SECRET.test(profileSecret)) return refused();
+        appendBody = await discussionInput(request);
+        if (appendBody === null) return refused();
+        relayPath = "/sync/link/discussion";
+      }
+
+      const refreshed = await refreshSession(authenticated);
+      if (!refreshed.ok) return refused(refreshed.status);
+      const refreshedCookieHeaders: Record<string, string> = refreshed.setCookie
+        ? { "set-cookie": refreshed.setCookie }
+        : {};
+      const capabilityToken = authenticated.session.capabilityToken;
+      try {
+        const relayResponse = await fetchRelay(
+          relayRequest(relayUrl, relayPath, {
+            method: request.method,
+            headers: {
+              authorization: `LinkCapability ${capabilityToken}`,
+              ...(request.method === "POST"
+                ? {
+                    "content-type": "application/json",
+                    "x-dohc-link-profile-secret": profileSecret!,
+                    "x-dohc-relay-exchange-key": relayExchangeKey!,
+                  }
+                : {}),
+            },
+            ...(appendBody === null ? {} : { body: appendBody }),
+            signal: request.signal,
+          }),
+        );
+        if (
+          !sessions.isCurrent(
+            authenticated.discriminator,
+            authenticated.token,
+            capabilityToken,
+            nowMs(),
+          )
+        ) {
+          await relayResponse.body?.cancel().catch(() => undefined);
+          return refused();
+        }
+        if (relayResponse.status === 200) {
+          return response(relayResponse.body, {
+            headers: {
+              "content-type": "application/json",
+              ...refreshedCookieHeaders,
+            },
+          });
+        }
+        if (relayResponse.status === 403) {
+          const state = await discussionState(relayResponse);
+          return state
+            ? jsonResponse(
+                { ok: false, state },
+                { status: 403, headers: refreshedCookieHeaders },
+              )
+            : refused(404, refreshedCookieHeaders);
+        }
+        if (relayResponse.status === 401) {
+          sessions.deleteIfCapability(
+            authenticated.discriminator,
+            authenticated.token,
+            capabilityToken,
+          );
+          return refused(404, refreshedCookieHeaders);
+        }
+        if (relayResponse.status === 429) {
+          return refused(429, refreshedCookieHeaders);
+        }
+        return refused(
+          relayResponse.status >= 500 ? 503 : 404,
+          refreshedCookieHeaders,
+        );
+      } catch {
+        return refused(503, refreshedCookieHeaders);
       }
     }
 

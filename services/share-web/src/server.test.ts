@@ -20,6 +20,8 @@ const CAP_BETA = Buffer.alloc(32, 3).toString("base64url");
 const SECRET_ALPHA = Buffer.alloc(32, 11).toString("base64url");
 const SECRET_ALPHA_ROTATED = Buffer.alloc(32, 12).toString("base64url");
 const SECRET_BETA = Buffer.alloc(32, 13).toString("base64url");
+const PROFILE_ALPHA = Buffer.alloc(32, 14).toString("base64url");
+const PROFILE_BETA = Buffer.alloc(32, 15).toString("base64url");
 const HANDOFF_CODE = Buffer.alloc(32, 31).toString("base64url");
 const HANDOFF_EXCHANGE_KEY = "share-web-to-relay-handoff-exchange-key";
 const PUBLIC_RELAY_URL = "https://relay.public.test";
@@ -47,7 +49,29 @@ function exchange(secret: string): RequestInit {
 }
 
 function cookiePair(response: Response): string {
-  return response.headers.get("set-cookie")!.split(";", 1)[0]!;
+  const pair = cookiePairs(response).find(
+    (cookie) =>
+      cookie.startsWith("dohc_share_") &&
+      !cookie.startsWith("dohc_share_profile_"),
+  );
+  if (!pair) throw new Error("viewer session cookie is missing");
+  return pair;
+}
+
+function profileCookiePair(response: Response): string {
+  const pair = cookiePairs(response).find((cookie) =>
+    cookie.startsWith("dohc_share_profile_"),
+  );
+  if (!pair) throw new Error("protected profile cookie is missing");
+  return pair;
+}
+
+function cookiePairs(response: Response): string[] {
+  return response.headers.getSetCookie().map((cookie) => cookie.split(";", 1)[0]!);
+}
+
+function cookieHeader(...pairs: Array<string | undefined>): string {
+  return pairs.filter((pair): pair is string => pair !== undefined).join("; ");
 }
 
 function capacityTestHandler(maxSessions: number): {
@@ -1397,6 +1421,680 @@ describe("share-web sessions", () => {
     expect(svgResponse.headers.get("content-disposition")).toBe("attachment");
     expect(svgResponse.headers.get("x-content-type-options")).toBe("nosniff");
     expect(await svgResponse.text()).toContain("<svg");
+  });
+});
+
+describe("share-web protected discussion proxy", () => {
+  function sessionHeaders(discriminator: string, cookies: string): HeadersInit {
+    return {
+      cookie: cookies,
+      "x-dohc-link-session": discriminator,
+    };
+  }
+
+  function publicMessage(body: string): Record<string, unknown> {
+    return {
+      ok: true,
+      message: {
+        messageId: "public-message",
+        createdAtMs: 2_000,
+        deleted: false,
+        body,
+        author: {
+          kind: "link",
+          displayName: "Public profile",
+          unverified: true,
+        },
+      },
+    };
+  }
+
+  it("keeps one protected profile across session replacement and same-grant changes", async () => {
+    let sessionNumber = 0;
+    const profiles = [
+      PROFILE_ALPHA,
+      PROFILE_BETA,
+      Buffer.alloc(32, 16).toString("base64url"),
+    ];
+    let profileNumber = 0;
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      publicHosts: new Set([HOST]),
+      maxSessions: 1,
+      nowMs: () => 1_000,
+      newSessionToken: () =>
+        Buffer.alloc(32, 40 + ++sessionNumber).toString("base64url"),
+      newProfileSecret: () => profiles[profileNumber++]!,
+      fetchRelay: async (relayRequest) => {
+        expect(new URL(relayRequest.url).pathname).toBe("/sync/link-exchange");
+        const { secret } = (await relayRequest.json()) as { secret: string };
+        return Response.json({
+          ok: true,
+          grantId: secret === SECRET_BETA ? "grant-beta" : "grant-alpha",
+          capabilityToken: secret === SECRET_BETA ? CAP_BETA : CAP_ALPHA_1,
+          capabilityExpiresAtMs: 901_000,
+        });
+      },
+    });
+
+    const first = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
+    expect(first.status).toBe(200);
+    const firstCookies = first.headers.getSetCookie();
+    expect(firstCookies).toHaveLength(2);
+    for (const setCookie of firstCookies) {
+      expect(setCookie).toContain("; Path=/;");
+      expect(setCookie).toContain("; Secure;");
+      expect(setCookie).toContain("; HttpOnly;");
+      expect(setCookie).toContain("; SameSite=Strict");
+      expect(setCookie).not.toMatch(/(?:^|;)\s*Domain=/iu);
+    }
+    const firstSession = cookiePair(first);
+    const alphaProfile = profileCookiePair(first);
+    expect(alphaProfile.split("=", 2)[1]).toBe(PROFILE_ALPHA);
+    expect(Buffer.from(PROFILE_ALPHA, "base64url")).toHaveLength(32);
+    const firstBody = (await first.json()) as { ok: true; session: string };
+    expect(JSON.stringify(firstBody)).not.toContain(PROFILE_ALPHA);
+
+    const replaced = await handler(
+      request("/api/exchange", {
+        ...exchange(SECRET_ALPHA),
+        headers: {
+          ...exchange(SECRET_ALPHA).headers,
+          cookie: cookieHeader(firstSession, alphaProfile),
+        },
+      }),
+    );
+    expect(replaced.headers.getSetCookie()).toHaveLength(1);
+    expect(cookiePair(replaced)).not.toBe(firstSession);
+    expect((await replaced.json()) as { session: string }).toMatchObject({
+      session: firstBody.session,
+    });
+
+    const rotated = await handler(
+      request("/api/exchange", {
+        ...exchange(SECRET_ALPHA_ROTATED),
+        headers: {
+          ...exchange(SECRET_ALPHA_ROTATED).headers,
+          cookie: cookieHeader(cookiePair(replaced), alphaProfile),
+        },
+      }),
+    );
+    expect(rotated.headers.getSetCookie()).toHaveLength(1);
+    expect((await rotated.json()) as { session: string }).toMatchObject({
+      session: firstBody.session,
+    });
+
+    const beta = await handler(
+      request("/api/exchange", {
+        ...exchange(SECRET_BETA),
+        headers: {
+          ...exchange(SECRET_BETA).headers,
+          cookie: cookieHeader(cookiePair(rotated), alphaProfile),
+        },
+      }),
+    );
+    const betaProfile = profileCookiePair(beta);
+    expect(betaProfile.split("=", 2)[1]).toBe(PROFILE_BETA);
+    expect(betaProfile.split("=", 1)[0]).not.toBe(alphaProfile.split("=", 1)[0]);
+    expect((await beta.json()) as { session: string }).not.toMatchObject({
+      session: firstBody.session,
+    });
+
+    const cleared = await handler(
+      request("/api/exchange", {
+        ...exchange(SECRET_ALPHA),
+        headers: {
+          ...exchange(SECRET_ALPHA).headers,
+          cookie: cookiePair(beta),
+        },
+      }),
+    );
+    expect(profileCookiePair(cleared).split("=", 2)[1]).toBe(profiles[2]);
+    expect(profileNumber).toBe(3);
+  });
+
+  it("keeps the profile server-only and sends it only on trusted appends", async () => {
+    const relayKey = "discussion-relay-key-sentinel";
+    const relayRequests: Request[] = [];
+    const logs = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      relayExchangeKey: relayKey,
+      publicHosts: new Set([HOST]),
+      nowMs: () => 1_000,
+      newSessionToken: () => Buffer.alloc(32, 50).toString("base64url"),
+      newProfileSecret: () => PROFILE_ALPHA,
+      fetchRelay: async (relayRequest) => {
+        relayRequests.push(relayRequest.clone());
+        const url = new URL(relayRequest.url);
+        if (url.pathname === "/sync/link-exchange") {
+          return Response.json({
+            ok: true,
+            grantId: "grant-profile-sentinel",
+            capabilityToken: CAP_ALPHA_1,
+            capabilityExpiresAtMs: 901_000,
+          });
+        }
+        if (relayRequest.method === "GET") {
+          return Response.json({ ok: true, messages: [], nextCursor: null });
+        }
+        return Response.json(publicMessage("accepted public body"));
+      },
+    });
+    const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
+    const exchangeBody = (await exchanged.clone().json()) as { session: string };
+    const cookies = cookieHeader(cookiePair(exchanged), profileCookiePair(exchanged));
+
+    const read = await handler(
+      request(
+        `/api/view/discussion?session=${exchangeBody.session}&limit=17&cursor=abc`,
+        { headers: { cookie: cookies } },
+      ),
+    );
+    const appendText = JSON.stringify({
+      body: "accepted public body",
+      claimedName: "Public profile",
+      idempotencyKey: "append-once",
+    });
+    const append = await handler(
+      request("/api/view/discussion", {
+        method: "POST",
+        headers: {
+          ...sessionHeaders(exchangeBody.session, cookies),
+          "content-type": "application/json",
+        },
+        body: appendText,
+      }),
+    );
+
+    expect(read.status).toBe(200);
+    expect(append.status).toBe(200);
+    expect(await append.clone().json()).toEqual(publicMessage("accepted public body"));
+    const discussionRequests = relayRequests.slice(1);
+    expect(discussionRequests).toHaveLength(2);
+    expect(discussionRequests[0]!.method).toBe("GET");
+    expect(discussionRequests[0]!.url).toBe(
+      "http://relay.test/sync/link/discussion?cursor=abc&limit=17",
+    );
+    expect(discussionRequests[0]!.headers.get("authorization")).toBe(
+      `LinkCapability ${CAP_ALPHA_1}`,
+    );
+    expect(discussionRequests[0]!.headers.get("x-dohc-link-profile-secret")).toBeNull();
+    expect(discussionRequests[0]!.headers.get("x-dohc-relay-exchange-key")).toBeNull();
+    expect(discussionRequests[1]!.method).toBe("POST");
+    expect(discussionRequests[1]!.url).toBe(
+      "http://relay.test/sync/link/discussion",
+    );
+    expect(discussionRequests[1]!.headers.get("authorization")).toBe(
+      `LinkCapability ${CAP_ALPHA_1}`,
+    );
+    expect(discussionRequests[1]!.headers.get("x-dohc-link-profile-secret")).toBe(
+      PROFILE_ALPHA,
+    );
+    expect(discussionRequests[1]!.headers.get("x-dohc-relay-exchange-key")).toBe(
+      relayKey,
+    );
+    expect(await discussionRequests[1]!.text()).toBe(appendText);
+
+    const browserText = [
+      await exchanged.clone().text(),
+      await read.clone().text(),
+      await append.clone().text(),
+      exchangeBody.session,
+      ...[...logs.mock.calls, ...errors.mock.calls].flat().map(String),
+    ].join("\n");
+    for (const secret of [
+      PROFILE_ALPHA,
+      relayKey,
+      CAP_ALPHA_1,
+      SECRET_ALPHA,
+      "grant-profile-sentinel",
+    ]) {
+      expect(browserText).not.toContain(secret);
+    }
+    for (const relayRequest of discussionRequests) {
+      expect(relayRequest.url).not.toContain(PROFILE_ALPHA);
+    }
+  });
+
+  it("refuses invalid append transports and session bindings before the relay", async () => {
+    let now = 1_000;
+    let discussionCalls = 0;
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      relayExchangeKey: "discussion-relay-key",
+      publicHosts: new Set([HOST]),
+      nowMs: () => now,
+      newSessionToken: () => Buffer.alloc(32, 51).toString("base64url"),
+      newProfileSecret: () => PROFILE_ALPHA,
+      fetchRelay: async (relayRequest) => {
+        if (new URL(relayRequest.url).pathname === "/sync/link-exchange") {
+          return Response.json({
+            ok: true,
+            grantId: "grant-validation",
+            capabilityToken: CAP_ALPHA_1,
+            capabilityExpiresAtMs: 901_000,
+          });
+        }
+        discussionCalls += 1;
+        return Response.json(publicMessage("accepted"));
+      },
+    });
+    const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
+    const { session } = (await exchanged.clone().json()) as { session: string };
+    const cookies = cookieHeader(cookiePair(exchanged), profileCookiePair(exchanged));
+    const headers = {
+      ...sessionHeaders(session, cookies),
+      "content-type": "application/json",
+    };
+    const emptyBodyBytes = Buffer.byteLength(
+      JSON.stringify({ body: "", idempotencyKey: "cap" }),
+    );
+    const remaining = 8_000 - emptyBodyBytes;
+    const exactBody = "😀".repeat(Math.floor(remaining / 4)) + "x".repeat(remaining % 4);
+    const exactText = JSON.stringify({ body: exactBody, idempotencyKey: "cap" });
+    expect(Buffer.byteLength(exactText)).toBe(8_000);
+    expect(
+      (
+        await handler(
+          request("/api/view/discussion", {
+            method: "POST",
+            headers,
+            body: exactText,
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    expect(discussionCalls).toBe(1);
+
+    const mismatchedSession = "mismatch1234";
+    expect(mismatchedSession).not.toBe(session);
+    const mismatched = await handler(
+      request(`/api/view/discussion?session=${mismatchedSession}`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          body: "mismatched session",
+          idempotencyKey: "mismatched-session",
+        }),
+      }),
+    );
+    expect({ status: mismatched.status, body: await mismatched.text() }).toEqual({
+      status: 404,
+      body: shareWebRefusalBody,
+    });
+    expect(discussionCalls).toBe(1);
+
+    const invalidRequests = [
+      request("/api/view/discussion", {
+        method: "POST",
+        headers,
+        body: `${exactText} `,
+      }),
+      request("/api/view/discussion", {
+        method: "POST",
+        headers,
+        body: "{not-json",
+      }),
+      request("/api/view/discussion", {
+        method: "POST",
+        headers,
+        body: "[]",
+      }),
+      request("/api/view/discussion", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ body: "missing key" }),
+      }),
+      ...[
+        "authorId",
+        "principalId",
+        "linkGrantId",
+        "provenance",
+        "attachment",
+        "reaction",
+        "decision",
+        "anchor",
+        "markupMode",
+        "urlMetadata",
+      ].map((field) =>
+        request("/api/view/discussion", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            body: "closed body",
+            idempotencyKey: `forged-${field}`,
+            [field]: `forged-${field}`,
+          }),
+        }),
+      ),
+      request("/api/view/discussion", {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({ body: "wrong method", idempotencyKey: "wrong-method" }),
+      }),
+      request("/api/view/discussion", {
+        method: "POST",
+        headers: {
+          ...headers,
+          "x-dohc-link-session": "wrongsession",
+        },
+        body: JSON.stringify({ body: "wrong session", idempotencyKey: "wrong-session" }),
+      }),
+    ];
+    for (const invalidRequest of invalidRequests) {
+      const refusal = await handler(invalidRequest);
+      expect({ status: refusal.status, body: await refusal.text() }).toEqual({
+        status: 404,
+        body: shareWebRefusalBody,
+      });
+      expectSecurityHeaders(refusal);
+      expect(refusal.headers.get("cache-control")).toBe("private, no-store");
+    }
+    expect(discussionCalls).toBe(1);
+
+    now = 901_000 + LINK_SESSION_RENEWAL_GRACE_MS + 1;
+    const stale = await handler(
+      request("/api/view/discussion", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ body: "stale", idempotencyKey: "stale-session" }),
+      }),
+    );
+    expect({ status: stale.status, body: await stale.text() }).toEqual({
+      status: 404,
+      body: shareWebRefusalBody,
+    });
+    expect(discussionCalls).toBe(1);
+  });
+
+  it("shares one forced refresh across concurrent discussion appends", async () => {
+    let now = 1_000;
+    let refreshCalls = 0;
+    const discussionCapabilities: string[] = [];
+    const discussionProfiles: string[] = [];
+    let releaseRefresh: (() => void) | undefined;
+    const refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      relayExchangeKey: "discussion-relay-key",
+      publicHosts: new Set([HOST]),
+      nowMs: () => now,
+      newSessionToken: () => Buffer.alloc(32, 52).toString("base64url"),
+      newProfileSecret: () => PROFILE_ALPHA,
+      fetchRelay: async (relayRequest) => {
+        const pathname = new URL(relayRequest.url).pathname;
+        if (pathname === "/sync/link-exchange") {
+          return Response.json({
+            ok: true,
+            grantId: "grant-refresh",
+            capabilityToken: CAP_ALPHA_1,
+            capabilityExpiresAtMs: 901_000,
+          });
+        }
+        if (pathname === "/sync/link-refresh") {
+          refreshCalls += 1;
+          await refreshGate;
+          return Response.json({
+            ok: true,
+            grantId: "grant-refresh",
+            capabilityToken: CAP_ALPHA_2,
+            capabilityExpiresAtMs: now + 900_000,
+          });
+        }
+        discussionCapabilities.push(relayRequest.headers.get("authorization") ?? "");
+        discussionProfiles.push(
+          relayRequest.headers.get("x-dohc-link-profile-secret") ?? "",
+        );
+        return Response.json(publicMessage("refreshed"));
+      },
+    });
+    const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
+    const { session } = (await exchanged.clone().json()) as { session: string };
+    const cookies = cookieHeader(cookiePair(exchanged), profileCookiePair(exchanged));
+    const append = (idempotencyKey: string) =>
+      handler(
+        request("/api/view/discussion", {
+          method: "POST",
+          headers: {
+            ...sessionHeaders(session, cookies),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ body: "refreshed", idempotencyKey }),
+        }),
+      );
+    now = 601_001;
+
+    const first = append("concurrent-one");
+    const second = append("concurrent-two");
+    await vi.waitFor(() => expect(refreshCalls).toBe(1));
+    releaseRefresh?.();
+    const responses = await Promise.all([first, second]);
+
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    expect(discussionCapabilities).toEqual([
+      `LinkCapability ${CAP_ALPHA_2}`,
+      `LinkCapability ${CAP_ALPHA_2}`,
+    ]);
+    expect(discussionProfiles).toEqual([PROFILE_ALPHA, PROFILE_ALPHA]);
+  });
+
+  it("refuses an old append response after session replacement and retries exactly", async () => {
+    let exchangeCalls = 0;
+    let discussionCalls = 0;
+    let releaseOldAppend: (() => void) | undefined;
+    const oldAppendGate = new Promise<void>((resolve) => {
+      releaseOldAppend = resolve;
+    });
+    const appendBodies: string[] = [];
+    let sessionNumber = 0;
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      relayExchangeKey: "discussion-relay-key",
+      publicHosts: new Set([HOST]),
+      maxSessions: 1,
+      nowMs: () => 1_000,
+      newSessionToken: () =>
+        Buffer.alloc(32, 53 + sessionNumber++).toString("base64url"),
+      newProfileSecret: () => PROFILE_ALPHA,
+      fetchRelay: async (relayRequest) => {
+        if (new URL(relayRequest.url).pathname === "/sync/link-exchange") {
+          exchangeCalls += 1;
+          return Response.json({
+            ok: true,
+            grantId: "grant-currentness",
+            capabilityToken: exchangeCalls === 1 ? CAP_ALPHA_1 : CAP_ALPHA_2,
+            capabilityExpiresAtMs: 901_000,
+          });
+        }
+        discussionCalls += 1;
+        appendBodies.push(await relayRequest.clone().text());
+        if (discussionCalls === 1) await oldAppendGate;
+        return Response.json(publicMessage("once"));
+      },
+    });
+    const firstExchange = await handler(
+      request("/api/exchange", exchange(SECRET_ALPHA)),
+    );
+    const firstState = (await firstExchange.clone().json()) as { session: string };
+    const profile = profileCookiePair(firstExchange);
+    const appendText = JSON.stringify({ body: "once", idempotencyKey: "retry-once" });
+    const firstAppend = handler(
+      request("/api/view/discussion", {
+        method: "POST",
+        headers: {
+          ...sessionHeaders(
+            firstState.session,
+            cookieHeader(cookiePair(firstExchange), profile),
+          ),
+          "content-type": "application/json",
+        },
+        body: appendText,
+      }),
+    );
+    await vi.waitFor(() => expect(discussionCalls).toBe(1));
+
+    const replacementExchange = await handler(
+      request("/api/exchange", {
+        ...exchange(SECRET_ALPHA_ROTATED),
+        headers: {
+          ...exchange(SECRET_ALPHA_ROTATED).headers,
+          cookie: cookieHeader(cookiePair(firstExchange), profile),
+        },
+      }),
+    );
+    expect(replacementExchange.headers.getSetCookie()).toHaveLength(1);
+    const replacementState = (await replacementExchange.clone().json()) as {
+      session: string;
+    };
+    expect(replacementState.session).toBe(firstState.session);
+    releaseOldAppend?.();
+    const staleResponse = await firstAppend;
+    expect({ status: staleResponse.status, body: await staleResponse.text() }).toEqual({
+      status: 404,
+      body: shareWebRefusalBody,
+    });
+    expect(staleResponse.headers.has("set-cookie")).toBe(false);
+
+    const retry = await handler(
+      request("/api/view/discussion", {
+        method: "POST",
+        headers: {
+          ...sessionHeaders(
+            replacementState.session,
+            cookieHeader(cookiePair(replacementExchange), profile),
+          ),
+          "content-type": "application/json",
+        },
+        body: appendText,
+      }),
+    );
+    expect(retry.status).toBe(200);
+    expect(appendBodies).toEqual([appendText, appendText]);
+    expect(
+      appendBodies.map(
+        (body) => (JSON.parse(body) as { idempotencyKey: string }).idempotencyKey,
+      ),
+    ).toEqual(["retry-once", "retry-once"]);
+  });
+
+  it("translates only recognized discussion states and hides every relay detail", async () => {
+    const relayKey = "discussion-error-key-sentinel";
+    const grant = "grant-error-sentinel";
+    const principal = "principal-error-sentinel";
+    const relayResponses = [
+      () =>
+        Response.json(
+          {
+            ok: false,
+            code: "link_discussion_blocked",
+            error: `blocked ${principal} ${PROFILE_ALPHA}`,
+          },
+          { status: 403 },
+        ),
+      () =>
+        Response.json(
+          {
+            ok: false,
+            code: "link_discussion_paused",
+            error: `paused ${grant} ${CAP_ALPHA_1}`,
+          },
+          { status: 403 },
+        ),
+      () =>
+        Response.json(
+          { ok: false, code: "other_forbidden", error: PROFILE_ALPHA },
+          { status: 403 },
+        ),
+      () => Response.json({ ok: false, error: relayKey }, { status: 403 }),
+      () => new Response(`credential ${SECRET_ALPHA}`, { status: 404 }),
+      () => new Response(`rate ${principal}`, { status: 429 }),
+      () => new Response(`conflict ${grant}`, { status: 409 }),
+      () => new Response(`failure ${CAP_ALPHA_1}`, { status: 500 }),
+    ];
+    let attempt = 0;
+    const logs = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const relayUrls: string[] = [];
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      relayExchangeKey: relayKey,
+      publicHosts: new Set([HOST]),
+      nowMs: () => 1_000,
+      newSessionToken: () => Buffer.alloc(32, 55).toString("base64url"),
+      newProfileSecret: () => PROFILE_ALPHA,
+      fetchRelay: async (relayRequest) => {
+        relayUrls.push(relayRequest.url);
+        if (new URL(relayRequest.url).pathname === "/sync/link-exchange") {
+          return Response.json({
+            ok: true,
+            grantId: grant,
+            capabilityToken: CAP_ALPHA_1,
+            capabilityExpiresAtMs: 901_000,
+          });
+        }
+        return relayResponses[attempt++]!();
+      },
+    });
+    const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
+    const { session } = (await exchanged.clone().json()) as { session: string };
+    const cookies = cookieHeader(cookiePair(exchanged), profileCookiePair(exchanged));
+    const responses: Response[] = [];
+    for (let index = 0; index < relayResponses.length; index += 1) {
+      responses.push(
+        await handler(
+          request("/api/view/discussion", {
+            method: "POST",
+            headers: {
+              ...sessionHeaders(session, cookies),
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({ body: "state", idempotencyKey: `state-${index}` }),
+          }),
+        ),
+      );
+    }
+
+    expect({ status: responses[0]!.status, body: await responses[0]!.json() }).toEqual({
+      status: 403,
+      body: { ok: false, state: "blocked" },
+    });
+    expect({ status: responses[1]!.status, body: await responses[1]!.json() }).toEqual({
+      status: 403,
+      body: { ok: false, state: "paused" },
+    });
+    const genericStatuses = [404, 404, 404, 429, 404, 503];
+    for (const [index, status] of genericStatuses.entries()) {
+      const response = responses[index + 2]!;
+      expect({ status: response.status, body: await response.text() }).toEqual({
+        status,
+        body: shareWebRefusalBody,
+      });
+    }
+    for (const response of responses) {
+      expectSecurityHeaders(response);
+      expect(response.headers.get("cache-control")).toBe("private, no-store");
+    }
+    const browserText = [
+      ...responses.map((response) => response.statusText),
+      ...[...logs.mock.calls, ...errors.mock.calls].flat().map(String),
+    ].join("\n");
+    for (const sentinel of [
+      PROFILE_ALPHA,
+      relayKey,
+      CAP_ALPHA_1,
+      SECRET_ALPHA,
+      grant,
+      principal,
+      "link_discussion_blocked",
+      "link_discussion_paused",
+    ]) {
+      expect(browserText).not.toContain(sentinel);
+      expect(relayUrls.every((url) => !url.includes(sentinel))).toBe(true);
+    }
   });
 });
 
