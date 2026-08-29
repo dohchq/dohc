@@ -245,7 +245,6 @@ export function CommentsPanel(props: { access: ShareAccess; session: string }) {
     submitControllerRef.current = controller;
     pendingRef.current = true;
     setPending(true);
-    setSubmitError(false);
 
     const isCurrent = () =>
       submitTokenRef.current === token && sessionRef.current === session;
@@ -272,7 +271,9 @@ export function CommentsPanel(props: { access: ShareAccess; session: string }) {
       );
       if (!isCurrent()) return;
       if (response.status === 403) {
-        const state = parseDiscussionWriteState(await response.json());
+        const result = await response.json();
+        if (!isCurrent()) return;
+        const state = parseDiscussionWriteState(result);
         if (state) {
           intentRef.current = null;
           setSubmitError(false);
@@ -280,7 +281,9 @@ export function CommentsPanel(props: { access: ShareAccess; session: string }) {
           return;
         }
       } else if (response.ok) {
-        const message = parseDiscussionAppendResult(await response.json());
+        const result = await response.json();
+        if (!isCurrent()) return;
+        const message = parseDiscussionAppendResult(result);
         const merged = message && messagesRef.current
           ? mergeDiscussionMessages(messagesRef.current, [message])
           : null;

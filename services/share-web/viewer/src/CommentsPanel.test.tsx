@@ -39,6 +39,30 @@ function jsonResponse(value: unknown, status = 200): Response {
   });
 }
 
+function heldJsonResponse(status: number): {
+  bodyStarted: () => boolean;
+  release: (value: unknown) => void;
+  response: Response;
+} {
+  let bodyStarted = false;
+  let releaseBody: (value: unknown) => void = () => {
+    throw new Error("held response body is not ready");
+  };
+  const body = new Promise<unknown>((resolve) => {
+    releaseBody = resolve;
+  });
+  const response = new Response(null, { status });
+  vi.spyOn(response, "json").mockImplementation(() => {
+    bodyStarted = true;
+    return body as ReturnType<Response["json"]>;
+  });
+  return {
+    bodyStarted: () => bodyStarted,
+    release: (value) => releaseBody(value),
+    response,
+  };
+}
+
 function discussionPage(
   messages: readonly unknown[] = [],
   nextCursor: string | null = null,
@@ -251,6 +275,64 @@ describe("CommentsPanel", () => {
     expect(posted[2]?.idempotencyKey).not.toBe(posted[1]?.idempotencyKey);
   });
 
+  it.each(["success", "blocked", "paused"] as const)(
+    "keeps a generic failure visible through a held %s retry body",
+    async (outcome) => {
+      const held = heldJsonResponse(outcome === "success" ? 200 : 403);
+      const posted: Array<Record<string, unknown>> = [];
+      vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+        if (requestPath(input) !== "/api/view/discussion" || init?.method !== "POST") {
+          return discussionPage();
+        }
+        posted.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+        return posted.length === 1
+          ? new Response(null, { status: 404 })
+          : held.response;
+      }));
+
+      await render("comment");
+      setControlValue(bodyInput(), "Retry draft");
+      submit();
+      await settle(() =>
+        container.textContent?.includes("The comment didn't post. Try again.") === true
+      );
+      submit();
+      await settle(held.bodyStarted);
+
+      expect(posted).toHaveLength(2);
+      expect(posted[1]?.idempotencyKey).toBe(posted[0]?.idempotencyKey);
+      expect(container.textContent).toContain("The comment didn't post. Try again.");
+      expect(bodyInput().value).toBe("Retry draft");
+      expect(submitButton().disabled).toBe(true);
+
+      held.release(outcome === "success"
+        ? {
+            ok: true,
+            message: {
+              ...LINK_MESSAGE,
+              messageId: "retry-terminal",
+              createdAtMs: 4_000,
+              body: "Retry draft",
+            },
+          }
+        : { ok: false, state: outcome });
+      if (outcome === "success") {
+        await settle(() => container.textContent?.includes("Retry draft") === true);
+        expect(container.textContent).not.toContain("The comment didn't post. Try again.");
+        expect(bodyInput().value).toBe("");
+        expect(bodyInput().disabled).toBe(false);
+      } else {
+        const stateCopy = outcome === "blocked"
+          ? "The owner turned off comments for this browser."
+          : "The owner paused comments. You can still read everything.";
+        await settle(() => container.textContent?.includes(stateCopy) === true);
+        expect(container.textContent).not.toContain("The comment didn't post. Try again.");
+        expect(bodyInput().value).toBe("Retry draft");
+        expect(bodyInput().disabled).toBe(true);
+      }
+    },
+  );
+
   it("reuses the intent key across an automatic transport retry", async () => {
     vi.useFakeTimers();
     const posted: Array<Record<string, unknown>> = [];
@@ -394,6 +476,54 @@ describe("CommentsPanel", () => {
       expect(container.textContent).not.toContain("Old committed body");
       expect(container.textContent).not.toContain(
         "The owner turned off comments for this browser.",
+      );
+    },
+  );
+
+  it.each(["success", "blocked", "paused"] as const)(
+    "does not apply a held %s append body to a replacement session",
+    async (outcome) => {
+      const held = heldJsonResponse(outcome === "success" ? 200 : 403);
+      let oldSignal: AbortSignal | undefined;
+      vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (_input, init) => {
+        if (init?.method === "POST") {
+          oldSignal = init.signal ?? undefined;
+          return held.response;
+        }
+        return requestSession(init) === FIRST_SESSION
+          ? discussionPage()
+          : discussionPage([{ ...NAMED_MESSAGE, body: "Replacement timeline" }]);
+      }));
+
+      await render("comment");
+      setControlValue(bodyInput(), "Old draft");
+      submit();
+      await settle(held.bodyStarted);
+      await act(async () => {
+        root.render(<CommentsPanel access="comment" session={SECOND_SESSION} />);
+      });
+      await settle(() => container.textContent?.includes("Replacement timeline") === true);
+      setControlValue(bodyInput(), "Replacement draft");
+      held.release(outcome === "success"
+        ? {
+            ok: true,
+            message: { ...LINK_MESSAGE, body: "Old committed body" },
+          }
+        : { ok: false, state: outcome });
+      await settle(() => oldSignal?.aborted === true);
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(bodyInput().value).toBe("Replacement draft");
+      expect(bodyInput().disabled).toBe(false);
+      expect(container.textContent).toContain("Replacement timeline");
+      expect(container.textContent).not.toContain("Old committed body");
+      expect(container.textContent).not.toContain(
+        "The owner turned off comments for this browser.",
+      );
+      expect(container.textContent).not.toContain(
+        "The owner paused comments. You can still read everything.",
       );
     },
   );
