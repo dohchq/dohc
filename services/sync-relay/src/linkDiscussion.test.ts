@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -885,6 +886,265 @@ describe("share discussion HTTP boundary", () => {
         .listShareDiscussionMessages({ shareId: SHARE, limit: 100 })
         .messages.map((message) => message.authorUserId),
     ).toEqual([OWNER, COMMENTER, EDITOR]);
+  });
+
+  it("lets a named Comment recipient discuss a pinned version without file authority", async () => {
+    const test = await fixture();
+    const shareId = "version-comment-share-sentinel";
+    const versionId = "review-version-sentinel";
+    const path = "docs/pinned.md";
+    const pinnedBody = "pinned version bytes\n";
+    const liveBody = "newer live bytes\n";
+    const digest = (value: string) =>
+      createHash("sha256").update(value).digest("hex");
+    const pinnedSha256 = digest(pinnedBody);
+    const liveSha256 = digest(liveBody);
+    for (const [sha256, content, createdAtMs] of [
+      [pinnedSha256, pinnedBody, 2_000],
+      [liveSha256, liveBody, 2_001],
+    ] as const) {
+      const bytes = new TextEncoder().encode(content);
+      expect(
+        test.storage.putBlob({
+          workspaceId: WORKSPACE,
+          sha256,
+          content: bytes,
+          createdAtMs,
+        }),
+      ).toEqual({ byteLength: bytes.byteLength, alreadyHad: false });
+    }
+    expect(
+      test.storage.appendLogBatch({
+        workspaceId: WORKSPACE,
+        originId: "version-comment-origin",
+        ops: [
+          {
+            originSeq: 0,
+            opKind: "version.create",
+            payloadJson: JSON.stringify({
+              versionId,
+              name: "Review version",
+              kind: "named",
+              createdAtMs: 2_002,
+              forkSnapshots: [
+                {
+                  objectId: "version-comment-object",
+                  path,
+                  blobSha256: pinnedSha256,
+                  updatedAtMs: 2_002,
+                  latestMomentId: "version-comment-snapshot",
+                  metadata: {},
+                },
+              ],
+            }),
+            recordedAtMs: 2_002,
+          },
+          {
+            originSeq: 1,
+            opKind: "moment.append",
+            payloadJson: JSON.stringify({
+              momentId: "version-comment-live-moment",
+              versionId: "main",
+              objectId: "version-comment-object",
+              path,
+              recordedAtMs: 2_003,
+              operation: "write",
+              payloadBeforeBlobSha256: null,
+              payloadBeforePath: null,
+              payloadAfterBlobSha256: liveSha256,
+              payloadAfterPath: path,
+              metadata: { origin: "user" },
+              beforePresent: "null",
+              afterPresent: "content",
+            }),
+            recordedAtMs: 2_003,
+          },
+        ],
+      }),
+    ).toMatchObject({ inserted: 2 });
+
+    test.storage.createShare({
+      share: {
+        shareId,
+        workspaceId: WORKSPACE,
+        granterUserId: OWNER,
+        selectorJson: JSON.stringify({ paths: [], versionId }),
+        createdAtMs: 2_004,
+      },
+      grant: {
+        grantId: "version-view-grant-sentinel",
+        shareId,
+        principalKind: "user",
+        principalUserId: VIEWER,
+        principalEmail: null,
+        access: "view",
+        generation: 1,
+        status: "active",
+        createdAtMs: 2_004,
+        revokedAtMs: null,
+        parentGrantId: null,
+      },
+    });
+    const link: LinkFixture = {
+      access: "comment",
+      grantId: "version-comment-link-grant-sentinel",
+      secret: secret("l"),
+      capabilityToken: secret("m"),
+    };
+    expect(
+      test.storage.createLinkGrant({
+        grant: {
+          grantId: link.grantId,
+          shareId,
+          principalKind: "link",
+          principalUserId: null,
+          principalEmail: null,
+          access: link.access,
+          generation: 1,
+          status: "active",
+          createdAtMs: 2_005,
+          revokedAtMs: null,
+          parentGrantId: null,
+        },
+        credential: {
+          credentialId: "version-comment-credential-sentinel",
+          grantId: link.grantId,
+          secretHash: hashLinkBearer(link.secret, LINK_KEY),
+          generation: 1,
+          mintedAtMs: 2_005,
+          retiredAtMs: null,
+        },
+      }),
+    ).toBe(true);
+    expect(
+      test.storage.mintLinkSession({
+        session: {
+          sessionId: "version-comment-session-sentinel",
+          capabilityHash: hashLinkBearer(link.capabilityToken, LINK_KEY),
+          grantId: link.grantId,
+          generation: 1,
+          mintedAtMs: 2_006,
+          expiresAtMs: 1_000_000,
+        },
+      }),
+    ).toBe(true);
+
+    const linkAppend = await test.handler(
+      trustedAppend(
+        link,
+        {
+          body: "link version comment",
+          claimedName: "Version Link",
+          idempotencyKey: "version-link-comment",
+        },
+        PROFILE_A,
+      ),
+    );
+    expect(linkAppend.status).toBe(200);
+    await linkAppend.arrayBuffer();
+
+    const handoff = await test.handler(
+      linkRequest(
+        link,
+        "/sync/link-handoff",
+        { method: "POST" },
+        { relayKey: RELAY_KEY },
+      ),
+    );
+    expect(handoff.status).toBe(200);
+    const redeemed = await test.handler(
+      request(
+        COMMENTER,
+        "/sync/link-redeem",
+        jsonRequest({ code: (await body(handoff)).code }),
+      ),
+    );
+    expect(redeemed.status).toBe(200);
+    const redeemedBody = await body(redeemed);
+    expect(redeemedBody).toMatchObject({
+      shareId,
+      access: "comment",
+    });
+    expect(test.storage.getShareGrant(String(redeemedBody.grantId))).toMatchObject({
+      principalUserId: COMMENTER,
+      parentGrantId: link.grantId,
+    });
+
+    const namedAppend = await test.handler(
+      request(
+        COMMENTER,
+        `/sync/shares/${shareId}/discussion`,
+        jsonRequest({
+          body: "named version comment",
+          idempotencyKey: "version-named-comment",
+        }),
+      ),
+    );
+    expect(namedAppend.status).toBe(200);
+    expectPrivate(namedAppend);
+    const timeline = await body(
+      await test.handler(request(OWNER, `/sync/shares/${shareId}/discussion`)),
+    );
+    expect(messages(timeline).map((message) => message.body)).toEqual([
+      "link version comment",
+      "named version comment",
+    ]);
+
+    const namedLog = await body(
+      await test.handler(
+        request(COMMENTER, `/sync/shares/${shareId}/log?since=0`),
+      ),
+    );
+    expect(JSON.stringify(namedLog)).toContain(pinnedSha256);
+    expect(JSON.stringify(namedLog)).not.toContain(liveSha256);
+    const pinnedBlob = await test.handler(
+      request(COMMENTER, `/sync/shares/${shareId}/blobs/${pinnedSha256}`),
+    );
+    expect(pinnedBlob.status).toBe(200);
+    expect(await pinnedBlob.text()).toBe(pinnedBody);
+    expect(
+      (
+        await test.handler(
+          request(COMMENTER, `/sync/shares/${shareId}/blobs/${liveSha256}`),
+        )
+      ).status,
+    ).toBe(404);
+
+    for (const [route, payload] of [
+      ["log", { originId: "version-named-write", ops: [] }],
+      ["proposals", { submitId: "version-named-proposal", ops: [] }],
+    ] as const) {
+      const denied = await test.handler(
+        request(
+          COMMENTER,
+          `/sync/shares/${shareId}/${route}`,
+          jsonRequest(payload),
+        ),
+      );
+      expect(denied.status, route).toBe(403);
+      expect(await body(denied), route).toEqual({
+        ok: false,
+        error: "this share does not accept appends",
+        code: "share_read_only",
+      });
+    }
+    const viewAppend = await test.handler(
+      request(
+        VIEWER,
+        `/sync/shares/${shareId}/discussion`,
+        jsonRequest({
+          body: "view version comment",
+          idempotencyKey: "version-view-comment",
+        }),
+      ),
+    );
+    expect(viewAppend.status).toBe(403);
+    expectPrivate(viewAppend);
+    expect(await body(viewAppend)).toEqual({
+      ok: false,
+      error: "this share does not accept appends",
+      code: "share_read_only",
+    });
   });
 
   it("keeps exact retries idempotent and rechecks revoke, retune, pause, and block inside storage", async () => {

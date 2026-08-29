@@ -779,7 +779,7 @@ export function createSyncRelayHandler({
     ) {
       return { viewer: "owner" };
     }
-    const authorized = requireShareAction(shareId, actorUserId, action);
+    const authorized = requireShareAction(shareId, actorUserId, "read");
     if (
       action === "append" &&
       authorized.grant.access !== "comment" &&
