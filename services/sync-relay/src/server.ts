@@ -32,6 +32,10 @@ import {
   verifyRelayExchangeKey,
 } from "./linkSecurity";
 import {
+  DiscussionActivityCapacityError,
+  DiscussionActivityHub,
+} from "./discussionActivity";
+import {
   PresenceCapacityError,
   PresenceHub,
   presenceScopeKey,
@@ -76,6 +80,7 @@ import {
   type SyncRelayLinkInventoryRow,
   type SyncRelayShareDiscussionCursor,
   type SyncRelayShareDiscussionMessageRow,
+  type SyncRelayShareDiscussionActivityPage,
   type SyncRelayShareDiscussionPage,
   type SyncRelayShareGrantRow,
   type SyncRelayShareWithGrantRow,
@@ -145,6 +150,9 @@ export interface CreateSyncRelayHandlerOptions {
   // tests can assert it holds only in-memory state (never a storage row).
   // Absent => a fresh in-memory hub, which is correct for production too.
   presence?: PresenceHub;
+  // Wake-only long-poll coordination. Durable revisions and data stay in
+  // storage, so replacing this hub cannot invalidate a client watermark.
+  discussionActivity?: DiscussionActivityHub;
   // Relay-instance HMAC key. When absent, every link route refuses without
   // touching storage. main.ts requires it outside development and test.
   linkKey?: string | Uint8Array;
@@ -172,6 +180,7 @@ type SyncRelayRoute =
   | { route: "link-current" }
   | { route: "link-log" }
   | { route: "link-discussion" }
+  | { route: "link-discussion-activity" }
   | { route: "link-blob"; sha256: string }
   | { route: "workspaces" }
   | { route: "blob"; workspaceId: string; sha256: string }
@@ -194,6 +203,7 @@ type SyncRelayRoute =
   | { route: "share-grant-revoke"; shareId: string; grantId: string }
   | { route: "share-log"; shareId: string }
   | { route: "share-discussion"; shareId: string }
+  | { route: "share-discussion-activity"; shareId: string }
   | { route: "share-discussion-moderation"; shareId: string }
   | { route: "share-blob"; shareId: string; sha256: string }
   // #646 PR3a. The recipient's half of the proposal lane is share-scoped; the
@@ -252,6 +262,8 @@ export const MAX_OPS_PER_REQUEST = 500;
 export const DEFAULT_LOG_PAGE_SIZE = 100;
 export const MAX_LOG_PAGE_SIZE = 500;
 const DEFAULT_DISCUSSION_PAGE_SIZE = 50;
+export const DEFAULT_DISCUSSION_ACTIVITY_HOLD_MS = 25_000;
+export const MAX_DISCUSSION_ACTIVITY_HOLD_MS = 30_000;
 const DISCUSSION_CURSOR_MAX_CHARS = 1_024;
 const DISCUSSION_MODERATION_HANDLE_MAX_CHARS = 512;
 const MAX_LINK_CURRENT_FILES = 5_000;
@@ -358,6 +370,7 @@ export function createSyncRelayHandler({
   newGrantId = () => randomUUID(),
   newId = () => randomUUID(),
   presence = new PresenceHub(),
+  discussionActivity = new DiscussionActivityHub(),
   linkKey,
   shareWebOrigin,
   relayExchangeKey,
@@ -808,6 +821,7 @@ export function createSyncRelayHandler({
   ): Record<string, unknown> => {
     return {
       ok: true,
+      activityRevision: page.activityRevision,
       ...(viewer === "owner"
         ? { linkCommentsPaused: page.linkCommentsPaused }
         : {}),
@@ -820,6 +834,32 @@ export function createSyncRelayHandler({
           : encodeDiscussionCursor(page.nextCursor),
     };
   };
+
+  const discussionActivityPage = (
+    page: SyncRelayShareDiscussionActivityPage,
+    viewer: DiscussionViewer,
+    composerState?: "available" | "blocked" | "paused",
+  ): Record<string, unknown> => ({
+    ok: true,
+    latestRevision: page.latestRevision,
+    cursorRevision: page.cursorRevision,
+    hasMore: page.hasMore,
+    messages: page.messages.map((message) =>
+      projectDiscussionMessage(message, viewer),
+    ),
+    ...(viewer === "public"
+      ? { composerState: composerState ?? "available" }
+      : {}),
+    ...(viewer === "owner"
+      ? {
+          linkCommentsPaused: page.linkCommentsPaused,
+          principals: page.principals.map((principal) => ({
+            principalId: principal.principalId,
+            blocked: principal.blockedAtMs !== null,
+          })),
+        }
+      : {}),
+  });
 
   function requireOwnedLinkGrant(
     shareId: string,
@@ -1467,11 +1507,103 @@ export function createSyncRelayHandler({
         }
         return refused();
       }
+      if (!result.replayed) discussionActivity.wake(capability.shareId);
       return privateResponse(
         linkJsonResponse(capability.shareId, capability.grantId, {
           ok: true,
           message: projectDiscussionMessage(result.message, "public"),
         }),
+      );
+    } catch (error) {
+      if (
+        error instanceof HttpError &&
+        (error.statusCode === 401 || error.code === RELAY_ERRORS.not_found.code)
+      ) {
+        return refused();
+      }
+      return privateErrorResponse(error);
+    }
+  };
+
+  const respondToLinkDiscussionActivity = async (
+    request: Request,
+  ): Promise<Response> => {
+    const refused = (): Response => privateErrorResponse(notFound());
+    if (!linkKey) return refused();
+    if (request.method !== "GET") {
+      return privateErrorResponse(methodNotAllowed());
+    }
+    const profileSecret = request.headers.get("x-dohc-link-profile-secret");
+    if (profileSecret === null || !/^[A-Za-z0-9_-]{43}$/u.test(profileSecret)) {
+      return refused();
+    }
+
+    try {
+      const { capabilityToken, capability } = requireLinkRead(
+        request,
+        linkReadRateLimiter,
+        linkGrantReadRateLimiter,
+      );
+      const query = parseDiscussionActivityQuery(new URL(request.url).searchParams);
+      const observedRevision = storage.getShareDiscussionRevision(capability.shareId);
+      if (observedRevision === null) return refused();
+      if (query.since > observedRevision) {
+        throw badRequest("since is ahead of discussion activity");
+      }
+      if (query.since === observedRevision && query.hold > 0) {
+        try {
+          await discussionActivity.wait(
+            capability.shareId,
+            `link:${capability.session.capabilityHash}`,
+            {
+              holdMs: query.hold,
+              signal: request.signal,
+              shouldPark: () => {
+                try {
+                  requireFreshLinkRead(capabilityToken, capability);
+                  return (
+                    storage.getShareDiscussionRevision(capability.shareId) ===
+                    query.since
+                  );
+                } catch {
+                  return false;
+                }
+              },
+            },
+          );
+        } catch (error) {
+          if (error instanceof DiscussionActivityCapacityError) {
+            throw linkReadRateLimited();
+          }
+          throw error;
+        }
+      }
+
+      // Every settled wait (wake, timeout, or abort) re-establishes the
+      // capability before reading durable state, then once more before bytes
+      // leave the process.
+      requireFreshLinkRead(capabilityToken, capability);
+      const page = storage.listShareDiscussionActivity({
+        shareId: capability.shareId,
+        sinceRevision: query.since,
+        limit: query.limit,
+      });
+      const principal = storage.getLinkPrincipalForGrantProfile(
+        capability.grantId,
+        hashLinkProfileSecret(profileSecret, linkKey),
+      );
+      const composerState = page.linkCommentsPaused
+        ? "paused"
+        : principal !== null && principal.blockedAtMs !== null
+          ? "blocked"
+          : "available";
+      requireFreshLinkRead(capabilityToken, capability);
+      return privateResponse(
+        linkJsonResponse(
+          capability.shareId,
+          capability.grantId,
+          discussionActivityPage(page, "public", composerState),
+        ),
       );
     } catch (error) {
       if (
@@ -1499,13 +1631,26 @@ export function createSyncRelayHandler({
       }
       await claimPendingShares(actor.userId);
       if (request.method === "GET") {
-        requireDiscussionAuthority(shareId, actor.userId, "read");
+        const initialAuthority = requireDiscussionAuthority(
+          shareId,
+          actor.userId,
+          "read",
+        );
         const url = new URL(request.url);
         const cursor = decodeDiscussionCursor(url.searchParams.get("cursor"));
         const limit = parseDiscussionLimit(url.searchParams.get("limit"));
+        const direction = parseDiscussionDirection(
+          url.searchParams.get("direction"),
+        );
+        if (direction === "newest-first" && initialAuthority.viewer !== "owner") {
+          throw notFound();
+        }
         const storedPage = storage.listShareDiscussionMessages({
           shareId,
-          after: cursor,
+          ...(direction === "newest-first"
+            ? { before: cursor }
+            : { after: cursor }),
+          direction,
           limit,
         });
         const finalAuthority = requireDiscussionAuthority(
@@ -1513,6 +1658,9 @@ export function createSyncRelayHandler({
           actor.userId,
           "read",
         );
+        if (direction === "newest-first" && finalAuthority.viewer !== "owner") {
+          throw notFound();
+        }
         return privateJsonResponse(
           discussionPage(storedPage, finalAuthority.viewer),
         );
@@ -1548,10 +1696,104 @@ export function createSyncRelayHandler({
         }
         throw badRequest("discussion message is invalid");
       }
+      if (!result.replayed) discussionActivity.wake(shareId);
       return privateJsonResponse({
         ok: true,
         message: projectDiscussionMessage(result.message, authority.viewer),
       });
+    } catch (error) {
+      return privateErrorResponse(error);
+    }
+  };
+
+  const respondToShareDiscussionActivity = async (
+    request: Request,
+    shareId: string,
+  ): Promise<Response> => {
+    if (request.method !== "GET") {
+      return privateErrorResponse(methodNotAllowed());
+    }
+    try {
+      const actor = await resolveActor(request, "");
+      if (
+        !actor.userId ||
+        Buffer.byteLength(actor.userId, "utf8") >
+          LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT
+      ) {
+        throw badRequest("discussion actor id is invalid");
+      }
+      await claimPendingShares(actor.userId);
+      const initialAuthority = requireDiscussionAuthority(
+        shareId,
+        actor.userId,
+        "read",
+      );
+      const query = parseDiscussionActivityQuery(new URL(request.url).searchParams);
+      const observedRevision = storage.getShareDiscussionRevision(shareId);
+      if (observedRevision === null) throw notFound();
+      if (query.since > observedRevision) {
+        throw badRequest("since is ahead of discussion activity");
+      }
+      if (query.since === observedRevision && query.hold > 0) {
+        try {
+          await discussionActivity.wait(shareId, `user:${actor.userId}`, {
+            holdMs: query.hold,
+            signal: request.signal,
+            shouldPark: () => {
+              try {
+                const authority = requireDiscussionAuthority(
+                  shareId,
+                  actor.userId,
+                  "read",
+                );
+                return (
+                  (initialAuthority.viewer !== "owner" ||
+                    authority.viewer === "owner") &&
+                  storage.getShareDiscussionRevision(shareId) === query.since
+                );
+              } catch {
+                return false;
+              }
+            },
+          });
+        } catch (error) {
+          if (error instanceof DiscussionActivityCapacityError) {
+            throw linkReadRateLimited();
+          }
+          throw error;
+        }
+      }
+
+      const postWakeAuthority = requireDiscussionAuthority(
+        shareId,
+        actor.userId,
+        "read",
+      );
+      if (
+        initialAuthority.viewer === "owner" &&
+        postWakeAuthority.viewer !== "owner"
+      ) {
+        throw notFound();
+      }
+      const page = storage.listShareDiscussionActivity({
+        shareId,
+        sinceRevision: query.since,
+        limit: query.limit,
+      });
+      const finalAuthority = requireDiscussionAuthority(
+        shareId,
+        actor.userId,
+        "read",
+      );
+      if (
+        initialAuthority.viewer === "owner" &&
+        finalAuthority.viewer !== "owner"
+      ) {
+        throw notFound();
+      }
+      return privateJsonResponse(
+        discussionActivityPage(page, finalAuthority.viewer),
+      );
     } catch (error) {
       return privateErrorResponse(error);
     }
@@ -1592,6 +1834,7 @@ export function createSyncRelayHandler({
           actorUserId,
         });
         if (deleted === null) return refused();
+        discussionActivity.wake(shareId);
         return privateJsonResponse({
           ok: true,
           message: {
@@ -1613,6 +1856,7 @@ export function createSyncRelayHandler({
         ) {
           return refused();
         }
+        discussionActivity.wake(shareId);
         return privateJsonResponse({ ok: true, blocked });
       }
       const linkCommentsPaused = action.action === "pause";
@@ -1625,6 +1869,7 @@ export function createSyncRelayHandler({
       ) {
         return refused();
       }
+      discussionActivity.wake(shareId);
       return privateJsonResponse({ ok: true, linkCommentsPaused });
     } catch (error) {
       return privateErrorResponse(error);
@@ -1975,8 +2220,14 @@ export function createSyncRelayHandler({
       if (route.route === "link-discussion") {
         return await respondToLinkDiscussion(request);
       }
+      if (route.route === "link-discussion-activity") {
+        return await respondToLinkDiscussionActivity(request);
+      }
       if (route.route === "share-discussion") {
         return await respondToShareDiscussion(request, route.shareId);
+      }
+      if (route.route === "share-discussion-activity") {
+        return await respondToShareDiscussionActivity(request, route.shareId);
       }
       if (route.route === "share-discussion-moderation") {
         return await respondToShareDiscussionModeration(request, route.shareId);
@@ -2269,6 +2520,7 @@ export function createSyncRelayHandler({
         }
         if (!secret) throw notFound();
         terminateLinkStreamsForGrant(result.grant.grantId);
+        discussionActivity.wake(share.shareId);
         return jsonResponse({
           ok: true,
           ...linkGrantBody(result.grant),
@@ -2321,6 +2573,7 @@ export function createSyncRelayHandler({
           throw notFound();
         }
         terminateLinkStreamsForGrant(result.grant.grantId);
+        discussionActivity.wake(share.shareId);
         return jsonResponse({
           ok: true,
           ...linkGrantBody(result.grant),
@@ -2346,6 +2599,7 @@ export function createSyncRelayHandler({
           },
         });
         if (!result.ok) throw notFound();
+        discussionActivity.wake(route.shareId);
         return jsonResponse({
           ok: true,
           ...namedGrantTransitionBody(result.grant),
@@ -2368,6 +2622,7 @@ export function createSyncRelayHandler({
           },
         });
         if (!result.ok) throw notFound();
+        discussionActivity.wake(route.shareId);
         return jsonResponse({
           ok: true,
           ...namedGrantTransitionBody(result.grant),
@@ -2416,10 +2671,12 @@ export function createSyncRelayHandler({
             throw notFound();
           }
           terminateLinkStreamsForGrant(result.grant.grantId);
+          discussionActivity.wake(share.shareId);
           return jsonResponse({ ok: true, ...linkGrantBody(result.grant) });
         }
         if (storage.revokeShare(route.shareId, nowMs())) {
           terminateLinkStreamsForShare(route.shareId);
+          discussionActivity.wake(route.shareId);
         }
         return jsonResponse({ ok: true, shareId: route.shareId });
       }
@@ -3688,6 +3945,15 @@ function parseRoute(request: Request): SyncRelayRoute {
     parts.length === 4 &&
     parts[0] === "sync" &&
     parts[1] === "link" &&
+    parts[2] === "discussion" &&
+    parts[3] === "activity"
+  ) {
+    return { route: "link-discussion-activity" };
+  }
+  if (
+    parts.length === 4 &&
+    parts[0] === "sync" &&
+    parts[1] === "link" &&
     parts[2] === "blobs"
   ) {
     return { route: "link-blob", sha256: parts[3]! };
@@ -3734,6 +4000,13 @@ function parseRoute(request: Request): SyncRelayRoute {
     if (parts.length === 4 && parts[3] === "log") return { route: "share-log", shareId };
     if (parts.length === 4 && parts[3] === "discussion") {
       return { route: "share-discussion", shareId };
+    }
+    if (
+      parts.length === 5 &&
+      parts[3] === "discussion" &&
+      parts[4] === "activity"
+    ) {
+      return { route: "share-discussion-activity", shareId };
     }
     if (
       parts.length === 5 &&
@@ -3973,6 +4246,51 @@ function parseDiscussionLimit(value: string | null): number {
     throw badRequest(`limit must not exceed ${LINK_DISCUSSION_PAGE_LIMIT}`);
   }
   return limit;
+}
+
+function parseDiscussionDirection(
+  value: string | null,
+): "oldest-first" | "newest-first" {
+  if (value === null || value === "oldest-first") return "oldest-first";
+  if (value === "newest-first") return "newest-first";
+  throw badRequest("direction is invalid");
+}
+
+function parseDiscussionActivityQuery(searchParams: URLSearchParams): {
+  since: number;
+  hold: number;
+  limit: number;
+} {
+  const allowed = new Set(["since", "hold", "limit"]);
+  for (const key of searchParams.keys()) {
+    if (!allowed.has(key) || searchParams.getAll(key).length !== 1) {
+      throw badRequest("discussion activity query is invalid");
+    }
+  }
+  const parseNonnegative = (value: string | null, name: string): number => {
+    if (value === null || !/^(0|[1-9][0-9]*)$/u.test(value)) {
+      throw badRequest(`${name} is invalid`);
+    }
+    const parsed = Number(value);
+    if (!Number.isSafeInteger(parsed)) throw badRequest(`${name} is invalid`);
+    return parsed;
+  };
+  const since = parseNonnegative(searchParams.get("since"), "since");
+  const holdValue = searchParams.get("hold");
+  const hold =
+    holdValue === null
+      ? DEFAULT_DISCUSSION_ACTIVITY_HOLD_MS
+      : parseNonnegative(holdValue, "hold");
+  if (hold > MAX_DISCUSSION_ACTIVITY_HOLD_MS) {
+    throw badRequest(
+      `hold must not exceed ${MAX_DISCUSSION_ACTIVITY_HOLD_MS}`,
+    );
+  }
+  return {
+    since,
+    hold,
+    limit: parseDiscussionLimit(searchParams.get("limit")),
+  };
 }
 
 function parseLinkDiscussionAppendBody(input: Record<string, unknown>): {

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { hashLinkBearer } from "./linkSecurity";
+import { DiscussionActivityHub } from "./discussionActivity";
 import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
 import {
   openSyncRelayStorage,
@@ -64,6 +65,7 @@ type Fixture = {
   dbPath: string;
   handler: SyncRelayHandler;
   makeHandler: (storage: SyncRelayStorage) => SyncRelayHandler;
+  discussionActivity: DiscussionActivityHub;
   view: LinkFixture;
   comment: LinkFixture;
   edit: LinkFixture;
@@ -80,6 +82,7 @@ async function fixture(
     ) => Promise<string | null> | string | null;
     workspaceQuotaBytes?: number;
     namedRecipient?: string;
+    discussionActivity?: DiscussionActivityHub;
   } = {},
 ): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), "dohc-link-discussion-http-"));
@@ -194,6 +197,8 @@ async function fixture(
 
   let id = 0;
   let clock = 10_000;
+  const discussionActivity =
+    overrides.discussionActivity ?? new DiscussionActivityHub();
   const names: Record<string, string> = {
     [OWNER]: "Owner Name",
     [COMMENTER]: "Commenter Name",
@@ -203,6 +208,7 @@ async function fixture(
   const makeHandler = (targetStorage: SyncRelayStorage): SyncRelayHandler =>
     createSyncRelayHandler({
       storage: targetStorage,
+      discussionActivity,
       resolveActor(request: Request, workspaceId: string) {
         const match = /^Bearer user:([^ ]+)$/u.exec(
           request.headers.get("authorization") ?? "",
@@ -222,7 +228,16 @@ async function fixture(
       relayExchangeKey: RELAY_KEY,
     });
   const handler = makeHandler(storage);
-  return { storage, dbPath, handler, makeHandler, view, comment, edit };
+  return {
+    storage,
+    dbPath,
+    handler,
+    makeHandler,
+    discussionActivity,
+    view,
+    comment,
+    edit,
+  };
 }
 
 function addIndependentCommentLink(storage: SyncRelayStorage): LinkFixture {
@@ -437,8 +452,8 @@ function bytes(...values: string[]): number {
 }
 
 const DELETING_USER_ID_RESERVATION_BYTES = 1_024;
-const MESSAGE_FIXED_BYTES = DELETING_USER_ID_RESERVATION_BYTES + 3 * 8;
-const PRINCIPAL_FIXED_BYTES = 160 + 4 * 8;
+const MESSAGE_FIXED_BYTES = DELETING_USER_ID_RESERVATION_BYTES + 4 * 8;
+const PRINCIPAL_FIXED_BYTES = 160 + 5 * 8;
 
 function namedMessageCharge(input: {
   actorUserId: string;
@@ -567,6 +582,565 @@ function seedCrossShareHandles(storage: SyncRelayStorage): {
 }
 
 describe("share discussion HTTP boundary", () => {
+  it("relays durable current-state activity across waits, lifecycle changes, restart, timeout, abort, and capacity", async () => {
+    const activityHub = new DiscussionActivityHub({
+      maxTotalWaiters: 2,
+      maxWaitersPerShare: 2,
+      maxWaitersPerActor: 1,
+    });
+    const test = await fixture({ discussionActivity: activityHub });
+    const first = await body(
+      await test.handler(
+        trustedAppend(test.comment, {
+          body: "activity first",
+          claimedName: "Activity Link",
+          idempotencyKey: "activity-route-first",
+        }),
+      ),
+    );
+    for (const [bodyText, key] of [
+      ["activity second", "activity-route-second"],
+      ["activity third", "activity-route-third"],
+    ] as const) {
+      expect(
+        (
+          await test.handler(
+            request(
+              OWNER,
+              `/sync/shares/${SHARE}/discussion`,
+              jsonRequest({ body: bodyText, idempotencyKey: key }),
+            ),
+          )
+        ).status,
+      ).toBe(200);
+    }
+
+    const chronological = await body(
+      await test.handler(linkRequest(test.view, "/sync/link/discussion?limit=2")),
+    );
+    expect(chronological.activityRevision).toBe(3);
+    expect(messages(chronological).map((message) => message.body)).toEqual([
+      "activity first",
+      "activity second",
+    ]);
+    const laterChronological = await body(
+      await test.handler(
+        linkRequest(
+          test.view,
+          `/sync/link/discussion?limit=2&cursor=${String(chronological.nextCursor)}`,
+        ),
+      ),
+    );
+    expect(laterChronological.activityRevision).toBe(3);
+    expect(messages(laterChronological).map((message) => message.body)).toEqual([
+      "activity third",
+    ]);
+
+    const newestOwner = await body(
+      await test.handler(
+        request(
+          OWNER,
+          `/sync/shares/${SHARE}/discussion?direction=newest-first&limit=2`,
+        ),
+      ),
+    );
+    expect(newestOwner.activityRevision).toBe(3);
+    expect(messages(newestOwner).map((message) => message.body)).toEqual([
+      "activity third",
+      "activity second",
+    ]);
+
+    const publicWait = test.handler(
+      linkRequest(
+        test.comment,
+        "/sync/link/discussion/activity?since=3&hold=30000&limit=100",
+        {},
+        { profileSecret: PROFILE_A },
+      ),
+    );
+    const ownerWait = test.handler(
+      request(
+        OWNER,
+        `/sync/shares/${SHARE}/discussion/activity?since=3&hold=30000&limit=100`,
+      ),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(activityHub.stats()).toEqual({ shares: 1, waiters: 2 });
+
+    const appended = await body(
+      await test.handler(
+        request(
+          COMMENTER,
+          `/sync/shares/${SHARE}/discussion`,
+          jsonRequest({
+            body: "activity after watermark",
+            idempotencyKey: "activity-route-after-watermark",
+          }),
+        ),
+      ),
+    );
+    const publicActivity = await body(await publicWait);
+    expect(publicActivity).toMatchObject({
+      ok: true,
+      latestRevision: 4,
+      cursorRevision: 4,
+      hasMore: false,
+      composerState: "available",
+    });
+    expect(messages(publicActivity)).toEqual([appended.message]);
+    for (const sentinel of [
+      WORKSPACE,
+      SHARE,
+      test.comment.grantId,
+      test.comment.capabilityToken,
+      PROFILE_A,
+    ]) {
+      expect(JSON.stringify(publicActivity), sentinel).not.toContain(sentinel);
+    }
+
+    const ownerActivity = await body(await ownerWait);
+    expect(ownerActivity).toMatchObject({
+      ok: true,
+      latestRevision: 4,
+      cursorRevision: 4,
+      hasMore: false,
+      linkCommentsPaused: false,
+    });
+    expect(messages(ownerActivity)).toEqual([appended.message]);
+    expect(first.message).toMatchObject({ body: "activity first" });
+    expect(activityHub.stats()).toEqual({ shares: 0, waiters: 0 });
+
+    const rawLink = test.storage.listShareDiscussionMessages({
+      shareId: SHARE,
+      limit: 100,
+    }).messages[0]!;
+    const changedPublic = async (since: number): Promise<Record<string, unknown>> =>
+      body(
+        await test.handler(
+          linkRequest(
+            test.comment,
+            `/sync/link/discussion/activity?since=${since}&hold=0&limit=100`,
+            {},
+            { profileSecret: PROFILE_A },
+          ),
+        ),
+      );
+    const changedOwner = async (since: number): Promise<Record<string, unknown>> =>
+      body(
+        await test.handler(
+          request(
+            OWNER,
+            `/sync/shares/${SHARE}/discussion/activity?since=${since}&hold=0&limit=100`,
+          ),
+        ),
+      );
+
+    expect(
+      (
+        await test.handler(
+          moderationRequest(OWNER, {
+            action: "delete",
+            messageId: (appended.message as Record<string, unknown>).messageId,
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    const deleted = await changedPublic(4);
+    expect(deleted).toMatchObject({ cursorRevision: 5, composerState: "available" });
+    expect(messages(deleted)).toEqual([
+      {
+        messageId: (appended.message as Record<string, unknown>).messageId,
+        createdAtMs: (appended.message as Record<string, unknown>).createdAtMs,
+        deleted: true,
+      },
+    ]);
+
+    expect(
+      (
+        await test.handler(
+          moderationRequest(OWNER, {
+            action: "block",
+            principalId: rawLink.linkPrincipalId,
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    const blocked = await changedPublic(5);
+    expect(blocked).toMatchObject({
+      cursorRevision: 6,
+      messages: [],
+      composerState: "blocked",
+    });
+    expect(await changedOwner(5)).toMatchObject({
+      cursorRevision: 6,
+      principals: [{ principalId: rawLink.linkPrincipalId, blocked: true }],
+    });
+
+    expect(
+      (await test.handler(moderationRequest(OWNER, { action: "pause" }))).status,
+    ).toBe(200);
+    expect(await changedPublic(6)).toMatchObject({
+      cursorRevision: 7,
+      messages: [],
+      composerState: "paused",
+    });
+
+    expect(
+      (
+        await test.handler(
+          moderationRequest(OWNER, {
+            action: "unblock",
+            principalId: rawLink.linkPrincipalId,
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    expect(await changedOwner(7)).toMatchObject({
+      cursorRevision: 8,
+      principals: [{ principalId: rawLink.linkPrincipalId, blocked: false }],
+    });
+    expect(await changedPublic(7)).toMatchObject({
+      cursorRevision: 8,
+      composerState: "paused",
+    });
+
+    expect(
+      (await test.handler(moderationRequest(OWNER, { action: "resume" }))).status,
+    ).toBe(200);
+    const resumed = await changedPublic(8);
+    expect(resumed).toMatchObject({
+      latestRevision: 9,
+      cursorRevision: 9,
+      messages: [],
+      composerState: "available",
+    });
+    for (const publicDelta of [publicActivity, deleted, blocked, resumed]) {
+      const serialized = JSON.stringify(publicDelta);
+      for (const sentinel of [
+        OWNER,
+        COMMENTER,
+        WORKSPACE,
+        SHARE,
+        test.comment.grantId,
+        rawLink.linkPrincipalId!,
+        test.comment.capabilityToken,
+        PROFILE_A,
+        "session-comment-sentinel",
+      ]) {
+        expect(serialized, sentinel).not.toContain(sentinel);
+      }
+    }
+
+    const revokedWait = test.handler(
+      linkRequest(
+        test.comment,
+        "/sync/link/discussion/activity?since=9&hold=30000&limit=100",
+        {},
+        { profileSecret: PROFILE_A },
+      ),
+    );
+    expect(activityHub.stats()).toEqual({ shares: 1, waiters: 1 });
+    const revoke = await test.handler(
+      request(
+        OWNER,
+        `/sync/shares/${SHARE}/revoke`,
+        jsonRequest({
+          grantId: test.comment.grantId,
+          workspaceId: WORKSPACE,
+          expectedDependentGrantIds: [],
+        }),
+      ),
+    );
+    expect(revoke.status).toBe(200);
+    expect(await genericRefusal(await revokedWait)).toContain("404:");
+    expect(activityHub.stats()).toEqual({ shares: 0, waiters: 0 });
+
+    test.storage.close();
+    storages.splice(storages.indexOf(test.storage), 1);
+    const reopened = openSyncRelayStorage(test.dbPath, {
+      newDiscussionId: () => "discussion-after-restart",
+    });
+    storages.push(reopened);
+    const restarted = test.makeHandler(reopened);
+    const later = await body(
+      await restarted(
+        request(
+          OWNER,
+          `/sync/shares/${SHARE}/discussion`,
+          jsonRequest({
+            body: "activity after restart",
+            idempotencyKey: "activity-after-restart",
+          }),
+        ),
+      ),
+    );
+    const afterRestart = await body(
+      await restarted(
+        linkRequest(
+          test.view,
+          "/sync/link/discussion/activity?since=9&hold=0&limit=100",
+          {},
+          { profileSecret: PROFILE_B },
+        ),
+      ),
+    );
+    expect(afterRestart).toMatchObject({
+      latestRevision: 10,
+      cursorRevision: 10,
+      hasMore: false,
+      composerState: "available",
+    });
+    expect(messages(afterRestart)).toEqual([later.message]);
+
+    const timedOut = await body(
+      await restarted(
+        linkRequest(
+          test.view,
+          "/sync/link/discussion/activity?since=10&hold=1&limit=100",
+          {},
+          { profileSecret: PROFILE_B },
+        ),
+      ),
+    );
+    expect(timedOut).toMatchObject({
+      latestRevision: 10,
+      cursorRevision: 10,
+      hasMore: false,
+      messages: [],
+    });
+    expect(activityHub.stats()).toEqual({ shares: 0, waiters: 0 });
+
+    const publicAbort = new AbortController();
+    const ownerAbort = new AbortController();
+    const publicAbortedWait = restarted(
+      linkRequest(
+        test.view,
+        "/sync/link/discussion/activity?since=10&hold=30000&limit=100",
+        { signal: publicAbort.signal },
+        { profileSecret: PROFILE_B },
+      ),
+    );
+    const ownerAbortedWait = restarted(
+      request(
+        OWNER,
+        `/sync/shares/${SHARE}/discussion/activity?since=10&hold=30000&limit=100`,
+        { signal: ownerAbort.signal },
+      ),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(activityHub.stats()).toEqual({ shares: 1, waiters: 2 });
+    const overflow = await restarted(
+      request(
+        COMMENTER,
+        `/sync/shares/${SHARE}/discussion/activity?since=10&hold=30000&limit=100`,
+      ),
+    );
+    expect(overflow.status).toBe(429);
+    expect(await body(overflow)).toMatchObject({ code: "link_read_rate_limited" });
+    expect(activityHub.stats()).toEqual({ shares: 1, waiters: 2 });
+    publicAbort.abort();
+    ownerAbort.abort();
+    expect((await publicAbortedWait).status).toBe(200);
+    expect((await ownerAbortedWait).status).toBe(200);
+    expect(activityHub.stats()).toEqual({ shares: 0, waiters: 0 });
+
+    for (const path of [
+      `/sync/shares/${SHARE}/discussion/activity?since=10&hold=0&extra=1`,
+      `/sync/shares/${SHARE}/discussion/activity?since=11&hold=0`,
+      `/sync/shares/${SHARE}/discussion/activity?hold=0`,
+      `/sync/shares/${SHARE}/discussion/activity?since=-1&hold=0`,
+      `/sync/shares/${SHARE}/discussion/activity?since=10&hold=30001`,
+      `/sync/shares/${SHARE}/discussion/activity?since=10&hold=0&limit=101`,
+      `/sync/shares/${SHARE}/discussion/activity?since=10&since=10&hold=0`,
+    ]) {
+      expect((await restarted(request(OWNER, path))).status).toBe(400);
+      expect(activityHub.stats()).toEqual({ shares: 0, waiters: 0 });
+    }
+  });
+
+  it("orders a newer append and an older tombstone canonically inside one activity delta", async () => {
+    const test = await fixture();
+    const older = await body(
+      await test.handler(
+        request(
+          OWNER,
+          `/sync/shares/${SHARE}/discussion`,
+          jsonRequest({ body: "older", idempotencyKey: "ordered-older" }),
+        ),
+      ),
+    );
+    const newer = await body(
+      await test.handler(
+        request(
+          OWNER,
+          `/sync/shares/${SHARE}/discussion`,
+          jsonRequest({ body: "newer", idempotencyKey: "ordered-newer" }),
+        ),
+      ),
+    );
+    expect(
+      (
+        await test.handler(
+          moderationRequest(OWNER, {
+            action: "delete",
+            messageId: (older.message as Record<string, unknown>).messageId,
+          }),
+        )
+      ).status,
+    ).toBe(200);
+
+    const delta = await body(
+      await test.handler(
+        linkRequest(
+          test.view,
+          "/sync/link/discussion/activity?since=1&hold=0&limit=100",
+          {},
+          { profileSecret: PROFILE_A },
+        ),
+      ),
+    );
+    expect(messages(delta)).toEqual([
+      {
+        messageId: (older.message as Record<string, unknown>).messageId,
+        createdAtMs: (older.message as Record<string, unknown>).createdAtMs,
+        deleted: true,
+      },
+      newer.message,
+    ]);
+  });
+
+  it("refuses public activity when principal lookup races with grant revocation", async () => {
+    const test = await fixture();
+    const invalidCapability = {
+      ...test.comment,
+      capabilityToken: secret("z"),
+    };
+    const baseline = await genericRefusal(
+      await test.handler(
+        linkRequest(
+          invalidCapability,
+          "/sync/link/discussion/activity?since=0&hold=0&limit=100",
+          {},
+          { profileSecret: PROFILE_A },
+        ),
+      ),
+    );
+    const original = test.storage.getLinkPrincipalForGrantProfile.bind(
+      test.storage,
+    );
+    let revoked = false;
+    test.storage.getLinkPrincipalForGrantProfile = (grantId, profileTokenHash) => {
+      const principal = original(grantId, profileTokenHash);
+      const result = test.storage.revokeShareGrant({
+        shareId: SHARE,
+        grantId: test.comment.grantId,
+        revokedAtMs: 20_000,
+        expectedDependentGrantIds: [],
+      });
+      expect(result.ok).toBe(true);
+      revoked = true;
+      return principal;
+    };
+
+    const response = await test.handler(
+      linkRequest(
+        test.comment,
+        "/sync/link/discussion/activity?since=0&hold=0&limit=100",
+        {},
+        { profileSecret: PROFILE_A },
+      ),
+    );
+    expect(revoked).toBe(true);
+    expect(await genericRefusal(response)).toBe(baseline);
+  });
+
+  it("wakes parked readers into refusal on rotation, retune, ownership loss, and named access loss", async () => {
+    for (const transition of ["rotate", "retune"] as const) {
+      const activityHub = new DiscussionActivityHub();
+      const test = await fixture({ discussionActivity: activityHub });
+      const waiting = test.handler(
+        linkRequest(
+          test.comment,
+          "/sync/link/discussion/activity?since=0&hold=30000&limit=100",
+          {},
+          { profileSecret: PROFILE_A },
+        ),
+      );
+      expect(activityHub.stats()).toEqual({ shares: 1, waiters: 1 });
+      const changed = await test.handler(
+        request(
+          OWNER,
+          `/sync/shares/${SHARE}/links/${test.comment.grantId}/${transition}`,
+          jsonRequest(
+            transition === "rotate"
+              ? { workspaceId: WORKSPACE, expectedDependentGrantIds: [] }
+              : { access: "view", expectedDependentGrantIds: [] },
+          ),
+        ),
+      );
+      expect(changed.status, transition).toBe(200);
+      await changed.arrayBuffer();
+      expect(await genericRefusal(await waiting), transition).toContain("404:");
+      expect(activityHub.stats()).toEqual({ shares: 0, waiters: 0 });
+    }
+
+    const ownershipHub = new DiscussionActivityHub();
+    const ownership = await fixture({ discussionActivity: ownershipHub });
+    const oldOwnerWait = ownership.handler(
+      request(
+        OWNER,
+        `/sync/shares/${SHARE}/discussion/activity?since=0&hold=30000&limit=100`,
+      ),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(ownershipHub.stats()).toEqual({ shares: 1, waiters: 1 });
+    updateWorkspaceOwner(ownership.dbPath, NEW_OWNER);
+    const newOwnerAppend = await ownership.handler(
+      request(
+        NEW_OWNER,
+        `/sync/shares/${SHARE}/discussion`,
+        jsonRequest({
+          body: "new owner wake",
+          idempotencyKey: "new-owner-wake",
+        }),
+      ),
+    );
+    expect(newOwnerAppend.status).toBe(200);
+    await newOwnerAppend.arrayBuffer();
+    expect(await genericRefusal(await oldOwnerWait)).toContain("404:");
+    expect(ownershipHub.stats()).toEqual({ shares: 0, waiters: 0 });
+
+    const accessHub = new DiscussionActivityHub();
+    const access = await fixture({ discussionActivity: accessHub });
+    const recipientWait = access.handler(
+      request(
+        COMMENTER,
+        `/sync/shares/${SHARE}/discussion/activity?since=0&hold=30000&limit=100`,
+      ),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(accessHub.stats()).toEqual({ shares: 1, waiters: 1 });
+    const revoke = await access.handler(
+      request(
+        OWNER,
+        "/sync/shares/share-discussion-sentinel/grants/named-comment-grant-sentinel/revoke",
+        { method: "POST" },
+      ),
+    );
+    expect(revoke.status).toBe(200);
+    await revoke.arrayBuffer();
+    expect(await genericRefusal(await recipientWait)).toContain("404:");
+    expect(accessHub.stats()).toEqual({ shares: 0, waiters: 0 });
+  });
+
   it("shares one mixed timeline across View and Comment links without aggregating write authority", async () => {
     const test = await fixture();
     const linkAppend = await test.handler(

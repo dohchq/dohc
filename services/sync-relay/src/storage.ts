@@ -138,6 +138,7 @@ export interface SyncRelayLinkPrincipalRow {
   displayName: string | null;
   createdAtMs: number;
   blockedAtMs: number | null;
+  discussionRevision: number;
   storageBytes: number;
 }
 
@@ -155,6 +156,7 @@ export interface SyncRelayShareDiscussionMessageRow {
   createdAtMs: number;
   deletedAtMs: number | null;
   deletedByUserId: string | null;
+  discussionRevision: number;
   storageBytes: number;
 }
 
@@ -171,6 +173,20 @@ export interface SyncRelayShareDiscussionPageMessage
 export interface SyncRelayShareDiscussionPage {
   messages: SyncRelayShareDiscussionPageMessage[];
   nextCursor: SyncRelayShareDiscussionCursor | null;
+  linkCommentsPaused: boolean;
+  activityRevision: number;
+}
+
+export type SyncRelayShareDiscussionPageDirection =
+  | "oldest-first"
+  | "newest-first";
+
+export interface SyncRelayShareDiscussionActivityPage {
+  latestRevision: number;
+  cursorRevision: number;
+  hasMore: boolean;
+  messages: SyncRelayShareDiscussionPageMessage[];
+  principals: SyncRelayLinkPrincipalRow[];
   linkCommentsPaused: boolean;
 }
 
@@ -552,9 +568,21 @@ export interface SyncRelayStorage {
   listShareDiscussionMessages(input: {
     shareId: string;
     after?: SyncRelayShareDiscussionCursor | null;
+    before?: SyncRelayShareDiscussionCursor | null;
+    direction?: SyncRelayShareDiscussionPageDirection;
     limit: number;
   }): SyncRelayShareDiscussionPage;
+  getShareDiscussionRevision(shareId: string): number | null;
+  listShareDiscussionActivity(input: {
+    shareId: string;
+    sinceRevision: number;
+    limit: number;
+  }): SyncRelayShareDiscussionActivityPage;
   getLinkPrincipal(principalId: string): SyncRelayLinkPrincipalRow | null;
+  getLinkPrincipalForGrantProfile(
+    grantId: string,
+    profileTokenHash: string,
+  ): SyncRelayLinkPrincipalRow | null;
   setLinkPrincipalBlocked(input: {
     shareId: string;
     principalId: string;
@@ -805,9 +833,10 @@ export const LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT = 1_024;
 const LINK_DISCUSSION_SQLITE_INTEGER_BYTES = 8;
 const LINK_DISCUSSION_MESSAGE_FIXED_STORAGE_BYTES =
   LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT +
-  3 * LINK_DISCUSSION_SQLITE_INTEGER_BYTES;
+  4 * LINK_DISCUSSION_SQLITE_INTEGER_BYTES;
 const LINK_DISCUSSION_PRINCIPAL_FIXED_STORAGE_BYTES =
-  LINK_DISCUSSION_NAME_BYTE_LIMIT + 4 * LINK_DISCUSSION_SQLITE_INTEGER_BYTES;
+  LINK_DISCUSSION_NAME_BYTE_LIMIT + 5 * LINK_DISCUSSION_SQLITE_INTEGER_BYTES;
+const MAX_DISCUSSION_REVISION = Number.MAX_SAFE_INTEGER;
 // Retention grace for freshly-uploaded blobs (0P sync-hardening item 4). Blob
 // upload is two-phase (PUT /blobs/:sha, then POST /log referencing it); GC that
 // runs between the two must NOT reclaim the blob just because no log row
@@ -850,6 +879,7 @@ const NORMALIZED_SHARE_SCHEMA_SQL = `
     selector_json TEXT NOT NULL,
     created_at_ms INTEGER NOT NULL,
     link_writes_paused_at_ms INTEGER,
+    discussion_revision INTEGER NOT NULL DEFAULT 0 CHECK (discussion_revision >= 0),
     FOREIGN KEY (workspace_id)
       REFERENCES sync_relay_workspaces(workspace_id)
       ON DELETE CASCADE
@@ -937,6 +967,7 @@ const NORMALIZED_SHARE_SCHEMA_SQL = `
     ),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
     blocked_at_ms INTEGER,
+    discussion_revision INTEGER NOT NULL DEFAULT 0 CHECK (discussion_revision >= 0),
     storage_bytes INTEGER NOT NULL CHECK (storage_bytes > 0),
     UNIQUE (grant_id, profile_token_hash),
     FOREIGN KEY (grant_id)
@@ -944,6 +975,8 @@ const NORMALIZED_SHARE_SCHEMA_SQL = `
   ) STRICT;
   CREATE INDEX IF NOT EXISTS idx_sync_relay_link_principals_budget
     ON sync_relay_link_principals(grant_id, mint_generation, created_at_ms, principal_id);
+  CREATE INDEX IF NOT EXISTS idx_sync_relay_link_principals_activity
+    ON sync_relay_link_principals(grant_id, discussion_revision);
   CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_relay_link_principals_principal_grant
     ON sync_relay_link_principals(principal_id, grant_id);
 
@@ -986,6 +1019,7 @@ const NORMALIZED_SHARE_SCHEMA_SQL = `
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
     deleted_at_ms INTEGER,
     deleted_by_user_id TEXT,
+    discussion_revision INTEGER NOT NULL DEFAULT 0 CHECK (discussion_revision >= 0),
     storage_bytes INTEGER NOT NULL CHECK (storage_bytes > 0),
     CHECK (
       (author_kind = 'named'
@@ -1012,6 +1046,8 @@ const NORMALIZED_SHARE_SCHEMA_SQL = `
   ) STRICT;
   CREATE INDEX IF NOT EXISTS idx_sync_relay_share_discussion_page
     ON sync_relay_share_discussion_messages(share_id, created_at_ms, message_id);
+  CREATE INDEX IF NOT EXISTS idx_sync_relay_share_discussion_activity
+    ON sync_relay_share_discussion_messages(share_id, discussion_revision);
   CREATE INDEX IF NOT EXISTS idx_sync_relay_share_discussion_principal_budget
     ON sync_relay_share_discussion_messages(
       link_principal_id, created_at_ms, message_id
@@ -1357,8 +1393,11 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       shareColumns.includes("recipient_user_id") ||
       !String(grantSchema?.sql ?? "").includes("'link'") ||
       !shareColumns.includes("link_writes_paused_at_ms") ||
+      !shareColumns.includes("discussion_revision") ||
       !sessionColumns.includes("principal_id") ||
       !principalColumns.includes("storage_bytes") ||
+      !principalColumns.includes("discussion_revision") ||
+      !discussionSchemaSql.includes("discussion_revision") ||
       !discussionSchemaSql.includes(
         `length(display_name_snapshot) BETWEEN 1 AND ${LINK_DISCUSSION_NAME_CODE_POINT_LIMIT}`,
       ) ||
@@ -3757,7 +3796,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       const existingPrincipalRow = this.db
         .prepare(
           `SELECT principal_id, grant_id, mint_generation, profile_token_hash,
-                  display_name, created_at_ms, blocked_at_ms, storage_bytes
+                  display_name, created_at_ms, blocked_at_ms,
+                  discussion_revision, storage_bytes
            FROM sync_relay_link_principals
            WHERE grant_id = ? AND profile_token_hash = ?
            LIMIT 1`,
@@ -3783,7 +3823,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
             `SELECT message_id, share_id, idempotency_key, request_hash,
                     author_kind, author_user_id, link_grant_id, link_principal_id,
                     display_name_snapshot, body, created_at_ms, deleted_at_ms,
-                    deleted_by_user_id, storage_bytes
+                     deleted_by_user_id, discussion_revision, storage_bytes
              FROM sync_relay_share_discussion_messages
              WHERE share_id = ?
                AND author_kind = 'link'
@@ -3903,14 +3943,16 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       ) {
         return { ok: false, reason: "workspace-quota" };
       }
+      const discussionRevision = this.nextShareDiscussionRevision(shareId);
 
       if (!principal) {
         this.db
           .prepare(
             `INSERT INTO sync_relay_link_principals (
                principal_id, grant_id, mint_generation, profile_token_hash,
-               display_name, created_at_ms, blocked_at_ms, storage_bytes
-             ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?)`,
+               display_name, created_at_ms, blocked_at_ms,
+               discussion_revision, storage_bytes
+             ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
           )
           .run(
             principalId,
@@ -3919,6 +3961,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
             input.profileTokenHash,
             committedName,
             createdAtMs,
+            discussionRevision,
             principalAddedBytes,
           );
         principal = this.getLinkPrincipal(principalId)!;
@@ -3926,10 +3969,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         this.db
           .prepare(
             `UPDATE sync_relay_link_principals
-             SET display_name = ?
+             SET display_name = ?, discussion_revision = ?
              WHERE principal_id = ? AND display_name IS NULL`,
           )
-          .run(committedName, principal.principalId);
+          .run(committedName, discussionRevision, principal.principalId);
         principal = this.getLinkPrincipal(principal.principalId)!;
       }
 
@@ -3952,8 +3995,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
              message_id, share_id, idempotency_key, request_hash, author_kind,
              author_user_id, link_grant_id, link_principal_id,
              display_name_snapshot, body, created_at_ms, deleted_at_ms,
-             deleted_by_user_id, storage_bytes
-           ) VALUES (?, ?, ?, ?, 'link', NULL, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
+             deleted_by_user_id, discussion_revision, storage_bytes
+           ) VALUES (?, ?, ?, ?, 'link', NULL, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
         )
         .run(
           messageId,
@@ -3965,6 +4008,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           displayNameSnapshot,
           body,
           createdAtMs,
+          discussionRevision,
           messageStorageBytes,
         );
       const message = this.db
@@ -3972,7 +4016,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           `SELECT message_id, share_id, idempotency_key, request_hash,
                   author_kind, author_user_id, link_grant_id, link_principal_id,
                   display_name_snapshot, body, created_at_ms, deleted_at_ms,
-                  deleted_by_user_id, storage_bytes
+                  deleted_by_user_id, discussion_revision, storage_bytes
            FROM sync_relay_share_discussion_messages
            WHERE message_id = ?`,
         )
@@ -4032,7 +4076,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           `SELECT message_id, share_id, idempotency_key, request_hash,
                   author_kind, author_user_id, link_grant_id, link_principal_id,
                   display_name_snapshot, body, created_at_ms, deleted_at_ms,
-                  deleted_by_user_id, storage_bytes
+                  deleted_by_user_id, discussion_revision, storage_bytes
            FROM sync_relay_share_discussion_messages
            WHERE share_id = ?
              AND author_kind = 'named'
@@ -4074,6 +4118,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       ) {
         return { ok: false, reason: "workspace-quota" };
       }
+      const discussionRevision = this.nextShareDiscussionRevision(input.shareId);
 
       this.db
         .prepare(
@@ -4081,8 +4126,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
              message_id, share_id, idempotency_key, request_hash, author_kind,
              author_user_id, link_grant_id, link_principal_id,
              display_name_snapshot, body, created_at_ms, deleted_at_ms,
-             deleted_by_user_id, storage_bytes
-           ) VALUES (?, ?, ?, ?, 'named', ?, NULL, NULL, ?, ?, ?, NULL, NULL, ?)`,
+             deleted_by_user_id, discussion_revision, storage_bytes
+           ) VALUES (?, ?, ?, ?, 'named', ?, NULL, NULL, ?, ?, ?, NULL, NULL, ?, ?)`,
         )
         .run(
           messageId,
@@ -4093,6 +4138,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           displayName,
           body,
           createdAtMs,
+          discussionRevision,
           messageStorageBytes,
         );
       const message = this.db
@@ -4100,7 +4146,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           `SELECT message_id, share_id, idempotency_key, request_hash,
                   author_kind, author_user_id, link_grant_id, link_principal_id,
                   display_name_snapshot, body, created_at_ms, deleted_at_ms,
-                  deleted_by_user_id, storage_bytes
+                  deleted_by_user_id, discussion_revision, storage_bytes
            FROM sync_relay_share_discussion_messages
            WHERE message_id = ?`,
         )
@@ -4117,6 +4163,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   listShareDiscussionMessages(input: {
     shareId: string;
     after?: SyncRelayShareDiscussionCursor | null;
+    before?: SyncRelayShareDiscussionCursor | null;
+    direction?: SyncRelayShareDiscussionPageDirection;
     limit: number;
   }): SyncRelayShareDiscussionPage {
     if (
@@ -4126,23 +4174,28 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     ) {
       throw new Error(`discussion page limit must be between 1 and ${LINK_DISCUSSION_PAGE_LIMIT}`);
     }
-    const after = input.after ?? null;
+    const direction = input.direction ?? "oldest-first";
+    if (direction !== "oldest-first" && direction !== "newest-first") {
+      throw new Error("discussion page direction is invalid");
+    }
+    const cursor =
+      direction === "newest-first" ? (input.before ?? null) : (input.after ?? null);
     if (
-      after !== null &&
-      (!Number.isSafeInteger(after.createdAtMs) || !after.messageId)
+      cursor !== null &&
+      (!Number.isSafeInteger(cursor.createdAtMs) || !cursor.messageId)
     ) {
       throw new Error("discussion page cursor is invalid");
     }
     return this.readTx(() => {
       const share = this.db
         .prepare(
-          `SELECT link_writes_paused_at_ms
+          `SELECT link_writes_paused_at_ms, discussion_revision
            FROM sync_relay_shares
            WHERE share_id = ?`,
         )
         .get(input.shareId);
       const rows = (
-        after === null
+        cursor === null
           ? this.db
               .prepare(
                 `SELECT message.message_id, message.share_id,
@@ -4151,15 +4204,17 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
                         message.link_grant_id, message.link_principal_id,
                         message.display_name_snapshot, message.body,
                         message.created_at_ms, message.deleted_at_ms,
-                        message.deleted_by_user_id, message.storage_bytes,
+                        message.deleted_by_user_id, message.discussion_revision,
+                        message.storage_bytes,
                         principal.blocked_at_ms AS link_principal_blocked_at_ms
                  FROM sync_relay_share_discussion_messages AS message
                  LEFT JOIN sync_relay_link_principals AS principal
                    ON principal.principal_id = message.link_principal_id
                   AND principal.grant_id = message.link_grant_id
                  WHERE message.share_id = ?
-                 ORDER BY message.created_at_ms, message.message_id
-                 LIMIT ?`,
+                  ORDER BY message.created_at_ms ${direction === "newest-first" ? "DESC" : "ASC"},
+                           message.message_id ${direction === "newest-first" ? "DESC" : "ASC"}
+                  LIMIT ?`,
               )
               .all(input.shareId, input.limit + 1)
           : this.db
@@ -4170,23 +4225,26 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
                         message.link_grant_id, message.link_principal_id,
                         message.display_name_snapshot, message.body,
                         message.created_at_ms, message.deleted_at_ms,
-                        message.deleted_by_user_id, message.storage_bytes,
+                        message.deleted_by_user_id, message.discussion_revision,
+                        message.storage_bytes,
                         principal.blocked_at_ms AS link_principal_blocked_at_ms
                  FROM sync_relay_share_discussion_messages AS message
                  LEFT JOIN sync_relay_link_principals AS principal
                    ON principal.principal_id = message.link_principal_id
                   AND principal.grant_id = message.link_grant_id
                  WHERE message.share_id = ?
-                   AND (message.created_at_ms > ? OR
-                        (message.created_at_ms = ? AND message.message_id > ?))
-                 ORDER BY message.created_at_ms, message.message_id
-                 LIMIT ?`,
+                    AND (message.created_at_ms ${direction === "newest-first" ? "<" : ">"} ? OR
+                         (message.created_at_ms = ? AND
+                          message.message_id ${direction === "newest-first" ? "<" : ">"} ?))
+                  ORDER BY message.created_at_ms ${direction === "newest-first" ? "DESC" : "ASC"},
+                           message.message_id ${direction === "newest-first" ? "DESC" : "ASC"}
+                  LIMIT ?`,
               )
               .all(
                 input.shareId,
-                after.createdAtMs,
-                after.createdAtMs,
-                after.messageId,
+                cursor.createdAtMs,
+                cursor.createdAtMs,
+                cursor.messageId,
                 input.limit + 1,
               )
       ).map((row) => ({
@@ -4206,6 +4264,131 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
             ? { createdAtMs: last.createdAtMs, messageId: last.messageId }
             : null,
         linkCommentsPaused: share?.link_writes_paused_at_ms != null,
+        activityRevision: Number(share?.discussion_revision ?? 0),
+      };
+    });
+  }
+
+  getShareDiscussionRevision(shareId: string): number | null {
+    const row = this.db
+      .prepare(
+        `SELECT discussion_revision
+         FROM sync_relay_shares
+         WHERE share_id = ?`,
+      )
+      .get(shareId);
+    return row ? Number(row.discussion_revision) : null;
+  }
+
+  listShareDiscussionActivity(input: {
+    shareId: string;
+    sinceRevision: number;
+    limit: number;
+  }): SyncRelayShareDiscussionActivityPage {
+    if (
+      !Number.isSafeInteger(input.sinceRevision) ||
+      input.sinceRevision < 0 ||
+      !Number.isSafeInteger(input.limit) ||
+      input.limit < 1 ||
+      input.limit > LINK_DISCUSSION_PAGE_LIMIT
+    ) {
+      throw new Error("discussion activity query is invalid");
+    }
+    return this.readTx(() => {
+      const share = this.db
+        .prepare(
+          `SELECT link_writes_paused_at_ms, discussion_revision
+           FROM sync_relay_shares
+           WHERE share_id = ?`,
+        )
+        .get(input.shareId);
+      const latestRevision = Number(share?.discussion_revision ?? 0);
+      if (input.sinceRevision > latestRevision) {
+        throw new Error("discussion activity revision is ahead of storage");
+      }
+      const changedRevisions = this.db
+        .prepare(
+          `SELECT discussion_revision
+           FROM (
+             SELECT message.discussion_revision AS discussion_revision
+             FROM sync_relay_share_discussion_messages AS message
+             WHERE message.share_id = ?
+               AND message.discussion_revision > ?
+             UNION
+             SELECT principal.discussion_revision AS discussion_revision
+             FROM sync_relay_link_principals AS principal
+             JOIN sync_relay_share_grants AS grant
+               ON grant.grant_id = principal.grant_id
+             WHERE grant.share_id = ?
+               AND principal.discussion_revision > ?
+           )
+           ORDER BY discussion_revision
+           LIMIT ?`,
+        )
+        .all(
+          input.shareId,
+          input.sinceRevision,
+          input.shareId,
+          input.sinceRevision,
+          input.limit + 1,
+        )
+        .map((row) => Number(row.discussion_revision));
+      const hasMore = changedRevisions.length > input.limit;
+      const cursorRevision = hasMore
+        ? changedRevisions[input.limit - 1]!
+        : latestRevision;
+      const messages = this.db
+        .prepare(
+          `SELECT message.message_id, message.share_id,
+                  message.idempotency_key, message.request_hash,
+                  message.author_kind, message.author_user_id,
+                  message.link_grant_id, message.link_principal_id,
+                  message.display_name_snapshot, message.body,
+                  message.created_at_ms, message.deleted_at_ms,
+                  message.deleted_by_user_id, message.discussion_revision,
+                  message.storage_bytes,
+                  principal.blocked_at_ms AS link_principal_blocked_at_ms
+           FROM sync_relay_share_discussion_messages AS message
+           LEFT JOIN sync_relay_link_principals AS principal
+             ON principal.principal_id = message.link_principal_id
+            AND principal.grant_id = message.link_grant_id
+           WHERE message.share_id = ?
+             AND message.discussion_revision > ?
+             AND message.discussion_revision <= ?
+           ORDER BY message.created_at_ms, message.message_id`,
+        )
+        .all(input.shareId, input.sinceRevision, cursorRevision)
+        .map((row) => ({
+          ...rowToShareDiscussionMessageRow(row),
+          linkPrincipalBlocked:
+            row.author_kind === "link"
+              ? row.link_principal_blocked_at_ms !== null
+              : null,
+        }));
+      const principals = this.db
+        .prepare(
+          `SELECT principal.principal_id, principal.grant_id,
+                  principal.mint_generation, principal.profile_token_hash,
+                  principal.display_name, principal.created_at_ms,
+                  principal.blocked_at_ms, principal.discussion_revision,
+                  principal.storage_bytes
+           FROM sync_relay_link_principals AS principal
+           JOIN sync_relay_share_grants AS grant
+             ON grant.grant_id = principal.grant_id
+           WHERE grant.share_id = ?
+             AND principal.discussion_revision > ?
+             AND principal.discussion_revision <= ?
+           ORDER BY principal.discussion_revision, principal.principal_id`,
+        )
+        .all(input.shareId, input.sinceRevision, cursorRevision)
+        .map(rowToLinkPrincipalRow);
+      return {
+        latestRevision,
+        cursorRevision,
+        hasMore,
+        messages,
+        principals,
+        linkCommentsPaused: share?.link_writes_paused_at_ms != null,
       };
     });
   }
@@ -4214,11 +4397,29 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     const row = this.db
       .prepare(
         `SELECT principal_id, grant_id, mint_generation, profile_token_hash,
-                display_name, created_at_ms, blocked_at_ms, storage_bytes
+                display_name, created_at_ms, blocked_at_ms,
+                discussion_revision, storage_bytes
          FROM sync_relay_link_principals
          WHERE principal_id = ?`,
       )
       .get(principalId);
+    return row ? rowToLinkPrincipalRow(row) : null;
+  }
+
+  getLinkPrincipalForGrantProfile(
+    grantId: string,
+    profileTokenHash: string,
+  ): SyncRelayLinkPrincipalRow | null {
+    const row = this.db
+      .prepare(
+        `SELECT principal_id, grant_id, mint_generation, profile_token_hash,
+                display_name, created_at_ms, blocked_at_ms,
+                discussion_revision, storage_bytes
+         FROM sync_relay_link_principals
+         WHERE grant_id = ? AND profile_token_hash = ?
+         LIMIT 1`,
+      )
+      .get(grantId, profileTokenHash);
     return row ? rowToLinkPrincipalRow(row) : null;
   }
 
@@ -4250,13 +4451,18 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         )
         .get(input.principalId, input.shareId, input.actorUserId);
       if (!principal) return false;
+      const discussionRevision = this.nextShareDiscussionRevision(input.shareId);
       this.db
         .prepare(
           `UPDATE sync_relay_link_principals
-           SET blocked_at_ms = ?
+           SET blocked_at_ms = ?, discussion_revision = ?
            WHERE principal_id = ?`,
         )
-        .run(input.blockedAtMs === null ? null : Math.trunc(input.blockedAtMs), input.principalId);
+        .run(
+          input.blockedAtMs === null ? null : Math.trunc(input.blockedAtMs),
+          discussionRevision,
+          input.principalId,
+        );
       if (input.blockedAtMs !== null) {
         this.db
           .prepare(
@@ -4286,8 +4492,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       const updated = this.db
         .prepare(
           `UPDATE sync_relay_shares
-           SET link_writes_paused_at_ms = ?
+           SET link_writes_paused_at_ms = ?,
+               discussion_revision = discussion_revision + 1
            WHERE share_id = ?
+             AND discussion_revision < ${MAX_DISCUSSION_REVISION}
              AND EXISTS (
                SELECT 1
                FROM sync_relay_workspaces AS workspace
@@ -4345,17 +4553,20 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         .get(input.shareId, input.messageId, input.actorUserId);
       if (!message) return null;
       const deletedAtMs = Math.trunc(input.deletedAtMs);
+      const discussionRevision = this.nextShareDiscussionRevision(input.shareId);
       const deleted = this.db
         .prepare(
           `UPDATE sync_relay_share_discussion_messages
            SET body = NULL,
                deleted_at_ms = ?,
-               deleted_by_user_id = ?
+               deleted_by_user_id = ?,
+               discussion_revision = ?
            WHERE share_id = ? AND message_id = ? AND deleted_at_ms IS NULL`,
         )
         .run(
           deletedAtMs,
           input.actorUserId,
+          discussionRevision,
           input.shareId,
           input.messageId,
         );
@@ -4632,6 +4843,24 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         grant.revokedAtMs,
         grant.parentGrantId,
       );
+  }
+
+  private nextShareDiscussionRevision(shareId: string): number {
+    const row = this.db
+      .prepare(
+        `UPDATE sync_relay_shares
+         SET discussion_revision = discussion_revision + 1
+         WHERE share_id = ?
+           AND discussion_revision < ${MAX_DISCUSSION_REVISION}
+         RETURNING discussion_revision`,
+      )
+      .get(shareId);
+    if (!row) throw new Error("share discussion revision cannot advance");
+    const revision = Number(row.discussion_revision);
+    if (!Number.isSafeInteger(revision)) {
+      throw new Error("share discussion revision is invalid");
+    }
+    return revision;
   }
 
   private insertShare(share: SyncRelayShareRow): void {
@@ -5895,6 +6124,7 @@ function rowToLinkPrincipalRow(
     displayName: nullableText(row.display_name),
     createdAtMs: Number(row.created_at_ms),
     blockedAtMs: nullableInt(row.blocked_at_ms),
+    discussionRevision: Number(row.discussion_revision),
     storageBytes: Number(row.storage_bytes),
   };
 }
@@ -5920,6 +6150,7 @@ function rowToShareDiscussionMessageRow(
     createdAtMs: Number(row.created_at_ms),
     deletedAtMs: nullableInt(row.deleted_at_ms),
     deletedByUserId: nullableText(row.deleted_by_user_id),
+    discussionRevision: Number(row.discussion_revision),
     storageBytes: Number(row.storage_bytes),
   };
 }

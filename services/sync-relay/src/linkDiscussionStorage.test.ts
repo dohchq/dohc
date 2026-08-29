@@ -239,6 +239,232 @@ function replaceSession(
 }
 
 describe("durable link discussion storage", () => {
+  it("stamps one durable revision per current-state change and pages newest-first toward older messages", async () => {
+    const { storage, dbPath } = await openStorage();
+    const seeded = seedShare(storage, { suffix: "activity" });
+
+    const first = append(storage, seeded, {
+      body: "first",
+      idempotencyKey: "activity-first",
+      createdAtMs: 2_000,
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const second = storage.appendNamedDiscussionMessage({
+      shareId: seeded.shareId,
+      authorUserId: RECIPIENT,
+      displayName: "Recipient",
+      body: "second",
+      idempotencyKey: "activity-second",
+      createdAtMs: 2_001,
+      guard: () => {},
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    const third = storage.appendNamedDiscussionMessage({
+      shareId: seeded.shareId,
+      authorUserId: OWNER,
+      displayName: "Owner",
+      body: "third",
+      idempotencyKey: "activity-third",
+      createdAtMs: 2_002,
+      guard: () => {},
+    });
+    expect(third.ok).toBe(true);
+    if (!third.ok) return;
+
+    const newest = storage.listShareDiscussionMessages({
+      shareId: seeded.shareId,
+      direction: "newest-first",
+      limit: 2,
+    });
+    expect(newest.activityRevision).toBe(3);
+    expect(newest.messages.map((message) => message.body)).toEqual(["third", "second"]);
+    expect(newest.nextCursor).toEqual({
+      createdAtMs: second.message.createdAtMs,
+      messageId: second.message.messageId,
+    });
+    expect(
+      storage.listShareDiscussionMessages({
+        shareId: seeded.shareId,
+        direction: "newest-first",
+        before: newest.nextCursor,
+        limit: 2,
+      }).messages.map((message) => message.body),
+    ).toEqual(["first"]);
+
+    expect(
+      storage.setLinkPrincipalBlocked({
+        shareId: seeded.shareId,
+        principalId: first.principal.principalId,
+        actorUserId: OWNER,
+        blockedAtMs: 2_100,
+      }),
+    ).toBe(true);
+    expect(
+      storage.setShareLinkWritesPaused({
+        shareId: seeded.shareId,
+        actorUserId: OWNER,
+        pausedAtMs: 2_101,
+      }),
+    ).toBe(true);
+    expect(
+      storage.deleteShareDiscussionMessage({
+        shareId: seeded.shareId,
+        messageId: second.message.messageId,
+        deletedAtMs: 2_102,
+        actorUserId: OWNER,
+      }),
+    ).toMatchObject({ messageId: second.message.messageId });
+
+    const bounded = storage.listShareDiscussionActivity({
+      shareId: seeded.shareId,
+      sinceRevision: 3,
+      limit: 1,
+    });
+    expect(bounded).toMatchObject({
+      latestRevision: 6,
+      cursorRevision: 4,
+      hasMore: true,
+      messages: [],
+      linkCommentsPaused: true,
+    });
+    expect(bounded.principals).toEqual([
+      expect.objectContaining({
+        principalId: first.principal.principalId,
+        blockedAtMs: 2_100,
+        discussionRevision: 4,
+      }),
+    ]);
+    expect(
+      storage.listShareDiscussionActivity({
+        shareId: seeded.shareId,
+        sinceRevision: bounded.cursorRevision,
+        limit: 1,
+      }),
+    ).toMatchObject({
+      latestRevision: 6,
+      cursorRevision: 6,
+      hasMore: false,
+      messages: [
+        expect.objectContaining({
+          messageId: second.message.messageId,
+          discussionRevision: 6,
+        }),
+      ],
+      principals: [],
+    });
+
+    const stateOnly = seedShare(storage, { suffix: "activity-state-only" });
+    expect(
+      storage.setShareLinkWritesPaused({
+        shareId: stateOnly.shareId,
+        actorUserId: OWNER,
+        pausedAtMs: 2_200,
+      }),
+    ).toBe(true);
+    expect(
+      storage.listShareDiscussionActivity({
+        shareId: stateOnly.shareId,
+        sinceRevision: 0,
+        limit: 1,
+      }),
+    ).toMatchObject({
+      latestRevision: 1,
+      cursorRevision: 1,
+      hasMore: false,
+      messages: [],
+      principals: [],
+      linkCommentsPaused: true,
+    });
+
+    const capped = seedShare(storage, { suffix: "activity-capped" });
+    const writable = new InspectionDatabaseSync(dbPath);
+    try {
+      writable
+        .prepare(
+          "UPDATE sync_relay_shares SET discussion_revision = ? WHERE share_id = ?",
+        )
+        .run(Number.MAX_SAFE_INTEGER, capped.shareId);
+    } finally {
+      writable.close();
+    }
+    expect(
+      storage.setShareLinkWritesPaused({
+        shareId: capped.shareId,
+        actorUserId: OWNER,
+        pausedAtMs: 2_201,
+      }),
+    ).toBe(false);
+    expect(storage.getShareDiscussionRevision(capped.shareId)).toBe(
+      Number.MAX_SAFE_INTEGER,
+    );
+
+    const delta = storage.listShareDiscussionActivity({
+      shareId: seeded.shareId,
+      sinceRevision: 3,
+      limit: 100,
+    });
+    expect(delta).toMatchObject({
+      latestRevision: 6,
+      cursorRevision: 6,
+      hasMore: false,
+      linkCommentsPaused: true,
+    });
+    expect(delta.messages).toHaveLength(1);
+    expect(delta.messages[0]).toMatchObject({
+      messageId: second.message.messageId,
+      deletedAtMs: 2_102,
+      discussionRevision: 6,
+    });
+    expect(delta.principals).toEqual([
+      expect.objectContaining({
+        principalId: first.principal.principalId,
+        blockedAtMs: 2_100,
+        discussionRevision: 4,
+      }),
+    ]);
+
+    const db = new InspectionDatabaseSync(dbPath, { readOnly: true });
+    try {
+      expect(
+        db.prepare(
+          "SELECT discussion_revision FROM sync_relay_shares WHERE share_id = ?",
+        ).get(seeded.shareId)?.discussion_revision,
+      ).toBe(6);
+      expect(
+        db.prepare(
+          "SELECT discussion_revision FROM sync_relay_share_discussion_messages WHERE message_id = ?",
+        ).get(second.message.messageId)?.discussion_revision,
+      ).toBe(6);
+      expect(
+        db.prepare(
+          "SELECT discussion_revision FROM sync_relay_link_principals WHERE principal_id = ?",
+        ).get(first.principal.principalId)?.discussion_revision,
+      ).toBe(4);
+    } finally {
+      db.close();
+    }
+
+    storage.close();
+    storages.splice(storages.indexOf(storage), 1);
+    const reopened = openSyncRelayStorage(dbPath);
+    storages.push(reopened);
+    expect(
+      reopened.listShareDiscussionActivity({
+        shareId: seeded.shareId,
+        sinceRevision: 6,
+        limit: 100,
+      }),
+    ).toMatchObject({
+      latestRevision: 6,
+      cursorRevision: 6,
+      hasMore: false,
+      messages: [],
+      principals: [],
+    });
+  });
+
   it("mints only on a committed Comment append and preserves the binding on refresh", async () => {
     const { storage, dbPath } = await openStorage();
     const seeded = seedShare(storage);
@@ -247,6 +473,7 @@ describe("durable link discussion storage", () => {
       messages: [],
       nextCursor: null,
       linkCommentsPaused: false,
+      activityRevision: 0,
     });
     expect(
       append(storage, seeded, { body: "", idempotencyKey: "refused" }),
