@@ -3363,6 +3363,8 @@ describe("App", () => {
   });
 
   it("loads Comment access without widening file authority", async () => {
+    let activitySignal: AbortSignal | undefined;
+    let unexpectedRequests = 0;
     const file: SharedFile = {
       path: "docs/commented.md",
       blobSha256: "9".repeat(64),
@@ -3391,16 +3393,28 @@ describe("App", () => {
           nextCursor: null,
         });
       }
+      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        const signal = init?.signal;
+        if (!signal) throw new Error("Discussion activity request has no abort signal");
+        activitySignal = signal;
+        return await new Promise<Response>((_resolve, reject) => {
+          const abort = () => reject(new DOMException("Aborted", "AbortError"));
+          if (signal.aborted) abort();
+          else signal.addEventListener("abort", abort, { once: true });
+        });
+      }
       if (path === `/api/view/blob/${file.blobSha256}`) {
         return new Response("# Commented file\n\nFile bytes stay read-only.");
       }
       if (path === "/api/view/meta") return jsonResponse(commentMeta);
+      unexpectedRequests += 1;
       throw new Error(`Unexpected request: ${path} ${String(init?.method)}`);
     });
     vi.stubGlobal("fetch", fetchMock);
 
     await renderApp();
     await settle(() => container.textContent?.includes("Shared comment") === true);
+    await settle(() => activitySignal !== undefined);
 
     expect(container.querySelector(".badge")?.textContent).toBe("Comment");
     expect(container.querySelector("main.content")?.textContent).toContain(
@@ -3410,12 +3424,21 @@ describe("App", () => {
     expect(container.querySelector(".comments-panel form")).not.toBeNull();
     expect(container.querySelector("main.content textarea")).toBeNull();
     expect(container.querySelector('main.content [contenteditable="true"]')).toBeNull();
+    expect(unexpectedRequests).toBe(0);
+    act(() => root?.unmount());
+    root = null;
+    await settle(() => activitySignal?.aborted === true);
+
+    expect(activitySignal).toBeInstanceOf(AbortSignal);
+    expect(activitySignal?.aborted).toBe(true);
   });
 
   it.each([
     ["blocked", "The owner turned off comments for this browser."],
     ["paused", "The owner paused comments. You can still read everything."],
   ] as const)("keeps the file and timeline readable when Comment append is %s", async (writeState, copy) => {
+    let activitySignal: AbortSignal | undefined;
+    let unexpectedRequests = 0;
     const file: SharedFile = {
       path: "docs/readable.md",
       blobSha256: "8".repeat(64),
@@ -3447,13 +3470,25 @@ describe("App", () => {
           nextCursor: null,
         });
       }
+      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        const signal = init?.signal;
+        if (!signal) throw new Error("Discussion activity request has no abort signal");
+        activitySignal = signal;
+        return await new Promise<Response>((_resolve, reject) => {
+          const abort = () => reject(new DOMException("Aborted", "AbortError"));
+          if (signal.aborted) abort();
+          else signal.addEventListener("abort", abort, { once: true });
+        });
+      }
       if (path === `/api/view/blob/${file.blobSha256}`) return new Response("Readable file bytes");
       if (path === "/api/view/meta") return jsonResponse(commentMeta);
+      unexpectedRequests += 1;
       throw new Error(`Unexpected request: ${path}`);
     }));
 
     await renderApp();
     await settle(() => container.textContent?.includes("Readable timeline") === true);
+    await settle(() => activitySignal !== undefined);
     const body = container.querySelector<HTMLTextAreaElement>('textarea[name="body"]');
     if (!body) throw new Error("comment body is missing");
     setControlValue(body, "Refused comment");
@@ -3463,6 +3498,13 @@ describe("App", () => {
     expect(container.querySelector("main.content")?.textContent).toContain("Readable file bytes");
     expect(container.querySelector(".comments-panel")?.textContent).toContain("Readable timeline");
     expect(body.disabled).toBe(true);
+    expect(unexpectedRequests).toBe(0);
+    act(() => root?.unmount());
+    root = null;
+    await settle(() => activitySignal?.aborted === true);
+
+    expect(activitySignal).toBeInstanceOf(AbortSignal);
+    expect(activitySignal?.aborted).toBe(true);
   });
 
   it("refuses mismatched top-level and effective Comment access", async () => {
