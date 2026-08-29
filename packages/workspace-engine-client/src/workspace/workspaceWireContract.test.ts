@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   WORKSPACE_METHOD,
   WorkspaceProtocolShapeError,
+  decodeCollectionValue,
   decodeConflictRecord,
   decodeWorkspaceResult,
+  encodeCollectionValue,
   encodeCollectionQueryParams,
 } from "./workspaceWireContract";
 
@@ -208,6 +210,44 @@ describe("workspace wire schemas", () => {
       filter: { value: markedInteger },
       cursor: { sortValues: [{ value: markedInteger }] },
     });
+  });
+
+  it("round-trips a marker-shaped user collection object unchanged", () => {
+    const value = { $dohcInt64: "9007199254740993" };
+    const encoded = encodeCollectionValue(value);
+
+    expect(encoded).toEqual({ $dohcEscaped: value });
+    expect(decodeCollectionValue(encoded)).toEqual(value);
+  });
+
+  it("decodes exact integral collection floats beyond the 64-bit range", () => {
+    expect(
+      decodeCollectionValue({ $dohcInt64: "100000000000000000000" }),
+    ).toBe(100000000000000000000n);
+  });
+
+  it("enforces safe-range collection integer marker rules", () => {
+    expect(() =>
+      decodeCollectionValue({ $dohcInt64: "9007199254740991" }),
+    ).toThrow(WorkspaceProtocolShapeError);
+    expect(encodeCollectionValue(9007199254740991n)).toBe(
+      Number.MAX_SAFE_INTEGER,
+    );
+    expect(encodeCollectionValue(-9007199254740991n)).toBe(
+      -Number.MAX_SAFE_INTEGER,
+    );
+    expect(() => encodeCollectionValue(-(1n << 63n) - 1n)).toThrow(
+      WorkspaceProtocolShapeError,
+    );
+    expect(() => encodeCollectionValue(1n << 64n)).toThrow(
+      WorkspaceProtocolShapeError,
+    );
+  });
+
+  it("rejects collection escape markers the encoder does not produce", () => {
+    expect(() =>
+      decodeCollectionValue({ $dohcEscaped: { plain: true } }),
+    ).toThrow(WorkspaceProtocolShapeError);
   });
 
   it("rejects malformed collection integer markers", () => {

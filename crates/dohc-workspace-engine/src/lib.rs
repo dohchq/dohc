@@ -141,6 +141,7 @@ const MAX_METADATA_FIELD_BYTES: usize = dohc_engine_domain::MAX_METADATA_FIELD_B
 const COLLECTION_RESPONSE_HARD_CAP_BYTES: usize =
     dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize - 64 * 1024;
 const COLLECTION_INTEGER_MARKER: &str = "$dohcInt64";
+const COLLECTION_ESCAPED_MARKER: &str = "$dohcEscaped";
 
 fn encode_collection_wire_integers(value: &mut Value) {
     match value {
@@ -154,15 +155,32 @@ fn encode_collection_wire_integers(value: &mut Value) {
                         .as_u64()
                         .filter(|number| *number > dohc_engine_protocol::MAX_WIRE_INTEGER)
                         .map(|number| number.to_string())
+                })
+                .or_else(|| {
+                    number.as_f64().and_then(|number| {
+                        (number.is_finite()
+                            && number.fract() == 0.0
+                            && number.abs() > dohc_engine_protocol::MAX_WIRE_INTEGER as f64)
+                            .then(|| format!("{number:.0}"))
+                    })
                 });
             if let Some(decimal) = decimal {
                 *value = json!({ (COLLECTION_INTEGER_MARKER): decimal });
             }
         }
         Value::Array(values) => values.iter_mut().for_each(encode_collection_wire_integers),
-        Value::Object(object) => object
-            .values_mut()
-            .for_each(encode_collection_wire_integers),
+        Value::Object(object) => {
+            object
+                .values_mut()
+                .for_each(encode_collection_wire_integers);
+            if object.len() == 1
+                && (object.contains_key(COLLECTION_INTEGER_MARKER)
+                    || object.contains_key(COLLECTION_ESCAPED_MARKER))
+            {
+                let escaped = std::mem::take(object);
+                object.insert(COLLECTION_ESCAPED_MARKER.to_owned(), Value::Object(escaped));
+            }
+        }
         Value::Null | Value::Bool(_) | Value::String(_) => {}
     }
 }
@@ -175,7 +193,28 @@ fn decode_collection_wire_integer(value: &mut Value) -> Result<(), WireError> {
             }
         }
         Value::Object(object) => {
-            if object.len() == 1 && object.contains_key(COLLECTION_INTEGER_MARKER) {
+            if object.len() == 1 && object.contains_key(COLLECTION_ESCAPED_MARKER) {
+                let Some(Value::Object(mut escaped)) = object.remove(COLLECTION_ESCAPED_MARKER)
+                else {
+                    return Err(wire(
+                        ErrorCode::InvalidParams,
+                        "collection-escape-marker-invalid",
+                    ));
+                };
+                if escaped.len() != 1
+                    || (!escaped.contains_key(COLLECTION_INTEGER_MARKER)
+                        && !escaped.contains_key(COLLECTION_ESCAPED_MARKER))
+                {
+                    return Err(wire(
+                        ErrorCode::InvalidParams,
+                        "collection-escape-marker-invalid",
+                    ));
+                }
+                for child in escaped.values_mut() {
+                    decode_collection_wire_integer(child)?;
+                }
+                *value = Value::Object(escaped);
+            } else if object.len() == 1 && object.contains_key(COLLECTION_INTEGER_MARKER) {
                 let decimal = object
                     .get(COLLECTION_INTEGER_MARKER)
                     .and_then(Value::as_str)
@@ -12829,6 +12868,47 @@ mod tests {
     use std::time::Duration;
 
     const SHADOW_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn collection_integer_marker_shaped_user_objects_use_the_shared_escape_vector() {
+        let literal = json!({ "$dohcInt64": "9007199254740993" });
+        let mut encoded = literal.clone();
+        encode_collection_wire_integers(&mut encoded);
+        assert_eq!(
+            encoded,
+            json!({
+                "$dohcEscaped": { "$dohcInt64": "9007199254740993" }
+            })
+        );
+
+        decode_collection_wire_integer(&mut encoded).expect("decode escaped collection object");
+        assert_eq!(encoded, literal);
+
+        let nested_literal = json!({
+            "$dohcEscaped": { "integer": 9_007_199_254_740_993_i64 }
+        });
+        let mut nested_integer = nested_literal.clone();
+        encode_collection_wire_integers(&mut nested_integer);
+        assert_eq!(
+            nested_integer,
+            json!({
+                "$dohcEscaped": {
+                    "$dohcEscaped": {
+                        "integer": { "$dohcInt64": "9007199254740993" }
+                    }
+                }
+            })
+        );
+        decode_collection_wire_integer(&mut nested_integer)
+            .expect("decode integer nested below a literal escaped root");
+        assert_eq!(nested_integer, nested_literal);
+
+        let mut noncanonical = json!({ "$dohcEscaped": { "plain": true } });
+        let error = decode_collection_wire_integer(&mut noncanonical)
+            .expect_err("an escape the encoder cannot produce must be refused");
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+        assert_eq!(error.message, "collection-escape-marker-invalid");
+    }
 
     /// #595 round 8: the artifact lock and a busy engine database are two
     /// different contentions, and only the first may be reported as

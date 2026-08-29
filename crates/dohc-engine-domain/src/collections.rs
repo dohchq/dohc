@@ -197,6 +197,7 @@ pub enum CollectionSchemaReasonCode {
     ReservedFieldName,
     InvalidRelationTarget,
     UnknownFieldReference,
+    SchemaCollectionLimitExceeded,
     RecordTooLargeForAdoption,
 }
 
@@ -486,6 +487,10 @@ pub struct CollectionRecordDetails {
 }
 
 pub const MAX_COLLECTION_HISTORY_LIMIT: usize = 500;
+
+// Collection schemas cross the default engine wire as arrays. Capping them
+// while parsing prevents those arrays from exceeding the wire collection limit.
+const MAX_SCHEMA_COLLECTION_ITEMS: usize = 16_384;
 
 fn pointer_segment(value: &str) -> String {
     value.replace('~', "~0").replace('/', "~1")
@@ -1056,11 +1061,30 @@ pub fn parse_collection_schema(yaml_text: &str) -> CollectionSchemaParseResult {
         "",
         &mut reasons,
     );
-    let fields = parse_fields(mapping_get(root, "fields"), &mut reasons);
+    let mut fields = parse_fields(mapping_get(root, "fields"), &mut reasons);
+    let name = read_optional_text(root, "name", "", &mut reasons);
+    let description = read_optional_text(root, "description", "", &mut reasons);
+    let mut views = parse_views(mapping_get(root, "views"), &fields, &mut reasons);
+    if fields.len() > MAX_SCHEMA_COLLECTION_ITEMS {
+        fields.truncate(MAX_SCHEMA_COLLECTION_ITEMS);
+        push_reason(
+            &mut reasons,
+            CollectionSchemaReasonCode::SchemaCollectionLimitExceeded,
+            "/fields",
+        );
+    }
+    if views.len() > MAX_SCHEMA_COLLECTION_ITEMS {
+        views.truncate(MAX_SCHEMA_COLLECTION_ITEMS);
+        push_reason(
+            &mut reasons,
+            CollectionSchemaReasonCode::SchemaCollectionLimitExceeded,
+            "/views",
+        );
+    }
     let schema = CollectionSchema {
-        name: read_optional_text(root, "name", "", &mut reasons),
-        description: read_optional_text(root, "description", "", &mut reasons),
-        views: parse_views(mapping_get(root, "views"), &fields, &mut reasons),
+        name,
+        description,
+        views,
         fields,
     };
     CollectionSchemaParseResult {

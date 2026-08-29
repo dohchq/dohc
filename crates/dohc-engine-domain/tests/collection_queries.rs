@@ -1325,6 +1325,24 @@ fn fresh_conflicted_record_keeps_its_id_and_relation_until_conflict_resolution()
         })
         .expect("finish target adoption");
     assert!(matches!(adopted, TxnOutcome::Committed(())));
+    let reconciled_again = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("second reconcile after target conflict clears");
+    assert!(matches!(reconciled_again, TxnOutcome::Committed(_)));
+    let relation_count = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM collection_relation_edges \
+                 WHERE workspace_id=?1 AND version_id=?2 AND source_record_id=?3 \
+                   AND target_record_id=?4",
+                params![WORKSPACE_ID, VERSION_ID, FIRST_TASK_ID, TARGET_ID],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .expect("source relation survives the resolved conflict reconcile");
+    assert_eq!(relation_count, 1);
     let resolved = store
         .read_with(|conn| get_collection_record(conn, WORKSPACE_ID, "people", TARGET_ID, 10, None))
         .expect("get resolved target")

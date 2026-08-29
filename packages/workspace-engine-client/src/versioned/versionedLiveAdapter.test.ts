@@ -289,7 +289,21 @@ const WORKSPACE_DECODER_CASES: Array<{
   },
   {
     method: WORKSPACE_METHOD.collectionsListPendingAdoptions,
-    valid: { adoptions: [], nextCursor: null },
+    valid: {
+      adoptions: [
+        {
+          versionId: "main",
+          recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+          collectionPath: "projects",
+          filePath: "projects/roadmap.md",
+          objectId: "object",
+        },
+      ],
+      nextCursor: {
+        filePath: "projects/roadmap.md",
+        recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      },
+    },
   },
   {
     method: WORKSPACE_METHOD.collectionsGet,

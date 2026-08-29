@@ -16,7 +16,7 @@ use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::{fmt::Write as _, sync::Arc};
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const WORKSPACE_ID: &str = "ws-rpc-collections";
@@ -244,6 +244,85 @@ async fn every_collection_request_answers_for_a_degraded_schema() {
     )
     .await;
     assert_eq!(switched_query["records"][0]["id"], json!(RECORD_ID));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn collections_get_caps_schema_arrays_at_the_wire_collection_limit() {
+    const SCHEMA_LIMIT: usize = WireLimits::SPIKE_DEFAULTS.max_collection_len as usize;
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let mut schema = String::from("fields:\n");
+    for index in 0..=SCHEMA_LIMIT {
+        writeln!(schema, "  field{index:05}:\n    type: text").expect("append field");
+    }
+    schema.push_str("views:\n");
+    for index in 0..=SCHEMA_LIMIT {
+        if index == 0 {
+            writeln!(
+                schema,
+                "  - name: view00000\n    kind: table\n    groupBy: field{SCHEMA_LIMIT:05}"
+            )
+            .expect("append referenced view");
+        } else {
+            writeln!(schema, "  - name: view{index:05}\n    kind: table").expect("append view");
+        }
+    }
+    seed_schema(&scratch, &schema);
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+    let response = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                2,
+                "collections.get",
+                Some(handle),
+                json!({ "collectionPath": "tasks" }),
+            ),
+        )
+        .await
+        .expect("get capped collection");
+    let collection = &response.result;
+    assert_eq!(collection["status"], "degraded");
+    assert_eq!(
+        collection["schema"]["fields"].as_array().map(Vec::len),
+        Some(SCHEMA_LIMIT)
+    );
+    assert_eq!(
+        collection["schema"]["views"].as_array().map(Vec::len),
+        Some(SCHEMA_LIMIT)
+    );
+    assert_eq!(
+        collection["schema"]["views"][0]["groupBy"],
+        format!("field{SCHEMA_LIMIT:05}"),
+        "views must be parsed against all fields before the response arrays are capped"
+    );
+    assert_eq!(
+        collection["reasons"],
+        json!([
+            { "code": "schema-collection-limit-exceeded", "path": "/fields" },
+            { "code": "schema-collection-limit-exceeded", "path": "/views" },
+        ])
+    );
+    encode_control(&Envelope::Response(response), &WireLimits::SPIKE_DEFAULTS)
+        .expect("capped collection response must fit the wire collection limit");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -794,6 +873,7 @@ async fn collection_larger_than_frame_cap_pages_completely_in_sorted_order() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unsafe_integer_round_trips_through_query_and_get_record_wire_results() {
     const UNSAFE_INTEGER: i64 = 9_007_199_254_740_993;
+    const EXPONENT_INTEGER: &str = "100000000000000000000";
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     let db = scratch.engine_db_path().expect("engine db path");
@@ -802,8 +882,8 @@ async fn unsafe_integer_round_trips_through_query_and_get_record_wire_results() 
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");
-    let schema = "fields:\n  exact:\n    type: number\n";
-    let record = format!("---\nid: {RECORD_ID}\nexact: {UNSAFE_INTEGER}\n---\n");
+    let schema = "fields:\n  exact:\n    type: number\n  exponent:\n    type: number\n";
+    let record = format!("---\nid: {RECORD_ID}\nexact: {UNSAFE_INTEGER}\nexponent: 1e20\n---\n");
     seed_text(&mut store, "integers/collection.yaml", schema, 2);
     seed_text(&mut store, "integers/record.md", &record, 3);
     store
@@ -877,6 +957,14 @@ async fn unsafe_integer_round_trips_through_query_and_get_record_wire_results() 
             json!({ "$dohcInt64": UNSAFE_INTEGER.to_string() })
         );
         assert_eq!(exact["validation"]["status"], json!("valid"));
+        let exponent = record["values"]
+            .as_array()
+            .expect("record values")
+            .iter()
+            .find(|value| value["field"] == "exponent")
+            .expect("exponent indexed value");
+        assert_eq!(exponent["value"], json!({ "$dohcInt64": EXPONENT_INTEGER }));
+        assert_eq!(exponent["validation"]["status"], json!("valid"));
         encode_control(
             &Envelope::Response(output.response),
             &WireLimits::SPIKE_DEFAULTS,
@@ -949,6 +1037,19 @@ async fn near_limit_record_round_trips_via_query_and_get_record_blob_egress() {
             }),
         ),
     ] {
+        let refusal = ProtocolEngineService::call(
+            service.as_ref(),
+            RequestContext::unbounded(),
+            request(id + 100, method, Some(handle.clone()), params.clone()),
+        )
+        .await
+        .expect_err("an over-limit collection response without blobs must be refused");
+        assert_eq!(
+            refusal.code,
+            dohc_engine_protocol::error::ErrorCode::LimitExceeded
+        );
+        assert_eq!(refusal.message, "collection-response-exceeds-wire-limit");
+
         let output = ProtocolEngineService::call(
             service.as_ref(),
             RequestContext::unbounded().with_capability("blobs"),

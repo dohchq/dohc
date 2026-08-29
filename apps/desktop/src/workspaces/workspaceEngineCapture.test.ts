@@ -428,6 +428,65 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
+  it("continues draining pending collection adoptions after one adoption fails", async () => {
+    const root = await tempRoot();
+    let listed = false;
+    const store = {
+      ensureMainVersion: async () => undefined,
+      flushCapture: async () => undefined,
+      reconcileCapture: async () => undefined,
+      listPendingCollectionAdoptions: async () => {
+        if (listed) return { adoptions: [], nextCursor: null };
+        listed = true;
+        return {
+          adoptions: [
+            {
+              versionId: "main",
+              recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+              collectionPath: "projects",
+              filePath: "projects/poisoned.md",
+              objectId: "object-poisoned",
+            },
+            {
+              versionId: "main",
+              recordId: "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb",
+              collectionPath: "projects",
+              filePath: "projects/healthy.md",
+              objectId: "object-healthy",
+            },
+          ],
+          nextCursor: null,
+        };
+      },
+    } as unknown as CaptureVersionedTextStore;
+    const poison = new Error("poisoned adoption");
+    let adoptionRuns = 0;
+    const sessions = {
+      run: async () => {
+        adoptionRuns += 1;
+        if (adoptionRuns === 1) throw poison;
+      },
+    } as unknown as EngineWorkspaceSessions;
+    const errors: Array<{ context: string; error: unknown }> = [];
+    const engine = capture(root, {
+      store,
+      rustEngineSessions: sessions,
+      daemonOwnsCapture: true,
+      onError: (context, error) => errors.push({ context, error }),
+    });
+
+    await engine.flush();
+
+    expect(adoptionRuns).toBe(2);
+    expect(errors).toEqual([
+      {
+        context: "collection adoption of projects/poisoned.md",
+        error: poison,
+      },
+    ]);
+    await engine.stop();
+  });
+
   it("flushes daemon capture before reading versions for a merge", async () => {
     const root = await tempRoot();
     const requests: Request[] = [];

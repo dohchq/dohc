@@ -77,6 +77,7 @@ export type CollectionSchemaReasonCode =
   | "reserved-field-name"
   | "invalid-relation-target"
   | "unknown-field-reference"
+  | "schema-collection-limit-exceeded"
   | "record-too-large-for-adoption";
 
 export interface CollectionSchemaReason {

@@ -499,18 +499,21 @@ async fn flush_capture(
     handle: &WorkspaceHandle,
     id: &mut u64,
 ) {
-    let mut state = Value::Null;
-    for _ in 0..20 {
-        state = call(transport, handle, id, "capture.flush", json!({})).await;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let state = call(transport, handle, id, "capture.flush", json!({})).await;
         if state["settled"] == json!(true) {
             return;
         }
         if state["degraded"] == json!(true) {
-            break;
+            panic!("capture degraded before settling: {state}");
         }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "capture did not settle before its deadline: {state}"
+        );
         tokio::task::yield_now().await;
     }
-    panic!("capture did not settle: {state}");
 }
 
 fn workspace_row(

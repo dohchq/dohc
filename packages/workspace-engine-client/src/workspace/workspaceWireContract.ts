@@ -318,19 +318,34 @@ export class WorkspaceProtocolShapeError extends Error {
 }
 
 const COLLECTION_INTEGER_MARKER = "$dohcInt64";
+const COLLECTION_ESCAPED_MARKER = "$dohcEscaped";
 const MAX_SAFE_COLLECTION_INTEGER = BigInt(Number.MAX_SAFE_INTEGER);
 const MIN_COLLECTION_INTEGER = -(1n << 63n);
 const MAX_COLLECTION_INTEGER = (1n << 64n) - 1n;
 
+function collectionWireObject(
+  value: JsonValue | undefined,
+): WorkspaceJsonObject | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value
+    : null;
+}
+
+function singleCollectionWireEntry(
+  value: JsonValue,
+): [string, JsonValue | undefined] | null {
+  const object = collectionWireObject(value);
+  if (object === null) return null;
+  const entries = Object.entries(object);
+  return entries.length === 1 ? entries[0]! : null;
+}
+
 function collectionIntegerMarker(value: JsonValue): bigint | null {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+  const entry = singleCollectionWireEntry(value);
+  if (entry?.[0] !== COLLECTION_INTEGER_MARKER) {
     return null;
   }
-  const entries = Object.entries(value);
-  if (entries.length !== 1 || entries[0]?.[0] !== COLLECTION_INTEGER_MARKER) {
-    return null;
-  }
-  const decimal = entries[0]![1];
+  const decimal = entry[1];
   if (typeof decimal !== "string" || !/^-?(?:0|[1-9]\d*)$/.test(decimal)) {
     throw new WorkspaceProtocolShapeError(
       "A collection integer marker must contain a canonical decimal string.",
@@ -338,8 +353,6 @@ function collectionIntegerMarker(value: JsonValue): bigint | null {
   }
   const integer = BigInt(decimal);
   if (
-    integer < MIN_COLLECTION_INTEGER ||
-    integer > MAX_COLLECTION_INTEGER ||
     (integer >= -MAX_SAFE_COLLECTION_INTEGER &&
       integer <= MAX_SAFE_COLLECTION_INTEGER)
   ) {
@@ -351,6 +364,27 @@ function collectionIntegerMarker(value: JsonValue): bigint | null {
 }
 
 export function decodeCollectionValue(value: JsonValue): CollectionValue {
+  const entry = singleCollectionWireEntry(value);
+  if (entry?.[0] === COLLECTION_ESCAPED_MARKER) {
+    const escaped = collectionWireObject(entry[1]);
+    const escapedEntry =
+      entry[1] === undefined ? null : singleCollectionWireEntry(entry[1]);
+    if (
+      escaped === null ||
+      (escapedEntry?.[0] !== COLLECTION_INTEGER_MARKER &&
+        escapedEntry?.[0] !== COLLECTION_ESCAPED_MARKER)
+    ) {
+      throw new WorkspaceProtocolShapeError(
+        "A collection escape marker must contain one reserved-marker object.",
+      );
+    }
+    return Object.fromEntries(
+      Object.entries(escaped).map(([key, child]) => [
+        key,
+        decodeCollectionValue(child!),
+      ]),
+    );
+  }
   const integer = collectionIntegerMarker(value);
   if (integer !== null) return integer;
   if (Array.isArray(value)) return value.map(decodeCollectionValue);
@@ -382,12 +416,18 @@ export function encodeCollectionValue(value: CollectionValue): JsonValue {
   }
   if (Array.isArray(value)) return value.map(encodeCollectionValue);
   if (value !== null && typeof value === "object") {
-    return Object.fromEntries(
+    const encoded = Object.fromEntries(
       Object.entries(value).map(([key, child]) => [
         key,
         encodeCollectionValue(child),
       ]),
     );
+    const entry = Object.entries(encoded);
+    return entry.length === 1 &&
+      (entry[0]?.[0] === COLLECTION_INTEGER_MARKER ||
+        entry[0]?.[0] === COLLECTION_ESCAPED_MARKER)
+      ? { [COLLECTION_ESCAPED_MARKER]: encoded }
+      : encoded;
   }
   return value;
 }
@@ -555,6 +595,7 @@ const CollectionSchemaReasonSchema = mutableStruct({
     "reserved-field-name",
     "invalid-relation-target",
     "unknown-field-reference",
+    "schema-collection-limit-exceeded",
     "record-too-large-for-adoption",
   ]),
   path: Schema.String,

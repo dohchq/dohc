@@ -3350,26 +3350,30 @@ export function createWorkspaceEngineCapture(
       if (!pending) return;
       found ||= pending.adoptions.length > 0;
       for (const adoption of pending.adoptions) {
-        await options.rustEngineSessions.run(
-          workspace,
-          async (binding) => {
-            const provider = await openEngineYdocProviderSession({
-              transport: binding.client as EngineTransport,
-              workspace: binding.workspace,
-              versionId: adoption.versionId,
-              path: adoption.filePath,
-              expectedObjectId: adoption.objectId,
-              contentKind: "richdoc",
-              seedAbsentLineage: true,
-              onRemoteUpdate: () => undefined,
-            });
-            // Keep the imported lineage durable until reconciliation applies the
-            // record id. A seed-only settling close can prove the artifact already
-            // covers the document and prune the lineage before adoption uses it.
-            await provider.evict();
-          },
-          { retryTransportErrors: true },
-        );
+        try {
+          await options.rustEngineSessions.run(
+            workspace,
+            async (binding) => {
+              const provider = await openEngineYdocProviderSession({
+                transport: binding.client as EngineTransport,
+                workspace: binding.workspace,
+                versionId: adoption.versionId,
+                path: adoption.filePath,
+                expectedObjectId: adoption.objectId,
+                contentKind: "richdoc",
+                seedAbsentLineage: true,
+                onRemoteUpdate: () => undefined,
+              });
+              // Keep the imported lineage durable until reconciliation applies the
+              // record id. A seed-only settling close can prove the artifact already
+              // covers the document and prune the lineage before adoption uses it.
+              await provider.evict();
+            },
+            { retryTransportErrors: true },
+          );
+        } catch (error) {
+          onError(`collection adoption of ${adoption.filePath}`, error);
+        }
       }
       cursor = pending.nextCursor;
     } while (cursor !== null);
