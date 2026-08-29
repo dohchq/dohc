@@ -107,7 +107,12 @@ test("keeps the viewer bearer and authored credential probes outside page reach"
     const safeImage = article.getByRole("img", { name: "Seeded safe image" });
     await expect(safeImage).toBeVisible();
     await expect.poll(() => safeImageResponses.length).toBeGreaterThan(0);
-    await page.waitForLoadState("networkidle");
+    await expect.poll(() => safeImage.evaluate((element) =>
+      element instanceof HTMLImageElement &&
+      element.complete &&
+      element.naturalWidth === 1 &&
+      element.naturalHeight === 1
+    )).toBe(true);
 
     expect(exchangeRequests).toHaveLength(1);
     const exchangeRequestBody = record(exchangeRequests[0]!.postDataJSON());
@@ -262,21 +267,13 @@ test("keeps the viewer bearer and authored credential probes outside page reach"
       "src",
       `/api/view/blob/${safeBlobSha256}?session=${responseSession}`,
     );
-    expect(await safeImage.evaluate((element) =>
-      element instanceof HTMLImageElement &&
-      element.complete &&
-      element.naturalWidth === 1 &&
-      element.naturalHeight === 1
-    )).toBe(true);
-
     const finalUrl = page.url();
     await page.goto("about:blank");
     await page.goBack({ waitUntil: "domcontentloaded" });
     await expect(page.locator("article.markdown")).toContainText(
       "Viewer credential browser conformance",
     );
-    await page.waitForLoadState("networkidle");
-    expect(page.url()).toBe(finalUrl);
+    await expect(page).toHaveURL(finalUrl);
     expect(new URL(page.url()).hash).toBe("");
     expect(page.url().includes(seeded.secret)).toBe(false);
     expect(exchangeRequests).toHaveLength(1);

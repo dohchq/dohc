@@ -93,7 +93,7 @@ test("blocks remote media and cross-origin connection egress", async ({ browser,
 
     const article = page.locator("article.markdown");
     await expect(article).toContainText("Remote fetch browser conformance");
-    await page.waitForLoadState("networkidle");
+    await expect(page).toHaveURL(/\/s\/[A-Za-z0-9_-]{12}$/u);
     await expect(
       article.locator(
         'img[src^="http:" i], img[src^="https:" i], img[src^="data:" i]',
@@ -146,7 +146,6 @@ test("blocks remote media and cross-origin connection egress", async ({ browser,
     expect(probe.requests).toEqual([]);
 
     const viewerUrl = page.url();
-    expect(new URL(viewerUrl).pathname).toMatch(/^\/s\/[A-Za-z0-9_-]{12}$/u);
     const remoteFileButton = page
       .getByRole("navigation", { name: "Shared files" })
       .getByRole("button", { name: "remote.md", exact: true });

@@ -220,7 +220,7 @@ test("keeps shared content from creating viewer-origin browser storage", async (
     const hostileArticle = hostilePage.locator("article.markdown");
     await expect(hostileArticle).toContainText(ORDINARY_HOSTILE_TEXT);
     await expect(hostileArticle.locator("script, [onerror], [onload]")).toHaveCount(0);
-    await hostilePage.waitForLoadState("networkidle");
+    await expect(hostilePage).toHaveURL(/\/s\/[A-Za-z0-9_-]{12}$/u);
 
     const hostileSession = sessionFromPage(hostilePage);
     const hostileUrl = hostilePage.url();
