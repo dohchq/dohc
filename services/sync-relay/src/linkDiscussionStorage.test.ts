@@ -200,14 +200,7 @@ function discussionUsageBytes(dbPath: string): number {
     const principalBytes = Number(
       db
         .prepare(
-          `SELECT COALESCE(
-             SUM(
-               length(CAST(principal_id AS BLOB)) +
-               length(CAST(grant_id AS BLOB)) +
-               length(CAST(profile_token_hash AS BLOB)) +
-               COALESCE(length(CAST(display_name AS BLOB)), 0)
-             ), 0
-           ) AS bytes
+          `SELECT COALESCE(SUM(storage_bytes), 0) AS bytes
            FROM sync_relay_link_principals`,
         )
         .get()?.bytes ?? 0,

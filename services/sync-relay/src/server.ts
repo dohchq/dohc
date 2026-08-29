@@ -12,6 +12,7 @@ import {
   constantTimeHashEqual,
   hashLinkBearer,
   hashLinkHandoffCode,
+  hashLinkProfileSecret,
   hashRelayExchangeKey,
   LinkEgressRateLimiter,
   LinkExchangeRateLimiter,
@@ -60,6 +61,8 @@ import {
 } from "./shareFilter";
 import {
   SHARED_BLOB_CANDIDATE_LIMIT,
+  LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT,
+  LINK_DISCUSSION_PAGE_LIMIT,
   SyncRelayBlobMissingError,
   SyncRelayConflictError,
   SyncRelayQuotaExceededError,
@@ -70,6 +73,9 @@ import {
   type SyncRelayLogRow,
   type SyncRelayLinkInventoryCursor,
   type SyncRelayLinkInventoryRow,
+  type SyncRelayShareDiscussionCursor,
+  type SyncRelayShareDiscussionMessageRow,
+  type SyncRelayShareDiscussionPage,
   type SyncRelayShareGrantRow,
   type SyncRelayShareWithGrantRow,
   type SyncRelayStorage,
@@ -122,6 +128,10 @@ export interface CreateSyncRelayHandlerOptions {
   resolveUserIdByEmail?: (email: string) => Promise<string | null> | string | null;
   // Display-only reverse lookup for share listings; never used for authz.
   lookupUserEmail?: (userId: string) => Promise<string | null> | string | null;
+  // Better Auth display name for discussion authorship; never used for authz.
+  lookupUserDisplayName?: (
+    userId: string,
+  ) => Promise<string | null> | string | null;
   newShareId?: () => string;
   newGrantId?: () => string;
   // #646 PR3a: ids the relay MINTS — proposal ids, and the moment and object
@@ -160,6 +170,7 @@ type SyncRelayRoute =
   | { route: "link-share" }
   | { route: "link-current" }
   | { route: "link-log" }
+  | { route: "link-discussion" }
   | { route: "link-blob"; sha256: string }
   | { route: "workspaces" }
   | { route: "blob"; workspaceId: string; sha256: string }
@@ -181,6 +192,7 @@ type SyncRelayRoute =
   | { route: "share-grant-promote"; shareId: string; grantId: string }
   | { route: "share-grant-revoke"; shareId: string; grantId: string }
   | { route: "share-log"; shareId: string }
+  | { route: "share-discussion"; shareId: string }
   | { route: "share-blob"; shareId: string; sha256: string }
   // #646 PR3a. The recipient's half of the proposal lane is share-scoped; the
   // granter's half is WORKSPACE-scoped, so its authorization is the one
@@ -237,6 +249,8 @@ export const MAX_KEY_ENVELOPE_BYTES = 16 * 1024;
 export const MAX_OPS_PER_REQUEST = 500;
 export const DEFAULT_LOG_PAGE_SIZE = 100;
 export const MAX_LOG_PAGE_SIZE = 500;
+const DEFAULT_DISCUSSION_PAGE_SIZE = 50;
+const DISCUSSION_CURSOR_MAX_CHARS = 1_024;
 const MAX_LINK_CURRENT_FILES = 5_000;
 // One accountless response may scan this many raw log rows for admitted ops.
 export const MAX_RAW_ROWS_PER_LINK_PAGE = 10_000;
@@ -336,6 +350,7 @@ export function createSyncRelayHandler({
   nowMs = () => Date.now(),
   resolveUserIdByEmail,
   lookupUserEmail,
+  lookupUserDisplayName,
   newShareId = () => randomUUID(),
   newGrantId = () => randomUUID(),
   newId = () => randomUUID(),
@@ -694,6 +709,98 @@ export function createSyncRelayHandler({
     }
     throw notFound();
   }
+
+  type DiscussionViewer = "public" | "named" | "owner";
+
+  const privateResponse = (response: Response): Response => {
+    response.headers.set("cache-control", "private, no-store");
+    return response;
+  };
+
+  const privateJsonResponse = (body: unknown, status = 200): Response =>
+    privateResponse(jsonResponse(body, status));
+
+  const privateErrorResponse = (error: unknown): Response =>
+    privateResponse(errorResponse(error));
+
+  const projectDiscussionMessage = (
+    message: SyncRelayShareDiscussionMessageRow,
+    viewer: DiscussionViewer,
+  ): Record<string, unknown> => {
+    const base = {
+      messageId: message.messageId,
+      createdAtMs: message.createdAtMs,
+      deleted: message.deletedAtMs !== null,
+    };
+    if (message.deletedAtMs !== null && viewer !== "owner") return base;
+    const author =
+      message.authorKind === "link"
+        ? {
+            kind: "link" as const,
+            displayName: message.displayNameSnapshot,
+            unverified: true as const,
+          }
+        : {
+            kind: "named" as const,
+            displayName: message.displayNameSnapshot,
+          };
+    return {
+      ...base,
+      ...(message.deletedAtMs === null ? { body: message.body } : {}),
+      author,
+      ...(viewer === "owner" &&
+      message.authorKind === "link" &&
+      message.linkGrantId !== null &&
+      message.linkPrincipalId !== null
+        ? {
+            moderation: {
+              linkGrantId: message.linkGrantId,
+              linkPrincipalId: message.linkPrincipalId,
+            },
+          }
+        : {}),
+    };
+  };
+
+  const requireDiscussionAuthority = (
+    shareId: string,
+    actorUserId: string,
+    action: "read" | "append",
+  ): { viewer: "owner" | "named" } => {
+    const share = storage.getShare(shareId);
+    if (
+      share &&
+      share.granterUserId === actorUserId &&
+      storage.workspaceIsOwnedBy(share.workspaceId, actorUserId)
+    ) {
+      return { viewer: "owner" };
+    }
+    const authorized = requireShareAction(shareId, actorUserId, action);
+    if (
+      action === "append" &&
+      authorized.grant.access !== "comment" &&
+      authorized.grant.access !== "edit"
+    ) {
+      throw shareNotAppendable();
+    }
+    return { viewer: "named" };
+  };
+
+  const discussionPage = (
+    page: SyncRelayShareDiscussionPage,
+    viewer: DiscussionViewer,
+  ): Record<string, unknown> => {
+    return {
+      ok: true,
+      messages: page.messages.map((message) =>
+        projectDiscussionMessage(message, viewer),
+      ),
+      nextCursor:
+        page.nextCursor === null
+          ? null
+          : encodeDiscussionCursor(page.nextCursor),
+    };
+  };
 
   function requireOwnedLinkGrant(
     shareId: string,
@@ -1265,6 +1372,156 @@ export function createSyncRelayHandler({
     );
   };
 
+  const respondToLinkDiscussion = async (request: Request): Promise<Response> => {
+    const refused = (): Response => privateErrorResponse(notFound());
+    if (!linkKey) return refused();
+    if (request.method !== "GET" && request.method !== "POST") {
+      return privateErrorResponse(methodNotAllowed());
+    }
+    if (
+      request.method === "POST" &&
+      (relayExchangeKeyHash === undefined || !hasValidRelayExchangeKey(request))
+    ) {
+      return refused();
+    }
+    const profileSecret = request.headers.get("x-dohc-link-profile-secret");
+    if (
+      request.method === "POST" &&
+      (profileSecret === null || !/^[A-Za-z0-9_-]{43}$/u.test(profileSecret))
+    ) {
+      return refused();
+    }
+
+    try {
+      const { capabilityToken, capability } = requireLinkRead(
+        request,
+        linkReadRateLimiter,
+        linkGrantReadRateLimiter,
+      );
+      if (request.method === "GET") {
+        const url = new URL(request.url);
+        const cursor = decodeDiscussionCursor(url.searchParams.get("cursor"));
+        const limit = parseDiscussionLimit(url.searchParams.get("limit"));
+        const storedPage = storage.listShareDiscussionMessages({
+          shareId: capability.shareId,
+          after: cursor,
+          limit,
+        });
+        const page = discussionPage(storedPage, "public");
+        requireFreshLinkRead(capabilityToken, capability);
+        return privateResponse(
+          linkJsonResponse(capability.shareId, capability.grantId, page),
+        );
+      }
+
+      const input = parseLinkDiscussionAppendBody(await readJsonObject(request));
+      const result = storage.appendLinkDiscussionMessage({
+        capabilityHash: capability.session.capabilityHash,
+        profileTokenHash: hashLinkProfileSecret(profileSecret!, linkKey),
+        claimedName: input.claimedName,
+        body: input.body,
+        idempotencyKey: input.idempotencyKey,
+        createdAtMs: nowMs(),
+      });
+      if (!result.ok) {
+        if (result.reason === "invalid-input") {
+          return privateErrorResponse(badRequest("discussion message is invalid"));
+        }
+        return refused();
+      }
+      return privateResponse(
+        linkJsonResponse(capability.shareId, capability.grantId, {
+          ok: true,
+          message: projectDiscussionMessage(result.message, "public"),
+        }),
+      );
+    } catch (error) {
+      if (
+        error instanceof HttpError &&
+        (error.statusCode === 401 || error.code === RELAY_ERRORS.not_found.code)
+      ) {
+        return refused();
+      }
+      return privateErrorResponse(error);
+    }
+  };
+
+  const respondToShareDiscussion = async (
+    request: Request,
+    shareId: string,
+  ): Promise<Response> => {
+    try {
+      const actor = await resolveActor(request, "");
+      if (
+        !actor.userId ||
+        Buffer.byteLength(actor.userId, "utf8") >
+          LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT
+      ) {
+        throw badRequest("discussion actor id is invalid");
+      }
+      await claimPendingShares(actor.userId);
+      if (request.method === "GET") {
+        requireDiscussionAuthority(shareId, actor.userId, "read");
+        const url = new URL(request.url);
+        const cursor = decodeDiscussionCursor(url.searchParams.get("cursor"));
+        const limit = parseDiscussionLimit(url.searchParams.get("limit"));
+        const storedPage = storage.listShareDiscussionMessages({
+          shareId,
+          after: cursor,
+          limit,
+        });
+        const finalAuthority = requireDiscussionAuthority(
+          shareId,
+          actor.userId,
+          "read",
+        );
+        return privateJsonResponse(
+          discussionPage(storedPage, finalAuthority.viewer),
+        );
+      }
+      if (request.method !== "POST") {
+        return privateErrorResponse(methodNotAllowed());
+      }
+
+      const authority = requireDiscussionAuthority(shareId, actor.userId, "append");
+      const input = parseNamedDiscussionAppendBody(await readJsonObject(request));
+      const lookedUpName = await lookupUserDisplayName?.(actor.userId);
+      const displayName =
+        typeof lookedUpName === "string" && lookedUpName.trim().length > 0
+          ? lookedUpName
+          : "Unnamed";
+      const result = storage.appendNamedDiscussionMessage({
+        shareId,
+        authorUserId: actor.userId,
+        displayName,
+        body: input.body,
+        idempotencyKey: input.idempotencyKey,
+        createdAtMs: nowMs(),
+        guard: () => {
+          requireDiscussionAuthority(shareId, actor.userId, "append");
+        },
+      });
+      if (!result.ok) {
+        if (result.reason === "idempotency-conflict") {
+          throw relayHttpError(
+            RELAY_ERRORS.conflict,
+            "idempotency key was already used for a different message",
+          );
+        }
+        if (result.reason === "workspace-quota") {
+          throw relayHttpError(RELAY_ERRORS.quota_exceeded, "workspace quota exceeded");
+        }
+        throw badRequest("discussion message is invalid");
+      }
+      return privateJsonResponse({
+        ok: true,
+        message: projectDiscussionMessage(result.message, authority.viewer),
+      });
+    } catch (error) {
+      return privateErrorResponse(error);
+    }
+  };
+
   const requireRefreshableLinkSession = (request: Request, refreshedAtMs: number) => {
     if (!linkKey) throw invalidLinkCapability();
     const match = /^LinkCapability ([A-Za-z0-9_-]{43})$/u.exec(
@@ -1605,6 +1862,12 @@ export function createSyncRelayHandler({
         if (request.method !== "POST") throw methodNotAllowed();
         const actor = await resolveActor(request, "");
         return await respondToLinkRedeem(request, actor.userId);
+      }
+      if (route.route === "link-discussion") {
+        return await respondToLinkDiscussion(request);
+      }
+      if (route.route === "share-discussion") {
+        return await respondToShareDiscussion(request, route.shareId);
       }
       if (
         route.route === "link-share" ||
@@ -3307,6 +3570,7 @@ function parseRoute(request: Request): SyncRelayRoute {
     if (parts[2] === "share") return { route: "link-share" };
     if (parts[2] === "current") return { route: "link-current" };
     if (parts[2] === "log") return { route: "link-log" };
+    if (parts[2] === "discussion") return { route: "link-discussion" };
   }
   if (
     parts.length === 4 &&
@@ -3356,6 +3620,9 @@ function parseRoute(request: Request): SyncRelayRoute {
       };
     }
     if (parts.length === 4 && parts[3] === "log") return { route: "share-log", shareId };
+    if (parts.length === 4 && parts[3] === "discussion") {
+      return { route: "share-discussion", shareId };
+    }
     if (parts.length === 4 && parts[3] === "presence") return { route: "share-presence", shareId };
     if (parts.length === 5 && parts[3] === "blobs" && parts[4]) {
       return { route: "share-blob", shareId, sha256: parts[4] };
@@ -3529,6 +3796,109 @@ function decodeLinkInventoryCursor(
     linkCreatedAtMs: Number(row.linkCreatedAtMs),
     grantId: row.grantId,
   };
+}
+
+function encodeDiscussionCursor(cursor: SyncRelayShareDiscussionCursor): string {
+  return Buffer.from(JSON.stringify({ version: 1, ...cursor }), "utf8").toString(
+    "base64url",
+  );
+}
+
+function decodeDiscussionCursor(
+  value: string | null,
+): SyncRelayShareDiscussionCursor | undefined {
+  if (value === null) return undefined;
+  const invalid = () => badRequest("cursor is invalid");
+  if (
+    value.length === 0 ||
+    value.length > DISCUSSION_CURSOR_MAX_CHARS ||
+    !/^[A-Za-z0-9_-]+$/u.test(value)
+  ) {
+    throw invalid();
+  }
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+  } catch {
+    throw invalid();
+  }
+  if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) {
+    throw invalid();
+  }
+  const row = decoded as Record<string, unknown>;
+  if (
+    Object.keys(row).sort().join("\0") !==
+      ["createdAtMs", "messageId", "version"].sort().join("\0") ||
+    row.version !== 1 ||
+    !Number.isSafeInteger(row.createdAtMs) ||
+    Number(row.createdAtMs) < 0 ||
+    typeof row.messageId !== "string" ||
+    row.messageId.length === 0 ||
+    row.messageId.length > 512
+  ) {
+    throw invalid();
+  }
+  return {
+    createdAtMs: Number(row.createdAtMs),
+    messageId: row.messageId,
+  };
+}
+
+function parseDiscussionLimit(value: string | null): number {
+  if (value === null) return DEFAULT_DISCUSSION_PAGE_SIZE;
+  if (!/^[1-9][0-9]{0,2}$/u.test(value)) {
+    throw badRequest("limit is invalid");
+  }
+  const limit = Number(value);
+  if (limit > LINK_DISCUSSION_PAGE_LIMIT) {
+    throw badRequest(`limit must not exceed ${LINK_DISCUSSION_PAGE_LIMIT}`);
+  }
+  return limit;
+}
+
+function parseLinkDiscussionAppendBody(input: Record<string, unknown>): {
+  body: string;
+  idempotencyKey: string;
+  claimedName?: string;
+} {
+  const keys = Object.keys(input);
+  if (
+    keys.some(
+      (key) => key !== "body" && key !== "idempotencyKey" && key !== "claimedName",
+    ) ||
+    !Object.hasOwn(input, "body") ||
+    !Object.hasOwn(input, "idempotencyKey") ||
+    typeof input.body !== "string" ||
+    typeof input.idempotencyKey !== "string" ||
+    (Object.hasOwn(input, "claimedName") && typeof input.claimedName !== "string")
+  ) {
+    throw badRequest("discussion append body is invalid");
+  }
+  return {
+    body: input.body,
+    idempotencyKey: input.idempotencyKey,
+    ...(typeof input.claimedName === "string"
+      ? { claimedName: input.claimedName }
+      : {}),
+  };
+}
+
+function parseNamedDiscussionAppendBody(input: Record<string, unknown>): {
+  body: string;
+  idempotencyKey: string;
+} {
+  if (
+    Object.keys(input).some(
+      (key) => key !== "body" && key !== "idempotencyKey",
+    ) ||
+    !Object.hasOwn(input, "body") ||
+    !Object.hasOwn(input, "idempotencyKey") ||
+    typeof input.body !== "string" ||
+    typeof input.idempotencyKey !== "string"
+  ) {
+    throw badRequest("discussion append body is invalid");
+  }
+  return { body: input.body, idempotencyKey: input.idempotencyKey };
 }
 
 function parseExpectedDependentGrantIds(

@@ -138,6 +138,7 @@ export interface SyncRelayLinkPrincipalRow {
   displayName: string | null;
   createdAtMs: number;
   blockedAtMs: number | null;
+  storageBytes: number;
 }
 
 export interface SyncRelayShareDiscussionMessageRow {
@@ -188,6 +189,17 @@ export type AppendLinkDiscussionMessageResult =
         | "lifetime-limit"
         | "share-limit"
         | "workspace-quota";
+    };
+
+export type AppendNamedDiscussionMessageResult =
+  | {
+      ok: true;
+      replayed: boolean;
+      message: SyncRelayShareDiscussionMessageRow;
+    }
+  | {
+      ok: false;
+      reason: "invalid-input" | "idempotency-conflict" | "workspace-quota";
     };
 
 export interface SyncRelayLinkHandoffCodeRow {
@@ -515,6 +527,15 @@ export interface SyncRelayStorage {
     idempotencyKey: string;
     createdAtMs: number;
   }): AppendLinkDiscussionMessageResult;
+  appendNamedDiscussionMessage(input: {
+    shareId: string;
+    authorUserId: string;
+    displayName: string;
+    body: string;
+    idempotencyKey: string;
+    createdAtMs: number;
+    guard: () => void;
+  }): AppendNamedDiscussionMessageResult;
   listShareDiscussionMessages(input: {
     shareId: string;
     after?: SyncRelayShareDiscussionCursor | null;
@@ -763,6 +784,15 @@ export const LINK_DISCUSSION_MESSAGE_RATE_WINDOW_MS = 60_000;
 export const LINK_DISCUSSION_LIFETIME_MESSAGE_LIMIT = 500;
 export const LINK_DISCUSSION_SHARE_ROW_LIMIT = 5_000;
 export const LINK_DISCUSSION_PAGE_LIMIT = 100;
+// Share creation accepts account ids up to 256 characters. Reserve the
+// four-byte UTF-8 worst case so a later owner tombstone never grows quota.
+export const LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT = 1_024;
+const LINK_DISCUSSION_SQLITE_INTEGER_BYTES = 8;
+const LINK_DISCUSSION_MESSAGE_FIXED_STORAGE_BYTES =
+  LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT +
+  3 * LINK_DISCUSSION_SQLITE_INTEGER_BYTES;
+const LINK_DISCUSSION_PRINCIPAL_FIXED_STORAGE_BYTES =
+  LINK_DISCUSSION_NAME_BYTE_LIMIT + 4 * LINK_DISCUSSION_SQLITE_INTEGER_BYTES;
 // Retention grace for freshly-uploaded blobs (0P sync-hardening item 4). Blob
 // upload is two-phase (PUT /blobs/:sha, then POST /log referencing it); GC that
 // runs between the two must NOT reclaim the blob just because no log row
@@ -892,6 +922,7 @@ const NORMALIZED_SHARE_SCHEMA_SQL = `
     ),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
     blocked_at_ms INTEGER,
+    storage_bytes INTEGER NOT NULL CHECK (storage_bytes > 0),
     UNIQUE (grant_id, profile_token_hash),
     FOREIGN KEY (grant_id)
       REFERENCES sync_relay_share_grants(grant_id) ON DELETE CASCADE
@@ -1289,6 +1320,10 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       .prepare("PRAGMA table_info(sync_relay_link_sessions)")
       .all()
       .map((row) => String(row.name));
+    const principalColumns = db
+      .prepare("PRAGMA table_info(sync_relay_link_principals)")
+      .all()
+      .map((row) => String(row.name));
     const grantSchema = db
       .prepare(
         "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'sync_relay_share_grants'",
@@ -1298,7 +1333,8 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       shareColumns.includes("recipient_user_id") ||
       !String(grantSchema?.sql ?? "").includes("'link'") ||
       !shareColumns.includes("link_writes_paused_at_ms") ||
-      !sessionColumns.includes("principal_id")
+      !sessionColumns.includes("principal_id") ||
+      !principalColumns.includes("storage_bytes")
     ) {
       // Pre-launch replacement. Discussion authority is one normalized model:
       // the share pause, grant, protected principal, session binding, and
@@ -1939,6 +1975,60 @@ function linkDiscussionRequestHash(body: string, claimedName: string | null): st
   return createHash("sha256")
     .update(JSON.stringify({ body, claimedName }))
     .digest("base64url");
+}
+
+function namedDiscussionRequestHash(body: string): string {
+  return createHash("sha256")
+    .update(JSON.stringify({ body }))
+    .digest("base64url");
+}
+
+function discussionMessageStorageBytes(input: {
+  messageId: string;
+  shareId: string;
+  idempotencyKey: string;
+  requestHash: string;
+  authorKind: "named" | "link";
+  authorUserId: string | null;
+  linkGrantId: string | null;
+  linkPrincipalId: string | null;
+  displayNameSnapshot: string;
+  body: string;
+}): number {
+  return (
+    utf8Bytes(
+      input.messageId,
+      input.shareId,
+      input.idempotencyKey,
+      input.requestHash,
+      input.authorKind,
+      input.authorUserId,
+      input.linkGrantId,
+      input.linkPrincipalId,
+      input.displayNameSnapshot,
+      input.body,
+    ) + LINK_DISCUSSION_MESSAGE_FIXED_STORAGE_BYTES
+  );
+}
+
+function linkPrincipalStorageBytes(input: {
+  principalId: string;
+  grantId: string;
+  profileTokenHash: string;
+}): number {
+  return (
+    utf8Bytes(input.principalId, input.grantId, input.profileTokenHash) +
+    LINK_DISCUSSION_PRINCIPAL_FIXED_STORAGE_BYTES
+  );
+}
+
+function validDiscussionDeletingUserId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    Buffer.byteLength(value, "utf8") <=
+      LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT
+  );
 }
 
 function utf8Bytes(...values: Array<string | null>): number {
@@ -2958,15 +3048,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       .get(workspaceId);
     const discussionPrincipalRow = this.db
       .prepare(
-        `SELECT COALESCE(
-           SUM(
-             length(CAST(principal.principal_id AS BLOB)) +
-             length(CAST(principal.grant_id AS BLOB)) +
-             length(CAST(principal.profile_token_hash AS BLOB)) +
-             COALESCE(length(CAST(principal.display_name AS BLOB)), 0)
-           ),
-           0
-         ) AS bytes
+        `SELECT COALESCE(SUM(principal.storage_bytes), 0) AS bytes
          FROM sync_relay_link_principals AS principal
          JOIN sync_relay_share_grants AS grant ON grant.grant_id = principal.grant_id
          JOIN sync_relay_shares AS share ON share.share_id = grant.share_id
@@ -3640,7 +3722,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       const existingPrincipalRow = this.db
         .prepare(
           `SELECT principal_id, grant_id, mint_generation, profile_token_hash,
-                  display_name, created_at_ms, blocked_at_ms
+                  display_name, created_at_ms, blocked_at_ms, storage_bytes
            FROM sync_relay_link_principals
            WHERE grant_id = ? AND profile_token_hash = ?
            LIMIT 1`,
@@ -3762,21 +3844,24 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       const committedName = principal?.displayName ?? claimedName;
       const displayNameSnapshot = committedName ?? "Anonymous";
       const principalAddedBytes = principal
-        ? principal.displayName === null && committedName !== null
-          ? Buffer.byteLength(committedName, "utf8")
-          : 0
-        : utf8Bytes(principalId, grantId, input.profileTokenHash, committedName);
-      const messageStorageBytes = utf8Bytes(
+        ? 0
+        : linkPrincipalStorageBytes({
+            principalId,
+            grantId,
+            profileTokenHash: input.profileTokenHash,
+          });
+      const messageStorageBytes = discussionMessageStorageBytes({
         messageId,
         shareId,
-        input.idempotencyKey,
+        idempotencyKey: input.idempotencyKey,
         requestHash,
-        "link",
-        grantId,
-        principalId,
+        authorKind: "link",
+        authorUserId: null,
+        linkGrantId: grantId,
+        linkPrincipalId: principalId,
         displayNameSnapshot,
         body,
-      );
+      });
       if (
         this.workspaceUsageBytes(workspaceId) + principalAddedBytes + messageStorageBytes >
         this.workspaceQuotaBytes
@@ -3789,8 +3874,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           .prepare(
             `INSERT INTO sync_relay_link_principals (
                principal_id, grant_id, mint_generation, profile_token_hash,
-               display_name, created_at_ms, blocked_at_ms
-             ) VALUES (?, ?, ?, ?, ?, ?, NULL)`,
+               display_name, created_at_ms, blocked_at_ms, storage_bytes
+             ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?)`,
           )
           .run(
             principalId,
@@ -3799,6 +3884,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
             input.profileTokenHash,
             committedName,
             createdAtMs,
+            principalAddedBytes,
           );
         principal = this.getLinkPrincipal(principalId)!;
       } else if (principal.displayName === null && committedName !== null) {
@@ -3861,6 +3947,131 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         ok: true,
         replayed: false,
         principal,
+        message: rowToShareDiscussionMessageRow(message),
+      };
+    });
+  }
+
+  appendNamedDiscussionMessage(input: {
+    shareId: string;
+    authorUserId: string;
+    displayName: string;
+    body: string;
+    idempotencyKey: string;
+    createdAtMs: number;
+    guard: () => void;
+  }): AppendNamedDiscussionMessageResult {
+    const body = normalizeLinkDiscussionBody(input.body);
+    if (
+      body === null ||
+      !input.shareId ||
+      !validDiscussionDeletingUserId(input.authorUserId) ||
+      !input.displayName ||
+      !validLinkDiscussionIdempotencyKey(input.idempotencyKey) ||
+      !Number.isSafeInteger(input.createdAtMs) ||
+      input.createdAtMs < 0
+    ) {
+      return { ok: false, reason: "invalid-input" };
+    }
+    const createdAtMs = Math.trunc(input.createdAtMs);
+    const requestHash = namedDiscussionRequestHash(body);
+
+    return this.tx(() => {
+      // The caller's server-derived identity and current share authority are
+      // rechecked under this write lock, immediately before replay or insert.
+      input.guard();
+      const share = this.db
+        .prepare(
+          `SELECT workspace_id
+           FROM sync_relay_shares
+           WHERE share_id = ?
+           LIMIT 1`,
+        )
+        .get(input.shareId);
+      if (!share) return { ok: false, reason: "invalid-input" };
+
+      const replayRow = this.db
+        .prepare(
+          `SELECT message_id, share_id, idempotency_key, request_hash,
+                  author_kind, author_user_id, link_grant_id, link_principal_id,
+                  display_name_snapshot, body, created_at_ms, deleted_at_ms,
+                  deleted_by_user_id, storage_bytes
+           FROM sync_relay_share_discussion_messages
+           WHERE share_id = ?
+             AND author_kind = 'named'
+             AND author_user_id = ?
+             AND idempotency_key = ?
+           LIMIT 1`,
+        )
+        .get(input.shareId, input.authorUserId, input.idempotencyKey);
+      if (replayRow) {
+        if (replayRow.request_hash !== requestHash) {
+          return { ok: false, reason: "idempotency-conflict" };
+        }
+        return {
+          ok: true,
+          replayed: true,
+          message: rowToShareDiscussionMessageRow(replayRow),
+        };
+      }
+
+      const messageId = this.newDiscussionId();
+      if (!messageId) {
+        throw new Error("discussion id generator returned an invalid identifier");
+      }
+      const messageStorageBytes = discussionMessageStorageBytes({
+        messageId,
+        shareId: input.shareId,
+        idempotencyKey: input.idempotencyKey,
+        requestHash,
+        authorKind: "named",
+        authorUserId: input.authorUserId,
+        linkGrantId: null,
+        linkPrincipalId: null,
+        displayNameSnapshot: input.displayName,
+        body,
+      });
+      if (
+        this.workspaceUsageBytes(String(share.workspace_id)) + messageStorageBytes >
+        this.workspaceQuotaBytes
+      ) {
+        return { ok: false, reason: "workspace-quota" };
+      }
+
+      this.db
+        .prepare(
+          `INSERT INTO sync_relay_share_discussion_messages (
+             message_id, share_id, idempotency_key, request_hash, author_kind,
+             author_user_id, link_grant_id, link_principal_id,
+             display_name_snapshot, body, created_at_ms, deleted_at_ms,
+             deleted_by_user_id, storage_bytes
+           ) VALUES (?, ?, ?, ?, 'named', ?, NULL, NULL, ?, ?, ?, NULL, NULL, ?)`,
+        )
+        .run(
+          messageId,
+          input.shareId,
+          input.idempotencyKey,
+          requestHash,
+          input.authorUserId,
+          input.displayName,
+          body,
+          createdAtMs,
+          messageStorageBytes,
+        );
+      const message = this.db
+        .prepare(
+          `SELECT message_id, share_id, idempotency_key, request_hash,
+                  author_kind, author_user_id, link_grant_id, link_principal_id,
+                  display_name_snapshot, body, created_at_ms, deleted_at_ms,
+                  deleted_by_user_id, storage_bytes
+           FROM sync_relay_share_discussion_messages
+           WHERE message_id = ?`,
+        )
+        .get(messageId);
+      if (!message) throw new Error("inserted discussion message is missing");
+      return {
+        ok: true,
+        replayed: false,
         message: rowToShareDiscussionMessageRow(message),
       };
     });
@@ -3935,7 +4146,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     const row = this.db
       .prepare(
         `SELECT principal_id, grant_id, mint_generation, profile_token_hash,
-                display_name, created_at_ms, blocked_at_ms
+                display_name, created_at_ms, blocked_at_ms, storage_bytes
          FROM sync_relay_link_principals
          WHERE principal_id = ?`,
       )
@@ -4024,7 +4235,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     if (
       !Number.isSafeInteger(input.deletedAtMs) ||
       input.deletedAtMs < 0 ||
-      !input.deletedByUserId
+      !validDiscussionDeletingUserId(input.deletedByUserId)
     ) {
       return false;
     }
@@ -4034,14 +4245,12 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           `UPDATE sync_relay_share_discussion_messages
            SET body = NULL,
                deleted_at_ms = ?,
-               deleted_by_user_id = ?,
-               storage_bytes = storage_bytes + ?
+               deleted_by_user_id = ?
            WHERE share_id = ? AND message_id = ? AND deleted_at_ms IS NULL`,
         )
         .run(
           Math.trunc(input.deletedAtMs),
           input.deletedByUserId,
-          Buffer.byteLength(input.deletedByUserId, "utf8"),
           input.shareId,
           input.messageId,
         );
@@ -5562,6 +5771,7 @@ function rowToLinkPrincipalRow(
     displayName: nullableText(row.display_name),
     createdAtMs: Number(row.created_at_ms),
     blockedAtMs: nullableInt(row.blocked_at_ms),
+    storageBytes: Number(row.storage_bytes),
   };
 }
 
