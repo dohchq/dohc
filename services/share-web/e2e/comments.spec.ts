@@ -120,8 +120,26 @@ test("keeps mixed View and Comment links isolated over one committed discussion"
     const cookieNames = (await context.cookies()).map((cookie) => cookie.name);
     expect(cookieNames).toContain(`dohc_share_${commentSession}`);
     expect(cookieNames).toContain(`dohc_share_${viewSession}`);
-    expect(cookieNames.filter((name) => name.startsWith("dohc_share_profile_")))
-      .toHaveLength(2);
+    expect(cookieNames.filter((name) => name.startsWith("dohc_share_profile_")).sort())
+      .toEqual([
+        `dohc_share_profile_${commentSession}`,
+        `dohc_share_profile_${viewSession}`,
+      ].sort());
+
+    const afterProfilesBody = "Committed after both profiles exist.";
+    await commentPage.bringToFront();
+    await commentPage.getByLabel("Comment", { exact: true }).fill(afterProfilesBody);
+    await commentPage.getByRole("button", { name: "Post comment" }).click();
+    const afterProfilesRow = commentPage.locator(".comment-row")
+      .filter({ hasText: afterProfilesBody });
+    await expect(afterProfilesRow).toBeVisible();
+    await expect(afterProfilesRow.locator(".comment-author"))
+      .toHaveText("Link ReaderUnverified");
+
+    await viewPage.reload();
+    await expect(viewPage.getByText(afterProfilesBody, { exact: true })).toBeVisible();
+    await expect(viewPage.getByLabel("Comment", { exact: true })).toHaveCount(0);
+    await expect(viewPage.getByRole("button", { name: "Post comment" })).toHaveCount(0);
 
     await deleteComment({
       relayUrl: stack.relayUrl,
@@ -134,6 +152,7 @@ test("keeps mixed View and Comment links isolated over one committed discussion"
       await expect(page.getByText("Comment deleted by the owner", { exact: true })).toBeVisible();
       await expect(page.getByText(namedBody, { exact: true })).toHaveCount(0);
       await expect(page.getByText("Committed from Comment", { exact: true })).toBeVisible();
+      await expect(page.getByText(afterProfilesBody, { exact: true })).toBeVisible();
     }
   } finally {
     await context.close();
