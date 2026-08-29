@@ -1,4 +1,4 @@
-export type ShareAccess = "view";
+export type ShareAccess = "view" | "comment";
 
 export interface ViewMeta {
   access: ShareAccess;
@@ -24,12 +24,211 @@ export interface SharedFile {
   contentKind: "text" | "binary";
 }
 
+export interface NamedDiscussionAuthor {
+  kind: "named";
+  displayName: string;
+}
+
+export interface LinkDiscussionAuthor {
+  kind: "link";
+  displayName: string;
+  unverified: true;
+}
+
+export interface LiveDiscussionMessage {
+  messageId: string;
+  createdAtMs: number;
+  deleted: false;
+  body: string;
+  author: NamedDiscussionAuthor | LinkDiscussionAuthor;
+}
+
+export interface DeletedDiscussionMessage {
+  messageId: string;
+  createdAtMs: number;
+  deleted: true;
+}
+
+export type PublicDiscussionMessage =
+  | LiveDiscussionMessage
+  | DeletedDiscussionMessage;
+
+export interface PublicDiscussionPage {
+  messages: PublicDiscussionMessage[];
+  nextCursor: string | null;
+}
+
 export type FileAccumulator = Map<string, SharedFile>;
 
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length &&
+    actual.every((key, index) => key === expected[index]);
+}
+
+function discussionAuthor(value: unknown): NamedDiscussionAuthor | LinkDiscussionAuthor | null {
+  const author = record(value);
+  if (!author || typeof author.displayName !== "string" || author.displayName.length === 0) {
+    return null;
+  }
+  if (author.kind === "named" && hasExactKeys(author, ["kind", "displayName"])) {
+    return { kind: "named", displayName: author.displayName };
+  }
+  if (
+    author.kind === "link" &&
+    author.unverified === true &&
+    hasExactKeys(author, ["kind", "displayName", "unverified"])
+  ) {
+    return { kind: "link", displayName: author.displayName, unverified: true };
+  }
+  return null;
+}
+
+function discussionMessage(value: unknown): PublicDiscussionMessage | null {
+  const message = record(value);
+  if (
+    !message ||
+    typeof message.messageId !== "string" ||
+    message.messageId.length === 0 ||
+    typeof message.createdAtMs !== "number" ||
+    !Number.isSafeInteger(message.createdAtMs) ||
+    message.createdAtMs < 0
+  ) {
+    return null;
+  }
+  if (
+    message.deleted === true &&
+    hasExactKeys(message, ["messageId", "createdAtMs", "deleted"])
+  ) {
+    return {
+      messageId: message.messageId,
+      createdAtMs: message.createdAtMs,
+      deleted: true,
+    };
+  }
+  const author = discussionAuthor(message.author);
+  if (
+    message.deleted !== false ||
+    typeof message.body !== "string" ||
+    message.body.length === 0 ||
+    !author ||
+    !hasExactKeys(message, ["messageId", "createdAtMs", "deleted", "body", "author"])
+  ) {
+    return null;
+  }
+  return {
+    messageId: message.messageId,
+    createdAtMs: message.createdAtMs,
+    deleted: false,
+    body: message.body,
+    author,
+  };
+}
+
+function discussionOrder(
+  left: PublicDiscussionMessage,
+  right: PublicDiscussionMessage,
+): number {
+  return left.createdAtMs - right.createdAtMs || left.messageId.localeCompare(right.messageId);
+}
+
+export function parseDiscussionPage(value: unknown): PublicDiscussionPage | null {
+  const page = record(value);
+  if (
+    !page ||
+    !hasExactKeys(page, ["ok", "messages", "nextCursor"]) ||
+    page.ok !== true ||
+    !Array.isArray(page.messages) ||
+    (page.nextCursor !== null &&
+      (typeof page.nextCursor !== "string" ||
+        !/^[A-Za-z0-9_-]{1,1024}$/u.test(page.nextCursor)))
+  ) {
+    return null;
+  }
+  const messages: PublicDiscussionMessage[] = [];
+  for (const rawMessage of page.messages) {
+    const message = discussionMessage(rawMessage);
+    if (!message || (messages.length > 0 && discussionOrder(messages.at(-1)!, message) >= 0)) {
+      return null;
+    }
+    messages.push(message);
+  }
+  return { messages, nextCursor: page.nextCursor as string | null };
+}
+
+export function parseDiscussionAppendResult(value: unknown): PublicDiscussionMessage | null {
+  const result = record(value);
+  return result && result.ok === true && hasExactKeys(result, ["ok", "message"])
+    ? discussionMessage(result.message)
+    : null;
+}
+
+export function parseDiscussionWriteState(value: unknown): "blocked" | "paused" | null {
+  const result = record(value);
+  if (
+    !result ||
+    result.ok !== false ||
+    !hasExactKeys(result, ["ok", "state"])
+  ) {
+    return null;
+  }
+  return result.state === "blocked" || result.state === "paused"
+    ? result.state
+    : null;
+}
+
+function sameDiscussionMessage(
+  left: PublicDiscussionMessage,
+  right: PublicDiscussionMessage,
+): boolean {
+  if (
+    left.messageId !== right.messageId ||
+    left.createdAtMs !== right.createdAtMs ||
+    left.deleted !== right.deleted
+  ) {
+    return false;
+  }
+  if (left.deleted || right.deleted) return left.deleted && right.deleted;
+  return left.body === right.body &&
+    left.author.kind === right.author.kind &&
+    left.author.displayName === right.author.displayName &&
+    (left.author.kind === "named" ||
+      (right.author.kind === "link" && right.author.unverified === true));
+}
+
+export function mergeDiscussionMessages(
+  current: readonly PublicDiscussionMessage[],
+  incoming: readonly PublicDiscussionMessage[],
+): PublicDiscussionMessage[] | null {
+  const merged = [...current];
+  const positions = new Map(merged.map((message, index) => [message.messageId, index]));
+  for (const message of incoming) {
+    const existingIndex = positions.get(message.messageId);
+    if (existingIndex === undefined) {
+      positions.set(message.messageId, merged.length);
+      merged.push(message);
+      continue;
+    }
+    const existing = merged[existingIndex]!;
+    if (sameDiscussionMessage(existing, message)) continue;
+    if (
+      !existing.deleted &&
+      message.deleted &&
+      existing.createdAtMs === message.createdAtMs
+    ) {
+      merged[existingIndex] = message;
+      continue;
+    }
+    return null;
+  }
+  return merged;
 }
 
 function storedFile(value: unknown): SharedFile | null {

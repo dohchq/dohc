@@ -3,6 +3,9 @@ import {
   filesFromAccumulator,
   filesFromLog,
   foldLogOps,
+  mergeDiscussionMessages,
+  parseDiscussionAppendResult,
+  parseDiscussionPage,
   type RelayOp,
   type SharedFile,
 } from "./model";
@@ -231,5 +234,99 @@ describe("filesFromLog", () => {
       blobSha256: ARRIVED_SHA,
       contentKind: "text",
     }]);
+  });
+});
+
+describe("public discussion projection", () => {
+  const named = {
+    messageId: "message-named",
+    createdAtMs: 1_000,
+    deleted: false as const,
+    body: "Named body",
+    author: { kind: "named" as const, displayName: "Named Person" },
+  };
+  const link = {
+    messageId: "message-link",
+    createdAtMs: 2_000,
+    deleted: false as const,
+    body: "Link body",
+    author: {
+      kind: "link" as const,
+      displayName: "Link Person",
+      unverified: true as const,
+    },
+  };
+  const tombstone = {
+    messageId: "message-deleted",
+    createdAtMs: 3_000,
+    deleted: true as const,
+  };
+
+  it("parses only the exact public page and append unions", () => {
+    expect(parseDiscussionPage({
+      ok: true,
+      messages: [named, link, tombstone],
+      nextCursor: "cursor_1",
+    })).toEqual({
+      messages: [named, link, tombstone],
+      nextCursor: "cursor_1",
+    });
+    expect(parseDiscussionAppendResult({ ok: true, message: link })).toEqual(link);
+  });
+
+  it.each([
+    ["an internal page field", { ok: true, messages: [], nextCursor: null, shareId: "secret" }],
+    ["an internal message field", {
+      ok: true,
+      messages: [{ ...named, linkPrincipalId: "secret" }],
+      nextCursor: null,
+    }],
+    ["a tombstone body", {
+      ok: true,
+      messages: [{ ...tombstone, body: "deleted body" }],
+      nextCursor: null,
+    }],
+    ["a tombstone author", {
+      ok: true,
+      messages: [{ ...tombstone, author: named.author }],
+      nextCursor: null,
+    }],
+    ["a live row without an exact author", {
+      ok: true,
+      messages: [{ ...link, author: { ...link.author, unverified: false } }],
+      nextCursor: null,
+    }],
+    ["an out-of-order page", {
+      ok: true,
+      messages: [link, named],
+      nextCursor: null,
+    }],
+    ["a malformed cursor", { ok: true, messages: [], nextCursor: "cursor/value" }],
+  ])("refuses %s", (_case, value) => {
+    expect(parseDiscussionPage(value)).toBeNull();
+  });
+
+  it("merges exact repeats once and replaces a live row with its tombstone in place", () => {
+    const deletedLink = {
+      messageId: link.messageId,
+      createdAtMs: link.createdAtMs,
+      deleted: true as const,
+    };
+    expect(mergeDiscussionMessages([named, link], [link, tombstone])).toEqual([
+      named,
+      link,
+      tombstone,
+    ]);
+    expect(mergeDiscussionMessages([named, link, tombstone], [deletedLink])).toEqual([
+      named,
+      deletedLink,
+      tombstone,
+    ]);
+  });
+
+  it("refuses every conflicting message-id reuse", () => {
+    expect(mergeDiscussionMessages([link], [{ ...link, body: "forged" }])).toBeNull();
+    expect(mergeDiscussionMessages([tombstone], [{ ...tombstone, createdAtMs: 4_000 }]))
+      .toBeNull();
   });
 });

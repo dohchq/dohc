@@ -12,6 +12,7 @@ import {
 import { parsePublicExcalidrawScene } from "./excalidraw";
 import { useImageRetryHandlers } from "./imageRetry";
 import { MarkdownContent } from "./MarkdownContent";
+import { CommentsPanel } from "./CommentsPanel";
 import {
   RETRY_BUDGET_MS,
   RETRY_INITIAL_MS,
@@ -29,6 +30,7 @@ import {
   resolveSharedImage,
   type FileAccumulator,
   type RelayOp,
+  type ShareAccess,
   type SharedFile,
   type ViewMeta,
 } from "./model";
@@ -341,9 +343,10 @@ function viewMeta(value: unknown): ViewMeta | null {
   const selector = record.effectiveSelector;
   if (!selector || typeof selector !== "object" || Array.isArray(selector)) return null;
   const selectorRecord = selector as Record<string, unknown>;
+  const access = record.access;
   if (
-    record.access !== "view" ||
-    selectorRecord.access !== "view" ||
+    (access !== "view" && access !== "comment") ||
+    selectorRecord.access !== access ||
     !Array.isArray(selectorRecord.paths) ||
     selectorRecord.paths.some((path) => typeof path !== "string") ||
     (selectorRecord.versionId !== null && typeof selectorRecord.versionId !== "string") ||
@@ -355,11 +358,11 @@ function viewMeta(value: unknown): ViewMeta | null {
     return null;
   }
   return {
-    access: "view",
+    access,
     effectiveSelector: {
       paths: selectorRecord.paths as string[],
       versionId: selectorRecord.versionId as string | null,
-      access: "view",
+      access,
     },
     lastSettledAtMs: record.lastSettledAtMs as number | null,
     lastSettledKnown: record.lastSettledKnown,
@@ -423,11 +426,13 @@ export async function loadCurrentState(
 async function loadMeta(session: string, signal?: AbortSignal): Promise<ViewMeta> {
   const response = await apiWithThrottleRetry(session, "/api/view/meta", signal);
   if (!response.ok) throw new ViewResponseError(response.status);
-  const meta = (await response.json()) as ViewMeta;
-  if (meta.access !== "view" || meta.effectiveSelector.access !== "view") {
-    throw new Error("refused");
-  }
+  const meta = viewMeta(await response.json());
+  if (!meta) throw new Error("refused");
   return meta;
+}
+
+function accessLabel(access: ShareAccess): string {
+  return access === "comment" ? "Comment" : "View";
 }
 
 function scrubFragment(): void {
@@ -1136,7 +1141,7 @@ export function App() {
           <h1>{selected?.path ?? "Shared files"}</h1>
         </div>
         <div className="header-actions">
-          <span className="badge">View</span>
+          <span className="badge">{accessLabel(state.meta.access)}</span>
           <OpenInDohc key={state.session} session={state.session} />
         </div>
       </header>
@@ -1182,6 +1187,7 @@ export function App() {
             <p>No files in this share yet.</p>
           )}
         </main>
+        <CommentsPanel access={state.meta.access} session={state.session} />
       </div>
     </div>
   );

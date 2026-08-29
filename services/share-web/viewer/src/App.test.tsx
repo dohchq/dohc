@@ -214,6 +214,21 @@ describe("App", () => {
     });
   }
 
+  function setControlValue(
+    control: HTMLInputElement | HTMLTextAreaElement,
+    value: string,
+  ): void {
+    const prototype = control instanceof HTMLTextAreaElement
+      ? HTMLTextAreaElement.prototype
+      : HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+    if (!setter) throw new Error("control value setter is missing");
+    act(() => {
+      setter.call(control, value);
+      control.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+
   function handoffCalls(fetchMock: ReturnType<typeof vi.fn>): Array<unknown[]> {
     return fetchMock.mock.calls.filter(
       ([input]) => requestPath(input as RequestInfo | URL) === "/api/handoff",
@@ -3303,6 +3318,132 @@ describe("App", () => {
     );
     expect(container.textContent).not.toContain("This link isn't available.");
     expect(renderedFilePaths()).toEqual([file.path]);
+  });
+
+  it("loads Comment access without widening file authority", async () => {
+    const file: SharedFile = {
+      path: "docs/commented.md",
+      blobSha256: "9".repeat(64),
+      contentKind: "text",
+    };
+    const commentMeta: ViewMeta = {
+      ...DEFAULT_META,
+      access: "comment",
+      effectiveSelector: { ...DEFAULT_META.effectiveSelector, access: "comment" },
+    };
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/view/current") return currentPage([file], 1, 0, commentMeta);
+      if (path === "/api/view/log?since=1&limit=500") return logOpsPage([], 1);
+      if (path === "/api/view/discussion") {
+        return jsonResponse({
+          ok: true,
+          messages: [{
+            messageId: "comment-app",
+            createdAtMs: 1,
+            deleted: false,
+            body: "Shared comment",
+            author: { kind: "named", displayName: "Named Person" },
+          }],
+          nextCursor: null,
+        });
+      }
+      if (path === `/api/view/blob/${file.blobSha256}`) {
+        return new Response("# Commented file\n\nFile bytes stay read-only.");
+      }
+      if (path === "/api/view/meta") return jsonResponse(commentMeta);
+      throw new Error(`Unexpected request: ${path} ${String(init?.method)}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+    await settle(() => container.textContent?.includes("Shared comment") === true);
+
+    expect(container.querySelector(".badge")?.textContent).toBe("Comment");
+    expect(container.querySelector("main.content")?.textContent).toContain(
+      "File bytes stay read-only.",
+    );
+    expect(container.querySelector(".comments-panel")?.textContent).toContain("Shared comment");
+    expect(container.querySelector(".comments-panel form")).not.toBeNull();
+    expect(container.querySelector("main.content textarea")).toBeNull();
+    expect(container.querySelector('main.content [contenteditable="true"]')).toBeNull();
+  });
+
+  it.each([
+    ["blocked", "The owner turned off comments for this browser."],
+    ["paused", "The owner paused comments. You can still read everything."],
+  ] as const)("keeps the file and timeline readable when Comment append is %s", async (writeState, copy) => {
+    const file: SharedFile = {
+      path: "docs/readable.md",
+      blobSha256: "8".repeat(64),
+      contentKind: "text",
+    };
+    const commentMeta: ViewMeta = {
+      ...DEFAULT_META,
+      access: "comment",
+      effectiveSelector: { ...DEFAULT_META.effectiveSelector, access: "comment" },
+    };
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/view/current") return currentPage([file], 1, 0, commentMeta);
+      if (path === "/api/view/log?since=1&limit=500") return logOpsPage([], 1);
+      if (path === "/api/view/discussion" && init?.method === "POST") {
+        return jsonResponse({ ok: false, state: writeState }, 403);
+      }
+      if (path === "/api/view/discussion") {
+        return jsonResponse({
+          ok: true,
+          messages: [{
+            messageId: "readable-comment",
+            createdAtMs: 1,
+            deleted: false,
+            body: "Readable timeline",
+            author: { kind: "named", displayName: "Named Person" },
+          }],
+          nextCursor: null,
+        });
+      }
+      if (path === `/api/view/blob/${file.blobSha256}`) return new Response("Readable file bytes");
+      if (path === "/api/view/meta") return jsonResponse(commentMeta);
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+
+    await renderApp();
+    await settle(() => container.textContent?.includes("Readable timeline") === true);
+    const body = container.querySelector<HTMLTextAreaElement>('textarea[name="body"]');
+    if (!body) throw new Error("comment body is missing");
+    setControlValue(body, "Refused comment");
+    clickButton("Post comment");
+    await settle(() => container.textContent?.includes(copy) === true);
+
+    expect(container.querySelector("main.content")?.textContent).toContain("Readable file bytes");
+    expect(container.querySelector(".comments-panel")?.textContent).toContain("Readable timeline");
+    expect(body.disabled).toBe(true);
+  });
+
+  it("refuses mismatched top-level and effective Comment access", async () => {
+    const mismatched = {
+      ...DEFAULT_META,
+      access: "comment",
+      effectiveSelector: { ...DEFAULT_META.effectiveSelector, access: "view" },
+    };
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/current") {
+        return jsonResponse({
+          ok: true,
+          ...mismatched,
+          files: [],
+          nextCursor: 0,
+          epochLogFloor: 0,
+        });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+
+    await renderApp();
+
+    expect(container.textContent).toBe("This link isn't available.");
   });
 
   describe("log rate limits", () => {

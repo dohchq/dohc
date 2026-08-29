@@ -158,32 +158,43 @@ test("keeps the viewer bearer and authored credential probes outside page reach"
     expect(page.url().includes(seeded.secret)).toBe(false);
     expect(responseSession).not.toBe(FAKE_AUTHORED_SESSION);
 
-    const setCookie = await exchangeResponse.headerValue("set-cookie");
-    const cookieParts = setCookie?.split(";").map((part) => part.trim()) ?? [];
-    const cookieNameValue = cookieParts[0] ?? "";
-    const cookieSeparator = cookieNameValue.indexOf("=");
-    const cookieName = cookieSeparator < 0 ? "" : cookieNameValue.slice(0, cookieSeparator);
-    const cookieValue = cookieSeparator < 0 ? "" : cookieNameValue.slice(cookieSeparator + 1);
-    const cookieAttributes = cookieParts.slice(1).map((part) => part.toLowerCase());
-    expect({
-      attributes: cookieAttributes
-        .filter((attribute) => !attribute.startsWith("max-age="))
-        .sort(),
-      hasDomainAttribute: cookieAttributes.some((attribute) =>
-        attribute.startsWith("domain=")
-      ),
-      hasPositiveMaxAge: cookieAttributes.some((attribute) =>
-        /^max-age=[1-9][0-9]*$/u.test(attribute)
-      ),
-      name: cookieName,
-      valueHasOpaqueShape: /^[A-Za-z0-9_-]{16,}$/u.test(cookieValue),
-    }).toEqual({
-      attributes: ["httponly", "path=/", "samesite=strict", "secure"],
-      hasDomainAttribute: false,
-      hasPositiveMaxAge: true,
-      name: `dohc_share_${responseSession}`,
-      valueHasOpaqueShape: true,
-    });
+    const cookieEvidence = (await exchangeResponse.headerValues("set-cookie"))
+      .map((setCookie) => {
+        const cookieParts = setCookie.split(";").map((part) => part.trim());
+        const cookieNameValue = cookieParts[0] ?? "";
+        const cookieSeparator = cookieNameValue.indexOf("=");
+        const cookieName = cookieSeparator < 0 ? "" : cookieNameValue.slice(0, cookieSeparator);
+        const cookieValue = cookieSeparator < 0 ? "" : cookieNameValue.slice(cookieSeparator + 1);
+        const cookieAttributes = cookieParts.slice(1).map((part) => part.toLowerCase());
+        return {
+          attributes: cookieAttributes
+            .filter((attribute) => !attribute.startsWith("max-age="))
+            .sort(),
+          hasDomainAttribute: cookieAttributes.some((attribute) =>
+            attribute.startsWith("domain=")
+          ),
+          hasPositiveMaxAge: cookieAttributes.some((attribute) =>
+            /^max-age=[1-9][0-9]*$/u.test(attribute)
+          ),
+          name: cookieName,
+          valueHasOpaqueShape: /^[A-Za-z0-9_-]{16,}$/u.test(cookieValue),
+        };
+      });
+    expect(Object.fromEntries(cookieEvidence.map(({ name, ...evidence }) => [name, evidence])))
+      .toEqual({
+        [`dohc_share_${responseSession}`]: {
+          attributes: ["httponly", "path=/", "samesite=strict", "secure"],
+          hasDomainAttribute: false,
+          hasPositiveMaxAge: true,
+          valueHasOpaqueShape: true,
+        },
+        [`dohc_share_profile_${responseSession}`]: {
+          attributes: ["httponly", "path=/", "samesite=strict", "secure"],
+          hasDomainAttribute: false,
+          hasPositiveMaxAge: false,
+          valueHasOpaqueShape: true,
+        },
+      });
 
     const shareCookies = (await context.cookies())
       .filter((cookie) => cookie.name.startsWith("dohc_share_"))
@@ -197,15 +208,26 @@ test("keeps the viewer bearer and authored credential probes outside page reach"
         sameSite: cookie.sameSite,
         secure: cookie.secure,
       }));
-    expect(shareCookies).toEqual([{
-      domain: "127.0.0.1",
-      hostOnlyEquivalent: true,
-      httpOnly: true,
-      name: `dohc_share_${responseSession}`,
-      path: "/",
-      sameSite: "Strict",
-      secure: true,
-    }]);
+    expect(shareCookies).toEqual([
+      {
+        domain: "127.0.0.1",
+        hostOnlyEquivalent: true,
+        httpOnly: true,
+        name: `dohc_share_${responseSession}`,
+        path: "/",
+        sameSite: "Strict",
+        secure: true,
+      },
+      {
+        domain: "127.0.0.1",
+        hostOnlyEquivalent: true,
+        httpOnly: true,
+        name: `dohc_share_profile_${responseSession}`,
+        path: "/",
+        sameSite: "Strict",
+        secure: true,
+      },
+    ]);
     expect((await page.evaluate(() => document.cookie)).includes("dohc_share_"))
       .toBe(false);
 

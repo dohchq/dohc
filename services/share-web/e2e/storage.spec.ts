@@ -248,12 +248,25 @@ test("keeps shared content from creating viewer-origin browser storage", async (
     expect(observerStorage.cacheNames).toEqual([]);
     expect(observerStorage.serviceWorkerRegistrations).toEqual([]);
 
-    const sessionCookies = (await context.cookies())
-      .filter((cookie) => cookie.name.startsWith("dohc_share_"));
+    const shareCookies = await context.cookies();
+    const sessionCookies = shareCookies.filter((cookie) =>
+      cookie.name.startsWith("dohc_share_") &&
+      !cookie.name.startsWith("dohc_share_profile_")
+    );
     expect(sessionCookies.map((cookie) => cookie.name).sort()).toEqual(
       [`dohc_share_${hostileSession}`, `dohc_share_${observerSession}`].sort(),
     );
     expect(new Set(sessionCookies.map((cookie) => cookie.value)).size).toBe(2);
+    const profileCookies = shareCookies.filter((cookie) =>
+      cookie.name.startsWith("dohc_share_profile_")
+    );
+    expect(profileCookies.map((cookie) => cookie.name).sort()).toEqual(
+      [
+        `dohc_share_profile_${hostileSession}`,
+        `dohc_share_profile_${observerSession}`,
+      ].sort(),
+    );
+    expect(new Set(profileCookies.map((cookie) => cookie.value)).size).toBe(2);
     expect(apiRequestsUseSession(observerRequests, observerSession)).toBe(true);
     expect(apiRequestsUseSession(hostileRequests, hostileSession)).toBe(true);
 
