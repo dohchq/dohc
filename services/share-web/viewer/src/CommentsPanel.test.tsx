@@ -6,6 +6,7 @@ import { CommentsPanel } from "./CommentsPanel";
 
 const FIRST_SESSION = "abcdefghijkl";
 const SECOND_SESSION = "mnopqrstuvwx";
+const THIRD_SESSION = "zyxwvutsrqpo";
 const SETTLE_TURN_LIMIT = 200;
 
 const NAMED_MESSAGE = {
@@ -72,6 +73,7 @@ function discussionPage(
     activityRevision: 7,
     messages: [...messages].reverse(),
     nextCursor,
+    profileName: null,
   });
 }
 
@@ -85,6 +87,7 @@ function discussionPageAt(
     activityRevision,
     messages: [...messages].reverse(),
     nextCursor,
+    profileName: null,
   });
 }
 
@@ -353,6 +356,68 @@ describe("CommentsPanel", () => {
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => discussionPage()));
     await render("view");
     expect(container.textContent).toContain("No comments yet.");
+  });
+
+  it("restores and locks the committed profile name after a new session", async () => {
+    let committedName: string | null = null;
+    const messages: unknown[] = [];
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      const session = requestSession(init);
+      if (path === "/api/view/discussion" && init?.method === "POST") {
+        const posted = JSON.parse(String(init.body)) as {
+          body: string;
+          claimedName?: string;
+        };
+        committedName = posted.claimedName ?? null;
+        const message = {
+          ...LINK_MESSAGE,
+          messageId: "committed-profile-message",
+          body: posted.body,
+          author: {
+            ...LINK_MESSAGE.author,
+            displayName: committedName ?? "Unnamed",
+          },
+        };
+        messages.push(message);
+        return jsonResponse({ ok: true, message });
+      }
+      if (path === "/api/view/discussion?direction=newest-first") {
+        return jsonResponse({
+          ok: true,
+          activityRevision: 7,
+          messages,
+          nextCursor: null,
+          profileName: session === THIRD_SESSION ? null : committedName,
+        });
+      }
+      return discussionPageAt(7);
+    }));
+
+    await render("comment", FIRST_SESSION);
+    await settle(() => container.querySelector('input[name="claimedName"]') !== null);
+    expect(nameInput().value).toBe("");
+    expect(nameInput().disabled).toBe(false);
+
+    setControlValue(nameInput(), "Stable Name");
+    setControlValue(bodyInput(), "First comment");
+    submit();
+    await settle(() => nameInput().disabled && nameInput().value === "Stable Name");
+
+    await act(async () => {
+      root.render(<CommentsPanel access="comment" session={SECOND_SESSION} />);
+    });
+    await settle(() => nameInput().disabled && nameInput().value === "Stable Name");
+    expect(bodyInput().value).toBe("");
+
+    await act(async () => {
+      root.render(<CommentsPanel access="comment" session={THIRD_SESSION} />);
+    });
+    await settle(() => nameInput().value === "" && !nameInput().disabled);
+    expect(container.textContent).toContain("Stable NameUnverifiedFirst comment");
+    for (const internal of [FIRST_SESSION, SECOND_SESSION, THIRD_SESSION, "profile-sentinel"]) {
+      expect(container.textContent).not.toContain(internal);
+    }
   });
 
   it("renders hostile names and bodies as inert React text", async () => {
@@ -1024,7 +1089,9 @@ describe("CommentsPanel", () => {
     let parkedSignal: AbortSignal | undefined;
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
       const path = requestPath(input);
-      if (path === "/api/view/discussion") return discussionPageAt(7);
+      if (path === "/api/view/discussion?direction=newest-first") {
+        return discussionPageAt(7);
+      }
       if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
         activityAttempts += 1;
         return activityAttempts === 1

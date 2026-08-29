@@ -989,6 +989,10 @@ export function createShareWebHandler({
         const parsedPath = discussionRelayPath(request);
         if (!parsedPath) return refused();
         relayPath = parsedPath;
+        profileSecret = parseCookies(request.headers.get("cookie")).get(
+          profileCookieName(authenticated.discriminator),
+        ) ?? null;
+        if (!profileSecret || !PROFILE_SECRET.test(profileSecret)) return refused();
       } else {
         if (
           !relayExchangeKey ||
@@ -1025,7 +1029,7 @@ export function createShareWebHandler({
                     "x-dohc-link-profile-secret": profileSecret!,
                     "x-dohc-relay-exchange-key": relayExchangeKey!,
                   }
-                : {}),
+                : { "x-dohc-link-profile-secret": profileSecret! }),
             },
             ...(appendBody === null ? {} : { body: appendBody }),
             signal: request.signal,

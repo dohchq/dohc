@@ -1636,7 +1636,146 @@ describe("share-web protected discussion proxy", () => {
     expect(profileNumber).toBe(3);
   });
 
-  it("keeps the profile server-only and sends it only on trusted appends", async () => {
+  it("restores only the committed name for the protected profile", async () => {
+    const names = new Map<string, string>();
+    const forwardedProfiles: string[] = [];
+    const profiles = [PROFILE_ALPHA, PROFILE_BETA];
+    let profileNumber = 0;
+    let sessionNumber = 0;
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      relayExchangeKey: "discussion-relay-key",
+      publicHosts: new Set([HOST]),
+      nowMs: () => 1_000,
+      newSessionToken: () =>
+        Buffer.alloc(32, 60 + ++sessionNumber).toString("base64url"),
+      newProfileSecret: () => profiles[profileNumber++]!,
+      fetchRelay: async (relayRequest) => {
+        const url = new URL(relayRequest.url);
+        if (url.pathname === "/sync/link-exchange") {
+          const { secret } = (await relayRequest.json()) as { secret: string };
+          return Response.json({
+            ok: true,
+            grantId: secret === SECRET_BETA ? "grant-beta" : "grant-alpha",
+            capabilityToken: secret === SECRET_BETA ? CAP_BETA : CAP_ALPHA_1,
+            capabilityExpiresAtMs: 901_000,
+          });
+        }
+        const profile = relayRequest.headers.get("x-dohc-link-profile-secret");
+        if (!profile) return new Response(null, { status: 404 });
+        forwardedProfiles.push(profile);
+        if (relayRequest.method === "POST") {
+          const input = (await relayRequest.json()) as { body: string; claimedName?: string };
+          if (input.claimedName) names.set(profile, input.claimedName);
+          return Response.json(publicMessage(input.body));
+        }
+        return Response.json({
+          ok: true,
+          activityRevision: 1,
+          messages: [],
+          nextCursor: null,
+          profileName: names.get(profile) ?? null,
+        });
+      },
+    });
+
+    const first = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
+    const firstBody = (await first.clone().json()) as { session: string };
+    const firstCookies = cookieHeader(cookiePair(first), profileCookiePair(first));
+    const initial = await handler(
+      request(`/api/view/discussion?session=${firstBody.session}`, {
+        headers: { cookie: firstCookies },
+      }),
+    );
+    expect((await initial.json()) as Record<string, unknown>).toMatchObject({
+      profileName: null,
+    });
+
+    const profileCookie = profileCookiePair(first);
+    const tamperedProfile = `${profileCookie.split("=", 1)[0]}=not-a-profile`;
+    const tamperedRead = await handler(
+      request(`/api/view/discussion?session=${firstBody.session}`, {
+        headers: {
+          cookie: cookieHeader(cookiePair(first), tamperedProfile),
+        },
+      }),
+    );
+    expect({ status: tamperedRead.status, body: await tamperedRead.text() }).toEqual({
+      status: 404,
+      body: shareWebRefusalBody,
+    });
+    expect(forwardedProfiles).toEqual([PROFILE_ALPHA]);
+
+    const append = await handler(
+      request("/api/view/discussion", {
+        method: "POST",
+        headers: {
+          ...sessionHeaders(firstBody.session, firstCookies),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          body: "first comment",
+          claimedName: "Stable Name",
+          idempotencyKey: "profile-name-first",
+        }),
+      }),
+    );
+    expect(append.status).toBe(200);
+
+    const renewed = await handler(
+      request("/api/exchange", {
+        ...exchange(SECRET_ALPHA),
+        headers: {
+          ...exchange(SECRET_ALPHA).headers,
+          cookie: firstCookies,
+        },
+      }),
+    );
+    const renewedBody = (await renewed.clone().json()) as { session: string };
+    const renewedCookies = cookieHeader(
+      cookiePair(renewed),
+      profileCookiePair(renewed),
+    );
+    const restored = await handler(
+      request(`/api/view/discussion?session=${renewedBody.session}`, {
+        headers: { cookie: renewedCookies },
+      }),
+    );
+    const restoredText = await restored.clone().text();
+    expect(JSON.parse(restoredText) as Record<string, unknown>).toMatchObject({
+      profileName: "Stable Name",
+    });
+
+    const beta = await handler(request("/api/exchange", exchange(SECRET_BETA)));
+    const betaBody = (await beta.clone().json()) as { session: string };
+    const betaCookies = cookieHeader(cookiePair(beta), profileCookiePair(beta));
+    const unnamed = await handler(
+      request(`/api/view/discussion?session=${betaBody.session}`, {
+        headers: { cookie: betaCookies },
+      }),
+    );
+    expect((await unnamed.json()) as Record<string, unknown>).toMatchObject({
+      profileName: null,
+    });
+
+    expect(forwardedProfiles).toEqual([
+      PROFILE_ALPHA,
+      PROFILE_ALPHA,
+      PROFILE_ALPHA,
+      PROFILE_BETA,
+    ]);
+    for (const internal of [
+      PROFILE_ALPHA,
+      PROFILE_BETA,
+      CAP_ALPHA_1,
+      "grant-alpha",
+      "principal-sentinel",
+    ]) {
+      expect(restoredText).not.toContain(internal);
+    }
+  });
+
+  it("keeps the profile server-only and sends it only on protected discussion requests", async () => {
     const relayKey = "discussion-relay-key-sentinel";
     const relayRequests: Request[] = [];
     const logs = vi.spyOn(console, "log").mockImplementation(() => undefined);
@@ -1703,7 +1842,9 @@ describe("share-web protected discussion proxy", () => {
     expect(discussionRequests[0]!.headers.get("authorization")).toBe(
       `LinkCapability ${CAP_ALPHA_1}`,
     );
-    expect(discussionRequests[0]!.headers.get("x-dohc-link-profile-secret")).toBeNull();
+    expect(discussionRequests[0]!.headers.get("x-dohc-link-profile-secret")).toBe(
+      PROFILE_ALPHA,
+    );
     expect(discussionRequests[0]!.headers.get("x-dohc-relay-exchange-key")).toBeNull();
     expect(discussionRequests[1]!.method).toBe("POST");
     expect(discussionRequests[1]!.url).toBe(

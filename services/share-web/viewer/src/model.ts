@@ -57,6 +57,7 @@ export interface PublicDiscussionPage {
   messages: PublicDiscussionMessage[];
   nextCursor: string | null;
   activityRevision: number;
+  profileName: string | null;
 }
 
 export type DiscussionComposerState = "available" | "blocked" | "paused";
@@ -164,10 +165,18 @@ export function parseDiscussionPage(
   const page = record(value);
   if (
     !page ||
-    !hasExactKeys(page, ["ok", "messages", "nextCursor", "activityRevision"]) ||
+    !hasExactKeys(page, [
+      "ok",
+      "messages",
+      "nextCursor",
+      "activityRevision",
+      "profileName",
+    ]) ||
     page.ok !== true ||
     !Array.isArray(page.messages) ||
     !isRevision(page.activityRevision) ||
+    (page.profileName !== null &&
+      (typeof page.profileName !== "string" || page.profileName.length === 0)) ||
     (page.nextCursor !== null &&
       (typeof page.nextCursor !== "string" ||
         !/^[A-Za-z0-9_-]{1,1024}$/u.test(page.nextCursor)))
@@ -189,6 +198,7 @@ export function parseDiscussionPage(
     messages,
     nextCursor: page.nextCursor as string | null,
     activityRevision: page.activityRevision,
+    profileName: page.profileName as string | null,
   };
 }
 

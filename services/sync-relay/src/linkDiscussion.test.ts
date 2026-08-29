@@ -1215,7 +1215,7 @@ describe("share discussion HTTP boundary", () => {
     );
   });
 
-  it("mints on first append only and reuses the server-derived profile through refresh and re-exchange", async () => {
+  it("restores the server-derived profile name through refresh and re-exchange", async () => {
     const test = await fixture();
     const read = await test.handler(
       linkRequest(test.comment, "/sync/link/discussion"),
@@ -1293,6 +1293,33 @@ describe("share discussion HTTP boundary", () => {
     );
     expect(exchange.status).toBe(200);
     test.comment.capabilityToken = String((await body(exchange)).capabilityToken);
+    const restored = await test.handler(
+      linkRequest(
+        test.comment,
+        "/sync/link/discussion",
+        {},
+        { profileSecret: PROFILE_A },
+      ),
+    );
+    expect(restored.status).toBe(200);
+    const restoredPage = await body(restored);
+    expect(restoredPage.profileName).toBe("Stable Name");
+    expect(Object.keys(restoredPage).sort()).toEqual([
+      "activityRevision",
+      "messages",
+      "nextCursor",
+      "ok",
+      "profileName",
+    ]);
+    const restoredText = JSON.stringify(restoredPage);
+    for (const internal of [
+      firstPrincipal!,
+      PROFILE_A,
+      test.comment.grantId,
+      test.comment.capabilityToken,
+    ]) {
+      expect(restoredText).not.toContain(internal);
+    }
     expect(
       (
         await test.handler(
@@ -1323,6 +1350,16 @@ describe("share discussion HTTP boundary", () => {
     test.comment.capabilityToken = String(
       (await body(secondExchange)).capabilityToken,
     );
+    const unnamed = await test.handler(
+      linkRequest(
+        test.comment,
+        "/sync/link/discussion",
+        {},
+        { profileSecret: PROFILE_B },
+      ),
+    );
+    expect(unnamed.status).toBe(200);
+    expect((await body(unnamed)).profileName).toBeNull();
     expect(
       (
         await test.handler(
@@ -1372,6 +1409,14 @@ describe("share discussion HTTP boundary", () => {
         { relayKey: RELAY_KEY, profileSecret: "not-a-profile" },
       ),
     );
+    const malformedProfileRead = await test.handler(
+      linkRequest(
+        test.comment,
+        "/sync/link/discussion",
+        {},
+        { profileSecret: "not-a-profile" },
+      ),
+    );
     const invalidCredential = await test.handler(
       linkRequest(
         { ...test.comment, capabilityToken: secret("z") },
@@ -1383,6 +1428,7 @@ describe("share discussion HTTP boundary", () => {
     const refusal = await genericRefusal(missingKey);
     expect(await genericRefusal(missingProfile)).toBe(refusal);
     expect(await genericRefusal(malformedProfile)).toBe(refusal);
+    expect(await genericRefusal(malformedProfileRead)).toBe(refusal);
     expect(await genericRefusal(invalidCredential)).toBe(refusal);
 
     const forbiddenFields = [

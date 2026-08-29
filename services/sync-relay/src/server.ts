@@ -818,6 +818,7 @@ export function createSyncRelayHandler({
   const discussionPage = (
     page: SyncRelayShareDiscussionPage,
     viewer: DiscussionViewer,
+    profileName: string | null = null,
   ): Record<string, unknown> => {
     return {
       ok: true,
@@ -825,6 +826,7 @@ export function createSyncRelayHandler({
       ...(viewer === "owner"
         ? { linkCommentsPaused: page.linkCommentsPaused }
         : {}),
+      ...(viewer === "public" ? { profileName } : {}),
       messages: page.messages.map((message) =>
         projectDiscussionMessage(message, viewer),
       ),
@@ -1445,8 +1447,8 @@ export function createSyncRelayHandler({
     }
     const profileSecret = request.headers.get("x-dohc-link-profile-secret");
     if (
-      request.method === "POST" &&
-      (profileSecret === null || !/^[A-Za-z0-9_-]{43}$/u.test(profileSecret))
+      (request.method === "POST" && profileSecret === null) ||
+      (profileSecret !== null && !/^[A-Za-z0-9_-]{43}$/u.test(profileSecret))
     ) {
       return refused();
     }
@@ -1472,7 +1474,17 @@ export function createSyncRelayHandler({
           direction,
           limit,
         });
-        const page = discussionPage(storedPage, "public");
+        const principal = profileSecret === null
+          ? null
+          : storage.getLinkPrincipalForGrantProfile(
+              capability.grantId,
+              hashLinkProfileSecret(profileSecret, linkKey),
+            );
+        const page = discussionPage(
+          storedPage,
+          "public",
+          principal?.displayName ?? null,
+        );
         requireFreshLinkRead(capabilityToken, capability);
         return privateResponse(
           linkJsonResponse(capability.shareId, capability.grantId, page),

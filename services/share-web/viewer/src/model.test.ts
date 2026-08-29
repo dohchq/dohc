@@ -270,10 +270,12 @@ describe("public discussion projection", () => {
       activityRevision: 7,
       messages: [named, link, tombstone],
       nextCursor: "cursor_1",
+      profileName: null,
     })).toEqual({
       messages: [named, link, tombstone],
       nextCursor: "cursor_1",
       activityRevision: 7,
+      profileName: null,
     });
     expect(parseDiscussionAppendResult({ ok: true, message: link })).toEqual(link);
   });
@@ -284,17 +286,60 @@ describe("public discussion projection", () => {
       activityRevision: 7,
       messages: [tombstone, link, named],
       nextCursor: "cursor_older",
+      profileName: null,
     }, "newest-first")).toEqual({
       messages: [named, link, tombstone],
       nextCursor: "cursor_older",
       activityRevision: 7,
+      profileName: null,
     });
     expect(parseDiscussionPage({
       ok: true,
       activityRevision: 7,
       messages: [named, link],
       nextCursor: null,
+      profileName: null,
     }, "newest-first")).toBeNull();
+  });
+
+  it("parses only the committed name without accepting profile identifiers", () => {
+    expect(parseDiscussionPage({
+      ok: true,
+      activityRevision: 7,
+      messages: [],
+      nextCursor: null,
+      profileName: "Stable Name",
+    })).toEqual({
+      messages: [],
+      nextCursor: null,
+      activityRevision: 7,
+      profileName: "Stable Name",
+    });
+    expect(parseDiscussionPage({
+      ok: true,
+      activityRevision: 7,
+      messages: [],
+      nextCursor: null,
+      profileName: null,
+    })).toEqual({
+      messages: [],
+      nextCursor: null,
+      activityRevision: 7,
+      profileName: null,
+    });
+    for (const internal of [
+      { principalId: "principal-sentinel" },
+      { profileTokenHash: "profile-sentinel" },
+    ]) {
+      expect(parseDiscussionPage({
+        ok: true,
+        activityRevision: 7,
+        messages: [],
+        nextCursor: null,
+        profileName: "Stable Name",
+        ...internal,
+      })).toBeNull();
+    }
   });
 
   it("accepts only a live link-authored append result", () => {
@@ -304,41 +349,68 @@ describe("public discussion projection", () => {
   });
 
   it.each([
+    ["a missing profile name", {
+      ok: true,
+      activityRevision: 7,
+      messages: [],
+      nextCursor: null,
+    }],
+    ["an empty profile name", {
+      ok: true,
+      activityRevision: 7,
+      messages: [],
+      nextCursor: null,
+      profileName: "",
+    }],
     ["an internal page field", {
-      ok: true, activityRevision: 7, messages: [], nextCursor: null, shareId: "secret",
+      ok: true,
+      activityRevision: 7,
+      messages: [],
+      nextCursor: null,
+      profileName: null,
+      shareId: "secret",
     }],
     ["an internal message field", {
       ok: true,
       activityRevision: 7,
       messages: [{ ...named, linkPrincipalId: "secret" }],
       nextCursor: null,
+      profileName: null,
     }],
     ["a tombstone body", {
       ok: true,
       activityRevision: 7,
       messages: [{ ...tombstone, body: "deleted body" }],
       nextCursor: null,
+      profileName: null,
     }],
     ["a tombstone author", {
       ok: true,
       activityRevision: 7,
       messages: [{ ...tombstone, author: named.author }],
       nextCursor: null,
+      profileName: null,
     }],
     ["a live row without an exact author", {
       ok: true,
       activityRevision: 7,
       messages: [{ ...link, author: { ...link.author, unverified: false } }],
       nextCursor: null,
+      profileName: null,
     }],
     ["an out-of-order page", {
       ok: true,
       activityRevision: 7,
       messages: [link, named],
       nextCursor: null,
+      profileName: null,
     }],
     ["a malformed cursor", {
-      ok: true, activityRevision: 7, messages: [], nextCursor: "cursor/value",
+      ok: true,
+      activityRevision: 7,
+      messages: [],
+      nextCursor: "cursor/value",
+      profileName: null,
     }],
   ])("refuses %s", (_case, value) => {
     expect(parseDiscussionPage(value)).toBeNull();
@@ -407,7 +479,13 @@ describe("public discussion projection", () => {
       activityRevision: 7,
       messages: [first, second],
       nextCursor: null,
-    })).toEqual({ messages: [first, second], nextCursor: null, activityRevision: 7 });
+      profileName: null,
+    })).toEqual({
+      messages: [first, second],
+      nextCursor: null,
+      activityRevision: 7,
+      profileName: null,
+    });
     expect(mergeDiscussionMessages([first], [second])).toEqual([first, second]);
   });
 

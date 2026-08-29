@@ -294,6 +294,8 @@ export function CommentsPanel(props: { access: ShareAccess; session: string }) {
         if (loaded.nextCursor !== null) {
           seenEarlierCursorsRef.current.add(loaded.nextCursor);
         }
+        setClaimedName(loaded.profileName ?? "");
+        setNameLocked(loaded.profileName !== null);
         setLoadState("ready");
         void followDiscussionActivity(
           props.session,

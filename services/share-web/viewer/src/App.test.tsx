@@ -250,6 +250,7 @@ describe("App", () => {
           activityRevision: 0,
           messages: [],
           nextCursor: null,
+          profileName: null,
         });
       }
       if (path === "/api/view/discussion/activity?since=0&hold=0&limit=100") {
@@ -3391,6 +3392,7 @@ describe("App", () => {
             author: { kind: "named", displayName: "Named Person" },
           }],
           nextCursor: null,
+          profileName: null,
         });
       }
       if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
@@ -3468,6 +3470,7 @@ describe("App", () => {
             author: { kind: "named", displayName: "Named Person" },
           }],
           nextCursor: null,
+          profileName: null,
         });
       }
       if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
