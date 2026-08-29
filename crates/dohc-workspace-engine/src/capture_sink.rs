@@ -1573,6 +1573,7 @@ mod tests {
         first_line_len: Option<usize>,
         line_ending: &'static str,
         replicated: bool,
+        id_collision_copy: bool,
     }
 
     impl GeneratedAdoptionCase {
@@ -1634,6 +1635,7 @@ mod tests {
             ),
             prop::bool::ANY,
             prop::bool::ANY,
+            prop::bool::ANY,
         )
             .prop_map(
                 |(
@@ -1647,6 +1649,7 @@ mod tests {
                     cell_chars,
                     trailing_newline,
                     replicated,
+                    id_collision_copy,
                 )| {
                     let line_ending = if crlf { "\r\n" } else { "\n" };
                     let whitespace = |kind| match kind {
@@ -1675,6 +1678,7 @@ mod tests {
                             first_line_len: None,
                             line_ending,
                             replicated,
+                            id_collision_copy,
                         };
                     }
 
@@ -1701,6 +1705,7 @@ mod tests {
                         frontmatter,
                         line_ending,
                         replicated,
+                        id_collision_copy,
                     }
                 },
             )
@@ -1733,10 +1738,48 @@ mod tests {
                 sink.reconcile_collections().expect("seeded adoption pass");
             }
 
+            let original_binding = collection_record(&db, "tasks/generated.md");
+            if case.id_collision_copy
+                && let Some((Some(original_id), state)) = original_binding.as_ref()
+                && state == "adopted"
+            {
+                let original = std::fs::read_to_string(
+                    scratch.path().join("tasks/generated.md"),
+                )
+                .expect("read adopted generated record");
+                std::fs::copy(
+                    scratch.path().join("tasks/generated.md"),
+                    scratch.path().join("tasks/generated-copy.md"),
+                )
+                .expect("copy adopted generated record");
+                ingest(&mut sink, "tasks/generated-copy.md").expect("capture generated copy");
+                seed_captured_richdoc_lineage(&sink, "tasks/generated-copy.md");
+                sink.reconcile_collections().expect("adopt generated copy");
+
+                let copy_id = adopted_record_id(&db, "tasks/generated-copy.md");
+                prop_assert_ne!(copy_id.as_str(), original_id.as_str());
+                let id_line = format!("id: {original_id}{}", case.line_ending);
+                let replacement = format!("id: {copy_id}{}", case.line_ending);
+                let expected_copy = original.replacen(&id_line, &replacement, 1);
+                prop_assert_ne!(expected_copy.as_str(), original.as_str());
+                let copy_disk = std::fs::read_to_string(
+                    scratch.path().join("tasks/generated-copy.md"),
+                )
+                .expect("read adopted generated copy");
+                let copy_stored = snapshot(&db, "tasks/generated-copy.md")
+                    .expect("generated copy snapshot");
+                prop_assert_eq!(copy_disk.as_str(), expected_copy.as_str());
+                prop_assert_eq!(copy_stored.text.as_str(), expected_copy.as_str());
+                let original_after_copy =
+                    std::fs::read_to_string(scratch.path().join("tasks/generated.md"))
+                        .expect("reread adopted generated record");
+                prop_assert_eq!(original_after_copy.as_str(), original.as_str());
+            }
+
             let disk = std::fs::read(scratch.path().join("tasks/generated.md"))
                 .expect("read generated record");
             let stored = snapshot(&db, "tasks/generated.md").expect("generated snapshot");
-            let binding = collection_record(&db, "tasks/generated.md");
+            let binding = original_binding;
             let final_moments = moment_count(&db, "tasks/generated.md");
             let final_updates = ydoc_update_count(&db, "tasks/generated.md");
             drop(sink);
@@ -2226,17 +2269,33 @@ mod tests {
     }
 
     #[test]
-    fn copied_collection_record_gets_a_fresh_id_without_rebinding_the_original() {
+    fn copied_source_preserved_collection_record_keeps_bytes_modulo_fresh_id() {
         let scratch = ScratchDir::new().expect("scratch");
         let supervisor = WorkspaceSupervisor::new();
         let (db, mut sink) = sink_for(&scratch, &supervisor);
         write_file(scratch.path(), "tasks/collection.yaml", b"name: Tasks\n");
-        write_file(scratch.path(), "tasks/original.md", b"Original\n");
+        let source = concat!(
+            "--- \r\n",
+            "status:   open\r\n",
+            "---\t\r\n",
+            "\r\n",
+            "| Metric | Value |\r\n",
+            "| ------ | ----- |\r\n",
+            "| apples | 10    |\r\n",
+            "\r\n",
+            "- parent\r\n",
+            "  - nested with **bold** and [details](https://example.com)"
+        );
+        write_file(scratch.path(), "tasks/original.md", source.as_bytes());
         ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
         ingest(&mut sink, "tasks/original.md").expect("capture original");
         seed_captured_richdoc_lineage(&sink, "tasks/original.md");
         sink.reconcile_collections().expect("adopt original");
         let original_id = adopted_record_id(&db, "tasks/original.md");
+        let original = std::fs::read_to_string(scratch.path().join("tasks/original.md"))
+            .expect("read adopted original");
+        let original_snapshot = snapshot(&db, "tasks/original.md").expect("original snapshot");
+        assert_eq!(original_snapshot.text, original);
 
         std::fs::copy(
             scratch.path().join("tasks/original.md"),
@@ -2254,7 +2313,24 @@ mod tests {
         assert_eq!(adopted_record_id(&db, "tasks/original.md"), original_id);
         let copy_text = std::fs::read_to_string(scratch.path().join("tasks/copy.md"))
             .expect("read copied record");
-        assert!(copy_text.contains(&copy_id));
+        let expected = original.replacen(
+            &format!("id: {original_id}\r\n"),
+            &format!("id: {copy_id}\r\n"),
+            1,
+        );
+        assert_ne!(expected, original, "the expected bytes must replace the id");
+        assert_eq!(copy_text, expected);
+        assert_eq!(
+            snapshot(&db, "tasks/copy.md")
+                .expect("copied record snapshot")
+                .text,
+            expected
+        );
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("tasks/original.md"))
+                .expect("reread adopted original"),
+            original
+        );
 
         drop(sink);
         supervisor.close(&db).expect("close actor");

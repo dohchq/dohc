@@ -73,6 +73,53 @@ fn fresh_store() -> (ScratchDir, EngineStore) {
     (scratch, store)
 }
 
+#[test]
+fn reconcile_does_not_load_unrelated_large_text_snapshot() {
+    let (_scratch, mut store) = fresh_store();
+    write_text(&mut store, "tasks/collection.yaml", "name: Tasks\n", 2).expect("task schema");
+    write_text(&mut store, "tasks/alpha.md", "Alpha task\n", 3).expect("task record");
+    write_text(
+        &mut store,
+        "notes/unrelated.txt",
+        &"x".repeat(1024 * 1024),
+        4,
+    )
+    .expect("large unrelated text");
+
+    let poisoned = store
+        .write_with(&NoFaults, |tx| -> Result<(), StorageError> {
+            tx.execute(
+                "UPDATE blobs SET text=CAST(x'80' || CAST(substr(text,2) AS BLOB) AS TEXT) \
+                 WHERE sha256=(SELECT blob_sha256 FROM snapshots \
+                   WHERE workspace_id=?1 AND version_id=?2 AND path='notes/unrelated.txt')",
+                params![WORKSPACE_ID, VERSION_ID],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok(())
+        })
+        .expect("poison unrelated text body");
+    assert!(matches!(poisoned, TxnOutcome::Committed(())));
+
+    // rusqlite rejects the sentinel as UTF-8 if reconciliation selects this
+    // body. A successful pass proves the collection query never hydrates it.
+    let reconciled = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile without loading unrelated text");
+    let TxnOutcome::Committed(reconciled) = reconciled else {
+        panic!("collection reconciliation crashed");
+    };
+    assert_eq!(
+        reconciled
+            .adoptions
+            .iter()
+            .map(|candidate| candidate.file_path.as_str())
+            .collect::<Vec<_>>(),
+        ["tasks/alpha.md"]
+    );
+}
+
 fn seeded_store() -> (ScratchDir, EngineStore) {
     let (scratch, mut store) = fresh_store();
 

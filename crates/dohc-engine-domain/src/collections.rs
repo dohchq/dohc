@@ -1194,11 +1194,33 @@ pub fn markdown_frontmatter_json_with_body(markdown: &str) -> Option<(Value, &st
     parse_markdown_frontmatter(markdown).map(|frontmatter| (frontmatter.value, frontmatter.body))
 }
 
-/// Insert a collection record id without reserializing the user's Markdown.
+fn engine_authored_record_id_range(
+    markdown: &str,
+    existing_id: &str,
+) -> Option<std::ops::Range<usize>> {
+    let first_line = markdown.split_inclusive('\n').next()?;
+    if !first_line.ends_with('\n') || !is_frontmatter_delimiter(first_line) {
+        return None;
+    }
+    let id_line_start = first_line.len();
+    let id_line = markdown[id_line_start..].split_inclusive('\n').next()?;
+    let id_line_content = id_line
+        .strip_suffix("\r\n")
+        .or_else(|| id_line.strip_suffix('\n'))?;
+    let prefix = format!("{RECORD_ID_FRONTMATTER_KEY}: ");
+    if id_line_content.strip_prefix(&prefix) != Some(existing_id) {
+        return None;
+    }
+    let value_start = id_line_start + prefix.len();
+    Some(value_start..value_start + existing_id.len())
+}
+
+/// Set a collection record id without reserializing the user's Markdown.
 ///
 /// A malformed frontmatter block is not adoptable. Valid frontmatter keeps
 /// every existing byte; a document without frontmatter receives the smallest
-/// id-only block while its body remains byte-identical.
+/// id-only block while its body remains byte-identical. A copied adopted record
+/// keeps every byte around its engine-authored id scalar when the id is re-minted.
 pub fn collection_record_markdown_with_id(markdown: &str, record_id: &str) -> Option<String> {
     if !is_record_id(record_id) {
         return None;
@@ -1210,7 +1232,14 @@ pub fn collection_record_markdown_with_id(markdown: &str, record_id: &str) -> Op
         markdown_frontmatter_json_with_body(markdown)?
     };
     if let Some(existing_id) = frontmatter.get(RECORD_ID_FRONTMATTER_KEY) {
-        return (existing_id.as_str() == Some(record_id)).then(|| markdown.to_owned());
+        let existing_id = existing_id.as_str()?;
+        if existing_id == record_id {
+            return Some(markdown.to_owned());
+        }
+        let range = engine_authored_record_id_range(markdown, existing_id)?;
+        let mut reminted = markdown.to_owned();
+        reminted.replace_range(range, record_id);
+        return Some(reminted);
     }
 
     let first_line = markdown.split_inclusive('\n').next();
@@ -1819,20 +1848,42 @@ fn load_collection_snapshots(
 ) -> Result<Vec<CollectionSnapshot>, crate::DomainError> {
     let mut statement = conn
         .prepare(
-            "SELECT s.path, s.object_id, b.text \
-             FROM snapshots s JOIN blobs b ON b.sha256 = s.blob_sha256 \
-             WHERE s.workspace_id = ?1 AND s.version_id = ?2 \
-               AND s.content_kind = 'text' ORDER BY s.path",
+            "WITH collection_prefixes(prefix) AS MATERIALIZED (\
+               SELECT substr(schema.path,1,length(schema.path)-length(?3)-1) \
+               FROM snapshots schema \
+               WHERE schema.workspace_id=?1 AND schema.version_id=?2 \
+                 AND schema.content_kind='text' AND schema.path<>?3 \
+                 AND length(schema.path)>length(?3)+1 \
+                 AND substr(schema.path,-(length(?3)+1))='/'||?3\
+             ), collection_snapshots(path,object_id,blob_sha256) AS MATERIALIZED (\
+               SELECT s.path,s.object_id,s.blob_sha256 FROM snapshots s \
+               WHERE s.workspace_id=?1 AND s.version_id=?2 \
+                 AND s.content_kind='text' \
+                 AND (s.path=?3 \
+                   OR substr(s.path,-(length(?3)+1))='/'||?3 \
+                   OR (substr(s.path,-3)='.md' AND EXISTS (\
+                     SELECT 1 FROM collection_prefixes c \
+                     WHERE substr(s.path,1,length(c.prefix))=c.prefix \
+                       AND substr(s.path,length(c.prefix)+1,1)='/' \
+                       AND instr(substr(s.path,length(c.prefix)+2),'/')=0\
+                   )))\
+             ) \
+             SELECT s.path,s.object_id,b.text FROM collection_snapshots s \
+             JOIN blobs b ON b.sha256=s.blob_sha256 \
+             ORDER BY s.path",
         )
         .map_err(crate::DomainError::sql_corrupt)?;
     statement
-        .query_map(params![workspace_id, version_id], |row| {
-            Ok(CollectionSnapshot {
-                path: row.get(0)?,
-                object_id: row.get(1)?,
-                text: row.get(2)?,
-            })
-        })
+        .query_map(
+            params![workspace_id, version_id, COLLECTION_SCHEMA_FILENAME],
+            |row| {
+                Ok(CollectionSnapshot {
+                    path: row.get(0)?,
+                    object_id: row.get(1)?,
+                    text: row.get(2)?,
+                })
+            },
+        )
         .map_err(crate::DomainError::sql_corrupt)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(crate::DomainError::sql_corrupt)
@@ -2102,13 +2153,19 @@ pub fn reconcile_collections_in_tx(
                 .is_some_and(|owner_path| owner_path != &record.path);
             if occupied_by_current || occupied_in_pass {
                 let fresh_id = mint_unused_record_id(&mut used_ids)?;
+                let lossless_remint_required =
+                    engine_authored_record_id_range(&record.text, &record_id).is_some();
                 claimed_ids.insert(fresh_id.clone(), record.path.clone());
                 desired.push(DesiredRecordBinding {
                     record_id: Some(fresh_id.clone()),
                     collection_path: collection_path.clone(),
                     file_path: record.path.clone(),
                     object_id: record.object_id.clone(),
-                    adoption_state: "pending",
+                    adoption_state: if lossless_remint_required {
+                        "pending-lossless"
+                    } else {
+                        "pending"
+                    },
                     index_initialized: false,
                 });
                 adoptions.push(CollectionAdoptionCandidate {
@@ -2116,7 +2173,7 @@ pub fn reconcile_collections_in_tx(
                     collection_path,
                     file_path: record.path.clone(),
                     object_id: record.object_id.clone(),
-                    lossless_insertion_required: false,
+                    lossless_insertion_required: lossless_remint_required,
                 });
             } else {
                 used_ids.insert(record_id.clone());
