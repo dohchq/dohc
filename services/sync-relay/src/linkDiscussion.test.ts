@@ -1707,6 +1707,97 @@ describe("share discussion HTTP boundary", () => {
     ).toContain("404:");
   });
 
+  it("ejects every session bound to a blocked protected profile", async () => {
+    const test = await fixture();
+    const firstSession = { ...test.comment };
+    const seeded = await test.handler(
+      trustedAppend(
+        firstSession,
+        {
+          body: "first bound session",
+          claimedName: "Shared Profile",
+          idempotencyKey: "block-all-first",
+        },
+        PROFILE_A,
+      ),
+    );
+    expect(seeded.status).toBe(200);
+    await seeded.arrayBuffer();
+    const principalId = test.storage.listShareDiscussionMessages({
+      shareId: SHARE,
+      limit: 100,
+    }).messages[0]!.linkPrincipalId!;
+
+    const secondSession = {
+      ...test.comment,
+      capabilityToken: await exchangeLink(test, test.comment.secret),
+    };
+    const secondBound = await test.handler(
+      trustedAppend(
+        secondSession,
+        {
+          body: "second bound session",
+          idempotencyKey: "block-all-second",
+        },
+        PROFILE_A,
+      ),
+    );
+    expect(secondBound.status).toBe(200);
+    await secondBound.arrayBuffer();
+
+    for (const link of [firstSession, secondSession]) {
+      expect(
+        test.storage.findLinkSessionByCapabilityHash(
+          hashLinkBearer(link.capabilityToken, LINK_KEY),
+        ),
+      ).toMatchObject({ principalId });
+    }
+    const messagesBeforeBlock = count(
+      test.dbPath,
+      "sync_relay_share_discussion_messages",
+    );
+    const usageBeforeBlock = discussionUsage(test.dbPath);
+
+    const blocked = await test.handler(
+      moderationRequest(OWNER, { action: "block", principalId }),
+    );
+    expect(blocked.status).toBe(200);
+    expect(await body(blocked)).toEqual({ ok: true, blocked: true });
+
+    for (const [index, link] of [firstSession, secondSession].entries()) {
+      expect(
+        test.storage.findLinkSessionByCapabilityHash(
+          hashLinkBearer(link.capabilityToken, LINK_KEY),
+        ),
+      ).toMatchObject({ principalId: null });
+      for (const path of ["/sync/link/discussion", "/sync/link/share"]) {
+        const read = await test.handler(linkRequest(link, path));
+        expect(read.status, `session ${index + 1} ${path}`).toBe(200);
+        await read.arrayBuffer();
+      }
+      expect(
+        await discussionStateRefusal(
+          await test.handler(
+            trustedAppend(
+              link,
+              {
+                body: `blocked session ${index + 1}`,
+                idempotencyKey: `block-all-refused-${index + 1}`,
+              },
+              PROFILE_A,
+            ),
+          ),
+          "blocked",
+        ),
+      ).toContain("link_discussion_blocked");
+    }
+
+    expect(
+      count(test.dbPath, "sync_relay_share_discussion_messages"),
+    ).toBe(messagesBeforeBlock);
+    expect(discussionUsage(test.dbPath)).toBe(usageBeforeBlock);
+  });
+
   it("pauses only link-authored writes and resumes without rotating authority or charging debt", async () => {
     const test = await fixture();
     const seeded = await test.handler(
