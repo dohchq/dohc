@@ -10630,6 +10630,7 @@ fn ydoc_record_update_on_store(
                 tx,
                 &journal_key,
                 &journal_path,
+                actor_origin_id.as_deref(),
                 now_ms,
             )
             .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
@@ -10658,6 +10659,7 @@ fn ydoc_record_update_on_store(
                         journal_kind,
                         update_sha,
                         &lineage_claim_id,
+                        actor_origin_id.as_deref(),
                         false,
                     ),
                     now_ms,

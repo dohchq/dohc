@@ -315,6 +315,11 @@ const WORKSPACE_DECODER_CASES: Array<{
       collection: collectionSummary,
       records: [collectionRecord],
       groups: [{ value: "active", records: [collectionRecord] }],
+      nextCursor: {
+        sortValues: [{ present: true, value: "active" }],
+        recordPath: collectionRecord.path,
+        recordId: collectionRecord.id,
+      },
     },
   },
   {
@@ -1451,6 +1456,15 @@ describe("VersionedLiveAdapter", () => {
       ],
       groupBy: "status",
       resolveRelations: true,
+      limit: 25,
+      cursor: {
+        sortValues: [
+          { present: true, value: "2026-09-01" },
+          { present: false, value: null },
+        ],
+        recordPath: "projects/roadmap.md",
+        recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      },
     };
 
     await expect(adapter.listCollections()).rejects.toBe(SENTINEL);

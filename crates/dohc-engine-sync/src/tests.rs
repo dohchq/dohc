@@ -17952,6 +17952,7 @@ fn recover_origin_rebases_ydoc_suffix_coordinates_before_repair_and_arbitration(
         dohc_engine_collab::ContentKind::Plaintext,
         &restored_claim,
         &restored_claim,
+        None,
         true,
     );
     let base_seq = journal_local_replication_op(
@@ -17977,6 +17978,7 @@ fn recover_origin_rebases_ydoc_suffix_coordinates_before_repair_and_arbitration(
         dohc_engine_collab::ContentKind::Plaintext,
         &delta_sha,
         &restored_claim,
+        None,
         false,
     );
     let delta_seq = journal_local_replication_op(
@@ -18135,6 +18137,7 @@ fn recover_origin_rebases_ydoc_suffix_coordinates_before_repair_and_arbitration(
             dohc_engine_collab::ContentKind::Plaintext,
             &winner_claim,
             &winner_claim,
+            None,
             true,
         ),
     );

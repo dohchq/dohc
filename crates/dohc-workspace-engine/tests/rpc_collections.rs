@@ -6,6 +6,7 @@ use dohc_engine_domain::{
     CaptureIngest, NoFaults, TxnOutcome, VersionedTextStore, reconcile_collections_in_tx,
 };
 use dohc_engine_protocol::{
+    limits::WireLimits,
     transport::{EngineTransport, InProcessTransport, RequestContext},
     wire::{Request, WorkspaceHandle},
 };
@@ -682,4 +683,108 @@ async fn capture_adoption_leaves_rich_markdown_unmodified_until_shared_import() 
         settled, original,
         "Rust capture must not run its limited Markdown grammar while the shared importer is pending"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn collection_larger_than_frame_cap_pages_completely_in_sorted_order() {
+    const LARGE_FIELD_BYTES: usize = 3 * 1024 * 1024;
+    const RECORDS: [(&str, &str, i64); 3] = [
+        ("zeta.md", "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa", 2),
+        ("alpha.md", "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb", 1),
+        ("beta.md", "rec_cccccccccccccccccccccccccc", 1),
+    ];
+    assert!(
+        LARGE_FIELD_BYTES * RECORDS.len() > WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize,
+        "the fixture must exceed one response frame"
+    );
+
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let db = scratch.engine_db_path().expect("engine db path");
+    let mut store = EngineStore::open(&db, 1).expect("open store");
+    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
+        .expect("main version");
+    let schema =
+        "name: Large tasks\nfields:\n  rank:\n    type: number\n  notes:\n    type: text\n";
+    seed_text(&mut store, "large/collection.yaml", schema, 2);
+    let collection_dir = scratch.path().join("large");
+    std::fs::create_dir_all(&collection_dir).expect("large collection directory");
+    std::fs::write(collection_dir.join("collection.yaml"), schema).expect("schema file");
+    let large_value = "x".repeat(LARGE_FIELD_BYTES);
+    for (index, (filename, record_id, rank)) in RECORDS.iter().enumerate() {
+        let record = format!("---\nid: {record_id}\nrank: {rank}\nnotes: {large_value}\n---\n");
+        seed_text(
+            &mut store,
+            &format!("large/{filename}"),
+            &record,
+            3 + index as i64,
+        );
+        std::fs::write(collection_dir.join(filename), record).expect("large record file");
+    }
+    let reconciled = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, "main")
+        })
+        .expect("reconcile large collection");
+    assert!(matches!(reconciled, TxnOutcome::Committed(_)));
+    drop(store);
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+
+    let mut cursor = Value::Null;
+    let mut record_paths = Vec::new();
+    for request_id in 100..104 {
+        let mut params = json!({
+            "collectionPath": "large",
+            "sort": [{ "field": "rank", "direction": "asc" }],
+            "limit": 1,
+        });
+        if !cursor.is_null() {
+            params["cursor"] = cursor.clone();
+        }
+        let page = call(&transport, &handle, request_id, "collections.query", params).await;
+        let records = page["records"].as_array().expect("record page");
+        if records.is_empty() {
+            break;
+        }
+        assert_eq!(records.len(), 1, "the requested page bound must be honored");
+        record_paths.push(records[0]["path"].as_str().expect("record path").to_owned());
+        cursor = page["nextCursor"].clone();
+        if cursor.is_null() {
+            break;
+        }
+    }
+
+    assert_eq!(
+        record_paths,
+        vec!["large/alpha.md", "large/beta.md", "large/zeta.md"]
+    );
+    assert_eq!(
+        record_paths
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        RECORDS.len(),
+        "exclusive page boundaries must not duplicate records"
+    );
+    assert!(cursor.is_null(), "the final page must terminate the cursor");
 }

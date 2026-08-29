@@ -174,6 +174,17 @@ export interface CollectionQuerySort {
   direction: ViewSortDirection;
 }
 
+export interface CollectionQueryCursorValue {
+  present: boolean;
+  value: CollectionJsonValue;
+}
+
+export interface CollectionQueryCursor {
+  sortValues: CollectionQueryCursorValue[];
+  recordPath: string;
+  recordId: string;
+}
+
 export interface CollectionListResult {
   collections: CollectionSummary[];
 }
@@ -190,12 +201,15 @@ export interface CollectionQueryParams {
   sort?: CollectionQuerySort[];
   groupBy?: string;
   resolveRelations?: boolean;
+  limit?: number;
+  cursor?: CollectionQueryCursor;
 }
 
 export interface CollectionQueryResult {
   collection: CollectionSummary;
   records: CollectionRecord[];
   groups: CollectionRecordGroup[] | null;
+  nextCursor: CollectionQueryCursor | null;
 }
 
 export interface CollectionGetRecordParams {

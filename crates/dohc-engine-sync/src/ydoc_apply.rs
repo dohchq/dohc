@@ -1,10 +1,10 @@
 use dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD;
 use dohc_engine_collab::{
     CollabError, CompactOutcome, ContentKind, DocKey, RemoteAppendProbe, RemoteUpdate,
-    ReplicationApplyOutcome, WriterDocCache, apply_remote_update,
-    apply_remote_update_for_deferred_drain,
-    apply_remote_update_in_transaction_cached_with_projection,
-    apply_remote_update_in_transaction_with_projection, maybe_compact,
+    ReplicationApplyOutcome, WriterDocCache, apply_remote_update_for_deferred_drain_with_actor,
+    apply_remote_update_in_transaction_cached_with_projection_and_actor,
+    apply_remote_update_in_transaction_with_projection_and_actor, apply_remote_update_with_actor,
+    maybe_compact,
 };
 use dohc_engine_domain::{
     ConflictFileState, DomainError, WriteText, enqueue_write, select_snapshot_by_path_in_tx,
@@ -46,6 +46,8 @@ struct YdocUpdatePayload {
     update_blob_sha256: String,
     lineage_claim_id: String,
     #[serde(default)]
+    actor_origin_id: Option<String>,
+    #[serde(default)]
     is_base_state: bool,
 }
 
@@ -54,6 +56,15 @@ fn valid_lineage_claim_id(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn valid_actor_origin_id(value: Option<&str>) -> bool {
+    match value {
+        Some(value) => {
+            !value.is_empty() && value.len() <= dohc_engine_storage::MAX_IDENTIFIER_BYTES
+        }
+        None => true,
+    }
 }
 
 /// Admit a valid base only for authenticated, exact-coordinate repair.
@@ -72,6 +83,7 @@ pub(crate) fn is_exact_repairable_ydoc_base_claim(
         && payload.update_blob_sha256 == lineage_claim_id
         && payload.lineage_claim_id == lineage_claim_id
         && valid_lineage_claim_id(lineage_claim_id)
+        && valid_actor_origin_id(payload.actor_origin_id.as_deref())
         && ContentKind::parse(&payload.content_kind).is_ok()
         && classification == PathClassification::Tracked
         && normalized.as_deref() == Some(payload.path.as_str())
@@ -595,6 +607,7 @@ fn drain_deferred_ydoc(
                     .map_err(|_| local_corruption("parked ydoc.update payload is malformed"))?;
                 if lineage_claim_id != payload.lineage_claim_id
                     || !valid_lineage_claim_id(&lineage_claim_id)
+                    || !valid_actor_origin_id(payload.actor_origin_id.as_deref())
                 {
                     return Err(local_corruption(
                         "parked ydoc.update lineage identity does not match its payload",
@@ -707,16 +720,24 @@ fn drain_deferred_ydoc(
             bytes,
         };
         let apply_result = if let Some(cache) = cache.as_deref_mut() {
-            apply_remote_update_for_deferred_drain(
+            apply_remote_update_for_deferred_drain_with_actor(
                 store,
                 cache,
                 key,
                 &remote,
+                payload.actor_origin_id.as_deref(),
                 faults,
                 recorded_at_ms,
             )
         } else {
-            apply_remote_update(store, key, &remote, faults, recorded_at_ms)
+            apply_remote_update_with_actor(
+                store,
+                key,
+                &remote,
+                payload.actor_origin_id.as_deref(),
+                faults,
+                recorded_at_ms,
+            )
         };
         let outcome = match apply_result {
             Ok(outcome) => outcome,
@@ -949,7 +970,13 @@ fn write_final_drained_projection(
             search_policy,
         )?;
         // Origination intentionally remains a full cold reconstruction.
-        crate::originate_ydoc_base_in_tx(tx, key, &payload.path, payload_recorded_at)
+        crate::originate_ydoc_base_in_tx(
+            tx,
+            key,
+            &payload.path,
+            payload.actor_origin_id.as_deref(),
+            payload_recorded_at,
+        )
     })
 }
 
@@ -1527,6 +1554,7 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
                     marker.content_kind,
                     &dohc_engine_storage::hex_sha256(&update),
                     lineage_claim_id,
+                    actor_origin_id,
                     false,
                 ),
                 now_ms,
@@ -2001,6 +2029,14 @@ fn apply_ydoc_envelope_inner(
             "ydoc.update lineage claim is invalid",
         );
     }
+    if !valid_actor_origin_id(payload.actor_origin_id.as_deref()) {
+        return refuse_ydoc(
+            store,
+            envelope,
+            faults,
+            "ydoc.update actor origin is invalid",
+        );
+    }
     let search_policy = search_policy_for_store(store);
     // Gate on the SAME floor the projection sink applies
     // (`validate_plaintext_storable_path`) rather than R10's narrow
@@ -2109,7 +2145,9 @@ fn apply_ydoc_envelope_inner(
             for (queued_claim_id, payload_json) in rows {
                 let queued_payload = serde_json::from_str::<YdocUpdatePayload>(&payload_json)
                     .map_err(|_| local_corruption("parked ydoc.update payload is malformed"))?;
-                if queued_claim_id != queued_payload.lineage_claim_id {
+                if queued_claim_id != queued_payload.lineage_claim_id
+                    || !valid_actor_origin_id(queued_payload.actor_origin_id.as_deref())
+                {
                     return Err(local_corruption(
                         "parked ydoc.update lineage identity does not match its payload",
                     ));
@@ -2784,19 +2822,21 @@ fn apply_ydoc_envelope_inner(
     let outcome_result =
         crate::apply::apply_envelope_with_mutation_outcome(store, envelope, faults, |tx, op| {
             let projected = if let Some(cache) = cache.as_deref() {
-                apply_remote_update_in_transaction_cached_with_projection(
+                apply_remote_update_in_transaction_cached_with_projection_and_actor(
                     tx,
                     cache,
                     &mut cache_probe,
                     &key,
                     &remote,
+                    payload.actor_origin_id.as_deref(),
                     op.recorded_at_ms,
                 )
             } else {
-                apply_remote_update_in_transaction_with_projection(
+                apply_remote_update_in_transaction_with_projection_and_actor(
                     tx,
                     &key,
                     &remote,
+                    payload.actor_origin_id.as_deref(),
                     op.recorded_at_ms,
                 )
             }
@@ -2829,6 +2869,7 @@ fn apply_ydoc_envelope_inner(
                                 tx,
                                 &key,
                                 &update_path,
+                                payload.actor_origin_id.as_deref(),
                                 op.recorded_at_ms,
                             )?
                         {

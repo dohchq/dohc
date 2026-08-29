@@ -586,6 +586,7 @@ fn query_uses_indexed_values_flags_filter_sort_group_and_relation_labels() {
                     ],
                     group_by: Some("Status".to_owned()),
                     resolve_relations: true,
+                    ..CollectionQuery::default()
                 },
             )
         })
@@ -685,6 +686,76 @@ fn query_uses_indexed_values_flags_filter_sort_group_and_relation_labels() {
         .expect("tasks collection");
     assert_eq!(equals.records.len(), 1);
     assert_eq!(equals.records[0].id, SECOND_TASK_ID);
+}
+
+#[test]
+fn sorted_collection_query_cursor_pages_are_gapless_and_duplicate_free() {
+    let (_scratch, store) = seeded_store();
+    let sort = vec![
+        CollectionSort {
+            field: "Rank".to_owned(),
+            direction: ViewSortDirection::Asc,
+        },
+        CollectionSort {
+            field: "Title".to_owned(),
+            direction: ViewSortDirection::Desc,
+        },
+    ];
+    let expected = store
+        .read_with(|conn| {
+            query_collection_records(
+                conn,
+                WORKSPACE_ID,
+                "tasks",
+                &CollectionQuery {
+                    sort: sort.clone(),
+                    ..CollectionQuery::default()
+                },
+            )
+        })
+        .expect("full sorted query")
+        .expect("tasks collection")
+        .records
+        .into_iter()
+        .map(|record| record.id)
+        .collect::<Vec<_>>();
+
+    let mut cursor = None;
+    let mut paged = Vec::new();
+    loop {
+        let page = store
+            .read_with(|conn| {
+                query_collection_records(
+                    conn,
+                    WORKSPACE_ID,
+                    "tasks",
+                    &CollectionQuery {
+                        sort: sort.clone(),
+                        limit: 1,
+                        cursor: cursor.clone(),
+                        ..CollectionQuery::default()
+                    },
+                )
+            })
+            .expect("sorted page")
+            .expect("tasks collection");
+        paged.extend(page.records.into_iter().map(|record| record.id));
+        let Some(next_cursor) = page.next_cursor else {
+            break;
+        };
+        assert_eq!(next_cursor.sort_values.len(), sort.len());
+        cursor = Some(next_cursor);
+    }
+
+    assert_eq!(
+        paged, expected,
+        "page boundaries must preserve sorted order"
+    );
+    assert_eq!(
+        paged.iter().collect::<std::collections::HashSet<_>>().len(),
+        paged.len(),
+        "exclusive cursors must not repeat a boundary record"
+    );
 }
 
 #[test]

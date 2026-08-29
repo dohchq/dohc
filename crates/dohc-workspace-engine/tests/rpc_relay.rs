@@ -8,13 +8,13 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use dohc_engine_collab::Ydoc;
-use dohc_engine_domain::VersionedTextStore;
+use dohc_engine_domain::{VersionedTextStore, WriteText, reconcile_collections_in_tx};
 use dohc_engine_protocol::{
     error::ErrorCode,
     transport::{EngineTransport, InProcessTransport, RequestContext},
     wire::{Request, WorkspaceHandle},
 };
-use dohc_engine_storage::{EngineStore, NoFaults, hex_sha256};
+use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome, hex_sha256};
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
 use rusqlite::{Connection, OptionalExtension};
@@ -492,6 +492,21 @@ async fn seed_sync_identity(
         }),
     )
     .await;
+}
+
+async fn flush_capture(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    id: &mut u64,
+) {
+    for _ in 0..20 {
+        let status = call(transport, handle, id, "capture.flush", json!({})).await;
+        if status["settled"] == json!(true) {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("capture did not settle");
 }
 
 fn workspace_row(
@@ -1258,6 +1273,191 @@ async fn pull_without_commit_keeps_persisted_cursor_unmoved_and_redelivers() {
         )
         .expect("persisted relay cursor");
     assert_eq!(persisted, "1");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_page_pull_keeps_relation_to_target_arriving_on_second_page() {
+    const SOURCE_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const TARGET_ID: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let workspace_id = "rpc-relay-two-page-relation";
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
+    let db_path = scratch.engine_db_path().expect("engine db path");
+    let mut store = EngineStore::open(&db_path, 1_000).expect("open store");
+    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(workspace_id, "main", 1, &NoFaults)
+        .expect("main version");
+    let schema = "fields:\n  title:\n    type: text\n  related:\n    type: relation\n    collection: tasks\n    many: false\n";
+    VersionedTextStore::new(&mut store)
+        .write_text(
+            &WriteText {
+                workspace_id: workspace_id.to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "two-page-relation-schema".to_owned(),
+                path: "tasks/collection.yaml".to_owned(),
+                text: schema.to_owned(),
+                moment_id: "two-page-relation-schema-moment".to_owned(),
+                metadata_origin: "test".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .expect("seed collection schema");
+    let reconciled = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, workspace_id, "main")
+        })
+        .expect("reconcile schema");
+    assert!(matches!(reconciled, TxnOutcome::Committed(_)));
+    let collection_dir = scratch.path().join("tasks");
+    std::fs::create_dir_all(&collection_dir).expect("collection directory");
+    std::fs::write(collection_dir.join("collection.yaml"), schema).expect("schema file");
+    drop(store);
+
+    let source = format!("---\nid: {SOURCE_ID}\ntitle: Source\nrelated: {TARGET_ID}\n---\n");
+    let target = format!("---\nid: {TARGET_ID}\ntitle: Target\n---\n");
+    let source_sha = hex_sha256(source.as_bytes());
+    let target_sha = hex_sha256(target.as_bytes());
+    let pass_limit = i64::try_from(dohc_engine_sync::MAX_PULL_OPS).expect("pull pass limit");
+    let mut workspace_ops =
+        Vec::with_capacity(usize::try_from(pass_limit + 1).expect("two-page operation capacity"));
+    workspace_ops.push(workspace_row(
+        1,
+        workspace_id,
+        "remote-device",
+        0,
+        "moment.append",
+        absent_moment_payload(
+            "source-moment",
+            "source-object",
+            "tasks/source.md",
+            &source_sha,
+            "text",
+            source.len(),
+        ),
+    ));
+    for origin_seq in 1..pass_limit {
+        workspace_ops.push(workspace_row(
+            origin_seq + 1,
+            workspace_id,
+            "remote-device",
+            origin_seq,
+            "workspace.init",
+            json!({}),
+        ));
+    }
+    workspace_ops.push(workspace_row(
+        pass_limit + 1,
+        workspace_id,
+        "remote-device",
+        pass_limit,
+        "moment.append",
+        absent_moment_payload(
+            "target-moment",
+            "target-object",
+            "tasks/target.md",
+            &target_sha,
+            "text",
+            target.len(),
+        ),
+    ));
+    let relay = FakeRelay::start(RelayState {
+        workspace_ops,
+        workspace_blobs: HashMap::from([
+            (source_sha, source.into_bytes()),
+            (target_sha, target.into_bytes()),
+        ]),
+        ..RelayState::default()
+    });
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let mut id = 1;
+    let handle = open_workspace(&transport, &scratch, &relay, id, workspace_id).await;
+    seed_sync_identity(&transport, &handle, &mut id).await;
+    flush_capture(&transport, &handle, &mut id).await;
+
+    let first = call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.pull",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    assert_eq!(first["fetched"], pass_limit);
+    assert!(!first["pendingCursor"].is_null(), "page one must continue");
+    flush_capture(&transport, &handle, &mut id).await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.commitCursor",
+        json!({
+            "workspaceId": workspace_id,
+            "pendingCursor": first["pendingCursor"],
+        }),
+    )
+    .await;
+
+    let second = call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.pull",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    assert_eq!(second["fetched"], 1);
+    assert_eq!(second["hasMore"], false, "page two must finish the pull");
+    assert!(
+        !second["pendingCursor"].is_null(),
+        "the final data page still requires cursor commit"
+    );
+    flush_capture(&transport, &handle, &mut id).await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.commitCursor",
+        json!({
+            "workspaceId": workspace_id,
+            "pendingCursor": second["pendingCursor"],
+        }),
+    )
+    .await;
+
+    let source_record = call(
+        &transport,
+        &handle,
+        &mut id,
+        "collections.getRecord",
+        json!({
+            "collectionPath": "tasks",
+            "recordId": SOURCE_ID,
+            "historyLimit": 50,
+        }),
+    )
+    .await;
+    let relation = source_record["record"]["values"]
+        .as_array()
+        .expect("source values")
+        .iter()
+        .find(|value| value["field"] == "related")
+        .expect("source relation");
+    assert_eq!(relation["value"], json!(TARGET_ID));
+    assert!(
+        source_record["history"]
+            .as_array()
+            .expect("source history")
+            .iter()
+            .all(|entry| entry["authorOriginId"] != "engine"),
+        "a partial pull must not create an engine-authored relation drop"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

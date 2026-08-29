@@ -22,11 +22,12 @@ use dohc_engine_domain::{
     ChatChannelSummary, ChatDecision, ChatDecisionState, ChatFeedReadState, ChatFileMention,
     ChatFollow, ChatMention, ChatMessage, ChatProjectionFileAccess, ChatReaction,
     ChatReactionState, ChatThread, ChatThreadReadState, CollectionFilter, CollectionQuery,
-    CollectionSort, CompareTextFileVersions, ComparisonStatus, ConflictChoice, ConflictContentKind,
-    ConflictFileState, ConflictMetadata, ConflictResolution, ConflictStatus, CreateFileThread,
-    CreateNamedVersion, DeleteTextFile, DispatchClaim, DispatchRecord, DomainError,
-    FeedCursorValue, FollowState, FollowTargetKind, LocalAttachmentInput,
-    MAX_COLLECTION_HISTORY_LIMIT, MentionCursor, MergeTextFileFromVersion, MergeTextFileResult,
+    CollectionQueryCursor, CollectionSort, CompareTextFileVersions, ComparisonStatus,
+    ConflictChoice, ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution,
+    ConflictStatus, CreateFileThread, CreateNamedVersion, DEFAULT_COLLECTION_QUERY_LIMIT,
+    DeleteTextFile, DispatchClaim, DispatchRecord, DomainError, FeedCursorValue, FollowState,
+    FollowTargetKind, LocalAttachmentInput, MAX_COLLECTION_HISTORY_LIMIT,
+    MAX_COLLECTION_QUERY_LIMIT, MentionCursor, MergeTextFileFromVersion, MergeTextFileResult,
     MergeUnchangedReason, MomentOp, MomentPage, RenameTextFile, ResolveConflictKind,
     ResolveDecision, ResolveTextConflict, RollbackTextFileMutation, SaveBookmark, SecretDelete,
     SecretDiskIntent, SecretMomentRecord, SecretWrite, SendMessage, SetFollow, SetReaction,
@@ -2197,16 +2198,17 @@ impl EngineService {
                 "sync.pull",
             )
             .await?;
-        // The bounded sync outcome does not expose which applied op kinds
-        // were conflict resolutions. Any applied pull may therefore carry a
-        // conflict transition; fail toward one queued reconciliation instead
-        // of polling collections on every idle watcher tick.
+        // Reconcile only after the terminal pull page. A relation target may
+        // be on a later page, and dangling-link cleanup must not observe the
+        // pull's partial state. The bounded outcome does not expose whether an
+        // earlier page applied a collection change, so the terminal page
+        // queues one reconciliation even when that page itself was empty.
         if matches!(
             &outcome,
-            RelayOperationOutcome::Sync(
-                SyncPassOutcome::Complete { applied, .. }
-                    | SyncPassOutcome::CrashedAfterApply { applied, .. }
-            ) if *applied > 0
+            RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
+                has_more: false,
+                ..
+            })
         ) {
             open.request_collection_reconcile();
         }
@@ -3819,6 +3821,12 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: CollectionsQueryParams = parse(params)?;
+        if params.limit == 0 || params.limit > MAX_COLLECTION_QUERY_LIMIT {
+            return Err(wire(
+                ErrorCode::InvalidParams,
+                "collection-query-limit-out-of-range",
+            ));
+        }
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let result = Self::read_under_ctx(
@@ -3832,6 +3840,8 @@ impl EngineService {
                     sort: params.sort,
                     group_by: params.group_by,
                     resolve_relations: params.resolve_relations,
+                    limit: params.limit,
+                    cursor: params.cursor,
                 },
             ),
         )
@@ -10098,6 +10108,14 @@ struct CollectionsQueryParams {
     group_by: Option<String>,
     #[serde(default)]
     resolve_relations: bool,
+    #[serde(default = "default_collection_query_limit")]
+    limit: usize,
+    #[serde(default)]
+    cursor: Option<CollectionQueryCursor>,
+}
+
+fn default_collection_query_limit() -> usize {
+    DEFAULT_COLLECTION_QUERY_LIMIT
 }
 
 #[derive(Deserialize)]

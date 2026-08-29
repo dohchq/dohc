@@ -552,6 +552,19 @@ const CollectionListResultSchema = mutableStruct({
   collections: Schema.mutable(Schema.Array(CollectionSummarySchema)),
 });
 
+const CollectionQueryCursorSchema = mutableStruct({
+  sortValues: Schema.mutable(
+    Schema.Array(
+      mutableStruct({
+        present: Schema.Boolean,
+        value: Schema.MutableJson,
+      }),
+    ),
+  ),
+  recordPath: Schema.String,
+  recordId: Schema.String,
+});
+
 const CollectionPendingAdoptionsResultSchema = mutableStruct({
   adoptions: Schema.mutable(
     Schema.Array(
@@ -579,6 +592,7 @@ const CollectionQueryResultSchema = mutableStruct({
       ),
     ),
   ),
+  nextCursor: Schema.NullOr(CollectionQueryCursorSchema),
 });
 
 const CollectionGetRecordResultSchema = mutableStruct({

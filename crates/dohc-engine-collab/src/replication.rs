@@ -39,8 +39,8 @@ pub enum UpdateOrigin {
     /// This node's live editor. The actor id is NULL in the log (local edits are
     /// the implicit self origin).
     Local,
-    /// A replicating peer; carries the peer's stable origin id so the durable
-    /// row records provenance and echo suppression can key off it.
+    /// The actor attributed to an update received from a replicating peer.
+    /// Older payloads fall back to the peer's stable origin id.
     Remote { origin_id: String },
 }
 
@@ -89,6 +89,23 @@ pub struct RemoteApplyProjection {
     pub content_kind: ContentKind,
 }
 
+fn remote_update_origin(
+    remote: &RemoteUpdate,
+    actor_origin_id: Option<&str>,
+) -> Result<UpdateOrigin, CollabError> {
+    let actor_origin_id = actor_origin_id.unwrap_or(&remote.origin_id);
+    if actor_origin_id.is_empty()
+        || actor_origin_id.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES
+    {
+        return Err(CollabError::InvalidIdentifier {
+            reason: "remote actor_origin_id must be non-empty and bounded".to_owned(),
+        });
+    }
+    Ok(UpdateOrigin::Remote {
+        origin_id: actor_origin_id.to_owned(),
+    })
+}
+
 /// Apply a remote `ydoc.update` op into a replicated durable lineage.
 ///
 /// - **Validated first** (constraint 5): empty/oversized/truncated bytes are
@@ -108,7 +125,18 @@ pub fn apply_remote_update(
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<ReplicationApplyOutcome>, CollabError> {
-    apply_remote_update_outer(store, None, key, remote, faults, now_ms)
+    apply_remote_update_outer(store, None, key, remote, None, faults, now_ms)
+}
+
+pub fn apply_remote_update_with_actor(
+    store: &mut EngineStore,
+    key: &DocKey,
+    remote: &RemoteUpdate,
+    actor_origin_id: Option<&str>,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+) -> Result<TxnOutcome<ReplicationApplyOutcome>, CollabError> {
+    apply_remote_update_outer(store, None, key, remote, actor_origin_id, faults, now_ms)
 }
 
 /// Drain-only outer wrapper that keeps an already-resident writer-cache entry
@@ -122,7 +150,27 @@ pub fn apply_remote_update_for_deferred_drain(
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<ReplicationApplyOutcome>, CollabError> {
-    apply_remote_update_outer(store, Some(cache), key, remote, faults, now_ms)
+    apply_remote_update_outer(store, Some(cache), key, remote, None, faults, now_ms)
+}
+
+pub fn apply_remote_update_for_deferred_drain_with_actor(
+    store: &mut EngineStore,
+    cache: &mut WriterDocCache,
+    key: &DocKey,
+    remote: &RemoteUpdate,
+    actor_origin_id: Option<&str>,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+) -> Result<TxnOutcome<ReplicationApplyOutcome>, CollabError> {
+    apply_remote_update_outer(
+        store,
+        Some(cache),
+        key,
+        remote,
+        actor_origin_id,
+        faults,
+        now_ms,
+    )
 }
 
 fn apply_remote_update_outer(
@@ -130,6 +178,7 @@ fn apply_remote_update_outer(
     mut cache: Option<&mut WriterDocCache>,
     key: &DocKey,
     remote: &RemoteUpdate,
+    actor_origin_id: Option<&str>,
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<ReplicationApplyOutcome>, CollabError> {
@@ -140,6 +189,7 @@ fn apply_remote_update_outer(
             tx,
             key,
             remote,
+            actor_origin_id,
             now_ms,
             maintain_frontier.then_some(&mut candidate),
         )
@@ -187,13 +237,14 @@ pub fn apply_remote_update_in_transaction(
     remote: &RemoteUpdate,
     now_ms: i64,
 ) -> Result<ReplicationApplyOutcome, CollabError> {
-    apply_remote_update_in_transaction_inner(tx, key, remote, now_ms, None)
+    apply_remote_update_in_transaction_inner(tx, key, remote, None, now_ms, None)
 }
 
 fn apply_remote_update_in_transaction_inner(
     tx: &Transaction<'_>,
     key: &DocKey,
     remote: &RemoteUpdate,
+    actor_origin_id: Option<&str>,
     now_ms: i64,
     candidate_probe: Option<&mut Option<crate::replay_parity::IntegratedFrontierDelta>>,
 ) -> Result<ReplicationApplyOutcome, CollabError> {
@@ -206,9 +257,7 @@ fn apply_remote_update_in_transaction_inner(
         });
     }
     let sha = crate::hex_sha256(&remote.bytes);
-    let origin = UpdateOrigin::Remote {
-        origin_id: remote.origin_id.clone(),
-    };
+    let origin = remote_update_origin(remote, actor_origin_id)?;
 
     let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
     if marker.regime != Regime::Replicated {
@@ -260,6 +309,16 @@ pub fn apply_remote_update_in_transaction_with_projection(
     remote: &RemoteUpdate,
     now_ms: i64,
 ) -> Result<RemoteApplyProjection, CollabError> {
+    apply_remote_update_in_transaction_with_projection_and_actor(tx, key, remote, None, now_ms)
+}
+
+pub fn apply_remote_update_in_transaction_with_projection_and_actor(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    remote: &RemoteUpdate,
+    actor_origin_id: Option<&str>,
+    now_ms: i64,
+) -> Result<RemoteApplyProjection, CollabError> {
     validate_update_bytes(&remote.bytes)?;
     if remote.origin_id.is_empty()
         || remote.origin_id.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES
@@ -269,9 +328,7 @@ pub fn apply_remote_update_in_transaction_with_projection(
         });
     }
     let sha = crate::hex_sha256(&remote.bytes);
-    let origin = UpdateOrigin::Remote {
-        origin_id: remote.origin_id.clone(),
-    };
+    let origin = remote_update_origin(remote, actor_origin_id)?;
     let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
     if marker.regime != Regime::Replicated {
         return Err(CollabError::InvalidIdentifier {
@@ -322,6 +379,20 @@ pub fn apply_remote_update_in_transaction_cached_with_projection(
     remote: &RemoteUpdate,
     now_ms: i64,
 ) -> Result<RemoteApplyProjection, CollabError> {
+    apply_remote_update_in_transaction_cached_with_projection_and_actor(
+        tx, cache, probe, key, remote, None, now_ms,
+    )
+}
+
+pub fn apply_remote_update_in_transaction_cached_with_projection_and_actor(
+    tx: &Transaction<'_>,
+    cache: &WriterDocCache,
+    probe: &mut RemoteAppendProbe,
+    key: &DocKey,
+    remote: &RemoteUpdate,
+    actor_origin_id: Option<&str>,
+    now_ms: i64,
+) -> Result<RemoteApplyProjection, CollabError> {
     validate_update_bytes(&remote.bytes)?;
     if remote.origin_id.is_empty()
         || remote.origin_id.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES
@@ -331,9 +402,7 @@ pub fn apply_remote_update_in_transaction_cached_with_projection(
         });
     }
     let sha = crate::hex_sha256(&remote.bytes);
-    let origin = UpdateOrigin::Remote {
-        origin_id: remote.origin_id.clone(),
-    };
+    let origin = remote_update_origin(remote, actor_origin_id)?;
     let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
     if marker.regime != Regime::Replicated {
         return Err(CollabError::InvalidIdentifier {

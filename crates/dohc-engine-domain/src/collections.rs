@@ -16,6 +16,8 @@ use serde_json::Value;
 use crate::chats::{base32_lowercase_no_padding, is_js_trim_ws};
 
 pub const COLLECTION_SCHEMA_FILENAME: &str = "collection.yaml";
+pub const DEFAULT_COLLECTION_QUERY_LIMIT: usize = 100;
+pub const MAX_COLLECTION_QUERY_LIMIT: usize = 500;
 const ROOT_COLLECTION_DIAGNOSTIC_PATH: &str = ".";
 pub const RECORD_ID_FRONTMATTER_KEY: &str = "id";
 pub const RECORD_ID_PREFIX: &str = "rec_";
@@ -355,13 +357,43 @@ pub struct CollectionSort {
     pub direction: ViewSortDirection,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CollectionQuery {
     pub filter: Option<CollectionFilter>,
     pub sort: Vec<CollectionSort>,
     pub group_by: Option<String>,
     pub resolve_relations: bool,
+    pub limit: usize,
+    pub cursor: Option<CollectionQueryCursor>,
+}
+
+impl Default for CollectionQuery {
+    fn default() -> Self {
+        Self {
+            filter: None,
+            sort: Vec::new(),
+            group_by: None,
+            resolve_relations: false,
+            limit: DEFAULT_COLLECTION_QUERY_LIMIT,
+            cursor: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CollectionQueryCursorValue {
+    pub present: bool,
+    pub value: Value,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CollectionQueryCursor {
+    pub sort_values: Vec<CollectionQueryCursorValue>,
+    pub record_path: String,
+    pub record_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -410,6 +442,7 @@ pub struct CollectionQueryResult {
     pub collection: CollectionSummary,
     pub records: Vec<CollectionRecord>,
     pub groups: Option<Vec<CollectionRecordGroup>>,
+    pub next_cursor: Option<CollectionQueryCursor>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -2924,6 +2957,96 @@ fn compare_optional_json(left: Option<&Value>, right: Option<&Value>) -> Orderin
     }
 }
 
+fn compare_collection_records(
+    left: &CollectionRecord,
+    right: &CollectionRecord,
+    sort: &[CollectionSort],
+) -> Ordering {
+    for sort in sort {
+        let ordering = compare_optional_json(
+            value_for_field(left, &sort.field),
+            value_for_field(right, &sort.field),
+        );
+        let ordering = match sort.direction {
+            ViewSortDirection::Asc => ordering,
+            ViewSortDirection::Desc => ordering.reverse(),
+        };
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    left.path
+        .cmp(&right.path)
+        .then_with(|| left.id.cmp(&right.id))
+}
+
+fn query_cursor_value(
+    value: &CollectionQueryCursorValue,
+) -> Result<Option<&Value>, crate::DomainError> {
+    match value.present {
+        true => Ok(Some(&value.value)),
+        false if value.value.is_null() => Ok(None),
+        false => Err(crate::DomainError::InvalidInput {
+            reason: "collection query cursor is invalid",
+        }),
+    }
+}
+
+fn compare_record_to_cursor(
+    record: &CollectionRecord,
+    cursor: &CollectionQueryCursor,
+    sort: &[CollectionSort],
+) -> Result<Ordering, crate::DomainError> {
+    if cursor.sort_values.len() != sort.len()
+        || cursor.record_path.is_empty()
+        || cursor.record_id.is_empty()
+    {
+        return Err(crate::DomainError::InvalidInput {
+            reason: "collection query cursor is invalid",
+        });
+    }
+    for (sort, cursor_value) in sort.iter().zip(&cursor.sort_values) {
+        let ordering = compare_optional_json(
+            value_for_field(record, &sort.field),
+            query_cursor_value(cursor_value)?,
+        );
+        let ordering = match sort.direction {
+            ViewSortDirection::Asc => ordering,
+            ViewSortDirection::Desc => ordering.reverse(),
+        };
+        if ordering != Ordering::Equal {
+            return Ok(ordering);
+        }
+    }
+    Ok(record
+        .path
+        .cmp(&cursor.record_path)
+        .then_with(|| record.id.cmp(&cursor.record_id)))
+}
+
+fn query_cursor_for_record(
+    record: &CollectionRecord,
+    sort: &[CollectionSort],
+) -> CollectionQueryCursor {
+    CollectionQueryCursor {
+        sort_values: sort
+            .iter()
+            .map(|sort| match value_for_field(record, &sort.field) {
+                Some(value) => CollectionQueryCursorValue {
+                    present: true,
+                    value: value.clone(),
+                },
+                None => CollectionQueryCursorValue {
+                    present: false,
+                    value: Value::Null,
+                },
+            })
+            .collect(),
+        record_path: record.path.clone(),
+        record_id: record.id.clone(),
+    }
+}
+
 fn group_collection_records(
     records: &[CollectionRecord],
     field: &str,
@@ -2962,6 +3085,11 @@ pub fn query_collection_records(
     collection_path: &str,
     query: &CollectionQuery,
 ) -> Result<Option<CollectionQueryResult>, crate::DomainError> {
+    if query.limit == 0 || query.limit > MAX_COLLECTION_QUERY_LIMIT {
+        return Err(crate::DomainError::InvalidInput {
+            reason: "collection query limit is invalid",
+        });
+    }
     let version_id = active_version_id(conn, workspace_id)?;
     let Some(collection) =
         collection_summary_for_version(conn, workspace_id, &version_id, collection_path)?
@@ -2982,24 +3110,26 @@ pub fn query_collection_records(
     if let Some(filter) = &query.filter {
         records.retain(|record| matches_collection_filter(record, filter));
     }
-    records.sort_by(|left, right| {
-        for sort in &query.sort {
-            let ordering = compare_optional_json(
-                value_for_field(left, &sort.field),
-                value_for_field(right, &sort.field),
-            );
-            let ordering = match sort.direction {
-                ViewSortDirection::Asc => ordering,
-                ViewSortDirection::Desc => ordering.reverse(),
-            };
-            if ordering != Ordering::Equal {
-                return ordering;
-            }
+    records.sort_by(|left, right| compare_collection_records(left, right, &query.sort));
+    if let Some(cursor) = &query.cursor {
+        let mut page_start = 0;
+        while page_start < records.len()
+            && compare_record_to_cursor(&records[page_start], cursor, &query.sort)?
+                != Ordering::Greater
+        {
+            page_start += 1;
         }
-        left.path
-            .cmp(&right.path)
-            .then_with(|| left.id.cmp(&right.id))
-    });
+        records.drain(..page_start);
+    }
+    let has_more = records.len() > query.limit;
+    records.truncate(query.limit);
+    let next_cursor = if has_more {
+        records
+            .last()
+            .map(|record| query_cursor_for_record(record, &query.sort))
+    } else {
+        None
+    };
     let groups = query
         .group_by
         .as_deref()
@@ -3009,6 +3139,7 @@ pub fn query_collection_records(
         collection,
         records,
         groups,
+        next_cursor,
     }))
 }
 
