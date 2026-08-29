@@ -357,25 +357,38 @@ async function discussionInput(request: Request): Promise<string | null> {
 function discussionRelayPath(request: Request): string | null {
   const url = new URL(request.url);
   for (const key of url.searchParams.keys()) {
-    if (key !== "session" && key !== "cursor" && key !== "limit") return null;
+    if (
+      key !== "session" &&
+      key !== "cursor" &&
+      key !== "limit" &&
+      key !== "direction"
+    ) {
+      return null;
+    }
   }
   if (
     url.searchParams.getAll("session").length > 1 ||
     url.searchParams.getAll("cursor").length > 1 ||
-    url.searchParams.getAll("limit").length > 1
+    url.searchParams.getAll("limit").length > 1 ||
+    url.searchParams.getAll("direction").length > 1
   ) {
     return null;
   }
   const cursor = url.searchParams.get("cursor");
   const limit = url.searchParams.get("limit");
+  const direction = url.searchParams.get("direction");
   if (
     (cursor !== null && !DISCUSSION_CURSOR.test(cursor)) ||
-    (limit !== null && (!DISCUSSION_LIMIT.test(limit) || Number(limit) > 100))
+    (limit !== null && (!DISCUSSION_LIMIT.test(limit) || Number(limit) > 100)) ||
+    (direction !== null &&
+      direction !== "oldest-first" &&
+      direction !== "newest-first")
   ) {
     return null;
   }
   const relaySearch = new URLSearchParams();
   if (cursor !== null) relaySearch.set("cursor", cursor);
+  if (direction !== null) relaySearch.set("direction", direction);
   if (limit !== null) relaySearch.set("limit", limit);
   const serialized = relaySearch.toString();
   return `/sync/link/discussion${serialized ? `?${serialized}` : ""}`;

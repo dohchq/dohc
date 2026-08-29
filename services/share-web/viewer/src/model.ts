@@ -157,7 +157,10 @@ function discussionOrder(
       : 0;
 }
 
-export function parseDiscussionPage(value: unknown): PublicDiscussionPage | null {
+export function parseDiscussionPage(
+  value: unknown,
+  direction: "oldest-first" | "newest-first" = "oldest-first",
+): PublicDiscussionPage | null {
   const page = record(value);
   if (
     !page ||
@@ -174,11 +177,14 @@ export function parseDiscussionPage(value: unknown): PublicDiscussionPage | null
   const messages: PublicDiscussionMessage[] = [];
   for (const rawMessage of page.messages) {
     const message = discussionMessage(rawMessage);
-    if (!message || (messages.length > 0 && discussionOrder(messages.at(-1)!, message) >= 0)) {
-      return null;
+    if (!message) return null;
+    if (messages.length > 0) {
+      const order = discussionOrder(messages.at(-1)!, message);
+      if (direction === "newest-first" ? order <= 0 : order >= 0) return null;
     }
     messages.push(message);
   }
+  if (direction === "newest-first") messages.reverse();
   return {
     messages,
     nextCursor: page.nextCursor as string | null,
@@ -318,6 +324,21 @@ export function mergeDiscussionMessages(
   }
   if (needsSort) merged.sort(discussionOrder);
   return merged;
+}
+
+export function mergeDiscussionWindowMessages(
+  current: readonly PublicDiscussionMessage[],
+  incoming: readonly PublicDiscussionMessage[],
+): PublicDiscussionMessage[] | null {
+  const oldest = current.at(0);
+  if (!oldest) return mergeDiscussionMessages(current, incoming);
+  const loadedIds = new Set(current.map((message) => message.messageId));
+  return mergeDiscussionMessages(
+    current,
+    incoming.filter((message) =>
+      loadedIds.has(message.messageId) || discussionOrder(message, oldest) >= 0
+    ),
+  );
 }
 
 function storedFile(value: unknown): SharedFile | null {

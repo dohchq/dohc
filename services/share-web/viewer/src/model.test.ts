@@ -4,6 +4,7 @@ import {
   filesFromLog,
   foldLogOps,
   mergeDiscussionMessages,
+  mergeDiscussionWindowMessages,
   parseDiscussionAppendResult,
   parseDiscussionActivity,
   parseDiscussionPage,
@@ -277,6 +278,25 @@ describe("public discussion projection", () => {
     expect(parseDiscussionAppendResult({ ok: true, message: link })).toEqual(link);
   });
 
+  it("validates newest-first pages and returns their loaded window chronologically", () => {
+    expect(parseDiscussionPage({
+      ok: true,
+      activityRevision: 7,
+      messages: [tombstone, link, named],
+      nextCursor: "cursor_older",
+    }, "newest-first")).toEqual({
+      messages: [named, link, tombstone],
+      nextCursor: "cursor_older",
+      activityRevision: 7,
+    });
+    expect(parseDiscussionPage({
+      ok: true,
+      activityRevision: 7,
+      messages: [named, link],
+      nextCursor: null,
+    }, "newest-first")).toBeNull();
+  });
+
   it("accepts only a live link-authored append result", () => {
     expect(parseDiscussionAppendResult({ ok: true, message: link })).toEqual(link);
     expect(parseDiscussionAppendResult({ ok: true, message: named })).toBeNull();
@@ -411,6 +431,24 @@ describe("public discussion projection", () => {
       earlierId,
       { ...laterId, body: "conflicting body" },
     ])).toBeNull();
+  });
+
+  it("ignores unseen activity before a loaded window without hiding conflicts", () => {
+    const olderUnseen = {
+      ...named,
+      messageId: "message-before-window",
+      createdAtMs: link.createdAtMs - 1,
+    };
+    const newerUnseen = {
+      ...named,
+      messageId: "message-after-window",
+      createdAtMs: link.createdAtMs + 1,
+    };
+
+    expect(mergeDiscussionWindowMessages([link], [olderUnseen, newerUnseen]))
+      .toEqual([link, newerUnseen]);
+    expect(mergeDiscussionWindowMessages([link], [{ ...link, body: "conflict" }]))
+      .toBeNull();
   });
 
   it("refuses every conflicting message-id reuse", () => {

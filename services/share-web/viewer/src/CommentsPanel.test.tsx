@@ -67,7 +67,12 @@ function discussionPage(
   messages: readonly unknown[] = [],
   nextCursor: string | null = null,
 ): Response {
-  return jsonResponse({ ok: true, activityRevision: 7, messages, nextCursor });
+  return jsonResponse({
+    ok: true,
+    activityRevision: 7,
+    messages: [...messages].reverse(),
+    nextCursor,
+  });
 }
 
 function discussionPageAt(
@@ -75,7 +80,12 @@ function discussionPageAt(
   messages: readonly unknown[] = [],
   nextCursor: string | null = null,
 ): Response {
-  return jsonResponse({ ok: true, activityRevision, messages, nextCursor });
+  return jsonResponse({
+    ok: true,
+    activityRevision,
+    messages: [...messages].reverse(),
+    nextCursor,
+  });
 }
 
 function requestPath(input: RequestInfo | URL): string {
@@ -533,7 +543,9 @@ describe("CommentsPanel", () => {
       if (path === "/api/view/discussion" && init?.method === "POST") {
         return heldPost.response;
       }
-      if (path === "/api/view/discussion") return discussionPageAt(7);
+      if (path === "/api/view/discussion?direction=newest-first") {
+        return discussionPageAt(7);
+      }
       if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
         return jsonResponse({
           ok: true,
@@ -606,21 +618,50 @@ describe("CommentsPanel", () => {
     expect(container.textContent).not.toContain("The comment didn't post. Try again.");
   });
 
-  it("loads every ordered keyset page with opaque cursor encoding", async () => {
+  it("renders the newest page before activity and loads one earlier page on request", async () => {
+    const initialActivity = heldJsonResponse(200);
     const paths: string[] = [];
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
+    let parkedSignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
       const path = requestPath(input);
       paths.push(path);
-      return path === "/api/view/discussion"
-        ? discussionPage([NAMED_MESSAGE], "cursor_one")
-        : discussionPage([LINK_MESSAGE, TOMBSTONE]);
+      if (
+        path === "/api/view/discussion" ||
+        path === "/api/view/discussion?direction=newest-first"
+      ) {
+        return discussionPage([LINK_MESSAGE, TOMBSTONE], "cursor_one");
+      }
+      if (
+        path === "/api/view/discussion?cursor=cursor_one" ||
+        path === "/api/view/discussion?direction=newest-first&cursor=cursor_one"
+      ) {
+        return discussionPage([NAMED_MESSAGE]);
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        return initialActivity.response;
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
+        parkedSignal = init?.signal ?? undefined;
+        return await new Promise<Response>(() => undefined);
+      }
+      throw new Error(`unexpected request: ${path}`);
     }));
 
     await render("view");
+    await settle(initialActivity.bodyStarted);
     expect(paths).toEqual([
-      "/api/view/discussion",
-      "/api/view/discussion?cursor=cursor_one",
+      "/api/view/discussion?direction=newest-first",
       "/api/view/discussion/activity?since=7&hold=0&limit=100",
+    ]);
+    expect([...container.querySelectorAll(".comment-row")].map((row) => row.textContent))
+      .toEqual([
+        "Link PersonUnverifiedLink body",
+        "Comment deleted by the owner",
+      ]);
+    clickButton("Load earlier comments");
+    await settle(() => container.textContent?.includes("Named body") === true);
+    expect(paths.filter((path) => path.includes("cursor=cursor_one"))).toEqual([
+      "/api/view/discussion?direction=newest-first&cursor=cursor_one",
     ]);
     expect([...container.querySelectorAll(".comment-row")].map((row) => row.textContent))
       .toEqual([
@@ -628,6 +669,129 @@ describe("CommentsPanel", () => {
         "Link PersonUnverifiedLink body",
         "Comment deleted by the owner",
       ]);
+
+    initialActivity.release({
+      ok: true,
+      latestRevision: 7,
+      cursorRevision: 7,
+      hasMore: false,
+      messages: [],
+      composerState: "available",
+    });
+    await settle(() => parkedSignal !== undefined);
+  });
+
+  it("retries one failed earlier page only after another click", async () => {
+    let earlierAttempts = 0;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/discussion?direction=newest-first") {
+        return discussionPage([LINK_MESSAGE], "cursor_retry");
+      }
+      if (
+        path ===
+        "/api/view/discussion?direction=newest-first&cursor=cursor_retry"
+      ) {
+        earlierAttempts += 1;
+        return earlierAttempts === 1
+          ? new Response(null, { status: 503 })
+          : discussionPage([NAMED_MESSAGE]);
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        return await new Promise<Response>(() => undefined);
+      }
+      throw new Error(`unexpected request: ${path}`);
+    }));
+
+    await render("view");
+    await settle(() => container.textContent?.includes("Load earlier comments") === true);
+    clickButton("Load earlier comments");
+    await settle(() =>
+      container.textContent?.includes("Earlier comments didn't load.") === true
+    );
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(earlierAttempts).toBe(1);
+    expect(container.textContent).not.toContain("Named body");
+
+    clickButton("Load earlier comments");
+    await settle(() => container.textContent?.includes("Named body") === true);
+    expect(earlierAttempts).toBe(2);
+    expect(container.textContent).not.toContain("Earlier comments didn't load.");
+    expect(container.textContent).not.toContain("Load earlier comments");
+  });
+
+  it("refuses a repeated earlier-page cursor without adding its messages", async () => {
+    let earlierAttempts = 0;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/discussion?direction=newest-first") {
+        return discussionPage([LINK_MESSAGE], "cursor_repeat");
+      }
+      if (
+        path ===
+        "/api/view/discussion?direction=newest-first&cursor=cursor_repeat"
+      ) {
+        earlierAttempts += 1;
+        return discussionPage([NAMED_MESSAGE], "cursor_repeat");
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        return await new Promise<Response>(() => undefined);
+      }
+      throw new Error(`unexpected request: ${path}`);
+    }));
+
+    await render("view");
+    await settle(() => container.textContent?.includes("Load earlier comments") === true);
+    clickButton("Load earlier comments");
+    await settle(() =>
+      container.textContent?.includes("Earlier comments didn't load.") === true
+    );
+
+    expect(earlierAttempts).toBe(1);
+    expect(container.textContent).not.toContain("Named body");
+    expect(container.textContent).toContain("Link body");
+  });
+
+  it("aborts a held earlier-page request when the session changes", async () => {
+    let earlierSignal: AbortSignal | undefined;
+    let replacementActivitySignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      const session = requestSession(init);
+      if (path === "/api/view/discussion?direction=newest-first") {
+        return session === FIRST_SESSION
+          ? discussionPage([LINK_MESSAGE], "cursor_held")
+          : discussionPage([{ ...NAMED_MESSAGE, body: "Replacement timeline" }]);
+      }
+      if (
+        path ===
+        "/api/view/discussion?direction=newest-first&cursor=cursor_held"
+      ) {
+        earlierSignal = init?.signal ?? undefined;
+        return await new Promise<Response>(() => undefined);
+      }
+      if (session === FIRST_SESSION) {
+        return await new Promise<Response>(() => undefined);
+      }
+      replacementActivitySignal = init?.signal ?? undefined;
+      return await new Promise<Response>(() => undefined);
+    }));
+
+    await render("view");
+    await settle(() => container.textContent?.includes("Load earlier comments") === true);
+    clickButton("Load earlier comments");
+    await settle(() => earlierSignal !== undefined);
+    await act(async () => {
+      root.render(<CommentsPanel access="view" session={SECOND_SESSION} />);
+    });
+    await settle(() => replacementActivitySignal !== undefined);
+
+    expect(earlierSignal?.aborted).toBe(true);
+    expect(container.textContent).toContain("Replacement timeline");
+    expect(container.textContent).not.toContain("Earlier comments didn't load.");
   });
 
   it("converges ordered activity from the first-page revision without duplicates or hot loops", async () => {
@@ -652,11 +816,8 @@ describe("CommentsPanel", () => {
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
       const path = requestPath(input);
       paths.push(path);
-      if (path === "/api/view/discussion") {
-        return discussionPageAt(7, [NAMED_MESSAGE], "page_two");
-      }
-      if (path === "/api/view/discussion?cursor=page_two") {
-        return discussionPageAt(8, [LINK_MESSAGE, external]);
+      if (path === "/api/view/discussion?direction=newest-first") {
+        return discussionPageAt(7, [NAMED_MESSAGE, LINK_MESSAGE, external]);
       }
       if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
         return appendDelta.response;
@@ -741,9 +902,8 @@ describe("CommentsPanel", () => {
     });
     await settle(() => finalParkSignal !== undefined);
 
-    expect(paths.slice(0, 7)).toEqual([
-      "/api/view/discussion",
-      "/api/view/discussion?cursor=page_two",
+    expect(paths.slice(0, 6)).toEqual([
+      "/api/view/discussion?direction=newest-first",
       "/api/view/discussion/activity?since=7&hold=0&limit=100",
       "/api/view/discussion/activity?since=8&hold=30000&limit=100",
       "/api/view/discussion/activity?since=9&hold=30000&limit=100",
@@ -769,7 +929,7 @@ describe("CommentsPanel", () => {
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
       const path = requestPath(input);
       paths.push(path);
-      if (path === "/api/view/discussion") {
+      if (path === "/api/view/discussion?direction=newest-first") {
         return discussionPageAt(7, [NAMED_MESSAGE]);
       }
       if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
@@ -793,7 +953,7 @@ describe("CommentsPanel", () => {
     await settle(() => parkedSignal !== undefined);
 
     expect(paths.slice(0, 3)).toEqual([
-      "/api/view/discussion",
+      "/api/view/discussion?direction=newest-first",
       "/api/view/discussion/activity?since=7&hold=0&limit=100",
       "/api/view/discussion/activity?since=7&hold=30000&limit=100",
     ]);
@@ -809,7 +969,9 @@ describe("CommentsPanel", () => {
     let recoveredSignal: AbortSignal | undefined;
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
       const path = requestPath(input);
-      if (path === "/api/view/discussion") return discussionPageAt(7);
+      if (path === "/api/view/discussion?direction=newest-first") {
+        return discussionPageAt(7);
+      }
       if (path !== "/api/view/discussion/activity?since=7&hold=0&limit=100") {
         throw new Error(`unexpected request: ${path}`);
       }
@@ -907,7 +1069,7 @@ describe("CommentsPanel", () => {
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
       const path = requestPath(input);
       const session = requestSession(init);
-      if (path === "/api/view/discussion") {
+      if (path === "/api/view/discussion?direction=newest-first") {
         return session === FIRST_SESSION
           ? discussionPageAt(7, [NAMED_MESSAGE])
           : discussionPageAt(20, [{ ...NAMED_MESSAGE, body: "Replacement timeline" }]);

@@ -6,11 +6,13 @@ import {
 } from "react";
 import {
   mergeDiscussionMessages,
+  mergeDiscussionWindowMessages,
   parseDiscussionAppendResult,
   parseDiscussionActivity,
   parseDiscussionPage,
   parseDiscussionWriteState,
   type PublicDiscussionMessage,
+  type PublicDiscussionPage,
   type ShareAccess,
 } from "./model";
 import {
@@ -20,7 +22,6 @@ import {
 } from "./retry";
 
 const SESSION_HEADER = "x-dohc-link-session";
-const MAX_DISCUSSION_PAGES = 100;
 const DISCUSSION_ACTIVITY_HOLD_MS = 30_000;
 const DISCUSSION_ACTIVITY_LIMIT = 100;
 const SUBMIT_STATUS_ID = "comment-submit-status";
@@ -95,46 +96,30 @@ function discussionRequest(
   });
 }
 
-async function loadDiscussion(
+async function loadDiscussionPage(
   session: string,
+  cursor: string | null,
   signal: AbortSignal,
   isCurrent: () => boolean,
-): Promise<{ messages: PublicDiscussionMessage[]; activityRevision: number }> {
-  let messages: PublicDiscussionMessage[] = [];
-  let activityRevision: number | null = null;
-  let cursor: string | null = null;
-  const seenCursors = new Set<string>();
-  for (let pageNumber = 0; pageNumber < MAX_DISCUSSION_PAGES; pageNumber += 1) {
-    const search = new URLSearchParams();
-    if (cursor !== null) search.set("cursor", cursor);
-    const path = `/api/view/discussion${search.size > 0 ? `?${search}` : ""}`;
-    const response = await boundedRequest(
-      () => discussionRequest(session, path, {}, signal),
-      (candidate) => candidate.status === 429,
-      false,
-      signal,
-    );
-    if (!isCurrent()) {
-      await response.body?.cancel().catch(() => undefined);
-      throw new Error("cancelled");
-    }
-    if (!response.ok) throw new Error("refused");
-    const body: unknown = await response.json();
-    if (!isCurrent()) throw new Error("cancelled");
-    const page = parseDiscussionPage(body);
-    if (!page) throw new Error("refused");
-    activityRevision ??= page.activityRevision;
-    const merged = mergeDiscussionMessages(messages, page.messages);
-    if (!merged) throw new Error("refused");
-    messages = merged;
-    if (page.nextCursor === null) {
-      return { messages, activityRevision };
-    }
-    if (seenCursors.has(page.nextCursor)) throw new Error("refused");
-    seenCursors.add(page.nextCursor);
-    cursor = page.nextCursor;
+): Promise<PublicDiscussionPage> {
+  const search = new URLSearchParams({ direction: "newest-first" });
+  if (cursor !== null) search.set("cursor", cursor);
+  const response = await boundedRequest(
+    () => discussionRequest(session, `/api/view/discussion?${search}`, {}, signal),
+    (candidate) => candidate.status === 429,
+    false,
+    signal,
+  );
+  if (!isCurrent()) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new Error("cancelled");
   }
-  throw new Error("refused");
+  if (!response.ok) throw new Error("refused");
+  const body: unknown = await response.json();
+  if (!isCurrent()) throw new Error("cancelled");
+  const page = parseDiscussionPage(body, "newest-first");
+  if (!page) throw new Error("refused");
+  return page;
 }
 
 async function followDiscussionActivity(
@@ -248,6 +233,9 @@ export function CommentsPanel(props: { access: ShareAccess; session: string }) {
   const [loadState, setLoadState] = useState<InitialLoadState>("loading");
   const [loadStateSession, setLoadStateSession] = useState(props.session);
   const [loadAttempt, setLoadAttempt] = useState(0);
+  const [earlierCursor, setEarlierCursor] = useState<string | null>(null);
+  const [earlierPending, setEarlierPending] = useState(false);
+  const [earlierError, setEarlierError] = useState(false);
   const [body, setBody] = useState("");
   const [claimedName, setClaimedName] = useState("");
   const [nameLocked, setNameLocked] = useState(false);
@@ -256,7 +244,11 @@ export function CommentsPanel(props: { access: ShareAccess; session: string }) {
   const [submitError, setSubmitError] = useState(false);
   const sessionRef = useRef(props.session);
   const messagesRef = useRef<PublicDiscussionMessage[] | null>(null);
+  const activityRevisionRef = useRef(0);
   const pageTokenRef = useRef<symbol | null>(null);
+  const pageControllerRef = useRef<AbortController | null>(null);
+  const earlierPendingRef = useRef(false);
+  const seenEarlierCursorsRef = useRef(new Set<string>());
   const submitTokenRef = useRef<symbol | null>(null);
   const submitControllerRef = useRef<AbortController | null>(null);
   const pendingRef = useRef(false);
@@ -266,6 +258,8 @@ export function CommentsPanel(props: { access: ShareAccess; session: string }) {
   useEffect(() => {
     const token = Symbol("discussion-page");
     const controller = new AbortController();
+    pageControllerRef.current?.abort();
+    pageControllerRef.current = controller;
     pageTokenRef.current = token;
     submitTokenRef.current = null;
     submitControllerRef.current?.abort();
@@ -273,9 +267,15 @@ export function CommentsPanel(props: { access: ShareAccess; session: string }) {
     pendingRef.current = false;
     intentRef.current = null;
     messagesRef.current = null;
+    activityRevisionRef.current = 0;
+    earlierPendingRef.current = false;
+    seenEarlierCursorsRef.current = new Set();
     setMessages(null);
     setLoadState("loading");
     setLoadStateSession(props.session);
+    setEarlierCursor(null);
+    setEarlierPending(false);
+    setEarlierError(false);
     setBody("");
     setClaimedName("");
     setNameLocked(false);
@@ -284,11 +284,16 @@ export function CommentsPanel(props: { access: ShareAccess; session: string }) {
     setSubmitError(false);
     const isCurrent = () =>
       pageTokenRef.current === token && sessionRef.current === props.session;
-    void loadDiscussion(props.session, controller.signal, isCurrent)
+    void loadDiscussionPage(props.session, null, controller.signal, isCurrent)
       .then((loaded) => {
         if (!isCurrent()) return;
         messagesRef.current = loaded.messages;
+        activityRevisionRef.current = loaded.activityRevision;
         setMessages(loaded.messages);
+        setEarlierCursor(loaded.nextCursor);
+        if (loaded.nextCursor !== null) {
+          seenEarlierCursorsRef.current.add(loaded.nextCursor);
+        }
         setLoadState("ready");
         void followDiscussionActivity(
           props.session,
@@ -297,12 +302,13 @@ export function CommentsPanel(props: { access: ShareAccess; session: string }) {
           isCurrent,
           (activity) => {
             if (!messagesRef.current) return false;
-            const merged = mergeDiscussionMessages(
+            const merged = mergeDiscussionWindowMessages(
               messagesRef.current,
               activity.messages,
             );
             if (!merged) return false;
             messagesRef.current = merged;
+            activityRevisionRef.current = activity.cursorRevision;
             setMessages(merged);
             setComposerState(activity.composerState);
             return true;
@@ -315,12 +321,69 @@ export function CommentsPanel(props: { access: ShareAccess; session: string }) {
     return () => {
       if (pageTokenRef.current === token) pageTokenRef.current = null;
       controller.abort();
+      if (pageControllerRef.current === controller) pageControllerRef.current = null;
+      earlierPendingRef.current = false;
       submitTokenRef.current = null;
       submitControllerRef.current?.abort();
       submitControllerRef.current = null;
       pendingRef.current = false;
     };
   }, [loadAttempt, props.session]);
+
+  const loadEarlierComments = async () => {
+    const cursor = earlierCursor;
+    const token = pageTokenRef.current;
+    const controller = pageControllerRef.current;
+    const session = props.session;
+    if (
+      cursor === null ||
+      token === null ||
+      controller === null ||
+      earlierPendingRef.current
+    ) {
+      return;
+    }
+    const isCurrent = () =>
+      pageTokenRef.current === token &&
+      sessionRef.current === session &&
+      !controller.signal.aborted;
+    earlierPendingRef.current = true;
+    setEarlierPending(true);
+    setEarlierError(false);
+    try {
+      const page = await loadDiscussionPage(
+        session,
+        cursor,
+        controller.signal,
+        isCurrent,
+      );
+      if (!isCurrent() || !messagesRef.current) return;
+      if (page.activityRevision < activityRevisionRef.current) {
+        throw new Error("refused");
+      }
+      if (
+        page.nextCursor !== null &&
+        seenEarlierCursorsRef.current.has(page.nextCursor)
+      ) {
+        throw new Error("refused");
+      }
+      const merged = mergeDiscussionMessages(page.messages, messagesRef.current);
+      if (!merged) throw new Error("refused");
+      if (page.nextCursor !== null) {
+        seenEarlierCursorsRef.current.add(page.nextCursor);
+      }
+      messagesRef.current = merged;
+      setMessages(merged);
+      setEarlierCursor(page.nextCursor);
+    } catch {
+      if (isCurrent()) setEarlierError(true);
+    } finally {
+      if (isCurrent()) {
+        earlierPendingRef.current = false;
+        setEarlierPending(false);
+      }
+    }
+  };
 
   const editDraft = (field: "body" | "name", value: string) => {
     intentRef.current = null;
@@ -434,6 +497,22 @@ export function CommentsPanel(props: { access: ShareAccess; session: string }) {
           ? "Anyone with the link can also comment. Names they give are not verified."
           : "Anyone with the link can read what you selected."}
       </p>
+      {currentLoadState === "ready" && earlierCursor !== null ? (
+        <div>
+          {earlierError ? (
+            <p className="comments-empty" role="status">Earlier comments didn't load.</p>
+          ) : null}
+          <div className="comment-submit-row">
+            <button
+              type="button"
+              disabled={earlierPending}
+              onClick={() => void loadEarlierComments()}
+            >
+              Load earlier comments
+            </button>
+          </div>
+        </div>
+      ) : null}
       {currentLoadState === "loading" ? (
         <p className="comments-empty">Loading comments…</p>
       ) : currentLoadState === "failed" ? (

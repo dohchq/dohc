@@ -244,7 +244,7 @@ describe("App", () => {
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
       if (path === "/api/view/current") return currentPage([], 0);
       if (path === "/api/view/log?since=0&limit=500") return logPage([]);
-      if (path === "/api/view/discussion") {
+      if (path === "/api/view/discussion?direction=newest-first") {
         return jsonResponse({
           ok: true,
           activityRevision: 0,
@@ -3379,7 +3379,7 @@ describe("App", () => {
       const path = requestPath(input);
       if (path === "/api/view/current") return currentPage([file], 1, 0, commentMeta);
       if (path === "/api/view/log?since=1&limit=500") return logOpsPage([], 1);
-      if (path === "/api/view/discussion") {
+      if (path === "/api/view/discussion?direction=newest-first") {
         return jsonResponse({
           ok: true,
           activityRevision: 7,
@@ -3456,7 +3456,7 @@ describe("App", () => {
       if (path === "/api/view/discussion" && init?.method === "POST") {
         return jsonResponse({ ok: false, state: writeState }, 403);
       }
-      if (path === "/api/view/discussion") {
+      if (path === "/api/view/discussion?direction=newest-first") {
         return jsonResponse({
           ok: true,
           activityRevision: 7,

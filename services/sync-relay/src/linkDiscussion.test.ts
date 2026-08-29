@@ -636,6 +636,32 @@ describe("share discussion HTTP boundary", () => {
       "activity third",
     ]);
 
+    const newestPublic = await body(
+      await test.handler(
+        linkRequest(
+          test.view,
+          "/sync/link/discussion?direction=newest-first&limit=2",
+        ),
+      ),
+    );
+    expect(newestPublic.activityRevision).toBe(3);
+    expect(messages(newestPublic).map((message) => message.body)).toEqual([
+      "activity third",
+      "activity second",
+    ]);
+    const earlierPublic = await body(
+      await test.handler(
+        linkRequest(
+          test.view,
+          `/sync/link/discussion?direction=newest-first&limit=2&cursor=${String(newestPublic.nextCursor)}`,
+        ),
+      ),
+    );
+    expect(earlierPublic.activityRevision).toBe(3);
+    expect(messages(earlierPublic).map((message) => message.body)).toEqual([
+      "activity first",
+    ]);
+
     const newestOwner = await body(
       await test.handler(
         request(

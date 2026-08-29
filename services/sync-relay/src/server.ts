@@ -1461,9 +1461,15 @@ export function createSyncRelayHandler({
         const url = new URL(request.url);
         const cursor = decodeDiscussionCursor(url.searchParams.get("cursor"));
         const limit = parseDiscussionLimit(url.searchParams.get("limit"));
+        const direction = parseDiscussionDirection(
+          url.searchParams.get("direction"),
+        );
         const storedPage = storage.listShareDiscussionMessages({
           shareId: capability.shareId,
-          after: cursor,
+          ...(direction === "newest-first"
+            ? { before: cursor }
+            : { after: cursor }),
+          direction,
           limit,
         });
         const page = discussionPage(storedPage, "public");

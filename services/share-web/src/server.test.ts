@@ -1671,7 +1671,7 @@ describe("share-web protected discussion proxy", () => {
 
     const read = await handler(
       request(
-        `/api/view/discussion?session=${exchangeBody.session}&limit=17&cursor=abc`,
+        `/api/view/discussion?session=${exchangeBody.session}&direction=newest-first&limit=17&cursor=abc`,
         { headers: { cookie: cookies } },
       ),
     );
@@ -1698,7 +1698,7 @@ describe("share-web protected discussion proxy", () => {
     expect(discussionRequests).toHaveLength(2);
     expect(discussionRequests[0]!.method).toBe("GET");
     expect(discussionRequests[0]!.url).toBe(
-      "http://relay.test/sync/link/discussion?cursor=abc&limit=17",
+      "http://relay.test/sync/link/discussion?cursor=abc&direction=newest-first&limit=17",
     );
     expect(discussionRequests[0]!.headers.get("authorization")).toBe(
       `LinkCapability ${CAP_ALPHA_1}`,
