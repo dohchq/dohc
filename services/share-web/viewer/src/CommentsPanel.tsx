@@ -171,7 +171,7 @@ async function followDiscussionActivity(
       await response.body?.cancel().catch(() => undefined);
       return;
     }
-    if (response.status === 429 || response.status >= 500) {
+    if (response.status === 409 || response.status === 429 || response.status >= 500) {
       await response.body?.cancel().catch(() => undefined);
       await waitForRetry(retryDelayMs, signal).catch(() => undefined);
       retryDelayMs = Math.min(retryDelayMs * 2, RETRY_MAX_MS);

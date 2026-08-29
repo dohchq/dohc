@@ -297,7 +297,7 @@ function jsonResponse(
   });
 }
 
-function refused(status: 404 | 429 | 503 = 404, headers: HeadersInit = {}): Response {
+function refused(status: 404 | 409 | 429 | 503 = 404, headers: HeadersInit = {}): Response {
   return response(REFUSAL_BODY, {
     status,
     headers: { "content-type": "application/json", ...Object.fromEntries(new Headers(headers)) },
@@ -1027,7 +1027,7 @@ export function createShareWebHandler({
           )
         ) {
           await relayResponse.body?.cancel().catch(() => undefined);
-          return refused();
+          return refused(isActivity ? 409 : 404);
         }
         if (relayResponse.status === 200) {
           return response(relayResponse.body, {

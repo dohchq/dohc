@@ -850,6 +850,56 @@ describe("CommentsPanel", () => {
     expect(recoveredSignal?.aborted).toBe(false);
   });
 
+  it("resumes activity after a superseded viewer capability response", async () => {
+    vi.useFakeTimers();
+    const replacement = {
+      ...LINK_MESSAGE,
+      messageId: "message-after-capability-replacement",
+      createdAtMs: 4_000,
+      body: "Replacement capability stayed live",
+    };
+    let activityAttempts = 0;
+    let parkedSignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/view/discussion") return discussionPageAt(7);
+      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        activityAttempts += 1;
+        return activityAttempts === 1
+          ? new Response(null, { status: 409 })
+          : jsonResponse({
+              ok: true,
+              latestRevision: 8,
+              cursorRevision: 8,
+              hasMore: false,
+              messages: [replacement],
+              composerState: "available",
+            });
+      }
+      if (path === "/api/view/discussion/activity?since=8&hold=30000&limit=100") {
+        parkedSignal = init?.signal ?? undefined;
+        return await new Promise<Response>(() => undefined);
+      }
+      throw new Error(`unexpected request: ${path}`);
+    }));
+
+    await render("view");
+    await settle(() => activityAttempts === 1);
+    await settle(() => vi.getTimerCount() > 0);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(999);
+    });
+    expect(activityAttempts).toBe(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    await settle(() => parkedSignal !== undefined);
+
+    expect(activityAttempts).toBe(2);
+    expect(container.textContent).toContain("Replacement capability stayed live");
+    expect(parkedSignal?.aborted).toBe(false);
+  });
+
   it("fences an activity body after session replacement and aborts every parked lifecycle", async () => {
     const heldOldActivity = heldJsonResponse(200);
     let oldActivitySignal: AbortSignal | undefined;

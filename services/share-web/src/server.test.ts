@@ -2196,6 +2196,98 @@ describe("share-web protected discussion proxy", () => {
     ).toEqual(["retry-once", "retry-once"]);
   });
 
+  it("marks only a superseded activity response as retryable", async () => {
+    let exchangeCalls = 0;
+    let activityCalls = 0;
+    let releaseOldActivity: (() => void) | undefined;
+    const oldActivityGate = new Promise<void>((resolve) => {
+      releaseOldActivity = resolve;
+    });
+    let sessionNumber = 0;
+    const activityBody = {
+      ok: true,
+      latestRevision: 0,
+      cursorRevision: 0,
+      hasMore: false,
+      messages: [],
+      composerState: "available",
+    };
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      relayExchangeKey: "discussion-relay-key",
+      publicHosts: new Set([HOST]),
+      maxSessions: 1,
+      nowMs: () => 1_000,
+      newSessionToken: () =>
+        Buffer.alloc(32, 57 + sessionNumber++).toString("base64url"),
+      newProfileSecret: () => PROFILE_ALPHA,
+      fetchRelay: async (relayRequest) => {
+        if (new URL(relayRequest.url).pathname === "/sync/link-exchange") {
+          exchangeCalls += 1;
+          return Response.json({
+            ok: true,
+            grantId: "grant-activity-currentness",
+            capabilityToken: exchangeCalls === 1 ? CAP_ALPHA_1 : CAP_ALPHA_2,
+            capabilityExpiresAtMs: 901_000,
+          });
+        }
+        activityCalls += 1;
+        if (activityCalls === 1) await oldActivityGate;
+        return Response.json(activityBody);
+      },
+    });
+    const firstExchange = await handler(
+      request("/api/exchange", exchange(SECRET_ALPHA)),
+    );
+    const firstState = (await firstExchange.clone().json()) as { session: string };
+    const profile = profileCookiePair(firstExchange);
+    const firstActivity = handler(
+      request("/api/view/discussion/activity?since=0&hold=30000&limit=100", {
+        headers: sessionHeaders(
+          firstState.session,
+          cookieHeader(cookiePair(firstExchange), profile),
+        ),
+      }),
+    );
+    await vi.waitFor(() => expect(activityCalls).toBe(1));
+
+    const replacementExchange = await handler(
+      request("/api/exchange", {
+        ...exchange(SECRET_ALPHA_ROTATED),
+        headers: {
+          ...exchange(SECRET_ALPHA_ROTATED).headers,
+          cookie: cookieHeader(cookiePair(firstExchange), profile),
+        },
+      }),
+    );
+    const replacementState = (await replacementExchange.clone().json()) as {
+      session: string;
+    };
+    expect(replacementState.session).toBe(firstState.session);
+    releaseOldActivity?.();
+
+    const staleResponse = await firstActivity;
+    expect({ status: staleResponse.status, body: await staleResponse.text() }).toEqual({
+      status: 409,
+      body: shareWebRefusalBody,
+    });
+    expect(staleResponse.headers.has("set-cookie")).toBe(false);
+
+    const retry = await handler(
+      request("/api/view/discussion/activity?since=0&hold=30000&limit=100", {
+        headers: sessionHeaders(
+          replacementState.session,
+          cookieHeader(cookiePair(replacementExchange), profile),
+        ),
+      }),
+    );
+    expect({ status: retry.status, body: await retry.json() }).toEqual({
+      status: 200,
+      body: activityBody,
+    });
+    expect(activityCalls).toBe(2);
+  });
+
   it("translates only recognized discussion states and hides every relay detail", async () => {
     const relayKey = "discussion-error-key-sentinel";
     const grant = "grant-error-sentinel";
