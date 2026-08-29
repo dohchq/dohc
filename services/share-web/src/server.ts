@@ -27,6 +27,7 @@ const MAX_BLOB_PROXIES_PER_GRANT = 24;
 const DEFAULT_HANDOFF_RELAY_TIMEOUT_MS = 10_000;
 const LINK_REFRESH_WINDOW_MS = 5 * 60 * 1_000;
 export const LINK_SESSION_RENEWAL_GRACE_MS = 7 * 24 * 60 * 60 * 1_000;
+const PROFILE_COOKIE_MAX_AGE_SECONDS = 400 * 24 * 60 * 60;
 const RASTER_SIGNATURE_BYTES = 12;
 const HANDOFF_CODE = /^[A-Za-z0-9_-]{43}$/u;
 const SESSION_DISCRIMINATOR = /^[A-Za-z0-9_-]{12}$/u;
@@ -485,6 +486,7 @@ function sessionCookie(
 function profileCookie(discriminator: string, secret: string): string {
   return (
     `${profileCookieName(discriminator)}=${secret}; Path=/; ` +
+    `Max-Age=${PROFILE_COOKIE_MAX_AGE_SECONDS}; ` +
     "Secure; HttpOnly; SameSite=Strict"
   );
 }
@@ -851,13 +853,11 @@ export function createShareWebHandler({
         if (!/^[A-Za-z0-9_-]{16,}$/u.test(token)) return refused();
         const cookies = parseCookies(request.headers.get("cookie"));
         const existingProfile = cookies.get(profileCookieName(discriminator));
-        const allocatedProfile =
+        const profile =
           existingProfile && PROFILE_SECRET.test(existingProfile)
-            ? null
+            ? existingProfile
             : newProfileSecret();
-        if (allocatedProfile !== null && !PROFILE_SECRET.test(allocatedProfile)) {
-          return refused();
-        }
+        if (!PROFILE_SECRET.test(profile)) return refused();
         sessions.set(
           token,
           {
@@ -874,12 +874,10 @@ export function createShareWebHandler({
           "set-cookie",
           sessionCookie(discriminator, token, exchanged.expiresAtMs, nowMs()),
         );
-        if (allocatedProfile !== null) {
-          responseHeaders.append(
-            "set-cookie",
-            profileCookie(discriminator, allocatedProfile),
-          );
-        }
+        responseHeaders.append(
+          "set-cookie",
+          profileCookie(discriminator, profile),
+        );
         return jsonResponse(
           { ok: true, session: discriminator },
           { headers: responseHeaders },

@@ -1449,6 +1449,89 @@ describe("share-web protected discussion proxy", () => {
     };
   }
 
+  it("persists and renews a profile without making it viewer authority", async () => {
+    let sessionNumber = 0;
+    let discussionCalls = 0;
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      relayExchangeKey: "discussion-relay-key",
+      publicHosts: new Set([HOST]),
+      maxSessions: 1,
+      nowMs: () => 1_000,
+      newSessionToken: () =>
+        Buffer.alloc(32, 30 + ++sessionNumber).toString("base64url"),
+      newProfileSecret: () => PROFILE_ALPHA,
+      fetchRelay: async (relayRequest) => {
+        if (new URL(relayRequest.url).pathname === "/sync/link-exchange") {
+          return Response.json({
+            ok: true,
+            grantId: "grant-alpha",
+            capabilityToken: CAP_ALPHA_1,
+            capabilityExpiresAtMs: 901_000,
+          });
+        }
+        discussionCalls += 1;
+        return Response.json(publicMessage("unexpected"));
+      },
+    });
+
+    const first = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
+    const firstBody = (await first.clone().json()) as { session: string };
+    const firstSession = cookiePair(first);
+    const firstProfile = profileCookiePair(first);
+    const expectedProfileCookie =
+      `${firstProfile}; Path=/; Max-Age=34560000; ` +
+      "Secure; HttpOnly; SameSite=Strict";
+    expect(
+      first.headers.getSetCookie().find((cookie) =>
+        cookie.startsWith(`dohc_share_profile_${firstBody.session}=`),
+      ),
+    ).toBe(expectedProfileCookie);
+
+    const renewed = await handler(
+      request("/api/exchange", {
+        ...exchange(SECRET_ALPHA),
+        headers: {
+          ...exchange(SECRET_ALPHA).headers,
+          cookie: cookieHeader(firstSession, firstProfile),
+        },
+      }),
+    );
+    expect(profileCookiePair(renewed)).toBe(firstProfile);
+    expect(
+      renewed.headers.getSetCookie().find((cookie) =>
+        cookie.startsWith(`dohc_share_profile_${firstBody.session}=`),
+      ),
+    ).toBe(expectedProfileCookie);
+
+    const staleHeaders = sessionHeaders(
+      firstBody.session,
+      cookieHeader(firstSession, firstProfile),
+    );
+    const read = await handler(
+      request(`/api/view/discussion?session=${firstBody.session}`, {
+        headers: staleHeaders,
+      }),
+    );
+    const write = await handler(
+      request("/api/view/discussion", {
+        method: "POST",
+        headers: {
+          ...staleHeaders,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ body: "stale", idempotencyKey: "stale-profile" }),
+      }),
+    );
+    for (const refusal of [read, write]) {
+      expect({ status: refusal.status, body: await refusal.text() }).toEqual({
+        status: 404,
+        body: shareWebRefusalBody,
+      });
+    }
+    expect(discussionCalls).toBe(0);
+  });
+
   it("keeps one protected profile across session replacement and same-grant changes", async () => {
     let sessionNumber = 0;
     const profiles = [
@@ -1504,7 +1587,7 @@ describe("share-web protected discussion proxy", () => {
         },
       }),
     );
-    expect(replaced.headers.getSetCookie()).toHaveLength(1);
+    expect(replaced.headers.getSetCookie()).toHaveLength(2);
     expect(cookiePair(replaced)).not.toBe(firstSession);
     expect((await replaced.json()) as { session: string }).toMatchObject({
       session: firstBody.session,
@@ -1519,7 +1602,7 @@ describe("share-web protected discussion proxy", () => {
         },
       }),
     );
-    expect(rotated.headers.getSetCookie()).toHaveLength(1);
+    expect(rotated.headers.getSetCookie()).toHaveLength(2);
     expect((await rotated.json()) as { session: string }).toMatchObject({
       session: firstBody.session,
     });
@@ -2059,7 +2142,7 @@ describe("share-web protected discussion proxy", () => {
         },
       }),
     );
-    expect(replacementExchange.headers.getSetCookie()).toHaveLength(1);
+    expect(replacementExchange.headers.getSetCookie()).toHaveLength(2);
     const replacementState = (await replacementExchange.clone().json()) as {
       session: string;
     };

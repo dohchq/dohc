@@ -182,10 +182,17 @@ test("keeps the viewer bearer and authored credential probes outside page reach"
             /^max-age=[1-9][0-9]*$/u.test(attribute)
           ),
           name: cookieName,
+          secret: cookieValue,
           valueHasOpaqueShape: /^[A-Za-z0-9_-]{16,}$/u.test(cookieValue),
         };
       });
-    expect(Object.fromEntries(cookieEvidence.map(({ name, ...evidence }) => [name, evidence])))
+    expect(new Set(cookieEvidence.map((cookie) => cookie.secret)).size).toBe(2);
+    expect(Object.fromEntries(cookieEvidence.map((cookie) => [cookie.name, {
+      attributes: cookie.attributes,
+      hasDomainAttribute: cookie.hasDomainAttribute,
+      hasPositiveMaxAge: cookie.hasPositiveMaxAge,
+      valueHasOpaqueShape: cookie.valueHasOpaqueShape,
+    }])))
       .toEqual({
         [`dohc_share_${responseSession}`]: {
           attributes: ["httponly", "path=/", "samesite=strict", "secure"],
@@ -196,7 +203,7 @@ test("keeps the viewer bearer and authored credential probes outside page reach"
         [`dohc_share_profile_${responseSession}`]: {
           attributes: ["httponly", "path=/", "samesite=strict", "secure"],
           hasDomainAttribute: false,
-          hasPositiveMaxAge: false,
+          hasPositiveMaxAge: true,
           valueHasOpaqueShape: true,
         },
       });
@@ -212,7 +219,8 @@ test("keeps the viewer bearer and authored credential probes outside page reach"
         path: cookie.path,
         sameSite: cookie.sameSite,
         secure: cookie.secure,
-      }));
+      }))
+      .sort((left, right) => left.name.localeCompare(right.name));
     expect(shareCookies).toEqual([
       {
         domain: "127.0.0.1",
@@ -232,7 +240,7 @@ test("keeps the viewer bearer and authored credential probes outside page reach"
         sameSite: "Strict",
         secure: true,
       },
-    ]);
+    ].sort((left, right) => left.name.localeCompare(right.name)));
     expect((await page.evaluate(() => document.cookie)).includes("dohc_share_"))
       .toBe(false);
 

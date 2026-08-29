@@ -267,6 +267,11 @@ test("keeps shared content from creating viewer-origin browser storage", async (
       ].sort(),
     );
     expect(new Set(profileCookies.map((cookie) => cookie.value)).size).toBe(2);
+    expect(
+      new Set(
+        [...sessionCookies, ...profileCookies].map((cookie) => cookie.value),
+      ).size,
+    ).toBe(4);
     expect(apiRequestsUseSession(observerRequests, observerSession)).toBe(true);
     expect(apiRequestsUseSession(hostileRequests, hostileSession)).toBe(true);
 
