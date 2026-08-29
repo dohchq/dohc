@@ -586,6 +586,166 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
+  it("reopens a collection adoption provider after a transport rebind", async () => {
+    const root = await tempRoot();
+    const adoption = {
+      versionId: "main",
+      recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      collectionPath: "projects",
+      filePath: "projects/rebound.md",
+      objectId: "object-rebound",
+    };
+    let completed = false;
+    let reconciles = 0;
+    const store = {
+      ensureMainVersion: async () => undefined,
+      flushCapture: async () => undefined,
+      reconcileCapture: async () => {
+        reconciles += 1;
+      },
+      listPendingCollectionAdoptions: async () => ({
+        adoptions: completed ? [] : [adoption],
+        nextCursor: null,
+      }),
+    } as unknown as CaptureVersionedTextStore;
+    const firstClient = {};
+    const replacementClient = {};
+    const transportFailure = Object.assign(new Error("daemon transport replaced"), {
+      code: "transport-error",
+    });
+    const sessions = {
+      run: async (_workspace: unknown, task: (binding: unknown) => unknown) => {
+        try {
+          return await task({ client: firstClient, workspace: "first-workspace" });
+        } catch (error) {
+          if (error !== transportFailure) throw error;
+          return await task({
+            client: replacementClient,
+            workspace: "replacement-workspace",
+          });
+        }
+      },
+    } as unknown as EngineWorkspaceSessions;
+    const openedTransports: unknown[] = [];
+    const evictedTransports: unknown[] = [];
+    const errors: Array<{ context: string; error: unknown }> = [];
+    const engine = capture(root, {
+      store,
+      rustEngineSessions: sessions,
+      daemonOwnsCapture: true,
+      onError: (context, error) => errors.push({ context, error }),
+      openRustYDocProviderSession: async (options) => {
+        openedTransports.push(options.transport);
+        return {
+          path: options.path,
+          evict: async () => {
+            evictedTransports.push(options.transport);
+            if (options.transport === firstClient) throw transportFailure;
+            completed = true;
+          },
+        } as EngineYdocProviderSession;
+      },
+    });
+
+    await engine.flush();
+
+    expect(completed).toBe(true);
+    expect(openedTransports).toEqual([firstClient, replacementClient]);
+    expect(evictedTransports).toEqual([firstClient, replacementClient]);
+    expect(reconciles).toBe(1);
+    expect(errors).toEqual([]);
+    await engine.stop();
+  });
+
+  it("serializes overlapping collection adoption drains and preserves a busy provider", async () => {
+    const root = await tempRoot();
+    const adoption = {
+      versionId: "main",
+      recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      collectionPath: "projects",
+      filePath: "projects/busy-overlap.md",
+      objectId: "object-busy-overlap",
+    };
+    const firstListingEntered = deferredVoid();
+    const releaseListings = deferredVoid();
+    let activeListings = 0;
+    let maxActiveListings = 0;
+    let completed = false;
+    const store = {
+      ensureMainVersion: async () => undefined,
+      flushCapture: async () => undefined,
+      reconcileCapture: async () => undefined,
+      listPendingCollectionAdoptions: async () => {
+        activeListings += 1;
+        maxActiveListings = Math.max(maxActiveListings, activeListings);
+        firstListingEntered.resolve();
+        await releaseListings.promise;
+        activeListings -= 1;
+        return {
+          adoptions: completed ? [] : [adoption],
+          nextCursor: null,
+        };
+      },
+    } as unknown as CaptureVersionedTextStore;
+    const busy = new DaemonRefusalError(
+      {
+        code: "OVERLOADED",
+        message: "engine-store-busy",
+        retry: "afterBackoff",
+      },
+      undefined,
+    );
+    const sessionBusy = new DaemonRefusalError(
+      {
+        code: "INVALID_PARAMS",
+        message: "ydoc-session-busy",
+        retry: "no",
+      },
+      undefined,
+    );
+    const sessions = {
+      run: async (_workspace: unknown, task: (binding: unknown) => unknown) =>
+        await task({ client: {}, workspace: "workspace" }),
+    } as unknown as EngineWorkspaceSessions;
+    let opens = 0;
+    let evictionAttempts = 0;
+    const errors: Array<{ context: string; error: unknown }> = [];
+    const engine = capture(root, {
+      store,
+      rustEngineSessions: sessions,
+      daemonOwnsCapture: true,
+      onError: (context, error) => errors.push({ context, error }),
+      openRustYDocProviderSession: async (options) => {
+        opens += 1;
+        if (opens > 1) throw sessionBusy;
+        return {
+          path: options.path,
+          evict: async () => {
+            evictionAttempts += 1;
+            if (evictionAttempts === 1) throw busy;
+            completed = true;
+          },
+        } as EngineYdocProviderSession;
+      },
+    });
+
+    const firstFlush = engine.flush();
+    await firstListingEntered.promise;
+    const overlappingFlush = engine.flush();
+    await new Promise<void>((resolveTurn) => setImmediate(resolveTurn));
+    releaseListings.resolve();
+    await Promise.all([firstFlush, overlappingFlush]);
+
+    await engine.flush();
+
+    expect(maxActiveListings).toBe(1);
+    expect(opens).toBe(1);
+    expect(evictionAttempts).toBe(2);
+    expect(completed).toBe(true);
+    expect(errors).toEqual([]);
+    await engine.stop();
+  });
+
   it("flushes daemon capture before reading versions for a merge", async () => {
     const root = await tempRoot();
     const requests: Request[] = [];

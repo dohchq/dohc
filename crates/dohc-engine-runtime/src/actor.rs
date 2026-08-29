@@ -954,6 +954,7 @@ mod deferred_relay_tests {
     enum BlobWorkerEvent {
         Started(usize),
         Completed(usize),
+        Cancelled(usize),
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -987,32 +988,36 @@ mod deferred_relay_tests {
                 })
                 .collect(),
         };
-        let task = tokio::spawn(execute_blob_download_batch(request, move |request| {
-            let index = request.blobs[0]
-                .sha256
-                .parse::<usize>()
-                .expect("test blob index");
-            events
-                .send(BlobWorkerEvent::Started(index))
-                .expect("started event");
-            let (released, condition) = &worker_gates[index];
-            let mut released = released
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            while !*released {
-                released = condition
-                    .wait(released)
+        let task = tokio::spawn(execute_blob_download_batch(
+            request,
+            CancellationToken::new(),
+            move |request, _worker_token| {
+                let index = request.blobs[0]
+                    .sha256
+                    .parse::<usize>()
+                    .expect("test blob index");
+                events
+                    .send(BlobWorkerEvent::Started(index))
+                    .expect("started event");
+                let (released, condition) = &worker_gates[index];
+                let mut released = released
+                    .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-            }
-            events
-                .send(BlobWorkerEvent::Completed(index))
-                .expect("completed event");
-            Ok(BlobDownloadBatchResponse {
-                results: vec![Ok(BlobDownloadResponse {
-                    bytes: vec![u8::try_from(index).expect("test byte")],
-                })],
-            })
-        }));
+                while !*released {
+                    released = condition
+                        .wait(released)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+                events
+                    .send(BlobWorkerEvent::Completed(index))
+                    .expect("completed event");
+                Ok(BlobDownloadBatchResponse {
+                    results: vec![Ok(BlobDownloadResponse {
+                        bytes: vec![u8::try_from(index).expect("test byte")],
+                    })],
+                })
+            },
+        ));
 
         let mut started = std::collections::BTreeSet::new();
         for _ in 0..MAX_CONCURRENT_BLOB_DOWNLOADS {
@@ -1059,6 +1064,108 @@ mod deferred_relay_tests {
             .map(|result| result.expect("blob result").bytes)
             .collect::<Vec<_>>();
         assert_eq!(bytes, vec![vec![0], vec![1], vec![2], vec![3], vec![4]]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_blob_batch_stops_scheduling_and_releases_in_flight_downloads() {
+        use std::sync::{Condvar, mpsc};
+        use std::time::Duration;
+
+        let gates = Arc::new(
+            (0..5)
+                .map(|_| (Mutex::new(false), Condvar::new()))
+                .collect::<Vec<_>>(),
+        );
+        let (events, event_rx) = mpsc::channel();
+        let worker_gates = Arc::clone(&gates);
+        let cancellation = CancellationToken::new();
+        let task_cancellation = cancellation.clone();
+        let request = BlobDownloadBatchRequest {
+            workspace_id: "workspace".to_owned(),
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            blobs: (0..5)
+                .map(|index| dohc_engine_sync::BlobDownloadSpec {
+                    sha256: index.to_string(),
+                    limit_bytes: 1,
+                })
+                .collect(),
+        };
+        let task = tokio::spawn(execute_blob_download_batch(
+            request,
+            task_cancellation,
+            move |request, worker_cancellation| {
+                let index = request.blobs[0]
+                    .sha256
+                    .parse::<usize>()
+                    .expect("test blob index");
+                events
+                    .send(BlobWorkerEvent::Started(index))
+                    .expect("started event");
+                let (released, condition) = &worker_gates[index];
+                let mut released = released
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                while !*released && !worker_cancellation.is_cancelled() {
+                    released = condition
+                        .wait(released)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+                assert!(worker_cancellation.is_cancelled());
+                events
+                    .send(BlobWorkerEvent::Cancelled(index))
+                    .expect("cancelled event");
+                Err(RelayError::Local("cancelled test download".to_owned()))
+            },
+        ));
+
+        let mut started = std::collections::BTreeSet::new();
+        for _ in 0..MAX_CONCURRENT_BLOB_DOWNLOADS {
+            match event_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("four workers start")
+            {
+                BlobWorkerEvent::Started(index) => {
+                    started.insert(index);
+                }
+                event => panic!("unexpected worker event: {event:?}"),
+            }
+        }
+        assert_eq!(started, [0, 1, 2, 3].into_iter().collect());
+
+        cancellation.cancel();
+        for (released, condition) in gates.iter() {
+            *released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+            condition.notify_all();
+        }
+
+        let mut cancelled = std::collections::BTreeSet::new();
+        for _ in 0..MAX_CONCURRENT_BLOB_DOWNLOADS {
+            match event_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("in-flight workers observe cancellation")
+            {
+                BlobWorkerEvent::Cancelled(index) => {
+                    cancelled.insert(index);
+                }
+                event => panic!("unexpected worker event after cancellation: {event:?}"),
+            }
+        }
+        assert_eq!(cancelled, [0, 1, 2, 3].into_iter().collect());
+        let outcome = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("cancelled batch resolves promptly")
+            .expect("batch task");
+        assert!(
+            outcome.is_err(),
+            "a cancelled batch must not produce a response"
+        );
+        assert!(
+            event_rx.try_recv().is_err(),
+            "cancellation must prevent the fifth download from starting"
+        );
     }
 }
 
@@ -5825,8 +5932,13 @@ impl ActorHandle {
                     let http_transport = Arc::clone(&http_transport);
                     let io_request = request.clone();
                     let result = tokio::select! {
-                        result = execute_http_request(http_transport, io_request) => result,
+                        biased;
                         () = token.cancelled() => return Err(RuntimeError::Cancelled),
+                        result = execute_http_request(
+                            http_transport,
+                            io_request,
+                            token.clone(),
+                        ) => result,
                     };
                     transport.complete(request, result);
                 }
@@ -7107,15 +7219,21 @@ fn build_http_transport(
 }
 
 const MAX_CONCURRENT_BLOB_DOWNLOADS: usize = 4;
+const RELAY_IO_CANCELLED: &str = "relay-io-cancelled";
+
+fn relay_io_cancelled() -> RelayError {
+    RelayError::Local(RELAY_IO_CANCELLED.to_owned())
+}
 
 async fn execute_http_request(
     transport: Arc<HttpRelayTransport>,
     request: RelayIoRequest,
+    token: CancellationToken,
 ) -> Result<RelayIoResponse, RelayError> {
     if let RelayIoRequest::DownloadBlobs(request) = request {
         let download_transport = Arc::clone(&transport);
-        return execute_blob_download_batch(request, move |request| {
-            download_transport.download_blobs(request)
+        return execute_blob_download_batch(request, token, move |request, worker_token| {
+            download_transport.download_blobs_cancellable(request, || worker_token.is_cancelled())
         })
         .await
         .map(RelayIoResponse::DownloadBlobs);
@@ -7131,14 +7249,21 @@ async fn execute_http_request(
 /// bound blob bytes held here to 240 MiB, plus allocator and request overhead.
 async fn execute_blob_download_batch<F>(
     request: BlobDownloadBatchRequest,
+    token: CancellationToken,
     download: F,
 ) -> Result<BlobDownloadBatchResponse, RelayError>
 where
-    F: Fn(BlobDownloadBatchRequest) -> Result<BlobDownloadBatchResponse, RelayError>
+    F: Fn(
+            BlobDownloadBatchRequest,
+            CancellationToken,
+        ) -> Result<BlobDownloadBatchResponse, RelayError>
         + Clone
         + Send
         + 'static,
 {
+    if token.is_cancelled() {
+        return Err(relay_io_cancelled());
+    }
     if request.blobs.is_empty() || request.blobs.len() > MAX_BLOB_DOWNLOAD_BATCH {
         return Err(RelayError::InvalidResponse);
     }
@@ -7150,6 +7275,10 @@ where
 
     while next < result_count || !tasks.is_empty() {
         while next < result_count && tasks.len() < MAX_CONCURRENT_BLOB_DOWNLOADS {
+            if token.is_cancelled() {
+                tasks.abort_all();
+                return Err(relay_io_cancelled());
+            }
             let index = next;
             let single = BlobDownloadBatchRequest {
                 workspace_id: request.workspace_id.clone(),
@@ -7158,8 +7287,9 @@ where
                 blobs: vec![request.blobs[index].clone()],
             };
             let download = download.clone();
+            let worker_token = token.clone();
             tasks.spawn_blocking(move || {
-                let result = match download(single) {
+                let result = match download(single, worker_token) {
                     Ok(response) => {
                         let mut results = response.results.into_iter();
                         match (results.next(), results.next()) {
@@ -7174,12 +7304,21 @@ where
             next += 1;
         }
 
-        let (index, result) = tasks
-            .join_next()
-            .await
+        let joined = tokio::select! {
+            biased;
+            () = token.cancelled() => {
+                tasks.abort_all();
+                return Err(relay_io_cancelled());
+            }
+            joined = tasks.join_next() => joined,
+        };
+        let (index, result) = joined
             .ok_or(RelayError::InvalidResponse)?
             .map_err(|_| RelayError::Partitioned)?;
         results[index] = Some(result);
+    }
+    if token.is_cancelled() {
+        return Err(relay_io_cancelled());
     }
 
     let results = results
@@ -13782,6 +13921,12 @@ fn adopt_collection_record_on_store(
     Ok(Some(CollectionAdoptionExecution::Applied { changed_path }))
 }
 
+enum CollectionRelationCleanupExecution {
+    Applied(String),
+    NoChange,
+    LeaseHeld,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cleanup_collection_relation_on_store(
     store: &mut EngineStore,
@@ -13795,7 +13940,7 @@ fn cleanup_collection_relation_on_store(
     now_ms: i64,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
-) -> Result<Option<String>, RuntimeError> {
+) -> Result<CollectionRelationCleanupExecution, RuntimeError> {
     let probe = ydoc_open_state_on_store(
         store,
         doc_cache,
@@ -13817,7 +13962,9 @@ fn cleanup_collection_relation_on_store(
     }
     let _lease = match leases.acquire(&probe.key) {
         Ok(lease) => lease,
-        Err(CollabError::LeaseHeld) => return Ok(None),
+        Err(CollabError::LeaseHeld) => {
+            return Ok(CollectionRelationCleanupExecution::LeaseHeld);
+        }
         Err(error) => return Err(error.into()),
     };
     let state = ydoc_open_state_on_store(
@@ -13886,7 +14033,9 @@ fn cleanup_collection_relation_on_store(
             )
             .map_err(RuntimeError::from)
         })? {
-            TxnOutcome::Committed(()) => return Ok(None),
+            TxnOutcome::Committed(()) => {
+                return Ok(CollectionRelationCleanupExecution::NoChange);
+            }
             TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
         }
     };
@@ -13926,7 +14075,7 @@ fn cleanup_collection_relation_on_store(
         faults,
         token,
     )?;
-    Ok(Some(settlement.path))
+    Ok(CollectionRelationCleanupExecution::Applied(settlement.path))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -13954,6 +14103,7 @@ fn reconcile_collections_on_store(
 
     let mut changed_paths = Vec::new();
     let mut pending_seed_objects = HashSet::new();
+    let mut lease_held = false;
     for candidate in reconciliation.adoptions {
         if token.is_cancelled() {
             return Err(RuntimeError::Cancelled);
@@ -14008,11 +14158,7 @@ fn reconcile_collections_on_store(
                 pending_seed_objects.insert(candidate.object_id.clone());
             }
             Ok(None) => {
-                return Err(RuntimeError::Sync(
-                    dohc_engine_sync::SyncError::RetryableState {
-                        reason: "collection-reconciliation-lease-held",
-                    },
-                ));
+                lease_held = true;
             }
             Err(error) if adoption_conflict(&error) => {
                 let state = if candidate.lossless_insertion_required {
@@ -14052,21 +14198,25 @@ fn reconcile_collections_on_store(
             faults,
             token,
         ) {
-            Ok(Some(path)) => {
+            Ok(CollectionRelationCleanupExecution::Applied(path)) => {
                 if !changed_paths.contains(&path) {
                     changed_paths.push(path);
                 }
             }
-            Ok(None) => {
-                return Err(RuntimeError::Sync(
-                    dohc_engine_sync::SyncError::RetryableState {
-                        reason: "collection-reconciliation-lease-held",
-                    },
-                ));
+            Ok(CollectionRelationCleanupExecution::NoChange) => {}
+            Ok(CollectionRelationCleanupExecution::LeaseHeld) => {
+                lease_held = true;
             }
             Err(error) if adoption_conflict(&error) => {}
             Err(error) => return Err(error),
         }
+    }
+    if lease_held {
+        return Err(RuntimeError::Sync(
+            dohc_engine_sync::SyncError::RetryableState {
+                reason: "collection-reconciliation-lease-held",
+            },
+        ));
     }
     Ok(changed_paths)
 }

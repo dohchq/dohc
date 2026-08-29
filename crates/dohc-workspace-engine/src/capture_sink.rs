@@ -2269,6 +2269,140 @@ mod tests {
     }
 
     #[test]
+    fn moving_relation_target_out_of_declared_collection_drops_it_once_with_engine_history() {
+        const SOURCE_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const TARGET_ID: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        write_file(
+            scratch.path(),
+            "tasks/collection.yaml",
+            b"name: Tasks\nfields:\n  related:\n    type: relation\n    collection: people\n    many: false\n",
+        );
+        write_file(scratch.path(), "people/collection.yaml", b"name: People\n");
+        write_file(
+            scratch.path(),
+            "archive/collection.yaml",
+            b"name: Archive\n",
+        );
+        write_file(
+            scratch.path(),
+            "tasks/source.md",
+            format!("---\nid: {SOURCE_ID}\nrelated: {TARGET_ID}\n---\n\nSource\n").as_bytes(),
+        );
+        write_file(
+            scratch.path(),
+            "people/target.md",
+            format!("---\nid: {TARGET_ID}\n---\n\nTarget\n").as_bytes(),
+        );
+        for path in [
+            "tasks/collection.yaml",
+            "people/collection.yaml",
+            "archive/collection.yaml",
+            "tasks/source.md",
+            "people/target.md",
+        ] {
+            ingest(&mut sink, path).unwrap_or_else(|_| panic!("capture {path}"));
+        }
+        for path in ["tasks/source.md", "people/target.md"] {
+            seed_captured_richdoc_lineage(&sink, path);
+        }
+        sink.reconcile_collections()
+            .expect("adopt cross-collection relation");
+        assert_eq!(adopted_record_id(&db, "tasks/source.md"), SOURCE_ID);
+        assert_eq!(adopted_record_id(&db, "people/target.md"), TARGET_ID);
+        assert_eq!(
+            relation_edge_count(&db, "tasks/source.md", "related", TARGET_ID),
+            1
+        );
+
+        std::fs::rename(
+            scratch.path().join("people/target.md"),
+            scratch.path().join("archive/target.md"),
+        )
+        .expect("move target out of declared collection");
+        sink.retire("people/target.md")
+            .expect("retire target's declared collection path");
+        ingest(&mut sink, "archive/target.md").expect("capture moved target");
+        seed_captured_richdoc_lineage(&sink, "archive/target.md");
+        let changed = sink
+            .reconcile_collections()
+            .expect("drop relation to moved target");
+        assert!(
+            changed.iter().any(|path| path == "tasks/source.md"),
+            "moving the target out of its declared collection must settle the referrer"
+        );
+        assert_eq!(adopted_record_id(&db, "archive/target.md"), TARGET_ID);
+        assert_eq!(
+            relation_edge_count(&db, "tasks/source.md", "related", TARGET_ID),
+            0
+        );
+        assert_eq!(
+            indexed_collection_field(&db, "tasks/source.md", "related"),
+            None
+        );
+        assert!(
+            !std::fs::read_to_string(scratch.path().join("tasks/source.md"))
+                .expect("read cleaned referrer after target move")
+                .contains("related:"),
+            "the moved target is removed through the projected frontmatter write"
+        );
+        assert_eq!(
+            latest_field_history(&db, "tasks/source.md", "related"),
+            (
+                Some(format!("\"{TARGET_ID}\"")),
+                None,
+                Some("engine".to_owned())
+            )
+        );
+        assert_eq!(
+            latest_ydoc_actor_origin(&db, "tasks/source.md").as_deref(),
+            Some("engine")
+        );
+        let relation_history_count = get_record(&db, "tasks", SOURCE_ID)
+            .history
+            .iter()
+            .filter(|entry| entry.field == "related")
+            .count();
+        assert_eq!(relation_history_count, 1);
+
+        std::fs::rename(
+            scratch.path().join("archive/target.md"),
+            scratch.path().join("people/target.md"),
+        )
+        .expect("move target back to declared collection");
+        sink.retire("archive/target.md")
+            .expect("retire target's archive path");
+        ingest(&mut sink, "people/target.md").expect("capture restored target");
+        seed_captured_richdoc_lineage(&sink, "people/target.md");
+        sink.reconcile_collections()
+            .expect("reconcile restored target");
+        assert_eq!(adopted_record_id(&db, "people/target.md"), TARGET_ID);
+        assert_eq!(
+            relation_edge_count(&db, "tasks/source.md", "related", TARGET_ID),
+            0,
+            "moving the target back must not resurrect the removed relation"
+        );
+        assert_eq!(
+            indexed_collection_field(&db, "tasks/source.md", "related"),
+            None
+        );
+        let relation_history_count = get_record(&db, "tasks", SOURCE_ID)
+            .history
+            .iter()
+            .filter(|entry| entry.field == "related")
+            .count();
+        assert_eq!(
+            relation_history_count, 1,
+            "restoring the target must not author another source-field change"
+        );
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+    }
+
+    #[test]
     fn copied_source_preserved_collection_record_keeps_bytes_modulo_fresh_id() {
         let scratch = ScratchDir::new().expect("scratch");
         let supervisor = WorkspaceSupervisor::new();

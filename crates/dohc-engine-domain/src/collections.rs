@@ -1760,6 +1760,8 @@ pub fn index_collection_frontmatter_apply_in_tx(
     let after_object = after.as_object();
     let authored_before = authored_before.as_object();
     let authored_after = authored_after.as_object();
+    let applied_frontmatter_unchanged = before == after_object;
+    let authored_frontmatter_unchanged = authored_before == authored_after;
     let mut keys = HashSet::new();
     if let Some(values) = before {
         keys.extend(values.keys().map(String::as_str));
@@ -1815,6 +1817,9 @@ pub fn index_collection_frontmatter_apply_in_tx(
                 recorded_at_ms,
             )?;
         }
+    }
+    if applied_frontmatter_unchanged && authored_frontmatter_unchanged {
+        return Ok(());
     }
     let schema = load_collection_schema(conn, workspace_id, version_id, &collection_path)?;
     replace_index_for_record(
@@ -1901,7 +1906,8 @@ fn dangling_relation_cleanups(
                AND NOT EXISTS (SELECT 1 FROM collection_records target \
                  WHERE target.workspace_id=e.workspace_id \
                    AND target.version_id=e.version_id \
-                   AND target.record_id=e.target_record_id) \
+                   AND target.record_id=e.target_record_id \
+                   AND target.collection_path=e.target_collection_path) \
              ORDER BY r.file_path,e.field_name,e.target_record_id",
         )
         .map_err(crate::DomainError::sql_corrupt)?;

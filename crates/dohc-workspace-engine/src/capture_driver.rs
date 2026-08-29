@@ -3511,6 +3511,142 @@ mod collection_reconcile_scheduling_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lease_blocked_collection_candidate_does_not_starve_other_adoptions() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let collection_dir = scratch.path().join("tasks");
+        std::fs::create_dir_all(&collection_dir).expect("collection directory");
+        std::fs::write(collection_dir.join("collection.yaml"), b"name: Tasks\n")
+            .expect("collection schema");
+        std::fs::write(collection_dir.join("alpha.md"), b"Alpha task\n")
+            .expect("first collection record");
+        std::fs::write(collection_dir.join("beta.md"), b"Beta task\n")
+            .expect("second collection record");
+
+        let db = scratch.engine_db_path().expect("engine database path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        let seed_actor = actor.clone();
+        let seed_root = scratch.path().to_path_buf();
+        std::thread::spawn(move || {
+            let mut sink =
+                StoreCaptureSink::new(seed_actor, WORKSPACE_ID, "main", seed_root, 2, None);
+            for path in ["tasks/collection.yaml", "tasks/alpha.md", "tasks/beta.md"] {
+                sink.ingest(
+                    path,
+                    0,
+                    "advisory-sha",
+                    "text/markdown",
+                    IngestReason::Added,
+                )
+                .unwrap_or_else(|_| panic!("capture {path}"));
+            }
+        })
+        .join()
+        .expect("collection seed thread");
+
+        let object_id = rusqlite::Connection::open(&db)
+            .expect("open database observer")
+            .query_row(
+                "SELECT object_id FROM path_aliases \
+                 WHERE workspace_id = ?1 AND version_id = 'main' \
+                   AND path = 'tasks/alpha.md'",
+                [WORKSPACE_ID],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("first captured record object id");
+        seed_plain_richdoc_lineage(&actor, "tasks/alpha.md", "Alpha task\n").await;
+        seed_plain_richdoc_lineage(&actor, "tasks/beta.md", "Beta task\n").await;
+        let leases = LeaseRegistry::new();
+        let key = DocKey::new(WORKSPACE_ID, "main", &object_id).expect("first record key");
+        let lease = leases.acquire(&key).expect("hold first record lease");
+
+        let files = FilesActor::spawn_async(scratch.path().to_path_buf(), ScanBounds::default())
+            .await
+            .expect("files actor");
+        let files = FilesActorCloseGuard::new(files);
+        let status = Arc::new(DriverStatus::default());
+        let self_writes = SelfWriteSuppression::default();
+        status.request_collection_reconcile();
+        let first_clean = apply_run_with_handle(
+            ApplyRunContext {
+                root: scratch.path(),
+                actor: &actor,
+                workspace_id: WORKSPACE_ID,
+                leases: &leases,
+                status: &status,
+                self_writes: &self_writes,
+                author_json: None,
+                provenance: CaptureProvenance::default(),
+                events: EngineEvents::default(),
+            },
+            &files.handle(),
+            ReconcileRun::Converged,
+        )
+        .await;
+        assert!(!first_clean, "the held lease keeps its retry scheduled");
+        assert!(status.collection_reconcile_pending());
+        assert_eq!(
+            std::fs::read_to_string(collection_dir.join("alpha.md"))
+                .expect("read lease-blocked record"),
+            "Alpha task\n"
+        );
+        let beta_after_first =
+            std::fs::read_to_string(collection_dir.join("beta.md")).expect("read second record");
+        assert!(
+            beta_after_first.contains("id: rec_"),
+            "an unrelated candidate must adopt in the same pass"
+        );
+        let (alpha_state, beta_state) = rusqlite::Connection::open(&db)
+            .expect("open first-pass state observer")
+            .query_row(
+                "SELECT \
+                    MAX(CASE WHEN file_path = 'tasks/alpha.md' THEN adoption_state END), \
+                    MAX(CASE WHEN file_path = 'tasks/beta.md' THEN adoption_state END) \
+                 FROM collection_records \
+                 WHERE workspace_id = ?1 AND version_id = 'main'",
+                [WORKSPACE_ID],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .expect("first-pass adoption states");
+        assert_eq!(alpha_state, "pending-lossless");
+        assert_eq!(beta_state, "adopted");
+
+        drop(lease);
+        let second_clean = apply_run_with_handle(
+            ApplyRunContext {
+                root: scratch.path(),
+                actor: &actor,
+                workspace_id: WORKSPACE_ID,
+                leases: &leases,
+                status: &status,
+                self_writes: &self_writes,
+                author_json: None,
+                provenance: CaptureProvenance::default(),
+                events: EngineEvents::default(),
+            },
+            &files.handle(),
+            ReconcileRun::Converged,
+        )
+        .await;
+        assert!(second_clean, "the scheduled retry adopts after release");
+        assert!(!status.collection_reconcile_pending());
+        assert!(
+            std::fs::read_to_string(collection_dir.join("alpha.md"))
+                .expect("read adopted first record")
+                .contains("id: rec_")
+        );
+        assert_eq!(
+            std::fs::read_to_string(collection_dir.join("beta.md"))
+                .expect("read adopted second record"),
+            beta_after_first,
+            "the retry must not rewrite the already-adopted candidate"
+        );
+
+        files.close().await;
+        supervisor.close(&db).expect("close actor");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn watcher_edit_stripping_adopted_record_id_reasserts_the_binding() {
         let scratch = ScratchDir::new().expect("scratch");
         let collection_dir = scratch.path().join("tasks");

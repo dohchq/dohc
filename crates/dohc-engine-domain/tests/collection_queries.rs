@@ -3,9 +3,9 @@ use dohc_engine_domain::{
     CollectionPendingAdoptionCursor, CollectionQuery, CollectionSchemaReasonCode,
     CollectionSchemaStatus, CollectionSort, DomainError, MAX_COLLECTION_HISTORY_LIMIT,
     MAX_COLLECTION_QUERY_SORTS, NoFaults, TxnOutcome, VersionedTextStore, ViewSortDirection,
-    WriteText, get_collection, get_collection_record, list_collections,
-    list_pending_collection_adoptions, parse_collection_schema, query_collection_records,
-    reconcile_collections_in_tx, set_collection_adoption_state_in_tx,
+    WriteText, get_collection, get_collection_record, index_collection_frontmatter_apply_in_tx,
+    list_collections, list_pending_collection_adoptions, parse_collection_schema,
+    query_collection_records, reconcile_collections_in_tx, set_collection_adoption_state_in_tx,
     synchronize_collection_frontmatter_index_in_tx,
 };
 use dohc_engine_storage::{EngineStore, StorageError};
@@ -187,6 +187,56 @@ fn seeded_store() -> (ScratchDir, EngineStore) {
         .expect("reconcile collections");
     assert!(matches!(reconciled, TxnOutcome::Committed(_)));
     (scratch, store)
+}
+
+#[test]
+fn body_only_collection_apply_does_not_rewrite_index_or_history() {
+    let (_scratch, mut store) = seeded_store();
+    let frontmatter = json!({
+        "id": FIRST_TASK_ID,
+        "Title": "Alpha",
+        "Status": "Broken",
+        "Rank": 1,
+        "Owner": PERSON_ID,
+    });
+
+    let outcome = store
+        .write_with(&NoFaults, |tx| {
+            let writes_before = tx.total_changes();
+            index_collection_frontmatter_apply_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                "object-6",
+                &frontmatter,
+                &frontmatter,
+                &frontmatter,
+                &frontmatter,
+                Some("editor"),
+                10,
+            )?;
+            Ok::<_, DomainError>(tx.total_changes() - writes_before)
+        })
+        .expect("apply body-only collection update");
+    let TxnOutcome::Committed(index_writes) = outcome else {
+        panic!("body-only collection update crashed");
+    };
+    assert_eq!(
+        index_writes, 0,
+        "unchanged frontmatter must not rewrite the index"
+    );
+
+    let history_count = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM collection_field_history \
+                 WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3",
+                params![WORKSPACE_ID, VERSION_ID, FIRST_TASK_ID],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .expect("count body-only field history");
+    assert_eq!(history_count, 0, "a body-only update has no field history");
 }
 
 #[test]

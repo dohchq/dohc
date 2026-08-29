@@ -46,6 +46,10 @@ fn blob_body_overflow() -> RelayError {
     }
 }
 
+fn cancelled_relay_request() -> RelayError {
+    RelayError::Local("relay-io-cancelled".to_owned())
+}
+
 pub struct HttpRelayTransport {
     base_url: String,
     token: String,
@@ -104,6 +108,74 @@ impl HttpRelayTransport {
             token,
             agent: configured_agent(timeout, allow_insecure_loopback, None),
         })
+    }
+
+    /// Download blobs while cooperatively observing request cancellation.
+    pub fn download_blobs_cancellable<C>(
+        &self,
+        req: BlobDownloadBatchRequest,
+        cancelled: C,
+    ) -> Result<BlobDownloadBatchResponse, RelayError>
+    where
+        C: Fn() -> bool,
+    {
+        if req.blobs.is_empty() || req.blobs.len() > MAX_BLOB_DOWNLOAD_BATCH {
+            return Err(RelayError::InvalidResponse);
+        }
+        if cancelled() {
+            return Err(cancelled_relay_request());
+        }
+
+        let mut results = Vec::with_capacity(req.blobs.len());
+        for blob in req.blobs {
+            if cancelled() {
+                return Err(cancelled_relay_request());
+            }
+            let result = (|| {
+                if blob.limit_bytes > MAX_INGEST_BLOB_BYTES {
+                    return Err(RelayError::InvalidResponse);
+                }
+                let read_limit_bytes = blob
+                    .limit_bytes
+                    .checked_add(1)
+                    .ok_or(RelayError::InvalidResponse)?;
+                let url = self.workspace_url(
+                    &req.workspace_id,
+                    &format!("/blobs/{}", encode_segment(&blob.sha256)),
+                    &req.replication_epoch,
+                    &req.stream_identity,
+                    &[],
+                );
+                if cancelled() {
+                    return Err(cancelled_relay_request());
+                }
+                let response = self
+                    .agent
+                    .get(&url)
+                    .header("authorization", &self.authorization())
+                    .call();
+                if cancelled() {
+                    return Err(cancelled_relay_request());
+                }
+                let (bytes, _) = self.bytes_cancellable(
+                    response,
+                    RequestContext::Blob,
+                    read_limit_bytes,
+                    RelayError::BlobTooLarge {
+                        constraint: "MAX_INGEST_BLOB_BYTES",
+                        limit_bytes: blob.limit_bytes,
+                        observed: ObservedBytes::AtLeast(read_limit_bytes),
+                    },
+                    &cancelled,
+                )?;
+                Ok(BlobDownloadResponse { bytes })
+            })();
+            if cancelled() {
+                return Err(cancelled_relay_request());
+            }
+            results.push(result);
+        }
+        Ok(BlobDownloadBatchResponse { results })
     }
 
     fn authorization(&self) -> String {
@@ -189,27 +261,64 @@ impl HttpRelayTransport {
         read_limit_bytes: usize,
         overflow: RelayError,
     ) -> Result<(Vec<u8>, Option<String>), RelayError> {
+        self.bytes_cancellable(response, context, read_limit_bytes, overflow, &|| false)
+    }
+
+    fn bytes_cancellable<C>(
+        &self,
+        response: Result<Response<Body>, ureq::Error>,
+        context: RequestContext,
+        read_limit_bytes: usize,
+        overflow: RelayError,
+        cancelled: &C,
+    ) -> Result<(Vec<u8>, Option<String>), RelayError>
+    where
+        C: Fn() -> bool,
+    {
         let mut response = response.map_err(map_transport_error)?;
+        if cancelled() {
+            return Err(cancelled_relay_request());
+        }
         if !response.status().is_success() {
-            return Err(map_http_error(&mut response, context));
+            let error = map_http_error(&mut response, context);
+            return if cancelled() {
+                Err(cancelled_relay_request())
+            } else {
+                Err(error)
+            };
         }
         let etag = response
             .headers()
             .get("etag")
             .and_then(|value| value.to_str().ok())
             .and_then(parse_etag);
-        let bytes = response
+        let mut reader = response
             .body_mut()
             .with_config()
             .limit(read_limit_bytes as u64)
-            .read_to_vec()
-            .map_err(|error| match error {
-                // `ureq` boxes this variant into the `io::Error` its reader
-                // returns and unwraps it again, so the overflow stays a typed
-                // condition rather than an unreadable-response guess.
-                ureq::Error::BodyExceedsLimit(_) => overflow,
-                _ => RelayError::InvalidResponse,
+            .reader();
+        let mut bytes = Vec::new();
+        let mut chunk = [0_u8; 64 * 1024];
+        loop {
+            if cancelled() {
+                return Err(cancelled_relay_request());
+            }
+            let read = std::io::Read::read(&mut reader, &mut chunk).map_err(|error| {
+                // `ureq` wraps body-reader errors in `io::Error`; converting
+                // back recovers the typed limit variant used by the caller.
+                match ureq::Error::from(error) {
+                    ureq::Error::BodyExceedsLimit(_) => overflow.clone(),
+                    _ => RelayError::InvalidResponse,
+                }
             })?;
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+        }
+        if cancelled() {
+            return Err(cancelled_relay_request());
+        }
         Ok((bytes, etag))
     }
 }
@@ -452,45 +561,7 @@ impl RelayTransport for HttpRelayTransport {
         &self,
         req: BlobDownloadBatchRequest,
     ) -> Result<BlobDownloadBatchResponse, RelayError> {
-        if req.blobs.is_empty() || req.blobs.len() > MAX_BLOB_DOWNLOAD_BATCH {
-            return Err(RelayError::InvalidResponse);
-        }
-
-        let mut results = Vec::with_capacity(req.blobs.len());
-        for blob in req.blobs {
-            let result = (|| {
-                if blob.limit_bytes > MAX_INGEST_BLOB_BYTES {
-                    return Err(RelayError::InvalidResponse);
-                }
-                let read_limit_bytes = blob
-                    .limit_bytes
-                    .checked_add(1)
-                    .ok_or(RelayError::InvalidResponse)?;
-                let url = self.workspace_url(
-                    &req.workspace_id,
-                    &format!("/blobs/{}", encode_segment(&blob.sha256)),
-                    &req.replication_epoch,
-                    &req.stream_identity,
-                    &[],
-                );
-                let (bytes, _) = self.bytes(
-                    self.agent
-                        .get(&url)
-                        .header("authorization", &self.authorization())
-                        .call(),
-                    RequestContext::Blob,
-                    read_limit_bytes,
-                    RelayError::BlobTooLarge {
-                        constraint: "MAX_INGEST_BLOB_BYTES",
-                        limit_bytes: blob.limit_bytes,
-                        observed: ObservedBytes::AtLeast(read_limit_bytes),
-                    },
-                )?;
-                Ok(BlobDownloadResponse { bytes })
-            })();
-            results.push(result);
-        }
-        Ok(BlobDownloadBatchResponse { results })
+        self.download_blobs_cancellable(req, || false)
     }
 
     fn upload_key_envelope(

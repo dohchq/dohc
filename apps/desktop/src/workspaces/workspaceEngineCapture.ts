@@ -78,6 +78,7 @@ import {
   TRANSPORT_REBIND_MAX_BACKOFF_MS,
   WORKSPACE_OPEN_DEADLINE_MS,
   type AttachedEngineWorkspace,
+  type EngineWorkspaceBinding,
   type EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import {
@@ -1491,8 +1492,12 @@ export function createWorkspaceEngineCapture(
   let storeRefused: EngineStoreRefusal | null = null;
   const pendingCollectionAdoptionProviders = new Map<
     string,
-    EngineYdocProviderSession
+    {
+      binding: EngineWorkspaceBinding;
+      provider: EngineYdocProviderSession;
+    }
   >();
+  let pendingCollectionAdoptionDrain: Promise<void> | null = null;
 
   const publishCaptureOutcome = (): void => {
     const failure =
@@ -3340,7 +3345,22 @@ export function createWorkspaceEngineCapture(
     }
   }
 
-  async function drainPendingCollectionAdoptions(
+  function drainPendingCollectionAdoptions(
+    engine: CaptureVersionedTextStore,
+  ): Promise<void> {
+    if (pendingCollectionAdoptionDrain !== null) {
+      return pendingCollectionAdoptionDrain;
+    }
+    const pending = drainPendingCollectionAdoptionsOnce(engine).finally(() => {
+      if (pendingCollectionAdoptionDrain === pending) {
+        pendingCollectionAdoptionDrain = null;
+      }
+    });
+    pendingCollectionAdoptionDrain = pending;
+    return pending;
+  }
+
+  async function drainPendingCollectionAdoptionsOnce(
     engine: CaptureVersionedTextStore,
   ): Promise<void> {
     const workspace = { workspaceId, rootPath, attachmentId };
@@ -3357,11 +3377,15 @@ export function createWorkspaceEngineCapture(
         const adoptionKey =
           `${adoption.versionId}\0${adoption.recordId}\0` +
           `${adoption.objectId}\0${adoption.filePath}`;
-        let provider = pendingCollectionAdoptionProviders.get(adoptionKey);
+        let retained = pendingCollectionAdoptionProviders.get(adoptionKey);
         try {
           await options.rustEngineSessions.run(
             workspace,
             async (binding) => {
+              let provider =
+                retained?.binding.workspace === binding.workspace
+                  ? retained.provider
+                  : undefined;
               if (provider === undefined) {
                 const openProvider =
                   options.openRustYDocProviderSession ??
@@ -3376,6 +3400,7 @@ export function createWorkspaceEngineCapture(
                   seedAbsentLineage: true,
                   onRemoteUpdate: () => undefined,
                 });
+                retained = { binding, provider };
               }
               // Keep the imported lineage durable until reconciliation applies the
               // record id. A seed-only settling close can prove the artifact already
@@ -3387,8 +3412,8 @@ export function createWorkspaceEngineCapture(
           pendingCollectionAdoptionProviders.delete(adoptionKey);
         } catch (error) {
           if (isEngineStoreBusyRefusal(error)) {
-            if (provider !== undefined) {
-              pendingCollectionAdoptionProviders.set(adoptionKey, provider);
+            if (retained !== undefined) {
+              pendingCollectionAdoptionProviders.set(adoptionKey, retained);
             }
             continue;
           }
