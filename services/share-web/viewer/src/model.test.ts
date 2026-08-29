@@ -274,6 +274,12 @@ describe("public discussion projection", () => {
     expect(parseDiscussionAppendResult({ ok: true, message: link })).toEqual(link);
   });
 
+  it("accepts only a live link-authored append result", () => {
+    expect(parseDiscussionAppendResult({ ok: true, message: link })).toEqual(link);
+    expect(parseDiscussionAppendResult({ ok: true, message: named })).toBeNull();
+    expect(parseDiscussionAppendResult({ ok: true, message: tombstone })).toBeNull();
+  });
+
   it.each([
     ["an internal page field", { ok: true, messages: [], nextCursor: null, shareId: "secret" }],
     ["an internal message field", {
@@ -322,6 +328,46 @@ describe("public discussion projection", () => {
       deletedLink,
       tombstone,
     ]);
+  });
+
+  it("refuses unseen rows that do not advance the accumulated keyset tail", () => {
+    const tail = {
+      ...link,
+      messageId: "message-a",
+    };
+    const earlierTime = {
+      ...named,
+      messageId: "message-older-time",
+      createdAtMs: tail.createdAtMs - 1,
+    };
+    const earlierIdAtSameTime = {
+      ...named,
+      messageId: "message-Z",
+      createdAtMs: tail.createdAtMs,
+    };
+
+    expect(mergeDiscussionMessages([tail], [earlierTime])).toBeNull();
+    expect(mergeDiscussionMessages([tail], [earlierIdAtSameTime])).toBeNull();
+  });
+
+  it("uses relay keyset order for message ids with the same creation time", () => {
+    const first = {
+      ...named,
+      messageId: "message-Z",
+      createdAtMs: 4_000,
+    };
+    const second = {
+      ...link,
+      messageId: "message-a",
+      createdAtMs: first.createdAtMs,
+    };
+
+    expect(parseDiscussionPage({
+      ok: true,
+      messages: [first, second],
+      nextCursor: null,
+    })).toEqual({ messages: [first, second], nextCursor: null });
+    expect(mergeDiscussionMessages([first], [second])).toEqual([first, second]);
   });
 
   it("refuses every conflicting message-id reuse", () => {

@@ -136,7 +136,14 @@ function discussionOrder(
   left: PublicDiscussionMessage,
   right: PublicDiscussionMessage,
 ): number {
-  return left.createdAtMs - right.createdAtMs || left.messageId.localeCompare(right.messageId);
+  if (left.createdAtMs !== right.createdAtMs) {
+    return left.createdAtMs - right.createdAtMs;
+  }
+  return left.messageId < right.messageId
+    ? -1
+    : left.messageId > right.messageId
+      ? 1
+      : 0;
 }
 
 export function parseDiscussionPage(value: unknown): PublicDiscussionPage | null {
@@ -165,8 +172,12 @@ export function parseDiscussionPage(value: unknown): PublicDiscussionPage | null
 
 export function parseDiscussionAppendResult(value: unknown): PublicDiscussionMessage | null {
   const result = record(value);
-  return result && result.ok === true && hasExactKeys(result, ["ok", "message"])
-    ? discussionMessage(result.message)
+  if (!result || result.ok !== true || !hasExactKeys(result, ["ok", "message"])) {
+    return null;
+  }
+  const message = discussionMessage(result.message);
+  return message && !message.deleted && message.author.kind === "link"
+    ? message
     : null;
 }
 
@@ -212,6 +223,8 @@ export function mergeDiscussionMessages(
   for (const message of incoming) {
     const existingIndex = positions.get(message.messageId);
     if (existingIndex === undefined) {
+      const tail = merged.at(-1);
+      if (tail && discussionOrder(tail, message) >= 0) return null;
       positions.set(message.messageId, merged.length);
       merged.push(message);
       continue;
