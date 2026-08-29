@@ -160,7 +160,10 @@ type Setup = {
   capability: string;
 };
 
-async function setup(overrides: HandlerOverrides = {}): Promise<Setup> {
+async function setup(
+  overrides: HandlerOverrides = {},
+  access: "view" | "comment" = "view",
+): Promise<Setup> {
   const { storage, dbPath } = await newStorage();
   const now = { value: 10_000 };
   const h = handler(storage, {
@@ -185,7 +188,7 @@ async function setup(overrides: HandlerOverrides = {}): Promise<Setup> {
     request(
       OWNER,
       `/sync/${WORKSPACE}/shares/${SHARE_ID}/links`,
-      jsonBody({ access: "view" }),
+      jsonBody({ access }),
     ),
   );
   expect(linkResponse.status).toBe(200);
@@ -686,6 +689,86 @@ describe("single-use authenticated link handoff", () => {
       },
     ]);
   });
+
+  it("hands off Comment access and gives the named recipient the current link level", async () => {
+    const state = await setup({}, "comment");
+    expect(state.link).toMatchObject({ access: "comment", generation: 1 });
+
+    const minted = await mint(state);
+    const response = await state.h(redeemRequest(RECIPIENT, minted.code));
+    expect(response.status).toBe(200);
+    const redeemed = await json(response);
+    expect(redeemed).toMatchObject({
+      ok: true,
+      shareId: SHARE_ID,
+      access: "comment",
+    });
+    expect(state.storage.getShareGrant(String(redeemed.grantId))).toMatchObject({
+      access: "comment",
+      generation: 1,
+      parentGrantId: state.link.grantId,
+    });
+  });
+
+  it.each(["retune", "revoke"] as const)(
+    "refuses a Comment handoff redeem when %s wins before the storage commit",
+    async (transition) => {
+      const state = await setup({}, "comment");
+      const minted = await mint(state);
+      let armed = true;
+      const racedStorage = new Proxy(state.storage, {
+        get(target, property, receiver) {
+          const value = Reflect.get(target, property, receiver) as unknown;
+          if (property !== "redeemLinkHandoffCode" || typeof value !== "function") {
+            return typeof value === "function" ? value.bind(target) : value;
+          }
+          return (input: Parameters<SyncRelayStorage["redeemLinkHandoffCode"]>[0]) => {
+            if (armed) {
+              armed = false;
+              if (transition === "retune") {
+                expect(
+                  target.retuneShareGrant({
+                    shareId: SHARE_ID,
+                    grantId: String(state.link.grantId),
+                    access: "view",
+                    changedAtMs: state.now.value + 1,
+                    expectedDependentGrantIds: [],
+                    guard: () => undefined,
+                  }),
+                ).toMatchObject({ ok: true });
+              } else {
+                expect(
+                  target.revokeShareGrant({
+                    shareId: SHARE_ID,
+                    grantId: String(state.link.grantId),
+                    revokedAtMs: state.now.value + 1,
+                  }),
+                ).toMatchObject({ ok: true });
+              }
+            }
+            return target.redeemLinkHandoffCode(input);
+          };
+        },
+      });
+      const racedHandler = handler(state.storage, {
+        storage: racedStorage,
+        nowMs: () => state.now.value,
+        newGrantId: () => `raced-${transition}-dependent`,
+      });
+
+      await expectGeneric(
+        await racedHandler(redeemRequest(RECIPIENT, minted.code)),
+      );
+      expect(armed).toBe(false);
+      expect(
+        dependentRows(
+          inspect(state.dbPath, true),
+          String(state.link.grantId),
+          RECIPIENT,
+        ),
+      ).toEqual([]);
+    },
+  );
 
   it("caps active dependents at the owner mutation boundary without blocking an existing account", async () => {
     const state = await setup();

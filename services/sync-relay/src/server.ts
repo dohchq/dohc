@@ -94,13 +94,20 @@ function composePublicLinkUrl(shareWebOrigin: string, secret: string): string {
   return `${shareWebOrigin}/s/#${secret}`;
 }
 
-function validatePhase2LinkAccess(value: unknown): "view" {
+function isPublicLinkAccess(value: string): value is "view" | "comment" {
+  return value === "view" || value === "comment";
+}
+
+function validatePublicLinkAccess(value: unknown): "view" | "comment" {
   const validation = validateFileShareAccess(value);
   if (!validation.ok) {
     throw relayHttpError(RELAY_ERRORS[validation.code], validation.message);
   }
-  if (validation.access !== "view") {
-    throw relayHttpError(RELAY_ERRORS.invalid_access, 'access must be "view"');
+  if (!isPublicLinkAccess(validation.access)) {
+    throw relayHttpError(
+      RELAY_ERRORS.invalid_access,
+      'access must be "view" or "comment"',
+    );
   }
   return validation.access;
 }
@@ -1294,7 +1301,7 @@ export function createSyncRelayHandler({
       if (
         !authorized.ok ||
         authorized.grant.generation !== found.credential.generation ||
-        authorized.grant.access !== "view"
+        !isPublicLinkAccess(authorized.grant.access)
       ) {
         return refused();
       }
@@ -1334,7 +1341,8 @@ export function createSyncRelayHandler({
           if (
             !fresh.ok ||
             fresh.grant.generation !== found.grant.generation ||
-            fresh.grant.generation !== current.credential.generation
+            fresh.grant.generation !== current.credential.generation ||
+            fresh.grant.access !== authorized.grant.access
           ) {
             throw notFound();
           }
@@ -1375,7 +1383,8 @@ export function createSyncRelayHandler({
     });
     if (
       !authorized.ok ||
-      authorized.grant.generation !== current.session.generation
+      authorized.grant.generation !== current.session.generation ||
+      !isPublicLinkAccess(authorized.grant.access)
     ) {
       throw invalidLinkCapability();
     }
@@ -1402,7 +1411,8 @@ export function createSyncRelayHandler({
           !fresh.ok ||
           fresh.share.shareId !== authorized.share.shareId ||
           fresh.grant.grantId !== authorized.grant.grantId ||
-          fresh.grant.generation !== authorized.grant.generation
+          fresh.grant.generation !== authorized.grant.generation ||
+          fresh.grant.access !== authorized.grant.access
         ) {
           throw invalidLinkCapability();
         }
@@ -1456,7 +1466,7 @@ export function createSyncRelayHandler({
               fresh.grantId === capability.grantId &&
               fresh.generation === capability.generation &&
               fresh.access === capability.access &&
-              fresh.access === "view"
+              isPublicLinkAccess(fresh.access)
             );
           } catch {
             return false;
@@ -1519,7 +1529,7 @@ export function createSyncRelayHandler({
           return (
             authorized.ok &&
             authorized.grant.grantId === storedCode.grantId &&
-            authorized.grant.access === "view"
+            isPublicLinkAccess(authorized.grant.access)
           );
         } catch {
           return false;
@@ -1857,12 +1867,16 @@ export function createSyncRelayHandler({
           route.grantId,
           actor,
         );
+        if (!isPublicLinkAccess(grant.access)) throw notFound();
         const input = await readJsonObject(request);
         const expectedDependentGrantIds = parseExpectedDependentGrantIds(input, [
           "access",
           "expectedDependentGrantIds",
         ]);
-        const access = validatePhase2LinkAccess(input.access);
+        const access = validatePublicLinkAccess(input.access);
+        const widening = grant.access === "view" && access === "comment";
+        if (widening && (!linkKey || !shareWebOrigin)) throw notFound();
+        let secret: string | null = null;
         const result = storage.retuneShareGrant({
           shareId: share.shareId,
           grantId: grant.grantId,
@@ -1872,6 +1886,17 @@ export function createSyncRelayHandler({
           guard: () => {
             requireOwnedLinkGrant(share.shareId, grant.grantId, actor);
           },
+          ...(widening
+            ? {
+                mintCredential: () => {
+                  secret = newLinkBearer();
+                  return {
+                    credentialId: newId(),
+                    secretHash: hashLinkBearer(secret, linkKey!),
+                  };
+                },
+              }
+            : {}),
         });
         if (!result.ok) {
           if ("reason" in result && result.reason === "dependents-changed") {
@@ -1883,6 +1908,9 @@ export function createSyncRelayHandler({
         return jsonResponse({
           ok: true,
           ...linkGrantBody(result.grant),
+          ...(secret === null
+            ? {}
+            : { url: composePublicLinkUrl(shareWebOrigin!, secret) }),
         });
       }
       if (route.route === "share-link-retune") throw methodNotAllowed();
@@ -2680,9 +2708,14 @@ export function createSyncRelayHandler({
 
       if (route.route === "share-link-create-atomic" && request.method === "POST") {
         const input = await readJsonObject(request);
-        if (Object.keys(input).some((key) => key !== "paths" && key !== "versionId")) {
-          throw badRequest("A View link accepts only paths and versionId.");
+        if (
+          Object.keys(input).some(
+            (key) => key !== "paths" && key !== "versionId" && key !== "access",
+          )
+        ) {
+          throw badRequest("A link accepts only access, paths, and versionId.");
         }
+        const access = validatePublicLinkAccess(input.access);
         const validation = validateShareSelector({
           paths: input.paths,
           versionId: input.versionId,
@@ -2708,7 +2741,7 @@ export function createSyncRelayHandler({
           principalKind: "link" as const,
           principalUserId: null,
           principalEmail: null,
-          access: "view",
+          access,
           generation: 1,
           status: "active" as const,
           createdAtMs,
@@ -2743,7 +2776,10 @@ export function createSyncRelayHandler({
 
       if (route.route === "share-link-create" && request.method === "POST") {
         const input = await readJsonObject(request);
-        const access = validatePhase2LinkAccess(input.access);
+        if (Object.keys(input).some((key) => key !== "access")) {
+          throw badRequest("A link accepts only access.");
+        }
+        const access = validatePublicLinkAccess(input.access);
         const share = storage.getShare(route.shareId);
         const selector = share
           ? parseStoredAnyShareSelectorJson(share.selectorJson)

@@ -2708,7 +2708,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       grant.principalUserId !== null ||
       grant.principalEmail !== null ||
       grant.parentGrantId !== null ||
-      grant.access !== "view" ||
+      (grant.access !== "view" && grant.access !== "comment") ||
       grant.status !== "active" ||
       grant.revokedAtMs !== null ||
       grant.generation !== 1 ||
@@ -3239,7 +3239,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         grant.status !== "active" ||
         grant.revokedAtMs !== null ||
         grant.generation !== code.generation ||
-        grant.access !== "view"
+        (grant.access !== "view" && grant.access !== "comment")
       ) {
         return false;
       }
@@ -3366,7 +3366,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           grant.principalKind !== "user" ||
           grant.status !== "active" ||
           grant.revokedAtMs !== null ||
-          grant.access !== "view"
+          (grant.access !== "view" && grant.access !== "comment")
         ) {
           deleteCode();
           return { ok: false };
@@ -3394,7 +3394,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         parent.status !== "active" ||
         parent.revokedAtMs !== null ||
         parent.generation !== code.generation ||
-        parent.access !== "view"
+        (parent.access !== "view" && parent.access !== "comment")
       ) {
         return refuseAndConsume();
       }
@@ -3444,7 +3444,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         principalKind: "user",
         principalUserId: input.principalUserId,
         principalEmail: null,
-        access: "view",
+        access: parent.access,
         generation: 1,
         status: "active",
         createdAtMs: Math.trunc(input.redeemedAtMs),

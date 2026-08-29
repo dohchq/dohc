@@ -532,6 +532,69 @@ describe("LinkEgressRateLimiter", () => {
 });
 
 describe("relay capability reads", () => {
+  it("keeps simultaneous View and Comment grants bound to their own access", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const view = await seed(h, "view");
+    const shareId = storage.getShareGrant(view.grantId)!.shareId;
+    const commentResponse = await h(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/shares/${shareId}/links`,
+        jsonBody({ access: "comment" }),
+      ),
+    );
+    expect(commentResponse.status).toBe(200);
+    const commentLink = await json(commentResponse);
+    const commentExchangeResponse = await h(
+      request(
+        null,
+        "/sync/link-exchange",
+        jsonBody({ secret: linkSecret(commentLink.url) }),
+      ),
+    );
+    expect(commentExchangeResponse.status).toBe(200);
+    const commentExchange = await json(commentExchangeResponse);
+
+    expect(commentExchange).toMatchObject({
+      grantId: commentLink.grantId,
+      access: "comment",
+      generation: 1,
+      effectiveSelector: { access: "comment" },
+    });
+    expect(commentExchange.grantId).not.toBe(view.grantId);
+
+    for (const bound of [
+      { access: "view", capability: view.capability, grantId: view.grantId },
+      {
+        access: "comment",
+        capability: String(commentExchange.capabilityToken),
+        grantId: String(commentLink.grantId),
+      },
+    ] as const) {
+      const current = await h(linkRequest(bound.capability, "/sync/link/current"));
+      expect(current.status).toBe(200);
+      expect(await json(current)).toMatchObject({
+        access: bound.access,
+        effectiveSelector: { access: bound.access },
+      });
+
+      const refreshResponse = await h(
+        request(null, "/sync/link-refresh", {
+          method: "POST",
+          headers: { authorization: `LinkCapability ${bound.capability}` },
+        }),
+      );
+      expect(refreshResponse.status).toBe(200);
+      expect(await json(refreshResponse)).toMatchObject({
+        grantId: bound.grantId,
+        access: bound.access,
+        generation: 1,
+        effectiveSelector: { access: bound.access },
+      });
+    }
+  });
+
   it("projects only the selected current files from a fresh view capability", async () => {
     const storage = await newStorage();
     const h = handler(storage);
