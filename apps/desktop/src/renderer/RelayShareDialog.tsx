@@ -306,8 +306,16 @@ export function RelayShareDialog(props: {
     const requestId = ++latestCreateRequest.current;
     const payload: CreateRelayShareLinkPayload =
       props.target.kind === "version"
-        ? { workspaceId: props.workspaceId, versionId: props.target.versionId }
-        : { workspaceId: props.workspaceId, paths: props.target.paths };
+        ? {
+            workspaceId: props.workspaceId,
+            versionId: props.target.versionId,
+            access: "view",
+          }
+        : {
+            workspaceId: props.workspaceId,
+            paths: props.target.paths,
+            access: "view",
+          };
 
     setLinkBusy(true);
     setLinkError(null);

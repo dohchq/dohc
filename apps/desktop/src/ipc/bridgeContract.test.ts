@@ -100,6 +100,8 @@ import {
   parsePluginPanelInvalidatedEventForIpc,
   parsePluginPanelSdkEventForIpc,
   CloudJoinWorkspacePayload,
+  AddRelayShareLinkPayload,
+  AddRelayShareLinkResult,
   CreateRelayShareLinkPayload,
   CreateRelayShareLinkResult,
   ListRelayShareLinksPayload,
@@ -108,6 +110,8 @@ import {
   RotateRelayShareLinkResult,
   RevokeRelayShareLinkPayload,
   RevokeRelayShareLinkResult,
+  RetuneRelayShareLinkPayload,
+  RetuneRelayShareLinkResult,
   ReadShareProposalFileContentPayload,
   ReadShareProposalFileContentResult,
   ListShareProposalsPayload,
@@ -230,25 +234,89 @@ describe("owner relay share link IPC contract", () => {
     ).toBe(false);
   });
 
-  it("accepts exactly one file selector and no access choice on create", () => {
+  it("requires View or Comment with exactly one file selector on create", () => {
     expect(
       CreateRelayShareLinkPayload.safeParse({
         workspaceId: "workspace-1",
         paths: ["docs"],
+        access: "view",
       }).success,
     ).toBe(true);
     expect(
       CreateRelayShareLinkPayload.safeParse({
         workspaceId: "workspace-1",
         versionId: "version-1",
+        access: "comment",
       }).success,
     ).toBe(true);
     for (const payload of [
       { workspaceId: "workspace-1" },
-      { workspaceId: "workspace-1", paths: ["docs"], versionId: "version-1" },
-      { workspaceId: "workspace-1", paths: ["docs"], access: "view" },
+      { workspaceId: "workspace-1", paths: ["docs"] },
+      {
+        workspaceId: "workspace-1",
+        paths: ["docs"],
+        versionId: "version-1",
+        access: "view",
+      },
+      { workspaceId: "workspace-1", paths: ["docs"], access: "edit" },
+      {
+        workspaceId: "workspace-1",
+        paths: ["docs"],
+        access: "view",
+        ownerUserId: "must-not-cross",
+      },
     ]) {
       expect(CreateRelayShareLinkPayload.safeParse(payload).success).toBe(false);
+    }
+  });
+
+  it("adds a link only to one real share with an explicit public level", () => {
+    for (const access of ["view", "comment"] as const) {
+      const payload = {
+        workspaceId: "workspace-1",
+        shareId: "share-1",
+        access,
+      };
+      expect(AddRelayShareLinkPayload.parse(payload)).toEqual(payload);
+    }
+    for (const payload of [
+      { workspaceId: "workspace-1", shareId: "share-1" },
+      { workspaceId: "workspace-1", shareId: "share-1", access: "edit" },
+      {
+        workspaceId: "workspace-1",
+        shareId: "share-1",
+        access: "view",
+        paths: ["docs"],
+      },
+      {
+        workspaceId: "workspace-1",
+        shareId: "share-1",
+        access: "comment",
+        versionId: "version-1",
+      },
+    ]) {
+      expect(AddRelayShareLinkPayload.safeParse(payload).success).toBe(false);
+    }
+  });
+
+  it("retunes one displayed link with the exact dependent set", () => {
+    const payload = {
+      workspaceId: "workspace-1",
+      shareId: "share-1",
+      grantId: "grant-1",
+      access: "comment" as const,
+      expectedDependentGrantIds: ["dependent-1"],
+    };
+    expect(RetuneRelayShareLinkPayload.parse(payload)).toEqual(payload);
+    for (const invalid of [
+      { ...payload, access: "edit" },
+      { ...payload, access: undefined },
+      { ...payload, expectedDependentGrantIds: undefined },
+      { ...payload, expectedDependentGrantIds: "dependent-1" },
+      { ...payload, selector: { paths: ["docs"], versionId: null } },
+      { ...payload, principalUserId: "must-not-cross" },
+    ]) {
+      expect(RetuneRelayShareLinkPayload.safeParse(invalid).success).toBe(false);
     }
   });
 
@@ -277,7 +345,7 @@ describe("owner relay share link IPC contract", () => {
     }
   });
 
-  it("discriminates reset and end outcomes and rejects malformed projections", () => {
+  it("discriminates lifecycle outcomes and rejects malformed projections", () => {
     expect(
       RotateRelayShareLinkResult.parse({
         outcome: "rotated",
@@ -287,7 +355,11 @@ describe("owner relay share link IPC contract", () => {
       outcome: "rotated",
       url: "https://share.example.test/s/#new-bearer",
     });
-    for (const schema of [RotateRelayShareLinkResult, RevokeRelayShareLinkResult]) {
+    for (const schema of [
+      RotateRelayShareLinkResult,
+      RevokeRelayShareLinkResult,
+      RetuneRelayShareLinkResult,
+    ]) {
       expect(
         schema.parse({ outcome: "dependents-changed", dependents: readable.dependents }),
       ).toEqual({ outcome: "dependents-changed", dependents: readable.dependents });
@@ -307,21 +379,44 @@ describe("owner relay share link IPC contract", () => {
     expect(RevokeRelayShareLinkResult.parse({ outcome: "ended" })).toEqual({
       outcome: "ended",
     });
+    expect(
+      RetuneRelayShareLinkResult.parse({
+        outcome: "widened",
+        url: "https://share.example.test/s/#new-bearer",
+      }),
+    ).toEqual({
+      outcome: "widened",
+      url: "https://share.example.test/s/#new-bearer",
+    });
+    expect(RetuneRelayShareLinkResult.parse({ outcome: "narrowed" })).toEqual({
+      outcome: "narrowed",
+    });
+    for (const malformed of [
+      { outcome: "widened" },
+      { outcome: "widened", url: "https://share.example.test/s/#new", access: "comment" },
+      { outcome: "narrowed", url: "https://share.example.test/s/#must-not-cross" },
+      { outcome: "narrowed", dependents: [] },
+      { outcome: "dependents-changed", dependents: [], url: "https://share.example.test/s/#must-not-cross" },
+    ]) {
+      expect(RetuneRelayShareLinkResult.safeParse(malformed).success).toBe(false);
+    }
   });
 
-  it("allows a URL only on create and successful reset", () => {
-    expect(
-      CreateRelayShareLinkResult.parse({
+  it("allows a URL only on create, add, reset, and widening", () => {
+    for (const schema of [CreateRelayShareLinkResult, AddRelayShareLinkResult]) {
+      expect(
+        schema.parse({
+          shareId: "share-1",
+          grantId: "grant-1",
+          url: "https://share.example.test/s/#new-bearer",
+          secret: "stripped",
+        }),
+      ).toEqual({
         shareId: "share-1",
         grantId: "grant-1",
         url: "https://share.example.test/s/#new-bearer",
-        secret: "stripped",
-      }),
-    ).toEqual({
-      shareId: "share-1",
-      grantId: "grant-1",
-      url: "https://share.example.test/s/#new-bearer",
-    });
+      });
+    }
     expect(
       RevokeRelayShareLinkResult.safeParse({
         outcome: "ended",
@@ -332,6 +427,12 @@ describe("owner relay share link IPC contract", () => {
       RotateRelayShareLinkResult.safeParse({
         outcome: "dependents-changed",
         dependents: [],
+        url: "https://share.example.test/s/#must-not-cross",
+      }).success,
+    ).toBe(false);
+    expect(
+      RetuneRelayShareLinkResult.safeParse({
+        outcome: "narrowed",
         url: "https://share.example.test/s/#must-not-cross",
       }).success,
     ).toBe(false);

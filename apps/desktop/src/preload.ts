@@ -347,8 +347,12 @@ const bridge: DohcDesktopBridge = {
   revokeRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.revokeRelayShare, payload),
   createRelayShareLink: (payload) =>
     ipcRenderer.invoke(CHANNELS.createRelayShareLink, payload),
+  addRelayShareLink: (payload) =>
+    ipcRenderer.invoke(CHANNELS.addRelayShareLink, payload),
   listRelayShareLinks: (payload) =>
     ipcRenderer.invoke(CHANNELS.listRelayShareLinks, payload),
+  retuneRelayShareLink: (payload) =>
+    ipcRenderer.invoke(CHANNELS.retuneRelayShareLink, payload),
   rotateRelayShareLink: (payload) =>
     ipcRenderer.invoke(CHANNELS.rotateRelayShareLink, payload),
   revokeRelayShareLink: (payload) =>

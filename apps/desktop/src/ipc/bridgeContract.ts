@@ -3600,14 +3600,18 @@ export const RevokeRelaySharePayload = z.object({
 });
 export type RevokeRelaySharePayload = z.infer<typeof RevokeRelaySharePayload>;
 
-// Phase 2 owner links are workspace-scoped View capabilities. The renderer
-// supplies exactly one selector and never supplies an access level.
+const RELAY_SHARE_LINK_ACCESS = z.enum(["view", "comment"]);
+
+// The main process creates the share and its first link together. The
+// renderer must name the exact public level; there is no default at this
+// boundary once Comment exists.
 export const CreateRelayShareLinkPayload = z.union([
   z
     .object({
       workspaceId: WORKSPACE_ID,
       paths: z.array(PATH_STRING).min(1).max(100),
       versionId: z.never().optional(),
+      access: RELAY_SHARE_LINK_ACCESS,
     })
     .strict(),
   z
@@ -3615,6 +3619,7 @@ export const CreateRelayShareLinkPayload = z.union([
       workspaceId: WORKSPACE_ID,
       paths: z.never().optional(),
       versionId: z.string().min(1).max(128),
+      access: RELAY_SHARE_LINK_ACCESS,
     })
     .strict(),
 ]);
@@ -3631,6 +3636,22 @@ export const CreateRelayShareLinkResult = z.object({
 });
 export type CreateRelayShareLinkResult = z.infer<
   typeof CreateRelayShareLinkResult
+>;
+
+export const AddRelayShareLinkPayload = z
+  .object({
+    workspaceId: WORKSPACE_ID,
+    shareId: SHARE_ID,
+    access: RELAY_SHARE_LINK_ACCESS,
+  })
+  .strict();
+export type AddRelayShareLinkPayload = z.infer<
+  typeof AddRelayShareLinkPayload
+>;
+
+export const AddRelayShareLinkResult = CreateRelayShareLinkResult;
+export type AddRelayShareLinkResult = z.infer<
+  typeof AddRelayShareLinkResult
 >;
 
 const RELAY_SHARE_LINK_CURSOR = z.string().min(1).max(1024);
@@ -3710,6 +3731,13 @@ export type RevokeRelayShareLinkPayload = z.infer<
   typeof RevokeRelayShareLinkPayload
 >;
 
+export const RetuneRelayShareLinkPayload = RelayShareLinkMutationPayload.extend({
+  access: RELAY_SHARE_LINK_ACCESS,
+});
+export type RetuneRelayShareLinkPayload = z.infer<
+  typeof RetuneRelayShareLinkPayload
+>;
+
 export const RelayShareLinkDependentConflict = z.object({
   ok: z.literal(false),
   code: z.literal("dependents_changed"),
@@ -3730,6 +3758,18 @@ export const RelayShareLinkListResponse = ListRelayShareLinksResult.extend({
 export const RelayShareLinkRotateResponse = z.object({
   ok: z.literal(true),
   url: RELAY_SHARE_LINK_URL,
+});
+
+export const RelayShareLinkRetuneWidenResponse = z.object({
+  ok: z.literal(true),
+  access: z.literal("comment"),
+  url: RELAY_SHARE_LINK_URL,
+});
+
+export const RelayShareLinkRetuneNarrowResponse = z.object({
+  ok: z.literal(true),
+  access: z.literal("view"),
+  url: z.never().optional(),
 });
 
 export const RelayShareLinkEndResponse = z.object({
@@ -3754,6 +3794,20 @@ export const RotateRelayShareLinkResult = z.discriminatedUnion("outcome", [
 ]);
 export type RotateRelayShareLinkResult = z.infer<
   typeof RotateRelayShareLinkResult
+>;
+
+export const RetuneRelayShareLinkResult = z.discriminatedUnion("outcome", [
+  z
+    .object({
+      outcome: z.literal("widened"),
+      url: RELAY_SHARE_LINK_URL,
+    })
+    .strict(),
+  z.object({ outcome: z.literal("narrowed") }).strict(),
+  RelayShareLinkDependentsChangedOutcome,
+]);
+export type RetuneRelayShareLinkResult = z.infer<
+  typeof RetuneRelayShareLinkResult
 >;
 
 export const RevokeRelayShareLinkResult = z.discriminatedUnion("outcome", [
@@ -5223,12 +5277,18 @@ export interface DohcDesktopBridge {
   createRelayShareLink(
     payload: CreateRelayShareLinkPayload,
   ): Promise<CreateRelayShareLinkResult>;
+  addRelayShareLink(
+    payload: AddRelayShareLinkPayload,
+  ): Promise<AddRelayShareLinkResult>;
   listRelayShareLinks(
     payload: ListRelayShareLinksPayload,
   ): Promise<ListRelayShareLinksResult>;
   rotateRelayShareLink(
     payload: RotateRelayShareLinkPayload,
   ): Promise<RotateRelayShareLinkResult>;
+  retuneRelayShareLink(
+    payload: RetuneRelayShareLinkPayload,
+  ): Promise<RetuneRelayShareLinkResult>;
   revokeRelayShareLink(
     payload: RevokeRelayShareLinkPayload,
   ): Promise<RevokeRelayShareLinkResult>;

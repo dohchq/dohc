@@ -18,7 +18,9 @@ function handlerSource(channel: string): string {
 
 const ownerLinkChannels = [
   "createRelayShareLink",
+  "addRelayShareLink",
   "listRelayShareLinks",
+  "retuneRelayShareLink",
   "rotateRelayShareLink",
   "revokeRelayShareLink",
 ] as const;
@@ -82,28 +84,34 @@ describe("main-process owner relay link authorization", () => {
     expect(helper).not.toContain("const response = await fetch(");
   });
 
-  it("refuses shared-view link creation before credentials or a relay request", () => {
-    const handler = handlerSource("createRelayShareLink");
-    const operationAt = handler.indexOf("async (operation) => {");
-    const guardAt =
-      /if \(shareViewIsPresent\(operation\.workspace\.shareView\)\) \{\s*throw new Error\(\s*"This is a shared view — only the original workspace can be shared\.",\s*\);\s*\}/u.exec(
-        handler,
-      )?.index ?? -1;
-    const credentialsAt = handler.indexOf(
-      "remoteForWorkspace(operation.workspace)",
-    );
-    const relayAt = handler.indexOf("relayShareJsonWithCredentials");
+  it("refuses shared-view link mutations before credentials or a relay request", () => {
+    for (const channel of [
+      "createRelayShareLink",
+      "addRelayShareLink",
+      "retuneRelayShareLink",
+    ]) {
+      const handler = handlerSource(channel);
+      const operationAt = handler.indexOf("async (operation) => {");
+      const guardAt =
+        /if \(shareViewIsPresent\(operation\.workspace\.shareView\)\) \{\s*throw new Error\(\s*"This is a shared view — only the original workspace can be shared\.",\s*\);\s*\}/u.exec(
+          handler,
+        )?.index ?? -1;
+      const credentialsAt = handler.indexOf(
+        "remoteForWorkspace(operation.workspace)",
+      );
+      const relayAt = handler.indexOf("relayShareJsonWithCredentials");
 
-    expect(operationAt).toBeGreaterThan(-1);
-    expect(
-      guardAt,
-      "the shared-view presence refusal must be inside the physical workspace operation",
-    ).toBeGreaterThan(operationAt);
-    expect(credentialsAt).toBeGreaterThan(guardAt);
-    expect(relayAt).toBeGreaterThan(credentialsAt);
-    expect(handler).not.toMatch(
-      /if\s*\(\s*operation\.workspace\.shareView\s*\)/u,
-    );
+      expect(operationAt, channel).toBeGreaterThan(-1);
+      expect(
+        guardAt,
+        `${channel}: the shared-view refusal must be inside the physical workspace operation`,
+      ).toBeGreaterThan(operationAt);
+      expect(credentialsAt, channel).toBeGreaterThan(guardAt);
+      expect(relayAt, channel).toBeGreaterThan(credentialsAt);
+      expect(handler, channel).not.toMatch(
+        /if\s*\(\s*operation\.workspace\.shareView\s*\)/u,
+      );
+    }
   });
 
   it("addresses workspace routes and injects share-route workspace bodies from the operation", () => {
@@ -112,6 +120,11 @@ describe("main-process owner relay link authorization", () => {
         "/sync/${encodeURIComponent(operation.workspace.workspaceId)}/shares/links",
       );
     }
+    const add = handlerSource("addRelayShareLink");
+    expect(add).toContain(
+      "/sync/${encodeURIComponent(operation.workspace.workspaceId)}/shares/${encodeURIComponent(input.shareId)}/links",
+    );
+    expect(add).not.toContain("/sync/${encodeURIComponent(input.workspaceId)}");
     for (const channel of ["rotateRelayShareLink", "revokeRelayShareLink"]) {
       const handler = handlerSource(channel);
       expect(handler, channel).toContain(
@@ -119,6 +132,34 @@ describe("main-process owner relay link authorization", () => {
       );
       expect(handler, channel).not.toContain("workspaceId: input.workspaceId");
     }
+    const retune = handlerSource("retuneRelayShareLink");
+    expect(retune).toContain(
+      "/sync/shares/${encodeURIComponent(input.shareId)}/links/${encodeURIComponent(input.grantId)}/retune",
+    );
+    expect(retune).not.toContain("workspaceId: input.workspaceId");
+  });
+
+  it("sends only the exact method and bounded link lifecycle bodies", () => {
+    const create = handlerSource("createRelayShareLink");
+    expect(create).toContain("method: \"POST\"");
+    expect(create).toContain("access: input.access");
+    expect(create).not.toContain("ownerUserId");
+
+    const add = handlerSource("addRelayShareLink");
+    expect(add).toContain("method: \"POST\"");
+    expect(add).toContain("body: JSON.stringify({ access: input.access })");
+    expect(add).not.toContain("paths: input.paths");
+    expect(add).not.toContain("versionId: input.versionId");
+    expect(add).not.toContain("ownerUserId");
+
+    const retune = handlerSource("retuneRelayShareLink");
+    expect(retune).toContain("method: \"POST\"");
+    expect(retune).toContain("access: input.access");
+    expect(retune).toContain(
+      "expectedDependentGrantIds: input.expectedDependentGrantIds",
+    );
+    expect(retune).not.toContain("workspaceId: input.workspaceId");
+    expect(retune).not.toContain("ownerUserId");
   });
 
   it("forwards only the bounded parsed inventory cursor", () => {
@@ -149,8 +190,12 @@ describe("main-process owner relay link authorization", () => {
     }
   });
 
-  it("returns only typed dependent conflicts from reset and end", () => {
-    for (const channel of ["rotateRelayShareLink", "revokeRelayShareLink"]) {
+  it("returns only typed dependent conflicts from lifecycle mutations", () => {
+    for (const channel of [
+      "retuneRelayShareLink",
+      "rotateRelayShareLink",
+      "revokeRelayShareLink",
+    ]) {
       const handler = handlerSource(channel);
       expect(handler, channel).toContain("retainDependentSetConflict: true");
       expect(handler, channel).toContain("RelayShareLinkDependentConflict.safeParse(");
@@ -162,12 +207,32 @@ describe("main-process owner relay link authorization", () => {
   it("parses every relay success before returning it over IPC", () => {
     const schemas = {
       createRelayShareLink: "RelayShareLinkCreateResponse.safeParse(",
+      addRelayShareLink: "RelayShareLinkCreateResponse.safeParse(",
       listRelayShareLinks: "RelayShareLinkListResponse.safeParse(",
       rotateRelayShareLink: "RelayShareLinkRotateResponse.safeParse(",
       revokeRelayShareLink: "RelayShareLinkEndResponse.safeParse(",
     } as const;
     for (const [channel, parse] of Object.entries(schemas)) {
       expect(handlerSource(channel), channel).toContain(parse);
+    }
+    const retune = handlerSource("retuneRelayShareLink");
+    expect(retune).toContain("RelayShareLinkRetuneWidenResponse.safeParse(");
+    expect(retune).toContain("RelayShareLinkRetuneNarrowResponse.safeParse(");
+  });
+
+  it("checks currentness after a stale add or retune relay result resolves", () => {
+    for (const channel of ["addRelayShareLink", "retuneRelayShareLink"]) {
+      const handler = handlerSource(channel);
+      const relayAt = handler.indexOf("relayShareJsonWithCredentials");
+      const awaitEnd = handler.indexOf("});", relayAt);
+      const currentAfterAwait = handler.indexOf(
+        "operation.assertCurrent();",
+        awaitEnd,
+      );
+      const successParse = handler.indexOf("safeParse(", currentAfterAwait);
+      expect(relayAt, channel).toBeGreaterThan(-1);
+      expect(currentAfterAwait, channel).toBeGreaterThan(awaitEnd);
+      expect(successParse, channel).toBeGreaterThan(currentAfterAwait);
     }
   });
 

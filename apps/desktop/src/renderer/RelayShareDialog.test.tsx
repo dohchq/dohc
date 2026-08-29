@@ -633,7 +633,7 @@ describe("RelayShareDialog", () => {
     expect(screen.queryByTestId("share-link-row-same-paths-no-version")).toBeNull();
   });
 
-  it("creates a paths link with the physical workspace and no access property", async () => {
+  it("creates a paths link with the physical workspace and explicit View access", async () => {
     const user = userEvent.setup();
     render(
       <RelayShareDialog
@@ -648,13 +648,11 @@ describe("RelayShareDialog", () => {
     expect(bridgeMock.createRelayShareLink).toHaveBeenCalledWith({
       workspaceId: "physical-ws-1",
       paths: ["docs/plan.md", "assets/map.png"],
+      access: "view",
     });
-    expect(bridgeMock.createRelayShareLink.mock.calls[0]?.[0]).not.toHaveProperty(
-      "access",
-    );
   });
 
-  it("creates a version link with the physical workspace and no access property", async () => {
+  it("creates a version link with the physical workspace and explicit View access", async () => {
     const user = userEvent.setup();
     render(
       <RelayShareDialog
@@ -669,10 +667,8 @@ describe("RelayShareDialog", () => {
     expect(bridgeMock.createRelayShareLink).toHaveBeenCalledWith({
       workspaceId: "physical-ws-1",
       versionId: "version-7",
+      access: "view",
     });
-    expect(bridgeMock.createRelayShareLink.mock.calls[0]?.[0]).not.toHaveProperty(
-      "access",
-    );
   });
 
   it("disables Create link while pending and strips a current error", async () => {
