@@ -85,6 +85,38 @@ describe("share-web configuration", () => {
     expect(config.relayExchangeKey).toBeUndefined();
   });
 
+  it("uses no trusted proxies for the self-host empty value", () => {
+    const config = loadShareWebConfig({
+      NODE_ENV: "test",
+      DOHC_SHARE_WEB_RELAY_URL: "https://relay.example.test",
+      DOHC_SHARE_WEB_PUBLIC_RELAY_URL: "https://relay.example.test",
+      DOHC_SHARE_WEB_PUBLIC_HOSTS: "share.example.test",
+      DOHC_SHARE_WEB_TRUSTED_PROXIES: "",
+    });
+
+    expect(config.trustedProxies).toEqual(new Set());
+  });
+
+  it.each([
+    ["a leading empty segment", ",127.0.0.1"],
+    ["a trailing empty segment", "127.0.0.1,"],
+    ["an interior empty segment", "127.0.0.1,,10.0.0.2"],
+    ["leading whitespace", " 127.0.0.1"],
+    ["trailing whitespace", "127.0.0.1 "],
+    ["whitespace after a comma", "127.0.0.1, 10.0.0.2"],
+    ["only whitespace", " "],
+  ])("rejects a trusted-proxy list with %s", (_case, trustedProxies) => {
+    expect(() =>
+      loadShareWebConfig({
+        NODE_ENV: "test",
+        DOHC_SHARE_WEB_RELAY_URL: "https://relay.example.test",
+        DOHC_SHARE_WEB_PUBLIC_RELAY_URL: "https://relay.example.test",
+        DOHC_SHARE_WEB_PUBLIC_HOSTS: "share.example.test",
+        DOHC_SHARE_WEB_TRUSTED_PROXIES: trustedProxies,
+      }),
+    ).toThrow(/exact comma-separated peer addresses/u);
+  });
+
   it("requires a relay exchange key in production", () => {
     expect(() =>
       loadShareWebConfig({
@@ -123,15 +155,6 @@ describe("share-web configuration", () => {
         DOHC_SHARE_WEB_PUBLIC_HOSTS: "share.example.test, other.example.test",
       }),
     ).toThrow(/exact comma-separated Host/u);
-    expect(() =>
-      loadShareWebConfig({
-        NODE_ENV: "test",
-        DOHC_SHARE_WEB_RELAY_URL: "https://relay.example.test",
-        DOHC_SHARE_WEB_PUBLIC_RELAY_URL: "https://relay.example.test",
-        DOHC_SHARE_WEB_PUBLIC_HOSTS: "share.example.test",
-        DOHC_SHARE_WEB_TRUSTED_PROXIES: "127.0.0.1, 10.0.0.2",
-      }),
-    ).toThrow(/exact comma-separated peer addresses/u);
     expect(() =>
       loadShareWebConfig({
         NODE_ENV: "production",

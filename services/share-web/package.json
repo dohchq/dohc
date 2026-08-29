@@ -11,7 +11,7 @@
     ".": "./src/server.ts"
   },
   "scripts": {
-    "build": "vite build --config viewer/vite.config.ts && node scripts/build.mjs",
+    "build": "vite build --config viewer/vite.config.ts && node scripts/copy-excalidraw-fonts.mjs && node scripts/build.mjs",
     "dev": "tsx watch src/main.ts",
     "dev:viewer": "vite --config viewer/vite.config.ts",
     "start": "node dist/main.js",
@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@dohc/workspace-contracts": "workspace:*",
+    "@excalidraw/excalidraw": "0.18.1",
     "dompurify": "3.4.13",
     "marked": "17.0.6",
     "react": "^19.2.8",

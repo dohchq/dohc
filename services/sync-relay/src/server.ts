@@ -13,6 +13,7 @@ import {
   hashLinkBearer,
   hashLinkHandoffCode,
   hashRelayExchangeKey,
+  LinkEgressRateLimiter,
   LinkExchangeRateLimiter,
   LinkReadRateLimiter,
   LINK_GRANT_LOG_READ_BUCKET_CAPACITY,
@@ -40,6 +41,7 @@ import {
   filterOpForShare,
   filterOpForShareAppend,
   filterProposedChangeForShare,
+  hasValidShareMomentShape,
   isChatChannelSelector,
   parseShareOpPayloadWithReferencedPaths,
   parseStoredAnyShareSelectorJson,
@@ -136,7 +138,9 @@ export interface CreateSyncRelayHandlerOptions {
   linkGrantReadRateLimiter?: LinkReadRateLimiter;
   linkLogReadRateLimiter?: LinkReadRateLimiter;
   linkGrantLogReadRateLimiter?: LinkReadRateLimiter;
+  linkGrantEgressRateLimiter?: LinkEgressRateLimiter;
   linkCapabilityReadFallbackPageSize?: number;
+  linkCurrentFileLimit?: number;
   newLinkBearer?: () => string;
   newLinkHandoffCode?: () => string;
 }
@@ -147,6 +151,7 @@ type SyncRelayRoute =
   | { route: "link-handoff" }
   | { route: "link-redeem" }
   | { route: "link-share" }
+  | { route: "link-current" }
   | { route: "link-log" }
   | { route: "link-blob"; sha256: string }
   | { route: "workspaces" }
@@ -212,7 +217,7 @@ type SyncRelayRoute =
 // (crates/dohc-engine-sync-http/tests/relay_http.rs) reads this line and fails
 // if the two drift.
 export const MAX_BLOB_BYTES = 20 * 1024 * 1024;
-const LINK_BLOB_STREAM_CHUNK_BYTES = 64 * 1024;
+const LINK_STREAM_CHUNK_BYTES = 64 * 1024;
 export const LINK_BLOB_INFLIGHT_BYTES_PER_GRANT = 64 * 1024 * 1024;
 export const MAX_KEY_ENVELOPE_BYTES = 16 * 1024;
 // One PAGE of the continuous replication lane, for the two log routes. It is
@@ -223,6 +228,7 @@ export const MAX_KEY_ENVELOPE_BYTES = 16 * 1024;
 export const MAX_OPS_PER_REQUEST = 500;
 export const DEFAULT_LOG_PAGE_SIZE = 100;
 export const MAX_LOG_PAGE_SIZE = 500;
+const MAX_LINK_CURRENT_FILES = 5_000;
 // One accountless response may scan this many raw log rows for admitted ops.
 export const MAX_RAW_ROWS_PER_LINK_PAGE = 10_000;
 // Capability reads may synchronously inspect at most 10,000 fallback rows.
@@ -287,10 +293,6 @@ interface SettledMomentIdentity {
   deleted: boolean;
 }
 
-interface LinkCapabilityReadFallbackAllowance {
-  pagesRemaining: number;
-}
-
 function settledMomentIdentity(row: SyncRelayLogRow): SettledMomentIdentity | null {
   if (row.opKind !== "moment.append") return null;
   const parsed = parseShareOpPayloadWithReferencedPaths(row.payloadJson);
@@ -347,7 +349,9 @@ export function createSyncRelayHandler({
     LINK_GRANT_LOG_READ_BUCKET_CAPACITY,
     LINK_GRANT_LOG_READ_REFILL_PER_SECOND,
   ),
+  linkGrantEgressRateLimiter = new LinkEgressRateLimiter(),
   linkCapabilityReadFallbackPageSize = MAX_LOG_PAGE_SIZE,
+  linkCurrentFileLimit = MAX_LINK_CURRENT_FILES,
   newLinkBearer = () => mintLinkBearer(),
   newLinkHandoffCode = () => mintLinkHandoffCode(),
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler {
@@ -362,13 +366,14 @@ export function createSyncRelayHandler({
     return verifyRelayExchangeKey(presented, relayExchangeKeyHash);
   };
 
-  type ActiveLinkBlobStream = {
+  type ActiveLinkStream = {
     shareId: string;
     terminate: () => void;
   };
   // The relay runs as one process and main.ts creates one handler, so this
-  // intentionally per-process registry reaches every open link-blob response.
-  const activeLinkBlobStreams = new Map<string, Set<ActiveLinkBlobStream>>();
+  // intentionally per-process registry reaches every open accountless link
+  // response.
+  const activeLinkStreams = new Map<string, Set<ActiveLinkStream>>();
   const activeLinkBlobBytes = new Map<string, number>();
   const admitLinkBlobBytes = (
     grantId: string,
@@ -388,40 +393,42 @@ export function createSyncRelayHandler({
       else activeLinkBlobBytes.delete(grantId);
     };
   };
-  const registerLinkBlobStream = (
+  const registerLinkStream = (
     grantId: string,
-    stream: ActiveLinkBlobStream,
+    stream: ActiveLinkStream,
   ): (() => void) => {
-    let streams = activeLinkBlobStreams.get(grantId);
+    let streams = activeLinkStreams.get(grantId);
     if (!streams) {
       streams = new Set();
-      activeLinkBlobStreams.set(grantId, streams);
+      activeLinkStreams.set(grantId, streams);
     }
     streams.add(stream);
     return () => {
-      const registered = activeLinkBlobStreams.get(grantId);
+      const registered = activeLinkStreams.get(grantId);
       if (!registered) return;
       registered.delete(stream);
-      if (registered.size === 0) activeLinkBlobStreams.delete(grantId);
+      if (registered.size === 0) activeLinkStreams.delete(grantId);
     };
   };
-  const terminateLinkBlobStreamsForGrant = (grantId: string): void => {
-    const streams = activeLinkBlobStreams.get(grantId);
+  const terminateLinkStreamsForGrant = (grantId: string): void => {
+    const streams = activeLinkStreams.get(grantId);
     if (!streams) return;
-    activeLinkBlobStreams.delete(grantId);
+    activeLinkStreams.delete(grantId);
     for (const stream of streams) stream.terminate();
   };
-  const terminateLinkBlobStreamsForShare = (shareId: string): void => {
-    const grantIds = [...activeLinkBlobStreams]
+  const terminateLinkStreamsForShare = (shareId: string): void => {
+    const grantIds = [...activeLinkStreams]
       .filter(([, streams]) => [...streams].some((stream) => stream.shareId === shareId))
       .map(([grantId]) => grantId);
-    for (const grantId of grantIds) terminateLinkBlobStreamsForGrant(grantId);
+    for (const grantId of grantIds) terminateLinkStreamsForGrant(grantId);
   };
-  const respondWithLinkBlob = (
+  const respondWithLinkBytes = (
     bytes: Uint8Array,
     shareId: string,
     grantId: string,
-    releaseBytes: () => void,
+    releaseRetainedBytes: () => void,
+    settleEgress: (emittedByteLength: number, settledAtMs: number) => void,
+    headers: Record<string, string>,
   ): Response => {
     let offset = 0;
     let active = true;
@@ -430,20 +437,21 @@ export function createSyncRelayHandler({
       if (!active) return;
       active = false;
       unregister();
-      releaseBytes();
+      releaseRetainedBytes();
+      settleEgress(offset, nowMs());
     };
     const body = new ReadableStream<Uint8Array>(
       {
         start(controller) {
-          const stream: ActiveLinkBlobStream = {
+          const stream: ActiveLinkStream = {
             shareId,
             terminate: () => {
               if (!active) return;
               release();
-              controller.error(new Error("link grant changed during blob stream"));
+              controller.error(new Error("link grant changed during stream"));
             },
           };
-          unregister = registerLinkBlobStream(grantId, stream);
+          unregister = registerLinkStream(grantId, stream);
         },
         pull(controller) {
           if (!active) return;
@@ -452,7 +460,7 @@ export function createSyncRelayHandler({
             controller.close();
             return;
           }
-          const end = Math.min(offset + LINK_BLOB_STREAM_CHUNK_BYTES, bytes.byteLength);
+          const end = Math.min(offset + LINK_STREAM_CHUNK_BYTES, bytes.byteLength);
           controller.enqueue(bytes.subarray(offset, end));
           offset = end;
         },
@@ -462,15 +470,12 @@ export function createSyncRelayHandler({
         },
       },
       // Pull only when the transport asks for another chunk. This keeps one
-      // bounded view, rather than the full blob, queued ahead of backpressure.
+      // bounded view, rather than the full response, queued ahead of backpressure.
       { highWaterMark: 0 },
     );
     return new Response(body, {
       status: 200,
-      headers: {
-        "content-length": String(bytes.byteLength),
-        "content-type": "application/octet-stream",
-      },
+      headers,
     });
   };
 
@@ -880,7 +885,7 @@ export function createSyncRelayHandler({
     );
   };
 
-  const matchRefusedOutwardMove = (
+  const matchRefusedBoundaryMove = (
     selector: AnyShareSelector,
     projection: ReturnType<typeof createAccountlessPathProjection>,
     row: Pick<SyncRelayLogRow, "opKind" | "payloadJson">,
@@ -896,44 +901,58 @@ export function createSyncRelayHandler({
       return null;
     }
     const record = payload as Record<string, unknown>;
+    if (!hasValidShareMomentShape(record)) return null;
     if (record.operation !== "rename") return null;
     const beforePath = record.payloadBeforePath;
     const afterPath = record.payloadAfterPath;
     if (typeof beforePath !== "string" || typeof afterPath !== "string") {
       return null;
     }
-    if (record.path !== afterPath) return null;
-    if (
-      record.beforePath !== undefined &&
-      record.beforePath !== null &&
-      record.beforePath !== beforePath
-    ) {
-      return null;
-    }
-    if (
-      projection.projectPath(beforePath) === null ||
-      projection.projectPath(afterPath) !== null
-    ) {
-      return null;
+    const projectedBeforePath = projection.projectPath(beforePath);
+    const projectedAfterPath = projection.projectPath(afterPath);
+
+    if (projectedBeforePath !== null && projectedAfterPath === null) {
+      // Re-run the visible half as a delete so the existing filter validates
+      // its version and before-path, then emits the standard minimal payload.
+      const deletion = filterOpForShare(
+        selector,
+        row.opKind,
+        JSON.stringify({
+          operation: "delete",
+          versionId: record.versionId,
+          path: beforePath,
+          payloadBeforeBlobSha256: record.payloadBeforeBlobSha256,
+          payloadBeforePath: beforePath,
+          ...(record.beforePath === beforePath ? { beforePath } : {}),
+        }),
+        chatResolver,
+      );
+      return deletion.allowed ? projection.projectPayload(deletion.payload) : null;
     }
 
-    // Re-run the visible half as a delete so the existing filter validates
-    // its version and before-path, then emits the standard minimal payload.
-    // An inward move remains absent until its next in-boundary write.
-    const deletion = filterOpForShare(
-      selector,
-      row.opKind,
-      JSON.stringify({
-        operation: "delete",
-         versionId: record.versionId,
-         path: beforePath,
-         payloadBeforeBlobSha256: record.payloadBeforeBlobSha256,
-         payloadBeforePath: beforePath,
-        ...(record.beforePath === beforePath ? { beforePath } : {}),
-      }),
-      chatResolver,
-    );
-    return deletion.allowed ? projection.projectPayload(deletion.payload) : null;
+    if (projectedBeforePath === null && projectedAfterPath !== null) {
+      // The accountless replica never held the private predecessor, so expose
+      // only the visible half as a create. The normal filter validates the
+      // version and after-path and rebuilds the minimal replay payload.
+      const arrival = filterOpForShare(
+        selector,
+        row.opKind,
+        JSON.stringify({
+          operation: "write",
+          versionId: record.versionId,
+          path: afterPath,
+          payloadAfterBlobSha256: record.payloadAfterBlobSha256,
+          payloadAfterPath: afterPath,
+          ...(record.payloadAfterContentKind === "binary"
+            ? { payloadAfterContentKind: "binary" }
+            : {}),
+        }),
+        chatResolver,
+      );
+      return arrival.allowed ? projection.projectPayload(arrival.payload) : null;
+    }
+
+    return null;
   };
 
   const filteredLogPage = (
@@ -990,7 +1009,7 @@ export function createSyncRelayHandler({
             ? accountlessProjection.projectPayload(decision.payload)
             : decision.payload
           : accountlessProjection
-            ? matchRefusedOutwardMove(
+            ? matchRefusedBoundaryMove(
                 selector,
                 accountlessProjection,
                 row,
@@ -1066,7 +1085,7 @@ export function createSyncRelayHandler({
         }
         if (
           accountlessProjection !== null &&
-          matchRefusedOutwardMove(
+          matchRefusedBoundaryMove(
             selector,
             accountlessProjection,
             row,
@@ -1084,112 +1103,10 @@ export function createSyncRelayHandler({
     return { lastSettledAtMs: null, lastSettledKnown: false };
   };
 
-  const latestPathRelatedMoment = (
-    workspaceId: string,
-    versionId: string,
-    candidate: SyncRelayLogRow,
-    candidateIdentity: SettledMomentIdentity,
-    allowance: LinkCapabilityReadFallbackAllowance,
-  ): SyncRelayLogRow | null => {
-    let latest = candidateIdentity.versionId === versionId ? candidate : null;
-    let trackedObjectId = candidateIdentity.objectId;
-    let trackedPath =
-      candidateIdentity.settledPath ?? candidateIdentity.referencedPaths[0] ?? null;
-    let cursor = candidate.relaySeq;
-    while (allowance.pagesRemaining > 0) {
-      allowance.pagesRemaining -= 1;
-      const page = storage.fetchLogPage({
-        workspaceId,
-        sinceRelaySeq: cursor,
-        limit: linkCapabilityReadFallbackPageSize,
-      });
-      for (const row of page.rows) {
-        const identity = settledMomentIdentity(row);
-        if (!identity || identity.versionId !== versionId) continue;
-        const sameObject =
-          trackedObjectId !== null && identity.objectId === trackedObjectId;
-        const samePath =
-          trackedPath !== null && identity.referencedPaths.includes(trackedPath);
-        if (!sameObject && !samePath) continue;
-        latest = row;
-        trackedObjectId = identity.objectId ?? trackedObjectId;
-        if (!identity.deleted) trackedPath = identity.settledPath ?? trackedPath;
-      }
-      if (!page.hasMore) return latest;
-      cursor = page.nextCursor;
-    }
-    return null;
-  };
-
-  const currentSettledBlobMoment = (
-    workspaceId: string,
-    versionId: string,
-    candidate: SyncRelayLogRow,
-    allowance: LinkCapabilityReadFallbackAllowance,
-  ): SyncRelayLogRow | null => {
-    const candidateIdentity = settledMomentIdentity(candidate);
-    if (!candidateIdentity) return null;
-
-    let current = candidateIdentity.objectId
-      ? storage.latestLogRowForObjectInVersion({
-          workspaceId,
-          objectId: candidateIdentity.objectId,
-          versionId,
-        })
-      : null;
-    if (!current) {
-      const candidatePath =
-        candidateIdentity.settledPath ?? candidateIdentity.referencedPaths[0] ?? null;
-      const currentObjectId = candidatePath
-        ? storage.objectIdAtPathInVersion({ workspaceId, versionId, path: candidatePath })
-        : undefined;
-      current = currentObjectId
-        ? storage.latestLogRowForObjectInVersion({
-            workspaceId,
-            objectId: currentObjectId,
-            versionId,
-          })
-        : latestPathRelatedMoment(
-            workspaceId,
-            versionId,
-            candidate,
-            candidateIdentity,
-            allowance,
-          );
-    }
-    if (!current) return null;
-
-    let currentIdentity = settledMomentIdentity(current);
-    if (!currentIdentity || currentIdentity.deleted) return null;
-
-    if (currentIdentity.objectId && currentIdentity.settledPath) {
-      const occupyingObjectId = storage.objectIdAtPathInVersion({
-        workspaceId,
-        versionId,
-        path: currentIdentity.settledPath,
-      });
-      if (occupyingObjectId && occupyingObjectId !== currentIdentity.objectId) {
-        const occupyingMoment = storage.latestLogRowForObjectInVersion({
-          workspaceId,
-          objectId: occupyingObjectId,
-          versionId,
-        });
-        if (!occupyingMoment) return null;
-        current = occupyingMoment;
-        currentIdentity = settledMomentIdentity(current);
-        if (!currentIdentity || currentIdentity.deleted) return null;
-      }
-    }
-    return current;
-  };
-
   const filteredSharedBlob = (
     workspaceId: string,
     selector: AnyShareSelector,
     sha256: string,
-    semantics:
-      | { kind: "historical-log" }
-      | { kind: "current-state"; epochLogFloor: number },
   ): Uint8Array | null => {
     if (isChatChannelSelector(selector)) return null;
     const versionId = targetVersionId(selector);
@@ -1198,10 +1115,7 @@ export function createSyncRelayHandler({
         workspaceId,
         versionId,
         sha256,
-        semantics:
-          semantics.kind === "current-state" && selector.versionId === null
-            ? "current-state"
-            : "historical-log",
+        semantics: "historical-log",
         ...(selector.paths.length > 0
           ? { selectorPaths: selector.paths }
           : {}),
@@ -1211,30 +1125,11 @@ export function createSyncRelayHandler({
       .sort((left, right) => right.relaySeq - left.relaySeq)
       .slice(0, SHARED_BLOB_CANDIDATE_LIMIT);
     const chatResolver = chatResolverFor(workspaceId);
-    const fallbackAllowance: LinkCapabilityReadFallbackAllowance = {
-      pagesRemaining: LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET,
-    };
     const reachable = candidates.some((row) => {
-      const establishingRow =
-        semantics.kind === "current-state" && selector.versionId === null
-          ? currentSettledBlobMoment(
-              workspaceId,
-              versionId,
-              row,
-              fallbackAllowance,
-            )
-          : row;
-      if (
-        !establishingRow ||
-        (semantics.kind === "current-state" &&
-          establishingRow.relaySeq <= semantics.epochLogFloor)
-      ) {
-        return false;
-      }
       const decision = filterOpForShare(
         selector,
-        establishingRow.opKind,
-        establishingRow.payloadJson,
+        row.opKind,
+        row.payloadJson,
         chatResolver,
       );
       return decision.allowed && decision.blobSha256s.includes(sha256);
@@ -1246,19 +1141,7 @@ export function createSyncRelayHandler({
     workspaceId: string,
     selector: AnyShareSelector,
     sha256: string,
-  ): Uint8Array | null =>
-    filteredSharedBlob(workspaceId, selector, sha256, { kind: "historical-log" });
-
-  const currentSharedBlob = (
-    workspaceId: string,
-    selector: AnyShareSelector,
-    sha256: string,
-    epochLogFloor: number,
-  ): Uint8Array | null =>
-    filteredSharedBlob(workspaceId, selector, sha256, {
-      kind: "current-state",
-      epochLogFloor,
-    });
+  ): Uint8Array | null => filteredSharedBlob(workspaceId, selector, sha256);
 
   const requireLinkRead = (
     request: Request,
@@ -1310,6 +1193,28 @@ export function createSyncRelayHandler({
       throw invalidLinkCapability();
     }
     return fresh;
+  };
+
+  const linkJsonResponse = (
+    shareId: string,
+    grantId: string,
+    body: unknown,
+  ): Response => {
+    const bytes = new TextEncoder().encode(JSON.stringify(body));
+    const settleEgress = linkGrantEgressRateLimiter.reserve(
+      grantId,
+      bytes.byteLength,
+      nowMs(),
+    );
+    if (!settleEgress) throw linkReadRateLimited();
+    return respondWithLinkBytes(
+      bytes,
+      shareId,
+      grantId,
+      () => undefined,
+      settleEgress,
+      { "content-type": "application/json" },
+    );
   };
 
   const requireRefreshableLinkSession = (request: Request, refreshedAtMs: number) => {
@@ -1652,6 +1557,7 @@ export function createSyncRelayHandler({
       }
       if (
         route.route === "link-share" ||
+        route.route === "link-current" ||
         route.route === "link-log" ||
         route.route === "link-blob"
       ) {
@@ -1669,9 +1575,9 @@ export function createSyncRelayHandler({
         if (request.method !== "GET") throw methodNotAllowed();
         const share = storage.getShare(capability.shareId);
         if (!share) throw notFound();
-        const epochLogFloor = storage.getEpochLogFloor(share.workspaceId);
 
         if (route.route === "link-share") {
+          const epochLogFloor = storage.getEpochLogFloor(share.workspaceId);
           const freshness = newestFilteredOpFreshness(
             share.workspaceId,
             capability.effectiveSelector,
@@ -1681,7 +1587,7 @@ export function createSyncRelayHandler({
           const presentation = createAccountlessPathProjection(
             capability.effectiveSelector,
           );
-          return jsonResponse({
+          return linkJsonResponse(capability.shareId, capability.grantId, {
             ok: true,
             effectiveSelector: presentation.selector,
             access: capability.access,
@@ -1689,6 +1595,44 @@ export function createSyncRelayHandler({
           });
         }
 
+        if (route.route === "link-current") {
+          const snapshot = storage.readCurrentFileState({
+            workspaceId: share.workspaceId,
+            versionId: targetVersionId(capability.effectiveSelector),
+            selectorPaths: capability.effectiveSelector.paths,
+            limit: linkCurrentFileLimit,
+          });
+          if (snapshot.tooMany) throw notFound();
+          const presentation = createAccountlessPathProjection(
+            capability.effectiveSelector,
+          );
+          const files = snapshot.files.map((file) => {
+            const path = presentation.projectPath(file.path);
+            if (path === null) throw notFound();
+            return {
+              path,
+              blobSha256: file.blobSha256,
+              contentKind: file.contentKind,
+            };
+          });
+          const freshness = newestFilteredOpFreshness(
+            share.workspaceId,
+            capability.effectiveSelector,
+            snapshot.epochLogFloor,
+          );
+          requireFreshLinkRead(capabilityToken, capability);
+          return linkJsonResponse(capability.shareId, capability.grantId, {
+            ok: true,
+            effectiveSelector: presentation.selector,
+            access: capability.access,
+            files,
+            nextCursor: snapshot.nextCursor,
+            epochLogFloor: snapshot.epochLogFloor,
+            ...freshness,
+          });
+        }
+
+        const epochLogFloor = storage.getEpochLogFloor(share.workspaceId);
         if (route.route === "link-log") {
           const url = new URL(request.url);
           const requestedSince = parseCursor(url.searchParams.get("since"));
@@ -1702,29 +1646,67 @@ export function createSyncRelayHandler({
             "accountless",
           );
           requireFreshLinkRead(capabilityToken, capability);
-          return jsonResponse({ ok: true, ...page, epochLogFloor });
+          return linkJsonResponse(capability.shareId, capability.grantId, {
+            ok: true,
+            ...page,
+            epochLogFloor,
+          });
         }
 
         assertSha256(route.sha256);
-        const blob = currentSharedBlob(
-          share.workspaceId,
-          capability.effectiveSelector,
-          route.sha256,
+        const byteLength = storage.currentFileBlobByteLength({
+          workspaceId: share.workspaceId,
+          versionId: targetVersionId(capability.effectiveSelector),
+          selectorPaths: capability.effectiveSelector.paths,
+          sha256: route.sha256,
           epochLogFloor,
-        );
-        if (!blob) throw notFound();
-        requireFreshLinkRead(capabilityToken, capability);
+        });
+        if (
+          byteLength === null ||
+          !Number.isSafeInteger(byteLength) ||
+          byteLength < 0 ||
+          byteLength > MAX_BLOB_BYTES
+        ) {
+          throw notFound();
+        }
         const releaseBytes = admitLinkBlobBytes(
           capability.grantId,
-          blob.byteLength,
+          byteLength,
         );
         if (!releaseBytes) throw linkReadRateLimited();
-        return respondWithLinkBlob(
-          blob,
-          capability.shareId,
+        const settleEgress = linkGrantEgressRateLimiter.reserve(
           capability.grantId,
-          releaseBytes,
+          byteLength,
+          nowMs(),
         );
+        if (!settleEgress) {
+          releaseBytes();
+          throw linkReadRateLimited();
+        }
+        let streamOwnsAdmission = false;
+        try {
+          const blob = storage.getBlob(share.workspaceId, route.sha256);
+          if (!blob || blob.byteLength !== byteLength) throw notFound();
+          requireFreshLinkRead(capabilityToken, capability);
+          const response = respondWithLinkBytes(
+            blob,
+            capability.shareId,
+            capability.grantId,
+            releaseBytes,
+            settleEgress,
+            {
+              "content-length": String(byteLength),
+              "content-type": "application/octet-stream",
+            },
+          );
+          streamOwnsAdmission = true;
+          return response;
+        } finally {
+          if (!streamOwnsAdmission) {
+            releaseBytes();
+            settleEgress(0, nowMs());
+          }
+        }
       }
       const actor = await resolveActor(request, "workspaceId" in route ? route.workspaceId : "");
       if (
@@ -1860,7 +1842,7 @@ export function createSyncRelayHandler({
           throw notFound();
         }
         if (!secret) throw notFound();
-        terminateLinkBlobStreamsForGrant(result.grant.grantId);
+        terminateLinkStreamsForGrant(result.grant.grantId);
         return jsonResponse({
           ok: true,
           ...linkGrantBody(result.grant),
@@ -1897,7 +1879,7 @@ export function createSyncRelayHandler({
           }
           throw notFound();
         }
-        terminateLinkBlobStreamsForGrant(result.grant.grantId);
+        terminateLinkStreamsForGrant(result.grant.grantId);
         return jsonResponse({
           ok: true,
           ...linkGrantBody(result.grant),
@@ -1945,11 +1927,11 @@ export function createSyncRelayHandler({
             }
             throw notFound();
           }
-          terminateLinkBlobStreamsForGrant(result.grant.grantId);
+          terminateLinkStreamsForGrant(result.grant.grantId);
           return jsonResponse({ ok: true, ...linkGrantBody(result.grant) });
         }
         if (storage.revokeShare(route.shareId, nowMs())) {
-          terminateLinkBlobStreamsForShare(route.shareId);
+          terminateLinkStreamsForShare(route.shareId);
         }
         return jsonResponse({ ok: true, shareId: route.shareId });
       }
@@ -3202,6 +3184,7 @@ function parseRoute(request: Request): SyncRelayRoute {
   }
   if (parts.length === 3 && parts[0] === "sync" && parts[1] === "link") {
     if (parts[2] === "share") return { route: "link-share" };
+    if (parts[2] === "current") return { route: "link-current" };
     if (parts[2] === "log") return { route: "link-log" };
   }
   if (

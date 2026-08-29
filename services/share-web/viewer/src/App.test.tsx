@@ -6,6 +6,7 @@ import {
   App,
   dohcNavigation,
   fileTree,
+  loadCurrentState,
   loadLog,
   MARKDOWN_PREVIEW_BYTE_CAP,
   MAX_LOG_PAGES,
@@ -102,6 +103,21 @@ function logPage(files: readonly SharedFile[]): Response {
         }],
     files.length,
   );
+}
+
+function currentPage(
+  files: readonly SharedFile[],
+  nextCursor = files.length,
+  epochLogFloor = 0,
+  meta: ViewMeta = DEFAULT_META,
+): Response {
+  return jsonResponse({
+    ok: true,
+    ...meta,
+    files,
+    nextCursor,
+    epochLogFloor,
+  });
 }
 
 interface ReferenceFolderNode {
@@ -210,6 +226,7 @@ describe("App", () => {
     return vi.fn<typeof fetch>(async (input, init) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage([], 0);
       if (path === "/api/view/log?since=0&limit=500") return logPage([]);
       if (path === "/api/handoff") return handoff(init);
       throw new Error(`Unexpected request: ${path}`);
@@ -588,6 +605,7 @@ describe("App", () => {
     const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage([], 0);
       if (path === "/api/view/log?since=0&limit=500") return logPage([]);
       if (path === "/api/handoff") {
         firstHandoffSignal = init?.signal ?? undefined;
@@ -633,11 +651,10 @@ describe("App", () => {
     });
     const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
       const path = requestPath(input);
+      if (path === "/api/view/current") return currentPage([], 0);
       if (path === "/api/view/meta") {
         metaRequests += 1;
-        return metaRequests === 1
-          ? jsonResponse(DEFAULT_META)
-          : new Response(null, { status: 404 });
+        return new Response(null, { status: 404 });
       }
       if (path === "/api/view/log?since=0&limit=500") {
         logRequests += 1;
@@ -680,6 +697,7 @@ describe("App", () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage([], 0);
       if (path === "/api/view/log?since=0&limit=500") return logPage([]);
       throw new Error(`Unexpected request: ${path}`);
     });
@@ -700,38 +718,38 @@ describe("App", () => {
     expect(container.textContent).not.toContain("This link isn't available.");
   });
 
-  it("retries throttled metadata during the initial load", async () => {
+  it("retries a throttled current-state projection during the initial load", async () => {
     vi.useFakeTimers();
-    let metaRequests = 0;
+    let currentRequests = 0;
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
-      if (path === "/api/view/meta") {
-        metaRequests += 1;
-        return metaRequests === 1
+      if (path === "/api/view/current") {
+        currentRequests += 1;
+        return currentRequests === 1
           ? new Response(null, { status: 429 })
-          : jsonResponse(DEFAULT_META);
+          : currentPage([], 0);
       }
       if (path === "/api/view/log?since=0&limit=500") return logPage([]);
       throw new Error(`Unexpected request: ${path}`);
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    await renderApp(() => metaRequests === 1);
+    await renderApp(() => currentRequests === 1);
 
-    expect(metaRequests).toBe(1);
+    expect(currentRequests).toBe(1);
     expect(container.textContent).toContain("Opening shared files");
     expect(container.textContent).not.toContain("This link isn't available.");
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(999);
     });
-    expect(metaRequests).toBe(1);
+    expect(currentRequests).toBe(1);
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1);
     });
 
-    expect(metaRequests).toBe(2);
+    expect(currentRequests).toBe(2);
     expect(container.querySelector("header")?.textContent).toContain(
       "Shared by a dohc user",
     );
@@ -750,6 +768,7 @@ describe("App", () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage([file], 0);
       if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
       if (path === `/api/view/blob/${file.blobSha256}`) {
         return new Response("# Shared file");
@@ -821,24 +840,20 @@ describe("App", () => {
     expect(tree.files).toHaveLength(3);
   });
 
-  it("cancels an in-flight initial log scan on unmount", async () => {
-    const logPaths: string[] = [];
-    let logSignal: AbortSignal | undefined;
-    let releaseFirstPage: (() => void) | undefined;
-    const firstPageHeld = new Promise<void>((resolve) => {
-      releaseFirstPage = resolve;
+  it("cancels an in-flight current-state load on unmount", async () => {
+    const currentPaths: string[] = [];
+    let currentSignal: AbortSignal | undefined;
+    let releaseCurrent: (() => void) | undefined;
+    const currentHeld = new Promise<void>((resolve) => {
+      releaseCurrent = resolve;
     });
     const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
       const path = requestPath(input);
-      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
-      if (path.startsWith("/api/view/log?")) {
-        logPaths.push(path);
-        logSignal = init?.signal ?? undefined;
-        if (logPaths.length === 1) {
-          await firstPageHeld;
-          return logOpsPage([], 1, true);
-        }
-        return logOpsPage([], 2);
+      if (path === "/api/view/current") {
+        currentPaths.push(path);
+        currentSignal = init?.signal ?? undefined;
+        await currentHeld;
+        return currentPage([], 1);
       }
       throw new Error(`Unexpected request: ${path}`);
     });
@@ -849,42 +864,37 @@ describe("App", () => {
       root?.render(<App />);
       await Promise.resolve();
     });
-    expect(logPaths).toEqual(["/api/view/log?since=0&limit=500"]);
+    expect(currentPaths).toEqual(["/api/view/current"]);
 
     act(() => root?.unmount());
     root = null;
-    releaseFirstPage?.();
-    await settle(() => logSignal?.aborted === true);
+    releaseCurrent?.();
+    await settle(() => currentSignal?.aborted === true);
 
-    expect(logPaths).toEqual(["/api/view/log?since=0&limit=500"]);
-    expect(logSignal).toBeInstanceOf(AbortSignal);
-    expect(logSignal?.aborted).toBe(true);
+    expect(currentPaths).toEqual(["/api/view/current"]);
+    expect(currentSignal).toBeInstanceOf(AbortSignal);
+    expect(currentSignal?.aborted).toBe(true);
     expect(container.textContent).not.toContain("This link isn't available.");
   });
 
-  it("cancels an in-flight initial meta request on unmount", async () => {
-    let metaSignal: AbortSignal | undefined;
-    let logSignal: AbortSignal | undefined;
-    let metaAborts = 0;
-    let releaseMeta: ((response: Response) => void) | undefined;
-    let rejectMeta: ((reason: unknown) => void) | undefined;
-    const metaHeld = new Promise<Response>((resolve, reject) => {
-      releaseMeta = resolve;
-      rejectMeta = reject;
+  it("aborts the current-state request when the initial viewer unmounts", async () => {
+    let currentSignal: AbortSignal | undefined;
+    let currentAborts = 0;
+    let releaseCurrent: ((response: Response) => void) | undefined;
+    let rejectCurrent: ((reason: unknown) => void) | undefined;
+    const currentHeld = new Promise<Response>((resolve, reject) => {
+      releaseCurrent = resolve;
+      rejectCurrent = reject;
     });
     const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
       const path = requestPath(input);
-      if (path === "/api/view/meta") {
-        metaSignal = init?.signal ?? undefined;
-        metaSignal?.addEventListener("abort", () => {
-          metaAborts += 1;
-          rejectMeta?.(new DOMException("The request was aborted.", "AbortError"));
+      if (path === "/api/view/current") {
+        currentSignal = init?.signal ?? undefined;
+        currentSignal?.addEventListener("abort", () => {
+          currentAborts += 1;
+          rejectCurrent?.(new DOMException("The request was aborted.", "AbortError"));
         }, { once: true });
-        return metaHeld;
-      }
-      if (path === "/api/view/log?since=0&limit=500") {
-        logSignal = init?.signal ?? undefined;
-        return logPage([]);
+        return currentHeld;
       }
       throw new Error(`Unexpected request: ${path}`);
     });
@@ -898,13 +908,12 @@ describe("App", () => {
 
     act(() => root?.unmount());
     root = null;
-    releaseMeta?.(jsonResponse(DEFAULT_META));
-    await settle(() => metaSignal?.aborted === true && metaAborts === 1);
+    releaseCurrent?.(currentPage([]));
+    await settle(() => currentSignal?.aborted === true && currentAborts === 1);
 
-    expect(metaSignal).toBeInstanceOf(AbortSignal);
-    expect(metaSignal).toBe(logSignal);
-    expect(metaSignal?.aborted).toBe(true);
-    expect(metaAborts).toBe(1);
+    expect(currentSignal).toBeInstanceOf(AbortSignal);
+    expect(currentSignal?.aborted).toBe(true);
+    expect(currentAborts).toBe(1);
     expect(container.textContent).not.toContain("This link isn't available.");
   });
 
@@ -919,6 +928,7 @@ describe("App", () => {
       const path = requestPath(input);
       requestInits.set(path, init);
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage([file], 0);
       if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
       if (path === `/api/view/blob/${file.blobSha256}`) {
         return new Response("# Shared file");
@@ -929,8 +939,8 @@ describe("App", () => {
 
     await renderApp();
 
-    const metaRequestInit = requestInits.get("/api/view/meta");
-    expect(metaRequestInit).toMatchObject({
+    const currentRequestInit = requestInits.get("/api/view/current");
+    expect(currentRequestInit).toMatchObject({
       credentials: "same-origin",
       headers: { "x-dohc-link-session": SESSION },
     });
@@ -939,9 +949,9 @@ describe("App", () => {
       credentials: "same-origin",
       headers: { "x-dohc-link-session": SESSION },
     });
-    expect(metaRequestInit?.signal).toBeInstanceOf(AbortSignal);
+    expect(currentRequestInit?.signal).toBeInstanceOf(AbortSignal);
     expect(logRequestInit?.signal).toBeInstanceOf(AbortSignal);
-    expect(metaRequestInit?.signal).toBe(logRequestInit?.signal);
+    expect(currentRequestInit?.signal).toBe(logRequestInit?.signal);
     const blobRequestInit = requestInits.get(`/api/view/blob/${file.blobSha256}`);
     expect(blobRequestInit).toMatchObject({
       credentials: "same-origin",
@@ -958,6 +968,7 @@ describe("App", () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") return jsonResponse(meta);
+      if (path === "/api/view/current") return currentPage([], 0, 0, meta);
       if (path === "/api/view/log?since=0&limit=500") return logPage([]);
       throw new Error(`Unexpected request: ${path}`);
     });
@@ -991,6 +1002,15 @@ describe("App", () => {
       const path = requestPath(input);
       if (path === "/api/view/meta") {
         return jsonResponse({
+          ...DEFAULT_META,
+          effectiveSelector: {
+            ...DEFAULT_META.effectiveSelector,
+            paths: ["docs"],
+          },
+        });
+      }
+      if (path === "/api/view/current") {
+        return currentPage([readme, target], 0, 0, {
           ...DEFAULT_META,
           effectiveSelector: {
             ...DEFAULT_META.effectiveSelector,
@@ -1074,6 +1094,7 @@ describe("App", () => {
         if (metaRequests > 1) await refreshHeld;
         return jsonResponse(DEFAULT_META);
       }
+      if (path === "/api/view/current") return currentPage([staleFile], 0);
       if (path.startsWith("/api/view/log?")) logPaths.push(path);
       if (path === "/api/view/log?since=0&limit=500") {
         return logPage([staleFile]);
@@ -1112,7 +1133,7 @@ describe("App", () => {
     expect(container.querySelector(".badge")?.textContent).toBe("View");
     expect(container.querySelector('nav[aria-label="Shared files"]')?.textContent)
       .toContain(staleFile.path);
-    expect(metaRequests).toBe(2);
+    expect(metaRequests).toBe(1);
     expect(logPaths).toEqual([
       "/api/view/log?since=0&limit=500",
       "/api/view/log?since=1&limit=500",
@@ -1146,6 +1167,7 @@ describe("App", () => {
         return jsonResponse(DEFAULT_META);
       }
       if (path.startsWith("/api/view/log?")) logPaths.push(path);
+      if (path === "/api/view/current") return currentPage([file], 0);
       if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
       if (path === "/api/view/log?since=1&limit=500") {
         return logOpsPage([], 1);
@@ -1173,7 +1195,7 @@ describe("App", () => {
     expect(container.querySelector('nav[aria-label="Shared files"]')?.textContent)
       .toContain(file.path);
     expect({ metaRequests, logPaths, blobRequests }).toEqual({
-      metaRequests: 2,
+      metaRequests: 1,
       logPaths: [
         "/api/view/log?since=0&limit=500",
         "/api/view/log?since=1&limit=500",
@@ -1193,6 +1215,7 @@ describe("App", () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage([file], 0);
       if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
       if (path === `/api/view/blob/${file.blobSha256}`) {
         blobRequests += 1;
@@ -1226,6 +1249,7 @@ describe("App", () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage([file], 0);
       if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
       if (path === `/api/view/blob/${file.blobSha256}`) {
         blobRequests += 1;
@@ -1262,6 +1286,9 @@ describe("App", () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") {
+        return currentPage([firstFile, secondFile], 0);
+      }
       if (path === "/api/view/log?since=0&limit=500") {
         return logPage([firstFile, secondFile]);
       }
@@ -1317,6 +1344,9 @@ describe("App", () => {
     const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") {
+        return currentPage([firstFile, secondFile], 0);
+      }
       if (path === "/api/view/log?since=0&limit=500") {
         return logPage([firstFile, secondFile]);
       }
@@ -1406,6 +1436,7 @@ describe("App", () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage([], 0);
       if (path === "/api/view/log?since=0&limit=500") return logPage([]);
       throw new Error(`Unexpected request: ${path}`);
     });
@@ -1427,8 +1458,8 @@ describe("App", () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
       if (path === "/api/exchange") return exchangeResponse;
-      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
-      if (path === "/api/view/log?since=0&limit=500") return logPage([]);
+      if (path === "/api/view/current") return currentPage([]);
+      if (path === "/api/view/log?since=0&limit=500") return logOpsPage([], 0);
       throw new Error(`Unexpected request: ${path}`);
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -1467,6 +1498,7 @@ describe("App", () => {
         return jsonResponse({ session: SESSION });
       }
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage([], 0);
       if (path === "/api/view/log?since=0&limit=500") return logPage([]);
       throw new Error(`Unexpected request: ${path}`);
     });
@@ -1532,6 +1564,7 @@ describe("App", () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage([file], 0);
       if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
       throw new Error(`Unexpected request: ${path}`);
     });
@@ -1585,6 +1618,7 @@ describe("App", () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage([file], 0);
       if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
       if (path === downloadPath) {
         downloadRequests.push(path);
@@ -1648,6 +1682,7 @@ describe("App", () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage([file], 0);
       if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
       if (path === downloadPath) {
         downloadRequests += 1;
@@ -1698,6 +1733,7 @@ describe("App", () => {
     const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage([file], 0);
       if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
       if (path === downloadPath) {
         downloadRequests += 1;
@@ -1748,6 +1784,7 @@ describe("App", () => {
     const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage([file], 0);
       if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
       if (path === downloadPath) {
         const signal = init?.signal;
@@ -1798,6 +1835,7 @@ describe("App", () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage([file], 0);
       if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
       if (path === downloadPath) {
         downloadRequests.push(path);
@@ -1867,6 +1905,7 @@ describe("App", () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage([file], 0);
       if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
       throw new Error(`Unexpected request: ${path}`);
     });
@@ -1987,6 +2026,7 @@ describe("App", () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage([file], 0);
       if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
       if (path === `/api/view/blob/${file.blobSha256}`) {
         return new Response(body);
@@ -2024,6 +2064,7 @@ describe("App", () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage([file], 0);
       if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
       if (path === `/api/view/blob/${file.blobSha256}`) {
         return new Response(markdown);
@@ -2059,6 +2100,7 @@ describe("App", () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") return jsonResponse(meta);
+      if (path === "/api/view/current") return currentPage([file], 0, 0, meta);
       if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
       throw new Error(`Unexpected request: ${path}`);
     });
@@ -2090,16 +2132,9 @@ describe("App", () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage([file], 17);
       if (path.startsWith("/api/view/log?")) {
         logPaths.push(path);
-        if (logPaths.length === 1) {
-          return logOpsPage([{
-            relaySeq: 17,
-            opKind: "version.create",
-            payload: { forkSnapshots: [file] },
-            recordedAtMs: 1,
-          }], 17);
-        }
         return logOpsPage([], 17);
       }
       throw new Error(`Unexpected request: ${path}`);
@@ -2109,7 +2144,7 @@ describe("App", () => {
     await renderApp();
 
     expect(logPaths).toEqual([
-      "/api/view/log?since=0&limit=500",
+      "/api/view/log?since=17&limit=500",
     ]);
 
     await act(async () => {
@@ -2117,7 +2152,7 @@ describe("App", () => {
     });
 
     expect(logPaths).toEqual([
-      "/api/view/log?since=0&limit=500",
+      "/api/view/log?since=17&limit=500",
       "/api/view/log?since=17&limit=500",
     ]);
   });
@@ -2134,36 +2169,28 @@ describe("App", () => {
       blobSha256: "5".repeat(64),
       contentKind: "text",
     };
-    const initialOps: RelayOp[] = [{
-      relaySeq: 7,
-      opKind: "version.create",
-      payload: { forkSnapshots: [removedFile, survivingFile] },
-      recordedAtMs: 1,
-    }];
-    const postRotationOps: RelayOp[] = [{
-      relaySeq: 11,
-      opKind: "moment.append",
-      payload: {
-        operation: "write",
-        payloadAfterPath: survivingFile.path,
-        payloadAfterBlobSha256: "6".repeat(64),
-        payloadAfterContentKind: "text",
-      },
-      recordedAtMs: 2,
-    }];
+    const rotatedFile = { ...survivingFile, blobSha256: "6".repeat(64) };
     const logPaths: string[] = [];
+    let currentRequests = 0;
+    let sinceSevenRequests = 0;
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") {
+        currentRequests += 1;
+        return currentRequests === 1
+          ? currentPage([removedFile, survivingFile], 7, 0)
+          : currentPage([rotatedFile], 11, 10);
+      }
       if (path.startsWith("/api/view/log?")) logPaths.push(path);
-      if (path === "/api/view/log?since=0&limit=500") {
-        return logOpsPage(initialOps, 7);
-      }
       if (path === "/api/view/log?since=7&limit=500") {
-        return logOpsPage(postRotationOps, 11, false, 10);
+        sinceSevenRequests += 1;
+        return sinceSevenRequests === 1
+          ? logOpsPage([], 7, false, 0)
+          : logOpsPage([], 11, false, 10);
       }
-      if (path === "/api/view/log?since=10&limit=500") {
-        return logOpsPage(postRotationOps, 11, false, 10);
+      if (path === "/api/view/log?since=11&limit=500") {
+        return logOpsPage([], 11, false, 10);
       }
       throw new Error(`Unexpected request: ${path}`);
     });
@@ -2184,13 +2211,13 @@ describe("App", () => {
     expect(renderedFilePaths()).toEqual(["survives.txt"]);
     expect(container.querySelector("h1")?.textContent).toBe("survives.txt");
     expect(logPaths).toEqual([
-      "/api/view/log?since=0&limit=500",
       "/api/view/log?since=7&limit=500",
-      "/api/view/log?since=10&limit=500",
+      "/api/view/log?since=7&limit=500",
+      "/api/view/log?since=11&limit=500",
     ]);
   });
 
-  it("keeps an unchanged Markdown preview across an epoch replay", async () => {
+  it("keeps an unchanged Markdown preview across an epoch reload", async () => {
     vi.useFakeTimers();
     const initialFile: SharedFile = {
       path: "guide.md",
@@ -2201,18 +2228,6 @@ describe("App", () => {
       ...initialFile,
       blobSha256: "b".repeat(64),
     };
-    const initialOps: RelayOp[] = [{
-      relaySeq: 7,
-      opKind: "version.create",
-      payload: { forkSnapshots: [initialFile] },
-      recordedAtMs: 1,
-    }];
-    const replayOps: RelayOp[] = [{
-      relaySeq: 11,
-      opKind: "version.create",
-      payload: { forkSnapshots: [{ ...initialFile }] },
-      recordedAtMs: 2,
-    }];
     const changedOps: RelayOp[] = [{
       relaySeq: 12,
       opKind: "moment.append",
@@ -2227,23 +2242,32 @@ describe("App", () => {
       recordedAtMs: 3,
     }];
     const logPaths: string[] = [];
+    let currentRequests = 0;
+    let sinceSevenRequests = 0;
+    let sinceElevenRequests = 0;
     let initialBlobRequests = 0;
     let changedBlobRequests = 0;
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") {
+        currentRequests += 1;
+        return currentRequests === 1
+          ? currentPage([initialFile], 7, 0)
+          : currentPage([initialFile], 11, 10);
+      }
       if (path.startsWith("/api/view/log?")) logPaths.push(path);
-      if (path === "/api/view/log?since=0&limit=500") {
-        return logOpsPage(initialOps, 7);
-      }
       if (path === "/api/view/log?since=7&limit=500") {
-        return logOpsPage([], 10, false, 10);
-      }
-      if (path === "/api/view/log?since=10&limit=500") {
-        return logOpsPage(replayOps, 11, false, 10);
+        sinceSevenRequests += 1;
+        return sinceSevenRequests === 1
+          ? logOpsPage([], 7, false, 0)
+          : logOpsPage([], 10, false, 10);
       }
       if (path === "/api/view/log?since=11&limit=500") {
-        return logOpsPage(changedOps, 12, false, 10);
+        sinceElevenRequests += 1;
+        return sinceElevenRequests === 1
+          ? logOpsPage([], 11, false, 10)
+          : logOpsPage(changedOps, 12, false, 10);
       }
       if (path === `/api/view/blob/${initialFile.blobSha256}`) {
         initialBlobRequests += 1;
@@ -2283,9 +2307,9 @@ describe("App", () => {
       "Changed preview",
     );
     expect(logPaths).toEqual([
-      "/api/view/log?since=0&limit=500",
       "/api/view/log?since=7&limit=500",
-      "/api/view/log?since=10&limit=500",
+      "/api/view/log?since=7&limit=500",
+      "/api/view/log?since=11&limit=500",
       "/api/view/log?since=11&limit=500",
     ]);
   });
@@ -2431,15 +2455,17 @@ describe("App", () => {
       },
     ];
     const logPaths: string[] = [];
+    let sinceOneRequests = 0;
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage([fileA, fileB], 1);
       if (path.startsWith("/api/view/log?")) logPaths.push(path);
-      if (path === "/api/view/log?since=0&limit=500") {
-        return logOpsPage(initialOps, 1);
-      }
       if (path === "/api/view/log?since=1&limit=500") {
-        return logOpsPage(deltaOps, 8);
+        sinceOneRequests += 1;
+        return sinceOneRequests === 1
+          ? logOpsPage([], 1)
+          : logOpsPage(deltaOps, 8);
       }
       if (path === "/api/view/log?since=8&limit=500") {
         return logOpsPage(deleteOps, 10);
@@ -2469,13 +2495,13 @@ describe("App", () => {
     expect(afterDelete).toEqual(["a.txt", "final-b.txt"]);
     expect(renderedFilePaths()).toEqual(afterDelete);
     expect(logPaths).toEqual([
-      "/api/view/log?since=0&limit=500",
+      "/api/view/log?since=1&limit=500",
       "/api/view/log?since=1&limit=500",
       "/api/view/log?since=8&limit=500",
     ]);
   });
 
-  it("matches a full replay when the initial log spans pages", async () => {
+  it("opens from current state without requesting historical log pages", async () => {
     const fileA: SharedFile = {
       path: "a.txt",
       blobSha256: "4".repeat(64),
@@ -2531,15 +2557,14 @@ describe("App", () => {
       },
     ];
     const logPaths: string[] = [];
+    const fullReplay = filesFromLog([...firstPageOps, ...secondPageOps]);
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage(fullReplay, 10);
       if (path.startsWith("/api/view/log?")) logPaths.push(path);
-      if (path === "/api/view/log?since=0&limit=500") {
-        return logOpsPage(firstPageOps, 7, true);
-      }
-      if (path === "/api/view/log?since=7&limit=500") {
-        return logOpsPage(secondPageOps, 10);
+      if (path === "/api/view/log?since=10&limit=500") {
+        return logOpsPage([], 10);
       }
       throw new Error(`Unexpected request: ${path}`);
     });
@@ -2547,17 +2572,146 @@ describe("App", () => {
 
     await renderApp();
 
-    const fullReplay = filesFromLog([...firstPageOps, ...secondPageOps])
-      .map((file) => file.path);
-    expect(fullReplay).toEqual(["new.txt", "renamed.txt"]);
-    expect(renderedFilePaths()).toEqual(fullReplay);
+    expect(fullReplay.map((file) => file.path)).toEqual(["new.txt", "renamed.txt"]);
+    expect(renderedFilePaths()).toEqual(fullReplay.map((file) => file.path));
     expect(logPaths).toEqual([
-      "/api/view/log?since=0&limit=500",
-      "/api/view/log?since=7&limit=500",
+      "/api/view/log?since=10&limit=500",
     ]);
   });
 
-  it("restarts one load when the epoch floor changes between pages", async () => {
+  it("applies the first forward page before the current projection becomes ready", async () => {
+    const initialFile: SharedFile = {
+      path: "before.txt",
+      blobSha256: "4".repeat(64),
+      contentKind: "text",
+    };
+    const renamedFile: SharedFile = {
+      ...initialFile,
+      path: "after.txt",
+    };
+    const logPaths: string[] = [];
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/current") return currentPage([initialFile], 7);
+      if (path.startsWith("/api/view/log?")) logPaths.push(path);
+      if (path === "/api/view/log?since=7&limit=500") {
+        return logOpsPage([{
+          relaySeq: 8,
+          opKind: "moment.append",
+          payload: {
+            operation: "rename",
+            payloadBeforePath: initialFile.path,
+            payloadBeforeBlobSha256: initialFile.blobSha256,
+            payloadAfterPath: renamedFile.path,
+            payloadAfterBlobSha256: renamedFile.blobSha256,
+            payloadAfterContentKind: renamedFile.contentKind,
+          },
+          recordedAtMs: 8,
+        }], 8);
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+
+    expect(renderedFilePaths()).toEqual([renamedFile.path]);
+    expect(logPaths).toEqual(["/api/view/log?since=7&limit=500"]);
+  });
+
+  it.each([
+    ["duplicate file paths", {
+      ...DEFAULT_META,
+      ok: true,
+      files: [
+        { path: "same.txt", blobSha256: "1".repeat(64), contentKind: "text" },
+        { path: "same.txt", blobSha256: "2".repeat(64), contentKind: "text" },
+      ],
+      nextCursor: 2,
+      epochLogFloor: 0,
+    }],
+    ["a cursor below the epoch floor", {
+      ...DEFAULT_META,
+      ok: true,
+      files: [],
+      nextCursor: 1,
+      epochLogFloor: 2,
+    }],
+    ["an unsupported access level", {
+      ...DEFAULT_META,
+      ok: true,
+      access: "edit",
+      files: [],
+      nextCursor: 0,
+      epochLogFloor: 0,
+    }],
+    ["an invalid file digest", {
+      ...DEFAULT_META,
+      ok: true,
+      files: [{ path: "bad.txt", blobSha256: "short", contentKind: "text" }],
+      nextCursor: 1,
+      epochLogFloor: 0,
+    }],
+  ])("rejects current state with %s", async (_label, projection) => {
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/current") return jsonResponse(projection);
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+
+    await expect(loadCurrentState(SESSION)).rejects.toThrow("refused");
+  });
+
+  it.each([
+    ["a non-boolean continuation flag", {
+      ops: [], nextCursor: 1, hasMore: "false", epochLogFloor: 0,
+    }],
+    ["an unsafe operation sequence", {
+      ops: [{ relaySeq: Number.MAX_SAFE_INTEGER + 1, opKind: "moment.append", payload: {}, recordedAtMs: 1 }],
+      nextCursor: 1,
+      hasMore: false,
+      epochLogFloor: 0,
+    }],
+    ["an unsupported operation kind", {
+      ops: [{ relaySeq: 1, opKind: "unknown", payload: {}, recordedAtMs: 1 }],
+      nextCursor: 1,
+      hasMore: false,
+      epochLogFloor: 0,
+    }],
+    ["an unsafe operation timestamp", {
+      ops: [{ relaySeq: 1, opKind: "moment.append", payload: {}, recordedAtMs: 1.5 }],
+      nextCursor: 1,
+      hasMore: false,
+      epochLogFloor: 0,
+    }],
+    ["a stale operation sequence", {
+      ops: [{ relaySeq: 0, opKind: "moment.append", payload: {}, recordedAtMs: 1 }],
+      nextCursor: 1,
+      hasMore: false,
+      epochLogFloor: 0,
+    }],
+    ["operations outside strict relay order", {
+      ops: [
+        { relaySeq: 2, opKind: "moment.append", payload: {}, recordedAtMs: 1 },
+        { relaySeq: 1, opKind: "moment.append", payload: {}, recordedAtMs: 1 },
+      ],
+      nextCursor: 2,
+      hasMore: false,
+      epochLogFloor: 0,
+    }],
+    ["an operation beyond the page cursor", {
+      ops: [{ relaySeq: 2, opKind: "moment.append", payload: {}, recordedAtMs: 1 }],
+      nextCursor: 1,
+      hasMore: false,
+      epochLogFloor: 0,
+    }],
+  ])("rejects %s", async (_label, page) => {
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => jsonResponse(page)));
+
+    await expect(loadLog(SESSION, 0, new Map(), 1)).rejects.toThrow("refused");
+  });
+
+  it("rejects a forward load when the epoch floor changes between pages", async () => {
     const priorEpochFile: SharedFile = {
       path: "prior-epoch.txt",
       blobSha256: "1".repeat(64),
@@ -2596,28 +2750,16 @@ describe("App", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const loaded = await loadLog(
+    await expect(loadLog(
       SESSION,
       5,
       new Map([[priorEpochFile.path, priorEpochFile]]),
       3,
-    );
-
-    expect({
-      files: [...loaded.fileAccumulator.keys()].sort(),
-      nextCursor: loaded.nextCursor,
-      epochLogFloor: loaded.epochLogFloor,
-      logPaths,
-    }).toEqual({
-      files: [rotatedEpochFile.path],
-      nextCursor: 11,
-      epochLogFloor: 10,
-      logPaths: [
-        "/api/view/log?since=5&limit=500",
-        "/api/view/log?since=6&limit=500",
-        "/api/view/log?since=10&limit=500",
-      ],
-    });
+    )).rejects.toThrow("epoch floor changed");
+    expect(logPaths).toEqual([
+      "/api/view/log?since=5&limit=500",
+      "/api/view/log?since=6&limit=500",
+    ]);
   });
 
   it("keeps one fold when the epoch floor stays stable between pages", async () => {
@@ -2710,20 +2852,26 @@ describe("App", () => {
     };
     const metaPaths: string[] = [];
     const logPaths: string[] = [];
+    let sinceOneRequests = 0;
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") {
         metaPaths.push(path);
-        return jsonResponse(metaPaths.length === 1
-          ? DEFAULT_META
-          : { ...DEFAULT_META, lastSettledAtMs: startedAt + 4 * 60_000 });
+        return jsonResponse({
+          ...DEFAULT_META,
+          lastSettledAtMs: startedAt + 4 * 60_000,
+        });
       }
+      if (path === "/api/view/current") return currentPage([initialFile], 1);
       if (path.startsWith("/api/view/log?")) logPaths.push(path);
       if (path === "/api/view/log?since=0&limit=500") {
         return logPage([initialFile]);
       }
       if (path === "/api/view/log?since=1&limit=500") {
-        return logOpsPage([addedFileOp], 2);
+        sinceOneRequests += 1;
+        return sinceOneRequests === 1
+          ? logOpsPage([], 1)
+          : logOpsPage([addedFileOp], 2);
       }
       if (path === "/api/view/log?since=2&limit=500") {
         return logOpsPage([], 2);
@@ -2734,7 +2882,7 @@ describe("App", () => {
 
     await renderApp();
 
-    expect(metaPaths).toHaveLength(1);
+    expect(metaPaths).toHaveLength(0);
     expect(container.querySelector(".freshness")?.textContent).toBe(
       "No settled changes",
     );
@@ -2752,7 +2900,7 @@ describe("App", () => {
       files: ["alpha.txt", "zeta.txt"],
       freshness: "Last settled now",
     });
-    expect(metaPaths).toHaveLength(2);
+    expect(metaPaths).toHaveLength(1);
     expect(logPaths).toHaveLength(2);
     expect(container.querySelector("h1")?.textContent).toBe("zeta.txt");
 
@@ -2760,7 +2908,7 @@ describe("App", () => {
       await vi.advanceTimersByTimeAsync(4 * 60_000);
     });
 
-    expect(metaPaths).toHaveLength(3);
+    expect(metaPaths).toHaveLength(2);
     expect(logPaths).toHaveLength(3);
     act(() => root?.unmount());
     root = null;
@@ -2770,7 +2918,7 @@ describe("App", () => {
       await vi.advanceTimersByTimeAsync(4 * 60_000);
     });
 
-    expect(metaPaths).toHaveLength(3);
+    expect(metaPaths).toHaveLength(2);
     expect(logPaths).toHaveLength(3);
   });
 
@@ -2791,6 +2939,7 @@ describe("App", () => {
       const path = requestPath(input);
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
       if (path.startsWith("/api/view/log?")) logPaths.push(path);
+      if (path === "/api/view/current") return currentPage([file], 0);
       if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
       if (path === "/api/view/log?since=1&limit=500") {
         heartbeatSignal = init?.signal ?? undefined;
@@ -2846,7 +2995,6 @@ describe("App", () => {
       const path = requestPath(input);
       if (path === "/api/view/meta") {
         metaRequests += 1;
-        if (metaRequests === 1) return jsonResponse(DEFAULT_META);
         heartbeatMetaSignal = init?.signal ?? undefined;
         heartbeatMetaSignal?.addEventListener("abort", () => {
           metaAborts += 1;
@@ -2856,6 +3004,7 @@ describe("App", () => {
         }, { once: true });
         return heartbeatMetaHeld;
       }
+      if (path === "/api/view/current") return currentPage([file], 0);
       if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
       if (path === "/api/view/log?since=1&limit=500") {
         heartbeatLogSignal = init?.signal ?? undefined;
@@ -2870,7 +3019,7 @@ describe("App", () => {
       await vi.advanceTimersByTimeAsync(4 * 60_000);
     });
 
-    expect(metaRequests).toBe(2);
+    expect(metaRequests).toBe(1);
     expect(heartbeatMetaSignal).toBeInstanceOf(AbortSignal);
     expect(heartbeatMetaSignal).toBe(heartbeatLogSignal);
 
@@ -2919,6 +3068,7 @@ describe("App", () => {
     };
     let metaRequests = 0;
     let logRequests = 0;
+    let sinceTwoRequests = 0;
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") {
@@ -2930,13 +3080,19 @@ describe("App", () => {
             : startedAt + (metaRequests - 1) * 4 * 60_000,
         });
       }
+      if (path === "/api/view/current") {
+        return currentPage([firstFile, selectedFile], 2);
+      }
       if (path === "/api/view/log?since=0&limit=500") {
         logRequests += 1;
         return logPage([firstFile, selectedFile]);
       }
       if (path === "/api/view/log?since=2&limit=500") {
         logRequests += 1;
-        return logOpsPage([renameOp], 3);
+        sinceTwoRequests += 1;
+        return sinceTwoRequests === 1
+          ? logOpsPage([], 2)
+          : logOpsPage([renameOp], 3);
       }
       if (path === "/api/view/log?since=3&limit=500") {
         logRequests += 1;
@@ -2983,11 +3139,12 @@ describe("App", () => {
       const path = requestPath(input);
       if (path === "/api/view/meta") {
         metaRequests += 1;
-        if (metaRequests === 2) throw new Error("network error");
-        return jsonResponse(metaRequests === 3
+        if (metaRequests === 1) throw new Error("network error");
+        return jsonResponse(metaRequests === 2
           ? { ...DEFAULT_META, lastSettledAtMs: Date.now() }
           : DEFAULT_META);
       }
+      if (path === "/api/view/current") return currentPage([file], 1);
       if (path === "/api/view/log?since=0&limit=500") {
         logRequests += 1;
         return logPage([file]);
@@ -3008,7 +3165,7 @@ describe("App", () => {
       await vi.advanceTimersByTimeAsync(4 * 60_000);
     });
 
-    expect(metaRequests).toBe(2);
+    expect(metaRequests).toBe(1);
     expect(container.textContent).not.toContain("This link isn't available.");
     expect(renderedFilePaths()).toEqual([file.path]);
 
@@ -3016,7 +3173,7 @@ describe("App", () => {
       await vi.advanceTimersByTimeAsync(4 * 60_000);
     });
 
-    expect(metaRequests).toBe(3);
+    expect(metaRequests).toBe(2);
     expect(logRequests).toBe(3);
     expect(renderedFilePaths()).toEqual([file.path]);
     expect(container.querySelector(".freshness")?.textContent).toBe(
@@ -3033,10 +3190,9 @@ describe("App", () => {
         const path = requestPath(input);
         if (path === "/api/view/meta") {
           metaRequests += 1;
-          return metaRequests === 1
-            ? jsonResponse(DEFAULT_META)
-            : new Response(null, { status });
+          return new Response(null, { status });
         }
+        if (path === "/api/view/current") return currentPage([], 0);
         if (path === "/api/view/log?since=0&limit=500") return logPage([]);
         throw new Error(`Unexpected request: ${path}`);
       });
@@ -3050,7 +3206,7 @@ describe("App", () => {
         await vi.advanceTimersByTimeAsync(4 * 60_000);
       });
 
-      expect(metaRequests).toBe(2);
+      expect(metaRequests).toBe(1);
       expect(container.textContent).toContain("This link isn't available.");
     },
   );
@@ -3068,11 +3224,12 @@ describe("App", () => {
       const path = requestPath(input);
       if (path === "/api/view/meta") {
         metaRequests += 1;
-        if (metaRequests === 2) return new Response(null, { status: 503 });
-        return jsonResponse(metaRequests === 3
+        if (metaRequests === 1) return new Response(null, { status: 503 });
+        return jsonResponse(metaRequests === 2
           ? { ...DEFAULT_META, lastSettledAtMs: Date.now() }
           : DEFAULT_META);
       }
+      if (path === "/api/view/current") return currentPage([file], 1);
       if (path === "/api/view/log?since=0&limit=500") {
         logRequests += 1;
         return logPage([file]);
@@ -3091,7 +3248,7 @@ describe("App", () => {
       await vi.advanceTimersByTimeAsync(4 * 60_000);
     });
 
-    expect(metaRequests).toBe(2);
+    expect(metaRequests).toBe(1);
     expect(container.textContent).not.toContain("This link isn't available.");
     expect(renderedFilePaths()).toEqual([file.path]);
 
@@ -3099,7 +3256,7 @@ describe("App", () => {
       await vi.advanceTimersByTimeAsync(4 * 60_000);
     });
 
-    expect(metaRequests).toBe(3);
+    expect(metaRequests).toBe(2);
     expect(logRequests).toBe(3);
     expect(renderedFilePaths()).toEqual([file.path]);
     expect(container.querySelector(".freshness")?.textContent).toBe(
@@ -3118,6 +3275,7 @@ describe("App", () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/current") return currentPage([file], 0);
       if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
       const cursorMatch = /^\/api\/view\/log\?since=(\d+)&limit=500$/u.exec(path);
       if (cursorMatch) {
@@ -3157,6 +3315,7 @@ describe("App", () => {
       const fetchMock = vi.fn<typeof fetch>(async (input) => {
         const path = requestPath(input);
         if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+        if (path === "/api/view/current") return currentPage([], 0);
         if (path === "/api/view/log?since=0&limit=500") {
           logPaths.push(path);
           logTimes.push(Date.now() - startedAt);
@@ -3203,6 +3362,7 @@ describe("App", () => {
       const fetchMock = vi.fn<typeof fetch>(async (input) => {
         const path = requestPath(input);
         if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+        if (path === "/api/view/current") return currentPage([], 0);
         if (path === "/api/view/log?since=0&limit=500") {
           logPaths.push(path);
           return new Response(null, { status: 429 });
@@ -3233,6 +3393,7 @@ describe("App", () => {
       const fetchMock = vi.fn<typeof fetch>(async (input) => {
         const path = requestPath(input);
         if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+        if (path === "/api/view/current") return currentPage([], 0);
         if (path === "/api/view/log?since=0&limit=500") {
           logPaths.push(path);
           return new Response(null, { status: 500 });
