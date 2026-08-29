@@ -283,17 +283,18 @@ export function mergeDiscussionMessages(
   incoming: readonly PublicDiscussionMessage[],
 ): PublicDiscussionMessage[] | null {
   const merged = [...current];
-  const positions = new Map(merged.map((message, index) => [message.messageId, index]));
+  const known = new Map(merged.map((message) => [message.messageId, message]));
+  let needsSort = false;
   for (const message of incoming) {
-    const existingIndex = positions.get(message.messageId);
-    if (existingIndex === undefined) {
+    const existing = known.get(message.messageId);
+    if (!existing) {
       const tail = merged.at(-1);
-      if (tail && discussionOrder(tail, message) >= 0) return null;
-      positions.set(message.messageId, merged.length);
+      if (tail && message.createdAtMs < tail.createdAtMs) return null;
+      known.set(message.messageId, message);
       merged.push(message);
+      needsSort = true;
       continue;
     }
-    const existing = merged[existingIndex]!;
     if (sameDiscussionMessage(existing, message)) continue;
     if (
       existing.deleted &&
@@ -307,11 +308,15 @@ export function mergeDiscussionMessages(
       message.deleted &&
       existing.createdAtMs === message.createdAtMs
     ) {
+      const existingIndex = merged.indexOf(existing);
+      if (existingIndex === -1) return null;
       merged[existingIndex] = message;
+      known.set(message.messageId, message);
       continue;
     }
     return null;
   }
+  if (needsSort) merged.sort(discussionOrder);
   return merged;
 }
 

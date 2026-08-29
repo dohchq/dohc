@@ -356,7 +356,7 @@ describe("public discussion projection", () => {
     }])).toBeNull();
   });
 
-  it("refuses unseen rows that do not advance the accumulated keyset tail", () => {
+  it("refuses an unseen row with an earlier creation time", () => {
     const tail = {
       ...link,
       messageId: "message-a",
@@ -366,14 +366,8 @@ describe("public discussion projection", () => {
       messageId: "message-older-time",
       createdAtMs: tail.createdAtMs - 1,
     };
-    const earlierIdAtSameTime = {
-      ...named,
-      messageId: "message-Z",
-      createdAtMs: tail.createdAtMs,
-    };
 
     expect(mergeDiscussionMessages([tail], [earlierTime])).toBeNull();
-    expect(mergeDiscussionMessages([tail], [earlierIdAtSameTime])).toBeNull();
   });
 
   it("uses relay keyset order for message ids with the same creation time", () => {
@@ -395,6 +389,28 @@ describe("public discussion projection", () => {
       nextCursor: null,
     })).toEqual({ messages: [first, second], nextCursor: null, activityRevision: 7 });
     expect(mergeDiscussionMessages([first], [second])).toEqual([first, second]);
+  });
+
+  it("inserts an unseen same-millisecond message into canonical keyset order", () => {
+    const earlierId = {
+      ...named,
+      messageId: "message-a",
+      createdAtMs: 4_000,
+    };
+    const laterId = {
+      ...link,
+      messageId: "message-b",
+      createdAtMs: earlierId.createdAtMs,
+    };
+
+    expect(mergeDiscussionMessages([laterId], [earlierId, laterId])).toEqual([
+      earlierId,
+      laterId,
+    ]);
+    expect(mergeDiscussionMessages([laterId], [
+      earlierId,
+      { ...laterId, body: "conflicting body" },
+    ])).toBeNull();
   });
 
   it("refuses every conflicting message-id reuse", () => {
