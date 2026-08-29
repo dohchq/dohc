@@ -357,6 +357,24 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.rotateRelayShareLink, payload),
   revokeRelayShareLink: (payload) =>
     ipcRenderer.invoke(CHANNELS.revokeRelayShareLink, payload),
+  listRelayShareDiscussion: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listRelayShareDiscussion, payload),
+  appendRelayShareDiscussion: (payload) =>
+    ipcRenderer.invoke(CHANNELS.appendRelayShareDiscussion, payload),
+  deleteRelayShareDiscussionMessage: (payload) =>
+    ipcRenderer.invoke(CHANNELS.deleteRelayShareDiscussionMessage, payload),
+  blockRelayShareDiscussionPrincipal: (payload) =>
+    ipcRenderer.invoke(CHANNELS.blockRelayShareDiscussionPrincipal, payload),
+  unblockRelayShareDiscussionPrincipal: (payload) =>
+    ipcRenderer.invoke(CHANNELS.unblockRelayShareDiscussionPrincipal, payload),
+  pauseRelayShareDiscussion: (payload) =>
+    ipcRenderer.invoke(CHANNELS.pauseRelayShareDiscussion, payload),
+  resumeRelayShareDiscussion: (payload) =>
+    ipcRenderer.invoke(CHANNELS.resumeRelayShareDiscussion, payload),
+  promoteRelayShareGrant: (payload) =>
+    ipcRenderer.invoke(CHANNELS.promoteRelayShareGrant, payload),
+  revokeRelayShareGrant: (payload) =>
+    ipcRenderer.invoke(CHANNELS.revokeRelayShareGrant, payload),
   shareChatChannel: (payload) => ipcRenderer.invoke(CHANNELS.shareChatChannel, payload),
   listChatChannelShares: (payload) =>
     ipcRenderer.invoke(CHANNELS.listChatChannelShares, payload),

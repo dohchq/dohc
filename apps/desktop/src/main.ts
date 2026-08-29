@@ -67,10 +67,29 @@ import {
   RevokeRelaySharePayload,
   AddRelayShareLinkPayload,
   AddRelayShareLinkResult,
+  AppendRelayShareDiscussionPayload,
+  AppendRelayShareDiscussionResult,
+  BlockRelayShareDiscussionPrincipalPayload,
+  BlockRelayShareDiscussionPrincipalResult,
   CreateRelayShareLinkPayload,
   CreateRelayShareLinkResult,
+  DeleteRelayShareDiscussionMessagePayload,
+  DeleteRelayShareDiscussionMessageResult,
+  ListRelayShareDiscussionPayload,
+  ListRelayShareDiscussionResult,
   ListRelayShareLinksPayload,
   ListRelayShareLinksResult,
+  PauseRelayShareDiscussionPayload,
+  PauseRelayShareDiscussionResult,
+  PromoteRelayShareGrantPayload,
+  PromoteRelayShareGrantResult,
+  RelayShareDiscussionAppendResponse,
+  RelayShareDiscussionBlockResponse,
+  RelayShareDiscussionDeleteResponse,
+  RelayShareDiscussionPageResponse,
+  RelayShareDiscussionPauseResponse,
+  RelayShareGrantPromotionResponse,
+  RelayShareGrantRevokeResponse,
   RelayShareLinkCreateResponse,
   RelayShareLinkDependentConflict,
   RelayShareLinkEndResponse,
@@ -80,10 +99,16 @@ import {
   RelayShareLinkRetuneWidenResponse,
   RetuneRelayShareLinkPayload,
   RetuneRelayShareLinkResult,
+  ResumeRelayShareDiscussionPayload,
+  ResumeRelayShareDiscussionResult,
   RotateRelayShareLinkPayload,
   RotateRelayShareLinkResult,
+  RevokeRelayShareGrantPayload,
+  RevokeRelayShareGrantResult,
   RevokeRelayShareLinkPayload,
   RevokeRelayShareLinkResult,
+  UnblockRelayShareDiscussionPrincipalPayload,
+  UnblockRelayShareDiscussionPrincipalResult,
   ShareChatChannelPayload,
   ShareChatChannelResult,
   ListChatChannelSharesPayload,
@@ -8025,6 +8050,418 @@ function registerIpcHandlers(
           throw new Error(relayShareErrorCopy(500, null));
         }
         return RevokeRelayShareLinkResult.parse({ outcome: "ended" });
+      },
+    );
+  });
+
+  ipcMain.handle(CHANNELS.listRelayShareDiscussion, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListRelayShareDiscussionPayload.parse(payload);
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Sharing stopped because this window changed workspaces.",
+      async (operation) => {
+        operation.assertCurrent();
+        if (shareViewIsPresent(operation.workspace.shareView)) {
+          throw new Error(
+            "This is a shared view — only the original workspace can be shared.",
+          );
+        }
+        const { credentials, credentialGeneration } =
+          await remoteForWorkspace(operation.workspace);
+        operation.assertCurrent();
+        const relayResult = await awaitCredentialGeneration({
+          capturedGeneration: credentialGeneration,
+          currentGeneration: () => credentialCacheGeneration,
+          run: () => {
+            operation.assertCurrent();
+            const path = `/sync/shares/${encodeURIComponent(input.shareId)}/discussion`;
+            return relayShareJsonWithCredentials<unknown>(
+              credentials,
+              `${path}${input.cursor ? `?cursor=${encodeURIComponent(input.cursor)}` : ""}`,
+            );
+          },
+        });
+        operation.assertCurrent();
+        const parsed = RelayShareDiscussionPageResponse.safeParse(relayResult);
+        if (!parsed.success) {
+          throw new Error(relayShareErrorCopy(500, null));
+        }
+        return ListRelayShareDiscussionResult.parse({
+          linkCommentsPaused: parsed.data.linkCommentsPaused,
+          messages: parsed.data.messages,
+          nextCursor: parsed.data.nextCursor,
+        });
+      },
+    );
+  });
+
+  ipcMain.handle(CHANNELS.appendRelayShareDiscussion, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = AppendRelayShareDiscussionPayload.parse(payload);
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Sharing stopped because this window changed workspaces.",
+      async (operation) => {
+        operation.assertCurrent();
+        if (shareViewIsPresent(operation.workspace.shareView)) {
+          throw new Error(
+            "This is a shared view — only the original workspace can be shared.",
+          );
+        }
+        const { credentials, credentialGeneration } =
+          await remoteForWorkspace(operation.workspace);
+        operation.assertCurrent();
+        const relayResult = await awaitCredentialGeneration({
+          capturedGeneration: credentialGeneration,
+          currentGeneration: () => credentialCacheGeneration,
+          run: () => {
+            operation.assertCurrent();
+            return relayShareJsonWithCredentials<unknown>(
+              credentials,
+              `/sync/shares/${encodeURIComponent(input.shareId)}/discussion`,
+              {
+                method: "POST",
+                body: JSON.stringify({ body: input.body, idempotencyKey: input.idempotencyKey }),
+              },
+            );
+          },
+        });
+        operation.assertCurrent();
+        const parsed = RelayShareDiscussionAppendResponse.safeParse(relayResult);
+        if (!parsed.success) {
+          throw new Error(relayShareErrorCopy(500, null));
+        }
+        return AppendRelayShareDiscussionResult.parse({
+          message: parsed.data.message,
+        });
+      },
+    );
+  });
+
+  ipcMain.handle(
+    CHANNELS.deleteRelayShareDiscussionMessage,
+    async (event, payload) => {
+      assertTrustedSender(event);
+      const input = DeleteRelayShareDiscussionMessagePayload.parse(payload);
+      return withRendererWorkspaceOperation(
+        event.sender,
+        input.workspaceId,
+        "Sharing stopped because this window changed workspaces.",
+        async (operation) => {
+          operation.assertCurrent();
+          if (shareViewIsPresent(operation.workspace.shareView)) {
+            throw new Error(
+              "This is a shared view — only the original workspace can be shared.",
+            );
+          }
+          const { credentials, credentialGeneration } =
+            await remoteForWorkspace(operation.workspace);
+          operation.assertCurrent();
+          const relayResult = await awaitCredentialGeneration({
+            capturedGeneration: credentialGeneration,
+            currentGeneration: () => credentialCacheGeneration,
+            run: () => {
+              operation.assertCurrent();
+              return relayShareJsonWithCredentials<unknown>(
+                credentials,
+                `/sync/shares/${encodeURIComponent(input.shareId)}/discussion/moderation`,
+                {
+                  method: "POST",
+                  body: JSON.stringify({ action: "delete", messageId: input.messageId }),
+                },
+              );
+            },
+          });
+          operation.assertCurrent();
+          const parsed = RelayShareDiscussionDeleteResponse.safeParse(relayResult);
+          if (!parsed.success) {
+            throw new Error(relayShareErrorCopy(500, null));
+          }
+          return DeleteRelayShareDiscussionMessageResult.parse({
+            message: parsed.data.message,
+          });
+        },
+      );
+    },
+  );
+
+  ipcMain.handle(
+    CHANNELS.blockRelayShareDiscussionPrincipal,
+    async (event, payload) => {
+      assertTrustedSender(event);
+      const input = BlockRelayShareDiscussionPrincipalPayload.parse(payload);
+      return withRendererWorkspaceOperation(
+        event.sender,
+        input.workspaceId,
+        "Sharing stopped because this window changed workspaces.",
+        async (operation) => {
+          operation.assertCurrent();
+          if (shareViewIsPresent(operation.workspace.shareView)) {
+            throw new Error(
+              "This is a shared view — only the original workspace can be shared.",
+            );
+          }
+          const { credentials, credentialGeneration } =
+            await remoteForWorkspace(operation.workspace);
+          operation.assertCurrent();
+          const relayResult = await awaitCredentialGeneration({
+            capturedGeneration: credentialGeneration,
+            currentGeneration: () => credentialCacheGeneration,
+            run: () => {
+              operation.assertCurrent();
+              return relayShareJsonWithCredentials<unknown>(
+                credentials,
+                `/sync/shares/${encodeURIComponent(input.shareId)}/discussion/moderation`,
+                {
+                  method: "POST",
+                  body: JSON.stringify({ action: "block", principalId: input.principalId }),
+                },
+              );
+            },
+          });
+          operation.assertCurrent();
+          const parsed = RelayShareDiscussionBlockResponse.safeParse(relayResult);
+          if (!parsed.success || !parsed.data.blocked) {
+            throw new Error(relayShareErrorCopy(500, null));
+          }
+          return BlockRelayShareDiscussionPrincipalResult.parse({ blocked: true });
+        },
+      );
+    },
+  );
+
+  ipcMain.handle(
+    CHANNELS.unblockRelayShareDiscussionPrincipal,
+    async (event, payload) => {
+      assertTrustedSender(event);
+      const input = UnblockRelayShareDiscussionPrincipalPayload.parse(payload);
+      return withRendererWorkspaceOperation(
+        event.sender,
+        input.workspaceId,
+        "Sharing stopped because this window changed workspaces.",
+        async (operation) => {
+          operation.assertCurrent();
+          if (shareViewIsPresent(operation.workspace.shareView)) {
+            throw new Error(
+              "This is a shared view — only the original workspace can be shared.",
+            );
+          }
+          const { credentials, credentialGeneration } =
+            await remoteForWorkspace(operation.workspace);
+          operation.assertCurrent();
+          const relayResult = await awaitCredentialGeneration({
+            capturedGeneration: credentialGeneration,
+            currentGeneration: () => credentialCacheGeneration,
+            run: () => {
+              operation.assertCurrent();
+              return relayShareJsonWithCredentials<unknown>(
+                credentials,
+                `/sync/shares/${encodeURIComponent(input.shareId)}/discussion/moderation`,
+                {
+                  method: "POST",
+                  body: JSON.stringify({ action: "unblock", principalId: input.principalId }),
+                },
+              );
+            },
+          });
+          operation.assertCurrent();
+          const parsed = RelayShareDiscussionBlockResponse.safeParse(relayResult);
+          if (!parsed.success || parsed.data.blocked) {
+            throw new Error(relayShareErrorCopy(500, null));
+          }
+          return UnblockRelayShareDiscussionPrincipalResult.parse({
+            blocked: false,
+          });
+        },
+      );
+    },
+  );
+
+  ipcMain.handle(CHANNELS.pauseRelayShareDiscussion, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = PauseRelayShareDiscussionPayload.parse(payload);
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Sharing stopped because this window changed workspaces.",
+      async (operation) => {
+        operation.assertCurrent();
+        if (shareViewIsPresent(operation.workspace.shareView)) {
+          throw new Error(
+            "This is a shared view — only the original workspace can be shared.",
+          );
+        }
+        const { credentials, credentialGeneration } =
+          await remoteForWorkspace(operation.workspace);
+        operation.assertCurrent();
+        const relayResult = await awaitCredentialGeneration({
+          capturedGeneration: credentialGeneration,
+          currentGeneration: () => credentialCacheGeneration,
+          run: () => {
+            operation.assertCurrent();
+            return relayShareJsonWithCredentials<unknown>(
+              credentials,
+              `/sync/shares/${encodeURIComponent(input.shareId)}/discussion/moderation`,
+              {
+                method: "POST",
+                body: JSON.stringify({ action: "pause" }),
+              },
+            );
+          },
+        });
+        operation.assertCurrent();
+        const parsed = RelayShareDiscussionPauseResponse.safeParse(relayResult);
+        if (!parsed.success || !parsed.data.linkCommentsPaused) {
+          throw new Error(relayShareErrorCopy(500, null));
+        }
+        return PauseRelayShareDiscussionResult.parse({
+          linkCommentsPaused: true,
+        });
+      },
+    );
+  });
+
+  ipcMain.handle(CHANNELS.resumeRelayShareDiscussion, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ResumeRelayShareDiscussionPayload.parse(payload);
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Sharing stopped because this window changed workspaces.",
+      async (operation) => {
+        operation.assertCurrent();
+        if (shareViewIsPresent(operation.workspace.shareView)) {
+          throw new Error(
+            "This is a shared view — only the original workspace can be shared.",
+          );
+        }
+        const { credentials, credentialGeneration } =
+          await remoteForWorkspace(operation.workspace);
+        operation.assertCurrent();
+        const relayResult = await awaitCredentialGeneration({
+          capturedGeneration: credentialGeneration,
+          currentGeneration: () => credentialCacheGeneration,
+          run: () => {
+            operation.assertCurrent();
+            return relayShareJsonWithCredentials<unknown>(
+              credentials,
+              `/sync/shares/${encodeURIComponent(input.shareId)}/discussion/moderation`,
+              {
+                method: "POST",
+                body: JSON.stringify({ action: "resume" }),
+              },
+            );
+          },
+        });
+        operation.assertCurrent();
+        const parsed = RelayShareDiscussionPauseResponse.safeParse(relayResult);
+        if (!parsed.success || parsed.data.linkCommentsPaused) {
+          throw new Error(relayShareErrorCopy(500, null));
+        }
+        return ResumeRelayShareDiscussionResult.parse({
+          linkCommentsPaused: false,
+        });
+      },
+    );
+  });
+
+  ipcMain.handle(CHANNELS.promoteRelayShareGrant, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = PromoteRelayShareGrantPayload.parse(payload);
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Sharing stopped because this window changed workspaces.",
+      async (operation) => {
+        operation.assertCurrent();
+        if (shareViewIsPresent(operation.workspace.shareView)) {
+          throw new Error(
+            "This is a shared view — only the original workspace can be shared.",
+          );
+        }
+        const { credentials, credentialGeneration } =
+          await remoteForWorkspace(operation.workspace);
+        operation.assertCurrent();
+        const relayResult = await awaitCredentialGeneration({
+          capturedGeneration: credentialGeneration,
+          currentGeneration: () => credentialCacheGeneration,
+          run: () => {
+            operation.assertCurrent();
+            return relayShareJsonWithCredentials<unknown>(
+              credentials,
+              `/sync/shares/${encodeURIComponent(input.shareId)}/grants/${encodeURIComponent(input.grantId)}/promote`,
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  expectedParentGrantId: input.expectedParentGrantId,
+                  expectedParentGeneration: input.expectedParentGeneration,
+                }),
+              },
+            );
+          },
+        });
+        operation.assertCurrent();
+        const parsed = RelayShareGrantPromotionResponse.safeParse(relayResult);
+        if (!parsed.success) {
+          throw new Error(relayShareErrorCopy(500, null));
+        }
+        return PromoteRelayShareGrantResult.parse({
+          grantId: parsed.data.grantId,
+          access: parsed.data.access,
+          generation: parsed.data.generation,
+          status: parsed.data.status,
+          revokedAtMs: parsed.data.revokedAtMs,
+          parentGrantId: parsed.data.parentGrantId,
+        });
+      },
+    );
+  });
+
+  ipcMain.handle(CHANNELS.revokeRelayShareGrant, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = RevokeRelayShareGrantPayload.parse(payload);
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Sharing stopped because this window changed workspaces.",
+      async (operation) => {
+        operation.assertCurrent();
+        if (shareViewIsPresent(operation.workspace.shareView)) {
+          throw new Error(
+            "This is a shared view — only the original workspace can be shared.",
+          );
+        }
+        const { credentials, credentialGeneration } =
+          await remoteForWorkspace(operation.workspace);
+        operation.assertCurrent();
+        const relayResult = await awaitCredentialGeneration({
+          capturedGeneration: credentialGeneration,
+          currentGeneration: () => credentialCacheGeneration,
+          run: () => {
+            operation.assertCurrent();
+            return relayShareJsonWithCredentials<unknown>(
+              credentials,
+              `/sync/shares/${encodeURIComponent(input.shareId)}/grants/${encodeURIComponent(input.grantId)}/revoke`,
+              { method: "POST" },
+            );
+          },
+        });
+        operation.assertCurrent();
+        const parsed = RelayShareGrantRevokeResponse.safeParse(relayResult);
+        if (!parsed.success) {
+          throw new Error(relayShareErrorCopy(500, null));
+        }
+        return RevokeRelayShareGrantResult.parse({
+          grantId: parsed.data.grantId,
+          access: parsed.data.access,
+          generation: parsed.data.generation,
+          status: parsed.data.status,
+          revokedAtMs: parsed.data.revokedAtMs,
+          parentGrantId: parsed.data.parentGrantId,
+        });
       },
     );
   });

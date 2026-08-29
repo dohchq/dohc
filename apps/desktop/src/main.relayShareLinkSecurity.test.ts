@@ -16,16 +16,29 @@ function handlerSource(channel: string): string {
   return mainSource.slice(start, next < 0 ? undefined : next);
 }
 
-const ownerLinkChannels = [
+const newOwnerDiscussionChannels = [
+  "listRelayShareDiscussion",
+  "appendRelayShareDiscussion",
+  "deleteRelayShareDiscussionMessage",
+  "blockRelayShareDiscussionPrincipal",
+  "unblockRelayShareDiscussionPrincipal",
+  "pauseRelayShareDiscussion",
+  "resumeRelayShareDiscussion",
+  "promoteRelayShareGrant",
+  "revokeRelayShareGrant",
+] as const;
+
+const ownerShareChannels = [
   "createRelayShareLink",
   "addRelayShareLink",
   "listRelayShareLinks",
   "retuneRelayShareLink",
   "rotateRelayShareLink",
   "revokeRelayShareLink",
+  ...newOwnerDiscussionChannels,
 ] as const;
 
-describe("main-process owner relay link authorization", () => {
+describe("main-process owner relay share authorization", () => {
   it("refuses a missing channel marker before searching backwards", () => {
     const channel = "definitelyAbsentRelayShareLinkHandler";
     let thrown: unknown;
@@ -48,7 +61,7 @@ describe("main-process owner relay link authorization", () => {
   });
 
   it("admits every request through one exact physical workspace operation", () => {
-    for (const channel of ownerLinkChannels) {
+    for (const channel of ownerShareChannels) {
       const handler = handlerSource(channel);
       expect(handler, channel).toContain("assertTrustedSender(event);");
       expect(handler, channel).toContain("withRendererWorkspaceOperation(");
@@ -60,8 +73,8 @@ describe("main-process owner relay link authorization", () => {
     }
   });
 
-  it("bounds every owner link request through the shared relay helper", () => {
-    for (const channel of ownerLinkChannels) {
+  it("bounds every owner share request through the shared relay helper", () => {
+    for (const channel of ownerShareChannels) {
       expect(handlerSource(channel), channel).toContain(
         "relayShareJsonWithCredentials",
       );
@@ -84,11 +97,12 @@ describe("main-process owner relay link authorization", () => {
     expect(helper).not.toContain("const response = await fetch(");
   });
 
-  it("refuses shared-view link mutations before credentials or a relay request", () => {
+  it("refuses shared-view owner operations before credentials or a relay request", () => {
     for (const channel of [
       "createRelayShareLink",
       "addRelayShareLink",
       "retuneRelayShareLink",
+      ...newOwnerDiscussionChannels,
     ]) {
       const handler = handlerSource(channel);
       const operationAt = handler.indexOf("async (operation) => {");
@@ -169,8 +183,85 @@ describe("main-process owner relay link authorization", () => {
     expect(handler).not.toContain("payload.cursor");
   });
 
+  it("uses only the finalized owner discussion routes and bodies", () => {
+    const list = handlerSource("listRelayShareDiscussion");
+    expect(list).toContain(
+      "/sync/shares/${encodeURIComponent(input.shareId)}/discussion",
+    );
+    expect(list).toContain("input.cursor");
+    expect(list).toContain("encodeURIComponent(input.cursor)");
+    expect(list).not.toContain("payload.cursor");
+    expect(list).not.toContain("limit=");
+    expect(list).not.toContain('method: "POST"');
+    expect(list).not.toContain("JSON.stringify");
+
+    const append = handlerSource("appendRelayShareDiscussion");
+    expect(append).toContain(
+      "/sync/shares/${encodeURIComponent(input.shareId)}/discussion",
+    );
+    expect(append).toContain('method: "POST"');
+    expect(append).toContain(
+      "body: JSON.stringify({ body: input.body, idempotencyKey: input.idempotencyKey })",
+    );
+    for (const forbidden of [
+      "actorUserId",
+      "authorUserId",
+      "displayName",
+      "principalUserId",
+      "profile",
+      "capability",
+    ]) {
+      expect(append).not.toContain(forbidden);
+    }
+
+    const moderation = {
+      deleteRelayShareDiscussionMessage:
+        'body: JSON.stringify({ action: "delete", messageId: input.messageId })',
+      blockRelayShareDiscussionPrincipal:
+        'body: JSON.stringify({ action: "block", principalId: input.principalId })',
+      unblockRelayShareDiscussionPrincipal:
+        'body: JSON.stringify({ action: "unblock", principalId: input.principalId })',
+      pauseRelayShareDiscussion: 'body: JSON.stringify({ action: "pause" })',
+      resumeRelayShareDiscussion: 'body: JSON.stringify({ action: "resume" })',
+    } as const;
+    for (const [channel, body] of Object.entries(moderation)) {
+      const handler = handlerSource(channel);
+      expect(handler, channel).toContain(
+        "/sync/shares/${encodeURIComponent(input.shareId)}/discussion/moderation",
+      );
+      expect(handler, channel).toContain('method: "POST"');
+      expect(handler, channel).toContain(body);
+      expect(handler, channel).not.toContain("workspaceId: input.workspaceId");
+      expect(handler, channel).not.toContain("actorUserId");
+    }
+  });
+
+  it("uses exact promotion expectations and a bodyless direct named revoke", () => {
+    const promote = handlerSource("promoteRelayShareGrant");
+    expect(promote).toContain(
+      "/sync/shares/${encodeURIComponent(input.shareId)}/grants/${encodeURIComponent(input.grantId)}/promote",
+    );
+    expect(promote).toContain('method: "POST"');
+    expect(promote).toContain("expectedParentGrantId: input.expectedParentGrantId");
+    expect(promote).toContain(
+      "expectedParentGeneration: input.expectedParentGeneration",
+    );
+    expect(promote).not.toContain("expectedDependentGrantIds");
+    expect(promote).not.toContain("recipientUserId");
+
+    const revoke = handlerSource("revokeRelayShareGrant");
+    expect(revoke).toContain(
+      "/sync/shares/${encodeURIComponent(input.shareId)}/grants/${encodeURIComponent(input.grantId)}/revoke",
+    );
+    expect(revoke).toContain('method: "POST"');
+    expect(revoke).not.toContain("JSON.stringify");
+    expect(revoke).not.toContain("workspaceId:");
+    expect(revoke).not.toContain("expectedDependentGrantIds");
+    expect(revoke).not.toContain("recipientUserId");
+  });
+
   it("pins workspace currency and credential generation around every relay call", () => {
-    for (const channel of ownerLinkChannels) {
+    for (const channel of ownerShareChannels) {
       const handler = handlerSource(channel);
       expect(handler, channel).toContain("awaitCredentialGeneration({");
       expect(handler, channel).toContain(
@@ -211,6 +302,18 @@ describe("main-process owner relay link authorization", () => {
       listRelayShareLinks: "RelayShareLinkListResponse.safeParse(",
       rotateRelayShareLink: "RelayShareLinkRotateResponse.safeParse(",
       revokeRelayShareLink: "RelayShareLinkEndResponse.safeParse(",
+      listRelayShareDiscussion: "RelayShareDiscussionPageResponse.safeParse(",
+      appendRelayShareDiscussion: "RelayShareDiscussionAppendResponse.safeParse(",
+      deleteRelayShareDiscussionMessage:
+        "RelayShareDiscussionDeleteResponse.safeParse(",
+      blockRelayShareDiscussionPrincipal:
+        "RelayShareDiscussionBlockResponse.safeParse(",
+      unblockRelayShareDiscussionPrincipal:
+        "RelayShareDiscussionBlockResponse.safeParse(",
+      pauseRelayShareDiscussion: "RelayShareDiscussionPauseResponse.safeParse(",
+      resumeRelayShareDiscussion: "RelayShareDiscussionPauseResponse.safeParse(",
+      promoteRelayShareGrant: "RelayShareGrantPromotionResponse.safeParse(",
+      revokeRelayShareGrant: "RelayShareGrantRevokeResponse.safeParse(",
     } as const;
     for (const [channel, parse] of Object.entries(schemas)) {
       expect(handlerSource(channel), channel).toContain(parse);
@@ -220,8 +323,36 @@ describe("main-process owner relay link authorization", () => {
     expect(retune).toContain("RelayShareLinkRetuneNarrowResponse.safeParse(");
   });
 
-  it("checks currentness after a stale add or retune relay result resolves", () => {
-    for (const channel of ["addRelayShareLink", "retuneRelayShareLink"]) {
+  it("parses renderer input before entering any new owner operation", () => {
+    const schemas = {
+      listRelayShareDiscussion: "ListRelayShareDiscussionPayload.parse(payload)",
+      appendRelayShareDiscussion: "AppendRelayShareDiscussionPayload.parse(payload)",
+      deleteRelayShareDiscussionMessage:
+        "DeleteRelayShareDiscussionMessagePayload.parse(payload)",
+      blockRelayShareDiscussionPrincipal:
+        "BlockRelayShareDiscussionPrincipalPayload.parse(payload)",
+      unblockRelayShareDiscussionPrincipal:
+        "UnblockRelayShareDiscussionPrincipalPayload.parse(payload)",
+      pauseRelayShareDiscussion: "PauseRelayShareDiscussionPayload.parse(payload)",
+      resumeRelayShareDiscussion: "ResumeRelayShareDiscussionPayload.parse(payload)",
+      promoteRelayShareGrant: "PromoteRelayShareGrantPayload.parse(payload)",
+      revokeRelayShareGrant: "RevokeRelayShareGrantPayload.parse(payload)",
+    } as const;
+    for (const [channel, parse] of Object.entries(schemas)) {
+      const handler = handlerSource(channel);
+      expect(handler, channel).toContain(parse);
+      expect(handler.indexOf(parse), channel).toBeLessThan(
+        handler.indexOf("withRendererWorkspaceOperation("),
+      );
+    }
+  });
+
+  it("checks currentness after every guarded relay result resolves", () => {
+    for (const channel of [
+      "addRelayShareLink",
+      "retuneRelayShareLink",
+      ...newOwnerDiscussionChannels,
+    ]) {
       const handler = handlerSource(channel);
       const relayAt = handler.indexOf("relayShareJsonWithCredentials");
       const awaitEnd = handler.indexOf("});", relayAt);
@@ -237,10 +368,13 @@ describe("main-process owner relay link authorization", () => {
   });
 
   it("never logs or throws a minted URL", () => {
-    for (const channel of ownerLinkChannels) {
+    for (const channel of ownerShareChannels) {
       const handler = handlerSource(channel);
       expect(handler, channel).not.toMatch(/console\.(?:error|warn|log)/u);
       expect(handler, channel).not.toMatch(/throw[^;]*(?:\.url|\["url"\])/u);
+      expect(handler, channel).not.toMatch(
+        /throw[^;]*(?:token|credential|profile|principalUserId)/u,
+      );
     }
   });
 });

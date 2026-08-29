@@ -3818,6 +3818,299 @@ export type RevokeRelayShareLinkResult = z.infer<
   typeof RevokeRelayShareLinkResult
 >;
 
+const RELAY_SHARE_DISCUSSION_CURSOR = z
+  .string()
+  .min(1)
+  .max(1_024)
+  .regex(/^[A-Za-z0-9_-]+$/u, "discussion cursor must be base64url");
+const RELAY_SHARE_DISCUSSION_HANDLE = z.string().min(1).max(512);
+const RELAY_SHARE_DISCUSSION_DISPLAY_NAME = z.string().min(1).max(512);
+const RELAY_SHARE_DISCUSSION_BODY = z.string().superRefine((body, ctx) => {
+  if (utf8ByteLength(body) > 8_000) {
+    ctx.addIssue({
+      code: "custom",
+      message: "discussion body exceeds the relay limit",
+    });
+    return;
+  }
+  const codePoints = Array.from(body.normalize("NFC")).length;
+  if (codePoints >= 1 && codePoints <= 2_000) {
+    return;
+  }
+  ctx.addIssue({
+    code: "custom",
+    message: "discussion body exceeds the relay limit",
+  });
+});
+const RELAY_SHARE_DISCUSSION_IDEMPOTENCY_KEY = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[\x20-\x7e]+$/u, "idempotency key must be printable ASCII");
+
+const RelayShareDiscussionNamedAuthor = z
+  .object({
+    kind: z.literal("named"),
+    displayName: RELAY_SHARE_DISCUSSION_DISPLAY_NAME,
+  })
+  .strict();
+const RelayShareDiscussionLinkAuthor = z
+  .object({
+    kind: z.literal("link"),
+    displayName: RELAY_SHARE_DISCUSSION_DISPLAY_NAME,
+    unverified: z.literal(true),
+  })
+  .strict();
+const RelayShareDiscussionLinkModeration = z
+  .object({
+    linkGrantId: RELAY_SHARE_DISCUSSION_HANDLE,
+    linkPrincipalId: RELAY_SHARE_DISCUSSION_HANDLE,
+    blocked: z.boolean(),
+  })
+  .strict();
+const RelayShareDiscussionMessageBase = {
+  messageId: RELAY_SHARE_DISCUSSION_HANDLE,
+  createdAtMs: z.number().int().nonnegative(),
+};
+
+export const RelayShareDiscussionMessage = z.union([
+  z
+    .object({
+      ...RelayShareDiscussionMessageBase,
+      deleted: z.literal(false),
+      body: RELAY_SHARE_DISCUSSION_BODY,
+      author: RelayShareDiscussionNamedAuthor,
+    })
+    .strict(),
+  z
+    .object({
+      ...RelayShareDiscussionMessageBase,
+      deleted: z.literal(false),
+      body: RELAY_SHARE_DISCUSSION_BODY,
+      author: RelayShareDiscussionLinkAuthor,
+      moderation: RelayShareDiscussionLinkModeration,
+    })
+    .strict(),
+  z
+    .object({
+      ...RelayShareDiscussionMessageBase,
+      deleted: z.literal(true),
+      author: RelayShareDiscussionNamedAuthor,
+    })
+    .strict(),
+  z
+    .object({
+      ...RelayShareDiscussionMessageBase,
+      deleted: z.literal(true),
+      author: RelayShareDiscussionLinkAuthor,
+      moderation: RelayShareDiscussionLinkModeration,
+    })
+    .strict(),
+]);
+export type RelayShareDiscussionMessage = z.infer<
+  typeof RelayShareDiscussionMessage
+>;
+
+export const ListRelayShareDiscussionPayload = z
+  .object({
+    workspaceId: WORKSPACE_ID,
+    shareId: SHARE_ID,
+    cursor: RELAY_SHARE_DISCUSSION_CURSOR.optional(),
+  })
+  .strict();
+export type ListRelayShareDiscussionPayload = z.infer<
+  typeof ListRelayShareDiscussionPayload
+>;
+
+export const ListRelayShareDiscussionResult = z
+  .object({
+    linkCommentsPaused: z.boolean(),
+    messages: z.array(RelayShareDiscussionMessage).max(100),
+    nextCursor: RELAY_SHARE_DISCUSSION_CURSOR.nullable(),
+  })
+  .strict();
+export type ListRelayShareDiscussionResult = z.infer<
+  typeof ListRelayShareDiscussionResult
+>;
+
+export const RelayShareDiscussionPageResponse = ListRelayShareDiscussionResult.extend({
+  ok: z.literal(true),
+}).strict();
+
+export const AppendRelayShareDiscussionPayload = z
+  .object({
+    workspaceId: WORKSPACE_ID,
+    shareId: SHARE_ID,
+    body: RELAY_SHARE_DISCUSSION_BODY,
+    idempotencyKey: RELAY_SHARE_DISCUSSION_IDEMPOTENCY_KEY,
+  })
+  .strict();
+export type AppendRelayShareDiscussionPayload = z.infer<
+  typeof AppendRelayShareDiscussionPayload
+>;
+
+export const AppendRelayShareDiscussionResult = z
+  .object({ message: RelayShareDiscussionMessage })
+  .strict();
+export type AppendRelayShareDiscussionResult = z.infer<
+  typeof AppendRelayShareDiscussionResult
+>;
+
+export const RelayShareDiscussionAppendResponse = AppendRelayShareDiscussionResult.extend({
+  ok: z.literal(true),
+}).strict();
+
+const RelayShareDiscussionTargetPayload = z
+  .object({ workspaceId: WORKSPACE_ID, shareId: SHARE_ID })
+  .strict();
+
+export const DeleteRelayShareDiscussionMessagePayload =
+  RelayShareDiscussionTargetPayload.extend({
+    messageId: RELAY_SHARE_DISCUSSION_HANDLE,
+  });
+export type DeleteRelayShareDiscussionMessagePayload = z.infer<
+  typeof DeleteRelayShareDiscussionMessagePayload
+>;
+
+export const BlockRelayShareDiscussionPrincipalPayload =
+  RelayShareDiscussionTargetPayload.extend({
+    principalId: RELAY_SHARE_DISCUSSION_HANDLE,
+  });
+export type BlockRelayShareDiscussionPrincipalPayload = z.infer<
+  typeof BlockRelayShareDiscussionPrincipalPayload
+>;
+
+export const UnblockRelayShareDiscussionPrincipalPayload =
+  BlockRelayShareDiscussionPrincipalPayload;
+export type UnblockRelayShareDiscussionPrincipalPayload = z.infer<
+  typeof UnblockRelayShareDiscussionPrincipalPayload
+>;
+
+export const PauseRelayShareDiscussionPayload = RelayShareDiscussionTargetPayload;
+export type PauseRelayShareDiscussionPayload = z.infer<
+  typeof PauseRelayShareDiscussionPayload
+>;
+
+export const ResumeRelayShareDiscussionPayload = RelayShareDiscussionTargetPayload;
+export type ResumeRelayShareDiscussionPayload = z.infer<
+  typeof ResumeRelayShareDiscussionPayload
+>;
+
+const RelayShareDiscussionDeleteTombstone = z
+  .object({
+    messageId: RELAY_SHARE_DISCUSSION_HANDLE,
+    createdAtMs: z.number().int().nonnegative(),
+    deleted: z.literal(true),
+  })
+  .strict();
+
+export const DeleteRelayShareDiscussionMessageResult = z
+  .object({ message: RelayShareDiscussionDeleteTombstone })
+  .strict();
+export type DeleteRelayShareDiscussionMessageResult = z.infer<
+  typeof DeleteRelayShareDiscussionMessageResult
+>;
+
+export const RelayShareDiscussionDeleteResponse =
+  DeleteRelayShareDiscussionMessageResult.extend({ ok: z.literal(true) }).strict();
+
+export const BlockRelayShareDiscussionPrincipalResult = z
+  .object({ blocked: z.literal(true) })
+  .strict();
+export type BlockRelayShareDiscussionPrincipalResult = z.infer<
+  typeof BlockRelayShareDiscussionPrincipalResult
+>;
+
+export const UnblockRelayShareDiscussionPrincipalResult = z
+  .object({ blocked: z.literal(false) })
+  .strict();
+export type UnblockRelayShareDiscussionPrincipalResult = z.infer<
+  typeof UnblockRelayShareDiscussionPrincipalResult
+>;
+
+export const RelayShareDiscussionBlockResponse = z
+  .object({ ok: z.literal(true), blocked: z.boolean() })
+  .strict();
+
+export const PauseRelayShareDiscussionResult = z
+  .object({ linkCommentsPaused: z.literal(true) })
+  .strict();
+export type PauseRelayShareDiscussionResult = z.infer<
+  typeof PauseRelayShareDiscussionResult
+>;
+
+export const ResumeRelayShareDiscussionResult = z
+  .object({ linkCommentsPaused: z.literal(false) })
+  .strict();
+export type ResumeRelayShareDiscussionResult = z.infer<
+  typeof ResumeRelayShareDiscussionResult
+>;
+
+export const RelayShareDiscussionPauseResponse = z
+  .object({ ok: z.literal(true), linkCommentsPaused: z.boolean() })
+  .strict();
+
+export const PromoteRelayShareGrantPayload = z
+  .object({
+    workspaceId: WORKSPACE_ID,
+    shareId: SHARE_ID,
+    grantId: SHARE_ID,
+    expectedParentGrantId: SHARE_ID,
+    expectedParentGeneration: z.number().int().min(1),
+  })
+  .strict();
+export type PromoteRelayShareGrantPayload = z.infer<
+  typeof PromoteRelayShareGrantPayload
+>;
+
+export const RevokeRelayShareGrantPayload = z
+  .object({
+    workspaceId: WORKSPACE_ID,
+    shareId: SHARE_ID,
+    grantId: SHARE_ID,
+  })
+  .strict();
+export type RevokeRelayShareGrantPayload = z.infer<
+  typeof RevokeRelayShareGrantPayload
+>;
+
+const RelayShareNamedGrantTransitionBase = {
+  grantId: SHARE_ID,
+  access: SHARE_ACCESS,
+  generation: z.number().int().min(1),
+  parentGrantId: z.null(),
+};
+
+export const PromoteRelayShareGrantResult = z
+  .object({
+    ...RelayShareNamedGrantTransitionBase,
+    status: z.literal("active"),
+    revokedAtMs: z.null(),
+  })
+  .strict();
+export type PromoteRelayShareGrantResult = z.infer<
+  typeof PromoteRelayShareGrantResult
+>;
+
+export const RevokeRelayShareGrantResult = z
+  .object({
+    ...RelayShareNamedGrantTransitionBase,
+    status: z.literal("revoked"),
+    revokedAtMs: z.number().int().nonnegative(),
+  })
+  .strict();
+export type RevokeRelayShareGrantResult = z.infer<
+  typeof RevokeRelayShareGrantResult
+>;
+
+export const RelayShareGrantPromotionResponse = PromoteRelayShareGrantResult.extend({
+  ok: z.literal(true),
+}).strict();
+
+export const RelayShareGrantRevokeResponse = RevokeRelayShareGrantResult.extend({
+  ok: z.literal(true),
+}).strict();
+
 // ---- Share changes (#646 PR3a) ----
 // An edit-level recipient edits its own share view and SENDS the result. The
 // granter reads the changes and accepts or declines them; nothing lands in
@@ -5292,6 +5585,33 @@ export interface DohcDesktopBridge {
   revokeRelayShareLink(
     payload: RevokeRelayShareLinkPayload,
   ): Promise<RevokeRelayShareLinkResult>;
+  listRelayShareDiscussion(
+    payload: ListRelayShareDiscussionPayload,
+  ): Promise<ListRelayShareDiscussionResult>;
+  appendRelayShareDiscussion(
+    payload: AppendRelayShareDiscussionPayload,
+  ): Promise<AppendRelayShareDiscussionResult>;
+  deleteRelayShareDiscussionMessage(
+    payload: DeleteRelayShareDiscussionMessagePayload,
+  ): Promise<DeleteRelayShareDiscussionMessageResult>;
+  blockRelayShareDiscussionPrincipal(
+    payload: BlockRelayShareDiscussionPrincipalPayload,
+  ): Promise<BlockRelayShareDiscussionPrincipalResult>;
+  unblockRelayShareDiscussionPrincipal(
+    payload: UnblockRelayShareDiscussionPrincipalPayload,
+  ): Promise<UnblockRelayShareDiscussionPrincipalResult>;
+  pauseRelayShareDiscussion(
+    payload: PauseRelayShareDiscussionPayload,
+  ): Promise<PauseRelayShareDiscussionResult>;
+  resumeRelayShareDiscussion(
+    payload: ResumeRelayShareDiscussionPayload,
+  ): Promise<ResumeRelayShareDiscussionResult>;
+  promoteRelayShareGrant(
+    payload: PromoteRelayShareGrantPayload,
+  ): Promise<PromoteRelayShareGrantResult>;
+  revokeRelayShareGrant(
+    payload: RevokeRelayShareGrantPayload,
+  ): Promise<RevokeRelayShareGrantResult>;
   shareChatChannel(payload: ShareChatChannelPayload): Promise<ShareChatChannelResult>;
   listChatChannelShares(
     payload: ListChatChannelSharesPayload,

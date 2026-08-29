@@ -812,6 +812,18 @@ export const CHANNELS = {
   retuneRelayShareLink: "desktop:retune-relay-share-link",
   rotateRelayShareLink: "desktop:rotate-relay-share-link",
   revokeRelayShareLink: "desktop:revoke-relay-share-link",
+  listRelayShareDiscussion: "desktop:list-relay-share-discussion",
+  appendRelayShareDiscussion: "desktop:append-relay-share-discussion",
+  deleteRelayShareDiscussionMessage:
+    "desktop:delete-relay-share-discussion-message",
+  blockRelayShareDiscussionPrincipal:
+    "desktop:block-relay-share-discussion-principal",
+  unblockRelayShareDiscussionPrincipal:
+    "desktop:unblock-relay-share-discussion-principal",
+  pauseRelayShareDiscussion: "desktop:pause-relay-share-discussion",
+  resumeRelayShareDiscussion: "desktop:resume-relay-share-discussion",
+  promoteRelayShareGrant: "desktop:promote-relay-share-grant",
+  revokeRelayShareGrant: "desktop:revoke-relay-share-grant",
   shareChatChannel: "desktop:share-chat-channel",
   listChatChannelShares: "desktop:list-chat-channel-shares",
   listJoinedSharedChannels: "desktop:list-joined-shared-channels",

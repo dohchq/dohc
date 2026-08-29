@@ -102,16 +102,41 @@ import {
   CloudJoinWorkspacePayload,
   AddRelayShareLinkPayload,
   AddRelayShareLinkResult,
+  AppendRelayShareDiscussionPayload,
+  AppendRelayShareDiscussionResult,
+  BlockRelayShareDiscussionPrincipalPayload,
+  BlockRelayShareDiscussionPrincipalResult,
   CreateRelayShareLinkPayload,
   CreateRelayShareLinkResult,
+  DeleteRelayShareDiscussionMessagePayload,
+  DeleteRelayShareDiscussionMessageResult,
+  ListRelayShareDiscussionPayload,
+  ListRelayShareDiscussionResult,
   ListRelayShareLinksPayload,
   ListRelayShareLinksResult,
+  PauseRelayShareDiscussionPayload,
+  PauseRelayShareDiscussionResult,
+  PromoteRelayShareGrantPayload,
+  PromoteRelayShareGrantResult,
+  RelayShareDiscussionAppendResponse,
+  RelayShareDiscussionBlockResponse,
+  RelayShareDiscussionDeleteResponse,
+  RelayShareDiscussionPageResponse,
+  RelayShareDiscussionPauseResponse,
+  RelayShareGrantPromotionResponse,
+  RelayShareGrantRevokeResponse,
+  ResumeRelayShareDiscussionPayload,
+  ResumeRelayShareDiscussionResult,
+  RevokeRelayShareGrantPayload,
+  RevokeRelayShareGrantResult,
   RotateRelayShareLinkPayload,
   RotateRelayShareLinkResult,
   RevokeRelayShareLinkPayload,
   RevokeRelayShareLinkResult,
   RetuneRelayShareLinkPayload,
   RetuneRelayShareLinkResult,
+  UnblockRelayShareDiscussionPrincipalPayload,
+  UnblockRelayShareDiscussionPrincipalResult,
   ReadShareProposalFileContentPayload,
   ReadShareProposalFileContentResult,
   ListShareProposalsPayload,
@@ -436,6 +461,368 @@ describe("owner relay share link IPC contract", () => {
         url: "https://share.example.test/s/#must-not-cross",
       }).success,
     ).toBe(false);
+  });
+});
+
+describe("owner relay share discussion IPC contract", () => {
+  const namedAuthor = { kind: "named" as const, displayName: "Owner Name" };
+  const linkAuthor = {
+    kind: "link" as const,
+    displayName: "Visitor Name",
+    unverified: true as const,
+  };
+  const moderation = {
+    linkGrantId: "link-grant-1",
+    linkPrincipalId: "principal-1",
+    blocked: false,
+  };
+  const namedLive = {
+    messageId: "message-1",
+    createdAtMs: 10,
+    deleted: false as const,
+    body: "Named message",
+    author: namedAuthor,
+  };
+  const linkLive = {
+    messageId: "message-2",
+    createdAtMs: 11,
+    deleted: false as const,
+    body: "Link message",
+    author: linkAuthor,
+    moderation,
+  };
+  const namedDeleted = {
+    messageId: "message-3",
+    createdAtMs: 12,
+    deleted: true as const,
+    author: namedAuthor,
+  };
+  const linkDeleted = {
+    messageId: "message-4",
+    createdAtMs: 13,
+    deleted: true as const,
+    author: linkAuthor,
+    moderation: { ...moderation, blocked: true },
+  };
+
+  it("accepts only the closed owner page and message projections", () => {
+    const result = {
+      linkCommentsPaused: true,
+      messages: [namedLive, linkLive, namedDeleted, linkDeleted],
+      nextCursor: "eyJ2ZXJzaW9uIjoxfQ",
+    };
+    expect(ListRelayShareDiscussionResult.parse(result)).toEqual(result);
+    expect(
+      ListRelayShareDiscussionResult.parse({
+        linkCommentsPaused: false,
+        messages: [],
+        nextCursor: null,
+      }),
+    ).toEqual({ linkCommentsPaused: false, messages: [], nextCursor: null });
+    expect(RelayShareDiscussionPageResponse.parse({ ok: true, ...result })).toEqual({
+      ok: true,
+      ...result,
+    });
+    expect(
+      RelayShareDiscussionPageResponse.safeParse({
+        ok: true,
+        ...result,
+        credential: "must-not-cross",
+      }).success,
+    ).toBe(false);
+    expect(
+      ListRelayShareDiscussionResult.safeParse({ ok: true, ...result }).success,
+    ).toBe(false);
+
+    for (const malformed of [
+      { ...result, ownerUserId: "must-not-cross" },
+      { ...result, nextCursor: "not+base64" },
+      { ...result, nextCursor: "x".repeat(1_025) },
+      { ...result, messages: Array.from({ length: 101 }, () => namedLive) },
+      { ...result, messages: [{ ...namedLive, moderation }] },
+      { ...result, messages: [{ ...linkLive, moderation: undefined }] },
+      { ...result, messages: [{ ...linkLive, author: namedAuthor }] },
+      { ...result, messages: [{ ...linkDeleted, body: "must-not-cross" }] },
+      { ...result, messages: [{ ...namedDeleted, authorUserId: "must-not-cross" }] },
+      { ...result, messages: [{ ...linkLive, moderation: { ...moderation, blocked: null } }] },
+      { ...result, messages: [{ ...linkLive, author: { ...linkAuthor, unverified: false } }] },
+      { ...result, messages: [{ ...namedLive, body: "" }] },
+      {
+        ...result,
+        messages: [
+          { ...namedLive, author: { ...namedAuthor, displayName: "x".repeat(513) } },
+        ],
+      },
+      { ...result, messages: [{ ...namedLive, messageId: "x".repeat(513) }] },
+    ]) {
+      expect(ListRelayShareDiscussionResult.safeParse(malformed).success).toBe(false);
+    }
+  });
+
+  it("bounds the opaque list cursor and exact append payload before main", () => {
+    expect(
+      ListRelayShareDiscussionPayload.parse({
+        workspaceId: "workspace-1",
+        shareId: "share-1",
+        cursor: "cursor_1",
+      }),
+    ).toEqual({ workspaceId: "workspace-1", shareId: "share-1", cursor: "cursor_1" });
+    expect(
+      ListRelayShareDiscussionPayload.parse({
+        workspaceId: "workspace-1",
+        shareId: "share-1",
+      }),
+    ).toEqual({ workspaceId: "workspace-1", shareId: "share-1" });
+    for (const malformed of [
+      { workspaceId: "workspace-1", shareId: "share-1", cursor: "" },
+      { workspaceId: "workspace-1", shareId: "share-1", cursor: "bad+cursor" },
+      {
+        workspaceId: "workspace-1",
+        shareId: "share-1",
+        cursor: "cursor_1",
+        limit: 100,
+      },
+    ]) {
+      expect(ListRelayShareDiscussionPayload.safeParse(malformed).success).toBe(false);
+    }
+
+    const exactEightThousandBytes = `${"\u1100\u1161\u11a8".repeat(888)}abcdefgh`;
+    const eightThousandAndOneBytes = "\u1100\u1161\u11a8".repeat(889);
+    const exact = {
+      workspaceId: "workspace-1",
+      shareId: "share-1",
+      body: "😀".repeat(2_000),
+      idempotencyKey: "~".repeat(64),
+    };
+    expect(AppendRelayShareDiscussionPayload.parse(exact)).toEqual(exact);
+    expect(
+      AppendRelayShareDiscussionPayload.safeParse({
+        ...exact,
+        body: exactEightThousandBytes,
+      }).success,
+    ).toBe(true);
+    for (const malformed of [
+      { ...exact, body: "" },
+      { ...exact, body: "😀".repeat(2_001) },
+      { ...exact, body: eightThousandAndOneBytes },
+      { ...exact, idempotencyKey: "" },
+      { ...exact, idempotencyKey: "x".repeat(65) },
+      { ...exact, idempotencyKey: "line\nbreak" },
+      { ...exact, idempotencyKey: "non-ascii-é" },
+      { ...exact, actorUserId: "must-not-cross" },
+      { ...exact, displayName: "must-not-cross" },
+      { ...exact, author: namedAuthor },
+      { ...exact, grantId: "must-not-cross" },
+      { ...exact, profile: { id: "must-not-cross" } },
+    ]) {
+      expect(AppendRelayShareDiscussionPayload.safeParse(malformed).success).toBe(false);
+    }
+  });
+
+  it("parses only an appended owner message without relay sentinels", () => {
+    expect(AppendRelayShareDiscussionResult.parse({ message: linkLive })).toEqual({
+      message: linkLive,
+    });
+    expect(
+      RelayShareDiscussionAppendResponse.parse({ ok: true, message: namedLive }),
+    ).toEqual({ ok: true, message: namedLive });
+    expect(
+      RelayShareDiscussionAppendResponse.safeParse({
+        ok: true,
+        message: namedLive,
+        requestHash: "must-not-cross",
+      }).success,
+    ).toBe(false);
+    for (const malformed of [
+      { message: namedLive, ok: true },
+      { message: { ...namedLive, credential: "must-not-cross" } },
+      { message: namedLive, actor: { userId: "must-not-cross" } },
+    ]) {
+      expect(AppendRelayShareDiscussionResult.safeParse(malformed).success).toBe(false);
+    }
+  });
+
+  it("keeps each finalized moderation action and result exact", () => {
+    const target = { workspaceId: "workspace-1", shareId: "share-1" };
+    expect(
+      DeleteRelayShareDiscussionMessagePayload.parse({
+        ...target,
+        messageId: "message-1",
+      }),
+    ).toEqual({ ...target, messageId: "message-1" });
+    expect(
+      BlockRelayShareDiscussionPrincipalPayload.parse({
+        ...target,
+        principalId: "principal-1",
+      }),
+    ).toEqual({ ...target, principalId: "principal-1" });
+    expect(
+      UnblockRelayShareDiscussionPrincipalPayload.parse({
+        ...target,
+        principalId: "principal-1",
+      }),
+    ).toEqual({ ...target, principalId: "principal-1" });
+    expect(PauseRelayShareDiscussionPayload.parse(target)).toEqual(target);
+    expect(ResumeRelayShareDiscussionPayload.parse(target)).toEqual(target);
+
+    for (const [schema, malformed] of [
+      [DeleteRelayShareDiscussionMessagePayload, { ...target, messageId: "" }],
+      [
+        DeleteRelayShareDiscussionMessagePayload,
+        { ...target, messageId: "message-1", principalId: "principal-1" },
+      ],
+      [BlockRelayShareDiscussionPrincipalPayload, { ...target, principalId: "" }],
+      [
+        UnblockRelayShareDiscussionPrincipalPayload,
+        { ...target, principalId: "principal-1", actorUserId: "must-not-cross" },
+      ],
+      [PauseRelayShareDiscussionPayload, { ...target, action: "pause" }],
+      [ResumeRelayShareDiscussionPayload, { ...target, capability: "must-not-cross" }],
+    ] as const) {
+      expect(schema.safeParse(malformed).success).toBe(false);
+    }
+
+    const tombstone = { messageId: "message-1", createdAtMs: 10, deleted: true as const };
+    expect(DeleteRelayShareDiscussionMessageResult.parse({ message: tombstone })).toEqual({
+      message: tombstone,
+    });
+    expect(RelayShareDiscussionDeleteResponse.parse({ ok: true, message: tombstone })).toEqual({
+      ok: true,
+      message: tombstone,
+    });
+    expect(
+      RelayShareDiscussionDeleteResponse.safeParse({
+        ok: true,
+        message: tombstone,
+        deletedByUserId: "must-not-cross",
+      }).success,
+    ).toBe(false);
+    expect(BlockRelayShareDiscussionPrincipalResult.parse({ blocked: true })).toEqual({
+      blocked: true,
+    });
+    expect(UnblockRelayShareDiscussionPrincipalResult.parse({ blocked: false })).toEqual({
+      blocked: false,
+    });
+    expect(RelayShareDiscussionBlockResponse.parse({ ok: true, blocked: true })).toEqual({
+      ok: true,
+      blocked: true,
+    });
+    expect(
+      RelayShareDiscussionBlockResponse.safeParse({
+        ok: true,
+        blocked: true,
+        principalId: "must-not-cross",
+      }).success,
+    ).toBe(false);
+    expect(PauseRelayShareDiscussionResult.parse({ linkCommentsPaused: true })).toEqual({
+      linkCommentsPaused: true,
+    });
+    expect(ResumeRelayShareDiscussionResult.parse({ linkCommentsPaused: false })).toEqual({
+      linkCommentsPaused: false,
+    });
+    expect(
+      RelayShareDiscussionPauseResponse.parse({
+        ok: true,
+        linkCommentsPaused: false,
+      }),
+    ).toEqual({ ok: true, linkCommentsPaused: false });
+    expect(
+      RelayShareDiscussionPauseResponse.safeParse({
+        ok: true,
+        linkCommentsPaused: false,
+        shareId: "must-not-cross",
+      }).success,
+    ).toBe(false);
+
+    for (const [schema, malformed] of [
+      [DeleteRelayShareDiscussionMessageResult, { message: { ...tombstone, body: "secret" } }],
+      [BlockRelayShareDiscussionPrincipalResult, { blocked: true, ok: true }],
+      [UnblockRelayShareDiscussionPrincipalResult, { blocked: "false" }],
+      [PauseRelayShareDiscussionResult, { linkCommentsPaused: true, shareId: "share-1" }],
+      [ResumeRelayShareDiscussionResult, { linkCommentsPaused: null }],
+    ] as const) {
+      expect(schema.safeParse(malformed).success).toBe(false);
+    }
+  });
+
+  it("pins promotion and direct named revoke to closed permanent transitions", () => {
+    const promotion = {
+      workspaceId: "workspace-1",
+      shareId: "share-1",
+      grantId: "named-grant-1",
+      expectedParentGrantId: "link-grant-1",
+      expectedParentGeneration: 2,
+    };
+    expect(PromoteRelayShareGrantPayload.parse(promotion)).toEqual(promotion);
+    const revoke = {
+      workspaceId: "workspace-1",
+      shareId: "share-1",
+      grantId: "named-grant-1",
+    };
+    expect(RevokeRelayShareGrantPayload.parse(revoke)).toEqual(revoke);
+    for (const malformed of [
+      { ...promotion, expectedParentGeneration: 0 },
+      { ...promotion, expectedDependentGrantIds: [] },
+      { ...promotion, recipientUserId: "must-not-cross" },
+      { ...revoke, workspaceBody: "must-not-cross" },
+      { ...revoke, dependentGrantIds: [] },
+      { ...revoke, actor: { id: "must-not-cross" } },
+    ]) {
+      const schema = "expectedParentGrantId" in malformed
+        ? PromoteRelayShareGrantPayload
+        : RevokeRelayShareGrantPayload;
+      expect(schema.safeParse(malformed).success).toBe(false);
+    }
+
+    const promoted = {
+      grantId: "named-grant-1",
+      access: "comment" as const,
+      generation: 2,
+      status: "active" as const,
+      revokedAtMs: null,
+      parentGrantId: null,
+    };
+    const revoked = {
+      ...promoted,
+      generation: 3,
+      status: "revoked" as const,
+      revokedAtMs: 20,
+    };
+    expect(PromoteRelayShareGrantResult.parse(promoted)).toEqual(promoted);
+    expect(RevokeRelayShareGrantResult.parse(revoked)).toEqual(revoked);
+    expect(RelayShareGrantPromotionResponse.parse({ ok: true, ...promoted })).toEqual({
+      ok: true,
+      ...promoted,
+    });
+    expect(RelayShareGrantRevokeResponse.parse({ ok: true, ...revoked })).toEqual({
+      ok: true,
+      ...revoked,
+    });
+    expect(
+      RelayShareGrantPromotionResponse.safeParse({
+        ok: true,
+        ...promoted,
+        recipientUserId: "must-not-cross",
+      }).success,
+    ).toBe(false);
+    expect(
+      RelayShareGrantRevokeResponse.safeParse({
+        ok: true,
+        ...revoked,
+        credential: "must-not-cross",
+      }).success,
+    ).toBe(false);
+    for (const [schema, malformed] of [
+      [PromoteRelayShareGrantResult, { ...promoted, ok: true }],
+      [PromoteRelayShareGrantResult, { ...promoted, status: "revoked" }],
+      [PromoteRelayShareGrantResult, { ...promoted, access: "owner" }],
+      [PromoteRelayShareGrantResult, { ...promoted, parentGrantId: "link-grant-1" }],
+      [RevokeRelayShareGrantResult, { ...revoked, revokedAtMs: null }],
+      [RevokeRelayShareGrantResult, { ...revoked, url: "https://must-not-cross.test" }],
+      [RevokeRelayShareGrantResult, { ...revoked, principalUserId: "must-not-cross" }],
+    ] as const) {
+      expect(schema.safeParse(malformed).success).toBe(false);
+    }
   });
 });
 
