@@ -3556,7 +3556,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         return { ok: false };
       }
 
-      const generation = grant.generation + 1;
+      const generation = widening ? grant.generation + 1 : grant.generation;
       this.db
         .prepare(
           "UPDATE sync_relay_share_grants SET access = ?, generation = ? WHERE grant_id = ?",
@@ -3579,13 +3579,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         this.pruneRetiredLinkCredentials(grant.grantId);
         this.incrementActiveDependentGenerations(grant.grantId);
       } else {
-        this.db
-          .prepare(
-            `UPDATE sync_relay_link_credentials
-             SET generation = ?
-             WHERE grant_id = ? AND retired_at_ms IS NULL`,
-          )
-          .run(generation, grant.grantId);
         for (const dependent of dependents) {
           const dependentRank = shareAccessRank(dependent.access);
           if (dependentRank > to) {

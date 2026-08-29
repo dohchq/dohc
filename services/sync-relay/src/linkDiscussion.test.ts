@@ -1084,7 +1084,7 @@ describe("share discussion HTTP boundary", () => {
     expect(await genericRefusal(response)).toBe(baseline);
   });
 
-  it("wakes parked readers into refusal on rotation, retune, ownership loss, and named access loss", async () => {
+  it("keeps a narrowed parked reader and refuses invalidated readers", async () => {
     for (const transition of ["rotate", "retune"] as const) {
       const activityHub = new DiscussionActivityHub();
       const test = await fixture({ discussionActivity: activityHub });
@@ -1110,7 +1110,16 @@ describe("share discussion HTTP boundary", () => {
       );
       expect(changed.status, transition).toBe(200);
       await changed.arrayBuffer();
-      expect(await genericRefusal(await waiting), transition).toContain("404:");
+      const settled = await waiting;
+      if (transition === "retune") {
+        expect(settled.status).toBe(200);
+        expect(await body(settled)).toMatchObject({
+          cursorRevision: 0,
+          messages: [],
+        });
+      } else {
+        expect(await genericRefusal(settled), transition).toContain("404:");
+      }
       expect(activityHub.stats()).toEqual({ shares: 0, waiters: 0 });
     }
 

@@ -981,7 +981,7 @@ describe("Phase 3 owner link contract", () => {
       grantId: "storage-seeded-comment-link",
       principalKind: "link",
       access: "view",
-      generation: 2,
+      generation: 1,
       status: "active",
       createdAtMs: 2_001,
       revokedAtMs: null,
@@ -1000,17 +1000,16 @@ describe("Phase 3 owner link contract", () => {
     expect(newId).not.toHaveBeenCalled();
     expect(storage.getShareGrant("storage-seeded-comment-link")).toMatchObject({
       access: "view",
-      generation: 2,
+      generation: 1,
     });
     expect(storage.getShareGrant(dependentGrantId)).toMatchObject({
       access: "view",
       generation: 2,
       parentGrantId: "storage-seeded-comment-link",
     });
-    expect(storage.getCurrentLinkCredential("storage-seeded-comment-link")).toEqual({
-      ...beforeRetuneCredential,
-      generation: 2,
-    });
+    expect(storage.getCurrentLinkCredential("storage-seeded-comment-link")).toEqual(
+      beforeRetuneCredential,
+    );
     expect(
       (await h(request(null, "/sync/link-exchange", jsonBody({ secret: higherSecret })))).status,
     ).toBe(200);
@@ -1121,7 +1120,7 @@ describe("Phase 3 owner link contract", () => {
       ok: true,
       grantId,
       access: "view",
-      generation: 3,
+      generation: 2,
     });
     expect(narrowed).not.toHaveProperty("url");
     expect(retuneShareGrant).toHaveBeenCalledTimes(2);
@@ -1142,27 +1141,28 @@ describe("Phase 3 owner link contract", () => {
     });
     expect(storage.getCurrentLinkCredential(grantId)).toMatchObject({
       secretHash: hmac(commentSecret),
-      generation: 3,
+      generation: 2,
       retiredAtMs: null,
     });
-    expect(
-      (
-        await h(
-          request(null, "/sync/link/share", {
-            headers: {
-              authorization: `LinkCapability ${String(commentExchange.capabilityToken)}`,
-            },
-          }),
-        )
-      ).status,
-    ).toBe(401);
+    const narrowedCapabilityRead = await h(
+      request(null, "/sync/link/share", {
+        headers: {
+          authorization: `LinkCapability ${String(commentExchange.capabilityToken)}`,
+        },
+      }),
+    );
+    expect(narrowedCapabilityRead.status).toBe(200);
+    expect(await json(narrowedCapabilityRead)).toMatchObject({
+      access: "view",
+      effectiveSelector: { access: "view" },
+    });
     const narrowedExchange = await json(
       await h(request(null, "/sync/link-exchange", jsonBody({ secret: commentSecret }))),
     );
     expect(narrowedExchange).toMatchObject({
       grantId,
       access: "view",
-      generation: 3,
+      generation: 2,
       effectiveSelector: { access: "view" },
     });
   });
@@ -1378,7 +1378,7 @@ describe("Phase 3 owner link contract", () => {
     expect(await json(narrowed)).not.toHaveProperty("url");
     expect(storage.getShareGrant("storage-seeded-comment-without-origin-link")).toMatchObject({
       access: "view",
-      generation: 2,
+      generation: 1,
     });
   });
 
@@ -2251,7 +2251,7 @@ describe("owner link inventory and impact preconditions", () => {
     expect(retune.status).toBe(200);
     expect((await ownerLinkInventory(h))[0]).toMatchObject({
       access: "view",
-      generation: 3,
+      generation: 2,
       dependents: [
         { grantId: "dependent-lifecycle", access: "view", generation: 3 },
       ],
@@ -2262,7 +2262,7 @@ describe("owner link inventory and impact preconditions", () => {
         shareId: "share-existing",
         grantId: "dependent-lifecycle",
         expectedParentGrantId: "link-lifecycle",
-        expectedParentGeneration: 3,
+        expectedParentGeneration: 2,
         guard: () => undefined,
       }),
     ).toMatchObject({ ok: true });
@@ -2283,7 +2283,7 @@ describe("owner link inventory and impact preconditions", () => {
     expect((await ownerLinkInventory(h))[0]).toMatchObject({
       grantId: "link-lifecycle",
       status: "revoked",
-      generation: 4,
+      generation: 3,
       revokedAtMs: 2_000,
       dependents: [],
     });
@@ -2966,7 +2966,7 @@ describe("durable link usage inventory", () => {
         expectedDependentGrantIds: [],
         guard: () => undefined,
       }),
-    ).toMatchObject({ ok: true, grant: { access: "view", generation: 2 } });
+    ).toMatchObject({ ok: true, grant: { access: "view", generation: 1 } });
     expect(await ownerLinkInventoryRow(h, grantId)).toMatchObject({
       lastUsedAtMs: 2_200,
       urlIssuedAtMs: 2_100,
@@ -2985,7 +2985,7 @@ describe("durable link usage inventory", () => {
           secretHash: hmac("storage-seeded-widened-secret"),
         }),
       }),
-    ).toMatchObject({ ok: true, grant: { access: "comment", generation: 3 } });
+    ).toMatchObject({ ok: true, grant: { access: "comment", generation: 2 } });
     expect(await ownerLinkInventoryRow(h, grantId)).toMatchObject({
       lastUsedAtMs: null,
       urlIssuedAtMs: 2_400,
@@ -3169,7 +3169,7 @@ describe("relay link grants", () => {
       },
     });
 
-    // Narrow keeps the URL, moves its credential, and narrows an over-wide dependent.
+    // Narrow keeps the URL and generation while narrowing an over-wide dependent.
     expect(
       storage.retuneShareGrant({
         shareId: "share-existing",
@@ -3179,14 +3179,14 @@ describe("relay link grants", () => {
         expectedDependentGrantIds: ["grant-dependent"],
         guard: () => undefined,
       }),
-    ).toMatchObject({ ok: true, grant: { access: "comment", generation: 2 } });
+    ).toMatchObject({ ok: true, grant: { access: "comment", generation: 1 } });
     expect(storage.getShareGrant(linkGrantId)).toMatchObject({
       access: "comment",
-      generation: 2,
+      generation: 1,
     });
     expect(storage.getCurrentLinkCredential(linkGrantId)).toMatchObject({
       credentialId: firstCredential.credentialId,
-      generation: 2,
+      generation: 1,
       retiredAtMs: null,
     });
     expect(storage.getShareGrant("grant-dependent")).toMatchObject({
@@ -3200,7 +3200,7 @@ describe("relay link grants", () => {
     expect(await json(commentExchange)).toMatchObject({
       grantId: linkGrantId,
       access: "comment",
-      generation: 2,
+      generation: 1,
       effectiveSelector: { access: "comment" },
     });
 
@@ -3219,9 +3219,9 @@ describe("relay link grants", () => {
           secretHash: hmac(widenedSecret),
         }),
       }),
-    ).toMatchObject({ ok: true, grant: { access: "edit", generation: 3 } });
+    ).toMatchObject({ ok: true, grant: { access: "edit", generation: 2 } });
     expect(widenedSecret).not.toBe(firstSecret);
-    expect(storage.getShareGrant(linkGrantId)).toMatchObject({ access: "edit", generation: 3 });
+    expect(storage.getShareGrant(linkGrantId)).toMatchObject({ access: "edit", generation: 2 });
     expect(storage.getShareGrant("grant-dependent")).toMatchObject({
       access: "comment",
       generation: 3,
@@ -3251,9 +3251,9 @@ describe("relay link grants", () => {
           secretHash: hmac(rotatedSecret),
         }),
       }),
-    ).toMatchObject({ ok: true, grant: { access: "edit", generation: 4 } });
+    ).toMatchObject({ ok: true, grant: { access: "edit", generation: 3 } });
     expect(rotatedSecret).not.toBe(widenedSecret);
-    expect(storage.getShareGrant(linkGrantId)).toMatchObject({ access: "edit", generation: 4 });
+    expect(storage.getShareGrant(linkGrantId)).toMatchObject({ access: "edit", generation: 3 });
     expect(storage.getShareGrant("grant-dependent")).toMatchObject({ generation: 4 });
 
     // Promote detaches one dependent permanently.
@@ -3262,7 +3262,7 @@ describe("relay link grants", () => {
         shareId: "share-existing",
         grantId: "grant-dependent",
         expectedParentGrantId: linkGrantId,
-        expectedParentGeneration: 4,
+        expectedParentGeneration: 3,
         guard: () => undefined,
       }),
     ).toMatchObject({ ok: true, grant: { generation: 5, parentGrantId: null } });
@@ -3291,7 +3291,7 @@ describe("relay link grants", () => {
     expect(revokedResponse.status).toBe(200);
     expect(storage.getShareGrant(linkGrantId)).toMatchObject({
       status: "revoked",
-      generation: 5,
+      generation: 4,
       revokedAtMs: 2_000,
     });
     expect(storage.getCurrentLinkCredential(linkGrantId)).toBeNull();
@@ -3677,7 +3677,7 @@ describe("relay link grants", () => {
     }).toEqual(before);
   });
 
-  it("bumps every dependent generation when a link narrows", async () => {
+  it("keeps the link generation and bumps every dependent generation when it narrows", async () => {
     const storage = await newStorage();
     const h = handler(storage);
     await seedFileShare(h);
@@ -3745,14 +3745,14 @@ describe("relay link grants", () => {
         expectedDependentGrantIds: ["grant-dependent-at-new-level"],
         guard: () => undefined,
       }),
-    ).toMatchObject({ ok: true, grant: { access: "comment", generation: 3 } });
+    ).toMatchObject({ ok: true, grant: { access: "comment", generation: 2 } });
     expect(storage.getShareGrant("grant-dependent-at-new-level")).toMatchObject({
       access: "comment",
       generation: 3,
     });
     expect(storage.getShareGrant(grantId)).toMatchObject({
       access: "comment",
-      generation: 3,
+      generation: 2,
     });
   });
 

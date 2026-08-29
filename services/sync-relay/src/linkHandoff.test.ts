@@ -711,7 +711,7 @@ describe("single-use authenticated link handoff", () => {
   });
 
   it.each(["retune", "revoke"] as const)(
-    "refuses a Comment handoff redeem when %s wins before the storage commit",
+    "resolves a Comment handoff after %s wins before the storage commit",
     async (transition) => {
       const state = await setup({}, "comment");
       const minted = await mint(state);
@@ -756,17 +756,29 @@ describe("single-use authenticated link handoff", () => {
         newGrantId: () => `raced-${transition}-dependent`,
       });
 
-      await expectGeneric(
-        await racedHandler(redeemRequest(RECIPIENT, minted.code)),
-      );
+      const response = await racedHandler(redeemRequest(RECIPIENT, minted.code));
       expect(armed).toBe(false);
-      expect(
-        dependentRows(
-          inspect(state.dbPath, true),
-          String(state.link.grantId),
-          RECIPIENT,
-        ),
-      ).toEqual([]);
+      const dependents = dependentRows(
+        inspect(state.dbPath, true),
+        String(state.link.grantId),
+        RECIPIENT,
+      );
+      if (transition === "retune") {
+        expect(response.status).toBe(200);
+        expect(await json(response)).toMatchObject({
+          ok: true,
+          access: "view",
+        });
+        expect(dependents).toEqual([
+          expect.objectContaining({
+            access: "view",
+            parent_grant_id: state.link.grantId,
+          }),
+        ]);
+      } else {
+        await expectGeneric(response);
+        expect(dependents).toEqual([]);
+      }
     },
   );
 

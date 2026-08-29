@@ -733,7 +733,7 @@ describe("durable link discussion storage", () => {
         expectedDependentGrantIds: [],
         guard: () => {},
       }),
-    ).toMatchObject({ ok: true, grant: { generation: 2, access: "view" } });
+    ).toMatchObject({ ok: true, grant: { generation: 1, access: "view" } });
     expect(
       storage.retuneShareGrant({
         shareId: seeded.shareId,
@@ -747,7 +747,7 @@ describe("durable link discussion storage", () => {
           secretHash: "retuned-secret-hash",
         }),
       }),
-    ).toMatchObject({ ok: true, grant: { generation: 3, access: "comment" } });
+    ).toMatchObject({ ok: true, grant: { generation: 2, access: "comment" } });
     expect(
       storage.setLinkPrincipalBlocked({
         shareId: seeded.shareId,
@@ -776,7 +776,7 @@ describe("durable link discussion storage", () => {
           secretHash: "rotated-secret-hash",
         }),
       }),
-    ).toMatchObject({ ok: true, grant: { generation: 4 } });
+    ).toMatchObject({ ok: true, grant: { generation: 3 } });
 
     expect(
       storage.listShareDiscussionMessages({ shareId: seeded.shareId, limit: 50 }).messages,

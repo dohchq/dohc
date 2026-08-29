@@ -4,6 +4,8 @@ import {
   createSeededLink,
   expect,
   ownerHeaders,
+  revokeSeededLink,
+  rotateSeededLink,
   seedShare,
   test,
   type SeededLink,
@@ -72,6 +74,147 @@ async function openLink(
   await expect(page.getByRole("heading", { name: "Comments" })).toBeVisible();
   return page;
 }
+
+async function retuneLink(input: {
+  access: "view" | "comment";
+  grantId: string;
+  relayUrl: string;
+  seeded: Awaited<ReturnType<typeof seedShare>>;
+}): Promise<Record<string, unknown>> {
+  const response = await requireOk(
+    await fetch(
+      `${input.relayUrl}/sync/shares/${encodeURIComponent(input.seeded.shareId)}/links/${encodeURIComponent(input.grantId)}/retune`,
+      {
+        method: "POST",
+        headers: ownerHeaders(input.seeded.ownerUserId, true),
+        body: JSON.stringify({
+          access: input.access,
+          expectedDependentGrantIds: [],
+        }),
+      },
+    ),
+    `retune link to ${input.access}`,
+  );
+  return (await response.json()) as Record<string, unknown>;
+}
+
+async function viewerRequest(
+  page: Page,
+  input: { body?: string; method?: "GET" | "POST"; path: string },
+): Promise<{ body: string; status: number }> {
+  return page.evaluate(async ({ body, method = "GET", path }) => {
+    const session = location.pathname.slice("/s/".length);
+    const response = await fetch(path, {
+      method,
+      credentials: "same-origin",
+      headers: {
+        "x-dohc-link-session": session,
+        ...(body === undefined ? {} : { "content-type": "application/json" }),
+      },
+      ...(body === undefined ? {} : { body }),
+    });
+    return { body: await response.text(), status: response.status };
+  }, input);
+}
+
+test("keeps a narrowed Comment link readable without weakening transition invalidation", async ({
+  browser,
+  stack,
+}) => {
+  const seeded = await seedShare({
+    access: "comment",
+    relayUrl: stack.relayUrl,
+    files: [{ path: "docs/retuned.md", content: "# Retuned link\n" }],
+  });
+  const context = await browser.newContext();
+  const replacementContext = await browser.newContext();
+  try {
+    const page = await openLink(context, stack.shareWebUrl, seeded);
+    const sessionPath = new URL(page.url()).pathname;
+    expect(new URL(page.url()).hash).toBe("");
+    expect(sessionPath).toMatch(/^\/s\/[A-Za-z0-9_-]{12}$/u);
+    await expect(page.locator(".badge")).toHaveText("Comment");
+
+    const narrowed = await retuneLink({
+      access: "view",
+      grantId: seeded.grantId,
+      relayUrl: stack.relayUrl,
+      seeded,
+    });
+    expect(narrowed).toMatchObject({ access: "view", grantId: seeded.grantId });
+    expect(narrowed).not.toHaveProperty("url");
+
+    const current = await viewerRequest(page, { path: "/api/view/current" });
+    expect(current.status).toBe(200);
+    expect(current.body).toContain("docs/retuned.md");
+    const metadata = await viewerRequest(page, { path: "/api/view/meta" });
+    expect(metadata.status).toBe(200);
+    expect(JSON.parse(metadata.body)).toMatchObject({ access: "view" });
+
+    const rejectedBody = "This narrowed session must not write.";
+    const rejected = await viewerRequest(page, {
+      method: "POST",
+      path: "/api/view/discussion",
+      body: JSON.stringify({
+        body: rejectedBody,
+        idempotencyKey: "narrowed-comment-must-not-land",
+      }),
+    });
+    expect(rejected.status).toBe(404);
+    expect(rejected.body).not.toContain(rejectedBody);
+    const discussion = await viewerRequest(page, { path: "/api/view/discussion" });
+    expect(discussion.status).toBe(200);
+    expect(discussion.body).not.toContain(rejectedBody);
+
+    await page.reload();
+    expect(new URL(page.url()).pathname).toBe(sessionPath);
+    await expect(page.locator(".badge")).toHaveText("View");
+    await expect(page.getByText("Retuned link", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("Comment", { exact: true })).toHaveCount(0);
+
+    const replacementPage = await openLink(
+      replacementContext,
+      stack.shareWebUrl,
+      { grantId: seeded.grantId, secret: seeded.secret },
+    );
+    await expect(replacementPage.locator(".badge")).toHaveText("View");
+
+    const invalidatingCases = [
+      {
+        label: "broaden",
+        transition: async (grantId: string) => {
+          const result = await retuneLink({
+            access: "comment",
+            grantId,
+            relayUrl: stack.relayUrl,
+            seeded,
+          });
+          expect(result).toHaveProperty("url");
+        },
+      },
+      {
+        label: "rotate",
+        transition: (grantId: string) =>
+          rotateSeededLink(stack.relayUrl, seeded, grantId),
+      },
+      {
+        label: "revoke",
+        transition: (grantId: string) =>
+          revokeSeededLink(stack.relayUrl, seeded, grantId),
+      },
+    ] as const;
+    for (const invalidatingCase of invalidatingCases) {
+      const link = await createSeededLink(stack.relayUrl, seeded, "view");
+      const transitionPage = await openLink(context, stack.shareWebUrl, link);
+      await invalidatingCase.transition(link.grantId);
+      const refused = await viewerRequest(transitionPage, { path: "/api/view/meta" });
+      expect(refused.status, invalidatingCase.label).toBe(404);
+      await transitionPage.close();
+    }
+  } finally {
+    await Promise.all([context.close(), replacementContext.close()]);
+  }
+});
 
 test("keeps two open public comment sessions current", async ({ browser, stack }) => {
   const seeded = await seedShare({
