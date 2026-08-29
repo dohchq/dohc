@@ -2,7 +2,11 @@
 import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ListRelayShareLinksResult } from "../ipc/bridgeContract";
+import {
+  ListRelayShareLinksResult,
+  type RelayShareDiscussionMessage,
+  type RelayShareGrantedRow,
+} from "../ipc/bridgeContract";
 import { RelayShareDialog } from "./RelayShareDialog";
 
 const SHARE_CODE = "dohc-share:share-1:http://relay.test";
@@ -52,6 +56,17 @@ type DamagedLink = Omit<ReadableLink, "access" | "selector"> & {
 };
 
 type LinkRow = ReadableLink | DamagedLink;
+
+type DiscussionPage = {
+  linkCommentsPaused: boolean;
+  messages: RelayShareDiscussionMessage[];
+  nextCursor: string | null;
+};
+
+type ReadableGrantedRow = Extract<
+  RelayShareGrantedRow,
+  { selector: { paths: string[]; versionId: string | null } }
+>;
 
 const CREATED_MS = Date.UTC(2026, 0, 2, 3, 4);
 
@@ -127,6 +142,80 @@ function linkResult(url: string): LinkResult {
   return { shareId: "share-link-1", grantId: "grant-link-1", url };
 }
 
+function namedComment(
+  messageId: string,
+  body: string,
+  displayName = "Owner Name",
+): RelayShareDiscussionMessage {
+  return {
+    messageId,
+    createdAtMs: CREATED_MS,
+    deleted: false,
+    body,
+    author: { kind: "named", displayName },
+  };
+}
+
+function linkComment(
+  messageId: string,
+  body: string,
+  overrides: {
+    blocked?: boolean;
+    displayName?: string;
+    linkGrantId?: string;
+    linkPrincipalId?: string;
+  } = {},
+): RelayShareDiscussionMessage {
+  return {
+    messageId,
+    createdAtMs: CREATED_MS,
+    deleted: false,
+    body,
+    author: {
+      kind: "link",
+      displayName: overrides.displayName ?? "Link Visitor",
+      unverified: true,
+    },
+    moderation: {
+      linkGrantId: overrides.linkGrantId ?? "link-grant-1",
+      linkPrincipalId: overrides.linkPrincipalId ?? "principal-1",
+      blocked: overrides.blocked ?? false,
+    },
+  };
+}
+
+function discussionPage(
+  messages: RelayShareDiscussionMessage[] = [],
+  overrides: Partial<DiscussionPage> = {},
+): DiscussionPage {
+  return {
+    linkCommentsPaused: false,
+    messages,
+    nextCursor: null,
+    ...overrides,
+  };
+}
+
+function independentGrant(
+  grantId: string,
+  overrides: Partial<ReadableGrantedRow> = {},
+): ReadableGrantedRow {
+  return {
+    shareId: "share-1",
+    workspaceId: "ws-1",
+    recipientUserId: `user-${grantId}`,
+    recipientEmail: `${grantId}@example.test`,
+    grantId,
+    generation: 2,
+    createdAtMs: CREATED_MS,
+    revokedAtMs: null,
+    shareCode: `dohc-share:${grantId}`,
+    selector: { paths: ["docs/plan.md"], versionId: null },
+    access: "comment",
+    ...overrides,
+  };
+}
+
 function controllable<T>() {
   let resolve!: (value: T) => void;
   let reject!: (cause: unknown) => void;
@@ -145,6 +234,16 @@ const bridgeMock = {
   retuneRelayShareLink: vi.fn(),
   rotateRelayShareLink: vi.fn(),
   revokeRelayShareLink: vi.fn(),
+  listRelayShares: vi.fn(),
+  listRelayShareDiscussion: vi.fn(),
+  appendRelayShareDiscussion: vi.fn(),
+  deleteRelayShareDiscussionMessage: vi.fn(),
+  blockRelayShareDiscussionPrincipal: vi.fn(),
+  unblockRelayShareDiscussionPrincipal: vi.fn(),
+  pauseRelayShareDiscussion: vi.fn(),
+  resumeRelayShareDiscussion: vi.fn(),
+  promoteRelayShareGrant: vi.fn(),
+  revokeRelayShareGrant: vi.fn(),
   writeClipboardText: vi.fn(),
 };
 
@@ -168,6 +267,38 @@ beforeEach(() => {
     url: LINK_URL_B,
   });
   bridgeMock.revokeRelayShareLink.mockResolvedValue({ outcome: "ended" });
+  bridgeMock.listRelayShares.mockResolvedValue({ granted: [], received: [] });
+  bridgeMock.listRelayShareDiscussion.mockResolvedValue(discussionPage());
+  bridgeMock.appendRelayShareDiscussion.mockResolvedValue({
+    message: namedComment("appended-1", "Posted comment"),
+  });
+  bridgeMock.deleteRelayShareDiscussionMessage.mockResolvedValue({
+    message: { messageId: "message-1", createdAtMs: CREATED_MS, deleted: true },
+  });
+  bridgeMock.blockRelayShareDiscussionPrincipal.mockResolvedValue({ blocked: true });
+  bridgeMock.unblockRelayShareDiscussionPrincipal.mockResolvedValue({ blocked: false });
+  bridgeMock.pauseRelayShareDiscussion.mockResolvedValue({
+    linkCommentsPaused: true,
+  });
+  bridgeMock.resumeRelayShareDiscussion.mockResolvedValue({
+    linkCommentsPaused: false,
+  });
+  bridgeMock.promoteRelayShareGrant.mockResolvedValue({
+    grantId: "dependent-1",
+    access: "comment",
+    generation: 2,
+    status: "active",
+    revokedAtMs: null,
+    parentGrantId: null,
+  });
+  bridgeMock.revokeRelayShareGrant.mockResolvedValue({
+    grantId: "independent-1",
+    access: "comment",
+    generation: 3,
+    status: "revoked",
+    revokedAtMs: CREATED_MS + 1,
+    parentGrantId: null,
+  });
   bridgeMock.writeClipboardText.mockResolvedValue(undefined);
 });
 
@@ -177,6 +308,15 @@ afterEach(() => {
 
 async function showLinkPane(user: ReturnType<typeof userEvent.setup>) {
   await user.click(screen.getByRole("radio", { name: "Anyone with the link" }));
+}
+
+async function openOwnerComments(
+  user: ReturnType<typeof userEvent.setup>,
+  shareId: string,
+) {
+  const group = await screen.findByTestId(`share-link-group-${shareId}`);
+  await user.click(within(group).getByRole("button", { name: "Comments" }));
+  return group;
 }
 
 describe("RelayShareDialog", () => {
@@ -1916,5 +2056,1205 @@ describe("RelayShareDialog", () => {
       paths: ["docs/plan.md"],
     });
     expect(bridgeMock.writeClipboardText).not.toHaveBeenCalled();
+  });
+
+  it("keeps one collapsed Comments section per eligible real share", async () => {
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [
+        readableLink("link-a", { shareId: "share-a" }),
+        readableLink("link-b", { shareId: "share-b" }),
+        damagedLink("damaged-only", { shareId: "share-damaged" }),
+      ],
+    });
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+
+    const groupA = await screen.findByTestId("share-link-group-share-a");
+    const groupB = screen.getByTestId("share-link-group-share-b");
+    const damaged = screen.getByTestId("share-link-group-share-damaged");
+    expect(within(groupA).getByRole("button", { name: "Comments" }).textContent).toBe(
+      "Comments",
+    );
+    expect(within(groupB).getByRole("button", { name: "Comments" }).textContent).toBe(
+      "Comments",
+    );
+    expect(within(damaged).queryByRole("button", { name: "Comments" })).toBeNull();
+    expect(bridgeMock.listRelayShareDiscussion).not.toHaveBeenCalled();
+
+    await user.click(within(groupA).getByRole("button", { name: "Comments" }));
+    expect(bridgeMock.listRelayShareDiscussion).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      shareId: "share-a",
+    });
+    expect(await within(groupA).findByText("No comments yet.")).toBeTruthy();
+    expect(within(groupB).queryByText("No comments yet.")).toBeNull();
+  });
+
+  it("promotes a named dependent under a damaged sibling in an eligible group", async () => {
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [
+        readableLink("readable-parent", { shareId: "share-mixed" }),
+        damagedLink("damaged-parent", {
+          shareId: "share-mixed",
+          generation: 9,
+          dependents: [
+            dependent(
+              "damaged-dependent",
+              "damaged@example.test",
+              "damaged-user",
+              "comment",
+            ),
+          ],
+        }),
+      ],
+    });
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await openOwnerComments(user, "share-mixed");
+
+    const dependentRow = await within(group).findByTestId(
+      "share-dependent-damaged-dependent",
+    );
+    await user.click(
+      within(dependentRow).getByRole("button", { name: "Make independent" }),
+    );
+    await user.click(
+      within(group)
+        .getByTestId("owner-comments-confirmation")
+        .querySelector<HTMLButtonElement>('button[type="button"]:last-child')!,
+    );
+
+    expect(bridgeMock.promoteRelayShareGrant).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      shareId: "share-mixed",
+      grantId: "damaged-dependent",
+      expectedParentGrantId: "damaged-parent",
+      expectedParentGeneration: 9,
+    });
+  });
+
+  it("appends ordered pages without duplicates and renders owner tombstones", async () => {
+    const first = namedComment("message-1", "First");
+    const second = linkComment("message-2", "Second");
+    const deleted: RelayShareDiscussionMessage = {
+      messageId: "message-3",
+      createdAtMs: CREATED_MS + 2,
+      deleted: true,
+      author: { kind: "named", displayName: "Deleted Author" },
+    };
+    const fourth = namedComment("message-4", "Fourth");
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("link-1", { shareId: "share-1" })],
+    });
+    bridgeMock.listRelayShareDiscussion
+      .mockResolvedValueOnce(
+        discussionPage([first, second, deleted], { nextCursor: "cursor-1" }),
+      )
+      .mockResolvedValueOnce(discussionPage([second, fourth]));
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await openOwnerComments(user, "share-1");
+
+    expect(await within(group).findByText("First")).toBeTruthy();
+    expect(within(group).getByText("Second")).toBeTruthy();
+    expect(within(group).getByText("Unverified")).toBeTruthy();
+    expect(within(group).getByText("Comment deleted by the owner")).toBeTruthy();
+    expect(within(group).queryByText("Deleted body must not render")).toBeNull();
+    await user.click(
+      within(group).getByRole("button", { name: "Show more comments" }),
+    );
+    expect(bridgeMock.listRelayShareDiscussion).toHaveBeenNthCalledWith(2, {
+      workspaceId: "ws-1",
+      shareId: "share-1",
+      cursor: "cursor-1",
+    });
+    expect(await within(group).findByText("Fourth")).toBeTruthy();
+    const messageIds = Array.from(
+      group.querySelectorAll<HTMLElement>("[data-comment-message-id]"),
+      (node) => node.dataset.commentMessageId,
+    );
+    expect(messageIds).toEqual([
+      "message-1",
+      "message-2",
+      "message-3",
+      "message-4",
+    ]);
+  });
+
+  it("retries one append intent, changes its key after an edit, and never adds early", async () => {
+    const first = controllable<{ message: RelayShareDiscussionMessage }>();
+    const third = controllable<{ message: RelayShareDiscussionMessage }>();
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("link-1", { shareId: "share-1" })],
+    });
+    bridgeMock.appendRelayShareDiscussion
+      .mockReturnValueOnce(first.promise)
+      .mockRejectedValueOnce(new Error("Retry failed."))
+      .mockReturnValueOnce(third.promise);
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await openOwnerComments(user, "share-1");
+    const field = within(group).getByRole("textbox", { name: "Add a comment" });
+    await user.type(field, "Keep this draft");
+    const post = within(group).getByRole("button", { name: "Post" });
+    await user.dblClick(post);
+    expect(bridgeMock.appendRelayShareDiscussion).toHaveBeenCalledTimes(1);
+    const firstPayload = bridgeMock.appendRelayShareDiscussion.mock.calls[0]?.[0];
+    expect(firstPayload).toEqual({
+      workspaceId: "ws-1",
+      shareId: "share-1",
+      body: "Keep this draft",
+      idempotencyKey: expect.stringMatching(/^[\x20-\x7e]{1,64}$/u),
+    });
+    expect(
+      Array.from(group.querySelectorAll("[data-comment-message-id]")).some(
+        (row) => row.textContent?.includes("Keep this draft"),
+      ),
+    ).toBe(false);
+
+    await act(async () => {
+      first.reject(new Error("Post failed."));
+    });
+    expect(await within(group).findByText("Couldn't post comment.")).toBeTruthy();
+    expect((field as HTMLTextAreaElement).value).toBe("Keep this draft");
+    await user.click(within(group).getByRole("button", { name: "Retry" }));
+    expect(bridgeMock.appendRelayShareDiscussion).toHaveBeenCalledTimes(2);
+    expect(bridgeMock.appendRelayShareDiscussion.mock.calls[1]?.[0]).toEqual(
+      firstPayload,
+    );
+    expect(await within(group).findByText("Couldn't post comment.")).toBeTruthy();
+
+    await user.type(field, "!");
+    expect(within(group).queryByRole("button", { name: "Retry" })).toBeNull();
+    await user.click(within(group).getByRole("button", { name: "Post" }));
+    const editedPayload = bridgeMock.appendRelayShareDiscussion.mock.calls[2]?.[0];
+    expect(editedPayload).toMatchObject({
+      workspaceId: "ws-1",
+      shareId: "share-1",
+      body: "Keep this draft!",
+    });
+    expect(editedPayload.idempotencyKey).not.toBe(firstPayload.idempotencyKey);
+    expect(
+      Array.from(group.querySelectorAll("[data-comment-message-id]")).some(
+        (row) => row.textContent?.includes("Keep this draft!"),
+      ),
+    ).toBe(false);
+    await act(async () => {
+      third.resolve({
+        message: namedComment("settled-message", "Keep this draft!"),
+      });
+    });
+    expect((field as HTMLTextAreaElement).value).toBe("");
+    expect(within(group).getAllByText("Keep this draft!")).toHaveLength(1);
+  });
+
+  it("retries a failed discussion load without changing the draft", async () => {
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("link-1", { shareId: "share-1" })],
+    });
+    bridgeMock.listRelayShareDiscussion
+      .mockRejectedValueOnce(new Error("private relay detail"))
+      .mockResolvedValueOnce(discussionPage([namedComment("message-1", "Loaded")]));
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await openOwnerComments(user, "share-1");
+    expect(await within(group).findByText("Couldn't load comments.")).toBeTruthy();
+    const field = within(group).getByRole("textbox", { name: "Add a comment" });
+    await user.type(field, "Draft survives");
+    await user.click(within(group).getByRole("button", { name: "Retry" }));
+    expect(await within(group).findByText("Loaded")).toBeTruthy();
+    expect(within(group).queryByText("Couldn't load comments.")).toBeNull();
+    expect((field as HTMLTextAreaElement).value).toBe("Draft survives");
+  });
+
+  it("retries a failed authoritative refresh without the stale page cursor", async () => {
+    const live = namedComment("message-1", "Delete this body");
+    const tombstone: RelayShareDiscussionMessage = {
+      messageId: "message-1",
+      createdAtMs: CREATED_MS,
+      deleted: true,
+      author: { kind: "named", displayName: "Owner Name" },
+    };
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("link-1", { shareId: "share-1" })],
+    });
+    bridgeMock.listRelayShareDiscussion
+      .mockResolvedValueOnce(
+        discussionPage([live], { nextCursor: "stale-page-cursor" }),
+      )
+      .mockRejectedValueOnce(new Error("authoritative refresh failed"))
+      .mockResolvedValueOnce(discussionPage([tombstone]));
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await openOwnerComments(user, "share-1");
+    const message = await within(group).findByTestId("share-comment-message-1");
+    await user.click(
+      within(message).getByRole("button", { name: "Delete comment" }),
+    );
+    await user.click(
+      within(within(group).getByTestId("owner-comments-confirmation")).getByRole(
+        "button",
+        { name: "Delete comment" },
+      ),
+    );
+
+    expect(await within(group).findByText("Couldn't load comments.")).toBeTruthy();
+    expect(bridgeMock.listRelayShareDiscussion).toHaveBeenNthCalledWith(2, {
+      workspaceId: "ws-1",
+      shareId: "share-1",
+    });
+    await user.click(within(group).getByRole("button", { name: "Retry" }));
+    expect(bridgeMock.listRelayShareDiscussion).toHaveBeenNthCalledWith(3, {
+      workspaceId: "ws-1",
+      shareId: "share-1",
+    });
+    expect(
+      await within(group).findByText("Comment deleted by the owner"),
+    ).toBeTruthy();
+    expect(within(group).queryByText("Delete this body")).toBeNull();
+  });
+
+  it("retries a failed page with the same opaque cursor and keeps earlier rows", async () => {
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("link-1", { shareId: "share-1" })],
+    });
+    bridgeMock.listRelayShareDiscussion
+      .mockResolvedValueOnce(
+        discussionPage([namedComment("message-1", "First page")], {
+          nextCursor: "opaque-page-cursor",
+        }),
+      )
+      .mockRejectedValueOnce(new Error("page failed"))
+      .mockResolvedValueOnce(
+        discussionPage([namedComment("message-2", "Second page")]),
+      );
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await openOwnerComments(user, "share-1");
+    expect(await within(group).findByText("First page")).toBeTruthy();
+    await user.click(
+      within(group).getByRole("button", { name: "Show more comments" }),
+    );
+
+    expect(await within(group).findByText("Couldn't load comments.")).toBeTruthy();
+    expect(within(group).getByText("First page")).toBeTruthy();
+    await user.click(within(group).getByRole("button", { name: "Retry" }));
+    expect(bridgeMock.listRelayShareDiscussion).toHaveBeenNthCalledWith(3, {
+      workspaceId: "ws-1",
+      shareId: "share-1",
+      cursor: "opaque-page-cursor",
+    });
+    expect(await within(group).findByText("Second page")).toBeTruthy();
+    expect(within(group).getByText("First page")).toBeTruthy();
+  });
+
+  it("reloads delete, principal block, and share pause changes from authority", async () => {
+    const named = namedComment("message-1", "Remove me");
+    const link = linkComment("message-2", "Moderate me");
+    const tombstone: RelayShareDiscussionMessage = {
+      messageId: "message-1",
+      createdAtMs: CREATED_MS,
+      deleted: true,
+      author: { kind: "named", displayName: "Owner Name" },
+    };
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("link-1", { shareId: "share-1" })],
+    });
+    bridgeMock.listRelayShareDiscussion
+      .mockResolvedValueOnce(discussionPage([named, link]))
+      .mockResolvedValueOnce(discussionPage([tombstone, link]))
+      .mockResolvedValueOnce(
+        discussionPage([tombstone, linkComment("message-2", "Moderate me", { blocked: true })]),
+      )
+      .mockResolvedValueOnce(discussionPage([tombstone, link]))
+      .mockResolvedValueOnce(
+        discussionPage([tombstone, link], { linkCommentsPaused: true }),
+      )
+      .mockResolvedValueOnce(discussionPage([tombstone, link]));
+    bridgeMock.pauseRelayShareDiscussion
+      .mockRejectedValueOnce(new Error("private failure"))
+      .mockResolvedValueOnce({ linkCommentsPaused: true });
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await openOwnerComments(user, "share-1");
+    const namedRow = await within(group).findByTestId("share-comment-message-1");
+    await user.click(
+      within(namedRow).getByRole("button", { name: "Delete comment" }),
+    );
+    let confirmation = within(group).getByTestId("owner-comments-confirmation");
+    expect(confirmation.querySelector("p")?.textContent).toBe(
+      "Delete this comment? Its text is removed for everyone right away and can't be brought back. Readers see that a comment was deleted.",
+    );
+    await user.click(
+      within(confirmation).getByRole("button", { name: "Delete comment" }),
+    );
+    expect(bridgeMock.deleteRelayShareDiscussionMessage).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      shareId: "share-1",
+      messageId: "message-1",
+    });
+    expect(await within(group).findByText("Comment deleted by the owner")).toBeTruthy();
+
+    let linkRow = within(group).getByTestId("share-comment-message-2");
+    await user.click(within(linkRow).getByRole("button", { name: "Block" }));
+    confirmation = within(group).getByTestId("owner-comments-confirmation");
+    expect(confirmation.querySelector("p")?.textContent).toBe(
+      "Block Link Visitor? They can't comment on this share from that browser until you unblock them. The same person can still comment from another browser with this link. To stop everyone with this link, reset it.",
+    );
+    await user.click(within(confirmation).getByRole("button", { name: "Block" }));
+    expect(bridgeMock.blockRelayShareDiscussionPrincipal).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      shareId: "share-1",
+      principalId: "principal-1",
+    });
+    linkRow = await within(group).findByTestId("share-comment-message-2");
+    await user.click(within(linkRow).getByRole("button", { name: "Unblock" }));
+    expect(bridgeMock.unblockRelayShareDiscussionPrincipal).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      shareId: "share-1",
+      principalId: "principal-1",
+    });
+    expect(
+      await within(group).findByRole("button", { name: "Block" }),
+    ).toBeTruthy();
+
+    await user.click(within(group).getByRole("button", { name: "Pause link comments" }));
+    expect(await within(group).findByText("Couldn't complete that change.")).toBeTruthy();
+    expect(
+      within(group).getByRole("button", { name: "Pause link comments" }),
+    ).toBeTruthy();
+    await user.click(within(group).getByRole("button", { name: "Pause link comments" }));
+    expect(bridgeMock.pauseRelayShareDiscussion).toHaveBeenLastCalledWith({
+      workspaceId: "ws-1",
+      shareId: "share-1",
+    });
+    expect(
+      await within(group).findByText(
+        "Link comments are paused. People with links can still read everything.",
+      ),
+    ).toBeTruthy();
+    expect(within(group).queryByText("Couldn't complete that change.")).toBeNull();
+    await user.click(within(group).getByRole("button", { name: "Resume link comments" }));
+    expect(bridgeMock.resumeRelayShareDiscussion).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      shareId: "share-1",
+    });
+    expect(
+      await within(group).findByRole("button", { name: "Pause link comments" }),
+    ).toBeTruthy();
+  });
+
+  it("keeps a confirmation-action error visible through its pending retry", async () => {
+    const retry = controllable<{
+      message: { messageId: string; createdAtMs: number; deleted: true };
+    }>();
+    const live = namedComment("message-1", "Retry deletion");
+    const tombstone: RelayShareDiscussionMessage = {
+      messageId: "message-1",
+      createdAtMs: CREATED_MS,
+      deleted: true,
+      author: { kind: "named", displayName: "Owner Name" },
+    };
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("link-1", { shareId: "share-1" })],
+    });
+    bridgeMock.listRelayShareDiscussion
+      .mockResolvedValueOnce(discussionPage([live]))
+      .mockResolvedValueOnce(discussionPage([tombstone]));
+    bridgeMock.deleteRelayShareDiscussionMessage
+      .mockRejectedValueOnce(new Error("delete failed"))
+      .mockReturnValueOnce(retry.promise);
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await openOwnerComments(user, "share-1");
+    const row = await within(group).findByTestId("share-comment-message-1");
+    await user.click(within(row).getByRole("button", { name: "Delete comment" }));
+    await user.click(
+      within(within(group).getByTestId("owner-comments-confirmation")).getByRole(
+        "button",
+        { name: "Delete comment" },
+      ),
+    );
+    expect(await within(group).findByText("Couldn't complete that change.")).toBeTruthy();
+
+    await user.click(within(row).getByRole("button", { name: "Delete comment" }));
+    expect(within(group).getByText("Couldn't complete that change.")).toBeTruthy();
+    await user.click(
+      within(within(group).getByTestId("owner-comments-confirmation")).getByRole(
+        "button",
+        { name: "Delete comment" },
+      ),
+    );
+    expect(bridgeMock.deleteRelayShareDiscussionMessage).toHaveBeenCalledTimes(2);
+    expect(within(group).getByText("Couldn't complete that change.")).toBeTruthy();
+
+    await act(async () => {
+      retry.resolve({
+        message: {
+          messageId: "message-1",
+          createdAtMs: CREATED_MS,
+          deleted: true,
+        },
+      });
+    });
+    expect(
+      await within(group).findByText("Comment deleted by the owner"),
+    ).toBeTruthy();
+    expect(within(group).queryByText("Couldn't complete that change.")).toBeNull();
+  });
+
+  it("keeps a direct pause error visible through its pending retry", async () => {
+    const retry = controllable<{ linkCommentsPaused: true }>();
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("link-1", { shareId: "share-1" })],
+    });
+    bridgeMock.listRelayShareDiscussion
+      .mockResolvedValueOnce(discussionPage())
+      .mockResolvedValueOnce(discussionPage([], { linkCommentsPaused: true }));
+    bridgeMock.pauseRelayShareDiscussion
+      .mockRejectedValueOnce(new Error("pause failed"))
+      .mockReturnValueOnce(retry.promise);
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await openOwnerComments(user, "share-1");
+    await user.click(
+      within(group).getByRole("button", { name: "Pause link comments" }),
+    );
+    expect(await within(group).findByText("Couldn't complete that change.")).toBeTruthy();
+
+    await user.click(
+      within(group).getByRole("button", { name: "Pause link comments" }),
+    );
+    expect(bridgeMock.pauseRelayShareDiscussion).toHaveBeenCalledTimes(2);
+    expect(within(group).getByText("Couldn't complete that change.")).toBeTruthy();
+    await act(async () => {
+      retry.resolve({ linkCommentsPaused: true });
+    });
+    expect(
+      await within(group).findByText(
+        "Link comments are paused. People with links can still read everything.",
+      ),
+    ).toBeTruthy();
+    expect(within(group).queryByText("Couldn't complete that change.")).toBeNull();
+  });
+
+  it("promotes under the displayed parent and keeps direct End access reachable", async () => {
+    const parentWithDependent = readableLink("parent-link", {
+      shareId: "share-1",
+      generation: 7,
+      dependents: [
+        dependent("dependent-1", "friend@example.test", "friend-user", "comment"),
+      ],
+    });
+    const parentWithoutDependent = { ...parentWithDependent, dependents: [] };
+    bridgeMock.listRelayShareLinks
+      .mockResolvedValueOnce({ links: [parentWithDependent] })
+      .mockResolvedValueOnce({ links: [parentWithoutDependent] })
+      .mockResolvedValueOnce({ links: [parentWithoutDependent] });
+    bridgeMock.listRelayShares
+      .mockResolvedValueOnce({ granted: [], received: [] })
+      .mockResolvedValueOnce({
+        granted: [independentGrant("dependent-1", { shareId: "share-1" })],
+        received: [],
+      })
+      .mockResolvedValueOnce({ granted: [], received: [] });
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await openOwnerComments(user, "share-1");
+    const dependentRow = await within(group).findByTestId(
+      "share-dependent-dependent-1",
+    );
+    await user.click(
+      within(dependentRow).getByRole("button", { name: "Make independent" }),
+    );
+    let confirmation = within(group).getByTestId("owner-comments-confirmation");
+    expect(confirmation.querySelector("p")?.textContent).toBe(
+      "Make friend@example.test's access independent of this link? This is permanent. Resetting or ending the link no longer affects their access. You can end their access here at any time.",
+    );
+    await user.click(
+      within(confirmation).getByRole("button", { name: "Make independent" }),
+    );
+    expect(bridgeMock.promoteRelayShareGrant).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      shareId: "share-1",
+      grantId: "dependent-1",
+      expectedParentGrantId: "parent-link",
+      expectedParentGeneration: 7,
+    });
+
+    const independentRow = await within(group).findByTestId(
+      "share-independent-dependent-1",
+    );
+    await user.click(
+      within(independentRow).getByRole("button", { name: "End access" }),
+    );
+    confirmation = within(group).getByTestId("owner-comments-confirmation");
+    expect(confirmation.querySelector("p")?.textContent).toBe(
+      "End dependent-1@example.test's access? They lose access right away. Copies they already made stay with them.",
+    );
+    await user.click(
+      within(confirmation).getByRole("button", { name: "End access" }),
+    );
+    expect(bridgeMock.revokeRelayShareGrant).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      shareId: "share-1",
+      grantId: "dependent-1",
+    });
+    await act(async () => {});
+    expect(within(group).queryByTestId("share-independent-dependent-1")).toBeNull();
+  });
+
+  it("retries an initial independent-access inventory failure in isolation", async () => {
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("link-1", { shareId: "share-1" })],
+    });
+    bridgeMock.listRelayShares
+      .mockRejectedValueOnce(new Error("private inventory failure"))
+      .mockResolvedValueOnce({
+        granted: [independentGrant("independent-1")],
+        received: [],
+      });
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await openOwnerComments(user, "share-1");
+    const error = await within(group).findByText(
+      "Couldn't load people with independent access.",
+    );
+    expect(
+      within(group).getByRole("button", { name: "Pause link comments" })
+        .hasAttribute("disabled"),
+    ).toBe(false);
+    expect(
+      within(group).getByRole("textbox", { name: "Add a comment" }).hasAttribute(
+        "disabled",
+      ),
+    ).toBe(false);
+    for (const name of ["Turn on comments", "Reset link", "End link"]) {
+      expect(
+        within(group).getByRole("button", { name }).hasAttribute("disabled"),
+      ).toBe(false);
+    }
+    const linkCalls = bridgeMock.listRelayShareLinks.mock.calls.length;
+    const discussionCalls = bridgeMock.listRelayShareDiscussion.mock.calls.length;
+
+    await user.click(
+      within(error.parentElement!).getByRole("button", { name: "Retry" }),
+    );
+    expect(bridgeMock.listRelayShares).toHaveBeenCalledTimes(2);
+    expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(linkCalls);
+    expect(bridgeMock.listRelayShareDiscussion).toHaveBeenCalledTimes(
+      discussionCalls,
+    );
+    expect(
+      await within(group).findByTestId("share-independent-independent-1"),
+    ).toBeTruthy();
+    expect(
+      within(group).queryByText(
+        "Couldn't load people with independent access.",
+      ),
+    ).toBeNull();
+    expect(within(group).getByRole("button", { name: "End access" })).toBeTruthy();
+  });
+
+  it("keeps promotion recovery reachable when only named inventory refresh fails", async () => {
+    const parentWithDependent = readableLink("parent-link", {
+      shareId: "share-1",
+      generation: 7,
+      dependents: [
+        dependent("dependent-1", "friend@example.test", "friend-user", "comment"),
+      ],
+    });
+    bridgeMock.listRelayShareLinks
+      .mockResolvedValueOnce({ links: [parentWithDependent] })
+      .mockResolvedValueOnce({
+        links: [{ ...parentWithDependent, dependents: [] }],
+      });
+    bridgeMock.listRelayShares
+      .mockResolvedValueOnce({
+        granted: [independentGrant("existing-1", { shareId: "share-1" })],
+        received: [],
+      })
+      .mockRejectedValueOnce(new Error("split refresh failure"))
+      .mockResolvedValueOnce({
+        granted: [
+          independentGrant("existing-1", { shareId: "share-1" }),
+          independentGrant("dependent-1", { shareId: "share-1" }),
+        ],
+        received: [],
+      });
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await openOwnerComments(user, "share-1");
+    await user.click(
+      within(await within(group).findByTestId("share-dependent-dependent-1"))
+        .getByRole("button", { name: "Make independent" }),
+    );
+    await user.click(
+      within(within(group).getByTestId("owner-comments-confirmation")).getByRole(
+        "button",
+        { name: "Make independent" },
+      ),
+    );
+
+    const error = await within(group).findByText(
+      "Couldn't load people with independent access.",
+    );
+    expect(within(group).queryByTestId("share-dependent-dependent-1")).toBeNull();
+    expect(
+      within(group).queryByTestId("share-independent-dependent-1"),
+    ).toBeNull();
+    expect(within(group).getByTestId("share-independent-existing-1")).toBeTruthy();
+    expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
+    await user.click(
+      within(error.parentElement!).getByRole("button", { name: "Retry" }),
+    );
+    expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
+    const independent = await within(group).findByTestId(
+      "share-independent-dependent-1",
+    );
+    expect(within(independent).getByRole("button", { name: "End access" })).toBeTruthy();
+  });
+
+  it("ignores an independent-access inventory failure from an old target", async () => {
+    const stale = controllable<{ granted: []; received: [] }>();
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [
+        readableLink("path-link", { shareId: "share-path" }),
+        readableLink("version-link", {
+          shareId: "share-version",
+          selector: { paths: [], versionId: "version-2" },
+        }),
+      ],
+    });
+    bridgeMock.listRelayShares
+      .mockReturnValueOnce(stale.promise)
+      .mockResolvedValueOnce({ granted: [], received: [] });
+    const user = userEvent.setup();
+    const view = render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    expect(await screen.findByTestId("share-link-group-share-path")).toBeTruthy();
+    view.rerender(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "version", versionId: "version-2" }}
+        onClose={() => {}}
+      />,
+    );
+    const group = await openOwnerComments(user, "share-version");
+    await vi.waitFor(() => {
+      expect(bridgeMock.listRelayShares).toHaveBeenCalledTimes(2);
+    });
+    await act(async () => {
+      stale.reject(new Error("stale inventory failure"));
+    });
+    expect(
+      within(group).queryByText(
+        "Couldn't load people with independent access.",
+      ),
+    ).toBeNull();
+  });
+
+  it("ignores an older named-inventory failure after a replacement request", async () => {
+    const stale = controllable<{ granted: []; received: [] }>();
+    const parent = readableLink("parent-link", {
+      shareId: "share-1",
+      dependents: [
+        dependent("dependent-1", "friend@example.test", "friend-user", "comment"),
+      ],
+    });
+    bridgeMock.listRelayShareLinks
+      .mockResolvedValueOnce({ links: [parent] })
+      .mockResolvedValueOnce({ links: [{ ...parent, dependents: [] }] });
+    bridgeMock.listRelayShares
+      .mockReturnValueOnce(stale.promise)
+      .mockResolvedValueOnce({
+        granted: [independentGrant("dependent-1", { shareId: "share-1" })],
+        received: [],
+      });
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await openOwnerComments(user, "share-1");
+    await user.click(
+      within(await within(group).findByTestId("share-dependent-dependent-1"))
+        .getByRole("button", { name: "Make independent" }),
+    );
+    await user.click(
+      within(within(group).getByTestId("owner-comments-confirmation")).getByRole(
+        "button",
+        { name: "Make independent" },
+      ),
+    );
+    expect(
+      await within(group).findByTestId("share-independent-dependent-1"),
+    ).toBeTruthy();
+    await act(async () => {
+      stale.reject(new Error("replaced inventory failure"));
+    });
+    expect(
+      within(group).queryByText(
+        "Couldn't load people with independent access.",
+      ),
+    ).toBeNull();
+  });
+
+  it("keeps hostile author names and comment bodies inert", async () => {
+    const hostileName = `<img src=x onerror=alert(1)> javascript: data: \u202e%3C`;
+    const hostileBody = `<script>bad()</script> [open](javascript:alert(1)) data:text/html,%3Csvg%3E`;
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("link-1", { shareId: "share-1" })],
+    });
+    bridgeMock.listRelayShareDiscussion.mockResolvedValue(
+      discussionPage([
+        namedComment("hostile-named", hostileBody, hostileName),
+        linkComment("hostile-link", "**literal Markdown**", {
+          displayName: `Link ${hostileName}`,
+        }),
+      ]),
+    );
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await openOwnerComments(user, "share-1");
+
+    expect(await within(group).findByText(hostileBody)).toBeTruthy();
+    expect(within(group).getByText(hostileName)).toBeTruthy();
+    expect(within(group).getByText("**literal Markdown**")).toBeTruthy();
+    expect(group.querySelector("a, img, script, svg, [href]")).toBeNull();
+    expect(group.querySelector("[dangerouslySetInnerHTML]")).toBeNull();
+  });
+
+  it("lets a newer read win and refuses an append after Close", async () => {
+    const firstRead = controllable<DiscussionPage>();
+    const secondRead = controllable<DiscussionPage>();
+    const append = controllable<{ message: RelayShareDiscussionMessage }>();
+    const onClose = vi.fn();
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("link-1", { shareId: "share-1" })],
+    });
+    bridgeMock.listRelayShareDiscussion
+      .mockReturnValueOnce(firstRead.promise)
+      .mockReturnValueOnce(secondRead.promise);
+    bridgeMock.appendRelayShareDiscussion.mockReturnValueOnce(append.promise);
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={onClose}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await openOwnerComments(user, "share-1");
+    await user.click(within(group).getByRole("button", { name: "Comments" }));
+    await user.click(within(group).getByRole("button", { name: "Comments" }));
+    await act(async () => {
+      secondRead.resolve(discussionPage([namedComment("current", "Current page")]));
+    });
+    expect(await within(group).findByText("Current page")).toBeTruthy();
+    await act(async () => {
+      firstRead.resolve(discussionPage([namedComment("stale", "Stale page")]));
+    });
+    expect(within(group).queryByText("Stale page")).toBeNull();
+
+    const field = within(group).getByRole("textbox", { name: "Add a comment" });
+    await user.type(field, "Late append");
+    await user.click(within(group).getByRole("button", { name: "Post" }));
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      append.resolve({ message: namedComment("late", "Late append") });
+    });
+    expect(within(group).queryByTestId("share-comment-late")).toBeNull();
+  });
+
+  it("settles concurrent discussion reads for different shares independently", async () => {
+    const readA = controllable<DiscussionPage>();
+    const readB = controllable<DiscussionPage>();
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [
+        readableLink("link-a", { shareId: "share-a" }),
+        readableLink("link-b", { shareId: "share-b" }),
+      ],
+    });
+    bridgeMock.listRelayShareDiscussion
+      .mockReturnValueOnce(readA.promise)
+      .mockReturnValueOnce(readB.promise);
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const groupA = await openOwnerComments(user, "share-a");
+    const groupB = await openOwnerComments(user, "share-b");
+
+    await act(async () => {
+      readB.resolve(discussionPage([namedComment("message-b", "From B")]));
+    });
+    expect(await within(groupB).findByText("From B")).toBeTruthy();
+    await act(async () => {
+      readA.resolve(discussionPage([namedComment("message-a", "From A")]));
+    });
+    expect(await within(groupA).findByText("From A")).toBeTruthy();
+    expect(within(groupB).getByText("From B")).toBeTruthy();
+  });
+
+  it("keeps a mutation refresh current while another share is read", async () => {
+    const refreshA = controllable<DiscussionPage>();
+    const readB = controllable<DiscussionPage>();
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [
+        readableLink("link-a", { shareId: "share-a" }),
+        readableLink("link-b", { shareId: "share-b" }),
+      ],
+    });
+    bridgeMock.listRelayShareDiscussion
+      .mockResolvedValueOnce(
+        discussionPage([namedComment("message-a-old", "A before refresh")]),
+      )
+      .mockReturnValueOnce(refreshA.promise)
+      .mockReturnValueOnce(readB.promise);
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const groupA = await openOwnerComments(user, "share-a");
+    expect(await within(groupA).findByText("A before refresh")).toBeTruthy();
+    await user.click(
+      within(groupA).getByRole("button", { name: "Pause link comments" }),
+    );
+    await vi.waitFor(() => {
+      expect(bridgeMock.listRelayShareDiscussion).toHaveBeenCalledTimes(2);
+    });
+
+    const groupB = await openOwnerComments(user, "share-b");
+    await act(async () => {
+      readB.resolve(discussionPage([namedComment("message-b", "B current")]));
+    });
+    expect(await within(groupB).findByText("B current")).toBeTruthy();
+    await act(async () => {
+      refreshA.resolve(
+        discussionPage([namedComment("message-a-new", "A after refresh")], {
+          linkCommentsPaused: true,
+        }),
+      );
+    });
+    expect(await within(groupA).findByText("A after refresh")).toBeTruthy();
+    expect(
+      within(groupA).getByText(
+        "Link comments are paused. People with links can still read everything.",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("ignores moderation after a target change", async () => {
+    const pause = controllable<{ linkCommentsPaused: true }>();
+    bridgeMock.listRelayShareLinks
+      .mockResolvedValueOnce({
+        links: [readableLink("link-a", { shareId: "share-a" })],
+      })
+      .mockResolvedValueOnce({
+        links: [
+          readableLink("link-b", {
+            shareId: "share-b",
+            selector: { paths: [], versionId: "version-b" },
+          }),
+        ],
+      });
+    bridgeMock.pauseRelayShareDiscussion.mockReturnValueOnce(pause.promise);
+    const user = userEvent.setup();
+    const view = render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const groupA = await openOwnerComments(user, "share-a");
+    await user.click(
+      within(groupA).getByRole("button", { name: "Pause link comments" }),
+    );
+    view.rerender(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "version", versionId: "version-b" }}
+        onClose={() => {}}
+      />,
+    );
+    expect(await screen.findByTestId("share-link-group-share-b")).toBeTruthy();
+    await act(async () => {
+      pause.resolve({ linkCommentsPaused: true });
+    });
+    expect(
+      screen.queryByText(
+        "Link comments are paused. People with links can still read everything.",
+      ),
+    ).toBeNull();
+  });
+
+  it("ignores promotion after a workspace change and revoke after unmount", async () => {
+    const promotion = controllable<{
+      grantId: string;
+      access: "comment";
+      generation: number;
+      status: "active";
+      revokedAtMs: null;
+      parentGrantId: null;
+    }>();
+    const revoke = controllable<{
+      grantId: string;
+      access: "comment";
+      generation: number;
+      status: "revoked";
+      revokedAtMs: number;
+      parentGrantId: null;
+    }>();
+    bridgeMock.listRelayShareLinks.mockImplementation(
+      async ({ workspaceId }: { workspaceId: string }) => ({
+        links:
+          workspaceId === "ws-a"
+            ? [
+                readableLink("parent-a", {
+                  shareId: "share-a",
+                  dependents: [
+                    dependent("dependent-a", "a@example.test", "user-a", "comment"),
+                  ],
+                }),
+              ]
+            : [readableLink("parent-b", { shareId: "share-b" })],
+      }),
+    );
+    bridgeMock.listRelayShares
+      .mockResolvedValueOnce({ granted: [], received: [] })
+      .mockResolvedValueOnce({
+        granted: [
+          independentGrant("independent-b", {
+            workspaceId: "ws-b",
+            shareId: "share-b",
+            recipientEmail: "b@example.test",
+          }),
+        ],
+        received: [],
+      });
+    bridgeMock.promoteRelayShareGrant.mockReturnValueOnce(promotion.promise);
+    bridgeMock.revokeRelayShareGrant.mockReturnValueOnce(revoke.promise);
+    const user = userEvent.setup();
+    const view = render(
+      <RelayShareDialog
+        workspaceId="ws-a"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const groupA = await openOwnerComments(user, "share-a");
+    await user.click(
+      within(await within(groupA).findByTestId("share-dependent-dependent-a"))
+        .getByRole("button", { name: "Make independent" }),
+    );
+    await user.click(
+      within(groupA)
+        .getByTestId("owner-comments-confirmation")
+        .querySelector<HTMLButtonElement>('button[type="button"]:last-child')!,
+    );
+
+    view.rerender(
+      <RelayShareDialog
+        workspaceId="ws-b"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    const groupB = await openOwnerComments(user, "share-b");
+    const callsBeforePromotionSettles = bridgeMock.listRelayShares.mock.calls.length;
+    await act(async () => {
+      promotion.resolve({
+        grantId: "dependent-a",
+        access: "comment",
+        generation: 2,
+        status: "active",
+        revokedAtMs: null,
+        parentGrantId: null,
+      });
+    });
+    expect(bridgeMock.listRelayShares).toHaveBeenCalledTimes(
+      callsBeforePromotionSettles,
+    );
+
+    const independent = await within(groupB).findByTestId(
+      "share-independent-independent-b",
+    );
+    await user.click(
+      within(independent).getByRole("button", { name: "End access" }),
+    );
+    await user.click(
+      within(groupB).getByTestId("owner-comments-confirmation")
+        .querySelector<HTMLButtonElement>('button[type="button"]:last-child')!,
+    );
+    const callsBeforeUnmount = bridgeMock.listRelayShares.mock.calls.length;
+    view.unmount();
+    await act(async () => {
+      revoke.resolve({
+        grantId: "independent-b",
+        access: "comment",
+        generation: 3,
+        status: "revoked",
+        revokedAtMs: CREATED_MS + 1,
+        parentGrantId: null,
+      });
+    });
+    expect(bridgeMock.listRelayShares).toHaveBeenCalledTimes(callsBeforeUnmount);
+  });
+
+  it("keeps owner controls and existing link controls keyboard operable", async () => {
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("keyboard-link", { shareId: "share-keyboard" })],
+    });
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await screen.findByTestId("share-link-group-share-keyboard");
+    const comments = within(group).getByRole("button", { name: "Comments" });
+    comments.focus();
+    await user.keyboard("{Enter}");
+    expect(
+      await within(group).findByRole("textbox", { name: "Add a comment" }),
+    ).toBeTruthy();
+    for (const name of [
+      "Turn on comments",
+      "Reset link",
+      "End link",
+      "Pause link comments",
+      "Post",
+    ]) {
+      expect(within(group).getByRole("button", { name })).toBeTruthy();
+    }
+    expect(screen.getByRole("button", { name: "Create link" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
   });
 });

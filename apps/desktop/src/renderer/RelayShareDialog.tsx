@@ -3,6 +3,8 @@ import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
   CreateRelayShareLinkPayload,
   CreateRelaySharePayload,
+  RelayShareDiscussionMessage,
+  RelayShareGrantedRow,
   RelayShareLinkDependent,
   RelayShareLinkRow,
   ShareAccess,
@@ -81,6 +83,54 @@ type LinkGroup = {
   rows: RelayShareLinkRow[];
 };
 
+type OwnerAppendIntent = {
+  body: string;
+  idempotencyKey: string;
+};
+
+type OwnerDiscussionState = {
+  expanded: boolean;
+  loaded: boolean;
+  loading: boolean;
+  paging: boolean;
+  linkCommentsPaused: boolean;
+  messages: RelayShareDiscussionMessage[];
+  nextCursor: string | null;
+  loadError: boolean;
+  failedReadCursor: string | null;
+  draft: string;
+  appendIntent: OwnerAppendIntent | null;
+  appendError: boolean;
+};
+
+type OwnerMutationBusy = {
+  shareId: string;
+  actionKey: string;
+};
+
+type OwnerConfirmation =
+  | { kind: "delete"; shareId: string; messageId: string }
+  | {
+      kind: "block";
+      shareId: string;
+      principalId: string;
+      name: string;
+    }
+  | {
+      kind: "promote";
+      shareId: string;
+      grantId: string;
+      parentGrantId: string;
+      parentGeneration: number;
+      name: string;
+    }
+  | {
+      kind: "revoke";
+      shareId: string;
+      grantId: string;
+      name: string;
+    };
+
 const LINK_ACCESS_OPTIONS: ReadonlyArray<{
   value: LinkAccess;
   label: string;
@@ -141,6 +191,58 @@ function groupLinksByShareId(rows: RelayShareLinkRow[]): LinkGroup[] {
     groups.push(group);
   }
   return groups;
+}
+
+function emptyOwnerDiscussion(): OwnerDiscussionState {
+  return {
+    expanded: false,
+    loaded: false,
+    loading: false,
+    paging: false,
+    linkCommentsPaused: false,
+    messages: [],
+    nextCursor: null,
+    loadError: false,
+    failedReadCursor: null,
+    draft: "",
+    appendIntent: null,
+    appendError: false,
+  };
+}
+
+function mergeDiscussionMessages(
+  current: RelayShareDiscussionMessage[],
+  incoming: RelayShareDiscussionMessage[],
+): RelayShareDiscussionMessage[] {
+  const seen = new Set(current.map((message) => message.messageId));
+  return [
+    ...current,
+    ...incoming.filter((message) => {
+      if (seen.has(message.messageId)) return false;
+      seen.add(message.messageId);
+      return true;
+    }),
+  ];
+}
+
+function namedGrantName(grant: RelayShareGrantedRow): string {
+  return grant.recipientEmail ?? grant.recipientUserId ?? "Unknown recipient";
+}
+
+function dependentName(dependent: RelayShareLinkDependent): string {
+  return dependent.recipientEmail ?? dependent.recipientUserId ?? "Unknown recipient";
+}
+
+function isDiscussionMutationAction(actionKey: string): boolean {
+  return (
+    actionKey === "pause" ||
+    actionKey.startsWith("delete:") ||
+    actionKey.startsWith("principal:")
+  );
+}
+
+function isGrantMutationAction(actionKey: string): boolean {
+  return actionKey.startsWith("promote:") || actionKey.startsWith("revoke:");
 }
 
 const shortDate = new Intl.DateTimeFormat(undefined, { dateStyle: "short" });
@@ -229,11 +331,32 @@ export function RelayShareDialog(props: {
   const [confirmation, setConfirmation] = useState<LinkConfirmation | null>(null);
   const [mutationBusy, setMutationBusy] = useState<LinkMutationBusy | null>(null);
   const [lifecycleError, setLifecycleError] = useState<string | null>(null);
+  const [ownerDiscussionByShareId, setOwnerDiscussionByShareId] = useState<
+    Record<string, OwnerDiscussionState>
+  >({});
+  const [independentGrants, setIndependentGrants] = useState<
+    RelayShareGrantedRow[]
+  >([]);
+  const [independentGrantsError, setIndependentGrantsError] = useState(false);
+  const [ownerAppendBusy, setOwnerAppendBusy] = useState<string | null>(null);
+  const [ownerMutationBusy, setOwnerMutationBusy] =
+    useState<OwnerMutationBusy | null>(null);
+  const [ownerMutationError, setOwnerMutationError] =
+    useState<OwnerMutationBusy | null>(null);
+  const [ownerConfirmation, setOwnerConfirmation] =
+    useState<OwnerConfirmation | null>(null);
   const linkScopeGeneration = useRef(0);
   const latestMintRequest = useRef(0);
   const latestCopyRequest = useRef(0);
   const latestInventoryRequest = useRef(0);
   const latestMutationRequest = useRef(0);
+  const latestNamedInventoryRequest = useRef(0);
+  const latestDiscussionRequestByShareId = useRef(new Map<string, number>());
+  const latestOwnerAppendRequest = useRef(0);
+  const latestOwnerMutationRequest = useRef(0);
+  const activeOwnerAppendShareId = useRef<string | null>(null);
+  const activeOwnerMutationShareId = useRef<string | null>(null);
+  const eligibleShareIdsRef = useRef<Set<string>>(new Set());
 
   const subject =
     props.target.kind === "version"
@@ -264,6 +387,16 @@ export function RelayShareDialog(props: {
   const hasMatchingShare = visibleLinkGroups.some((group) =>
     group.rows.some((row) => rowMatchesTarget(row, props.target)),
   );
+  const eligibleShareIds = useMemo(
+    () =>
+      visibleLinkGroups
+        .filter((group) =>
+          group.rows.some((row) => rowMatchesTarget(row, props.target)),
+        )
+        .map((group) => group.shareId),
+    [targetKey, visibleLinkGroups],
+  );
+  const eligibleShareIdsKey = JSON.stringify([...eligibleShareIds].sort());
 
   const confirmationRow = confirmation
     ? visibleLinks.find(
@@ -302,6 +435,13 @@ export function RelayShareDialog(props: {
     latestCopyRequest.current += 1;
     latestInventoryRequest.current += 1;
     latestMutationRequest.current += 1;
+    latestNamedInventoryRequest.current += 1;
+    latestDiscussionRequestByShareId.current.clear();
+    latestOwnerAppendRequest.current += 1;
+    latestOwnerMutationRequest.current += 1;
+    activeOwnerAppendShareId.current = null;
+    activeOwnerMutationShareId.current = null;
+    eligibleShareIdsRef.current = new Set();
     setLinkBusy(false);
     setLinkRequestBusy(null);
     setLinkAccess("view");
@@ -315,6 +455,13 @@ export function RelayShareDialog(props: {
     setConfirmation(null);
     setMutationBusy(null);
     setLifecycleError(null);
+    setOwnerDiscussionByShareId({});
+    setIndependentGrants([]);
+    setIndependentGrantsError(false);
+    setOwnerAppendBusy(null);
+    setOwnerMutationBusy(null);
+    setOwnerMutationError(null);
+    setOwnerConfirmation(null);
 
     return () => {
       linkScopeGeneration.current += 1;
@@ -322,6 +469,13 @@ export function RelayShareDialog(props: {
       latestCopyRequest.current += 1;
       latestInventoryRequest.current += 1;
       latestMutationRequest.current += 1;
+      latestNamedInventoryRequest.current += 1;
+      latestDiscussionRequestByShareId.current.clear();
+      latestOwnerAppendRequest.current += 1;
+      latestOwnerMutationRequest.current += 1;
+      activeOwnerAppendShareId.current = null;
+      activeOwnerMutationShareId.current = null;
+      eligibleShareIdsRef.current = new Set();
     };
   }, [linkScope]);
 
@@ -329,10 +483,67 @@ export function RelayShareDialog(props: {
     if (shareWith !== "link") return;
     const scopeGeneration = linkScopeGeneration.current;
     void refreshLinks(scopeGeneration);
+    void refreshIndependentGrants(scopeGeneration);
     return () => {
       latestInventoryRequest.current += 1;
+      latestNamedInventoryRequest.current += 1;
+      for (const [
+        shareId,
+        requestId,
+      ] of latestDiscussionRequestByShareId.current) {
+        latestDiscussionRequestByShareId.current.set(shareId, requestId + 1);
+      }
+      latestOwnerAppendRequest.current += 1;
+      latestOwnerMutationRequest.current += 1;
+      activeOwnerAppendShareId.current = null;
+      activeOwnerMutationShareId.current = null;
+      eligibleShareIdsRef.current = new Set();
+      setOwnerAppendBusy(null);
+      setOwnerMutationBusy(null);
+      setOwnerConfirmation(null);
     };
   }, [linkScope, shareWith]);
+
+  useLayoutEffect(() => {
+    if (shareWith !== "link") return;
+    const nextEligible = new Set(eligibleShareIds);
+    const previousEligible = eligibleShareIdsRef.current;
+    eligibleShareIdsRef.current = nextEligible;
+    for (const shareId of previousEligible) {
+      if (!nextEligible.has(shareId)) invalidateDiscussionRequest(shareId);
+    }
+    if (
+      activeOwnerAppendShareId.current !== null &&
+      !nextEligible.has(activeOwnerAppendShareId.current)
+    ) {
+      latestOwnerAppendRequest.current += 1;
+      activeOwnerAppendShareId.current = null;
+    }
+    if (
+      activeOwnerMutationShareId.current !== null &&
+      !nextEligible.has(activeOwnerMutationShareId.current)
+    ) {
+      latestOwnerMutationRequest.current += 1;
+      activeOwnerMutationShareId.current = null;
+    }
+    setOwnerAppendBusy((current) =>
+      current !== null && !nextEligible.has(current) ? null : current,
+    );
+    setOwnerMutationBusy((current) =>
+      current !== null && !nextEligible.has(current.shareId) ? null : current,
+    );
+    setOwnerConfirmation((current) =>
+      current !== null && !nextEligible.has(current.shareId) ? null : current,
+    );
+    setOwnerMutationError((current) =>
+      current !== null && !nextEligible.has(current.shareId) ? null : current,
+    );
+    setOwnerDiscussionByShareId((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(([shareId]) => nextEligible.has(shareId)),
+      ),
+    );
+  }, [eligibleShareIdsKey, shareWith]);
 
   async function createShare() {
     if (!canSubmit) return;
@@ -358,6 +569,388 @@ export function RelayShareDialog(props: {
 
   function isCurrentLinkScope(scopeGeneration: number): boolean {
     return linkScopeGeneration.current === scopeGeneration;
+  }
+
+  function isCurrentOwnerRequest(
+    scopeGeneration: number,
+    requestId: number,
+    latestRequest: { current: number },
+    shareId: string,
+  ): boolean {
+    return (
+      isCurrentLinkScope(scopeGeneration) &&
+      latestRequest.current === requestId &&
+      eligibleShareIdsRef.current.has(shareId)
+    );
+  }
+
+  function nextDiscussionRequest(shareId: string): number {
+    const requestId =
+      (latestDiscussionRequestByShareId.current.get(shareId) ?? 0) + 1;
+    latestDiscussionRequestByShareId.current.set(shareId, requestId);
+    return requestId;
+  }
+
+  function invalidateDiscussionRequest(shareId: string) {
+    latestDiscussionRequestByShareId.current.set(
+      shareId,
+      (latestDiscussionRequestByShareId.current.get(shareId) ?? 0) + 1,
+    );
+  }
+
+  function isCurrentDiscussionRequest(
+    scopeGeneration: number,
+    requestId: number,
+    shareId: string,
+  ): boolean {
+    return (
+      isCurrentLinkScope(scopeGeneration) &&
+      latestDiscussionRequestByShareId.current.get(shareId) === requestId &&
+      eligibleShareIdsRef.current.has(shareId)
+    );
+  }
+
+  function updateOwnerDiscussion(
+    shareId: string,
+    update: (current: OwnerDiscussionState) => OwnerDiscussionState,
+  ) {
+    setOwnerDiscussionByShareId((current) => ({
+      ...current,
+      [shareId]: update(current[shareId] ?? emptyOwnerDiscussion()),
+    }));
+  }
+
+  async function refreshIndependentGrants(
+    scopeGeneration = linkScopeGeneration.current,
+  ) {
+    if (!isCurrentLinkScope(scopeGeneration)) return;
+    const requestId = ++latestNamedInventoryRequest.current;
+    try {
+      const result = await bridge().listRelayShares();
+      if (
+        !isCurrentLinkScope(scopeGeneration) ||
+        latestNamedInventoryRequest.current !== requestId
+      ) {
+        return;
+      }
+      setIndependentGrants(
+        result.granted.filter(
+          (grant) =>
+            grant.workspaceId === props.workspaceId &&
+            grant.recipientUserId !== null &&
+            grant.revokedAtMs === null,
+        ),
+      );
+      setIndependentGrantsError(false);
+      setOwnerMutationError((current) =>
+        current !== null && isGrantMutationAction(current.actionKey)
+          ? null
+          : current,
+      );
+    } catch {
+      if (
+        !isCurrentLinkScope(scopeGeneration) ||
+        latestNamedInventoryRequest.current !== requestId
+      ) {
+        return;
+      }
+      setIndependentGrantsError(true);
+    }
+  }
+
+  async function refreshOwnerDiscussion(
+    shareId: string,
+    cursor?: string,
+    scopeGeneration = linkScopeGeneration.current,
+  ) {
+    if (
+      !isCurrentLinkScope(scopeGeneration) ||
+      !eligibleShareIdsRef.current.has(shareId)
+    ) {
+      return;
+    }
+    const requestId = nextDiscussionRequest(shareId);
+    updateOwnerDiscussion(shareId, (current) => ({
+      ...current,
+      loading: cursor === undefined,
+      paging: cursor !== undefined,
+      loadError: false,
+      failedReadCursor: null,
+    }));
+
+    try {
+      const result = await bridge().listRelayShareDiscussion({
+        workspaceId: props.workspaceId,
+        shareId,
+        ...(cursor === undefined ? {} : { cursor }),
+      });
+      if (!isCurrentDiscussionRequest(scopeGeneration, requestId, shareId)) {
+        return;
+      }
+      updateOwnerDiscussion(shareId, (current) => ({
+        ...current,
+        loaded: true,
+        loading: false,
+        paging: false,
+        linkCommentsPaused: result.linkCommentsPaused,
+        messages:
+          cursor === undefined
+            ? result.messages
+            : mergeDiscussionMessages(current.messages, result.messages),
+        nextCursor: result.nextCursor,
+        loadError: false,
+        failedReadCursor: null,
+      }));
+      setOwnerMutationError((current) =>
+        current?.shareId === shareId &&
+        isDiscussionMutationAction(current.actionKey)
+          ? null
+          : current,
+      );
+    } catch {
+      if (!isCurrentDiscussionRequest(scopeGeneration, requestId, shareId)) {
+        return;
+      }
+      updateOwnerDiscussion(shareId, (current) => ({
+        ...current,
+        loading: false,
+        paging: false,
+        loadError: true,
+        failedReadCursor: cursor ?? null,
+      }));
+    } finally {
+      if (isCurrentDiscussionRequest(scopeGeneration, requestId, shareId)) {
+        updateOwnerDiscussion(shareId, (current) => ({
+          ...current,
+          loading: false,
+          paging: false,
+        }));
+      }
+    }
+  }
+
+  function toggleOwnerDiscussion(shareId: string) {
+    const state = ownerDiscussionByShareId[shareId] ?? emptyOwnerDiscussion();
+    if (state.expanded) {
+      invalidateDiscussionRequest(shareId);
+      if (activeOwnerAppendShareId.current === shareId) {
+        latestOwnerAppendRequest.current += 1;
+        activeOwnerAppendShareId.current = null;
+      }
+      if (ownerAppendBusy === shareId) setOwnerAppendBusy(null);
+      setOwnerConfirmation((current) =>
+        current?.shareId === shareId ? null : current,
+      );
+      updateOwnerDiscussion(shareId, (current) => ({
+        ...current,
+        expanded: false,
+        loading: false,
+        paging: false,
+        appendIntent: null,
+        appendError: false,
+      }));
+      return;
+    }
+    updateOwnerDiscussion(shareId, (current) => ({
+      ...current,
+      expanded: true,
+    }));
+    void refreshOwnerDiscussion(shareId);
+  }
+
+  async function appendOwnerComment(shareId: string, retry: boolean) {
+    if (ownerAppendBusy !== null || !eligibleShareIdsRef.current.has(shareId)) {
+      return;
+    }
+    const state = ownerDiscussionByShareId[shareId] ?? emptyOwnerDiscussion();
+    const intent = retry
+      ? state.appendIntent
+      : state.draft.length > 0
+        ? { body: state.draft, idempotencyKey: crypto.randomUUID() }
+        : null;
+    if (intent === null) return;
+
+    const scopeGeneration = linkScopeGeneration.current;
+    const requestId = ++latestOwnerAppendRequest.current;
+    activeOwnerAppendShareId.current = shareId;
+    setOwnerAppendBusy(shareId);
+    updateOwnerDiscussion(shareId, (current) => ({
+      ...current,
+      appendIntent: intent,
+      appendError: false,
+    }));
+
+    try {
+      const result = await bridge().appendRelayShareDiscussion({
+        workspaceId: props.workspaceId,
+        shareId,
+        body: intent.body,
+        idempotencyKey: intent.idempotencyKey,
+      });
+      if (
+        !isCurrentOwnerRequest(
+          scopeGeneration,
+          requestId,
+          latestOwnerAppendRequest,
+          shareId,
+        )
+      ) {
+        return;
+      }
+      updateOwnerDiscussion(shareId, (current) => ({
+        ...current,
+        messages: mergeDiscussionMessages(current.messages, [result.message]),
+        draft: "",
+        appendIntent: null,
+        appendError: false,
+      }));
+    } catch {
+      if (
+        !isCurrentOwnerRequest(
+          scopeGeneration,
+          requestId,
+          latestOwnerAppendRequest,
+          shareId,
+        )
+      ) {
+        return;
+      }
+      updateOwnerDiscussion(shareId, (current) => ({
+        ...current,
+        appendError: true,
+      }));
+    } finally {
+      if (
+        isCurrentOwnerRequest(
+          scopeGeneration,
+          requestId,
+          latestOwnerAppendRequest,
+          shareId,
+        )
+      ) {
+        activeOwnerAppendShareId.current = null;
+        setOwnerAppendBusy(null);
+      }
+    }
+  }
+
+  async function runOwnerMutation(
+    shareId: string,
+    actionKey: string,
+    request: () => Promise<unknown>,
+    refresh: "discussion" | "inventories",
+  ) {
+    if (ownerMutationBusy !== null || !eligibleShareIdsRef.current.has(shareId)) {
+      return;
+    }
+    const scopeGeneration = linkScopeGeneration.current;
+    const requestId = ++latestOwnerMutationRequest.current;
+    activeOwnerMutationShareId.current = shareId;
+    setOwnerMutationBusy({ shareId, actionKey });
+
+    try {
+      await request();
+      if (
+        !isCurrentOwnerRequest(
+          scopeGeneration,
+          requestId,
+          latestOwnerMutationRequest,
+          shareId,
+        )
+      ) {
+        return;
+      }
+      setOwnerConfirmation(null);
+      if (refresh === "discussion") {
+        void refreshOwnerDiscussion(shareId, undefined, scopeGeneration);
+      } else {
+        void refreshLinks(scopeGeneration);
+        void refreshIndependentGrants(scopeGeneration);
+      }
+    } catch {
+      if (
+        !isCurrentOwnerRequest(
+          scopeGeneration,
+          requestId,
+          latestOwnerMutationRequest,
+          shareId,
+        )
+      ) {
+        return;
+      }
+      setOwnerConfirmation(null);
+      setOwnerMutationError({ shareId, actionKey });
+    } finally {
+      if (
+        isCurrentOwnerRequest(
+          scopeGeneration,
+          requestId,
+          latestOwnerMutationRequest,
+          shareId,
+        )
+      ) {
+        activeOwnerMutationShareId.current = null;
+        setOwnerMutationBusy(null);
+      }
+    }
+  }
+
+  function executeOwnerConfirmation(action: OwnerConfirmation) {
+    if (action.kind === "delete") {
+      void runOwnerMutation(
+        action.shareId,
+        `delete:${action.messageId}`,
+        () =>
+          bridge().deleteRelayShareDiscussionMessage({
+            workspaceId: props.workspaceId,
+            shareId: action.shareId,
+            messageId: action.messageId,
+          }),
+        "discussion",
+      );
+      return;
+    }
+    if (action.kind === "block") {
+      void runOwnerMutation(
+        action.shareId,
+        `principal:${action.principalId}`,
+        () =>
+          bridge().blockRelayShareDiscussionPrincipal({
+            workspaceId: props.workspaceId,
+            shareId: action.shareId,
+            principalId: action.principalId,
+          }),
+        "discussion",
+      );
+      return;
+    }
+    if (action.kind === "promote") {
+      void runOwnerMutation(
+        action.shareId,
+        `promote:${action.grantId}`,
+        () =>
+          bridge().promoteRelayShareGrant({
+            workspaceId: props.workspaceId,
+            shareId: action.shareId,
+            grantId: action.grantId,
+            expectedParentGrantId: action.parentGrantId,
+            expectedParentGeneration: action.parentGeneration,
+          }),
+        "inventories",
+      );
+      return;
+    }
+    void runOwnerMutation(
+      action.shareId,
+      `revoke:${action.grantId}`,
+      () =>
+        bridge().revokeRelayShareGrant({
+          workspaceId: props.workspaceId,
+          shareId: action.shareId,
+          grantId: action.grantId,
+        }),
+      "inventories",
+    );
   }
 
   async function refreshLinks(scopeGeneration = linkScopeGeneration.current) {
@@ -640,6 +1233,13 @@ export function RelayShareDialog(props: {
     latestCopyRequest.current += 1;
     latestInventoryRequest.current += 1;
     latestMutationRequest.current += 1;
+    latestNamedInventoryRequest.current += 1;
+    latestDiscussionRequestByShareId.current.clear();
+    latestOwnerAppendRequest.current += 1;
+    latestOwnerMutationRequest.current += 1;
+    activeOwnerAppendShareId.current = null;
+    activeOwnerMutationShareId.current = null;
+    eligibleShareIdsRef.current = new Set();
     props.onClose();
   }
 
@@ -925,6 +1525,20 @@ export function RelayShareDialog(props: {
                 rowMatchesTarget(row, props.target),
               );
               const addAccess = addAccessByShareId[group.shareId] ?? "view";
+              const ownerDiscussion =
+                ownerDiscussionByShareId[group.shareId] ?? emptyOwnerDiscussion();
+              const displayedDependentIds = new Set(
+                group.rows.flatMap((row) =>
+                  row.status === "active"
+                    ? row.dependents.map((dependent) => dependent.grantId)
+                    : [],
+                ),
+              );
+              const shareIndependentGrants = independentGrants.filter(
+                (grant) =>
+                  grant.shareId === group.shareId &&
+                  !displayedDependentIds.has(grant.grantId),
+              );
               return (
                 <div
                   key={group.shareId}
@@ -1003,6 +1617,409 @@ export function RelayShareDialog(props: {
                       </article>
                     );
                   })}
+
+                  {canAdd ? (
+                    <section className="flex flex-col gap-2 border-t border-line pt-2">
+                      <SecondaryButton
+                        aria-expanded={ownerDiscussion.expanded}
+                        onClick={() => toggleOwnerDiscussion(group.shareId)}
+                      >
+                        Comments
+                      </SecondaryButton>
+
+                      {ownerDiscussion.expanded ? (
+                        <div className="flex flex-col gap-3 rounded-lg bg-panel-2 p-3">
+                          <div className="flex flex-col gap-2">
+                            <div className="flex justify-end">
+                              <SecondaryButton
+                                disabled={ownerMutationBusy !== null}
+                                aria-busy={
+                                  ownerMutationBusy?.shareId === group.shareId &&
+                                  ownerMutationBusy.actionKey === "pause"
+                                }
+                                onClick={() =>
+                                  void runOwnerMutation(
+                                    group.shareId,
+                                    "pause",
+                                    () =>
+                                      ownerDiscussion.linkCommentsPaused
+                                        ? bridge().resumeRelayShareDiscussion({
+                                            workspaceId: props.workspaceId,
+                                            shareId: group.shareId,
+                                          })
+                                        : bridge().pauseRelayShareDiscussion({
+                                            workspaceId: props.workspaceId,
+                                            shareId: group.shareId,
+                                          }),
+                                    "discussion",
+                                  )
+                                }
+                              >
+                                {ownerDiscussion.linkCommentsPaused
+                                  ? "Resume link comments"
+                                  : "Pause link comments"}
+                              </SecondaryButton>
+                            </div>
+                            {ownerDiscussion.linkCommentsPaused ? (
+                              <p className="m-0 text-xs leading-relaxed text-muted">
+                                Link comments are paused. People with links can still read
+                                everything.
+                              </p>
+                            ) : null}
+                            {ownerMutationError?.shareId === group.shareId &&
+                            ownerMutationError.actionKey === "pause" ? (
+                              <p role="alert" className="m-0 text-xs text-danger">
+                                Couldn't complete that change.
+                              </p>
+                            ) : null}
+                          </div>
+
+                          {ownerDiscussion.loading ? (
+                            <p className="m-0 text-xs text-muted">Loading comments…</p>
+                          ) : null}
+
+                          {ownerDiscussion.loadError ? (
+                            <div className="flex items-center justify-between gap-3">
+                              <p role="alert" className="m-0 text-xs text-danger">
+                                Couldn't load comments.
+                              </p>
+                              <SecondaryButton
+                                disabled={ownerDiscussion.loading}
+                                onClick={() =>
+                                  void refreshOwnerDiscussion(
+                                    group.shareId,
+                                    ownerDiscussion.failedReadCursor ?? undefined,
+                                  )
+                                }
+                              >
+                                Retry
+                              </SecondaryButton>
+                            </div>
+                          ) : null}
+
+                          {ownerDiscussion.loaded &&
+                          !ownerDiscussion.loading &&
+                          ownerDiscussion.messages.length === 0 ? (
+                            <p className="m-0 text-xs text-muted">No comments yet.</p>
+                          ) : null}
+
+                          {ownerDiscussion.messages.length > 0 ? (
+                            <ol className="m-0 flex max-h-64 list-none flex-col gap-2 overflow-y-auto p-0">
+                              {ownerDiscussion.messages.map((message) => {
+                                const linkAuthored = "moderation" in message;
+                                const deleteActionKey = `delete:${message.messageId}`;
+                                const principalActionKey = linkAuthored
+                                  ? `principal:${message.moderation.linkPrincipalId}`
+                                  : null;
+                                return (
+                                  <li
+                                    key={message.messageId}
+                                    data-testid={`share-comment-${message.messageId}`}
+                                    data-comment-message-id={message.messageId}
+                                    className="flex flex-col gap-1 rounded-md border border-line bg-panel p-2"
+                                  >
+                                    <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                                      <span className="font-medium text-ink">
+                                        {message.author.displayName}
+                                      </span>
+                                      {message.author.kind === "link" ? (
+                                        <span className="text-subtle">Unverified</span>
+                                      ) : null}
+                                    </div>
+                                    <p className="m-0 whitespace-pre-wrap break-words text-xs leading-relaxed text-muted">
+                                      {message.deleted
+                                        ? "Comment deleted by the owner"
+                                        : message.body}
+                                    </p>
+                                    <div className="flex flex-wrap justify-end gap-2">
+                                      {!message.deleted ? (
+                                        <SecondaryButton
+                                          disabled={ownerMutationBusy !== null}
+                                          onClick={() => {
+                                            setOwnerConfirmation({
+                                              kind: "delete",
+                                              shareId: group.shareId,
+                                              messageId: message.messageId,
+                                            });
+                                          }}
+                                        >
+                                          Delete comment
+                                        </SecondaryButton>
+                                      ) : null}
+                                      {linkAuthored ? (
+                                        message.moderation.blocked ? (
+                                          <SecondaryButton
+                                            disabled={ownerMutationBusy !== null}
+                                            onClick={() =>
+                                              void runOwnerMutation(
+                                                group.shareId,
+                                                principalActionKey!,
+                                                () =>
+                                                  bridge().unblockRelayShareDiscussionPrincipal(
+                                                    {
+                                                      workspaceId: props.workspaceId,
+                                                      shareId: group.shareId,
+                                                      principalId:
+                                                        message.moderation
+                                                          .linkPrincipalId,
+                                                    },
+                                                  ),
+                                                "discussion",
+                                              )
+                                            }
+                                          >
+                                            Unblock
+                                          </SecondaryButton>
+                                        ) : (
+                                          <SecondaryButton
+                                            disabled={ownerMutationBusy !== null}
+                                            onClick={() => {
+                                              setOwnerConfirmation({
+                                                kind: "block",
+                                                shareId: group.shareId,
+                                                principalId:
+                                                  message.moderation.linkPrincipalId,
+                                                name: message.author.displayName,
+                                              });
+                                            }}
+                                          >
+                                            Block
+                                          </SecondaryButton>
+                                        )
+                                      ) : null}
+                                    </div>
+                                    {ownerMutationError?.shareId === group.shareId &&
+                                    (ownerMutationError.actionKey === deleteActionKey ||
+                                      ownerMutationError.actionKey ===
+                                        principalActionKey) ? (
+                                      <p role="alert" className="m-0 text-xs text-danger">
+                                        Couldn't complete that change.
+                                      </p>
+                                    ) : null}
+                                  </li>
+                                );
+                              })}
+                            </ol>
+                          ) : null}
+
+                          {ownerDiscussion.nextCursor !== null ? (
+                            <SecondaryButton
+                              disabled={ownerDiscussion.paging}
+                              onClick={() =>
+                                void refreshOwnerDiscussion(
+                                  group.shareId,
+                                  ownerDiscussion.nextCursor ?? undefined,
+                                )
+                              }
+                            >
+                              Show more comments
+                            </SecondaryButton>
+                          ) : null}
+
+                          <div className="flex flex-col gap-2 border-t border-line pt-3">
+                            <label className="flex flex-col gap-1 text-[11px] font-medium text-subtle">
+                              Add a comment
+                              <textarea
+                                value={ownerDiscussion.draft}
+                                disabled={ownerAppendBusy !== null}
+                                rows={3}
+                                onChange={(event) => {
+                                  const draft = event.currentTarget.value;
+                                  updateOwnerDiscussion(group.shareId, (current) => ({
+                                    ...current,
+                                    draft,
+                                    appendIntent: null,
+                                    appendError: false,
+                                  }));
+                                }}
+                                className="w-full resize-y rounded-md border border-line bg-bg px-2.5 py-2 text-[13px] leading-relaxed text-ink placeholder:text-subtle focus:border-ink disabled:opacity-50"
+                              />
+                            </label>
+                            {ownerDiscussion.appendError ? (
+                              <p role="alert" className="m-0 text-xs text-danger">
+                                Couldn't post comment.
+                              </p>
+                            ) : null}
+                            <div className="flex justify-end">
+                              <SecondaryButton
+                                disabled={
+                                  ownerAppendBusy !== null ||
+                                  (!ownerDiscussion.appendError &&
+                                    ownerDiscussion.draft.length === 0)
+                                }
+                                aria-busy={ownerAppendBusy === group.shareId}
+                                onClick={() =>
+                                  void appendOwnerComment(
+                                    group.shareId,
+                                    ownerDiscussion.appendError,
+                                  )
+                                }
+                              >
+                                {ownerDiscussion.appendError ? "Retry" : "Post"}
+                              </SecondaryButton>
+                            </div>
+                          </div>
+
+                          {independentGrantsError ? (
+                            <div
+                              data-testid="share-independent-inventory-error"
+                              className="flex items-center justify-between gap-3 border-t border-line pt-3"
+                            >
+                              <p role="alert" className="m-0 text-xs text-danger">
+                                Couldn't load people with independent access.
+                              </p>
+                              <SecondaryButton
+                                onClick={() => void refreshIndependentGrants()}
+                              >
+                                Retry
+                              </SecondaryButton>
+                            </div>
+                          ) : null}
+
+                          {group.rows.some(
+                            (row) =>
+                              row.status === "active" &&
+                              row.dependents.some(
+                                (dependent) => dependent.recipientUserId !== null,
+                              ),
+                          ) ? (
+                            <div className="flex flex-col gap-2 border-t border-line pt-3">
+                              {group.rows.flatMap((row) =>
+                                row.status === "active"
+                                  ? row.dependents
+                                      .filter(
+                                        (dependent) =>
+                                          dependent.recipientUserId !== null,
+                                      )
+                                      .map((dependent) => {
+                                        const actionKey = `promote:${dependent.grantId}`;
+                                        return (
+                                          <div
+                                            key={`${row.grantId}:${dependent.grantId}`}
+                                            data-testid={`share-dependent-${dependent.grantId}`}
+                                            className="flex flex-col gap-1"
+                                          >
+                                            <div className="flex items-center justify-between gap-3">
+                                              <span className="min-w-0 break-all text-xs text-muted">
+                                                {dependentName(dependent)}
+                                              </span>
+                                              <SecondaryButton
+                                                disabled={ownerMutationBusy !== null}
+                                                onClick={() => {
+                                                  setOwnerConfirmation({
+                                                    kind: "promote",
+                                                    shareId: group.shareId,
+                                                    grantId: dependent.grantId,
+                                                    parentGrantId: row.grantId,
+                                                    parentGeneration: row.generation,
+                                                    name: dependentName(dependent),
+                                                  });
+                                                }}
+                                              >
+                                                Make independent
+                                              </SecondaryButton>
+                                            </div>
+                                            {ownerMutationError?.shareId ===
+                                              group.shareId &&
+                                            ownerMutationError.actionKey === actionKey ? (
+                                              <p
+                                                role="alert"
+                                                className="m-0 text-xs text-danger"
+                                              >
+                                                Couldn't complete that change.
+                                              </p>
+                                            ) : null}
+                                          </div>
+                                        );
+                                      })
+                                  : [],
+                              )}
+                            </div>
+                          ) : null}
+
+                          {shareIndependentGrants.length > 0 ? (
+                            <div className="flex flex-col gap-2 border-t border-line pt-3">
+                              {shareIndependentGrants.map((grant) => {
+                                const actionKey = `revoke:${grant.grantId}`;
+                                return (
+                                  <div
+                                    key={grant.grantId}
+                                    data-testid={`share-independent-${grant.grantId}`}
+                                    className="flex flex-col gap-1"
+                                  >
+                                    <div className="flex items-center justify-between gap-3">
+                                      <span className="min-w-0 break-all text-xs text-muted">
+                                        {namedGrantName(grant)}
+                                      </span>
+                                      <SecondaryButton
+                                        disabled={ownerMutationBusy !== null}
+                                        onClick={() => {
+                                          setOwnerConfirmation({
+                                            kind: "revoke",
+                                            shareId: group.shareId,
+                                            grantId: grant.grantId,
+                                            name: namedGrantName(grant),
+                                          });
+                                        }}
+                                      >
+                                        End access
+                                      </SecondaryButton>
+                                    </div>
+                                    {ownerMutationError?.shareId === group.shareId &&
+                                    ownerMutationError.actionKey === actionKey ? (
+                                      <p role="alert" className="m-0 text-xs text-danger">
+                                        Couldn't complete that change.
+                                      </p>
+                                    ) : null}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : null}
+
+                          {ownerConfirmation?.shareId === group.shareId ? (
+                            <div
+                              data-testid="owner-comments-confirmation"
+                              className="flex flex-col gap-2 rounded-lg border border-line bg-panel p-3"
+                            >
+                              <p className="m-0 text-xs leading-relaxed text-ink">
+                                {ownerConfirmation.kind === "delete"
+                                  ? "Delete this comment? Its text is removed for everyone right away and can't be brought back. Readers see that a comment was deleted."
+                                  : ownerConfirmation.kind === "block"
+                                    ? `Block ${ownerConfirmation.name}? They can't comment on this share from that browser until you unblock them. The same person can still comment from another browser with this link. To stop everyone with this link, reset it.`
+                                    : ownerConfirmation.kind === "promote"
+                                      ? `Make ${ownerConfirmation.name}'s access independent of this link? This is permanent. Resetting or ending the link no longer affects their access. You can end their access here at any time.`
+                                      : `End ${ownerConfirmation.name}'s access? They lose access right away. Copies they already made stay with them.`}
+                              </p>
+                              <div className="flex justify-end gap-2">
+                                <SecondaryButton
+                                  disabled={ownerMutationBusy !== null}
+                                  onClick={() => setOwnerConfirmation(null)}
+                                >
+                                  Cancel
+                                </SecondaryButton>
+                                <SecondaryButton
+                                  disabled={ownerMutationBusy !== null}
+                                  aria-busy={ownerMutationBusy !== null}
+                                  onClick={() =>
+                                    executeOwnerConfirmation(ownerConfirmation)
+                                  }
+                                >
+                                  {ownerConfirmation.kind === "delete"
+                                    ? "Delete comment"
+                                    : ownerConfirmation.kind === "block"
+                                      ? "Block"
+                                      : ownerConfirmation.kind === "promote"
+                                        ? "Make independent"
+                                        : "End access"}
+                                </SecondaryButton>
+                              </div>
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </section>
+                  ) : null}
 
                   {canAdd ? (
                     <div className="flex flex-col gap-2 border-t border-line pt-2">
