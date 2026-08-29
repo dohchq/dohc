@@ -187,6 +187,39 @@ function countRows(dbPath: string, table: string): number {
   }
 }
 
+function replaceTableSchemaFragment(
+  dbPath: string,
+  table: string,
+  current: string,
+  stale: string,
+): void {
+  const db = new InspectionDatabaseSync(dbPath);
+  try {
+    const schema = db
+      .prepare(
+        `SELECT type, sql
+         FROM sqlite_schema
+         WHERE (type = 'table' AND name = ?)
+            OR (type = 'index' AND tbl_name = ? AND sql IS NOT NULL)
+         ORDER BY type DESC, name`,
+      )
+      .all(table, table);
+    const tableSql = String(schema.find((row) => row.type === "table")?.sql ?? "");
+    const staleTableSql = tableSql.replace(current, stale);
+    expect(staleTableSql).not.toBe(tableSql);
+    const indexSql = schema
+      .filter((row) => row.type === "index")
+      .map((row) => String(row.sql));
+
+    db.exec("PRAGMA foreign_keys = OFF");
+    db.exec(`DROP TABLE ${table}`);
+    db.exec(staleTableSql);
+    for (const sql of indexSql) db.exec(sql);
+  } finally {
+    db.close();
+  }
+}
+
 function discussionUsageBytes(dbPath: string): number {
   const db = new InspectionDatabaseSync(dbPath, { readOnly: true });
   try {
@@ -1375,6 +1408,90 @@ describe("durable link discussion storage", () => {
         "sync_relay_link_principals",
         "sync_relay_share_discussion_messages",
       ]);
+    } finally {
+      inspection.close();
+    }
+  });
+
+  it("creates principal and message CHECK clauses from the exported discussion bounds", async () => {
+    const { dbPath } = await openStorage();
+    const inspection = new InspectionDatabaseSync(dbPath, { readOnly: true });
+    try {
+      const principalSql = String(
+        inspection
+          .prepare(
+            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'sync_relay_link_principals'",
+          )
+          .get()?.sql ?? "",
+      );
+      const messageSql = String(
+        inspection
+          .prepare(
+            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'sync_relay_share_discussion_messages'",
+          )
+          .get()?.sql ?? "",
+      );
+
+      expect(principalSql).toContain(
+        `length(display_name) BETWEEN 1 AND ${LINK_DISCUSSION_NAME_CODE_POINT_LIMIT}`,
+      );
+      expect(principalSql).toContain(
+        `length(CAST(display_name AS BLOB)) <= ${LINK_DISCUSSION_NAME_BYTE_LIMIT}`,
+      );
+      expect(messageSql).toContain(
+        `length(display_name_snapshot) BETWEEN 1 AND ${LINK_DISCUSSION_NAME_CODE_POINT_LIMIT}`,
+      );
+      expect(messageSql).toContain(
+        `length(CAST(display_name_snapshot AS BLOB)) <= ${LINK_DISCUSSION_NAME_BYTE_LIMIT}`,
+      );
+      expect(messageSql).toContain(
+        `length(body) BETWEEN 1 AND ${LINK_DISCUSSION_BODY_CODE_POINT_LIMIT}`,
+      );
+      expect(messageSql).toContain(
+        `length(CAST(body AS BLOB)) <= ${LINK_DISCUSSION_BODY_INPUT_BYTE_LIMIT}`,
+      );
+    } finally {
+      inspection.close();
+    }
+  });
+
+  it.each([
+    {
+      label: "principal name",
+      table: "sync_relay_link_principals",
+      current: `length(display_name) BETWEEN 1 AND ${LINK_DISCUSSION_NAME_CODE_POINT_LIMIT}`,
+      stale: `length(display_name) BETWEEN 1 AND ${LINK_DISCUSSION_NAME_CODE_POINT_LIMIT - 1}`,
+    },
+    {
+      label: "message body",
+      table: "sync_relay_share_discussion_messages",
+      current: `length(body) BETWEEN 1 AND ${LINK_DISCUSSION_BODY_CODE_POINT_LIMIT}`,
+      stale: `length(body) BETWEEN 1 AND ${LINK_DISCUSSION_BODY_CODE_POINT_LIMIT - 1}`,
+    },
+  ])("replaces the normalized share model when the $label CHECK is stale", async ({
+    table,
+    current,
+    stale,
+  }) => {
+    const { storage, dbPath } = await openStorage();
+    const seeded = seedShare(storage, { suffix: "stale-schema" });
+    storage.close();
+    storages.splice(storages.indexOf(storage), 1);
+    replaceTableSchemaFragment(dbPath, table, current, stale);
+
+    const reopened = openSyncRelayStorage(dbPath);
+    storages.push(reopened);
+    expect(reopened.getShare(seeded.shareId)).toBeNull();
+
+    const inspection = new InspectionDatabaseSync(dbPath, { readOnly: true });
+    try {
+      const schemaSql = String(
+        inspection
+          .prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?")
+          .get(table)?.sql ?? "",
+      );
+      expect(schemaSql).toContain(current);
+      expect(schemaSql).not.toContain(stale);
     } finally {
       inspection.close();
     }

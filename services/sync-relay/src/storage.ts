@@ -961,8 +961,8 @@ const NORMALIZED_SHARE_SCHEMA_SQL = `
     profile_token_hash TEXT NOT NULL CHECK (length(profile_token_hash) > 0),
     display_name TEXT CHECK (
       display_name IS NULL OR (
-        length(display_name) BETWEEN 1 AND 40
-        AND length(CAST(display_name AS BLOB)) <= 160
+        length(display_name) BETWEEN 1 AND ${LINK_DISCUSSION_NAME_CODE_POINT_LIMIT}
+        AND length(CAST(display_name AS BLOB)) <= ${LINK_DISCUSSION_NAME_BYTE_LIMIT}
       )
     ),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
@@ -1012,8 +1012,8 @@ const NORMALIZED_SHARE_SCHEMA_SQL = `
     ),
     body TEXT CHECK (
       body IS NULL OR (
-        length(body) BETWEEN 1 AND 2000
-        AND length(CAST(body AS BLOB)) <= 8000
+        length(body) BETWEEN 1 AND ${LINK_DISCUSSION_BODY_CODE_POINT_LIMIT}
+        AND length(CAST(body AS BLOB)) <= ${LINK_DISCUSSION_BODY_INPUT_BYTE_LIMIT}
       )
     ),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
@@ -1383,11 +1383,17 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
         "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'sync_relay_share_grants'",
       )
       .get();
+    const principalSchema = db
+      .prepare(
+        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'sync_relay_link_principals'",
+      )
+      .get();
     const discussionSchema = db
       .prepare(
         "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'sync_relay_share_discussion_messages'",
       )
       .get();
+    const principalSchemaSql = String(principalSchema?.sql ?? "");
     const discussionSchemaSql = String(discussionSchema?.sql ?? "");
     if (
       shareColumns.includes("recipient_user_id") ||
@@ -1397,12 +1403,24 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       !sessionColumns.includes("principal_id") ||
       !principalColumns.includes("storage_bytes") ||
       !principalColumns.includes("discussion_revision") ||
+      !principalSchemaSql.includes(
+        `length(display_name) BETWEEN 1 AND ${LINK_DISCUSSION_NAME_CODE_POINT_LIMIT}`,
+      ) ||
+      !principalSchemaSql.includes(
+        `length(CAST(display_name AS BLOB)) <= ${LINK_DISCUSSION_NAME_BYTE_LIMIT}`,
+      ) ||
       !discussionSchemaSql.includes("discussion_revision") ||
       !discussionSchemaSql.includes(
         `length(display_name_snapshot) BETWEEN 1 AND ${LINK_DISCUSSION_NAME_CODE_POINT_LIMIT}`,
       ) ||
       !discussionSchemaSql.includes(
         `length(CAST(display_name_snapshot AS BLOB)) <= ${LINK_DISCUSSION_NAME_BYTE_LIMIT}`,
+      ) ||
+      !discussionSchemaSql.includes(
+        `length(body) BETWEEN 1 AND ${LINK_DISCUSSION_BODY_CODE_POINT_LIMIT}`,
+      ) ||
+      !discussionSchemaSql.includes(
+        `length(CAST(body AS BLOB)) <= ${LINK_DISCUSSION_BODY_INPUT_BYTE_LIMIT}`,
       )
     ) {
       // Pre-launch replacement. Discussion authority is one normalized model:
