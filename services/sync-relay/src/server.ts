@@ -178,6 +178,8 @@ type SyncRelayRoute =
   | { route: "share-revoke"; shareId: string }
   | { route: "share-link-rotate"; shareId: string; grantId: string }
   | { route: "share-link-retune"; shareId: string; grantId: string }
+  | { route: "share-grant-promote"; shareId: string; grantId: string }
+  | { route: "share-grant-revoke"; shareId: string; grantId: string }
   | { route: "share-log"; shareId: string }
   | { route: "share-blob"; shareId: string; sha256: string }
   // #646 PR3a. The recipient's half of the proposal lane is share-scoped; the
@@ -715,6 +717,29 @@ export function createSyncRelayHandler({
     return { share, grant };
   }
 
+  function requireOwnedNamedGrant(
+    shareId: string,
+    grantId: string,
+    actor: { userId: string },
+  ): SyncRelayShareWithGrantRow {
+    const share = storage.getShare(shareId);
+    const grant = storage.getShareGrant(grantId);
+    if (
+      !share ||
+      share.granterUserId !== actor.userId ||
+      !storage.workspaceIsOwnedBy(share.workspaceId, actor.userId) ||
+      !grant ||
+      grant.shareId !== share.shareId ||
+      grant.principalKind !== "user" ||
+      !grant.principalUserId ||
+      grant.status !== "active" ||
+      grant.revokedAtMs !== null
+    ) {
+      throw notFound();
+    }
+    return { share, grant };
+  }
+
   function requireShareWorkspace(
     share: { workspaceId: string },
     workspaceId: string,
@@ -817,6 +842,22 @@ export function createSyncRelayHandler({
     generation: grant.generation,
     status: grant.status,
     createdAtMs: grant.createdAtMs,
+    revokedAtMs: grant.revokedAtMs,
+    parentGrantId: grant.parentGrantId,
+  });
+
+  const namedGrantTransitionBody = (grant: {
+    grantId: string;
+    access: string;
+    generation: number;
+    status: string;
+    revokedAtMs: number | null;
+    parentGrantId: string | null;
+  }) => ({
+    grantId: grant.grantId,
+    access: grant.access,
+    generation: grant.generation,
+    status: grant.status,
     revokedAtMs: grant.revokedAtMs,
     parentGrantId: grant.parentGrantId,
   });
@@ -1914,6 +1955,50 @@ export function createSyncRelayHandler({
         });
       }
       if (route.route === "share-link-retune") throw methodNotAllowed();
+
+      if (route.route === "share-grant-promote" && request.method === "POST") {
+        requireOwnedNamedGrant(route.shareId, route.grantId, actor);
+        const input = await readJsonObject(request);
+        const { expectedParentGrantId, expectedParentGeneration } =
+          parsePromotionExpectation(input);
+        const result = storage.promoteShareGrant({
+          shareId: route.shareId,
+          grantId: route.grantId,
+          expectedParentGrantId,
+          expectedParentGeneration,
+          guard: () => {
+            requireOwnedNamedGrant(route.shareId, route.grantId, actor);
+          },
+        });
+        if (!result.ok) throw notFound();
+        return jsonResponse({
+          ok: true,
+          ...namedGrantTransitionBody(result.grant),
+        });
+      }
+      if (route.route === "share-grant-promote") throw methodNotAllowed();
+
+      if (route.route === "share-grant-revoke" && request.method === "POST") {
+        requireOwnedNamedGrant(route.shareId, route.grantId, actor);
+        const input = await readOptionalJsonObject(request);
+        if (input !== null && Object.keys(input).length > 0) {
+          throw badRequest("request body contains an unknown field");
+        }
+        const result = storage.revokeShareGrant({
+          shareId: route.shareId,
+          grantId: route.grantId,
+          revokedAtMs: nowMs(),
+          guard: () => {
+            requireOwnedNamedGrant(route.shareId, route.grantId, actor);
+          },
+        });
+        if (!result.ok) throw notFound();
+        return jsonResponse({
+          ok: true,
+          ...namedGrantTransitionBody(result.grant),
+        });
+      }
+      if (route.route === "share-grant-revoke") throw methodNotAllowed();
 
       if (route.route === "share-revoke" && request.method === "POST") {
         const share = storage.getShare(route.shareId);
@@ -3256,6 +3341,20 @@ function parseRoute(request: Request): SyncRelayRoute {
         grantId: parseShareId(parts[4]),
       };
     }
+    if (parts.length === 6 && parts[3] === "grants" && parts[5] === "promote") {
+      return {
+        route: "share-grant-promote",
+        shareId,
+        grantId: parseShareId(parts[4]),
+      };
+    }
+    if (parts.length === 6 && parts[3] === "grants" && parts[5] === "revoke") {
+      return {
+        route: "share-grant-revoke",
+        shareId,
+        grantId: parseShareId(parts[4]),
+      };
+    }
     if (parts.length === 4 && parts[3] === "log") return { route: "share-log", shareId };
     if (parts.length === 4 && parts[3] === "presence") return { route: "share-presence", shareId };
     if (parts.length === 5 && parts[3] === "blobs" && parts[4]) {
@@ -3456,6 +3555,31 @@ function parseExpectedDependentGrantIds(
     normalized.add(grantId);
   }
   return [...normalized];
+}
+
+function parsePromotionExpectation(input: Record<string, unknown>): {
+  expectedParentGrantId: string;
+  expectedParentGeneration: number;
+} {
+  const allowedKeys = ["expectedParentGrantId", "expectedParentGeneration"];
+  if (Object.keys(input).some((key) => !allowedKeys.includes(key))) {
+    throw badRequest("request body contains an unknown field");
+  }
+  const expectedParentGrantId = parseShareId(
+    typeof input.expectedParentGrantId === "string"
+      ? input.expectedParentGrantId
+      : undefined,
+  );
+  if (
+    !Number.isSafeInteger(input.expectedParentGeneration) ||
+    Number(input.expectedParentGeneration) < 1
+  ) {
+    throw badRequest("expectedParentGeneration must be a positive integer");
+  }
+  return {
+    expectedParentGrantId,
+    expectedParentGeneration: Number(input.expectedParentGeneration),
+  };
 }
 
 async function readJsonObject(request: Request): Promise<Record<string, unknown>> {

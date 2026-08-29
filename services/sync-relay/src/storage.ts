@@ -479,6 +479,7 @@ export interface SyncRelayStorage {
     grantId: string;
     revokedAtMs: number;
     expectedDependentGrantIds?: readonly string[];
+    guard?: () => void;
   }): LinkGrantTransitionResult;
   convertLinkGrant(input: {
     shareId: string;
@@ -490,6 +491,9 @@ export interface SyncRelayStorage {
   promoteShareGrant(input: {
     shareId: string;
     grantId: string;
+    expectedParentGrantId: string;
+    expectedParentGeneration: number;
+    guard: () => void;
   }): ShareGrantTransitionResult;
   mintLinkSession(input: {
     session: Omit<SyncRelayLinkSessionRow, "principalId">;
@@ -3284,8 +3288,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     grantId: string;
     revokedAtMs: number;
     expectedDependentGrantIds?: readonly string[];
+    guard?: () => void;
   }): LinkGrantTransitionResult {
     return this.tx(() => {
+      input.guard?.();
       const grant = this.getShareGrant(input.grantId);
       if (
         !grant ||
@@ -3363,16 +3369,30 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   promoteShareGrant(input: {
     shareId: string;
     grantId: string;
+    expectedParentGrantId: string;
+    expectedParentGeneration: number;
+    guard: () => void;
   }): ShareGrantTransitionResult {
     return this.tx(() => {
+      input.guard();
       const grant = this.getShareGrant(input.grantId);
+      const parent = grant?.parentGrantId
+        ? this.getShareGrant(grant.parentGrantId)
+        : null;
       if (
         !grant ||
         grant.shareId !== input.shareId ||
         grant.principalKind !== "user" ||
+        !grant.principalUserId ||
         grant.status !== "active" ||
         grant.revokedAtMs !== null ||
-        grant.parentGrantId === null
+        grant.parentGrantId !== input.expectedParentGrantId ||
+        !parent ||
+        parent.shareId !== grant.shareId ||
+        parent.principalKind !== "link" ||
+        parent.generation !== input.expectedParentGeneration ||
+        parent.status !== "active" ||
+        parent.revokedAtMs !== null
       ) {
         return { ok: false };
       }

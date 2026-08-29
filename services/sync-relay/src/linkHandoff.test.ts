@@ -945,7 +945,13 @@ describe("single-use authenticated link handoff", () => {
       await state.h(redeemRequest(OTHER_ACCOUNT, (await mint(state)).code)),
     );
     expect(
-      state.storage.promoteShareGrant({ shareId: SHARE_ID, grantId: String(first.grantId) }),
+      state.storage.promoteShareGrant({
+        shareId: SHARE_ID,
+        grantId: String(first.grantId),
+        expectedParentGrantId: String(state.link.grantId),
+        expectedParentGeneration: 1,
+        guard: () => undefined,
+      }),
     ).toMatchObject({ ok: true, grant: { parentGrantId: null } });
 
     const second = await json(

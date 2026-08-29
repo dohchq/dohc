@@ -1424,6 +1424,398 @@ describe("Phase 3 owner link contract", () => {
       errorSpy.mockRestore();
     }
   });
+
+  it("promotes a derived named grant permanently and reverses only by named revoke", async () => {
+    const storage = await newStorage();
+    const h = handler(storage, {
+      newLinkBearer: () => "r".repeat(43),
+    });
+    await seedFileShare(h, "edit");
+    seedStorageLink(storage, { grantId: "link-promotion", access: "comment" });
+    for (const [grantId, principalUserId] of [
+      ["named-promoted", "recipient-promotion-sentinel"],
+      ["named-dependent-peer", "recipient-peer"],
+    ] as const) {
+      expect(
+        storage.convertLinkGrant({
+          shareId: "share-existing",
+          parentGrantId: "link-promotion",
+          grantId,
+          principalUserId,
+          createdAtMs: 2_001,
+        }),
+      ).toMatchObject({ ok: true });
+    }
+    const selectorBefore = storage.getShare("share-existing")?.selectorJson;
+    const independentPeerBefore = storage.getShareGrant("grant-0");
+
+    const promotedResponse = await h(
+      request(
+        OWNER,
+        "/sync/shares/share-existing/grants/named-promoted/promote",
+        jsonBody({
+          expectedParentGrantId: "link-promotion",
+          expectedParentGeneration: 1,
+        }),
+      ),
+    );
+    expect(promotedResponse.status).toBe(200);
+    const promotedText = await promotedResponse.text();
+    const promoted = JSON.parse(promotedText) as Record<string, unknown>;
+    expect(promoted).toEqual({
+      ok: true,
+      grantId: "named-promoted",
+      access: "comment",
+      generation: 2,
+      status: "active",
+      revokedAtMs: null,
+      parentGrantId: null,
+    });
+    for (const sentinel of [
+      WORKSPACE,
+      "recipient-promotion-sentinel",
+      "link-promotion-credential",
+      "r".repeat(43),
+      "capability-sentinel",
+      "session-sentinel",
+    ]) {
+      expect(promotedText).not.toContain(sentinel);
+    }
+    expect(storage.getShare("share-existing")?.selectorJson).toBe(selectorBefore);
+    expect(storage.getShareGrant("named-promoted")).toMatchObject({
+      access: "comment",
+      generation: 2,
+      status: "active",
+      parentGrantId: null,
+    });
+
+    const rotateResponse = await h(
+      request(
+        OWNER,
+        "/sync/shares/share-existing/links/link-promotion/rotate",
+        jsonBody({
+          workspaceId: WORKSPACE,
+          expectedDependentGrantIds: ["named-dependent-peer"],
+        }),
+      ),
+    );
+    expect(rotateResponse.status).toBe(200);
+    expect(storage.getShareGrant("named-promoted")).toMatchObject({
+      access: "comment",
+      generation: 2,
+      status: "active",
+      parentGrantId: null,
+    });
+
+    const retuneResponse = await h(
+      request(
+        OWNER,
+        "/sync/shares/share-existing/links/link-promotion/retune",
+        jsonBody({
+          access: "view",
+          expectedDependentGrantIds: ["named-dependent-peer"],
+        }),
+      ),
+    );
+    expect(retuneResponse.status).toBe(200);
+    expect(storage.getShareGrant("named-promoted")).toMatchObject({
+      access: "comment",
+      generation: 2,
+      status: "active",
+    });
+
+    const parentBeforeRevoke = storage.getShareGrant("link-promotion");
+    const parentRevokeResponse = await h(
+      request(
+        OWNER,
+        "/sync/shares/share-existing/revoke",
+        jsonBody({
+          grantId: "link-promotion",
+          workspaceId: WORKSPACE,
+          expectedDependentGrantIds: ["named-dependent-peer"],
+        }),
+      ),
+    );
+    expect(parentRevokeResponse.status).toBe(200);
+    expect(storage.getShareGrant("link-promotion")).toMatchObject({
+      generation: Number(parentBeforeRevoke?.generation) + 1,
+      status: "revoked",
+    });
+    expect(storage.getShareGrant("named-dependent-peer")).toMatchObject({
+      status: "revoked",
+    });
+    expect(storage.getShareGrant("named-promoted")).toMatchObject({
+      access: "comment",
+      generation: 2,
+      status: "active",
+      parentGrantId: null,
+    });
+    expect(
+      authorizeShareAction({
+        storage,
+        actorUserId: "recipient-promotion-sentinel",
+        shareId: "share-existing",
+        action: "append",
+      }),
+    ).toMatchObject({ ok: true, grant: { grantId: "named-promoted" } });
+
+    const parentAfterRevoke = storage.getShareGrant("link-promotion");
+    const revokeResponse = await h(
+      request(
+        OWNER,
+        "/sync/shares/share-existing/grants/named-promoted/revoke",
+        { method: "POST" },
+      ),
+    );
+    expect(revokeResponse.status).toBe(200);
+    expect(await json(revokeResponse)).toEqual({
+      ok: true,
+      grantId: "named-promoted",
+      access: "comment",
+      generation: 3,
+      status: "revoked",
+      revokedAtMs: 2_000,
+      parentGrantId: null,
+    });
+    expect(storage.getShareGrant("link-promotion")).toEqual(parentAfterRevoke);
+    expect(storage.getShareGrant("grant-0")).toEqual(independentPeerBefore);
+    expect(
+      authorizeShareAction({
+        storage,
+        actorUserId: "recipient-promotion-sentinel",
+        shareId: "share-existing",
+        action: "read",
+      }),
+    ).toMatchObject({ ok: false });
+  });
+
+  it("refuses stale or invalid named grant transitions without mutation or identity input", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    await seedFileShare(h, "edit");
+    seedStorageLink(storage, { grantId: "link-validation", access: "comment" });
+    for (const grantId of ["named-stale", "named-promoted", "named-revoked"] as const) {
+      expect(
+        storage.convertLinkGrant({
+          shareId: "share-existing",
+          parentGrantId: "link-validation",
+          grantId,
+          principalUserId: `${grantId}-user`,
+          createdAtMs: 2_001,
+        }),
+      ).toMatchObject({ ok: true });
+    }
+    expect(
+      storage.promoteShareGrant({
+        shareId: "share-existing",
+        grantId: "named-promoted",
+        expectedParentGrantId: "link-validation",
+        expectedParentGeneration: 1,
+        guard: () => undefined,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      storage.revokeShareGrant({
+        shareId: "share-existing",
+        grantId: "named-revoked",
+        revokedAtMs: 2_002,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      storage.rotateLinkGrant({
+        shareId: "share-existing",
+        grantId: "link-validation",
+        rotatedAtMs: 2_003,
+        expectedDependentGrantIds: ["named-stale"],
+        guard: () => undefined,
+        mintCredential: () => ({
+          credentialId: "link-validation-rotated-credential",
+          secretHash: hmac("rotated-validation-secret"),
+        }),
+      }),
+    ).toMatchObject({ ok: true });
+
+    storage.createShare({
+      share: {
+        shareId: "share-email-pending",
+        workspaceId: WORKSPACE,
+        granterUserId: OWNER,
+        selectorJson: JSON.stringify({ paths: ["email"], versionId: null }),
+        createdAtMs: 2_003,
+      },
+      grant: {
+        grantId: "grant-email-pending",
+        shareId: "share-email-pending",
+        principalKind: "email",
+        principalUserId: null,
+        principalEmail: "pending@example.test",
+        access: "view",
+        generation: 1,
+        status: "active",
+        createdAtMs: 2_003,
+        revokedAtMs: null,
+        parentGrantId: null,
+      },
+    });
+    storage.createShare({
+      share: {
+        shareId: "share-cross",
+        workspaceId: WORKSPACE,
+        granterUserId: OWNER,
+        selectorJson: JSON.stringify({ paths: ["cross"], versionId: null }),
+        createdAtMs: 2_004,
+      },
+      grant: {
+        grantId: "grant-cross-independent",
+        shareId: "share-cross",
+        principalKind: "user",
+        principalUserId: "cross-user",
+        principalEmail: null,
+        access: "view",
+        generation: 1,
+        status: "active",
+        createdAtMs: 2_004,
+        revokedAtMs: null,
+        parentGrantId: null,
+      },
+    });
+    seedStorageLink(storage, {
+      shareId: "share-cross",
+      grantId: "link-cross",
+      access: "view",
+      createdAtMs: 2_005,
+    });
+    expect(
+      storage.convertLinkGrant({
+        shareId: "share-cross",
+        parentGrantId: "link-cross",
+        grantId: "named-cross",
+        principalUserId: "cross-derived-user",
+        createdAtMs: 2_006,
+      }),
+    ).toMatchObject({ ok: true });
+
+    const promotionPath =
+      "/sync/shares/share-existing/grants/named-stale/promote";
+    const promotionBody = {
+      expectedParentGrantId: "link-validation",
+      expectedParentGeneration: 1,
+    };
+    const beforeStale = storage.getShareGrant("named-stale");
+    const missingBytes = await denialBytes(
+      await h(
+        request(
+          OWNER,
+          "/sync/shares/share-missing/grants/named-stale/promote",
+          jsonBody(promotionBody),
+        ),
+      ),
+    );
+    for (const [body, expectedStatus] of [
+      [{ expectedParentGrantId: "link-other", expectedParentGeneration: 2 }, 404],
+      [promotionBody, 404],
+      [{ ...promotionBody, principalUserId: "forged-user" }, 400],
+      [{ ...promotionBody, ownerUserId: OWNER }, 400],
+      [{ expectedParentGrantId: "link-validation" }, 400],
+      [{ expectedParentGrantId: "link-validation", expectedParentGeneration: 1.5 }, 400],
+    ] as const) {
+      const response = await h(request(OWNER, promotionPath, jsonBody(body)));
+      expect(response.status).toBe(expectedStatus);
+      if (expectedStatus === 404) {
+        expect(await denialBytes(response)).toBe(missingBytes);
+      }
+      expect(storage.getShareGrant("named-stale")).toEqual(beforeStale);
+    }
+
+    const invalidPromotions = [
+      ["share-existing", "named-promoted", "link-validation"],
+      ["share-existing", "named-revoked", "link-validation"],
+      ["share-existing", "grant-0", "link-validation"],
+      ["share-existing", "link-validation", "link-validation"],
+      ["share-email-pending", "grant-email-pending", "link-validation"],
+      ["share-existing", "named-cross", "link-cross"],
+    ] as const;
+    for (const [shareId, grantId, expectedParentGrantId] of invalidPromotions) {
+      const before = storage.getShareGrant(grantId);
+      const response = await h(
+        request(
+          OWNER,
+          `/sync/shares/${shareId}/grants/${grantId}/promote`,
+          jsonBody({ expectedParentGrantId, expectedParentGeneration: 1 }),
+        ),
+      );
+      expect(response.status).toBe(404);
+      expect(storage.getShareGrant(grantId)).toEqual(before);
+    }
+
+    const recipientBefore = storage.getShareGrant("named-stale");
+    const forgedRecipient = await h(
+      request(
+        RECIPIENT,
+        promotionPath,
+        jsonBody({ ...promotionBody, ownerUserId: OWNER }),
+      ),
+    );
+    expect(await denialBytes(forgedRecipient)).toBe(missingBytes);
+    expect(storage.getShareGrant("named-stale")).toEqual(recipientBefore);
+
+    const invalidRevocations = [
+      ["share-existing", "link-validation"],
+      ["share-email-pending", "grant-email-pending"],
+      ["share-existing", "named-cross"],
+      ["share-existing", "named-revoked"],
+    ] as const;
+    for (const [shareId, grantId] of invalidRevocations) {
+      const before = storage.getShareGrant(grantId);
+      const response = await h(
+        request(
+          OWNER,
+          `/sync/shares/${shareId}/grants/${grantId}/revoke`,
+          { method: "POST" },
+        ),
+      );
+      expect(response.status).toBe(404);
+      expect(storage.getShareGrant(grantId)).toEqual(before);
+    }
+    const forgedRevoke = await h(
+      request(
+        OWNER,
+        "/sync/shares/share-existing/grants/named-stale/revoke",
+        jsonBody({ recipientUserId: "forged-user" }),
+      ),
+    );
+    expect(forgedRevoke.status).toBe(400);
+    expect(storage.getShareGrant("named-stale")).toEqual(beforeStale);
+
+    for (const operation of ["promote", "revoke"] as const) {
+      let ownershipChecks = 0;
+      const changedOwnerStorage = new Proxy(storage, {
+        get(target, property, receiver) {
+          if (property === "workspaceIsOwnedBy") {
+            return () => {
+              ownershipChecks += 1;
+              return ownershipChecks === 1;
+            };
+          }
+          const value = Reflect.get(target, property, receiver) as unknown;
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      const response = await handler(changedOwnerStorage)(
+        request(
+          OWNER,
+          `/sync/shares/share-existing/grants/named-stale/${operation}`,
+          operation === "promote" ? jsonBody({
+            expectedParentGrantId: "link-validation",
+            expectedParentGeneration: 2,
+          }) : { method: "POST" },
+        ),
+      );
+      expect(await denialBytes(response)).toBe(missingBytes);
+      expect(ownershipChecks).toBe(2);
+      expect(storage.getShareGrant("named-stale")).toEqual(beforeStale);
+    }
+  });
 });
 
 describe("owner link inventory and impact preconditions", () => {
@@ -1869,6 +2261,9 @@ describe("owner link inventory and impact preconditions", () => {
       storage.promoteShareGrant({
         shareId: "share-existing",
         grantId: "dependent-lifecycle",
+        expectedParentGrantId: "link-lifecycle",
+        expectedParentGeneration: 3,
+        guard: () => undefined,
       }),
     ).toMatchObject({ ok: true });
     expect(projectedDependentIds((await ownerLinkInventory(h))[0]!)).toEqual([]);
@@ -2031,6 +2426,9 @@ describe("owner link inventory and impact preconditions", () => {
       storage.promoteShareGrant({
         shareId: "share-existing",
         grantId: "dependent-promoted-race",
+        expectedParentGrantId: grantId,
+        expectedParentGeneration: 1,
+        guard: () => undefined,
       }),
     ).toMatchObject({ ok: true });
     const before = storage.getShareGrant(grantId);
@@ -2863,6 +3261,9 @@ describe("relay link grants", () => {
       storage.promoteShareGrant({
         shareId: "share-existing",
         grantId: "grant-dependent",
+        expectedParentGrantId: linkGrantId,
+        expectedParentGeneration: 4,
+        guard: () => undefined,
       }),
     ).toMatchObject({ ok: true, grant: { generation: 5, parentGrantId: null } });
     expect(
@@ -3422,13 +3823,31 @@ describe("relay link grants", () => {
       ).toEqual({ ok: false });
     }
     expect(
-      storage.promoteShareGrant({ shareId: "share-existing", grantId: linkGrantId }),
+      storage.promoteShareGrant({
+        shareId: "share-existing",
+        grantId: linkGrantId,
+        expectedParentGrantId: linkGrantId,
+        expectedParentGeneration: 1,
+        guard: () => undefined,
+      }),
     ).toEqual({ ok: false });
     expect(
-      storage.promoteShareGrant({ shareId: "share-email", grantId: "grant-email" }),
+      storage.promoteShareGrant({
+        shareId: "share-email",
+        grantId: "grant-email",
+        expectedParentGrantId: linkGrantId,
+        expectedParentGeneration: 1,
+        guard: () => undefined,
+      }),
     ).toEqual({ ok: false });
     expect(
-      storage.promoteShareGrant({ shareId: "share-existing", grantId: "grant-0" }),
+      storage.promoteShareGrant({
+        shareId: "share-existing",
+        grantId: "grant-0",
+        expectedParentGrantId: linkGrantId,
+        expectedParentGeneration: 1,
+        guard: () => undefined,
+      }),
     ).toEqual({ ok: false });
     expect(
       storage.retuneShareGrant({
@@ -3514,6 +3933,9 @@ describe("relay link grants", () => {
       storage.promoteShareGrant({
         shareId: "share-existing",
         grantId: "grant-dependent",
+        expectedParentGrantId: linkGrantId,
+        expectedParentGeneration: 2,
+        guard: () => undefined,
       }),
     ).toEqual({ ok: false });
     expect(
