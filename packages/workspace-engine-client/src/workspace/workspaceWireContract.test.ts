@@ -220,11 +220,44 @@ describe("workspace wire schemas", () => {
     expect(decodeCollectionValue(encoded)).toEqual(value);
   });
 
-  it("decodes exact integral collection floats beyond the 64-bit range", () => {
-    expect(
-      decodeCollectionValue({ $dohcInt64: "100000000000000000000" }),
-    ).toBe(100000000000000000000n);
-  });
+  it.each([
+    [-(1n << 63n), "-9223372036854775808"],
+    [(1n << 64n) - 1n, "18446744073709551615"],
+  ])(
+    "round-trips the collection integer marker domain edge %s into a follow-up filter",
+    (integer, decimal) => {
+      const marker = { $dohcInt64: decimal };
+      const decoded = decodeCollectionValue(marker);
+
+      expect(decoded).toBe(integer);
+      expect(encodeCollectionValue(decoded)).toEqual(marker);
+      expect(
+        encodeCollectionQueryParams({
+          collectionPath: "projects",
+          filter: {
+            field: "estimate",
+            operator: "equals",
+            value: decoded,
+          },
+        }),
+      ).toMatchObject({ filter: { value: marker } });
+    },
+  );
+
+  it.each([
+    [-(1n << 63n) - 1n, "-9223372036854775809"],
+    [1n << 64n, "18446744073709551616"],
+  ])(
+    "rejects the collection integer marker immediately outside domain edge %s in both directions",
+    (integer, decimal) => {
+      expect(() =>
+        decodeCollectionValue({ $dohcInt64: decimal }),
+      ).toThrow(WorkspaceProtocolShapeError);
+      expect(() => encodeCollectionValue(integer)).toThrow(
+        WorkspaceProtocolShapeError,
+      );
+    },
+  );
 
   it("enforces safe-range collection integer marker rules", () => {
     expect(() =>
@@ -235,12 +268,6 @@ describe("workspace wire schemas", () => {
     );
     expect(encodeCollectionValue(-9007199254740991n)).toBe(
       -Number.MAX_SAFE_INTEGER,
-    );
-    expect(() => encodeCollectionValue(-(1n << 63n) - 1n)).toThrow(
-      WorkspaceProtocolShapeError,
-    );
-    expect(() => encodeCollectionValue(1n << 64n)).toThrow(
-      WorkspaceProtocolShapeError,
     );
   });
 

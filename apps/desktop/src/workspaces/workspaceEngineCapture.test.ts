@@ -462,9 +462,10 @@ describe("workspaceEngineCapture batch capture", () => {
     const poison = new Error("poisoned adoption");
     let adoptionRuns = 0;
     const sessions = {
-      run: async () => {
+      run: async (_workspace: unknown, task: (binding: unknown) => unknown) => {
         adoptionRuns += 1;
         if (adoptionRuns === 1) throw poison;
+        return await task({ client: {}, workspace: "workspace" });
       },
     } as unknown as EngineWorkspaceSessions;
     const errors: Array<{ context: string; error: unknown }> = [];
@@ -473,6 +474,8 @@ describe("workspaceEngineCapture batch capture", () => {
       rustEngineSessions: sessions,
       daemonOwnsCapture: true,
       onError: (context, error) => errors.push({ context, error }),
+      openRustYDocProviderSession: async (options) =>
+        ({ path: options.path, evict: async () => undefined }) as EngineYdocProviderSession,
     });
 
     await engine.flush();
@@ -484,6 +487,102 @@ describe("workspaceEngineCapture batch capture", () => {
         error: poison,
       },
     ]);
+    await engine.stop();
+  });
+
+  it("retries a busy collection adoption provider on a later pass while other items proceed", async () => {
+    const root = await tempRoot();
+    const adoptions = [
+      {
+        versionId: "main",
+        recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+        collectionPath: "projects",
+        filePath: "projects/busy.md",
+        objectId: "object-busy",
+      },
+      {
+        versionId: "main",
+        recordId: "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb",
+        collectionPath: "projects",
+        filePath: "projects/healthy.md",
+        objectId: "object-healthy",
+      },
+    ];
+    const completed = new Set<string>();
+    const store = {
+      ensureMainVersion: async () => undefined,
+      flushCapture: async () => undefined,
+      reconcileCapture: async () => undefined,
+      listPendingCollectionAdoptions: async () => ({
+        adoptions: adoptions.filter(
+          (adoption) => !completed.has(adoption.filePath),
+        ),
+        nextCursor: null,
+      }),
+    } as unknown as CaptureVersionedTextStore;
+    const busy = new DaemonRefusalError(
+      {
+        code: "OVERLOADED",
+        message: "engine-store-busy",
+        retry: "afterBackoff",
+      },
+      undefined,
+    );
+    const attempts: string[] = [];
+    const opens = new Map<string, number>();
+    const sessions = {
+      run: async (_workspace: unknown, task: (binding: unknown) => unknown) =>
+        await task({ client: {}, workspace: "workspace" }),
+    } as unknown as EngineWorkspaceSessions;
+    const errors: Array<{ context: string; error: unknown }> = [];
+    const engine = capture(root, {
+      store,
+      rustEngineSessions: sessions,
+      daemonOwnsCapture: true,
+      onError: (context, error) => errors.push({ context, error }),
+      openRustYDocProviderSession: async (options) => {
+        opens.set(options.path, (opens.get(options.path) ?? 0) + 1);
+        let evictions = 0;
+        return {
+          path: options.path,
+          evict: async () => {
+            evictions += 1;
+            attempts.push(`${options.path}:${evictions}`);
+            if (options.path === "projects/busy.md" && evictions === 1) {
+              throw busy;
+            }
+            completed.add(options.path);
+          },
+        } as EngineYdocProviderSession;
+      },
+    });
+
+    await engine.flush();
+
+    expect(completed).toEqual(new Set(["projects/healthy.md"]));
+    expect(attempts).toEqual([
+      "projects/busy.md:1",
+      "projects/healthy.md:1",
+    ]);
+    expect(errors).toEqual([]);
+
+    await engine.flush();
+
+    expect(completed).toEqual(
+      new Set(["projects/healthy.md", "projects/busy.md"]),
+    );
+    expect(attempts).toEqual([
+      "projects/busy.md:1",
+      "projects/healthy.md:1",
+      "projects/busy.md:2",
+    ]);
+    expect(opens).toEqual(
+      new Map([
+        ["projects/busy.md", 1],
+        ["projects/healthy.md", 1],
+      ]),
+    );
+    expect(errors).toEqual([]);
     await engine.stop();
   });
 

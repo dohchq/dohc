@@ -505,6 +505,14 @@ fn push_reason(
     code: CollectionSchemaReasonCode,
     path: impl Into<String>,
 ) {
+    if reasons.len() >= MAX_SCHEMA_COLLECTION_ITEMS {
+        reasons.truncate(MAX_SCHEMA_COLLECTION_ITEMS - 1);
+        reasons.push(CollectionSchemaReason {
+            code: CollectionSchemaReasonCode::SchemaCollectionLimitExceeded,
+            path: "/reasons".to_owned(),
+        });
+        return;
+    }
     reasons.push(CollectionSchemaReason {
         code,
         path: path.into(),
@@ -2092,10 +2100,11 @@ pub fn reconcile_collections_in_tx(
             return false;
         };
         parsed.status = CollectionSchemaStatus::Degraded;
-        parsed.reasons.push(CollectionSchemaReason {
-            code: CollectionSchemaReasonCode::RecordTooLargeForAdoption,
-            path: path.clone(),
-        });
+        push_reason(
+            &mut parsed.reasons,
+            CollectionSchemaReasonCode::RecordTooLargeForAdoption,
+            path.clone(),
+        );
         true
     });
     let declined_adoption_paths: HashSet<&str> =
@@ -2491,7 +2500,7 @@ pub fn decline_oversized_collection_adoption_in_tx(
         path: file_path.to_owned(),
     };
     if !reasons.contains(&reason) {
-        reasons.push(reason);
+        push_reason(&mut reasons, reason.code, reason.path);
     }
     let reasons = serde_json::to_string(&reasons)
         .map_err(|error| crate::DomainError::Storage(StorageError::persist_public(error)))?;

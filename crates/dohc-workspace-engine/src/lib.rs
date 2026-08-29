@@ -162,6 +162,13 @@ fn encode_collection_wire_integers(value: &mut Value) {
                             && number.fract() == 0.0
                             && number.abs() > dohc_engine_protocol::MAX_WIRE_INTEGER as f64)
                             .then(|| format!("{number:.0}"))
+                            .filter(|decimal| {
+                                if decimal.starts_with('-') {
+                                    decimal.parse::<i64>().is_ok()
+                                } else {
+                                    decimal.parse::<u64>().is_ok()
+                                }
+                            })
                     })
                 });
             if let Some(decimal) = decimal {
@@ -12908,6 +12915,34 @@ mod tests {
             .expect_err("an escape the encoder cannot produce must be refused");
         assert_eq!(error.code, ErrorCode::InvalidParams);
         assert_eq!(error.message, "collection-escape-marker-invalid");
+    }
+
+    #[test]
+    fn collection_integer_markers_share_one_wire_domain_in_both_directions() {
+        for integer in [json!(i64::MIN), json!(u64::MAX)] {
+            let mut encoded = integer.clone();
+            encode_collection_wire_integers(&mut encoded);
+            let decimal = integer.as_number().expect("integer").to_string();
+            assert_eq!(encoded, json!({ "$dohcInt64": decimal }));
+
+            decode_collection_wire_integer(&mut encoded).expect("decode domain edge");
+            assert_eq!(encoded, integer);
+        }
+
+        for decimal in ["-9223372036854775809", "18446744073709551616"] {
+            let mut marker = json!({ "$dohcInt64": decimal });
+            let error = decode_collection_wire_integer(&mut marker)
+                .expect_err("reject integer immediately outside the marker domain");
+            assert_eq!(error.code, ErrorCode::InvalidParams);
+            assert_eq!(error.message, "collection-integer-marker-invalid");
+        }
+
+        let mut out_of_domain_float = json!(100_000_000_000_000_000_000_f64);
+        encode_collection_wire_integers(&mut out_of_domain_float);
+        assert!(
+            out_of_domain_float.is_number(),
+            "a float outside the integer marker domain must stay a number"
+        );
     }
 
     /// #595 round 8: the artifact lock and a busy engine database are two

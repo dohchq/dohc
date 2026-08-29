@@ -352,6 +352,11 @@ function collectionIntegerMarker(value: JsonValue): bigint | null {
     );
   }
   const integer = BigInt(decimal);
+  if (integer < MIN_COLLECTION_INTEGER || integer > MAX_COLLECTION_INTEGER) {
+    throw new WorkspaceProtocolShapeError(
+      "A collection integer marker must fit in the engine's 64-bit integer range.",
+    );
+  }
   if (
     (integer >= -MAX_SAFE_COLLECTION_INTEGER &&
       integer <= MAX_SAFE_COLLECTION_INTEGER)

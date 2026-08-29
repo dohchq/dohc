@@ -1489,6 +1489,10 @@ export function createWorkspaceEngineCapture(
   // (#874). Set when a pass failed because the engine REFUSED this
   // workspace's database, cleared by the next pass that reached the store.
   let storeRefused: EngineStoreRefusal | null = null;
+  const pendingCollectionAdoptionProviders = new Map<
+    string,
+    EngineYdocProviderSession
+  >();
 
   const publishCaptureOutcome = (): void => {
     const failure =
@@ -3350,20 +3354,29 @@ export function createWorkspaceEngineCapture(
       if (!pending) return;
       found ||= pending.adoptions.length > 0;
       for (const adoption of pending.adoptions) {
+        const adoptionKey =
+          `${adoption.versionId}\0${adoption.recordId}\0` +
+          `${adoption.objectId}\0${adoption.filePath}`;
+        let provider = pendingCollectionAdoptionProviders.get(adoptionKey);
         try {
           await options.rustEngineSessions.run(
             workspace,
             async (binding) => {
-              const provider = await openEngineYdocProviderSession({
-                transport: binding.client as EngineTransport,
-                workspace: binding.workspace,
-                versionId: adoption.versionId,
-                path: adoption.filePath,
-                expectedObjectId: adoption.objectId,
-                contentKind: "richdoc",
-                seedAbsentLineage: true,
-                onRemoteUpdate: () => undefined,
-              });
+              if (provider === undefined) {
+                const openProvider =
+                  options.openRustYDocProviderSession ??
+                  openEngineYdocProviderSession;
+                provider = await openProvider({
+                  transport: binding.client as EngineTransport,
+                  workspace: binding.workspace,
+                  versionId: adoption.versionId,
+                  path: adoption.filePath,
+                  expectedObjectId: adoption.objectId,
+                  contentKind: "richdoc",
+                  seedAbsentLineage: true,
+                  onRemoteUpdate: () => undefined,
+                });
+              }
               // Keep the imported lineage durable until reconciliation applies the
               // record id. A seed-only settling close can prove the artifact already
               // covers the document and prune the lineage before adoption uses it.
@@ -3371,7 +3384,15 @@ export function createWorkspaceEngineCapture(
             },
             { retryTransportErrors: true },
           );
+          pendingCollectionAdoptionProviders.delete(adoptionKey);
         } catch (error) {
+          if (isEngineStoreBusyRefusal(error)) {
+            if (provider !== undefined) {
+              pendingCollectionAdoptionProviders.set(adoptionKey, provider);
+            }
+            continue;
+          }
+          pendingCollectionAdoptionProviders.delete(adoptionKey);
           onError(`collection adoption of ${adoption.filePath}`, error);
         }
       }

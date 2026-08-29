@@ -1,7 +1,8 @@
 use dohc_engine_domain::collections::markdown_frontmatter_json;
 use dohc_engine_domain::{
-    CollectionFieldValue, CollectionSchemaParseResult, FieldDefinition, FieldValueValidation,
-    is_record_id, parse_collection_schema, validate_field_value,
+    CollectionFieldValue, CollectionSchemaParseResult, CollectionSchemaReasonCode,
+    CollectionSchemaStatus, FieldDefinition, FieldValueValidation, is_record_id,
+    parse_collection_schema, validate_field_value,
 };
 use saphyr::{LoadableYamlNode, ScalarOwned, YamlOwned};
 use serde::Deserialize;
@@ -88,6 +89,30 @@ fn collection_schema_results_match_the_typescript_oracle() {
             vector.name
         );
     }
+}
+
+#[test]
+fn collection_schema_caps_degradation_reasons_with_a_terminal_truncation_reason() {
+    let mut yaml = String::from("fields:\n");
+    for index in 0..16_385 {
+        yaml.push_str(&format!("  invalid_{index}: value\n"));
+    }
+
+    let parsed = parse_collection_schema(&yaml);
+
+    assert_eq!(parsed.status, CollectionSchemaStatus::Degraded);
+    assert!(parsed.schema.fields.is_empty());
+    assert_eq!(parsed.reasons.len(), 16_384);
+    assert_eq!(
+        parsed
+            .reasons
+            .last()
+            .map(|reason| (reason.code, reason.path.as_str())),
+        Some((
+            CollectionSchemaReasonCode::SchemaCollectionLimitExceeded,
+            "/reasons",
+        ))
+    );
 }
 
 #[test]

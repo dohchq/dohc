@@ -873,7 +873,6 @@ async fn collection_larger_than_frame_cap_pages_completely_in_sorted_order() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unsafe_integer_round_trips_through_query_and_get_record_wire_results() {
     const UNSAFE_INTEGER: i64 = 9_007_199_254_740_993;
-    const EXPONENT_INTEGER: &str = "100000000000000000000";
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     let db = scratch.engine_db_path().expect("engine db path");
@@ -882,8 +881,8 @@ async fn unsafe_integer_round_trips_through_query_and_get_record_wire_results() 
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");
-    let schema = "fields:\n  exact:\n    type: number\n  exponent:\n    type: number\n";
-    let record = format!("---\nid: {RECORD_ID}\nexact: {UNSAFE_INTEGER}\nexponent: 1e20\n---\n");
+    let schema = "fields:\n  exact:\n    type: number\n";
+    let record = format!("---\nid: {RECORD_ID}\nexact: {UNSAFE_INTEGER}\n---\n");
     seed_text(&mut store, "integers/collection.yaml", schema, 2);
     seed_text(&mut store, "integers/record.md", &record, 3);
     store
@@ -957,14 +956,6 @@ async fn unsafe_integer_round_trips_through_query_and_get_record_wire_results() 
             json!({ "$dohcInt64": UNSAFE_INTEGER.to_string() })
         );
         assert_eq!(exact["validation"]["status"], json!("valid"));
-        let exponent = record["values"]
-            .as_array()
-            .expect("record values")
-            .iter()
-            .find(|value| value["field"] == "exponent")
-            .expect("exponent indexed value");
-        assert_eq!(exponent["value"], json!({ "$dohcInt64": EXPONENT_INTEGER }));
-        assert_eq!(exponent["validation"]["status"], json!("valid"));
         encode_control(
             &Envelope::Response(output.response),
             &WireLimits::SPIKE_DEFAULTS,
