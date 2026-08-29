@@ -106,6 +106,7 @@ import {
   AppendRelayShareDiscussionResult,
   BlockRelayShareDiscussionPrincipalPayload,
   BlockRelayShareDiscussionPrincipalResult,
+  CancelRelayShareDiscussionActivityPayload,
   CreateRelayShareLinkPayload,
   CreateRelayShareLinkResult,
   DeleteRelayShareDiscussionMessagePayload,
@@ -116,9 +117,12 @@ import {
   ListRelayShareLinksResult,
   PauseRelayShareDiscussionPayload,
   PauseRelayShareDiscussionResult,
+  PollRelayShareDiscussionActivityPayload,
+  PollRelayShareDiscussionActivityResult,
   PromoteRelayShareGrantPayload,
   PromoteRelayShareGrantResult,
   RelayShareDiscussionAppendResponse,
+  RelayShareDiscussionActivityResponse,
   RelayShareDiscussionBlockResponse,
   RelayShareDiscussionDeleteResponse,
   RelayShareDiscussionPageResponse,
@@ -507,6 +511,7 @@ describe("owner relay share discussion IPC contract", () => {
 
   it("accepts only the closed owner page and message projections", () => {
     const result = {
+      activityRevision: 7,
       linkCommentsPaused: true,
       messages: [namedLive, linkLive, namedDeleted, linkDeleted],
       nextCursor: "eyJ2ZXJzaW9uIjoxfQ",
@@ -514,11 +519,17 @@ describe("owner relay share discussion IPC contract", () => {
     expect(ListRelayShareDiscussionResult.parse(result)).toEqual(result);
     expect(
       ListRelayShareDiscussionResult.parse({
+        activityRevision: 0,
         linkCommentsPaused: false,
         messages: [],
         nextCursor: null,
       }),
-    ).toEqual({ linkCommentsPaused: false, messages: [], nextCursor: null });
+    ).toEqual({
+      activityRevision: 0,
+      linkCommentsPaused: false,
+      messages: [],
+      nextCursor: null,
+    });
     expect(RelayShareDiscussionPageResponse.parse({ ok: true, ...result })).toEqual({
       ok: true,
       ...result,
@@ -536,6 +547,8 @@ describe("owner relay share discussion IPC contract", () => {
 
     for (const malformed of [
       { ...result, ownerUserId: "must-not-cross" },
+      { ...result, activityRevision: -1 },
+      { ...result, activityRevision: Number.MAX_SAFE_INTEGER + 1 },
       { ...result, nextCursor: "not+base64" },
       { ...result, nextCursor: "x".repeat(1_025) },
       { ...result, messages: Array.from({ length: 101 }, () => namedLive) },
@@ -564,21 +577,49 @@ describe("owner relay share discussion IPC contract", () => {
       ListRelayShareDiscussionPayload.parse({
         workspaceId: "workspace-1",
         shareId: "share-1",
+        direction: "newest-first",
         cursor: "cursor_1",
       }),
-    ).toEqual({ workspaceId: "workspace-1", shareId: "share-1", cursor: "cursor_1" });
+    ).toEqual({
+      workspaceId: "workspace-1",
+      shareId: "share-1",
+      direction: "newest-first",
+      cursor: "cursor_1",
+    });
     expect(
       ListRelayShareDiscussionPayload.parse({
         workspaceId: "workspace-1",
         shareId: "share-1",
+        direction: "newest-first",
       }),
-    ).toEqual({ workspaceId: "workspace-1", shareId: "share-1" });
+    ).toEqual({
+      workspaceId: "workspace-1",
+      shareId: "share-1",
+      direction: "newest-first",
+    });
     for (const malformed of [
-      { workspaceId: "workspace-1", shareId: "share-1", cursor: "" },
-      { workspaceId: "workspace-1", shareId: "share-1", cursor: "bad+cursor" },
+      { workspaceId: "workspace-1", shareId: "share-1" },
       {
         workspaceId: "workspace-1",
         shareId: "share-1",
+        direction: "oldest-first",
+      },
+      {
+        workspaceId: "workspace-1",
+        shareId: "share-1",
+        direction: "newest-first",
+        cursor: "",
+      },
+      {
+        workspaceId: "workspace-1",
+        shareId: "share-1",
+        direction: "newest-first",
+        cursor: "bad+cursor",
+      },
+      {
+        workspaceId: "workspace-1",
+        shareId: "share-1",
+        direction: "newest-first",
         cursor: "cursor_1",
         limit: 100,
       },
@@ -616,6 +657,76 @@ describe("owner relay share discussion IPC contract", () => {
       { ...exact, profile: { id: "must-not-cross" } },
     ]) {
       expect(AppendRelayShareDiscussionPayload.safeParse(malformed).success).toBe(false);
+    }
+  });
+
+  it("closes and bounds owner discussion activity polls and responses", () => {
+    const poll = {
+      workspaceId: "workspace-1",
+      shareId: "share-1",
+      since: 7,
+      hold: 30_000,
+      limit: 100,
+      pollId: "2cdeeb8f-f0ba-4d72-bd4a-b8f3f279ea18",
+    };
+    expect(PollRelayShareDiscussionActivityPayload.parse(poll)).toEqual(poll);
+    expect(
+      CancelRelayShareDiscussionActivityPayload.parse({ pollId: poll.pollId }),
+    ).toEqual({ pollId: poll.pollId });
+
+    for (const malformed of [
+      { ...poll, since: -1 },
+      { ...poll, since: Number.MAX_SAFE_INTEGER + 1 },
+      { ...poll, hold: 30_001 },
+      { ...poll, limit: 101 },
+      { ...poll, pollId: "not-a-uuid" },
+      { ...poll, cursor: "must-not-cross" },
+    ]) {
+      expect(PollRelayShareDiscussionActivityPayload.safeParse(malformed).success).toBe(
+        false,
+      );
+    }
+    expect(
+      CancelRelayShareDiscussionActivityPayload.safeParse({
+        pollId: poll.pollId,
+        workspaceId: "must-not-cross",
+      }).success,
+    ).toBe(false);
+
+    const activity = {
+      latestRevision: 11,
+      cursorRevision: 9,
+      hasMore: true,
+      messages: [linkLive, namedDeleted],
+      principals: [{ principalId: "principal-1", blocked: true }],
+      linkCommentsPaused: true,
+    };
+    expect(PollRelayShareDiscussionActivityResult.parse(activity)).toEqual(activity);
+    expect(
+      RelayShareDiscussionActivityResponse.parse({ ok: true, ...activity }),
+    ).toEqual({ ok: true, ...activity });
+
+    for (const malformed of [
+      { ...activity, latestRevision: -1 },
+      { ...activity, latestRevision: Number.MAX_SAFE_INTEGER + 1 },
+      { ...activity, cursorRevision: Number.MAX_SAFE_INTEGER + 1 },
+      { ...activity, cursorRevision: 12 },
+      { ...activity, cursorRevision: 10, hasMore: false },
+      { ...activity, cursorRevision: 11, latestRevision: 11, hasMore: true },
+      {
+        ...activity,
+        principals: [{ linkPrincipalId: "wrong-field", blocked: true }],
+      },
+      {
+        ...activity,
+        principals: [{ principalId: "principal-1", blocked: true, userId: "leak" }],
+      },
+      { ...activity, messages: Array.from({ length: 101 }, () => namedLive) },
+      { ...activity, credential: "must-not-cross" },
+    ]) {
+      expect(PollRelayShareDiscussionActivityResult.safeParse(malformed).success).toBe(
+        false,
+      );
     }
   });
 

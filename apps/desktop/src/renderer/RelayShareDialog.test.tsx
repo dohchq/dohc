@@ -58,9 +58,19 @@ type DamagedLink = Omit<ReadableLink, "access" | "selector"> & {
 type LinkRow = ReadableLink | DamagedLink;
 
 type DiscussionPage = {
+  activityRevision: number;
   linkCommentsPaused: boolean;
   messages: RelayShareDiscussionMessage[];
   nextCursor: string | null;
+};
+
+type DiscussionActivity = {
+  latestRevision: number;
+  cursorRevision: number;
+  hasMore: boolean;
+  messages: RelayShareDiscussionMessage[];
+  principals: Array<{ principalId: string; blocked: boolean }>;
+  linkCommentsPaused: boolean;
 };
 
 type ReadableGrantedRow = Extract<
@@ -189,9 +199,25 @@ function discussionPage(
   overrides: Partial<DiscussionPage> = {},
 ): DiscussionPage {
   return {
+    activityRevision: 1,
     linkCommentsPaused: false,
     messages,
     nextCursor: null,
+    ...overrides,
+  };
+}
+
+function discussionActivity(
+  revision: number,
+  overrides: Partial<DiscussionActivity> = {},
+): DiscussionActivity {
+  return {
+    latestRevision: revision,
+    cursorRevision: revision,
+    hasMore: false,
+    messages: [],
+    principals: [],
+    linkCommentsPaused: false,
     ...overrides,
   };
 }
@@ -236,6 +262,8 @@ const bridgeMock = {
   revokeRelayShareLink: vi.fn(),
   listRelayShares: vi.fn(),
   listRelayShareDiscussion: vi.fn(),
+  pollRelayShareDiscussionActivity: vi.fn(),
+  cancelRelayShareDiscussionActivity: vi.fn(),
   appendRelayShareDiscussion: vi.fn(),
   deleteRelayShareDiscussionMessage: vi.fn(),
   blockRelayShareDiscussionPrincipal: vi.fn(),
@@ -269,6 +297,10 @@ beforeEach(() => {
   bridgeMock.revokeRelayShareLink.mockResolvedValue({ outcome: "ended" });
   bridgeMock.listRelayShares.mockResolvedValue({ granted: [], received: [] });
   bridgeMock.listRelayShareDiscussion.mockResolvedValue(discussionPage());
+  bridgeMock.pollRelayShareDiscussionActivity.mockImplementation(
+    () => new Promise(() => {}),
+  );
+  bridgeMock.cancelRelayShareDiscussionActivity.mockResolvedValue(undefined);
   bridgeMock.appendRelayShareDiscussion.mockResolvedValue({
     message: namedComment("appended-1", "Posted comment"),
   });
@@ -2092,6 +2124,7 @@ describe("RelayShareDialog", () => {
     expect(bridgeMock.listRelayShareDiscussion).toHaveBeenCalledWith({
       workspaceId: "ws-1",
       shareId: "share-a",
+      direction: "newest-first",
     });
     expect(await within(groupA).findByText("No comments yet.")).toBeTruthy();
     expect(within(groupB).queryByText("No comments yet.")).toBeNull();
@@ -2187,6 +2220,7 @@ describe("RelayShareDialog", () => {
     expect(bridgeMock.listRelayShareDiscussion).toHaveBeenNthCalledWith(2, {
       workspaceId: "ws-1",
       shareId: "share-1",
+      direction: "newest-first",
       cursor: "cursor-1",
     });
     expect(await within(group).findByText("Fourth")).toBeTruthy();
@@ -2197,8 +2231,8 @@ describe("RelayShareDialog", () => {
     expect(messageIds).toEqual([
       "message-1",
       "message-2",
-      "message-3",
       "message-4",
+      "message-3",
     ]);
   });
 
@@ -2344,11 +2378,13 @@ describe("RelayShareDialog", () => {
     expect(bridgeMock.listRelayShareDiscussion).toHaveBeenNthCalledWith(2, {
       workspaceId: "ws-1",
       shareId: "share-1",
+      direction: "newest-first",
     });
     await user.click(within(group).getByRole("button", { name: "Retry" }));
     expect(bridgeMock.listRelayShareDiscussion).toHaveBeenNthCalledWith(3, {
       workspaceId: "ws-1",
       shareId: "share-1",
+      direction: "newest-first",
     });
     expect(
       await within(group).findByText("Comment deleted by the owner"),
@@ -2391,6 +2427,7 @@ describe("RelayShareDialog", () => {
     expect(bridgeMock.listRelayShareDiscussion).toHaveBeenNthCalledWith(3, {
       workspaceId: "ws-1",
       shareId: "share-1",
+      direction: "newest-first",
       cursor: "opaque-page-cursor",
     });
     expect(await within(group).findByText("Second page")).toBeTruthy();
@@ -2961,6 +2998,8 @@ describe("RelayShareDialog", () => {
       secondRead.resolve(discussionPage([namedComment("current", "Current page")]));
     });
     expect(await within(group).findByText("Current page")).toBeTruthy();
+    const activityPollId =
+      bridgeMock.pollRelayShareDiscussionActivity.mock.calls[0]![0].pollId;
     await act(async () => {
       firstRead.resolve(discussionPage([namedComment("stale", "Stale page")]));
     });
@@ -2971,6 +3010,9 @@ describe("RelayShareDialog", () => {
     await user.click(within(group).getByRole("button", { name: "Post" }));
     await user.click(screen.getByRole("button", { name: "Close" }));
     expect(onClose).toHaveBeenCalledTimes(1);
+    expect(bridgeMock.cancelRelayShareDiscussionActivity).toHaveBeenCalledWith({
+      pollId: activityPollId,
+    });
     await act(async () => {
       append.resolve({ message: namedComment("late", "Late append") });
     });
@@ -3010,6 +3052,431 @@ describe("RelayShareDialog", () => {
     });
     expect(await within(groupA).findByText("From A")).toBeTruthy();
     expect(within(groupB).getByText("From B")).toBeTruthy();
+  });
+
+  it("keeps two live owner discussions isolated through deltas, history, cancellation, and a workspace switch", async () => {
+    const activityCalls: Array<{
+      payload: {
+        workspaceId: string;
+        shareId: string;
+        since: number;
+        hold: number;
+        limit: number;
+        pollId: string;
+      };
+      deferred: ReturnType<typeof controllable<DiscussionActivity>>;
+    }> = [];
+    bridgeMock.pollRelayShareDiscussionActivity.mockImplementation((payload) => {
+      const deferred = controllable<DiscussionActivity>();
+      activityCalls.push({ payload, deferred });
+      return deferred.promise;
+    });
+    const activityCall = async (shareId: string, index: number) => {
+      await vi.waitFor(() => {
+        expect(
+          activityCalls.filter((call) => call.payload.shareId === shareId).length,
+        ).toBeGreaterThan(index);
+      });
+      return activityCalls.filter((call) => call.payload.shareId === shareId)[
+        index
+      ]!;
+    };
+
+    const aOlder = {
+      ...namedComment("a-older", "A older"),
+      createdAtMs: CREATED_MS + 10,
+    };
+    const aNewest = {
+      ...namedComment("a-newest", "A newest"),
+      createdAtMs: CREATED_MS + 20,
+    };
+    const bOnly = {
+      ...namedComment("b-only", "B only"),
+      createdAtMs: CREATED_MS + 15,
+    };
+    const external = {
+      messageId: "a-external",
+      createdAtMs: CREATED_MS + 30,
+      deleted: false as const,
+      body: "A external",
+      author: {
+        kind: "link" as const,
+        displayName: "Link Visitor",
+        unverified: true as const,
+      },
+      moderation: {
+        linkGrantId: "link-grant-1",
+        linkPrincipalId: "principal-a",
+        blocked: false,
+      },
+    } satisfies RelayShareDiscussionMessage;
+    const externalTombstone: RelayShareDiscussionMessage = {
+      messageId: external.messageId,
+      createdAtMs: external.createdAtMs,
+      deleted: true,
+      author: external.author,
+      moderation: external.moderation,
+    };
+    const ancient = {
+      ...namedComment("a-ancient", "A ancient"),
+      createdAtMs: CREATED_MS,
+    };
+    const reopened = {
+      ...namedComment("a-reopened", "A reopened"),
+      createdAtMs: CREATED_MS + 40,
+    };
+    let initialReadsForA = 0;
+
+    bridgeMock.listRelayShareLinks.mockImplementation(
+      async ({ workspaceId }: { workspaceId: string }) => ({
+        links:
+          workspaceId === "ws-1"
+            ? [
+                readableLink("link-a", { shareId: "share-a" }),
+                readableLink("link-b", { shareId: "share-b" }),
+              ]
+            : [readableLink("link-c", { shareId: "share-c" })],
+      }),
+    );
+    bridgeMock.listRelayShareDiscussion.mockImplementation(
+      async ({
+        workspaceId,
+        shareId,
+        cursor,
+      }: {
+        workspaceId: string;
+        shareId: string;
+        cursor?: string;
+      }) => {
+        if (workspaceId === "ws-1" && shareId === "share-a" && cursor) {
+          expect(cursor).toBe("older-a");
+          return discussionPage([external, aOlder, ancient], {
+            activityRevision: 12,
+            linkCommentsPaused: true,
+          });
+        }
+        if (workspaceId === "ws-1" && shareId === "share-a") {
+          initialReadsForA += 1;
+          return initialReadsForA === 1
+            ? discussionPage([aNewest, aOlder], {
+                activityRevision: 10,
+                nextCursor: "older-a",
+              })
+            : discussionPage([reopened], { activityRevision: 30 });
+        }
+        if (workspaceId === "ws-1" && shareId === "share-b") {
+          return discussionPage([bOnly], { activityRevision: 20 });
+        }
+        return discussionPage([], { activityRevision: 40 });
+      },
+    );
+
+    const user = userEvent.setup();
+    const view = render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const groupA = await openOwnerComments(user, "share-a");
+    const groupB = await openOwnerComments(user, "share-b");
+
+    expect(await within(groupA).findByText("A older")).toBeTruthy();
+    expect(within(groupA).getByText("A newest")).toBeTruthy();
+    expect(await within(groupB).findByText("B only")).toBeTruthy();
+    expect(bridgeMock.listRelayShareDiscussion).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      shareId: "share-a",
+      direction: "newest-first",
+    });
+    expect(bridgeMock.listRelayShareDiscussion).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      shareId: "share-b",
+      direction: "newest-first",
+    });
+
+    const a0 = await activityCall("share-a", 0);
+    const b0 = await activityCall("share-b", 0);
+    expect(a0.payload).toMatchObject({
+      workspaceId: "ws-1",
+      shareId: "share-a",
+      since: 10,
+      hold: 30_000,
+      limit: 100,
+    });
+    expect(b0.payload).toMatchObject({
+      workspaceId: "ws-1",
+      shareId: "share-b",
+      since: 20,
+      hold: 30_000,
+      limit: 100,
+    });
+    expect(a0.payload.pollId).not.toBe(b0.payload.pollId);
+
+    await act(async () => {
+      a0.deferred.resolve(
+        discussionActivity(12, {
+          cursorRevision: 11,
+          hasMore: true,
+          messages: [external],
+        }),
+      );
+    });
+    expect(within(groupA).queryByText("A external")).not.toBeNull();
+    expect(within(groupB).queryByText("A external")).toBeNull();
+
+    const a1 = await activityCall("share-a", 1);
+    expect(a1.payload).toMatchObject({ since: 11, hold: 0, limit: 100 });
+    await act(async () => {
+      a1.deferred.resolve(
+        discussionActivity(12, { messages: [externalTombstone] }),
+      );
+    });
+    expect(
+      await within(groupA).findByText("Comment deleted by the owner"),
+    ).toBeTruthy();
+    expect(within(groupA).queryByText("A external")).toBeNull();
+
+    const a2 = await activityCall("share-a", 2);
+    expect(a2.payload).toMatchObject({ since: 12, hold: 30_000, limit: 100 });
+    await act(async () => {
+      a2.deferred.resolve(
+        discussionActivity(13, {
+          principals: [{ principalId: "principal-a", blocked: true }],
+          linkCommentsPaused: true,
+        }),
+      );
+    });
+    expect(
+      await within(groupA).findByText(
+        "Link comments are paused. People with links can still read everything.",
+      ),
+    ).toBeTruthy();
+    expect(within(groupA).getByRole("button", { name: "Unblock" })).toBeTruthy();
+    expect(within(groupB).queryByRole("button", { name: "Unblock" })).toBeNull();
+
+    const a3 = await activityCall("share-a", 3);
+    await act(async () => {
+      a3.deferred.resolve(
+        discussionActivity(14, {
+          principals: [{ principalId: "principal-a", blocked: false }],
+          linkCommentsPaused: false,
+        }),
+      );
+    });
+    await vi.waitFor(() => {
+      expect(
+        within(groupA).queryByText(
+          "Link comments are paused. People with links can still read everything.",
+        ),
+      ).toBeNull();
+    });
+    expect(within(groupA).getByRole("button", { name: "Block" })).toBeTruthy();
+    expect(within(groupB).getByText("B only")).toBeTruthy();
+
+    await user.click(
+      within(groupA).getByRole("button", { name: "Show more comments" }),
+    );
+    expect(bridgeMock.listRelayShareDiscussion).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      shareId: "share-a",
+      direction: "newest-first",
+      cursor: "older-a",
+    });
+    expect(await within(groupA).findByText("A ancient")).toBeTruthy();
+    expect(within(groupA).queryByText("A external")).toBeNull();
+    expect(
+      within(groupA).queryByText(
+        "Link comments are paused. People with links can still read everything.",
+      ),
+    ).toBeNull();
+    expect(
+      Array.from(
+        groupA.querySelectorAll<HTMLElement>("[data-comment-message-id]"),
+        (node) => node.dataset.commentMessageId,
+      ),
+    ).toEqual(["a-ancient", "a-older", "a-newest", "a-external"]);
+
+    const a4 = await activityCall("share-a", 4);
+    await user.click(within(groupA).getByRole("button", { name: "Comments" }));
+    expect(bridgeMock.cancelRelayShareDiscussionActivity).toHaveBeenCalledWith({
+      pollId: a4.payload.pollId,
+    });
+    await user.click(within(groupA).getByRole("button", { name: "Comments" }));
+    expect(await within(groupA).findByText("A reopened")).toBeTruthy();
+    const a5 = await activityCall("share-a", 5);
+
+    await act(async () => {
+      a4.deferred.resolve(
+        discussionActivity(15, {
+          messages: [namedComment("late-after-collapse", "Late after collapse")],
+        }),
+      );
+    });
+    expect(within(groupA).queryByText("Late after collapse")).toBeNull();
+    expect(within(groupA).getByText("A reopened")).toBeTruthy();
+
+    view.rerender(
+      <RelayShareDialog
+        workspaceId="ws-2"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    expect(await screen.findByTestId("share-link-group-share-c")).toBeTruthy();
+    expect(bridgeMock.cancelRelayShareDiscussionActivity).toHaveBeenCalledWith({
+      pollId: a5.payload.pollId,
+    });
+    expect(bridgeMock.cancelRelayShareDiscussionActivity).toHaveBeenCalledWith({
+      pollId: b0.payload.pollId,
+    });
+
+    await act(async () => {
+      a5.deferred.resolve(
+        discussionActivity(31, {
+          messages: [namedComment("late-a", "Late old workspace A")],
+        }),
+      );
+      b0.deferred.resolve(
+        discussionActivity(21, {
+          messages: [namedComment("late-b", "Late old workspace B")],
+        }),
+      );
+    });
+    expect(screen.queryByText("Late old workspace A")).toBeNull();
+    expect(screen.queryByText("Late old workspace B")).toBeNull();
+  });
+
+  it("applies current principal activity states to an older page captured before the delta", async () => {
+    const olderPage = controllable<DiscussionPage>();
+    const firstActivity = controllable<DiscussionActivity>();
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("link-1", { shareId: "share-1" })],
+    });
+    bridgeMock.listRelayShareDiscussion.mockImplementation(
+      ({ cursor }: { cursor?: string }) =>
+        cursor === undefined
+          ? Promise.resolve(
+              discussionPage([], {
+                activityRevision: 10,
+                nextCursor: "older",
+              }),
+            )
+          : olderPage.promise,
+    );
+    bridgeMock.pollRelayShareDiscussionActivity.mockReturnValueOnce(
+      firstActivity.promise,
+    );
+
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await openOwnerComments(user, "share-1");
+    await user.click(
+      within(group).getByRole("button", { name: "Show more comments" }),
+    );
+    expect(bridgeMock.listRelayShareDiscussion).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      shareId: "share-1",
+      direction: "newest-first",
+      cursor: "older",
+    });
+
+    await act(async () => {
+      firstActivity.resolve(
+        discussionActivity(11, {
+          principals: [
+            { principalId: "principal-blocked", blocked: true },
+            { principalId: "principal-unblocked", blocked: false },
+          ],
+        }),
+      );
+    });
+    await vi.waitFor(() => {
+      expect(bridgeMock.pollRelayShareDiscussionActivity).toHaveBeenCalledTimes(2);
+    });
+
+    await act(async () => {
+      olderPage.resolve(
+        discussionPage([
+          linkComment("stale-blocked", "Stale blocked state", {
+            linkPrincipalId: "principal-blocked",
+            blocked: false,
+          }),
+          linkComment("stale-unblocked", "Stale unblocked state", {
+            linkPrincipalId: "principal-unblocked",
+            blocked: true,
+          }),
+        ]),
+      );
+    });
+
+    expect(
+      within(await screen.findByTestId("share-comment-stale-blocked")).getByRole(
+        "button",
+        { name: "Unblock" },
+      ),
+    ).toBeTruthy();
+    expect(
+      within(screen.getByTestId("share-comment-stale-unblocked")).getByRole(
+        "button",
+        { name: "Block" },
+      ),
+    ).toBeTruthy();
+  });
+
+  it("keeps the last activity page visible while retrying only an expanded share", async () => {
+    const retry = controllable<DiscussionActivity>();
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("link-1", { shareId: "share-1" })],
+    });
+    bridgeMock.listRelayShareDiscussion.mockResolvedValue(
+      discussionPage([namedComment("kept", "Kept through retry")], {
+        activityRevision: 9,
+      }),
+    );
+    bridgeMock.pollRelayShareDiscussionActivity
+      .mockRejectedValueOnce(new Error("transient activity failure"))
+      .mockReturnValueOnce(retry.promise);
+
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await openOwnerComments(user, "share-1");
+    expect(await within(group).findByText("Kept through retry")).toBeTruthy();
+    await vi.waitFor(() => {
+      expect(bridgeMock.pollRelayShareDiscussionActivity).toHaveBeenCalledTimes(2);
+    });
+    const retryPayload =
+      bridgeMock.pollRelayShareDiscussionActivity.mock.calls[1]![0];
+    expect(retryPayload).toMatchObject({
+      workspaceId: "ws-1",
+      shareId: "share-1",
+      since: 9,
+      hold: 30_000,
+      limit: 100,
+    });
+    expect(within(group).getByText("Kept through retry")).toBeTruthy();
+
+    await user.click(within(group).getByRole("button", { name: "Comments" }));
+    expect(bridgeMock.cancelRelayShareDiscussionActivity).toHaveBeenCalledWith({
+      pollId: retryPayload.pollId,
+    });
+    expect(bridgeMock.pollRelayShareDiscussionActivity).toHaveBeenCalledTimes(2);
   });
 
   it("keeps a mutation refresh current while another share is read", async () => {

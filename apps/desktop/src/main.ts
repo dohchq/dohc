@@ -71,6 +71,7 @@ import {
   AppendRelayShareDiscussionResult,
   BlockRelayShareDiscussionPrincipalPayload,
   BlockRelayShareDiscussionPrincipalResult,
+  CancelRelayShareDiscussionActivityPayload,
   CreateRelayShareLinkPayload,
   CreateRelayShareLinkResult,
   DeleteRelayShareDiscussionMessagePayload,
@@ -81,9 +82,12 @@ import {
   ListRelayShareLinksResult,
   PauseRelayShareDiscussionPayload,
   PauseRelayShareDiscussionResult,
+  PollRelayShareDiscussionActivityPayload,
+  PollRelayShareDiscussionActivityResult,
   PromoteRelayShareGrantPayload,
   PromoteRelayShareGrantResult,
   RelayShareDiscussionAppendResponse,
+  RelayShareDiscussionActivityResponse,
   RelayShareDiscussionBlockResponse,
   RelayShareDiscussionDeleteResponse,
   RelayShareDiscussionPageResponse,
@@ -2459,10 +2463,12 @@ function serializeWorkspaceAuthorityWork<Result>(
 // (<=30s) so an IPC invoke can never dangle forever.
 const PRESENCE_PUBLISH_TIMEOUT_MS = 15_000;
 const PRESENCE_POLL_SAFETY_MS = 35_000;
+const RELAY_SHARE_DISCUSSION_ACTIVITY_POLL_SAFETY_MS = 35_000;
 // In-flight presence long-polls, owned by (senderId + pollId) so a poll can only
 // be cancelled/superseded by its own window, and bounded so a renderer can't
 // open unbounded relay long-polls / controllers / timers.
 const presencePollRegistry = createPresencePollRegistry();
+const relayShareDiscussionActivityPolls = createPresencePollRegistry();
 const presenceMutationOwner = new PresenceMutationOwner<WebContents>();
 // A stable ownership key so one window holds at most ONE poll per (scope, topic):
 // a new poll for the same key supersedes (aborts) the prior long-poll.
@@ -5741,7 +5747,12 @@ const rendererWorkspaceSessions: RendererWorkspaceSessionOwner<WebContents> =
       pluginSurfaces,
       pluginRuntimes: pluginWorkspaceRuntimes,
       workspaceSearch: workspaceSearchOwner,
-      presencePolls: presencePollRegistry,
+      presencePolls: {
+        disposeSender: (senderId) => {
+          presencePollRegistry.disposeSender(senderId);
+          relayShareDiscussionActivityPolls.disposeSender(senderId);
+        },
+      },
       presenceMutations: presenceMutationOwner,
       onCleanupError: (owner, scope, error) => {
         const identity =
@@ -8079,7 +8090,7 @@ function registerIpcHandlers(
             const path = `/sync/shares/${encodeURIComponent(input.shareId)}/discussion`;
             return relayShareJsonWithCredentials<unknown>(
               credentials,
-              `${path}${input.cursor ? `?cursor=${encodeURIComponent(input.cursor)}` : ""}`,
+              `${path}?direction=${input.direction}${input.cursor ? `&cursor=${encodeURIComponent(input.cursor)}` : ""}`,
             );
           },
         });
@@ -8089,12 +8100,91 @@ function registerIpcHandlers(
           throw new Error(relayShareErrorCopy(500, null));
         }
         return ListRelayShareDiscussionResult.parse({
+          activityRevision: parsed.data.activityRevision,
           linkCommentsPaused: parsed.data.linkCommentsPaused,
           messages: parsed.data.messages,
           nextCursor: parsed.data.nextCursor,
         });
       },
     );
+  });
+
+  ipcMain.handle(
+    CHANNELS.pollRelayShareDiscussionActivity,
+    async (event, payload) => {
+      assertTrustedSender(event);
+      const input = PollRelayShareDiscussionActivityPayload.parse(payload);
+      const poll = relayShareDiscussionActivityPolls.begin(
+        event.sender.id,
+        input.pollId,
+        JSON.stringify([input.workspaceId, input.shareId]),
+      );
+      const safety = setTimeout(
+        () => poll.abort(),
+        RELAY_SHARE_DISCUSSION_ACTIVITY_POLL_SAFETY_MS,
+      );
+      try {
+        return await withRendererWorkspaceOperation(
+          event.sender,
+          input.workspaceId,
+          "Sharing stopped because this window changed workspaces.",
+          async (operation) => {
+            operation.assertCurrent();
+            if (shareViewIsPresent(operation.workspace.shareView)) {
+              throw new Error(
+                "This is a shared view — only the original workspace can be shared.",
+              );
+            }
+            const { credentials, credentialGeneration } =
+              await remoteForWorkspace(operation.workspace);
+            operation.assertCurrent();
+            if (poll.signal.aborted) throw new Error("aborted");
+            const relayResult = await awaitCredentialGeneration({
+              capturedGeneration: credentialGeneration,
+              currentGeneration: () => credentialCacheGeneration,
+              run: () => {
+                operation.assertCurrent();
+                const path = `/sync/shares/${encodeURIComponent(input.shareId)}/discussion/activity`;
+                return relayShareJsonWithCredentials<unknown>(
+                  credentials,
+                  `${path}?since=${input.since}&hold=${input.hold}&limit=${input.limit}`,
+                  { signal: poll.signal },
+                );
+              },
+            });
+            operation.assertCurrent();
+            if (poll.signal.aborted) throw new Error("aborted");
+            const parsed = RelayShareDiscussionActivityResponse.safeParse(relayResult);
+            if (!parsed.success) {
+              throw new Error(relayShareErrorCopy(500, null));
+            }
+            operation.assertCurrent();
+            if (credentialCacheGeneration !== credentialGeneration) {
+              throw new Error("Your dohc Cloud session changed. Try again.");
+            }
+            if (poll.signal.aborted) throw new Error("aborted");
+            return PollRelayShareDiscussionActivityResult.parse({
+              latestRevision: parsed.data.latestRevision,
+              cursorRevision: parsed.data.cursorRevision,
+              hasMore: parsed.data.hasMore,
+              messages: parsed.data.messages,
+              principals: parsed.data.principals,
+              linkCommentsPaused: parsed.data.linkCommentsPaused,
+            });
+          },
+        );
+      } finally {
+        clearTimeout(safety);
+        poll.release();
+      }
+    },
+  );
+
+  ipcMain.handle(CHANNELS.cancelRelayShareDiscussionActivity, (event, payload) => {
+    assertTrustedSender(event);
+    const input = CancelRelayShareDiscussionActivityPayload.parse(payload);
+    relayShareDiscussionActivityPolls.cancel(event.sender.id, input.pollId);
+    return undefined;
   });
 
   ipcMain.handle(CHANNELS.appendRelayShareDiscussion, async (event, payload) => {

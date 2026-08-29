@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
+import { createPresencePollRegistry } from "./collab/presencePollRegistry";
 
 const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8").replaceAll(
   "\r\n",
@@ -18,6 +19,7 @@ function handlerSource(channel: string): string {
 
 const newOwnerDiscussionChannels = [
   "listRelayShareDiscussion",
+  "pollRelayShareDiscussionActivity",
   "appendRelayShareDiscussion",
   "deleteRelayShareDiscussionMessage",
   "blockRelayShareDiscussionPrincipal",
@@ -94,6 +96,7 @@ describe("main-process owner relay share authorization", () => {
       "relayFetchWithTimeout(RELAY_SHARE_FETCH_TIMEOUT_MS)",
     );
     expect(helper).toContain("const response = await relayShareFetch(");
+    expect(helper).toContain("normalizeServerUrl(credentials.relayUrl)");
     expect(helper).not.toContain("const response = await fetch(");
   });
 
@@ -189,11 +192,23 @@ describe("main-process owner relay share authorization", () => {
       "/sync/shares/${encodeURIComponent(input.shareId)}/discussion",
     );
     expect(list).toContain("input.cursor");
+    expect(list).toContain("?direction=${input.direction}");
     expect(list).toContain("encodeURIComponent(input.cursor)");
     expect(list).not.toContain("payload.cursor");
     expect(list).not.toContain("limit=");
     expect(list).not.toContain('method: "POST"');
     expect(list).not.toContain("JSON.stringify");
+
+    const activity = handlerSource("pollRelayShareDiscussionActivity");
+    expect(activity).toContain(
+      "/sync/shares/${encodeURIComponent(input.shareId)}/discussion/activity",
+    );
+    for (const field of ["input.since", "input.hold", "input.limit"]) {
+      expect(activity).toContain(field);
+    }
+    expect(activity).not.toContain("payload.since");
+    expect(activity).not.toContain('method: "POST"');
+    expect(activity).not.toContain("body: JSON.stringify");
 
     const append = handlerSource("appendRelayShareDiscussion");
     expect(append).toContain(
@@ -303,6 +318,8 @@ describe("main-process owner relay share authorization", () => {
       rotateRelayShareLink: "RelayShareLinkRotateResponse.safeParse(",
       revokeRelayShareLink: "RelayShareLinkEndResponse.safeParse(",
       listRelayShareDiscussion: "RelayShareDiscussionPageResponse.safeParse(",
+      pollRelayShareDiscussionActivity:
+        "RelayShareDiscussionActivityResponse.safeParse(",
       appendRelayShareDiscussion: "RelayShareDiscussionAppendResponse.safeParse(",
       deleteRelayShareDiscussionMessage:
         "RelayShareDiscussionDeleteResponse.safeParse(",
@@ -326,6 +343,8 @@ describe("main-process owner relay share authorization", () => {
   it("parses renderer input before entering any new owner operation", () => {
     const schemas = {
       listRelayShareDiscussion: "ListRelayShareDiscussionPayload.parse(payload)",
+      pollRelayShareDiscussionActivity:
+        "PollRelayShareDiscussionActivityPayload.parse(payload)",
       appendRelayShareDiscussion: "AppendRelayShareDiscussionPayload.parse(payload)",
       deleteRelayShareDiscussionMessage:
         "DeleteRelayShareDiscussionMessagePayload.parse(payload)",
@@ -365,6 +384,57 @@ describe("main-process owner relay share authorization", () => {
       expect(currentAfterAwait, channel).toBeGreaterThan(awaitEnd);
       expect(successParse, channel).toBeGreaterThan(currentAfterAwait);
     }
+  });
+
+  it("owns each discussion activity park by window and poll id and fences its parsed body", () => {
+    expect(mainSource).toContain(
+      "const relayShareDiscussionActivityPolls = createPresencePollRegistry();",
+    );
+    const activity = handlerSource("pollRelayShareDiscussionActivity");
+    const beginAt = activity.indexOf("relayShareDiscussionActivityPolls.begin(");
+    const credentialsAt = activity.indexOf("remoteForWorkspace(operation.workspace)");
+    const relayAt = activity.indexOf("relayShareJsonWithCredentials<unknown>(");
+    const parseAt = activity.indexOf("RelayShareDiscussionActivityResponse.safeParse(");
+    const postParseWorkspaceFenceAt = activity.indexOf(
+      "operation.assertCurrent();",
+      parseAt,
+    );
+    const postParseCredentialFenceAt = activity.indexOf(
+      "credentialCacheGeneration !== credentialGeneration",
+      parseAt,
+    );
+
+    expect(beginAt).toBeGreaterThan(-1);
+    expect(activity).toContain("event.sender.id,");
+    expect(activity).toContain("input.pollId,");
+    expect(activity).toContain("signal: poll.signal");
+    expect(credentialsAt).toBeGreaterThan(beginAt);
+    expect(relayAt).toBeGreaterThan(credentialsAt);
+    expect(parseAt).toBeGreaterThan(relayAt);
+    expect(postParseWorkspaceFenceAt).toBeGreaterThan(parseAt);
+    expect(postParseCredentialFenceAt).toBeGreaterThan(parseAt);
+    expect(activity).toContain("poll.release();");
+
+    const cancel = handlerSource("cancelRelayShareDiscussionActivity");
+    expect(cancel).toContain(
+      "CancelRelayShareDiscussionActivityPayload.parse(payload)",
+    );
+    expect(cancel).toContain(
+      "relayShareDiscussionActivityPolls.cancel(event.sender.id, input.pollId)",
+    );
+    expect(cancel).not.toContain("presencePollRegistry.cancel");
+
+    const registry = createPresencePollRegistry();
+    const owned = registry.begin(1, "poll-a", "share-a");
+    const sibling = registry.begin(1, "poll-b", "share-b");
+    expect(sibling.signal).not.toBe(owned.signal);
+    registry.cancel(2, "poll-a");
+    expect(owned.signal.aborted).toBe(false);
+    registry.cancel(1, "poll-b");
+    expect(sibling.signal.aborted).toBe(true);
+    expect(owned.signal.aborted).toBe(false);
+    registry.cancel(1, "poll-a");
+    expect(owned.signal.aborted).toBe(true);
   });
 
   it("never logs or throws a minted URL", () => {

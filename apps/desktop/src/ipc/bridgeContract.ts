@@ -3915,6 +3915,7 @@ export const ListRelayShareDiscussionPayload = z
   .object({
     workspaceId: WORKSPACE_ID,
     shareId: SHARE_ID,
+    direction: z.literal("newest-first"),
     cursor: RELAY_SHARE_DISCUSSION_CURSOR.optional(),
   })
   .strict();
@@ -3924,6 +3925,7 @@ export type ListRelayShareDiscussionPayload = z.infer<
 
 export const ListRelayShareDiscussionResult = z
   .object({
+    activityRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
     linkCommentsPaused: z.boolean(),
     messages: z.array(RelayShareDiscussionMessage).max(100),
     nextCursor: RELAY_SHARE_DISCUSSION_CURSOR.nullable(),
@@ -3936,6 +3938,74 @@ export type ListRelayShareDiscussionResult = z.infer<
 export const RelayShareDiscussionPageResponse = ListRelayShareDiscussionResult.extend({
   ok: z.literal(true),
 }).strict();
+
+const RelayShareDiscussionActivityPrincipal = z
+  .object({
+    principalId: RELAY_SHARE_DISCUSSION_HANDLE,
+    blocked: z.boolean(),
+  })
+  .strict();
+
+export const PollRelayShareDiscussionActivityPayload = z
+  .object({
+    workspaceId: WORKSPACE_ID,
+    shareId: SHARE_ID,
+    since: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    hold: z.number().int().min(0).max(30_000),
+    limit: z.number().int().min(1).max(100),
+    pollId: z.uuid(),
+  })
+  .strict();
+export type PollRelayShareDiscussionActivityPayload = z.infer<
+  typeof PollRelayShareDiscussionActivityPayload
+>;
+
+const RelayShareDiscussionActivityResultShape = {
+  latestRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  cursorRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  hasMore: z.boolean(),
+  messages: z.array(RelayShareDiscussionMessage).max(100),
+  principals: z.array(RelayShareDiscussionActivityPrincipal).max(100),
+  linkCommentsPaused: z.boolean(),
+};
+
+export const PollRelayShareDiscussionActivityResult = z
+  .object(RelayShareDiscussionActivityResultShape)
+  .strict()
+  .refine(
+    (result) =>
+      result.hasMore
+        ? result.cursorRevision < result.latestRevision
+        : result.cursorRevision === result.latestRevision,
+    {
+      message: "activity cursor must match the progress flag",
+      path: ["cursorRevision"],
+    },
+  );
+export type PollRelayShareDiscussionActivityResult = z.infer<
+  typeof PollRelayShareDiscussionActivityResult
+>;
+
+export const RelayShareDiscussionActivityResponse = z
+  .object({ ok: z.literal(true), ...RelayShareDiscussionActivityResultShape })
+  .strict()
+  .refine(
+    (result) =>
+      result.hasMore
+        ? result.cursorRevision < result.latestRevision
+        : result.cursorRevision === result.latestRevision,
+    {
+      message: "activity cursor must match the progress flag",
+      path: ["cursorRevision"],
+    },
+  );
+
+export const CancelRelayShareDiscussionActivityPayload = z
+  .object({ pollId: z.uuid() })
+  .strict();
+export type CancelRelayShareDiscussionActivityPayload = z.infer<
+  typeof CancelRelayShareDiscussionActivityPayload
+>;
 
 export const AppendRelayShareDiscussionPayload = z
   .object({
@@ -5588,6 +5658,12 @@ export interface DohcDesktopBridge {
   listRelayShareDiscussion(
     payload: ListRelayShareDiscussionPayload,
   ): Promise<ListRelayShareDiscussionResult>;
+  pollRelayShareDiscussionActivity(
+    payload: PollRelayShareDiscussionActivityPayload,
+  ): Promise<PollRelayShareDiscussionActivityResult>;
+  cancelRelayShareDiscussionActivity(
+    payload: CancelRelayShareDiscussionActivityPayload,
+  ): Promise<void>;
   appendRelayShareDiscussion(
     payload: AppendRelayShareDiscussionPayload,
   ): Promise<AppendRelayShareDiscussionResult>;

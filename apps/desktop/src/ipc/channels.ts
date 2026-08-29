@@ -813,6 +813,10 @@ export const CHANNELS = {
   rotateRelayShareLink: "desktop:rotate-relay-share-link",
   revokeRelayShareLink: "desktop:revoke-relay-share-link",
   listRelayShareDiscussion: "desktop:list-relay-share-discussion",
+  pollRelayShareDiscussionActivity:
+    "desktop:poll-relay-share-discussion-activity",
+  cancelRelayShareDiscussionActivity:
+    "desktop:cancel-relay-share-discussion-activity",
   appendRelayShareDiscussion: "desktop:append-relay-share-discussion",
   deleteRelayShareDiscussionMessage:
     "desktop:delete-relay-share-discussion-message",

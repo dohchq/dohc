@@ -93,6 +93,7 @@ type OwnerDiscussionState = {
   loaded: boolean;
   loading: boolean;
   paging: boolean;
+  activityRevision: number | null;
   linkCommentsPaused: boolean;
   messages: RelayShareDiscussionMessage[];
   nextCursor: string | null;
@@ -103,10 +104,28 @@ type OwnerDiscussionState = {
   appendError: boolean;
 };
 
+type OwnerActivityControl = {
+  workspaceId: string;
+  shareId: string;
+  scopeGeneration: number;
+  generation: number;
+  revision: number;
+  principalBlockedById: Map<string, boolean>;
+  nextHold: number;
+  retryAttempt: number;
+  retryTimer: ReturnType<typeof setTimeout> | null;
+  pollId: string | null;
+};
+
 type OwnerMutationBusy = {
   shareId: string;
   actionKey: string;
 };
+
+const OWNER_DISCUSSION_ACTIVITY_HOLD_MS = 30_000;
+const OWNER_DISCUSSION_ACTIVITY_LIMIT = 100;
+const OWNER_DISCUSSION_ACTIVITY_RETRY_BASE_MS = 250;
+const OWNER_DISCUSSION_ACTIVITY_RETRY_MAX_MS = 5_000;
 
 type OwnerConfirmation =
   | { kind: "delete"; shareId: string; messageId: string }
@@ -199,6 +218,7 @@ function emptyOwnerDiscussion(): OwnerDiscussionState {
     loaded: false,
     loading: false,
     paging: false,
+    activityRevision: null,
     linkCommentsPaused: false,
     messages: [],
     nextCursor: null,
@@ -214,15 +234,32 @@ function mergeDiscussionMessages(
   current: RelayShareDiscussionMessage[],
   incoming: RelayShareDiscussionMessage[],
 ): RelayShareDiscussionMessage[] {
-  const seen = new Set(current.map((message) => message.messageId));
-  return [
-    ...current,
-    ...incoming.filter((message) => {
-      if (seen.has(message.messageId)) return false;
-      seen.add(message.messageId);
-      return true;
-    }),
-  ];
+  const byId = new Map(
+    current.map((message) => [message.messageId, message] as const),
+  );
+  for (const message of incoming) byId.set(message.messageId, message);
+  return [...byId.values()].sort(
+    (left, right) =>
+      left.createdAtMs - right.createdAtMs ||
+      left.messageId.localeCompare(right.messageId),
+  );
+}
+
+function applyDiscussionPrincipalOverrides(
+  messages: RelayShareDiscussionMessage[],
+  blockedByPrincipal: ReadonlyMap<string, boolean>,
+): RelayShareDiscussionMessage[] {
+  if (blockedByPrincipal.size === 0) return messages;
+  return messages.map((message) => {
+    if (!("moderation" in message)) return message;
+    const blocked = blockedByPrincipal.get(message.moderation.linkPrincipalId);
+    return blocked === undefined
+      ? message
+      : {
+          ...message,
+          moderation: { ...message.moderation, blocked },
+        };
+  });
 }
 
 function namedGrantName(grant: RelayShareGrantedRow): string {
@@ -352,6 +389,9 @@ export function RelayShareDialog(props: {
   const latestMutationRequest = useRef(0);
   const latestNamedInventoryRequest = useRef(0);
   const latestDiscussionRequestByShareId = useRef(new Map<string, number>());
+  const latestActivityGenerationByShareId = useRef(new Map<string, number>());
+  const ownerActivityByShareId = useRef(new Map<string, OwnerActivityControl>());
+  const expandedOwnerShareIdsRef = useRef(new Set<string>());
   const latestOwnerAppendRequest = useRef(0);
   const latestOwnerMutationRequest = useRef(0);
   const activeOwnerAppendShareId = useRef<string | null>(null);
@@ -430,6 +470,7 @@ export function RelayShareDialog(props: {
           : "Turning off comments…";
 
   useLayoutEffect(() => {
+    stopAllOwnerActivity();
     linkScopeGeneration.current += 1;
     latestMintRequest.current += 1;
     latestCopyRequest.current += 1;
@@ -442,6 +483,7 @@ export function RelayShareDialog(props: {
     activeOwnerAppendShareId.current = null;
     activeOwnerMutationShareId.current = null;
     eligibleShareIdsRef.current = new Set();
+    expandedOwnerShareIdsRef.current = new Set();
     setLinkBusy(false);
     setLinkRequestBusy(null);
     setLinkAccess("view");
@@ -464,6 +506,7 @@ export function RelayShareDialog(props: {
     setOwnerConfirmation(null);
 
     return () => {
+      stopAllOwnerActivity();
       linkScopeGeneration.current += 1;
       latestMintRequest.current += 1;
       latestCopyRequest.current += 1;
@@ -476,6 +519,7 @@ export function RelayShareDialog(props: {
       activeOwnerAppendShareId.current = null;
       activeOwnerMutationShareId.current = null;
       eligibleShareIdsRef.current = new Set();
+      expandedOwnerShareIdsRef.current = new Set();
     };
   }, [linkScope]);
 
@@ -485,6 +529,7 @@ export function RelayShareDialog(props: {
     void refreshLinks(scopeGeneration);
     void refreshIndependentGrants(scopeGeneration);
     return () => {
+      stopAllOwnerActivity();
       latestInventoryRequest.current += 1;
       latestNamedInventoryRequest.current += 1;
       for (const [
@@ -498,6 +543,7 @@ export function RelayShareDialog(props: {
       activeOwnerAppendShareId.current = null;
       activeOwnerMutationShareId.current = null;
       eligibleShareIdsRef.current = new Set();
+      expandedOwnerShareIdsRef.current = new Set();
       setOwnerAppendBusy(null);
       setOwnerMutationBusy(null);
       setOwnerConfirmation(null);
@@ -510,7 +556,11 @@ export function RelayShareDialog(props: {
     const previousEligible = eligibleShareIdsRef.current;
     eligibleShareIdsRef.current = nextEligible;
     for (const shareId of previousEligible) {
-      if (!nextEligible.has(shareId)) invalidateDiscussionRequest(shareId);
+      if (!nextEligible.has(shareId)) {
+        invalidateDiscussionRequest(shareId);
+        expandedOwnerShareIdsRef.current.delete(shareId);
+        stopOwnerActivity(shareId);
+      }
     }
     if (
       activeOwnerAppendShareId.current !== null &&
@@ -620,6 +670,141 @@ export function RelayShareDialog(props: {
     }));
   }
 
+  function stopOwnerActivity(shareId: string) {
+    const generation =
+      (latestActivityGenerationByShareId.current.get(shareId) ?? 0) + 1;
+    latestActivityGenerationByShareId.current.set(shareId, generation);
+    const control = ownerActivityByShareId.current.get(shareId);
+    if (!control) return;
+    ownerActivityByShareId.current.delete(shareId);
+    if (control.retryTimer !== null) clearTimeout(control.retryTimer);
+    if (control.pollId !== null) {
+      void bridge()
+        .cancelRelayShareDiscussionActivity({ pollId: control.pollId })
+        .catch(() => undefined);
+    }
+  }
+
+  function stopAllOwnerActivity() {
+    for (const shareId of [...ownerActivityByShareId.current.keys()]) {
+      stopOwnerActivity(shareId);
+    }
+  }
+
+  function isCurrentOwnerActivity(
+    control: OwnerActivityControl,
+    pollId?: string,
+  ): boolean {
+    return (
+      isCurrentLinkScope(control.scopeGeneration) &&
+      control.workspaceId === props.workspaceId &&
+      latestActivityGenerationByShareId.current.get(control.shareId) ===
+        control.generation &&
+      ownerActivityByShareId.current.get(control.shareId) === control &&
+      eligibleShareIdsRef.current.has(control.shareId) &&
+      expandedOwnerShareIdsRef.current.has(control.shareId) &&
+      (pollId === undefined || control.pollId === pollId)
+    );
+  }
+
+  function scheduleOwnerActivityRetry(control: OwnerActivityControl) {
+    if (!isCurrentOwnerActivity(control)) return;
+    const delay = Math.min(
+      OWNER_DISCUSSION_ACTIVITY_RETRY_MAX_MS,
+      OWNER_DISCUSSION_ACTIVITY_RETRY_BASE_MS * 2 ** control.retryAttempt,
+    );
+    control.retryAttempt += 1;
+    control.retryTimer = setTimeout(() => {
+      control.retryTimer = null;
+      if (isCurrentOwnerActivity(control)) void pollOwnerActivity(control);
+    }, delay);
+  }
+
+  async function pollOwnerActivity(control: OwnerActivityControl) {
+    if (!isCurrentOwnerActivity(control)) return;
+    const pollId = crypto.randomUUID();
+    control.pollId = pollId;
+    try {
+      const result = await bridge().pollRelayShareDiscussionActivity({
+        workspaceId: control.workspaceId,
+        shareId: control.shareId,
+        since: control.revision,
+        hold: control.nextHold,
+        limit: OWNER_DISCUSSION_ACTIVITY_LIMIT,
+        pollId,
+      });
+      if (!isCurrentOwnerActivity(control, pollId)) return;
+      if (
+        result.cursorRevision < control.revision ||
+        (result.hasMore && result.cursorRevision <= control.revision)
+      ) {
+        throw new Error("Invalid discussion activity cursor");
+      }
+      for (const principal of result.principals) {
+        control.principalBlockedById.set(
+          principal.principalId,
+          principal.blocked,
+        );
+      }
+
+      updateOwnerDiscussion(control.shareId, (current) => {
+        if (!isCurrentOwnerActivity(control) || !current.expanded) {
+          return current;
+        }
+        const messages = applyDiscussionPrincipalOverrides(
+          mergeDiscussionMessages(current.messages, result.messages),
+          control.principalBlockedById,
+        );
+        return {
+          ...current,
+          activityRevision: result.cursorRevision,
+          linkCommentsPaused: result.linkCommentsPaused,
+          messages,
+        };
+      });
+      if (!isCurrentOwnerActivity(control, pollId)) return;
+      control.revision = result.cursorRevision;
+      control.nextHold = result.hasMore ? 0 : OWNER_DISCUSSION_ACTIVITY_HOLD_MS;
+      control.retryAttempt = 0;
+      control.pollId = null;
+      void pollOwnerActivity(control);
+    } catch {
+      if (!isCurrentOwnerActivity(control, pollId)) return;
+      control.pollId = null;
+      scheduleOwnerActivityRetry(control);
+    }
+  }
+
+  function startOwnerActivity(
+    shareId: string,
+    revision: number,
+    scopeGeneration: number,
+  ) {
+    stopOwnerActivity(shareId);
+    if (
+      !isCurrentLinkScope(scopeGeneration) ||
+      !eligibleShareIdsRef.current.has(shareId) ||
+      !expandedOwnerShareIdsRef.current.has(shareId)
+    ) {
+      return;
+    }
+    const generation = latestActivityGenerationByShareId.current.get(shareId)!;
+    const control: OwnerActivityControl = {
+      workspaceId: props.workspaceId,
+      shareId,
+      scopeGeneration,
+      generation,
+      revision,
+      principalBlockedById: new Map(),
+      nextHold: OWNER_DISCUSSION_ACTIVITY_HOLD_MS,
+      retryAttempt: 0,
+      retryTimer: null,
+      pollId: null,
+    };
+    ownerActivityByShareId.current.set(shareId, control);
+    void pollOwnerActivity(control);
+  }
+
   async function refreshIndependentGrants(
     scopeGeneration = linkScopeGeneration.current,
   ) {
@@ -669,6 +854,7 @@ export function RelayShareDialog(props: {
     ) {
       return;
     }
+    if (cursor === undefined) stopOwnerActivity(shareId);
     const requestId = nextDiscussionRequest(shareId);
     updateOwnerDiscussion(shareId, (current) => ({
       ...current,
@@ -682,31 +868,53 @@ export function RelayShareDialog(props: {
       const result = await bridge().listRelayShareDiscussion({
         workspaceId: props.workspaceId,
         shareId,
+        direction: "newest-first",
         ...(cursor === undefined ? {} : { cursor }),
       });
       if (!isCurrentDiscussionRequest(scopeGeneration, requestId, shareId)) {
         return;
       }
-      updateOwnerDiscussion(shareId, (current) => ({
-        ...current,
-        loaded: true,
-        loading: false,
-        paging: false,
-        linkCommentsPaused: result.linkCommentsPaused,
-        messages:
+      updateOwnerDiscussion(shareId, (current) => {
+        const mergedMessages =
           cursor === undefined
-            ? result.messages
-            : mergeDiscussionMessages(current.messages, result.messages),
-        nextCursor: result.nextCursor,
-        loadError: false,
-        failedReadCursor: null,
-      }));
+            ? mergeDiscussionMessages([], result.messages)
+            : mergeDiscussionMessages(result.messages, current.messages);
+        const activityControl = ownerActivityByShareId.current.get(shareId);
+        const messages =
+          cursor !== undefined &&
+          activityControl !== undefined &&
+          isCurrentOwnerActivity(activityControl)
+            ? applyDiscussionPrincipalOverrides(
+                mergedMessages,
+                activityControl.principalBlockedById,
+              )
+            : mergedMessages;
+        return {
+          ...current,
+          loaded: true,
+          loading: false,
+          paging: false,
+          activityRevision:
+            cursor === undefined ? result.activityRevision : current.activityRevision,
+          linkCommentsPaused:
+            cursor === undefined
+              ? result.linkCommentsPaused
+              : current.linkCommentsPaused,
+          messages,
+          nextCursor: result.nextCursor,
+          loadError: false,
+          failedReadCursor: null,
+        };
+      });
       setOwnerMutationError((current) =>
         current?.shareId === shareId &&
         isDiscussionMutationAction(current.actionKey)
           ? null
           : current,
       );
+      if (cursor === undefined) {
+        startOwnerActivity(shareId, result.activityRevision, scopeGeneration);
+      }
     } catch {
       if (!isCurrentDiscussionRequest(scopeGeneration, requestId, shareId)) {
         return;
@@ -732,6 +940,8 @@ export function RelayShareDialog(props: {
   function toggleOwnerDiscussion(shareId: string) {
     const state = ownerDiscussionByShareId[shareId] ?? emptyOwnerDiscussion();
     if (state.expanded) {
+      expandedOwnerShareIdsRef.current.delete(shareId);
+      stopOwnerActivity(shareId);
       invalidateDiscussionRequest(shareId);
       if (activeOwnerAppendShareId.current === shareId) {
         latestOwnerAppendRequest.current += 1;
@@ -751,6 +961,7 @@ export function RelayShareDialog(props: {
       }));
       return;
     }
+    expandedOwnerShareIdsRef.current.add(shareId);
     updateOwnerDiscussion(shareId, (current) => ({
       ...current,
       expanded: true,
@@ -1228,6 +1439,7 @@ export function RelayShareDialog(props: {
   }
 
   function closeDialog() {
+    stopAllOwnerActivity();
     linkScopeGeneration.current += 1;
     latestMintRequest.current += 1;
     latestCopyRequest.current += 1;
@@ -1240,6 +1452,7 @@ export function RelayShareDialog(props: {
     activeOwnerAppendShareId.current = null;
     activeOwnerMutationShareId.current = null;
     eligibleShareIdsRef.current = new Set();
+    expandedOwnerShareIdsRef.current = new Set();
     props.onClose();
   }
 
