@@ -63,6 +63,7 @@ import {
   SHARED_BLOB_CANDIDATE_LIMIT,
   LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT,
   LINK_DISCUSSION_PAGE_LIMIT,
+  normalizeDiscussionDisplayName,
   SyncRelayBlobMissingError,
   SyncRelayConflictError,
   SyncRelayQuotaExceededError,
@@ -1523,10 +1524,7 @@ export function createSyncRelayHandler({
       const authority = requireDiscussionAuthority(shareId, actor.userId, "append");
       const input = parseNamedDiscussionAppendBody(await readJsonObject(request));
       const lookedUpName = await lookupUserDisplayName?.(actor.userId);
-      const displayName =
-        typeof lookedUpName === "string" && lookedUpName.trim().length > 0
-          ? lookedUpName
-          : "Unnamed";
+      const displayName = normalizeDiscussionDisplayName(lookedUpName) ?? "Unnamed";
       const result = storage.appendNamedDiscussionMessage({
         shareId,
         authorUserId: actor.userId,

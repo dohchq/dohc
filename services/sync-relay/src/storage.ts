@@ -973,7 +973,10 @@ const NORMALIZED_SHARE_SCHEMA_SQL = `
     author_user_id TEXT,
     link_grant_id TEXT,
     link_principal_id TEXT,
-    display_name_snapshot TEXT NOT NULL CHECK (length(display_name_snapshot) > 0),
+    display_name_snapshot TEXT NOT NULL CHECK (
+      length(display_name_snapshot) BETWEEN 1 AND ${LINK_DISCUSSION_NAME_CODE_POINT_LIMIT}
+      AND length(CAST(display_name_snapshot AS BLOB)) <= ${LINK_DISCUSSION_NAME_BYTE_LIMIT}
+    ),
     body TEXT CHECK (
       body IS NULL OR (
         length(body) BETWEEN 1 AND 2000
@@ -1344,12 +1347,24 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
         "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'sync_relay_share_grants'",
       )
       .get();
+    const discussionSchema = db
+      .prepare(
+        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'sync_relay_share_discussion_messages'",
+      )
+      .get();
+    const discussionSchemaSql = String(discussionSchema?.sql ?? "");
     if (
       shareColumns.includes("recipient_user_id") ||
       !String(grantSchema?.sql ?? "").includes("'link'") ||
       !shareColumns.includes("link_writes_paused_at_ms") ||
       !sessionColumns.includes("principal_id") ||
-      !principalColumns.includes("storage_bytes")
+      !principalColumns.includes("storage_bytes") ||
+      !discussionSchemaSql.includes(
+        `length(display_name_snapshot) BETWEEN 1 AND ${LINK_DISCUSSION_NAME_CODE_POINT_LIMIT}`,
+      ) ||
+      !discussionSchemaSql.includes(
+        `length(CAST(display_name_snapshot AS BLOB)) <= ${LINK_DISCUSSION_NAME_BYTE_LIMIT}`,
+      )
     ) {
       // Pre-launch replacement. Discussion authority is one normalized model:
       // the share pause, grant, protected principal, session binding, and
@@ -1960,7 +1975,7 @@ function normalizeLinkDiscussionBody(value: unknown): string | null {
     : null;
 }
 
-function normalizeLinkDiscussionName(value: unknown): string | null {
+export function normalizeDiscussionDisplayName(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const normalized = value
     .normalize("NFC")
@@ -3677,7 +3692,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     const hasClaimedName =
       input.claimedName !== undefined && input.claimedName !== null;
     const claimedName = hasClaimedName
-      ? normalizeLinkDiscussionName(input.claimedName)
+      ? normalizeDiscussionDisplayName(input.claimedName)
       : null;
     if (
       body === null ||
@@ -3982,11 +3997,13 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     guard: () => void;
   }): AppendNamedDiscussionMessageResult {
     const body = normalizeLinkDiscussionBody(input.body);
+    const displayName = normalizeDiscussionDisplayName(input.displayName);
     if (
       body === null ||
       !input.shareId ||
       !validDiscussionDeletingUserId(input.authorUserId) ||
-      !input.displayName ||
+      displayName === null ||
+      displayName !== input.displayName ||
       !validLinkDiscussionIdempotencyKey(input.idempotencyKey) ||
       !Number.isSafeInteger(input.createdAtMs) ||
       input.createdAtMs < 0
@@ -4048,7 +4065,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         authorUserId: input.authorUserId,
         linkGrantId: null,
         linkPrincipalId: null,
-        displayNameSnapshot: input.displayName,
+        displayNameSnapshot: displayName,
         body,
       });
       if (
@@ -4073,7 +4090,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           input.idempotencyKey,
           requestHash,
           input.authorUserId,
-          input.displayName,
+          displayName,
           body,
           createdAtMs,
           messageStorageBytes,

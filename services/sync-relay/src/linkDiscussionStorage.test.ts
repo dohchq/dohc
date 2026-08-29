@@ -1153,6 +1153,53 @@ describe("durable link discussion storage", () => {
     }
   });
 
+  it("keeps named display snapshots bounded across direct writes and restart", async () => {
+    const { storage, dbPath } = await openStorage();
+    const seeded = seedShare(storage, { suffix: "named-bound" });
+    expect(
+      storage.appendNamedDiscussionMessage({
+        shareId: seeded.shareId,
+        authorUserId: RECIPIENT,
+        displayName: "Stored Name",
+        body: "bounded",
+        idempotencyKey: "named-bounded",
+        createdAtMs: 2_000,
+        guard: () => {},
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      storage.appendNamedDiscussionMessage({
+        shareId: seeded.shareId,
+        authorUserId: RECIPIENT,
+        displayName: "x".repeat(LINK_DISCUSSION_NAME_CODE_POINT_LIMIT + 1),
+        body: "overbound",
+        idempotencyKey: "named-overbound",
+        createdAtMs: 2_001,
+        guard: () => {},
+      }),
+    ).toEqual({ ok: false, reason: "invalid-input" });
+
+    storage.close();
+    storages.splice(storages.indexOf(storage), 1);
+    const reopened = openSyncRelayStorage(dbPath);
+    storages.push(reopened);
+    expect(
+      reopened.listShareDiscussionMessages({ shareId: seeded.shareId, limit: 10 })
+        .messages.map((message) => message.displayNameSnapshot),
+    ).toEqual(["Stored Name"]);
+    expect(
+      reopened.appendNamedDiscussionMessage({
+        shareId: seeded.shareId,
+        authorUserId: RECIPIENT,
+        displayName: "😀".repeat(LINK_DISCUSSION_NAME_CODE_POINT_LIMIT + 1),
+        body: "overbound after restart",
+        idempotencyKey: "named-overbound-restart",
+        createdAtMs: 2_002,
+        guard: () => {},
+      }),
+    ).toEqual({ ok: false, reason: "invalid-input" });
+  });
+
   it("enforces the closed named and link author shapes in SQLite", async () => {
     const { storage, dbPath } = await openStorage();
     const seeded = seedShare(storage);
@@ -1214,6 +1261,38 @@ describe("durable link discussion storage", () => {
           "Unnamed",
           "body",
           3_002,
+          100,
+        ),
+      ).toThrow(/CHECK constraint/u);
+      expect(() =>
+        insert.run(
+          "bad-name-code-points",
+          seeded.shareId,
+          "bad-name-code-points",
+          "request-hash",
+          "named",
+          RECIPIENT,
+          null,
+          null,
+          "x".repeat(LINK_DISCUSSION_NAME_CODE_POINT_LIMIT + 1),
+          "body",
+          3_003,
+          100,
+        ),
+      ).toThrow(/CHECK constraint/u);
+      expect(() =>
+        insert.run(
+          "bad-name-bytes",
+          seeded.shareId,
+          "bad-name-bytes",
+          "request-hash",
+          "named",
+          RECIPIENT,
+          null,
+          null,
+          "😀".repeat(LINK_DISCUSSION_NAME_CODE_POINT_LIMIT + 1),
+          "body",
+          3_004,
           100,
         ),
       ).toThrow(/CHECK constraint/u);

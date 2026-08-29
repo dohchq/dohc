@@ -1147,6 +1147,62 @@ describe("share discussion HTTP boundary", () => {
     });
   });
 
+  it("canonicalizes named display snapshots and falls back at the durable bound", async () => {
+    for (const [sourceName, expectedName, idempotencyKey] of [
+      ["x".repeat(41), "Unnamed", "overbound-name"],
+      [" \u202eCafe\u0301   Person\u0000 ", "Café Person", "canonical-name"],
+    ] as const) {
+      const test = await fixture({
+        lookupUserDisplayName: (userId) =>
+          userId === COMMENTER ? sourceName : null,
+      });
+      const appended = await test.handler(
+        request(
+          COMMENTER,
+          `/sync/shares/${SHARE}/discussion`,
+          jsonRequest({ body: "bounded name", idempotencyKey }),
+        ),
+      );
+      expect(appended.status).toBe(200);
+      expectPrivate(appended);
+      await appended.arrayBuffer();
+
+      const reads = await Promise.all([
+        test.handler(linkRequest(test.view, "/sync/link/discussion")),
+        test.handler(request(COMMENTER, `/sync/shares/${SHARE}/discussion`)),
+        test.handler(request(OWNER, `/sync/shares/${SHARE}/discussion`)),
+      ]);
+      for (const response of reads) {
+        expect(response.status).toBe(200);
+        expectPrivate(response);
+        const page = await body(response);
+        const [message] = messages(page);
+        expect(message).toEqual({
+          messageId: expect.any(String),
+          createdAtMs: expect.any(Number),
+          deleted: false,
+          body: "bounded name",
+          author: { kind: "named", displayName: expectedName },
+        });
+        expect(Object.keys(message!).sort()).toEqual([
+          "author",
+          "body",
+          "createdAtMs",
+          "deleted",
+          "messageId",
+        ]);
+        expect(Object.keys(message!.author as object).sort()).toEqual([
+          "displayName",
+          "kind",
+        ]);
+      }
+      expect(
+        test.storage.listShareDiscussionMessages({ shareId: SHARE, limit: 1 })
+          .messages[0]?.displayNameSnapshot,
+      ).toBe(expectedName);
+    }
+  });
+
   it("keeps exact retries idempotent and rechecks revoke, retune, pause, and block inside storage", async () => {
     const retry = await fixture();
     const first = await retry.handler(
