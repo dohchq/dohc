@@ -28,6 +28,10 @@ const MAX_JSON_RESPONSE_BYTES: u64 = (MAX_PULL_OPS
     + MAX_LOG_PAGE_RESPONSE_OVERHEAD_BYTES) as u64;
 const MAX_ERROR_RESPONSE_BYTES: u64 = 64 * 1024;
 const MAX_KEY_ENVELOPE_ACK_BYTES: u64 = 64 * 1024;
+const CANCELLABLE_BODY_READ_POLL_INTERVAL: Duration = Duration::from_millis(25);
+/// A canceled synchronous ureq read may live until its transport timeout;
+/// match the runtime's download concurrency so those readers stay bounded.
+const MAX_CANCELLABLE_BODY_READ_WORKERS: usize = 4;
 /// The largest blob body a response may carry: the loosest ingest ceiling plus
 /// the one byte that lets ingest observe an overage and refuse it by name.
 const MAX_BLOB_BODY_BYTES: usize = MAX_INGEST_BLOB_BYTES + 1;
@@ -48,6 +52,58 @@ fn blob_body_overflow() -> RelayError {
 
 fn cancelled_relay_request() -> RelayError {
     RelayError::Local("relay-io-cancelled".to_owned())
+}
+
+fn map_body_read_error(error: std::io::Error, overflow: &RelayError) -> RelayError {
+    // `ureq` wraps body-reader errors in `io::Error`; converting back recovers
+    // the typed limit variant used by the caller.
+    match ureq::Error::from(error) {
+        ureq::Error::BodyExceedsLimit(_) => overflow.clone(),
+        _ => RelayError::InvalidResponse,
+    }
+}
+
+static CANCELLABLE_BODY_READ_WORKERS: std::sync::LazyLock<(
+    std::sync::Mutex<usize>,
+    std::sync::Condvar,
+)> = std::sync::LazyLock::new(|| (std::sync::Mutex::new(0), std::sync::Condvar::new()));
+
+struct BodyReadWorkerPermit;
+
+impl Drop for BodyReadWorkerPermit {
+    fn drop(&mut self) {
+        let (active, available) = &*CANCELLABLE_BODY_READ_WORKERS;
+        let mut active = active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *active = active.saturating_sub(1);
+        available.notify_one();
+    }
+}
+
+fn acquire_body_read_worker<C>(cancelled: &C) -> Result<BodyReadWorkerPermit, RelayError>
+where
+    C: Fn() -> bool + ?Sized,
+{
+    let (active, available) = &*CANCELLABLE_BODY_READ_WORKERS;
+    let mut active = active.lock().map_err(|_| RelayError::InvalidResponse)?;
+    loop {
+        if cancelled() {
+            return Err(cancelled_relay_request());
+        }
+        if *active < MAX_CANCELLABLE_BODY_READ_WORKERS {
+            *active += 1;
+            return Ok(BodyReadWorkerPermit);
+        }
+        (active, _) = available
+            .wait_timeout(active, CANCELLABLE_BODY_READ_POLL_INTERVAL)
+            .map_err(|_| RelayError::InvalidResponse)?;
+    }
+}
+
+enum BodyReadWorkerMessage {
+    Progress,
+    Finished(Result<Vec<u8>, RelayError>),
 }
 
 pub struct HttpRelayTransport {
@@ -261,7 +317,7 @@ impl HttpRelayTransport {
         read_limit_bytes: usize,
         overflow: RelayError,
     ) -> Result<(Vec<u8>, Option<String>), RelayError> {
-        self.bytes_cancellable(response, context, read_limit_bytes, overflow, &|| false)
+        self.bytes_with_cancellation(response, context, read_limit_bytes, overflow, None)
     }
 
     fn bytes_cancellable<C>(
@@ -275,13 +331,30 @@ impl HttpRelayTransport {
     where
         C: Fn() -> bool,
     {
+        self.bytes_with_cancellation(
+            response,
+            context,
+            read_limit_bytes,
+            overflow,
+            Some(cancelled),
+        )
+    }
+
+    fn bytes_with_cancellation(
+        &self,
+        response: Result<Response<Body>, ureq::Error>,
+        context: RequestContext,
+        read_limit_bytes: usize,
+        overflow: RelayError,
+        cancelled: Option<&dyn Fn() -> bool>,
+    ) -> Result<(Vec<u8>, Option<String>), RelayError> {
         let mut response = response.map_err(map_transport_error)?;
-        if cancelled() {
+        if cancelled.is_some_and(|cancelled| cancelled()) {
             return Err(cancelled_relay_request());
         }
         if !response.status().is_success() {
             let error = map_http_error(&mut response, context);
-            return if cancelled() {
+            return if cancelled.is_some_and(|cancelled| cancelled()) {
                 Err(cancelled_relay_request())
             } else {
                 Err(error)
@@ -293,33 +366,75 @@ impl HttpRelayTransport {
             .and_then(|value| value.to_str().ok())
             .and_then(parse_etag);
         let mut reader = response
-            .body_mut()
-            .with_config()
+            .into_body()
+            .into_with_config()
             .limit(read_limit_bytes as u64)
             .reader();
-        let mut bytes = Vec::new();
-        let mut chunk = [0_u8; 64 * 1024];
+        let Some(cancelled) = cancelled else {
+            let mut bytes = Vec::new();
+            let mut chunk = [0_u8; 64 * 1024];
+            loop {
+                let read = std::io::Read::read(&mut reader, &mut chunk)
+                    .map_err(|error| map_body_read_error(error, &overflow))?;
+                if read == 0 {
+                    return Ok((bytes, etag));
+                }
+                bytes.extend_from_slice(&chunk[..read]);
+            }
+        };
+
+        let permit = acquire_body_read_worker(cancelled)?;
+        let (message_tx, message_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::Builder::new()
+            .name("dohc-relay-body-read".to_owned())
+            .spawn(move || {
+                let _permit = permit;
+                let mut bytes = Vec::new();
+                let mut chunk = [0_u8; 64 * 1024];
+                loop {
+                    let read = std::io::Read::read(&mut reader, &mut chunk)
+                        .map_err(|error| map_body_read_error(error, &overflow));
+                    match read {
+                        Ok(0) => {
+                            let _ = message_tx.send(BodyReadWorkerMessage::Finished(Ok(bytes)));
+                            return;
+                        }
+                        Ok(read) => {
+                            bytes.extend_from_slice(&chunk[..read]);
+                            if message_tx.send(BodyReadWorkerMessage::Progress).is_err() {
+                                return;
+                            }
+                        }
+                        Err(error) => {
+                            let _ = message_tx.send(BodyReadWorkerMessage::Finished(Err(error)));
+                            return;
+                        }
+                    }
+                }
+            })
+            .map_err(|_| RelayError::InvalidResponse)?;
+
         loop {
+            match message_rx.recv_timeout(CANCELLABLE_BODY_READ_POLL_INTERVAL) {
+                Ok(BodyReadWorkerMessage::Progress) => {}
+                Ok(BodyReadWorkerMessage::Finished(result)) => {
+                    worker.join().map_err(|_| RelayError::InvalidResponse)?;
+                    return if cancelled() {
+                        Err(cancelled_relay_request())
+                    } else {
+                        result.map(|bytes| (bytes, etag))
+                    };
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    worker.join().map_err(|_| RelayError::InvalidResponse)?;
+                    return Err(RelayError::InvalidResponse);
+                }
+            }
             if cancelled() {
                 return Err(cancelled_relay_request());
             }
-            let read = std::io::Read::read(&mut reader, &mut chunk).map_err(|error| {
-                // `ureq` wraps body-reader errors in `io::Error`; converting
-                // back recovers the typed limit variant used by the caller.
-                match ureq::Error::from(error) {
-                    ureq::Error::BodyExceedsLimit(_) => overflow.clone(),
-                    _ => RelayError::InvalidResponse,
-                }
-            })?;
-            if read == 0 {
-                break;
-            }
-            bytes.extend_from_slice(&chunk[..read]);
         }
-        if cancelled() {
-            return Err(cancelled_relay_request());
-        }
-        Ok((bytes, etag))
     }
 }
 
@@ -1390,8 +1505,8 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_a_stalled_tls_blob_body_discards_partial_bytes() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
+    fn cancelling_a_stalled_tls_blob_body_settles_before_body_release() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use std::sync::mpsc;
         use std::time::Duration;
 
@@ -1436,11 +1551,13 @@ mod tests {
             agent: configured_agent(Duration::from_secs(5), false, Some(tls_config)),
         };
         let (mid_body_tx, mid_body_rx) = mpsc::channel();
-        let (cancel_tx, cancel_rx) = mpsc::channel();
+        let (outcome_tx, outcome_rx) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let request_cancelled = Arc::clone(&cancelled);
         let checks = Arc::new(AtomicUsize::new(0));
         let request_checks = Arc::clone(&checks);
         let request_thread = thread::spawn(move || {
-            transport.download_blobs_cancellable(
+            let outcome = transport.download_blobs_cancellable(
                 BlobDownloadBatchRequest {
                     workspace_id: "workspace".to_owned(),
                     replication_epoch: "epoch".to_owned(),
@@ -1451,29 +1568,34 @@ mod tests {
                     }],
                 },
                 || {
+                    let cancelled = request_cancelled.load(Ordering::SeqCst);
                     let check = request_checks.fetch_add(1, Ordering::SeqCst);
                     if check == 6 {
                         mid_body_tx.send(()).expect("mid-body signal");
-                        cancel_rx.recv().expect("cancellation signal");
                     }
-                    check >= 6
+                    cancelled
                 },
-            )
+            );
+            outcome_tx.send(outcome).expect("blob request outcome");
         });
 
         mid_body_rx
             .recv_timeout(Duration::from_secs(10))
             .expect("client checks cancellation after reading partial body");
-        cancel_tx.send(()).expect("cancel stalled download");
-        let outcome = request_thread.join().expect("blob request thread");
+        cancelled.store(true, Ordering::SeqCst);
+        let outcome_before_release = outcome_rx.recv_timeout(Duration::from_secs(1));
+
+        release_body_tx.send(()).expect("release TLS server");
+        request_thread.join().expect("blob request thread");
+        server_thread.join().expect("TLS server thread");
+
+        let outcome = outcome_before_release
+            .expect("cancellation must settle while the next body chunk is still stalled");
         assert!(
             matches!(&outcome, Err(RelayError::Local(reason)) if reason == "relay-io-cancelled"),
             "a cancelled body must not expose the bytes read before cancellation: {outcome:?}"
         );
-        assert_eq!(checks.load(Ordering::SeqCst), 8);
-
-        release_body_tx.send(()).expect("release TLS server");
-        server_thread.join().expect("TLS server thread");
+        assert!(checks.load(Ordering::SeqCst) >= 7);
     }
 
     #[test]

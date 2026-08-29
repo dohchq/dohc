@@ -1785,6 +1785,8 @@ pub fn index_collection_frontmatter_apply_in_tx(
     if let Some(values) = after_object {
         keys.extend(values.keys().map(String::as_str));
     }
+    let mut keys = keys.into_iter().collect::<Vec<_>>();
+    keys.sort_unstable();
     for field_name in keys {
         if field_name == RECORD_ID_FRONTMATTER_KEY {
             continue;
@@ -1812,6 +1814,8 @@ pub fn index_collection_frontmatter_apply_in_tx(
     if let Some(values) = authored_after {
         authored_keys.extend(values.keys().map(String::as_str));
     }
+    let mut authored_keys = authored_keys.into_iter().collect::<Vec<_>>();
+    authored_keys.sort_unstable();
     for field_name in authored_keys {
         if field_name == RECORD_ID_FRONTMATTER_KEY {
             continue;
@@ -2239,6 +2243,23 @@ pub fn reconcile_collections_in_tx(
                 && markdown_frontmatter_json_with_body(&record.text).is_none())
             || markdown_record_id(&record.text).is_some_and(|record_id| is_record_id(&record_id))
         {
+            return false;
+        }
+        let line_ending_bytes = record
+            .text
+            .split_inclusive('\n')
+            .next()
+            .map_or(1, |first_line| {
+                usize::from(first_line.ends_with("\r\n")) + 1
+            });
+        let adopted_bytes = record.text.len().saturating_add(
+            RECORD_ID_FRONTMATTER_KEY.len()
+                + ": ".len()
+                + RECORD_ID_PREFIX.len()
+                + RECORD_ID_RANDOM_BASE32_LENGTH
+                + line_ending_bytes,
+        );
+        if record.text.is_empty() || adopted_bytes <= crate::MAX_TEXT_BYTES {
             return false;
         }
         let collection_path = parent_path(path);

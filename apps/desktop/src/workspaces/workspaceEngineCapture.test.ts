@@ -586,6 +586,63 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
+  it("releases a retained busy collection adoption provider after the file is deleted", async () => {
+    const root = await tempRoot();
+    const adoption = {
+      versionId: "main",
+      recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      collectionPath: "projects",
+      filePath: "projects/deleted.md",
+      objectId: "object-deleted",
+    };
+    await write(root, adoption.filePath, "# Deleted\n");
+    const store = {
+      ensureMainVersion: async () => undefined,
+      flushCapture: async () => undefined,
+      reconcileCapture: async () => undefined,
+      listPendingCollectionAdoptions: async () => ({
+        adoptions: existsSync(join(root, adoption.filePath)) ? [adoption] : [],
+        nextCursor: null,
+      }),
+    } as unknown as CaptureVersionedTextStore;
+    const busy = new DaemonRefusalError(
+      {
+        code: "OVERLOADED",
+        message: "engine-store-busy",
+        retry: "afterBackoff",
+      },
+      undefined,
+    );
+    const sessions = {
+      run: async (_workspace: unknown, task: (binding: unknown) => unknown) =>
+        await task({ client: {}, workspace: "workspace" }),
+    } as unknown as EngineWorkspaceSessions;
+    let evictionAttempts = 0;
+    const engine = capture(root, {
+      store,
+      rustEngineSessions: sessions,
+      daemonOwnsCapture: true,
+      openRustYDocProviderSession: async (options) =>
+        ({
+          path: options.path,
+          evict: async () => {
+            evictionAttempts += 1;
+            if (evictionAttempts === 1) throw busy;
+          },
+        }) as EngineYdocProviderSession,
+    });
+
+    await engine.flush();
+    expect(evictionAttempts).toBe(1);
+
+    await unlink(join(root, adoption.filePath));
+    await engine.flush();
+    const evictionAttemptsAfterDeletionPass = evictionAttempts;
+    await engine.stop();
+
+    expect(evictionAttemptsAfterDeletionPass).toBe(2);
+  });
+
   it("releases the old collection adoption provider before reopening after a transport rebind", async () => {
     const root = await tempRoot();
     const adoption = {

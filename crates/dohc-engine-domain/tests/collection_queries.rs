@@ -241,6 +241,102 @@ fn body_only_collection_apply_does_not_rewrite_index_or_history() {
 }
 
 #[test]
+fn multi_field_history_order_matches_across_independent_stores() {
+    const FIELDS: [&str; 12] = [
+        "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+        "juliet", "kilo", "lima",
+    ];
+
+    fn apply_same_update() -> Vec<String> {
+        let (_scratch, mut store) = fresh_store();
+        let schema = FIELDS
+            .iter()
+            .map(|field| format!("  {field}:\n    type: text\n"))
+            .collect::<String>();
+        write_text(
+            &mut store,
+            "tasks/collection.yaml",
+            &format!("fields:\n{schema}"),
+            2,
+        )
+        .expect("multi-field schema");
+        let fields = FIELDS
+            .iter()
+            .map(|field| format!("{field}: before\n"))
+            .collect::<String>();
+        write_text(
+            &mut store,
+            "tasks/record.md",
+            &format!("---\nid: {FIRST_TASK_ID}\n{fields}---\n"),
+            3,
+        )
+        .expect("multi-field record");
+        let reconciled = store
+            .write_with(&NoFaults, |tx| {
+                reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+            })
+            .expect("reconcile multi-field record");
+        assert!(matches!(reconciled, TxnOutcome::Committed(_)));
+
+        let mut before = serde_json::Map::new();
+        before.insert("id".to_owned(), json!(FIRST_TASK_ID));
+        let mut after = before.clone();
+        for field in FIELDS {
+            before.insert(field.to_owned(), json!("before"));
+            after.insert(field.to_owned(), json!("after"));
+        }
+        let before = serde_json::Value::Object(before);
+        let after = serde_json::Value::Object(after);
+        let updated = store
+            .write_with(&NoFaults, |tx| {
+                index_collection_frontmatter_apply_in_tx(
+                    tx,
+                    WORKSPACE_ID,
+                    VERSION_ID,
+                    "object-3",
+                    &before,
+                    &after,
+                    &before,
+                    &after,
+                    Some("editor"),
+                    4,
+                )
+            })
+            .expect("apply multi-field update");
+        assert!(matches!(updated, TxnOutcome::Committed(())));
+
+        store
+            .read_with(|conn| {
+                get_collection_record(
+                    conn,
+                    WORKSPACE_ID,
+                    "tasks",
+                    FIRST_TASK_ID,
+                    FIELDS.len(),
+                    None,
+                )
+            })
+            .expect("get multi-field record")
+            .expect("multi-field record exists")
+            .history
+            .into_iter()
+            .map(|entry| entry.field)
+            .collect()
+    }
+
+    let first = apply_same_update();
+    let second = apply_same_update();
+    let expected = FIELDS
+        .iter()
+        .rev()
+        .map(|field| (*field).to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(first, expected);
+    assert_eq!(second, expected);
+    assert_eq!(first, second);
+}
+
+#[test]
 fn reconcile_indexes_fields_added_after_frontmatterless_record_adoption() {
     let (_scratch, mut store) = fresh_store();
     write_text(

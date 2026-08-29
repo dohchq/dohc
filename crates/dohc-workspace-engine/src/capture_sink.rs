@@ -1158,7 +1158,8 @@ mod tests {
     use dohc_engine_domain::{
         CollectionQuery, CollectionQueryResult, CollectionRecordDetails, MAX_TEXT_BYTES,
         RECORD_ID_FRONTMATTER_KEY, SecretDiskIntent, SecretFileStore, SecretWrite,
-        VersionedTextStore, get_collection_record, is_record_id, query_collection_records,
+        VersionedTextStore, decline_oversized_collection_adoption_in_tx, get_collection_record,
+        is_record_id, query_collection_records,
     };
     use dohc_engine_files::{
         CancellationToken, CaptureOp, ReconcilePlan, ScanGeneration, apply_reconcile_plan,
@@ -1987,6 +1988,87 @@ mod tests {
     }
 
     #[test]
+    fn oversized_collection_adoption_retries_after_watcher_shrinks_record() {
+        const RECORD_ID_BYTES: usize = "rec_".len() + 26;
+        const INSERTED_ID_LINE_BYTES: usize = "id: \n".len() + RECORD_ID_BYTES;
+        const SHRUNK: &str = "---\ntitle: Small enough now\n---\n";
+
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        let wrapper_bytes = "---\npadding: \n---".len();
+        let oversized = format!(
+            "---\npadding: {}\n---",
+            "x".repeat(MAX_TEXT_BYTES - INSERTED_ID_LINE_BYTES + 1 - wrapper_bytes)
+        );
+        assert_eq!(oversized.len() + INSERTED_ID_LINE_BYTES, MAX_TEXT_BYTES + 1);
+        write_file(scratch.path(), "tasks/collection.yaml", b"name: Tasks\n");
+        write_file(scratch.path(), "tasks/oversized.md", oversized.as_bytes());
+        ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
+        ingest(&mut sink, "tasks/oversized.md").expect("capture oversized record");
+        assert!(
+            sink.reconcile_collections()
+                .expect("bind oversized adoption")
+                .is_empty()
+        );
+        let record_id = collection_record(&db, "tasks/oversized.md")
+            .and_then(|(record_id, state)| {
+                (state == "pending-lossless").then_some(record_id).flatten()
+            })
+            .expect("pending oversized adoption");
+        let mut connection = Connection::open(&db).expect("open decline connection");
+        let transaction = connection.transaction().expect("begin decline transaction");
+        decline_oversized_collection_adoption_in_tx(
+            &transaction,
+            WORKSPACE_ID,
+            VERSION_ID,
+            "tasks",
+            "tasks/oversized.md",
+            &record_id,
+        )
+        .expect("persist oversized decline");
+        transaction.commit().expect("commit oversized decline");
+        drop(connection);
+        assert!(
+            sink.reconcile_collections()
+                .expect("retain oversized decline")
+                .is_empty()
+        );
+        assert_eq!(collection_record(&db, "tasks/oversized.md"), None);
+
+        write_file(scratch.path(), "tasks/oversized.md", SHRUNK.as_bytes());
+        ingest(&mut sink, "tasks/oversized.md").expect("capture watcher shrink");
+        assert!(
+            sink.reconcile_collections()
+                .expect("re-offer repaired adoption")
+                .is_empty()
+        );
+        seed_captured_richdoc_lineage(&sink, "tasks/oversized.md");
+        assert_eq!(
+            sink.reconcile_collections()
+                .expect("retry repaired adoption"),
+            ["tasks/oversized.md"]
+        );
+
+        let (adopted_record_id, state) = collection_record(&db, "tasks/oversized.md")
+            .and_then(|(record_id, state)| record_id.map(|record_id| (record_id, state)))
+            .expect("adopted repaired record");
+        assert_eq!(state, "adopted");
+        assert_eq!(
+            collection_status(&db, "tasks"),
+            Some(("valid".to_owned(), "[]".to_owned()))
+        );
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("tasks/oversized.md"))
+                .expect("read adopted repaired record"),
+            format!("---\nid: {adopted_record_id}\ntitle: Small enough now\n---\n")
+        );
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+    }
+
+    #[test]
     fn collection_adoption_writes_one_engine_id_and_self_write_does_not_loop() {
         let scratch = ScratchDir::new().expect("scratch");
         let supervisor = WorkspaceSupervisor::new();
@@ -2417,6 +2499,12 @@ mod tests {
                 Some("engine".to_owned())
             )
         );
+        let relation_history_count = get_record(&db, "tasks", SOURCE_ID)
+            .history
+            .iter()
+            .filter(|entry| entry.field == "related")
+            .count();
+        assert_eq!(relation_history_count, 1);
         assert_eq!(
             latest_ydoc_actor_origin(&db, "tasks/source.md").as_deref(),
             Some("engine")

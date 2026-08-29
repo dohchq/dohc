@@ -3366,6 +3366,7 @@ export function createWorkspaceEngineCapture(
     const workspace = { workspaceId, rootPath, attachmentId };
     let cursor: CollectionPendingAdoptionCursor | null = null;
     let found = false;
+    const pendingPaths = new Set<string>();
     do {
       const pending: CollectionPendingAdoptionsPage | undefined =
         await engine.listPendingCollectionAdoptions?.({
@@ -3374,6 +3375,7 @@ export function createWorkspaceEngineCapture(
       if (!pending) return;
       found ||= pending.adoptions.length > 0;
       for (const adoption of pending.adoptions) {
+        pendingPaths.add(adoption.filePath);
         const adoptionKey =
           `${adoption.versionId}\0${adoption.recordId}\0` +
           `${adoption.objectId}\0${adoption.filePath}`;
@@ -3435,8 +3437,28 @@ export function createWorkspaceEngineCapture(
       }
       cursor = pending.nextCursor;
     } while (cursor !== null);
+    await releaseRetainedCollectionAdoptionProviders(pendingPaths);
     if (!found) return;
     await engine.reconcileCapture?.();
+  }
+
+  async function releaseRetainedCollectionAdoptionProviders(
+    pendingPaths: ReadonlySet<string>,
+  ): Promise<void> {
+    for (const [adoptionKey, retained] of pendingCollectionAdoptionProviders) {
+      if (pendingPaths.has(retained.provider.path)) continue;
+      try {
+        await retained.provider.evict();
+        if (pendingCollectionAdoptionProviders.get(adoptionKey) === retained) {
+          pendingCollectionAdoptionProviders.delete(adoptionKey);
+        }
+      } catch (error) {
+        onError(
+          `collection adoption provider eviction of ${retained.provider.path}`,
+          error,
+        );
+      }
+    }
   }
 
   function pollDaemonCaptureHealth(): void {
@@ -6580,6 +6602,7 @@ export function createWorkspaceEngineCapture(
           await drainPendingCollectionAdoptions(store);
         }
       } finally {
+        await releaseRetainedCollectionAdoptionProviders(new Set());
         // App quit may abandon a dead generation's retained release obligation:
         // the daemon process exits immediately afterward and releases every
         // workspace/session lease. Interactive lifecycle operations never use
