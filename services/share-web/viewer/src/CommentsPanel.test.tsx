@@ -162,6 +162,154 @@ describe("CommentsPanel", () => {
     });
   }
 
+  function clickButton(label: string): void {
+    const button = [...container.querySelectorAll("button")]
+      .find((candidate) => candidate.textContent === label);
+    if (!button) throw new Error(`${label} button is missing`);
+    act(() => {
+      button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+  }
+
+  it("shows the Comments shell while the first page is loading", async () => {
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () =>
+      await new Promise<Response>(() => undefined)
+    ));
+
+    await act(async () => {
+      root.render(<CommentsPanel access="comment" session={FIRST_SESSION} />);
+    });
+
+    expect(container.querySelector("h2")?.textContent).toBe("Comments");
+    expect(container.textContent).toContain("Loading comments…");
+    expect(container.querySelector("form")).toBeNull();
+  });
+
+  it("keeps the viewer visible and offers retry after the first page fails", async () => {
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () =>
+      new Response(null, { status: 503 })
+    ));
+
+    await act(async () => {
+      root.render(
+        <>
+          <main>Rendered file</main>
+          <CommentsPanel access="comment" session={FIRST_SESSION} />
+        </>,
+      );
+    });
+    await settle(() => container.textContent?.includes("Comments didn't load.") === true);
+
+    expect(container.textContent).toContain("Rendered file");
+    expect(container.querySelector("h2")?.textContent).toBe("Comments");
+    expect(container.textContent).toContain("Comments didn't load.");
+    expect([...container.querySelectorAll("button")]
+      .some((button) => button.textContent === "Try again")).toBe(true);
+    expect(container.querySelector("form")).toBeNull();
+  });
+
+  it("retries the first page and reveals the timeline and composer only after success", async () => {
+    let attempts = 0;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => {
+      attempts += 1;
+      if (attempts === 1) return new Response(null, { status: 503 });
+      if (attempts === 2) return discussionPage([NAMED_MESSAGE]);
+      return await new Promise<Response>(() => undefined);
+    }));
+
+    await act(async () => {
+      root.render(<CommentsPanel access="comment" session={FIRST_SESSION} />);
+    });
+    await settle(() => container.textContent?.includes("Comments didn't load.") === true);
+    clickButton("Try again");
+    await settle(() => container.textContent?.includes("Named body") === true);
+
+    expect(attempts).toBe(3);
+    expect(container.textContent).not.toContain("Comments didn't load.");
+    expect(container.textContent).not.toContain("Loading comments…");
+    expect(bodyInput().disabled).toBe(false);
+  });
+
+  it.each(["success", "failure"] as const)(
+    "does not apply a held retry %s after session replacement",
+    async (outcome) => {
+      let firstSessionAttempts = 0;
+      let resolveRetry: ((response: Response) => void) | undefined;
+      let rejectRetry: ((reason: Error) => void) | undefined;
+      let retrySignal: AbortSignal | undefined;
+      let replacementSignal: AbortSignal | undefined;
+      const heldRetry = new Promise<Response>((resolve, reject) => {
+        resolveRetry = resolve;
+        rejectRetry = reject;
+      });
+      vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (_input, init) => {
+        if (requestSession(init) === FIRST_SESSION) {
+          firstSessionAttempts += 1;
+          if (firstSessionAttempts === 1) return new Response(null, { status: 503 });
+          retrySignal = init?.signal ?? undefined;
+          return await heldRetry;
+        }
+        replacementSignal = init?.signal ?? undefined;
+        return await new Promise<Response>(() => undefined);
+      }));
+
+      await act(async () => {
+        root.render(<CommentsPanel access="comment" session={FIRST_SESSION} />);
+      });
+      await settle(() => container.textContent?.includes("Comments didn't load.") === true);
+      clickButton("Try again");
+      await settle(() => retrySignal !== undefined);
+      await act(async () => {
+        root.render(<CommentsPanel access="comment" session={SECOND_SESSION} />);
+      });
+      await settle(() => replacementSignal !== undefined);
+      expect(retrySignal?.aborted).toBe(true);
+
+      if (outcome === "success") {
+        resolveRetry?.(discussionPage([{ ...NAMED_MESSAGE, body: "Stale retry body" }]));
+      } else {
+        rejectRetry?.(new Error("stale retry failed"));
+      }
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(container.textContent).toContain("Loading comments…");
+      expect(container.textContent).not.toContain("Stale retry body");
+      expect(container.textContent).not.toContain("Comments didn't load.");
+      expect(container.querySelector("form")).toBeNull();
+    },
+  );
+
+  it("does not apply a late first-page failure after unmount", async () => {
+    let rejectLoad: ((reason: Error) => void) | undefined;
+    let loadSignal: AbortSignal | undefined;
+    const heldLoad = new Promise<Response>((_resolve, reject) => {
+      rejectLoad = reject;
+    });
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (_input, init) => {
+      loadSignal = init?.signal ?? undefined;
+      return await heldLoad;
+    }));
+
+    await act(async () => {
+      root.render(<CommentsPanel access="comment" session={FIRST_SESSION} />);
+    });
+    await settle(() => loadSignal !== undefined);
+    await act(async () => {
+      root.render(<main>Replacement viewer</main>);
+    });
+    expect(loadSignal?.aborted).toBe(true);
+
+    rejectLoad?.(new Error("late load failure"));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toBe("Replacement viewer");
+    expect(container.textContent).not.toContain("Comments didn't load.");
+  });
+
   it.each(["view", "comment"] as const)(
     "renders the same strict mixed timeline for a %s link",
     async (access) => {

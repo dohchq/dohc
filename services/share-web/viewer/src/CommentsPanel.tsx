@@ -27,6 +27,7 @@ const SUBMIT_STATUS_ID = "comment-submit-status";
 const NAME_HELP_ID = "comment-name-help";
 
 type ComposerState = "available" | "blocked" | "paused";
+type InitialLoadState = "loading" | "failed" | "ready";
 
 interface SubmitIntent {
   body: string;
@@ -244,6 +245,9 @@ function CommentRow({ message }: { message: PublicDiscussionMessage }) {
 
 export function CommentsPanel(props: { access: ShareAccess; session: string }) {
   const [messages, setMessages] = useState<PublicDiscussionMessage[] | null>(null);
+  const [loadState, setLoadState] = useState<InitialLoadState>("loading");
+  const [loadStateSession, setLoadStateSession] = useState(props.session);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [body, setBody] = useState("");
   const [claimedName, setClaimedName] = useState("");
   const [nameLocked, setNameLocked] = useState(false);
@@ -270,6 +274,8 @@ export function CommentsPanel(props: { access: ShareAccess; session: string }) {
     intentRef.current = null;
     messagesRef.current = null;
     setMessages(null);
+    setLoadState("loading");
+    setLoadStateSession(props.session);
     setBody("");
     setClaimedName("");
     setNameLocked(false);
@@ -283,6 +289,7 @@ export function CommentsPanel(props: { access: ShareAccess; session: string }) {
         if (!isCurrent()) return;
         messagesRef.current = loaded.messages;
         setMessages(loaded.messages);
+        setLoadState("ready");
         void followDiscussionActivity(
           props.session,
           loaded.activityRevision,
@@ -302,7 +309,9 @@ export function CommentsPanel(props: { access: ShareAccess; session: string }) {
           },
         );
       })
-      .catch(() => undefined);
+      .catch(() => {
+        if (isCurrent() && !controller.signal.aborted) setLoadState("failed");
+      });
     return () => {
       if (pageTokenRef.current === token) pageTokenRef.current = null;
       controller.abort();
@@ -311,7 +320,7 @@ export function CommentsPanel(props: { access: ShareAccess; session: string }) {
       submitControllerRef.current = null;
       pendingRef.current = false;
     };
-  }, [props.session]);
+  }, [loadAttempt, props.session]);
 
   const editDraft = (field: "body" | "name", value: string) => {
     intentRef.current = null;
@@ -408,7 +417,7 @@ export function CommentsPanel(props: { access: ShareAccess; session: string }) {
     }
   };
 
-  if (messages === null) return null;
+  const currentLoadState = loadStateSession === props.session ? loadState : "loading";
   const disabled = pending || composerState !== "available";
   const stateCopy = composerState === "blocked"
     ? "The owner turned off comments for this browser."
@@ -425,16 +434,27 @@ export function CommentsPanel(props: { access: ShareAccess; session: string }) {
           ? "Anyone with the link can also comment. Names they give are not verified."
           : "Anyone with the link can read what you selected."}
       </p>
-      {messages.length === 0
-        ? <p className="comments-empty">No comments yet.</p>
-        : (
-          <ol className="comment-list">
-            {messages.map((message) => (
-              <CommentRow key={message.messageId} message={message} />
-            ))}
-          </ol>
-        )}
-      {props.access === "comment" ? (
+      {currentLoadState === "loading" ? (
+        <p className="comments-empty">Loading comments…</p>
+      ) : currentLoadState === "failed" ? (
+        <div>
+          <p className="comments-empty">Comments didn't load.</p>
+          <div className="comment-submit-row">
+            <button type="button" onClick={() => setLoadAttempt((attempt) => attempt + 1)}>
+              Try again
+            </button>
+          </div>
+        </div>
+      ) : messages?.length === 0 ? (
+        <p className="comments-empty">No comments yet.</p>
+      ) : (
+        <ol className="comment-list">
+          {messages?.map((message) => (
+            <CommentRow key={message.messageId} message={message} />
+          ))}
+        </ol>
+      )}
+      {currentLoadState === "ready" && props.access === "comment" ? (
         <form
           className="comment-composer"
           aria-describedby={`${NAME_HELP_ID} ${SUBMIT_STATUS_ID}`}

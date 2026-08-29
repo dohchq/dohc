@@ -237,16 +237,58 @@ describe("App", () => {
 
   function viewerFetch(
     handoff: (init: RequestInit | undefined) => Response | Promise<Response>,
+    onDiscussionPark: (signal: AbortSignal) => void = () => undefined,
   ) {
     return vi.fn<typeof fetch>(async (input, init) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
       if (path === "/api/view/current") return currentPage([], 0);
       if (path === "/api/view/log?since=0&limit=500") return logPage([]);
+      if (path === "/api/view/discussion") {
+        return jsonResponse({
+          ok: true,
+          activityRevision: 0,
+          messages: [],
+          nextCursor: null,
+        });
+      }
+      if (path === "/api/view/discussion/activity?since=0&hold=0&limit=100") {
+        const signal = init?.signal;
+        if (!signal) throw new Error("Discussion activity request has no abort signal");
+        onDiscussionPark(signal);
+        return await new Promise<Response>((_resolve, reject) => {
+          const abort = () => reject(new DOMException("Aborted", "AbortError"));
+          if (signal.aborted) abort();
+          else signal.addEventListener("abort", abort, { once: true });
+        });
+      }
       if (path === "/api/handoff") return handoff(init);
       throw new Error(`Unexpected request: ${path}`);
     });
   }
+
+  it("aborts parked Comments activity when the viewer unmounts", async () => {
+    let parkedSignal: AbortSignal | undefined;
+    const fetchMock = viewerFetch(
+      () => jsonResponse({
+        ok: true,
+        code: FIRST_HANDOFF_CODE,
+        relayUrl: PUBLIC_RELAY_URL,
+        expiresAtMs: Date.now() + 60_000,
+      }),
+      (signal) => {
+        parkedSignal = signal;
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+    await settle(() => parkedSignal !== undefined);
+    act(() => root?.unmount());
+    root = null;
+
+    expect(parkedSignal?.aborted).toBe(true);
+  });
 
   it("builds the browser handoff coordinate with the canonical issuer relay", () => {
     expect(
