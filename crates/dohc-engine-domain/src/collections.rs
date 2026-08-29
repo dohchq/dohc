@@ -1945,7 +1945,7 @@ fn dangling_relation_cleanups(
         .map_err(crate::DomainError::sql_corrupt)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(crate::DomainError::sql_corrupt)?;
-    let historical_targets = historical_relation_targets_still_present(
+    let unindexed_or_conflicted_targets = unindexed_or_conflicted_relation_targets_still_present(
         conn,
         workspace_id,
         version_id,
@@ -1963,14 +1963,14 @@ fn dangling_relation_cleanups(
         .into_iter()
         .filter_map(|(cleanup, collection_path)| {
             (!present_malformed_record_ids.contains(&cleanup.target_record_id)
-                && !historical_targets
+                && !unindexed_or_conflicted_targets
                     .contains(&(cleanup.target_record_id.clone(), collection_path)))
             .then_some(cleanup)
         })
         .collect())
 }
 
-fn historical_relation_targets_still_present(
+fn unindexed_or_conflicted_relation_targets_still_present(
     conn: &Connection,
     workspace_id: &str,
     version_id: &str,
@@ -1989,16 +1989,30 @@ fn historical_relation_targets_still_present(
 
     let mut statement = conn
         .prepare(
-            "SELECT b.text FROM snapshots s \
-             JOIN moments m ON m.workspace_id=s.workspace_id AND m.version_id=s.version_id \
-               AND m.object_id=s.object_id \
-             JOIN blobs b ON b.sha256=m.after_blob_sha256 \
-             WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.content_kind='text' \
-               AND m.after_content_kind='text' AND substr(s.path,-3)='.md' \
-               AND substr(s.path,1,length(?3))=?3 \
-               AND substr(s.path,length(?3)+1,1)='/' \
-               AND instr(substr(s.path,length(?3)+2),'/')=0 \
-             ORDER BY m.moment_order DESC",
+            "SELECT witness.text FROM (\
+               SELECT s.path,b.text,0 AS moment_order FROM snapshots s \
+               JOIN blobs b ON b.sha256=s.blob_sha256 \
+               WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.content_kind='text' \
+                 AND substr(s.path,-3)='.md' \
+                 AND substr(s.path,1,length(?3))=?3 \
+                 AND substr(s.path,length(?3)+1,1)='/' \
+                 AND instr(substr(s.path,length(?3)+2),'/')=0 \
+               UNION ALL \
+               SELECT s.path,b.text,m.moment_order FROM snapshots s \
+               JOIN moments m ON m.workspace_id=s.workspace_id AND m.version_id=s.version_id \
+                 AND m.object_id=s.object_id \
+               JOIN blobs b ON b.sha256=m.after_blob_sha256 \
+               WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.content_kind='text' \
+                 AND m.after_content_kind='text' AND substr(s.path,-3)='.md' \
+                 AND substr(s.path,1,length(?3))=?3 \
+                 AND substr(s.path,length(?3)+1,1)='/' \
+                 AND instr(substr(s.path,length(?3)+2),'/')=0 \
+                 AND EXISTS (SELECT 1 FROM conflicts c \
+                   WHERE c.workspace_id=s.workspace_id \
+                     AND c.target_version_id=s.version_id AND c.status='open' \
+                     AND (c.current_object_id=s.object_id \
+                       OR c.incoming_object_id=s.object_id OR c.path=s.path))\
+             ) witness ORDER BY witness.path,witness.moment_order DESC",
         )
         .map_err(crate::DomainError::sql_corrupt)?;
     let mut present = HashSet::new();

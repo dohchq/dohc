@@ -1269,6 +1269,78 @@ mod tests {
             });
     }
 
+    fn set_richdoc_frontmatter_and_settle(
+        sink: &StoreCaptureSink,
+        path: &str,
+        field: &str,
+        value: &str,
+    ) {
+        let actor = sink.actor.clone();
+        let root_dir = sink.shadow_root.clone();
+        let self_writes = Arc::new(sink.self_writes.clone());
+        let path = path.to_owned();
+        let field = field.to_owned();
+        let value = value.to_owned();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test rich-document edit runtime")
+            .block_on(async move {
+                let state = actor
+                    .ydoc_open_state(
+                        WORKSPACE_ID.to_owned(),
+                        13,
+                        false,
+                        None,
+                        VERSION_ID.to_owned(),
+                        path.clone(),
+                        Some(ContentKind::Richdoc),
+                        CancellationToken::new(),
+                    )
+                    .await
+                    .expect("open existing rich-document fixture");
+                assert!(state.lineage_existing, "fixture must already be adopted");
+                let doc = Ydoc::wire();
+                doc.apply(&state.initial_update)
+                    .expect("apply existing rich-document state");
+                let update = doc.frontmatter_set(&field, &value);
+                let append = actor
+                    .ydoc_record_update(
+                        state.key.clone(),
+                        path.clone(),
+                        ContentKind::Richdoc,
+                        state.regime,
+                        update,
+                        None,
+                        state.lineage_claim_id,
+                        false,
+                        None,
+                        None,
+                        14,
+                        Arc::new(FilesNoFaults),
+                        CancellationToken::new(),
+                    )
+                    .await
+                    .expect("record rich-document frontmatter edit");
+                actor
+                    .ydoc_settle(
+                        root_dir,
+                        state.key,
+                        path,
+                        ContentKind::Richdoc,
+                        append.lineage_claim_id,
+                        state.head_blob_sha256,
+                        "capture-sink-frontmatter-edit".to_owned(),
+                        self_writes,
+                        15,
+                        Arc::new(FilesNoFaults),
+                        CancellationToken::new(),
+                    )
+                    .await
+                    .expect("settle rich-document frontmatter edit");
+            });
+    }
+
     fn enable_sync_for_collection_test(db: &Path) {
         let connection = Connection::open(db).expect("open collection test database");
         connection
@@ -2250,6 +2322,92 @@ mod tests {
                 .expect("read cleaned referrer")
                 .contains("related:"),
             "the relation is removed through the projected frontmatter write"
+        );
+        assert_eq!(
+            latest_field_history(&db, "tasks/source.md", "related"),
+            (
+                Some(format!("\"{TARGET_ID}\"")),
+                None,
+                Some("engine".to_owned())
+            )
+        );
+        assert_eq!(
+            latest_ydoc_actor_origin(&db, "tasks/source.md").as_deref(),
+            Some("engine")
+        );
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+    }
+
+    #[test]
+    fn changing_relation_target_id_writes_back_an_attributed_edge_drop() {
+        const SOURCE_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const TARGET_ID: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
+        const NEW_TARGET_ID: &str = "rec_cccccccccccccccccccccccccc";
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        write_file(
+            scratch.path(),
+            "tasks/collection.yaml",
+            b"name: Tasks\nfields:\n  related:\n    type: relation\n    collection: tasks\n    many: false\n",
+        );
+        write_file(
+            scratch.path(),
+            "tasks/source.md",
+            format!("---\nid: {SOURCE_ID}\nrelated: {TARGET_ID}\n---\n\nSource\n").as_bytes(),
+        );
+        write_file(
+            scratch.path(),
+            "tasks/target.md",
+            format!("---\nid: {TARGET_ID}\n---\n\nTarget\n").as_bytes(),
+        );
+        ingest(&mut sink, "tasks/collection.yaml").expect("capture relation schema");
+        ingest(&mut sink, "tasks/source.md").expect("capture referrer");
+        ingest(&mut sink, "tasks/target.md").expect("capture target");
+        for path in ["tasks/source.md", "tasks/target.md"] {
+            seed_captured_richdoc_lineage(&sink, path);
+        }
+        sink.reconcile_collections()
+            .expect("adopt indexed relation");
+        assert_eq!(
+            relation_edge_count(&db, "tasks/source.md", "related", TARGET_ID),
+            1
+        );
+
+        set_richdoc_frontmatter_and_settle(
+            &sink,
+            "tasks/target.md",
+            RECORD_ID_FRONTMATTER_KEY,
+            NEW_TARGET_ID,
+        );
+        let changed = sink
+            .reconcile_collections()
+            .expect("drop relation to replaced target id");
+
+        assert_eq!(
+            adopted_record_id(&db, "tasks/target.md"),
+            NEW_TARGET_ID,
+            "the explicit unclaimed id replaces the target's old binding"
+        );
+        assert!(
+            changed.iter().any(|path| path == "tasks/source.md"),
+            "the referrer must settle through the attributed Y.Doc write"
+        );
+        assert_eq!(
+            relation_edge_count(&db, "tasks/source.md", "related", TARGET_ID),
+            0
+        );
+        assert_eq!(
+            indexed_collection_field(&db, "tasks/source.md", "related"),
+            None
+        );
+        assert!(
+            !std::fs::read_to_string(scratch.path().join("tasks/source.md"))
+                .expect("read cleaned referrer after target id change")
+                .contains("related:"),
+            "the historical target id is removed through projected frontmatter"
         );
         assert_eq!(
             latest_field_history(&db, "tasks/source.md", "related"),

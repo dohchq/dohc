@@ -44,6 +44,15 @@
       "name": "comment-only-frontmatter-is-empty-map",
       "markdown": "---\n# note\n---",
       "expected": {}
+    },
+    {
+      "name": "unsafe-integer-is-exact",
+      "markdown": "---\nexact: 9007199254740993\n---",
+      "expected": {
+        "exact": {
+          "$dohcInt64": "9007199254740993"
+        }
+      }
     }
   ]
 }

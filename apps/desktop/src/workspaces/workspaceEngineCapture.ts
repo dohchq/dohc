@@ -3382,10 +3382,22 @@ export function createWorkspaceEngineCapture(
           await options.rustEngineSessions.run(
             workspace,
             async (binding) => {
-              let provider =
-                retained?.binding.workspace === binding.workspace
-                  ? retained.provider
-                  : undefined;
+              if (
+                retained !== undefined &&
+                retained.binding.workspace !== binding.workspace
+              ) {
+                const evicted = retained;
+                retained = undefined;
+                try {
+                  await evicted.provider.evict();
+                } catch (error) {
+                  onError(
+                    `collection adoption provider eviction of ${adoption.filePath}`,
+                    error,
+                  );
+                }
+              }
+              let provider = retained?.provider;
               if (provider === undefined) {
                 const openProvider =
                   options.openRustYDocProviderSession ??

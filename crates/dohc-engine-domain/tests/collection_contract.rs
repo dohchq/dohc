@@ -155,13 +155,41 @@ fn record_id_results_match_the_typescript_oracle() {
 fn frontmatter_delimiters_match_the_typescript_oracle() {
     let fixture: Fixture<FrontmatterVector> =
         serde_json::from_str(FRONTMATTER_FIXTURE).expect("frontmatter fixture parses");
-    for vector in fixture.vectors {
+    for mut vector in fixture.vectors {
+        decode_fixture_integers(&mut vector.expected);
         assert_eq!(
             markdown_frontmatter_json(&vector.markdown),
             Some(vector.expected),
             "frontmatter vector {} disagrees with the TypeScript oracle",
             vector.name
         );
+    }
+}
+
+fn decode_fixture_integers(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                decode_fixture_integers(value);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            if values.len() == 1
+                && let Some(decimal) = values.get("$dohcInt64").and_then(|value| value.as_str())
+            {
+                *value = serde_json::Value::Number(
+                    decimal
+                        .parse::<i64>()
+                        .expect("fixture int64 is valid")
+                        .into(),
+                );
+            } else {
+                for value in values.values_mut() {
+                    decode_fixture_integers(value);
+                }
+            }
+        }
+        _ => {}
     }
 }
 

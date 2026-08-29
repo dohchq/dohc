@@ -3339,6 +3339,51 @@ mod collection_reconcile_scheduling_tests {
             .expect("record rich-document seed");
     }
 
+    fn seed_collection_capture(actor: &ActorHandle, root: &Path, paths: &[&str]) {
+        let seed_actor = actor.clone();
+        let seed_root = root.to_path_buf();
+        let paths = paths
+            .iter()
+            .map(|path| (*path).to_owned())
+            .collect::<Vec<_>>();
+        std::thread::spawn(move || {
+            let mut sink =
+                StoreCaptureSink::new(seed_actor, WORKSPACE_ID, "main", seed_root, 2, None);
+            for path in paths {
+                sink.ingest(
+                    &path,
+                    0,
+                    "advisory-sha",
+                    "text/markdown",
+                    IngestReason::Added,
+                )
+                .unwrap_or_else(|_| panic!("capture {path}"));
+            }
+        })
+        .join()
+        .expect("collection seed thread");
+    }
+
+    fn collection_apply_context<'a>(
+        root: &'a Path,
+        actor: &'a ActorHandle,
+        leases: &'a LeaseRegistry,
+        status: &'a Arc<DriverStatus>,
+        self_writes: &'a SelfWriteSuppression,
+    ) -> ApplyRunContext<'a> {
+        ApplyRunContext {
+            root,
+            actor,
+            workspace_id: WORKSPACE_ID,
+            leases,
+            status,
+            self_writes,
+            author_json: None,
+            provenance: CaptureProvenance::default(),
+            events: EngineEvents::default(),
+        }
+    }
+
     #[test]
     fn collection_reconcile_predicate_tracks_only_detection_and_membership_changes() {
         let scratch = ScratchDir::new().expect("scratch");
@@ -3402,24 +3447,11 @@ mod collection_reconcile_scheduling_tests {
         let db = scratch.engine_db_path().expect("engine database path");
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
-        let seed_actor = actor.clone();
-        let seed_root = scratch.path().to_path_buf();
-        std::thread::spawn(move || {
-            let mut sink =
-                StoreCaptureSink::new(seed_actor, WORKSPACE_ID, "main", seed_root, 2, None);
-            for path in ["tasks/collection.yaml", "tasks/alpha.md"] {
-                sink.ingest(
-                    path,
-                    0,
-                    "advisory-sha",
-                    "text/markdown",
-                    IngestReason::Added,
-                )
-                .unwrap_or_else(|_| panic!("capture {path}"));
-            }
-        })
-        .join()
-        .expect("collection seed thread");
+        seed_collection_capture(
+            &actor,
+            scratch.path(),
+            &["tasks/collection.yaml", "tasks/alpha.md"],
+        );
 
         let object_id = rusqlite::Connection::open(&db)
             .expect("open database observer")
@@ -3444,17 +3476,7 @@ mod collection_reconcile_scheduling_tests {
         let self_writes = SelfWriteSuppression::default();
         status.request_collection_reconcile();
         let first_clean = apply_run_with_handle(
-            ApplyRunContext {
-                root: scratch.path(),
-                actor: &actor,
-                workspace_id: WORKSPACE_ID,
-                leases: &leases,
-                status: &status,
-                self_writes: &self_writes,
-                author_json: None,
-                provenance: CaptureProvenance::default(),
-                events: EngineEvents::default(),
-            },
+            collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes),
             &files.handle(),
             ReconcileRun::Converged,
         )
@@ -3472,17 +3494,7 @@ mod collection_reconcile_scheduling_tests {
 
         drop(lease);
         let second_clean = apply_run_with_handle(
-            ApplyRunContext {
-                root: scratch.path(),
-                actor: &actor,
-                workspace_id: WORKSPACE_ID,
-                leases: &leases,
-                status: &status,
-                self_writes: &self_writes,
-                author_json: None,
-                provenance: CaptureProvenance::default(),
-                events: EngineEvents::default(),
-            },
+            collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes),
             &files.handle(),
             ReconcileRun::Converged,
         )
@@ -3525,24 +3537,11 @@ mod collection_reconcile_scheduling_tests {
         let db = scratch.engine_db_path().expect("engine database path");
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
-        let seed_actor = actor.clone();
-        let seed_root = scratch.path().to_path_buf();
-        std::thread::spawn(move || {
-            let mut sink =
-                StoreCaptureSink::new(seed_actor, WORKSPACE_ID, "main", seed_root, 2, None);
-            for path in ["tasks/collection.yaml", "tasks/alpha.md", "tasks/beta.md"] {
-                sink.ingest(
-                    path,
-                    0,
-                    "advisory-sha",
-                    "text/markdown",
-                    IngestReason::Added,
-                )
-                .unwrap_or_else(|_| panic!("capture {path}"));
-            }
-        })
-        .join()
-        .expect("collection seed thread");
+        seed_collection_capture(
+            &actor,
+            scratch.path(),
+            &["tasks/collection.yaml", "tasks/alpha.md", "tasks/beta.md"],
+        );
 
         let object_id = rusqlite::Connection::open(&db)
             .expect("open database observer")
@@ -3568,17 +3567,7 @@ mod collection_reconcile_scheduling_tests {
         let self_writes = SelfWriteSuppression::default();
         status.request_collection_reconcile();
         let first_clean = apply_run_with_handle(
-            ApplyRunContext {
-                root: scratch.path(),
-                actor: &actor,
-                workspace_id: WORKSPACE_ID,
-                leases: &leases,
-                status: &status,
-                self_writes: &self_writes,
-                author_json: None,
-                provenance: CaptureProvenance::default(),
-                events: EngineEvents::default(),
-            },
+            collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes),
             &files.handle(),
             ReconcileRun::Converged,
         )
@@ -3613,17 +3602,7 @@ mod collection_reconcile_scheduling_tests {
 
         drop(lease);
         let second_clean = apply_run_with_handle(
-            ApplyRunContext {
-                root: scratch.path(),
-                actor: &actor,
-                workspace_id: WORKSPACE_ID,
-                leases: &leases,
-                status: &status,
-                self_writes: &self_writes,
-                author_json: None,
-                provenance: CaptureProvenance::default(),
-                events: EngineEvents::default(),
-            },
+            collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes),
             &files.handle(),
             ReconcileRun::Converged,
         )

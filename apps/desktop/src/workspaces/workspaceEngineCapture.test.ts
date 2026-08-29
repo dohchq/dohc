@@ -586,7 +586,7 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
-  it("reopens a collection adoption provider after a transport rebind", async () => {
+  it("releases the old collection adoption provider before reopening after a transport rebind", async () => {
     const root = await tempRoot();
     const adoption = {
       versionId: "main",
@@ -628,6 +628,9 @@ describe("workspaceEngineCapture batch capture", () => {
     } as unknown as EngineWorkspaceSessions;
     const openedTransports: unknown[] = [];
     const evictedTransports: unknown[] = [];
+    const activeTransports = new Set<unknown>();
+    const activeProviderCountsAtOpen: number[] = [];
+    let firstProviderEvictions = 0;
     const errors: Array<{ context: string; error: unknown }> = [];
     const engine = capture(root, {
       store,
@@ -635,12 +638,30 @@ describe("workspaceEngineCapture batch capture", () => {
       daemonOwnsCapture: true,
       onError: (context, error) => errors.push({ context, error }),
       openRustYDocProviderSession: async (options) => {
+        activeProviderCountsAtOpen.push(activeTransports.size);
+        if (activeTransports.size > 0) {
+          throw new DaemonRefusalError(
+            {
+              code: "INVALID_PARAMS",
+              message: "ydoc-session-busy",
+              retry: "no",
+            },
+            undefined,
+          );
+        }
         openedTransports.push(options.transport);
+        activeTransports.add(options.transport);
         return {
           path: options.path,
           evict: async () => {
             evictedTransports.push(options.transport);
-            if (options.transport === firstClient) throw transportFailure;
+            if (
+              options.transport === firstClient &&
+              firstProviderEvictions++ === 0
+            ) {
+              throw transportFailure;
+            }
+            activeTransports.delete(options.transport);
             completed = true;
           },
         } as EngineYdocProviderSession;
@@ -651,7 +672,13 @@ describe("workspaceEngineCapture batch capture", () => {
 
     expect(completed).toBe(true);
     expect(openedTransports).toEqual([firstClient, replacementClient]);
-    expect(evictedTransports).toEqual([firstClient, replacementClient]);
+    expect(evictedTransports).toEqual([
+      firstClient,
+      firstClient,
+      replacementClient,
+    ]);
+    expect(activeProviderCountsAtOpen).toEqual([0, 0]);
+    expect(activeTransports.size).toBe(0);
     expect(reconciles).toBe(1);
     expect(errors).toEqual([]);
     await engine.stop();

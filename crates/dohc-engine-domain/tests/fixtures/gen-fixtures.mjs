@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "../../../..");
@@ -313,6 +314,10 @@ const frontmatter = [
     name: "comment-only-frontmatter-is-empty-map",
     markdown: "---\n# note\n---",
   },
+  {
+    name: "unsafe-integer-is-exact",
+    markdown: "---\nexact: 9007199254740993\n---",
+  },
 ].map(({ name, markdown }) => ({
   name,
   markdown,
@@ -320,15 +325,23 @@ const frontmatter = [
 }));
 
 function writeFixture(name, value) {
-  writeFileSync(join(outputDir, name), `${JSON.stringify(value, null, 2)}\n`);
+  const json = JSON.stringify(
+    value,
+    (_key, child) =>
+      typeof child === "bigint" ? { $dohcInt64: child.toString() } : child,
+    2,
+  ).replaceAll("\u0085", "\\u0085");
+  writeFileSync(join(outputDir, name), `${json}\n`);
 }
 
 writeFixture("collection-schemas.json", {
-  vectors: schemas.map(({ name, yaml, expected }) => ({
-    name,
-    yaml,
-    expected: expected ?? parseCollectionSchema(yaml),
-  })),
+  vectors: schemas.map(({ name, yaml, expected }) => {
+    const parsed = parseCollectionSchema(yaml);
+    if (expected !== undefined && !isDeepStrictEqual(expected, parsed)) {
+      throw new Error(`schema fixture ${name} disagrees with parseCollectionSchema`);
+    }
+    return { name, yaml, expected: expected ?? parsed };
+  }),
 });
 writeFixture("collection-field-values.json", { vectors: fieldValues });
 writeFixture("collection-record-ids.json", { vectors: recordIds });

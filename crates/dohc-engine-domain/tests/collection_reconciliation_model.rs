@@ -385,6 +385,14 @@ fn apply_event(
                 params![WORKSPACE_ID, conflict_id],
             )
             .map_err(StorageError::persist_public)?;
+            state
+                .owners
+                .retain(|_, owner_object| owner_object != TARGET_OBJECT);
+            if state.target_present && state.target_valid {
+                state
+                    .owners
+                    .insert(state.target_id().to_owned(), TARGET_OBJECT.to_owned());
+            }
         }
     }
     Ok(())
@@ -498,17 +506,11 @@ fn assert_invariants(
         if !binding.index_initialized {
             continue;
         }
-        let has_valid_name = binding.object_id == SOURCE_OBJECT
-            || (binding.object_id == TARGET_OBJECT && state.target_present && state.target_valid)
-            || (binding.object_id == COPY_OBJECT && state.copy_present);
-        let expected_field = if has_valid_name { Some("Name") } else { None };
-        if let Some(field_name) = expected_field {
-            assert_eq!(
-                indexed_field_count(conn, record_id, field_name)?,
-                1,
-                "index_initialized binding lacks its valid field after {sequence:?}: {binding:?}"
-            );
-        }
+        assert_eq!(
+            indexed_field_count(conn, record_id, "Name")?,
+            1,
+            "index_initialized binding lacks its current or retained field after {sequence:?}: {binding:?}"
+        );
     }
     Ok(())
 }

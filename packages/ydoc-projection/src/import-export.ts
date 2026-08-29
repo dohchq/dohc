@@ -16,6 +16,12 @@ import {
 import { TaskList } from '@tiptap/extension-list'
 import * as yaml from 'js-yaml'
 import {
+  CORE_SCHEMA,
+  defineScalarTag,
+  intCoreTag,
+  NOT_RESOLVED,
+} from 'js-yaml'
+import {
   prosemirrorJSONToYXmlFragment,
   yXmlFragmentToProseMirrorRootNode,
 } from 'y-prosemirror'
@@ -41,6 +47,38 @@ const PLAIN_TEXT_CONTENT_KIND = 'plain-text'
 // multi-block ProseMirror cell uses a visible hard break instead of U+001F.
 const GFM_TABLE_CELL_BLOCK_SEPARATOR = '<br>'
 const PARSE_SENTINEL_RE = /\uE000DOHC_PARSE_\d+\uE001/gu
+const MAX_SAFE_INTEGER = BigInt(Number.MAX_SAFE_INTEGER)
+const MIN_YDOC_INTEGER = -(1n << 63n)
+const MAX_YDOC_INTEGER = (1n << 63n) - 1n
+
+const losslessIntegerTag = defineScalarTag('tag:yaml.org,2002:int', {
+  implicit: true,
+  implicitFirstChars: ['-', '+', ...'0123456789'],
+  resolve: (source, isExplicit, tagName) => {
+    if (intCoreTag.resolve(source, isExplicit, tagName) === NOT_RESOLVED) {
+      return NOT_RESOLVED
+    }
+    let magnitude = source
+    let sign = 1n
+    if (magnitude[0] === '-' || magnitude[0] === '+') {
+      if (magnitude[0] === '-') sign = -1n
+      magnitude = magnitude.slice(1)
+    }
+    const integer = sign * BigInt(magnitude)
+    if (integer < MIN_YDOC_INTEGER || integer > MAX_YDOC_INTEGER) {
+      throw new Error('frontmatter integer exceeds the Y.Doc int64 domain')
+    }
+    if (integer >= -MAX_SAFE_INTEGER && integer <= MAX_SAFE_INTEGER) {
+      return integer === 0n && sign < 0n ? -0 : Number(integer)
+    }
+    return integer
+  },
+  identify: value =>
+    typeof value === 'bigint'
+    || (typeof value === 'number' && Number.isInteger(value) && !Object.is(value, -0)),
+  represent: value => value.toString(),
+})
+const losslessFrontmatterSchema = CORE_SCHEMA.withTags(losslessIntegerTag)
 
 function prepareRenderedTableCell(markdown: string): string {
   // Raw inline HTML is the canonical representation of cell block boundaries.
@@ -328,6 +366,7 @@ export function yDocToMarkdown(doc: Y.Doc): string {
   if (Object.keys(frontmatter).length === 0) return restoreLineEndings(body)
 
   const yamlFrontmatter = yaml.dump(frontmatter, {
+    schema: losslessFrontmatterSchema,
     lineWidth: -1,
     sortKeys: false,
   })
@@ -1014,7 +1053,7 @@ function parseFrontmatter(src: string): {
   let meta: Record<string, unknown> = {}
   if (isEmptyFrontmatter(raw ?? '')) return { meta, body: rest ?? '' }
   try {
-    const parsed = yaml.load(raw ?? '')
+    const parsed = yaml.load(raw ?? '', { schema: losslessFrontmatterSchema })
     if (parsed == null) return { meta: {}, body: src }
     if (!isFrontmatterMap(parsed)) return { meta: {}, body: src }
     meta = parsed

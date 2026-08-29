@@ -25,6 +25,24 @@ interface FrontmatterVector {
   expected: Record<string, unknown>
 }
 
+function decodeFixtureIntegers(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(decodeFixtureIntegers)
+  if (value !== null && typeof value === 'object') {
+    const entries = Object.entries(value)
+    if (
+      entries.length === 1
+      && entries[0]?.[0] === '$dohcInt64'
+      && typeof entries[0][1] === 'string'
+    ) {
+      return BigInt(entries[0][1])
+    }
+    return Object.fromEntries(
+      entries.map(([key, child]) => [key, decodeFixtureIntegers(child)]),
+    )
+  }
+  return value
+}
+
 const frontmatterVectors = frontmatterFixtureJson.vectors as FrontmatterVector[]
 
 function yDocFromBody(content: JSONContent[]): Y.Doc {
@@ -63,7 +81,23 @@ function expectStableMarkdownRoundTrip(
 
 describe('Y.Doc markdown import/export', () => {
   it.each(frontmatterVectors)('matches the shared frontmatter vector $name', ({ markdown, expected }) => {
-    expect(getDohcYDocFrontmatter(markdownToYDoc(markdown))).toEqual(expected)
+    expect(getDohcYDocFrontmatter(markdownToYDoc(markdown)))
+      .toEqual(decodeFixtureIntegers(expected))
+  })
+
+  it('seeds and round-trips an unsafe frontmatter integer exactly', () => {
+    const input = ['---', 'exact: 9007199254740993', 'status: open', '---', '', '# Body'].join('\n')
+    const doc = markdownToYDoc(input)
+    const replica = new Y.Doc()
+    Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc))
+
+    expect(getDohcYDocFrontmatter(replica).exact).toBe(9007199254740993n)
+    replica.getMap('frontmatter').set('status', 'closed')
+    const settled = yDocToMarkdown(replica)
+
+    expect(settled).toContain('exact: 9007199254740993')
+    expect(getDohcYDocFrontmatter(markdownToYDoc(settled)).exact)
+      .toBe(9007199254740993n)
   })
 
   it('round-trips CRLF richdoc frontmatter through the internal line-ending hint', () => {

@@ -1781,6 +1781,89 @@ fn malformed_relation_target_renamed_within_its_collection_preserves_inbound_rel
 }
 
 #[test]
+fn valid_target_id_change_emits_old_relation_cleanup_and_resolves_new_id() {
+    const CHANGED_PERSON_ID: &str = "rec_ffffffffffffffffffffffffff";
+    const NEW_REFERRER_ID: &str = "rec_yyyyyyyyyyyyyyyyyyyyyyyyyy";
+    let (_scratch, mut store) = seeded_store();
+    let adopted = store
+        .write_with(&NoFaults, |tx| {
+            set_collection_adoption_state_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                "people/alice.md",
+                PERSON_ID,
+                "adopted",
+            )
+        })
+        .expect("adopt relation target before id change");
+    assert!(matches!(adopted, TxnOutcome::Committed(())));
+
+    write_text_for_object(
+        &mut store,
+        "people/alice.md",
+        &format!("---\nid: {CHANGED_PERSON_ID}\ntitle: Alice changed id\n---\n"),
+        "object-3",
+        "change-relation-target-id",
+        50,
+    )
+    .expect("change relation target id");
+    write_text_for_object(
+        &mut store,
+        "tasks/new-referrer.md",
+        &format!(
+            "---\nid: {NEW_REFERRER_ID}\nTitle: New referrer\nStatus: Todo\nRank: 2\nOwner: {CHANGED_PERSON_ID}\n---\n"
+        ),
+        "new-id-referrer-object",
+        "new-id-referrer-moment",
+        51,
+    )
+    .expect("write relation to changed id");
+
+    let reconciled = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile changed relation target id");
+    let TxnOutcome::Committed(reconciled) = reconciled else {
+        panic!("changed relation target id reconciliation crashed");
+    };
+    assert_eq!(reconciled.relation_cleanups.len(), 1);
+    let cleanup = &reconciled.relation_cleanups[0];
+    assert_eq!(cleanup.source_record_id, FIRST_TASK_ID);
+    assert_eq!(cleanup.source_file_path, "tasks/alpha.md");
+    assert_eq!(cleanup.field_name, "Owner");
+    assert_eq!(cleanup.target_record_id, PERSON_ID);
+
+    let tasks = store
+        .read_with(|conn| {
+            query_collection_records(
+                conn,
+                WORKSPACE_ID,
+                "tasks",
+                &CollectionQuery {
+                    resolve_relations: true,
+                    ..CollectionQuery::default()
+                },
+            )
+        })
+        .expect("query referrers after target id change")
+        .expect("tasks collection");
+    let new_owner = tasks
+        .records
+        .iter()
+        .find(|record| record.id == NEW_REFERRER_ID)
+        .expect("new-id referrer")
+        .values
+        .iter()
+        .find(|value| value.field == "Owner")
+        .expect("new-id relation");
+    assert_eq!(new_owner.resolved_relations.len(), 1);
+    assert_eq!(new_owner.resolved_relations[0].record_id, CHANGED_PERSON_ID);
+    assert_eq!(new_owner.resolved_relations[0].label, "Alice changed id");
+}
+
+#[test]
 fn repaired_malformed_owner_keeps_its_id_from_a_same_id_copy() {
     const TARGET_PATH: &str = "people/alice.md";
     const TARGET_OBJECT_ID: &str = "object-3";
@@ -1911,7 +1994,7 @@ fn repaired_malformed_owner_keeps_its_id_from_a_same_id_copy() {
 }
 
 #[test]
-fn resolving_a_conflict_after_an_id_change_preserves_the_original_inbound_relation() {
+fn resolving_a_conflict_after_an_id_change_cleans_the_original_inbound_relation() {
     const TARGET_PATH: &str = "people/alice.md";
     const TARGET_OBJECT_ID: &str = "object-3";
     const CHANGED_ID: &str = "rec_ffffffffffffffffffffffffff";
@@ -1990,11 +2073,13 @@ fn resolving_a_conflict_after_an_id_change_preserves_the_original_inbound_relati
         let TxnOutcome::Committed(resolved) = resolved else {
             panic!("resolved changed-id reconciliation crashed");
         };
-        assert!(
-            resolved.relation_cleanups.is_empty(),
-            "pass {pass} must retain the original relation while its owner object remains: {:?}",
+        assert_eq!(
+            resolved.relation_cleanups.len(),
+            1,
+            "pass {pass} must clean the original id after the conflict no longer retains it: {:?}",
             resolved.relation_cleanups
         );
+        assert_eq!(resolved.relation_cleanups[0].target_record_id, PERSON_ID);
     }
     let binding = store
         .read_with(|conn| {
@@ -2017,7 +2102,7 @@ fn resolving_a_conflict_after_an_id_change_preserves_the_original_inbound_relati
                 |row| row.get::<_, i64>(0),
             )
         })
-        .expect("count original relation after conflict resolution");
+        .expect("count original relation awaiting attributed cleanup");
     assert_eq!(relation_count, 1);
 }
 

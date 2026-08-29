@@ -204,7 +204,7 @@
     },
     {
       "name": "degraded-c1-relation-target-salvages-siblings",
-      "yaml": "fields:\n  title:\n    type: text\n  project:\n    type: relation\n    collection: \"planningprojects\"\n    many: false\n",
+      "yaml": "fields:\n  title:\n    type: text\n  project:\n    type: relation\n    collection: \"planning\u0085projects\"\n    many: false\n",
       "expected": {
         "status": "degraded",
         "schema": {

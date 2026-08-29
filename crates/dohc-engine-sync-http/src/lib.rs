@@ -1390,6 +1390,93 @@ mod tests {
     }
 
     #[test]
+    fn cancelling_a_stalled_tls_blob_body_discards_partial_bytes() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let cert = base64::engine::general_purpose::STANDARD
+            .decode(TEST_CERT_DER_BASE64)
+            .expect("test certificate");
+        let key = base64::engine::general_purpose::STANDARD
+            .decode(TEST_KEY_DER_BASE64)
+            .expect("test key");
+        let server = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![CertificateDer::from(cert)],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key)),
+            )
+            .expect("TLS server config");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("TLS listener");
+        let port = listener.local_addr().expect("TLS address").port();
+        let server = Arc::new(server);
+        let (release_body_tx, release_body_rx) = mpsc::channel();
+        let server_thread = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("TLS accept");
+            let connection = ServerConnection::new(server).expect("TLS connection");
+            let mut stream = StreamOwned::new(connection, stream);
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).expect("TLS request");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 8\r\nconnection: close\r\n\r\npart")
+                .expect("partial TLS blob response");
+            stream.flush().expect("partial TLS blob flush");
+            release_body_rx.recv().expect("release stalled body");
+            let _ = stream.write_all(b"done");
+            let _ = stream.flush();
+        });
+        let tls_config = ureq::tls::TlsConfig::builder()
+            .provider(ureq::tls::TlsProvider::Rustls)
+            .disable_verification(true)
+            .build();
+        let transport = HttpRelayTransport {
+            base_url: format!("https://localhost:{port}"),
+            token: "token".to_owned(),
+            agent: configured_agent(Duration::from_secs(5), false, Some(tls_config)),
+        };
+        let (mid_body_tx, mid_body_rx) = mpsc::channel();
+        let (cancel_tx, cancel_rx) = mpsc::channel();
+        let checks = Arc::new(AtomicUsize::new(0));
+        let request_checks = Arc::clone(&checks);
+        let request_thread = thread::spawn(move || {
+            transport.download_blobs_cancellable(
+                BlobDownloadBatchRequest {
+                    workspace_id: "workspace".to_owned(),
+                    replication_epoch: "epoch".to_owned(),
+                    stream_identity: "stream".to_owned(),
+                    blobs: vec![dohc_engine_sync::BlobDownloadSpec {
+                        sha256: "blob".to_owned(),
+                        limit_bytes: 8,
+                    }],
+                },
+                || {
+                    let check = request_checks.fetch_add(1, Ordering::SeqCst);
+                    if check == 6 {
+                        mid_body_tx.send(()).expect("mid-body signal");
+                        cancel_rx.recv().expect("cancellation signal");
+                    }
+                    check >= 6
+                },
+            )
+        });
+
+        mid_body_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("client checks cancellation after reading partial body");
+        cancel_tx.send(()).expect("cancel stalled download");
+        let outcome = request_thread.join().expect("blob request thread");
+        assert!(
+            matches!(&outcome, Err(RelayError::Local(reason)) if reason == "relay-io-cancelled"),
+            "a cancelled body must not expose the bytes read before cancellation: {outcome:?}"
+        );
+        assert_eq!(checks.load(Ordering::SeqCst), 8);
+
+        release_body_tx.send(()).expect("release TLS server");
+        server_thread.join().expect("TLS server thread");
+    }
+
+    #[test]
     fn loopback_opt_in_disables_https_only_but_still_refuses_redirects() {
         let transport =
             HttpRelayTransport::new_insecure_loopback_for_tests("http://127.0.0.1:1", "token")
