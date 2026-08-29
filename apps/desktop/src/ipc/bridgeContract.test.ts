@@ -629,6 +629,8 @@ describe("owner relay share discussion IPC contract", () => {
 
     const exactEightThousandBytes = `${"\u1100\u1161\u11a8".repeat(888)}abcdefgh`;
     const eightThousandAndOneBytes = "\u1100\u1161\u11a8".repeat(889);
+    const twoThousandAndOneAsciiCodePoints = "a".repeat(2_001);
+    expect(Buffer.byteLength(twoThousandAndOneAsciiCodePoints, "utf8")).toBe(2_001);
     const exact = {
       workspaceId: "workspace-1",
       shareId: "share-1",
@@ -643,6 +645,7 @@ describe("owner relay share discussion IPC contract", () => {
       }).success,
     ).toBe(true);
     for (const malformed of [
+      { ...exact, body: twoThousandAndOneAsciiCodePoints },
       { ...exact, body: "" },
       { ...exact, body: "😀".repeat(2_001) },
       { ...exact, body: eightThousandAndOneBytes },
@@ -706,7 +709,7 @@ describe("owner relay share discussion IPC contract", () => {
       RelayShareDiscussionActivityResponse.parse({ ok: true, ...activity }),
     ).toEqual({ ok: true, ...activity });
 
-    for (const malformed of [
+    const malformedActivity = [
       { ...activity, latestRevision: -1 },
       { ...activity, latestRevision: Number.MAX_SAFE_INTEGER + 1 },
       { ...activity, cursorRevision: Number.MAX_SAFE_INTEGER + 1 },
@@ -723,10 +726,17 @@ describe("owner relay share discussion IPC contract", () => {
       },
       { ...activity, messages: Array.from({ length: 101 }, () => namedLive) },
       { ...activity, credential: "must-not-cross" },
-    ]) {
-      expect(PollRelayShareDiscussionActivityResult.safeParse(malformed).success).toBe(
-        false,
-      );
+    ];
+    for (const malformed of malformedActivity) {
+      for (const parsed of [
+        PollRelayShareDiscussionActivityResult.safeParse(malformed),
+        RelayShareDiscussionActivityResponse.safeParse({
+          ok: true,
+          ...malformed,
+        }),
+      ]) {
+        expect(parsed.success).toBe(false);
+      }
     }
   });
 

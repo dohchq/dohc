@@ -3969,18 +3969,27 @@ const RelayShareDiscussionActivityResultShape = {
   linkCommentsPaused: z.boolean(),
 };
 
+function relayShareDiscussionActivityCursorMatchesProgress(result: {
+  latestRevision: number;
+  cursorRevision: number;
+  hasMore: boolean;
+}): boolean {
+  return result.hasMore
+    ? result.cursorRevision < result.latestRevision
+    : result.cursorRevision === result.latestRevision;
+}
+
+const RELAY_SHARE_DISCUSSION_ACTIVITY_CURSOR_ISSUE = {
+  message: "activity cursor must match the progress flag",
+  path: ["cursorRevision"],
+};
+
 export const PollRelayShareDiscussionActivityResult = z
   .object(RelayShareDiscussionActivityResultShape)
   .strict()
   .refine(
-    (result) =>
-      result.hasMore
-        ? result.cursorRevision < result.latestRevision
-        : result.cursorRevision === result.latestRevision,
-    {
-      message: "activity cursor must match the progress flag",
-      path: ["cursorRevision"],
-    },
+    relayShareDiscussionActivityCursorMatchesProgress,
+    RELAY_SHARE_DISCUSSION_ACTIVITY_CURSOR_ISSUE,
   );
 export type PollRelayShareDiscussionActivityResult = z.infer<
   typeof PollRelayShareDiscussionActivityResult
@@ -3990,14 +3999,8 @@ export const RelayShareDiscussionActivityResponse = z
   .object({ ok: z.literal(true), ...RelayShareDiscussionActivityResultShape })
   .strict()
   .refine(
-    (result) =>
-      result.hasMore
-        ? result.cursorRevision < result.latestRevision
-        : result.cursorRevision === result.latestRevision,
-    {
-      message: "activity cursor must match the progress flag",
-      path: ["cursorRevision"],
-    },
+    relayShareDiscussionActivityCursorMatchesProgress,
+    RELAY_SHARE_DISCUSSION_ACTIVITY_CURSOR_ISSUE,
   );
 
 export const CancelRelayShareDiscussionActivityPayload = z

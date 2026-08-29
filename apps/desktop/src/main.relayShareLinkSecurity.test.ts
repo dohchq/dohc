@@ -17,6 +17,43 @@ function handlerSource(channel: string): string {
   return mainSource.slice(start, next < 0 ? undefined : next);
 }
 
+function guardedRelayResultBoundary(handler: string): {
+  assignedAwaitAt: number;
+  awaitEndAt: number;
+  currentAfterAwaitAt: number;
+} {
+  const assignedAwait = /^(?<indent>[ \t]*)const [A-Za-z_$][A-Za-z0-9_$]* = await awaitCredentialGeneration\(\{/mu.exec(
+    handler,
+  );
+  const indent = assignedAwait?.groups?.indent;
+  if (!assignedAwait || indent === undefined) {
+    throw new Error("Missing assigned credential-generation operation");
+  }
+  const awaitEndToken = `\n${indent}});`;
+  const currentToken = `\n${indent}operation.assertCurrent();`;
+  const currentAfterAwaitAt = handler.indexOf(
+    currentToken,
+    assignedAwait.index + assignedAwait[0].length,
+  );
+  if (currentAfterAwaitAt < 0) {
+    throw new Error("Missing currentness assertion after credential generation");
+  }
+  const awaitEndAt = handler.lastIndexOf(awaitEndToken, currentAfterAwaitAt);
+  if (awaitEndAt < assignedAwait.index) {
+    throw new Error("Missing assigned credential-generation boundary");
+  }
+  if (
+    handler.slice(awaitEndAt + awaitEndToken.length, currentAfterAwaitAt).trim()
+  ) {
+    throw new Error("Currentness assertion does not follow credential generation");
+  }
+  return {
+    assignedAwaitAt: assignedAwait.index,
+    awaitEndAt,
+    currentAfterAwaitAt,
+  };
+}
+
 const newOwnerDiscussionChannels = [
   "listRelayShareDiscussion",
   "pollRelayShareDiscussionActivity",
@@ -373,17 +410,32 @@ describe("main-process owner relay share authorization", () => {
       ...newOwnerDiscussionChannels,
     ]) {
       const handler = handlerSource(channel);
-      const relayAt = handler.indexOf("relayShareJsonWithCredentials");
-      const awaitEnd = handler.indexOf("});", relayAt);
-      const currentAfterAwait = handler.indexOf(
-        "operation.assertCurrent();",
-        awaitEnd,
+      const boundary = guardedRelayResultBoundary(handler);
+      const relayAt = handler.indexOf(
+        "relayShareJsonWithCredentials",
+        boundary.assignedAwaitAt,
       );
-      const successParse = handler.indexOf("safeParse(", currentAfterAwait);
+      const successParse = handler.indexOf("safeParse(", boundary.assignedAwaitAt);
       expect(relayAt, channel).toBeGreaterThan(-1);
-      expect(currentAfterAwait, channel).toBeGreaterThan(awaitEnd);
-      expect(successParse, channel).toBeGreaterThan(currentAfterAwait);
+      expect(boundary.awaitEndAt, channel).toBeGreaterThan(relayAt);
+      expect(boundary.currentAfterAwaitAt, channel).toBeGreaterThan(
+        boundary.awaitEndAt,
+      );
+      expect(successParse, channel).toBeGreaterThan(boundary.currentAfterAwaitAt);
     }
+
+    const handlerWithNestedCloseToken = handlerSource("addRelayShareLink").replace(
+      "relayShareJsonWithCredentials<unknown>(",
+      "relayShareJsonWithCredentials<unknown>(\n              /* nested }); token */",
+    );
+    const nestedBoundary = guardedRelayResultBoundary(handlerWithNestedCloseToken);
+    const nestedRelayAt = handlerWithNestedCloseToken.indexOf(
+      "relayShareJsonWithCredentials",
+      nestedBoundary.assignedAwaitAt,
+    );
+    expect(
+      handlerWithNestedCloseToken.indexOf("});", nestedRelayAt),
+    ).toBeLessThan(nestedBoundary.awaitEndAt);
   });
 
   it("owns each discussion activity park by window and poll id and fences its parsed body", () => {

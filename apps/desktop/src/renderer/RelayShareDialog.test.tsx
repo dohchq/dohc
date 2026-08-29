@@ -2166,9 +2166,10 @@ describe("RelayShareDialog", () => {
       within(dependentRow).getByRole("button", { name: "Make independent" }),
     );
     await user.click(
-      within(group)
-        .getByTestId("owner-comments-confirmation")
-        .querySelector<HTMLButtonElement>('button[type="button"]:last-child')!,
+      within(within(group).getByTestId("owner-comments-confirmation")).getByRole(
+        "button",
+        { name: "Make independent" },
+      ),
     );
 
     expect(bridgeMock.promoteRelayShareGrant).toHaveBeenCalledWith({
@@ -2967,7 +2968,6 @@ describe("RelayShareDialog", () => {
     expect(within(group).getByText(hostileName)).toBeTruthy();
     expect(within(group).getByText("**literal Markdown**")).toBeTruthy();
     expect(group.querySelector("a, img, script, svg, [href]")).toBeNull();
-    expect(group.querySelector("[dangerouslySetInnerHTML]")).toBeNull();
   });
 
   it("lets a newer read win and refuses an append after Close", async () => {
@@ -3639,10 +3639,12 @@ describe("RelayShareDialog", () => {
         .getByRole("button", { name: "Make independent" }),
     );
     await user.click(
-      within(groupA)
-        .getByTestId("owner-comments-confirmation")
-        .querySelector<HTMLButtonElement>('button[type="button"]:last-child')!,
+      within(within(groupA).getByTestId("owner-comments-confirmation")).getByRole(
+        "button",
+        { name: "Make independent" },
+      ),
     );
+    expect(bridgeMock.promoteRelayShareGrant).toHaveBeenCalledTimes(1);
 
     view.rerender(
       <RelayShareDialog
@@ -3674,8 +3676,10 @@ describe("RelayShareDialog", () => {
       within(independent).getByRole("button", { name: "End access" }),
     );
     await user.click(
-      within(groupB).getByTestId("owner-comments-confirmation")
-        .querySelector<HTMLButtonElement>('button[type="button"]:last-child')!,
+      within(within(groupB).getByTestId("owner-comments-confirmation")).getByRole(
+        "button",
+        { name: "End access" },
+      ),
     );
     const callsBeforeUnmount = bridgeMock.listRelayShares.mock.calls.length;
     view.unmount();
