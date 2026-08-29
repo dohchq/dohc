@@ -1857,6 +1857,7 @@ describe("share-web protected discussion proxy", () => {
   it("refuses invalid append transports and session bindings before the relay", async () => {
     let now = 1_000;
     let discussionCalls = 0;
+    const forwardedAppends: string[] = [];
     const handler = createShareWebHandler({
       relayUrl: "http://relay.test",
       relayExchangeKey: "discussion-relay-key",
@@ -1874,6 +1875,7 @@ describe("share-web protected discussion proxy", () => {
           });
         }
         discussionCalls += 1;
+        forwardedAppends.push(await relayRequest.clone().text());
         return Response.json(publicMessage("accepted"));
       },
     });
@@ -1884,24 +1886,41 @@ describe("share-web protected discussion proxy", () => {
       ...sessionHeaders(session, cookies),
       "content-type": "application/json",
     };
-    const emptyBodyBytes = Buffer.byteLength(
-      JSON.stringify({ body: "", idempotencyKey: "cap" }),
+    const maximumBody = "🙂".repeat(2_000);
+    const maximumText = JSON.stringify({
+      body: maximumBody,
+      claimedName: "🙂".repeat(40),
+      idempotencyKey: '"'.repeat(64),
+    });
+    expect(Buffer.byteLength(maximumBody)).toBe(8_000);
+    expect(Buffer.byteLength(maximumText)).toBeGreaterThan(8_000);
+    const maximum = await handler(
+      request("/api/view/discussion", {
+        method: "POST",
+        headers,
+        body: maximumText,
+      }),
     );
-    const remaining = 8_000 - emptyBodyBytes;
-    const exactBody = "😀".repeat(Math.floor(remaining / 4)) + "x".repeat(remaining % 4);
-    const exactText = JSON.stringify({ body: exactBody, idempotencyKey: "cap" });
-    expect(Buffer.byteLength(exactText)).toBe(8_000);
-    expect(
-      (
-        await handler(
-          request("/api/view/discussion", {
-            method: "POST",
-            headers,
-            body: exactText,
-          }),
-        )
-      ).status,
-    ).toBe(200);
+    expect(maximum.status).toBe(200);
+    expect(discussionCalls).toBe(1);
+    expect(forwardedAppends).toEqual([maximumText]);
+
+    const oversizedText = JSON.stringify({
+      body: "x".repeat(16 * 1_024),
+      idempotencyKey: "oversized-transport",
+    });
+    expect(Buffer.byteLength(oversizedText)).toBeGreaterThan(16 * 1_024);
+    const oversized = await handler(
+      request("/api/view/discussion", {
+        method: "POST",
+        headers,
+        body: oversizedText,
+      }),
+    );
+    expect({ status: oversized.status, body: await oversized.text() }).toEqual({
+      status: 404,
+      body: shareWebRefusalBody,
+    });
     expect(discussionCalls).toBe(1);
 
     const mismatchedSession = "mismatch1234";
@@ -1926,7 +1945,7 @@ describe("share-web protected discussion proxy", () => {
       request("/api/view/discussion", {
         method: "POST",
         headers,
-        body: `${exactText} `,
+        body: `${maximumText} trailing-garbage`,
       }),
       request("/api/view/discussion", {
         method: "POST",

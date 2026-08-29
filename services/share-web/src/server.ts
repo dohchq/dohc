@@ -16,7 +16,7 @@ export const SHARE_WEB_SECURITY_HEADERS = Object.freeze({
 
 const REFUSAL_BODY = JSON.stringify({ ok: false, error: "not found" });
 const MAX_EXCHANGE_BODY_BYTES = 8 * 1024;
-const MAX_DISCUSSION_BODY_BYTES = 8_000;
+const MAX_DISCUSSION_ENVELOPE_BYTES = 16 * 1024;
 export const EXCHANGE_BUCKET_CAPACITY = 12;
 const EXCHANGE_REFILL_PER_SECOND = 0.2;
 const EXCHANGE_MAX_IPS = 10_000;
@@ -334,7 +334,7 @@ async function exchangeInput(request: Request): Promise<string | null> {
 async function discussionInput(request: Request): Promise<string | null> {
   try {
     const text = await request.text();
-    if (Buffer.byteLength(text, "utf8") > MAX_DISCUSSION_BODY_BYTES) return null;
+    if (Buffer.byteLength(text, "utf8") > MAX_DISCUSSION_ENVELOPE_BYTES) return null;
     const input: unknown = JSON.parse(text);
     if (!input || typeof input !== "object" || Array.isArray(input)) return null;
     const body = input as Record<string, unknown>;

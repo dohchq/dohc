@@ -17,7 +17,6 @@ import { EXCHANGE_BUCKET_CAPACITY, shareWebRefusalBody } from "./server";
 const PUBLIC_HOST = "share.example.test";
 const MAX_REQUEST_BODY_BYTES = 16 * 1024;
 const MAX_EXCHANGE_BODY_BYTES = 8 * 1024;
-const MAX_DISCUSSION_BODY_BYTES = 8_000;
 const EXCHANGE_SECRET = Buffer.alloc(32, 11).toString("base64url");
 const CAPABILITY_TOKEN = Buffer.alloc(32, 12).toString("base64url");
 const RELAY_EXCHANGE_KEY = "share-web-discussion-integration-key";
@@ -380,13 +379,14 @@ describe("share-web Node request adapter", () => {
       relayUrl,
     });
     const session = await exchangeSession(server.port);
-    const emptyBodyBytes = Buffer.byteLength(
-      JSON.stringify({ body: "", idempotencyKey: "adapter-cap" }),
-    );
-    const remaining = MAX_DISCUSSION_BODY_BYTES - emptyBodyBytes;
-    const body = "😀".repeat(Math.floor(remaining / 4)) + "x".repeat(remaining % 4);
-    const exactBody = JSON.stringify({ body, idempotencyKey: "adapter-cap" });
-    expect(Buffer.byteLength(exactBody)).toBe(MAX_DISCUSSION_BODY_BYTES);
+    const maximumBody = "🙂".repeat(2_000);
+    const maximumText = JSON.stringify({
+      body: maximumBody,
+      claimedName: "🙂".repeat(40),
+      idempotencyKey: '"'.repeat(64),
+    });
+    expect(Buffer.byteLength(maximumBody)).toBe(8_000);
+    expect(Buffer.byteLength(maximumText)).toBeGreaterThan(8_000);
     const headers = {
       host: PUBLIC_HOST,
       cookie: `${session.cookie}; ${session.profileCookie}`,
@@ -398,22 +398,25 @@ describe("share-web Node request adapter", () => {
       method: "POST",
       headers: {
         ...headers,
-        "content-length": Buffer.byteLength(exactBody),
+        "content-length": Buffer.byteLength(maximumText),
       },
-      body: exactBody,
+      body: maximumText,
     });
     expect(accepted.statusCode).toBe(200);
     await readResponse(accepted);
     expect(discussions).toHaveLength(1);
     expect(discussions[0]).toMatchObject({
       authorization: `LinkCapability ${CAPABILITY_TOKEN}`,
-      body: Buffer.from(exactBody),
+      body: Buffer.from(maximumText),
       exchangeKey: RELAY_EXCHANGE_KEY,
       profileSecret: session.profileCookie.split("=", 2)[1],
     });
 
-    const oversizedBody = `${exactBody} `;
-    expect(Buffer.byteLength(oversizedBody)).toBe(MAX_DISCUSSION_BODY_BYTES + 1);
+    const oversizedBody = JSON.stringify({
+      body: "x".repeat(MAX_REQUEST_BODY_BYTES),
+      idempotencyKey: "adapter-oversized-transport",
+    });
+    expect(Buffer.byteLength(oversizedBody)).toBeGreaterThan(MAX_REQUEST_BODY_BYTES);
     const refused = await sendHttpRequest(server.port, "/api/view/discussion", {
       method: "POST",
       headers: {
