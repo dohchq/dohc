@@ -34,6 +34,16 @@
       "expected": {
         "title": "EOF trailing whitespace"
       }
+    },
+    {
+      "name": "empty-frontmatter-is-empty-map",
+      "markdown": "---\n---",
+      "expected": {}
+    },
+    {
+      "name": "comment-only-frontmatter-is-empty-map",
+      "markdown": "---\n# note\n---",
+      "expected": {}
     }
   ]
 }

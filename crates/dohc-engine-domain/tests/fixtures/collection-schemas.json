@@ -203,6 +203,30 @@
       }
     },
     {
+      "name": "degraded-c1-relation-target-salvages-siblings",
+      "yaml": "fields:\n  title:\n    type: text\n  project:\n    type: relation\n    collection: \"planningprojects\"\n    many: false\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [
+            {
+              "name": "title",
+              "type": "text"
+            }
+          ],
+          "views": []
+        },
+        "reasons": [
+          {
+            "code": "invalid-relation-target",
+            "path": "/fields/project/collection"
+          }
+        ]
+      }
+    },
+    {
       "name": "degraded-shapes-return-structured-reasons",
       "yaml": "name: 42\nextra: ignored\nfields:\n  id:\n    type: text\n  status:\n    type: select\n    options: [Active, Active, 3]\n  relation:\n    type: relation\n    collection: teams/people\n    many: yes\nviews:\n  - name: Broken references\n    kind: board\n    groupBy: missing\n    sort:\n      - field: status\n        direction: sideways\n    visibleFields: [status, missing, status]\n",
       "expected": {

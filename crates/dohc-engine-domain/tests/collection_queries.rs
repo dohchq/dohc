@@ -2,10 +2,11 @@ use dohc_engine_domain::{
     CollectionFilter, CollectionFilterOperator, CollectionIndexedValueValidation,
     CollectionPendingAdoptionCursor, CollectionQuery, CollectionSchemaReasonCode,
     CollectionSchemaStatus, CollectionSort, DomainError, MAX_COLLECTION_HISTORY_LIMIT,
-    MAX_COLLECTION_QUERY_SORTS, NoFaults, TxnOutcome, VersionedTextStore, ViewSortDirection,
-    WriteText, get_collection, get_collection_record, index_collection_frontmatter_apply_in_tx,
-    list_collections, list_pending_collection_adoptions, parse_collection_schema,
-    query_collection_records, reconcile_collections_in_tx, set_collection_adoption_state_in_tx,
+    MAX_COLLECTION_QUERY_SORTS, NoFaults, RenameTextFile, TxnOutcome, VersionedTextStore,
+    ViewSortDirection, WriteText, collection_record_markdown_with_id, get_collection,
+    get_collection_record, index_collection_frontmatter_apply_in_tx, list_collections,
+    list_pending_collection_adoptions, parse_collection_schema, query_collection_records,
+    reconcile_collections_in_tx, set_collection_adoption_state_in_tx,
     synchronize_collection_frontmatter_index_in_tx,
 };
 use dohc_engine_storage::{EngineStore, StorageError};
@@ -347,6 +348,369 @@ fn reconcile_indexes_fields_added_after_frontmatterless_record_adoption() {
             "validation for {field}"
         );
     }
+}
+
+#[test]
+fn empty_frontmatter_record_is_adopted_with_only_the_minted_id() {
+    let (_scratch, mut store) = fresh_store();
+    write_text(&mut store, "tasks/collection.yaml", "name: Tasks\n", 2).expect("task schema");
+    let empty_frontmatter = "---\n---";
+    write_text_for_object(
+        &mut store,
+        "tasks/empty.md",
+        empty_frontmatter,
+        "empty-frontmatter-object",
+        "empty-frontmatter-record",
+        3,
+    )
+    .expect("empty-frontmatter record");
+
+    let reconciled = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile empty-frontmatter record");
+    let TxnOutcome::Committed(reconciled) = reconciled else {
+        panic!("empty-frontmatter reconciliation did not commit");
+    };
+    let adoption = reconciled
+        .adoptions
+        .iter()
+        .find(|candidate| candidate.file_path == "tasks/empty.md")
+        .expect("empty-frontmatter record adoption");
+    assert!(adoption.lossless_insertion_required);
+    assert_eq!(
+        collection_record_markdown_with_id(empty_frontmatter, &adoption.record_id),
+        Some(format!("---\nid: {}\n---", adoption.record_id))
+    );
+}
+
+#[test]
+fn changing_an_adopted_record_id_rebuilds_its_field_index_under_the_new_id() {
+    const RECORD_OBJECT_ID: &str = "changed-id-record-object";
+    let (_scratch, mut store) = fresh_store();
+    write_text(
+        &mut store,
+        "tasks/collection.yaml",
+        "fields:\n  status:\n    type: text\n",
+        2,
+    )
+    .expect("task schema");
+    write_text_for_object(
+        &mut store,
+        "tasks/alpha.md",
+        &format!("---\nid: {FIRST_TASK_ID}\nstatus: before\n---\n"),
+        RECORD_OBJECT_ID,
+        "changed-id-record",
+        3,
+    )
+    .expect("record with original id");
+
+    let indexed = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("index record with original id");
+    assert!(matches!(indexed, TxnOutcome::Committed(_)));
+    let adopted = store
+        .write_with(&NoFaults, |tx| {
+            set_collection_adoption_state_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                "tasks/alpha.md",
+                FIRST_TASK_ID,
+                "adopted",
+            )
+        })
+        .expect("adopt record with original id");
+    assert!(matches!(adopted, TxnOutcome::Committed(())));
+
+    write_text_for_object(
+        &mut store,
+        "tasks/alpha.md",
+        &format!("---\nid: {SECOND_TASK_ID}\nstatus: after\n---\n"),
+        RECORD_OBJECT_ID,
+        "replace-record-id",
+        4,
+    )
+    .expect("replace record id");
+    let reconciled = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile replaced record id");
+    assert!(matches!(reconciled, TxnOutcome::Committed(_)));
+
+    let query = store
+        .read_with(|conn| {
+            query_collection_records(conn, WORKSPACE_ID, "tasks", &CollectionQuery::default())
+        })
+        .expect("query record under replacement id")
+        .expect("tasks collection");
+    assert_eq!(query.records.len(), 1);
+    let record = &query.records[0];
+    assert_eq!(record.id, SECOND_TASK_ID);
+    assert_eq!(record.path, "tasks/alpha.md");
+    let status = record
+        .values
+        .iter()
+        .find(|value| value.field == "status")
+        .expect("status indexed under replacement id");
+    assert_eq!(status.value, json!("after"));
+    assert_eq!(status.validation, CollectionIndexedValueValidation::Valid);
+}
+
+#[test]
+fn changed_id_owner_malformed_then_same_id_copy_keeps_changed_id_reserved() {
+    const OWNER_OBJECT_ID: &str = "changed-id-malformed-owner";
+    const COPY_OBJECT_ID: &str = "changed-id-malformed-copy";
+    const OWNER_PATH: &str = "tasks/owner.md";
+    const COPY_PATH: &str = "tasks/copy.md";
+    let (_scratch, mut store) = fresh_store();
+    write_text(&mut store, "tasks/collection.yaml", "name: Tasks\n", 2).expect("task schema");
+    write_text_for_object(
+        &mut store,
+        OWNER_PATH,
+        &format!("---\nid: {FIRST_TASK_ID}\nTitle: Owner\n---\n"),
+        OWNER_OBJECT_ID,
+        "changed-id-owner-original",
+        3,
+    )
+    .expect("original owner record");
+    let indexed = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile original owner");
+    assert!(matches!(indexed, TxnOutcome::Committed(_)));
+    let adopted = store
+        .write_with(&NoFaults, |tx| {
+            set_collection_adoption_state_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                OWNER_PATH,
+                FIRST_TASK_ID,
+                "adopted",
+            )
+        })
+        .expect("adopt original owner");
+    assert!(matches!(adopted, TxnOutcome::Committed(())));
+
+    write_text_for_object(
+        &mut store,
+        OWNER_PATH,
+        &format!("---\nid: {SECOND_TASK_ID}\nTitle: Changed id\n---\n"),
+        OWNER_OBJECT_ID,
+        "change-owner-id-before-malformed",
+        4,
+    )
+    .expect("change owner id");
+    let changed = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile changed owner id");
+    assert!(matches!(changed, TxnOutcome::Committed(_)));
+
+    write_text_for_object(
+        &mut store,
+        OWNER_PATH,
+        "---\nid: [\n---\n",
+        OWNER_OBJECT_ID,
+        "malform-changed-id-owner",
+        5,
+    )
+    .expect("malform changed-id owner");
+    let malformed = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile malformed changed-id owner");
+    assert!(matches!(malformed, TxnOutcome::Committed(_)));
+
+    write_text_for_object(
+        &mut store,
+        COPY_PATH,
+        &format!("---\nid: {SECOND_TASK_ID}\nTitle: Copy\n---\n"),
+        COPY_OBJECT_ID,
+        "copy-changed-id-owner",
+        6,
+    )
+    .expect("copy changed owner id");
+    let copied = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile copy of changed-id owner");
+    assert!(matches!(copied, TxnOutcome::Committed(_)));
+    let copy_id = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT record_id FROM collection_records \
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                params![WORKSPACE_ID, VERSION_ID, COPY_OBJECT_ID],
+                |row| row.get::<_, String>(0),
+            )
+        })
+        .expect("copy binding after changed-id owner became malformed");
+    assert_ne!(
+        copy_id, SECOND_TASK_ID,
+        "the malformed owner still reserves its changed id"
+    );
+}
+
+#[test]
+fn rename_and_same_id_copy_keep_identity_and_history_with_the_original_object() {
+    const ORIGINAL_OBJECT_ID: &str = "rename-owner-object";
+    const COPY_OBJECT_ID: &str = "same-id-copy-object";
+    const ORIGINAL_PATH: &str = "tasks/original.md";
+    const RENAMED_PATH: &str = "tasks/z-original.md";
+    const COPY_PATH: &str = "tasks/a-copy.md";
+    let (_scratch, mut store) = fresh_store();
+    write_text(
+        &mut store,
+        "tasks/collection.yaml",
+        "fields:\n  Title:\n    type: text\n",
+        2,
+    )
+    .expect("task schema");
+    write_text_for_object(
+        &mut store,
+        ORIGINAL_PATH,
+        &format!("---\nid: {FIRST_TASK_ID}\nTitle: Before\n---\n"),
+        ORIGINAL_OBJECT_ID,
+        "rename-owner-record",
+        3,
+    )
+    .expect("original record");
+    let indexed = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("index original record");
+    assert!(matches!(indexed, TxnOutcome::Committed(_)));
+    let adopted = store
+        .write_with(&NoFaults, |tx| {
+            set_collection_adoption_state_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                ORIGINAL_PATH,
+                FIRST_TASK_ID,
+                "adopted",
+            )
+        })
+        .expect("adopt original record");
+    assert!(matches!(adopted, TxnOutcome::Committed(())));
+
+    let before = json!({ "id": FIRST_TASK_ID, "Title": "Before" });
+    let after = json!({ "id": FIRST_TASK_ID, "Title": "Edited" });
+    write_text_for_object(
+        &mut store,
+        ORIGINAL_PATH,
+        &format!("---\nid: {FIRST_TASK_ID}\nTitle: Edited\n---\n"),
+        ORIGINAL_OBJECT_ID,
+        "edit-before-rename",
+        4,
+    )
+    .expect("edit original record");
+    let history_added = store
+        .write_with(&NoFaults, |tx| {
+            index_collection_frontmatter_apply_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                ORIGINAL_OBJECT_ID,
+                &before,
+                &after,
+                &before,
+                &after,
+                Some("editor"),
+                4,
+            )
+        })
+        .expect("record original field history");
+    assert!(matches!(history_added, TxnOutcome::Committed(())));
+
+    VersionedTextStore::new(&mut store)
+        .rename_text_file(
+            &RenameTextFile {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                version_id: VERSION_ID.to_owned(),
+                from_path: ORIGINAL_PATH.to_owned(),
+                to_path: RENAMED_PATH.to_owned(),
+                moment_id: "rename-original-record".to_owned(),
+                request_id: None,
+                metadata_origin: "test".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 5,
+            },
+            &NoFaults,
+        )
+        .expect("rename original record");
+    write_text_for_object(
+        &mut store,
+        COPY_PATH,
+        &format!("---\nid: {FIRST_TASK_ID}\nTitle: Copy\n---\n"),
+        COPY_OBJECT_ID,
+        "capture-same-id-copy",
+        6,
+    )
+    .expect("capture same-id copy");
+
+    let reconciled = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile rename and same-id copy together");
+    assert!(matches!(reconciled, TxnOutcome::Committed(_)));
+    let bindings = store
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT record_id,file_path,object_id FROM collection_records \
+                 WHERE workspace_id=?1 AND version_id=?2 AND collection_path='tasks' \
+                 ORDER BY file_path",
+            )?;
+            statement
+                .query_map(params![WORKSPACE_ID, VERSION_ID], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .expect("load rename and copy bindings");
+    assert_eq!(bindings.len(), 2);
+    let original = bindings
+        .iter()
+        .find(|(_, _, object_id)| object_id == ORIGINAL_OBJECT_ID)
+        .expect("renamed original binding");
+    assert_eq!(original.0, FIRST_TASK_ID);
+    assert_eq!(original.1, RENAMED_PATH);
+    let copy = bindings
+        .iter()
+        .find(|(_, _, object_id)| object_id == COPY_OBJECT_ID)
+        .expect("copy binding");
+    assert_ne!(copy.0, FIRST_TASK_ID, "the copy must receive a fresh id");
+    assert_eq!(copy.1, COPY_PATH);
+
+    let details = store
+        .read_with(|conn| {
+            get_collection_record(conn, WORKSPACE_ID, "tasks", FIRST_TASK_ID, 10, None)
+        })
+        .expect("get original record after rename")
+        .expect("original record identity survives rename");
+    assert_eq!(details.record.path, RENAMED_PATH);
+    assert_eq!(details.history.len(), 1);
+    assert_eq!(details.history[0].field, "Title");
+    assert_eq!(details.history[0].previous.value, Some(json!("Before")));
+    assert_eq!(details.history[0].next.value, Some(json!("Edited")));
 }
 
 #[test]
@@ -1234,6 +1598,693 @@ fn conflicted_files_surface_the_pending_record_in_query_and_get_record() {
         .expect("get contended record")
         .expect("contended record exists");
     assert!(record.record.conflicted);
+}
+
+#[test]
+fn malformed_present_relation_target_preserves_inbound_relation_through_repair() {
+    let (_scratch, mut store) = seeded_store();
+    let adopted = store
+        .write_with(&NoFaults, |tx| {
+            set_collection_adoption_state_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                "people/alice.md",
+                PERSON_ID,
+                "adopted",
+            )
+        })
+        .expect("adopt relation target");
+    assert!(matches!(adopted, TxnOutcome::Committed(())));
+
+    let relation_count = |store: &EngineStore| {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM collection_relation_edges \
+                     WHERE workspace_id=?1 AND version_id=?2 AND source_record_id=?3 \
+                       AND target_record_id=?4",
+                    params![WORKSPACE_ID, VERSION_ID, FIRST_TASK_ID, PERSON_ID],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .expect("count inbound relation")
+    };
+    assert_eq!(relation_count(&store), 1);
+
+    write_text_for_object(
+        &mut store,
+        "people/alice.md",
+        "---\nid: [\n---\n",
+        "object-3",
+        "malformed-relation-target",
+        50,
+    )
+    .expect("write malformed relation target");
+    let malformed = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile malformed relation target");
+    let TxnOutcome::Committed(malformed) = malformed else {
+        panic!("malformed relation target reconciliation crashed");
+    };
+    assert!(
+        malformed.relation_cleanups.is_empty(),
+        "a present malformed target must defer dangling-relation cleanup: {:?}",
+        malformed.relation_cleanups
+    );
+    assert_eq!(relation_count(&store), 1);
+
+    write_text_for_object(
+        &mut store,
+        "people/alice.md",
+        &format!("---\nid: {PERSON_ID}\ntitle: Alice repaired\n---\n"),
+        "object-3",
+        "repaired-relation-target",
+        51,
+    )
+    .expect("repair relation target");
+    let repaired = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile repaired relation target");
+    let TxnOutcome::Committed(repaired) = repaired else {
+        panic!("repaired relation target reconciliation crashed");
+    };
+    assert!(repaired.relation_cleanups.is_empty());
+    assert_eq!(relation_count(&store), 1);
+}
+
+#[test]
+fn malformed_relation_target_renamed_within_its_collection_preserves_inbound_relation() {
+    const ORIGINAL_PATH: &str = "people/alice.md";
+    const RENAMED_PATH: &str = "people/alice-renamed.md";
+    const TARGET_OBJECT_ID: &str = "object-3";
+    let (_scratch, mut store) = seeded_store();
+    let adopted = store
+        .write_with(&NoFaults, |tx| {
+            set_collection_adoption_state_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                ORIGINAL_PATH,
+                PERSON_ID,
+                "adopted",
+            )
+        })
+        .expect("adopt relation target before malformed rename");
+    assert!(matches!(adopted, TxnOutcome::Committed(())));
+
+    write_text_for_object(
+        &mut store,
+        ORIGINAL_PATH,
+        "---\nid: [\n---\n",
+        TARGET_OBJECT_ID,
+        "malformed-target-before-rename",
+        50,
+    )
+    .expect("write malformed relation target before rename");
+    let malformed = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile malformed relation target before rename");
+    let TxnOutcome::Committed(malformed) = malformed else {
+        panic!("malformed relation target reconciliation crashed");
+    };
+    assert!(malformed.relation_cleanups.is_empty());
+
+    VersionedTextStore::new(&mut store)
+        .rename_text_file(
+            &RenameTextFile {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                version_id: VERSION_ID.to_owned(),
+                from_path: ORIGINAL_PATH.to_owned(),
+                to_path: RENAMED_PATH.to_owned(),
+                moment_id: "rename-malformed-relation-target".to_owned(),
+                request_id: None,
+                metadata_origin: "test".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 51,
+            },
+            &NoFaults,
+        )
+        .expect("rename malformed relation target");
+    let renamed = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile renamed malformed relation target");
+    let TxnOutcome::Committed(renamed) = renamed else {
+        panic!("renamed malformed relation target reconciliation crashed");
+    };
+    assert!(
+        renamed.relation_cleanups.is_empty(),
+        "a malformed target renamed within its collection still owns its id: {:?}",
+        renamed.relation_cleanups
+    );
+    let relation_count = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM collection_relation_edges \
+                 WHERE workspace_id=?1 AND version_id=?2 AND source_record_id=?3 \
+                   AND target_record_id=?4",
+                params![WORKSPACE_ID, VERSION_ID, FIRST_TASK_ID, PERSON_ID],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .expect("count relation after malformed target rename");
+    assert_eq!(relation_count, 1);
+
+    write_text_for_object(
+        &mut store,
+        RENAMED_PATH,
+        &format!("---\nid: {PERSON_ID}\nName: Alice repaired\n---\n"),
+        TARGET_OBJECT_ID,
+        "repair-renamed-malformed-target",
+        52,
+    )
+    .expect("repair renamed malformed target");
+    let repaired = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile repaired renamed target");
+    let TxnOutcome::Committed(repaired) = repaired else {
+        panic!("repaired renamed target reconciliation crashed");
+    };
+    assert!(repaired.relation_cleanups.is_empty());
+}
+
+#[test]
+fn repaired_malformed_owner_keeps_its_id_from_a_same_id_copy() {
+    const TARGET_PATH: &str = "people/alice.md";
+    const TARGET_OBJECT_ID: &str = "object-3";
+    const COPY_PATH: &str = "people/alice-copy.md";
+    const COPY_OBJECT_ID: &str = "malformed-owner-copy-object";
+    let (_scratch, mut store) = seeded_store();
+    let adopted = store
+        .write_with(&NoFaults, |tx| {
+            set_collection_adoption_state_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                TARGET_PATH,
+                PERSON_ID,
+                "adopted",
+            )
+        })
+        .expect("adopt target before malformed copy sequence");
+    assert!(matches!(adopted, TxnOutcome::Committed(())));
+
+    write_text_for_object(
+        &mut store,
+        TARGET_PATH,
+        &format!("---\nid: {PERSON_ID}\nName: Alice revised\n---\n"),
+        TARGET_OBJECT_ID,
+        "valid-target-before-malformed-copy",
+        50,
+    )
+    .expect("write valid target revision");
+    let valid = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile valid target revision");
+    assert!(matches!(valid, TxnOutcome::Committed(_)));
+
+    write_text_for_object(
+        &mut store,
+        TARGET_PATH,
+        "---\nid: [\n---\n",
+        TARGET_OBJECT_ID,
+        "malformed-owner-before-copy",
+        51,
+    )
+    .expect("write malformed owner");
+    let malformed = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile malformed owner");
+    let TxnOutcome::Committed(malformed) = malformed else {
+        panic!("malformed owner reconciliation crashed");
+    };
+    assert!(malformed.relation_cleanups.is_empty());
+
+    write_text_for_object(
+        &mut store,
+        COPY_PATH,
+        &format!("---\nid: {PERSON_ID}\nName: Alice copy\n---\n"),
+        COPY_OBJECT_ID,
+        "same-id-copy-while-owner-malformed",
+        52,
+    )
+    .expect("write same-id copy while owner is malformed");
+    let copied = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile same-id copy while owner is malformed");
+    let TxnOutcome::Committed(copied) = copied else {
+        panic!("same-id copy reconciliation crashed");
+    };
+    assert!(copied.relation_cleanups.is_empty());
+    let copy_id_while_malformed = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT record_id FROM collection_records \
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                params![WORKSPACE_ID, VERSION_ID, COPY_OBJECT_ID],
+                |row| row.get::<_, String>(0),
+            )
+        })
+        .expect("copy binding while original is malformed");
+    assert_ne!(copy_id_while_malformed, PERSON_ID);
+
+    write_text_for_object(
+        &mut store,
+        TARGET_PATH,
+        &format!("---\nid: {PERSON_ID}\nName: Alice repaired\n---\n"),
+        TARGET_OBJECT_ID,
+        "repair-owner-after-same-id-copy",
+        53,
+    )
+    .expect("repair original owner after copy");
+    let repaired = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile repaired original owner after copy");
+    let TxnOutcome::Committed(repaired) = repaired else {
+        panic!("repaired original owner reconciliation crashed");
+    };
+    assert!(repaired.relation_cleanups.is_empty());
+    let bindings = store
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT record_id,object_id FROM collection_records \
+                 WHERE workspace_id=?1 AND version_id=?2 AND collection_path='people' \
+                 ORDER BY object_id",
+            )?;
+            statement
+                .query_map(params![WORKSPACE_ID, VERSION_ID], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .expect("load repaired owner and copy bindings");
+    let target = bindings
+        .iter()
+        .find(|(_, object_id)| object_id == TARGET_OBJECT_ID)
+        .expect("repaired owner binding");
+    assert_eq!(target.0, PERSON_ID);
+    let copy = bindings
+        .iter()
+        .find(|(_, object_id)| object_id == COPY_OBJECT_ID)
+        .expect("same-id copy binding after repair");
+    assert_ne!(copy.0, PERSON_ID);
+}
+
+#[test]
+fn resolving_a_conflict_after_an_id_change_preserves_the_original_inbound_relation() {
+    const TARGET_PATH: &str = "people/alice.md";
+    const TARGET_OBJECT_ID: &str = "object-3";
+    const CHANGED_ID: &str = "rec_ffffffffffffffffffffffffff";
+    let (_scratch, mut store) = seeded_store();
+    let adopted = store
+        .write_with(&NoFaults, |tx| {
+            set_collection_adoption_state_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                TARGET_PATH,
+                PERSON_ID,
+                "adopted",
+            )
+        })
+        .expect("adopt target before conflict resolution sequence");
+    assert!(matches!(adopted, TxnOutcome::Committed(())));
+
+    let conflict_opened = store
+        .write_with(&NoFaults, |tx| -> Result<(), StorageError> {
+            tx.execute(
+                "INSERT INTO conflicts (\
+                    workspace_id, conflict_id, path, target_version_id, source_version_id, \
+                    created_at_ms, updated_at_ms, status, chosen_from, metadata_origin, \
+                    base_exists, base_path, current_exists, current_path, current_object_id, \
+                    incoming_exists, incoming_path, incoming_object_id\
+                 ) VALUES (?1, 'resolve-after-id-change', ?2, ?3, ?3, \
+                    50, 50, 'open', 'current', 'sync', \
+                    0, ?2, 1, ?2, ?4, 1, ?2, ?4)",
+                params![WORKSPACE_ID, TARGET_PATH, VERSION_ID, TARGET_OBJECT_ID],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok(())
+        })
+        .expect("open target conflict before id change");
+    assert!(matches!(conflict_opened, TxnOutcome::Committed(())));
+
+    write_text_for_object(
+        &mut store,
+        TARGET_PATH,
+        &format!("---\nid: {CHANGED_ID}\ntitle: Alice changed\n---\n"),
+        TARGET_OBJECT_ID,
+        "change-id-before-conflict-resolution",
+        51,
+    )
+    .expect("change target id while conflict is open");
+    let changed = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile changed id while conflict is open");
+    let TxnOutcome::Committed(changed) = changed else {
+        panic!("changed-id conflict reconciliation crashed");
+    };
+    assert!(changed.relation_cleanups.is_empty());
+
+    let conflict_resolved = store
+        .write_with(&NoFaults, |tx| -> Result<(), StorageError> {
+            tx.execute(
+                "UPDATE conflicts SET status='resolved' \
+                 WHERE workspace_id=?1 AND conflict_id='resolve-after-id-change'",
+                [WORKSPACE_ID],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok(())
+        })
+        .expect("resolve target conflict after id change");
+    assert!(matches!(conflict_resolved, TxnOutcome::Committed(())));
+
+    for pass in 0..2 {
+        let resolved = store
+            .write_with(&NoFaults, |tx| {
+                reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+            })
+            .expect("reconcile resolved changed-id target");
+        let TxnOutcome::Committed(resolved) = resolved else {
+            panic!("resolved changed-id reconciliation crashed");
+        };
+        assert!(
+            resolved.relation_cleanups.is_empty(),
+            "pass {pass} must retain the original relation while its owner object remains: {:?}",
+            resolved.relation_cleanups
+        );
+    }
+    let binding = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT record_id FROM collection_records \
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                params![WORKSPACE_ID, VERSION_ID, TARGET_OBJECT_ID],
+                |row| row.get::<_, String>(0),
+            )
+        })
+        .expect("load resolved changed-id target binding");
+    assert_eq!(binding, CHANGED_ID);
+    let relation_count = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM collection_relation_edges \
+                 WHERE workspace_id=?1 AND version_id=?2 AND source_record_id=?3 \
+                   AND target_record_id=?4",
+                params![WORKSPACE_ID, VERSION_ID, FIRST_TASK_ID, PERSON_ID],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .expect("count original relation after conflict resolution");
+    assert_eq!(relation_count, 1);
+}
+
+#[test]
+fn conflicted_owner_keeps_its_ids_when_changed_frontmatter_is_copied_then_the_file_moves() {
+    const TARGET_PATH: &str = "people/alice.md";
+    const RENAMED_PATH: &str = "people/alice-renamed.md";
+    const TARGET_OBJECT_ID: &str = "object-3";
+    const COPY_PATH: &str = "people/alice-copy.md";
+    const COPY_OBJECT_ID: &str = "changed-id-conflict-copy";
+    const CHANGED_ID: &str = "rec_ffffffffffffffffffffffffff";
+    let (_scratch, mut store) = seeded_store();
+    let adopted = store
+        .write_with(&NoFaults, |tx| {
+            set_collection_adoption_state_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                TARGET_PATH,
+                PERSON_ID,
+                "adopted",
+            )
+        })
+        .expect("adopt target before conflict sequence");
+    assert!(matches!(adopted, TxnOutcome::Committed(())));
+
+    let conflict_opened = store
+        .write_with(&NoFaults, |tx| -> Result<(), StorageError> {
+            tx.execute(
+                "INSERT INTO conflicts (\
+                    workspace_id, conflict_id, path, target_version_id, source_version_id, \
+                    created_at_ms, updated_at_ms, status, chosen_from, metadata_origin, \
+                    base_exists, base_path, current_exists, current_path, current_object_id, \
+                    incoming_exists, incoming_path, incoming_object_id\
+                 ) VALUES (?1, 'changed-id-rename-conflict', ?2, ?3, ?3, \
+                    50, 50, 'open', 'current', 'sync', \
+                    0, ?2, 1, ?2, ?4, 1, ?2, ?4)",
+                params![WORKSPACE_ID, TARGET_PATH, VERSION_ID, TARGET_OBJECT_ID],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok(())
+        })
+        .expect("open target conflict");
+    assert!(matches!(conflict_opened, TxnOutcome::Committed(())));
+
+    write_text_for_object(
+        &mut store,
+        TARGET_PATH,
+        &format!("---\nid: {CHANGED_ID}\ntitle: Alice changed\n---\n"),
+        TARGET_OBJECT_ID,
+        "change-id-under-conflict",
+        51,
+    )
+    .expect("change target id under conflict");
+    let changed = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile changed id under conflict");
+    let TxnOutcome::Committed(changed) = changed else {
+        panic!("changed-id conflict reconciliation crashed");
+    };
+    assert!(changed.relation_cleanups.is_empty());
+
+    write_text_for_object(
+        &mut store,
+        COPY_PATH,
+        &format!("---\nid: {CHANGED_ID}\ntitle: Alice copy\n---\n"),
+        COPY_OBJECT_ID,
+        "copy-changed-id-under-conflict",
+        52,
+    )
+    .expect("copy changed id under conflict");
+    let copied = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile changed-id copy under conflict");
+    let TxnOutcome::Committed(copied) = copied else {
+        panic!("changed-id copy conflict reconciliation crashed");
+    };
+    assert!(copied.relation_cleanups.is_empty());
+    let copied_binding = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT record_id FROM collection_records \
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                params![WORKSPACE_ID, VERSION_ID, COPY_OBJECT_ID],
+                |row| row.get::<_, String>(0),
+            )
+        })
+        .expect("load changed-id copy binding");
+    assert_ne!(copied_binding, CHANGED_ID);
+
+    VersionedTextStore::new(&mut store)
+        .rename_text_file(
+            &RenameTextFile {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                version_id: VERSION_ID.to_owned(),
+                from_path: TARGET_PATH.to_owned(),
+                to_path: RENAMED_PATH.to_owned(),
+                moment_id: "rename-changed-id-conflict".to_owned(),
+                request_id: None,
+                metadata_origin: "test".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 53,
+            },
+            &NoFaults,
+        )
+        .expect("rename changed-id conflicted target");
+    let renamed = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile renamed changed-id conflicted target");
+    let TxnOutcome::Committed(renamed) = renamed else {
+        panic!("renamed changed-id conflict reconciliation crashed");
+    };
+    assert!(
+        renamed.relation_cleanups.is_empty(),
+        "the open conflict keeps the original record id attached to its object: {:?}",
+        renamed.relation_cleanups
+    );
+    let binding = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT record_id,file_path,object_id FROM collection_records \
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                params![WORKSPACE_ID, VERSION_ID, TARGET_OBJECT_ID],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+        })
+        .expect("load renamed conflicted binding");
+    assert_eq!(
+        binding,
+        (
+            PERSON_ID.to_owned(),
+            RENAMED_PATH.to_owned(),
+            TARGET_OBJECT_ID.to_owned(),
+        )
+    );
+    let relation_count = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM collection_relation_edges \
+                 WHERE workspace_id=?1 AND version_id=?2 AND source_record_id=?3 \
+                   AND target_record_id=?4",
+                params![WORKSPACE_ID, VERSION_ID, FIRST_TASK_ID, PERSON_ID],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .expect("count relation after conflicted target rename");
+    assert_eq!(relation_count, 1);
+}
+
+#[test]
+fn malformed_conflicted_owner_keeps_its_changed_id_reserved_from_an_existing_copy() {
+    const TARGET_PATH: &str = "people/alice.md";
+    const TARGET_OBJECT_ID: &str = "object-3";
+    const COPY_PATH: &str = "people/alice-copy-malformed.md";
+    const COPY_OBJECT_ID: &str = "changed-id-conflict-malformed-copy";
+    const CHANGED_ID: &str = "rec_ffffffffffffffffffffffffff";
+    let (_scratch, mut store) = seeded_store();
+    let adopted = store
+        .write_with(&NoFaults, |tx| {
+            set_collection_adoption_state_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                TARGET_PATH,
+                PERSON_ID,
+                "adopted",
+            )
+        })
+        .expect("adopt target before malformed conflict sequence");
+    assert!(matches!(adopted, TxnOutcome::Committed(())));
+
+    let conflict_opened = store
+        .write_with(&NoFaults, |tx| -> Result<(), StorageError> {
+            tx.execute(
+                "INSERT INTO conflicts (\
+                    workspace_id, conflict_id, path, target_version_id, source_version_id, \
+                    created_at_ms, updated_at_ms, status, chosen_from, metadata_origin, \
+                    base_exists, base_path, current_exists, current_path, current_object_id, \
+                    incoming_exists, incoming_path, incoming_object_id\
+                 ) VALUES (?1, 'changed-id-malformed-conflict', ?2, ?3, ?3, \
+                    50, 50, 'open', 'current', 'sync', \
+                    0, ?2, 1, ?2, ?4, 1, ?2, ?4)",
+                params![WORKSPACE_ID, TARGET_PATH, VERSION_ID, TARGET_OBJECT_ID],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok(())
+        })
+        .expect("open target conflict before malformed sequence");
+    assert!(matches!(conflict_opened, TxnOutcome::Committed(())));
+
+    write_text_for_object(
+        &mut store,
+        TARGET_PATH,
+        &format!("---\nid: {CHANGED_ID}\ntitle: Alice changed\n---\n"),
+        TARGET_OBJECT_ID,
+        "change-id-before-malformed-conflict",
+        51,
+    )
+    .expect("change target id under conflict");
+    store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile changed id under conflict");
+
+    write_text_for_object(
+        &mut store,
+        COPY_PATH,
+        &format!("---\nid: {CHANGED_ID}\ntitle: Alice copy\n---\n"),
+        COPY_OBJECT_ID,
+        "copy-changed-id-before-owner-malformed",
+        52,
+    )
+    .expect("copy changed id before owner becomes malformed");
+    store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile changed-id copy");
+
+    write_text_for_object(
+        &mut store,
+        TARGET_PATH,
+        "---\nid: [\n---\n",
+        TARGET_OBJECT_ID,
+        "malform-changed-id-conflicted-owner",
+        53,
+    )
+    .expect("make conflicted changed-id owner malformed");
+    let malformed = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile malformed conflicted owner");
+    let TxnOutcome::Committed(malformed) = malformed else {
+        panic!("malformed conflicted owner reconciliation crashed");
+    };
+    assert!(malformed.relation_cleanups.is_empty());
+
+    let copy_record_id = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT record_id FROM collection_records \
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                params![WORKSPACE_ID, VERSION_ID, COPY_OBJECT_ID],
+                |row| row.get::<_, String>(0),
+            )
+        })
+        .expect("load copy binding after owner becomes malformed");
+    assert_ne!(
+        copy_record_id, CHANGED_ID,
+        "the copy cannot take the changed id while its original owner object remains"
+    );
 }
 
 #[test]

@@ -164,3 +164,14 @@ fn frontmatter_delimiters_match_the_typescript_oracle() {
         );
     }
 }
+
+#[test]
+fn scalar_and_sequence_frontmatter_documents_are_not_mappings() {
+    for markdown in ["---\nnull\n---", "---\ntext\n---", "---\n[]\n---"] {
+        assert_eq!(
+            markdown_frontmatter_json(markdown),
+            None,
+            "non-mapping frontmatter must remain inadmissible: {markdown:?}"
+        );
+    }
+}

@@ -131,6 +131,32 @@ views:
 `,
   },
   {
+    name: "degraded-c1-relation-target-salvages-siblings",
+    yaml: `fields:
+  title:
+    type: text
+  project:
+    type: relation
+    collection: "planning\u0085projects"
+    many: false
+`,
+    expected: {
+      status: "degraded",
+      schema: {
+        name: null,
+        description: null,
+        fields: [{ name: "title", type: "text" }],
+        views: [],
+      },
+      reasons: [
+        {
+          code: "invalid-relation-target",
+          path: "/fields/project/collection",
+        },
+      ],
+    },
+  },
+  {
     name: "degraded-shapes-return-structured-reasons",
     yaml: `name: 42
 extra: ignored
@@ -279,6 +305,14 @@ const frontmatter = [
     name: "closing-delimiter-at-eof-without-newline-and-trailing-whitespace",
     markdown: "---\ntitle: EOF trailing whitespace\n--- \t",
   },
+  {
+    name: "empty-frontmatter-is-empty-map",
+    markdown: "---\n---",
+  },
+  {
+    name: "comment-only-frontmatter-is-empty-map",
+    markdown: "---\n# note\n---",
+  },
 ].map(({ name, markdown }) => ({
   name,
   markdown,
@@ -290,10 +324,10 @@ function writeFixture(name, value) {
 }
 
 writeFixture("collection-schemas.json", {
-  vectors: schemas.map(({ name, yaml }) => ({
+  vectors: schemas.map(({ name, yaml, expected }) => ({
     name,
     yaml,
-    expected: parseCollectionSchema(yaml),
+    expected: expected ?? parseCollectionSchema(yaml),
   })),
 });
 writeFixture("collection-field-values.json", { vectors: fieldValues });

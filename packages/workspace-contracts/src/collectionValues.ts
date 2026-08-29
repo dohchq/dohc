@@ -128,7 +128,7 @@ function isWorkspaceRelativeCollectionPath(value: string): boolean {
     value.startsWith("/") ||
     value.endsWith("/") ||
     value.includes("\\") ||
-    /[\u0000-\u001f\u007f]/u.test(value)
+    /[\u0000-\u001f\u007f-\u009f]/u.test(value)
   ) {
     return false;
   }

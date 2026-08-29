@@ -1245,22 +1245,38 @@ fn parse_markdown_frontmatter(markdown: &str) -> Option<ParsedMarkdownFrontmatte
         yaml_end += line.len();
     }
     let body_start = body_start?;
-    let documents = YamlOwned::load_from_str(&markdown[yaml_start..yaml_end]).ok()?;
-    if documents.len() != 1 {
-        return None;
-    }
-    let document = documents.first()?;
-    let mapping = document.as_mapping()?;
-    let non_finite_fields = mapping
-        .iter()
-        .filter_map(|(key, value)| {
-            yaml_value_is_non_finite_number(value)
-                .then(|| yaml_key_text(key))
-                .flatten()
-        })
-        .collect();
+    let yaml_source = &markdown[yaml_start..yaml_end];
+    let documents = YamlOwned::load_from_str(yaml_source).ok()?;
+    let yaml_is_empty = yaml_source.lines().all(|line| {
+        let content = line.trim_start_matches([' ', '\t', '\r']);
+        content.is_empty() || content.starts_with('#')
+    });
+    let document = match documents.as_slice() {
+        [] if yaml_is_empty => None,
+        [document] => Some(document),
+        _ => return None,
+    };
+    let (value, non_finite_fields) = if let Some(document) = document {
+        if let Some(mapping) = document.as_mapping() {
+            let non_finite_fields = mapping
+                .iter()
+                .filter_map(|(key, value)| {
+                    yaml_value_is_non_finite_number(value)
+                        .then(|| yaml_key_text(key))
+                        .flatten()
+                })
+                .collect();
+            (yaml_to_json(document), non_finite_fields)
+        } else if document.is_null() && yaml_is_empty {
+            (Value::Object(serde_json::Map::new()), HashSet::new())
+        } else {
+            return None;
+        }
+    } else {
+        (Value::Object(serde_json::Map::new()), HashSet::new())
+    };
     Some(ParsedMarkdownFrontmatter {
-        value: yaml_to_json(document),
+        value,
         body: &markdown[body_start..],
         non_finite_fields,
     })
@@ -1894,11 +1910,12 @@ fn dangling_relation_cleanups(
     conn: &Connection,
     workspace_id: &str,
     version_id: &str,
+    present_malformed_record_ids: &HashSet<String>,
 ) -> Result<Vec<CollectionRelationCleanupCandidate>, crate::DomainError> {
     let mut statement = conn
         .prepare(
             "SELECT e.source_record_id,r.file_path,r.object_id,e.field_name, \
-                    e.target_record_id,e.many \
+                    e.target_record_id,e.many,e.target_collection_path \
              FROM collection_relation_edges e \
              JOIN collection_records r ON r.workspace_id=e.workspace_id \
                AND r.version_id=e.version_id AND r.record_id=e.source_record_id \
@@ -1911,20 +1928,104 @@ fn dangling_relation_cleanups(
              ORDER BY r.file_path,e.field_name,e.target_record_id",
         )
         .map_err(crate::DomainError::sql_corrupt)?;
-    statement
+    let cleanups = statement
         .query_map(params![workspace_id, version_id], |row| {
-            Ok(CollectionRelationCleanupCandidate {
-                source_record_id: row.get(0)?,
-                source_file_path: row.get(1)?,
-                source_object_id: row.get(2)?,
-                field_name: row.get(3)?,
-                target_record_id: row.get(4)?,
-                many: row.get(5)?,
-            })
+            Ok((
+                CollectionRelationCleanupCandidate {
+                    source_record_id: row.get(0)?,
+                    source_file_path: row.get(1)?,
+                    source_object_id: row.get(2)?,
+                    field_name: row.get(3)?,
+                    target_record_id: row.get(4)?,
+                    many: row.get(5)?,
+                },
+                row.get::<_, String>(6)?,
+            ))
         })
         .map_err(crate::DomainError::sql_corrupt)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(crate::DomainError::sql_corrupt)
+        .map_err(crate::DomainError::sql_corrupt)?;
+    let historical_targets = historical_relation_targets_still_present(
+        conn,
+        workspace_id,
+        version_id,
+        cleanups
+            .iter()
+            .filter(|(cleanup, _)| {
+                !present_malformed_record_ids.contains(&cleanup.target_record_id)
+            })
+            .map(|(cleanup, collection_path)| {
+                (cleanup.target_record_id.clone(), collection_path.clone())
+            })
+            .collect(),
+    )?;
+    Ok(cleanups
+        .into_iter()
+        .filter_map(|(cleanup, collection_path)| {
+            (!present_malformed_record_ids.contains(&cleanup.target_record_id)
+                && !historical_targets
+                    .contains(&(cleanup.target_record_id.clone(), collection_path)))
+            .then_some(cleanup)
+        })
+        .collect())
+}
+
+fn historical_relation_targets_still_present(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    targets: HashSet<(String, String)>,
+) -> Result<HashSet<(String, String)>, crate::DomainError> {
+    let mut targets_by_collection: HashMap<String, HashSet<String>> = HashMap::new();
+    for (record_id, collection_path) in targets {
+        targets_by_collection
+            .entry(collection_path)
+            .or_default()
+            .insert(record_id);
+    }
+    if targets_by_collection.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    let mut statement = conn
+        .prepare(
+            "SELECT b.text FROM snapshots s \
+             JOIN moments m ON m.workspace_id=s.workspace_id AND m.version_id=s.version_id \
+               AND m.object_id=s.object_id \
+             JOIN blobs b ON b.sha256=m.after_blob_sha256 \
+             WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.content_kind='text' \
+               AND m.after_content_kind='text' AND substr(s.path,-3)='.md' \
+               AND substr(s.path,1,length(?3))=?3 \
+               AND substr(s.path,length(?3)+1,1)='/' \
+               AND instr(substr(s.path,length(?3)+2),'/')=0 \
+             ORDER BY m.moment_order DESC",
+        )
+        .map_err(crate::DomainError::sql_corrupt)?;
+    let mut present = HashSet::new();
+    for (collection_path, wanted_ids) in targets_by_collection {
+        let rows = statement
+            .query_map(params![workspace_id, version_id, collection_path], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(crate::DomainError::sql_corrupt)?;
+        for text in rows {
+            let text = text.map_err(crate::DomainError::sql_corrupt)?;
+            let Some(record_id) = markdown_record_id(&text).filter(|id| wanted_ids.contains(id))
+            else {
+                continue;
+            };
+            present.insert((record_id, collection_path.clone()));
+            if present
+                .iter()
+                .filter(|(_, path)| path == &collection_path)
+                .count()
+                == wanted_ids.len()
+            {
+                break;
+            }
+        }
+    }
+    Ok(present)
 }
 
 fn load_collection_snapshots(
@@ -2000,6 +2101,34 @@ fn load_record_bindings(
         .map_err(crate::DomainError::sql_corrupt)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(crate::DomainError::sql_corrupt)
+}
+
+fn latest_historical_record_id(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+) -> Result<Option<(String, String)>, crate::DomainError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT m.path,b.text FROM moments m \
+             JOIN blobs b ON b.sha256=m.after_blob_sha256 \
+             WHERE m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 \
+               AND m.after_content_kind='text' \
+             ORDER BY m.moment_order DESC",
+        )
+        .map_err(crate::DomainError::sql_corrupt)?;
+    let mut rows = statement
+        .query(params![workspace_id, version_id, object_id])
+        .map_err(crate::DomainError::sql_corrupt)?;
+    while let Some(row) = rows.next().map_err(crate::DomainError::sql_corrupt)? {
+        let path: String = row.get(0).map_err(crate::DomainError::sql_corrupt)?;
+        let text: String = row.get(1).map_err(crate::DomainError::sql_corrupt)?;
+        if let Some(record_id) = markdown_record_id(&text).filter(|value| is_record_id(value)) {
+            return Ok(Some((record_id, parent_path(&path).to_owned())));
+        }
+    }
+    Ok(None)
 }
 
 fn has_open_file_conflict(
@@ -2130,9 +2259,53 @@ pub fn reconcile_collections_in_tx(
         })
         .collect();
     let current_paths: HashSet<&str> = records.iter().map(|record| record.path.as_str()).collect();
-    let current_objects: HashMap<&str, &str> = records
+    let present_malformed_records: Vec<&CollectionSnapshot> = snapshots
         .iter()
-        .map(|record| (record.path.as_str(), record.object_id.as_str()))
+        .filter(|snapshot| {
+            snapshot.path.ends_with(".md")
+                && collection_schemas.contains_key(parent_path(&snapshot.path))
+                && !current_paths.contains(snapshot.path.as_str())
+        })
+        .collect();
+    let mut present_malformed_owners = HashMap::new();
+    for snapshot in &present_malformed_records {
+        let existing_owner = existing
+            .iter()
+            .filter(|binding| binding.object_id == snapshot.object_id)
+            .find_map(|binding| {
+                binding.record_id.as_ref().map(|record_id| {
+                    (
+                        record_id.clone(),
+                        parent_path(&binding.file_path).to_owned(),
+                    )
+                })
+            });
+        let historical_owner =
+            latest_historical_record_id(tx, workspace_id, version_id, &snapshot.object_id)?
+                .or(existing_owner);
+        let Some((record_id, prior_collection_path)) = historical_owner else {
+            continue;
+        };
+        present_malformed_owners.insert(
+            snapshot.object_id.clone(),
+            (
+                record_id,
+                prior_collection_path == parent_path(&snapshot.path),
+            ),
+        );
+    }
+    let present_malformed_record_ids: HashSet<String> = present_malformed_owners
+        .values()
+        .filter(|(_, remains_in_collection)| *remains_in_collection)
+        .map(|(record_id, _)| record_id.clone())
+        .collect();
+    let current_object_ids: HashSet<&str> = snapshots
+        .iter()
+        .filter(|snapshot| {
+            snapshot.path.ends_with(".md")
+                && collection_schemas.contains_key(parent_path(&snapshot.path))
+        })
+        .map(|snapshot| snapshot.object_id.as_str())
         .collect();
     let current_ids: HashMap<&str, String> = records
         .iter()
@@ -2156,7 +2329,7 @@ pub fn reconcile_collections_in_tx(
                 .map(|record_id| (record_id, binding))
         })
         .collect();
-    let mut current_owners: HashMap<String, &ExistingRecordBinding> = HashMap::new();
+    let mut current_owners: HashMap<String, String> = HashMap::new();
     let mut absent_owners = HashSet::new();
     let mut used_ids = HashSet::new();
     for binding in &existing {
@@ -2164,12 +2337,64 @@ pub fn reconcile_collections_in_tx(
             continue;
         };
         used_ids.insert(record_id.clone());
-        if current_objects.get(binding.file_path.as_str()) == Some(&binding.object_id.as_str()) {
-            current_owners.insert(record_id.clone(), binding);
+        if current_object_ids.contains(binding.object_id.as_str()) {
+            current_owners.insert(record_id.clone(), binding.object_id.clone());
         } else if !current_paths.contains(binding.file_path.as_str())
             && binding.adoption_state == "adopted"
         {
             absent_owners.insert(record_id.clone());
+        }
+    }
+    for (object_id, (record_id, _)) in &present_malformed_owners {
+        used_ids.insert(record_id.clone());
+        current_owners
+            .entry(record_id.clone())
+            .or_insert_with(|| object_id.clone());
+    }
+    let mut current_id_counts = HashMap::new();
+    for record_id in current_ids.values() {
+        *current_id_counts
+            .entry(record_id.as_str())
+            .or_insert(0_usize) += 1;
+    }
+    for record in &records {
+        let Some(record_id) = current_ids.get(record.path.as_str()) else {
+            continue;
+        };
+        let established_owner = existing.iter().any(|binding| {
+            binding.object_id == record.object_id
+                && (binding.adoption_state == "adopted"
+                    || binding.adoption_state.starts_with("deferred-conflict"))
+        });
+        if current_id_counts.get(record_id.as_str()) == Some(&1)
+            || current_owners.contains_key(record_id)
+            || !established_owner
+        {
+            continue;
+        }
+        used_ids.insert(record_id.clone());
+        current_owners.insert(record_id.clone(), record.object_id.clone());
+    }
+    for record in &records {
+        let Some(record_id) = current_ids.get(record.path.as_str()) else {
+            continue;
+        };
+        if current_id_counts.get(record_id.as_str()) == Some(&1)
+            || current_owners.contains_key(record_id)
+            || existing
+                .iter()
+                .any(|binding| binding.object_id == record.object_id)
+        {
+            continue;
+        }
+        let Some((historical_record_id, _)) =
+            latest_historical_record_id(tx, workspace_id, version_id, &record.object_id)?
+        else {
+            continue;
+        };
+        if historical_record_id == *record_id {
+            used_ids.insert(record_id.clone());
+            current_owners.insert(record_id.clone(), record.object_id.clone());
         }
     }
 
@@ -2183,8 +2408,9 @@ pub fn reconcile_collections_in_tx(
             continue;
         }
         let existing_at_path = existing_by_path.get(record.path.as_str()).copied();
-        let existing_same_object =
-            existing_at_path.filter(|binding| binding.object_id == record.object_id);
+        let existing_same_object = existing
+            .iter()
+            .find(|binding| binding.object_id == record.object_id);
         let lossless_insertion_required = parsed_id.is_none()
             && existing_same_object.is_none_or(|binding| {
                 matches!(
@@ -2201,13 +2427,17 @@ pub fn reconcile_collections_in_tx(
         )?;
 
         if conflicted {
-            let record_id = existing_at_path
+            let record_id = existing_same_object
                 .and_then(|binding| binding.record_id.clone())
+                .or_else(|| existing_at_path.and_then(|binding| binding.record_id.clone()))
                 .or_else(|| {
                     parsed_id
                         .as_ref()
                         .filter(|record_id| {
-                            (absent_owners.contains(*record_id)
+                            (current_owners
+                                .get(*record_id)
+                                .is_some_and(|owner| owner == &record.object_id)
+                                || absent_owners.contains(*record_id)
                                 || !existing_by_record_id.contains_key(record_id.as_str()))
                                 && !claimed_ids.contains_key(record_id.as_str())
                         })
@@ -2216,6 +2446,10 @@ pub fn reconcile_collections_in_tx(
             if let Some(record_id) = record_id.as_ref() {
                 claimed_ids.insert(record_id.clone(), record.path.clone());
             }
+            let index_initialized = existing_same_object
+                .or(existing_at_path)
+                .filter(|binding| binding.record_id.as_ref() == record_id.as_ref())
+                .is_some_and(|binding| binding.index_initialized);
             desired.push(DesiredRecordBinding {
                 record_id,
                 collection_path,
@@ -2226,8 +2460,7 @@ pub fn reconcile_collections_in_tx(
                 } else {
                     "deferred-conflict"
                 },
-                index_initialized: existing_at_path
-                    .is_some_and(|binding| binding.index_initialized),
+                index_initialized,
             });
             continue;
         }
@@ -2235,7 +2468,7 @@ pub fn reconcile_collections_in_tx(
         if let Some(record_id) = parsed_id {
             let occupied_by_current = current_owners
                 .get(&record_id)
-                .is_some_and(|owner| owner.file_path != record.path);
+                .is_some_and(|owner| owner != &record.object_id);
             let occupied_in_pass = claimed_ids
                 .get(&record_id)
                 .is_some_and(|owner_path| owner_path != &record.path);
@@ -2269,6 +2502,7 @@ pub fn reconcile_collections_in_tx(
                 let needs_adoption =
                     existing_at_path.is_none_or(|binding| binding.adoption_state != "adopted");
                 let index_initialized = existing_at_path
+                    .filter(|binding| binding.record_id.as_deref() == Some(record_id.as_str()))
                     .or_else(|| existing_by_record_id.get(record_id.as_str()).copied())
                     .is_some_and(|binding| binding.index_initialized);
                 desired.push(DesiredRecordBinding {
@@ -2424,7 +2658,8 @@ pub fn reconcile_collections_in_tx(
     )
     .map_err(crate::DomainError::sql_persist)?;
     revalidate_collection_index_in_tx(tx, workspace_id, version_id, &collection_schemas)?;
-    let relation_cleanups = dangling_relation_cleanups(tx, workspace_id, version_id)?;
+    let relation_cleanups =
+        dangling_relation_cleanups(tx, workspace_id, version_id, &present_malformed_record_ids)?;
     Ok(CollectionReconcileResult {
         adoptions,
         relation_cleanups,
