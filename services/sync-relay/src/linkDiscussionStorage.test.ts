@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   LINK_DISCUSSION_BODY_CODE_POINT_LIMIT,
   LINK_DISCUSSION_BODY_INPUT_BYTE_LIMIT,
@@ -242,6 +242,136 @@ function discussionUsageBytes(dbPath: string): number {
   } finally {
     db.close();
   }
+}
+
+function aggregateWorkspaceUsageBytes(dbPath: string, workspaceId: string): number {
+  const db = new InspectionDatabaseSync(dbPath, { readOnly: true });
+  try {
+    return Number(
+      db
+        .prepare(
+          `WITH usage_rows(workspace_id, bytes) AS (
+             SELECT workspace_id, byte_length FROM sync_relay_blobs
+             UNION ALL
+             SELECT workspace_id, length(CAST(payload_json AS BLOB)) FROM sync_relay_log
+             UNION ALL
+             SELECT workspace_id, length(CAST(envelope_json AS BLOB))
+             FROM sync_relay_key_envelopes
+             UNION ALL
+             SELECT workspace_id, length(CAST(envelope_json AS BLOB))
+             FROM sync_relay_key_envelope_history
+             UNION ALL
+             SELECT workspace_id,
+                    length(CAST(replication_epoch AS BLOB)) +
+                    length(CAST(stream_identity AS BLOB))
+             FROM sync_relay_epoch_supersessions
+             UNION ALL
+             SELECT share.workspace_id, message.storage_bytes
+             FROM sync_relay_share_discussion_messages AS message
+             JOIN sync_relay_shares AS share ON share.share_id = message.share_id
+             UNION ALL
+             SELECT share.workspace_id, principal.storage_bytes
+             FROM sync_relay_link_principals AS principal
+             JOIN sync_relay_share_grants AS grant ON grant.grant_id = principal.grant_id
+             JOIN sync_relay_shares AS share ON share.share_id = grant.share_id
+           )
+           SELECT COALESCE(SUM(bytes), 0) AS bytes
+           FROM usage_rows
+           WHERE workspace_id = ?`,
+        )
+        .get(workspaceId)?.bytes ?? 0,
+    );
+  } finally {
+    db.close();
+  }
+}
+
+function storedWorkspaceUsageBytes(dbPath: string, workspaceId: string): number {
+  const db = new InspectionDatabaseSync(dbPath, { readOnly: true });
+  try {
+    return Number(
+      db
+        .prepare(
+          `SELECT usage_bytes
+           FROM sync_relay_workspace_usage
+           WHERE workspace_id = ?`,
+        )
+        .get(workspaceId)?.usage_bytes ?? -1,
+    );
+  } finally {
+    db.close();
+  }
+}
+
+function expectExactWorkspaceUsage(dbPath: string, workspaceId: string): number {
+  const aggregate = aggregateWorkspaceUsageBytes(dbPath, workspaceId);
+  expect(storedWorkspaceUsageBytes(dbPath, workspaceId)).toBe(aggregate);
+  return aggregate;
+}
+
+function tracePreparedSql<T>(storage: SyncRelayStorage, action: () => T): {
+  events: Array<{ kind: "exec" | "prepare"; sql: string }>;
+  preparedSql: string[];
+  result: T;
+} {
+  const db = (storage as unknown as { db: InspectionDatabase }).db;
+  const events: Array<{ kind: "exec" | "prepare"; sql: string }> = [];
+  const originalPrepare = db.prepare.bind(db);
+  const originalExec = db.exec.bind(db);
+  const prepare = vi.spyOn(db, "prepare").mockImplementation((sql) => {
+    events.push({ kind: "prepare", sql });
+    return originalPrepare(sql);
+  });
+  const exec = vi.spyOn(db, "exec").mockImplementation((sql) => {
+    events.push({ kind: "exec", sql });
+    originalExec(sql);
+  });
+  try {
+    const result = action();
+    return {
+      events,
+      preparedSql: events
+        .filter((event) => event.kind === "prepare")
+        .map((event) => event.sql),
+      result,
+    };
+  } finally {
+    prepare.mockRestore();
+    exec.mockRestore();
+  }
+}
+
+const QUOTA_AGGREGATE_TABLES = [
+  "sync_relay_blobs",
+  "sync_relay_log",
+  "sync_relay_key_envelopes",
+  "sync_relay_key_envelope_history",
+  "sync_relay_epoch_supersessions",
+  "sync_relay_share_discussion_messages AS message",
+  "sync_relay_link_principals AS principal",
+] as const;
+
+function quotaAggregateSql(preparedSql: readonly string[]): string[] {
+  return preparedSql.filter((sql) =>
+    /\bSUM\s*\(/iu.test(sql) && QUOTA_AGGREGATE_TABLES.some((table) => sql.includes(table))
+  );
+}
+
+function expectStoredUsageReadInsideTransaction(
+  trace: ReturnType<typeof tracePreparedSql>,
+): void {
+  const begin = trace.events.findIndex((event) =>
+    event.kind === "exec" && event.sql === "BEGIN IMMEDIATE"
+  );
+  const usageRead = trace.events.findIndex((event) =>
+    event.kind === "prepare" && event.sql.includes("FROM sync_relay_workspace_usage")
+  );
+  const commit = trace.events.findIndex((event) =>
+    event.kind === "exec" && event.sql === "COMMIT"
+  );
+  expect(begin).toBeGreaterThanOrEqual(0);
+  expect(usageRead).toBeGreaterThan(begin);
+  expect(commit).toBeGreaterThan(usageRead);
 }
 
 function replaceSession(
@@ -1154,6 +1284,322 @@ describe("durable link discussion storage", () => {
     expect(countRows(quotaStore.dbPath, "sync_relay_share_discussion_messages")).toBe(1);
   });
 
+  it("reads one stored workspace total instead of aggregating history during quota checks", async () => {
+    const { storage } = await openStorage();
+    const seeded = seedShare(storage, { suffix: "quota-trace" });
+    const historicalBlob = Buffer.from("historical blob");
+    const historicalBlobSha = createHash("sha256").update(historicalBlob).digest("hex");
+    expect(
+      storage.putBlob({
+        workspaceId: seeded.workspaceId,
+        sha256: historicalBlobSha,
+        content: historicalBlob,
+        createdAtMs: 1_100,
+      }),
+    ).toMatchObject({ alreadyHad: false });
+    expect(
+      storage.appendLogBatch({
+        workspaceId: seeded.workspaceId,
+        originId: "quota-trace-origin",
+        ops: [{
+          originSeq: 0,
+          opKind: "quota.trace",
+          payloadJson: JSON.stringify({ historical: true }),
+          recordedAtMs: 1_101,
+        }],
+      }),
+    ).toMatchObject({ inserted: 1 });
+    const firstEnvelope = storage.putKeyEnvelope({
+      workspaceId: seeded.workspaceId,
+      envelopeJson: JSON.stringify({ generation: 1 }),
+      updatedAtMs: 1_102,
+      expectedSha256: null,
+    });
+    storage.putKeyEnvelope({
+      workspaceId: seeded.workspaceId,
+      envelopeJson: JSON.stringify({ generation: 2 }),
+      updatedAtMs: 1_103,
+      expectedSha256: firstEnvelope.sha256,
+    });
+    expect(
+      storage.claimWorkspaceIdentity({
+        workspaceId: seeded.workspaceId,
+        replicationEpoch: "quota-trace-epoch-1",
+        streamIdentity: "quota-trace-stream-1",
+      }),
+    ).toBe("claimed");
+    expect(
+      storage.rotateWorkspaceIdentity({
+        workspaceId: seeded.workspaceId,
+        ownerUserId: OWNER,
+        replicationEpoch: "quota-trace-epoch-2",
+        streamIdentity: "quota-trace-stream-2",
+        rotatedAtMs: 1_104,
+      }),
+    ).toBe("rotated");
+    expect(
+      append(storage, seeded, {
+        profile: "quota-trace-profile",
+        claimedName: "Trace Link",
+        body: "historical comment",
+        idempotencyKey: "quota-trace-history",
+        createdAtMs: 2_000,
+      }),
+    ).toMatchObject({ ok: true });
+
+    const link = tracePreparedSql(storage, () =>
+      append(storage, seeded, {
+        profile: "quota-trace-profile",
+        body: "traced link comment",
+        idempotencyKey: "quota-trace-link",
+        createdAtMs: 2_001,
+      })
+    );
+    const named = tracePreparedSql(storage, () =>
+      storage.appendNamedDiscussionMessage({
+        shareId: seeded.shareId,
+        authorUserId: RECIPIENT,
+        displayName: "Trace Named",
+        body: "traced named comment",
+        idempotencyKey: "quota-trace-named",
+        createdAtMs: 2_002,
+        guard: () => {},
+      })
+    );
+    const asserted = tracePreparedSql(storage, () => {
+      const content = Buffer.from("new quota probe");
+      return storage.putBlob({
+        workspaceId: seeded.workspaceId,
+        sha256: createHash("sha256").update(content).digest("hex"),
+        content,
+        createdAtMs: 2_003,
+      });
+    });
+    expect(link.result).toMatchObject({ ok: true });
+    expect(named.result).toMatchObject({ ok: true });
+    expect(asserted.result).toMatchObject({ alreadyHad: false });
+
+    expect({
+      link: quotaAggregateSql(link.preparedSql),
+      named: quotaAggregateSql(named.preparedSql),
+      asserted: quotaAggregateSql(asserted.preparedSql),
+    }).toEqual({ link: [], named: [], asserted: [] });
+    expect({
+      link: link.preparedSql.filter((sql) => sql.includes("FROM sync_relay_workspace_usage")),
+      named: named.preparedSql.filter((sql) => sql.includes("FROM sync_relay_workspace_usage")),
+      asserted: asserted.preparedSql.filter((sql) =>
+        sql.includes("FROM sync_relay_workspace_usage")
+      ),
+    }).toMatchObject({
+      link: [expect.stringContaining("SELECT usage_bytes")],
+      named: [expect.stringContaining("SELECT usage_bytes")],
+      asserted: [expect.stringContaining("SELECT usage_bytes")],
+    });
+    expectStoredUsageReadInsideTransaction(link);
+    expectStoredUsageReadInsideTransaction(named);
+    expectStoredUsageReadInsideTransaction(asserted);
+  });
+
+  it("keeps the durable workspace total exact across every counted write lifecycle", async () => {
+    const { storage, dbPath } = await openStorage({ blobGraceMs: 0 });
+    const seeded = seedShare(storage, { suffix: "usage-lifecycle" });
+    expect(expectExactWorkspaceUsage(dbPath, seeded.workspaceId)).toBe(0);
+
+    const blob = Buffer.from("usage lifecycle blob");
+    const blobSha = createHash("sha256").update(blob).digest("hex");
+    expect(
+      storage.putBlob({
+        workspaceId: seeded.workspaceId,
+        sha256: blobSha,
+        content: blob,
+        createdAtMs: 1_100,
+      }),
+    ).toMatchObject({ alreadyHad: false });
+    const afterBlob = expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
+    expect(
+      storage.putBlob({
+        workspaceId: seeded.workspaceId,
+        sha256: blobSha,
+        content: blob,
+        createdAtMs: 1_101,
+      }),
+    ).toMatchObject({ alreadyHad: true });
+    expect(expectExactWorkspaceUsage(dbPath, seeded.workspaceId)).toBe(afterBlob);
+
+    expect(
+      storage.appendLogBatch({
+        workspaceId: seeded.workspaceId,
+        originId: "usage-lifecycle-origin",
+        ops: [{
+          originSeq: 0,
+          opKind: "quota.lifecycle",
+          payloadJson: JSON.stringify({ row: "log" }),
+          recordedAtMs: 1_102,
+        }],
+      }),
+    ).toMatchObject({ inserted: 1 });
+    expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
+
+    const firstEnvelope = storage.putKeyEnvelope({
+      workspaceId: seeded.workspaceId,
+      envelopeJson: JSON.stringify({ generation: 1, payload: "first" }),
+      updatedAtMs: 1_103,
+      expectedSha256: null,
+    });
+    expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
+    storage.putKeyEnvelope({
+      workspaceId: seeded.workspaceId,
+      envelopeJson: JSON.stringify({ generation: 2, payload: "replacement" }),
+      updatedAtMs: 1_104,
+      expectedSha256: firstEnvelope.sha256,
+    });
+    expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
+
+    expect(
+      storage.claimWorkspaceIdentity({
+        workspaceId: seeded.workspaceId,
+        replicationEpoch: "usage-epoch-1",
+        streamIdentity: "usage-stream-1",
+      }),
+    ).toBe("claimed");
+    expect(
+      storage.rotateWorkspaceIdentity({
+        workspaceId: seeded.workspaceId,
+        ownerUserId: OWNER,
+        replicationEpoch: "usage-epoch-2",
+        streamIdentity: "usage-stream-2",
+        rotatedAtMs: 1_105,
+      }),
+    ).toBe("rotated");
+    expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
+
+    const linkMessage = append(storage, seeded, {
+      profile: "usage-profile",
+      claimedName: "Usage Link",
+      body: "counted link comment",
+      idempotencyKey: "usage-link",
+      createdAtMs: 2_000,
+    });
+    expect(linkMessage).toMatchObject({ ok: true, replayed: false });
+    if (!linkMessage.ok) return;
+    const afterLink = expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
+    expect(
+      append(storage, seeded, {
+        profile: "usage-profile",
+        claimedName: "Usage Link",
+        body: "counted link comment",
+        idempotencyKey: "usage-link",
+        createdAtMs: 2_000,
+      }),
+    ).toMatchObject({ ok: true, replayed: true });
+    expect(expectExactWorkspaceUsage(dbPath, seeded.workspaceId)).toBe(afterLink);
+
+    const second = openSyncRelayStorage(dbPath, {
+      blobGraceMs: 0,
+      newDiscussionId: () => "usage-second-message",
+    });
+    storages.push(second);
+    expect(
+      second.appendNamedDiscussionMessage({
+        shareId: seeded.shareId,
+        authorUserId: RECIPIENT,
+        displayName: "Usage Named",
+        body: "counted named comment",
+        idempotencyKey: "usage-named",
+        createdAtMs: 2_001,
+        guard: () => {},
+      }),
+    ).toMatchObject({ ok: true, replayed: false });
+    const afterNamed = expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
+    expect(
+      second.appendNamedDiscussionMessage({
+        shareId: seeded.shareId,
+        authorUserId: RECIPIENT,
+        displayName: "Usage Named",
+        body: "counted named comment",
+        idempotencyKey: "usage-named",
+        createdAtMs: 2_001,
+        guard: () => {},
+      }),
+    ).toMatchObject({ ok: true, replayed: true });
+    expect(expectExactWorkspaceUsage(dbPath, seeded.workspaceId)).toBe(afterNamed);
+
+    expect(
+      storage.deleteShareDiscussionMessage({
+        shareId: seeded.shareId,
+        messageId: linkMessage.message.messageId,
+        deletedAtMs: 2_002,
+        actorUserId: OWNER,
+      }),
+    ).toMatchObject({ messageId: linkMessage.message.messageId });
+    expect(expectExactWorkspaceUsage(dbPath, seeded.workspaceId)).toBe(afterNamed);
+
+    expect(
+      await storage.collectUnreferencedBlobs(seeded.workspaceId, { nowMs: 1_101 }),
+    ).toMatchObject({ removed: 1, removedSha256s: [blobSha] });
+    expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
+
+    storage.close();
+    storages.splice(storages.indexOf(storage), 1);
+    second.close();
+    storages.splice(storages.indexOf(second), 1);
+    const reopened = openSyncRelayStorage(dbPath, {
+      blobGraceMs: 0,
+      newDiscussionId: () => "usage-rejected-message",
+    });
+    storages.push(reopened);
+    const reopenedUsage = expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
+    const limited = openSyncRelayStorage(dbPath, {
+      workspaceQuotaBytes: reopenedUsage,
+      newDiscussionId: () => "usage-over-quota-message",
+    });
+    storages.push(limited);
+    expect(
+      append(limited, seeded, {
+        profile: "usage-profile",
+        body: "rejected quota comment",
+        idempotencyKey: "usage-rejected",
+        createdAtMs: 2_003,
+      }),
+    ).toEqual({ ok: false, reason: "workspace-quota" });
+    expect(expectExactWorkspaceUsage(dbPath, seeded.workspaceId)).toBe(reopenedUsage);
+  });
+
+  it.each(["grant", "share"] as const)(
+    "keeps the durable workspace total exact across a cascading %s delete",
+    async (deletedModel) => {
+      const { storage, dbPath } = await openStorage();
+      const seeded = seedShare(storage, { suffix: `usage-cascade-${deletedModel}` });
+      expect(
+        append(storage, seeded, {
+          profile: `usage-cascade-${deletedModel}`,
+          claimedName: "Usage Cascade",
+          body: "removed by cascade",
+          idempotencyKey: `usage-cascade-${deletedModel}`,
+        }),
+      ).toMatchObject({ ok: true });
+      expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
+
+      const inspection = new InspectionDatabaseSync(dbPath);
+      try {
+        inspection.exec("PRAGMA foreign_keys = ON");
+        if (deletedModel === "grant") {
+          inspection
+            .prepare("DELETE FROM sync_relay_share_grants WHERE grant_id = ?")
+            .run(seeded.grantId);
+        } else {
+          inspection
+            .prepare("DELETE FROM sync_relay_shares WHERE share_id = ?")
+            .run(seeded.shareId);
+        }
+      } finally {
+        inspection.close();
+      }
+
+      expect(expectExactWorkspaceUsage(dbPath, seeded.workspaceId)).toBe(0);
+    },
+  );
+
   it("pages by creation time and message id without gaps across tombstones", async () => {
     const { storage } = await openStorage();
     const seeded = seedShare(storage);
@@ -1495,6 +1941,43 @@ describe("durable link discussion storage", () => {
     } finally {
       inspection.close();
     }
+  });
+
+  it("reconciles the stored workspace total after normalized-share replacement", async () => {
+    const { storage, dbPath } = await openStorage();
+    const seeded = seedShare(storage, { suffix: "usage-reconcile" });
+    const blob = Buffer.from("usage survives share replacement");
+    expect(
+      storage.putBlob({
+        workspaceId: seeded.workspaceId,
+        sha256: createHash("sha256").update(blob).digest("hex"),
+        content: blob,
+        createdAtMs: 1_100,
+      }),
+    ).toMatchObject({ alreadyHad: false });
+    expect(
+      append(storage, seeded, {
+        profile: "usage-reconcile-profile",
+        claimedName: "Usage Reconcile",
+        body: "removed with normalized share model",
+        idempotencyKey: "usage-reconcile",
+      }),
+    ).toMatchObject({ ok: true });
+    expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
+
+    storage.close();
+    storages.splice(storages.indexOf(storage), 1);
+    replaceTableSchemaFragment(
+      dbPath,
+      "sync_relay_link_principals",
+      `length(display_name) BETWEEN 1 AND ${LINK_DISCUSSION_NAME_CODE_POINT_LIMIT}`,
+      `length(display_name) BETWEEN 1 AND ${LINK_DISCUSSION_NAME_CODE_POINT_LIMIT - 1}`,
+    );
+
+    const reopened = openSyncRelayStorage(dbPath);
+    storages.push(reopened);
+    expect(reopened.getShare(seeded.shareId)).toBeNull();
+    expect(expectExactWorkspaceUsage(dbPath, seeded.workspaceId)).toBe(blob.byteLength);
   });
 
   it("keeps named display snapshots bounded across direct writes and restart", async () => {

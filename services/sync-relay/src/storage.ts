@@ -1092,6 +1092,14 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
         epoch_log_floor INTEGER
       );
 
+      CREATE TABLE IF NOT EXISTS sync_relay_workspace_usage (
+        workspace_id TEXT PRIMARY KEY,
+        usage_bytes INTEGER NOT NULL CHECK (usage_bytes >= 0),
+        FOREIGN KEY (workspace_id)
+          REFERENCES sync_relay_workspaces(workspace_id)
+          ON DELETE CASCADE
+      ) STRICT;
+
       -- Every epoch that stops being active remains durable here. This makes
       -- stale pre-reset credentials permanently identifiable after rotation.
       CREATE TABLE IF NOT EXISTS sync_relay_epoch_supersessions (
@@ -1442,6 +1450,213 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       CREATE INDEX IF NOT EXISTS idx_sync_relay_link_handoff_codes_result_grant
         ON sync_relay_link_handoff_codes(result_grant_id)
         WHERE result_grant_id IS NOT NULL
+    `);
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_insert
+      AFTER INSERT ON sync_relay_workspaces
+      BEGIN
+        INSERT INTO sync_relay_workspace_usage (workspace_id, usage_bytes)
+        VALUES (NEW.workspace_id, 0)
+        ON CONFLICT(workspace_id) DO NOTHING;
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_blob_insert
+      AFTER INSERT ON sync_relay_blobs
+      BEGIN
+        UPDATE sync_relay_workspace_usage
+        SET usage_bytes = usage_bytes + NEW.byte_length
+        WHERE workspace_id = NEW.workspace_id;
+      END;
+      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_blob_delete
+      AFTER DELETE ON sync_relay_blobs
+      BEGIN
+        UPDATE sync_relay_workspace_usage
+        SET usage_bytes = usage_bytes - OLD.byte_length
+        WHERE workspace_id = OLD.workspace_id;
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_log_insert
+      AFTER INSERT ON sync_relay_log
+      BEGIN
+        UPDATE sync_relay_workspace_usage
+        SET usage_bytes = usage_bytes + length(CAST(NEW.payload_json AS BLOB))
+        WHERE workspace_id = NEW.workspace_id;
+      END;
+      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_log_delete
+      AFTER DELETE ON sync_relay_log
+      BEGIN
+        UPDATE sync_relay_workspace_usage
+        SET usage_bytes = usage_bytes - length(CAST(OLD.payload_json AS BLOB))
+        WHERE workspace_id = OLD.workspace_id;
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_envelope_insert
+      AFTER INSERT ON sync_relay_key_envelopes
+      BEGIN
+        UPDATE sync_relay_workspace_usage
+        SET usage_bytes = usage_bytes + length(CAST(NEW.envelope_json AS BLOB))
+        WHERE workspace_id = NEW.workspace_id;
+      END;
+      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_envelope_update
+      AFTER UPDATE OF envelope_json ON sync_relay_key_envelopes
+      BEGIN
+        UPDATE sync_relay_workspace_usage
+        SET usage_bytes = usage_bytes
+          - length(CAST(OLD.envelope_json AS BLOB))
+          + length(CAST(NEW.envelope_json AS BLOB))
+        WHERE workspace_id = NEW.workspace_id;
+      END;
+      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_envelope_delete
+      AFTER DELETE ON sync_relay_key_envelopes
+      BEGIN
+        UPDATE sync_relay_workspace_usage
+        SET usage_bytes = usage_bytes - length(CAST(OLD.envelope_json AS BLOB))
+        WHERE workspace_id = OLD.workspace_id;
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_envelope_history_insert
+      AFTER INSERT ON sync_relay_key_envelope_history
+      BEGIN
+        UPDATE sync_relay_workspace_usage
+        SET usage_bytes = usage_bytes + length(CAST(NEW.envelope_json AS BLOB))
+        WHERE workspace_id = NEW.workspace_id;
+      END;
+      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_envelope_history_delete
+      AFTER DELETE ON sync_relay_key_envelope_history
+      BEGIN
+        UPDATE sync_relay_workspace_usage
+        SET usage_bytes = usage_bytes - length(CAST(OLD.envelope_json AS BLOB))
+        WHERE workspace_id = OLD.workspace_id;
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_supersession_insert
+      AFTER INSERT ON sync_relay_epoch_supersessions
+      BEGIN
+        UPDATE sync_relay_workspace_usage
+        SET usage_bytes = usage_bytes
+          + length(CAST(NEW.replication_epoch AS BLOB))
+          + length(CAST(NEW.stream_identity AS BLOB))
+        WHERE workspace_id = NEW.workspace_id;
+      END;
+      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_supersession_delete
+      AFTER DELETE ON sync_relay_epoch_supersessions
+      BEGIN
+        UPDATE sync_relay_workspace_usage
+        SET usage_bytes = usage_bytes
+          - length(CAST(OLD.replication_epoch AS BLOB))
+          - length(CAST(OLD.stream_identity AS BLOB))
+        WHERE workspace_id = OLD.workspace_id;
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_share_delete
+      BEFORE DELETE ON sync_relay_shares
+      BEGIN
+        UPDATE sync_relay_workspace_usage
+        SET usage_bytes = usage_bytes
+          - COALESCE((
+              SELECT SUM(message.storage_bytes)
+              FROM sync_relay_share_discussion_messages AS message
+              WHERE message.share_id = OLD.share_id
+            ), 0)
+          - COALESCE((
+              SELECT SUM(principal.storage_bytes)
+              FROM sync_relay_link_principals AS principal
+              JOIN sync_relay_share_grants AS grant
+                ON grant.grant_id = principal.grant_id
+              WHERE grant.share_id = OLD.share_id
+            ), 0)
+        WHERE workspace_id = OLD.workspace_id;
+      END;
+      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_grant_delete
+      BEFORE DELETE ON sync_relay_share_grants
+      BEGIN
+        UPDATE sync_relay_workspace_usage
+        SET usage_bytes = usage_bytes - COALESCE((
+          SELECT SUM(storage_bytes)
+          FROM sync_relay_link_principals
+          WHERE grant_id = OLD.grant_id
+        ), 0)
+        WHERE workspace_id = (
+          SELECT workspace_id FROM sync_relay_shares WHERE share_id = OLD.share_id
+        );
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_message_insert
+      AFTER INSERT ON sync_relay_share_discussion_messages
+      BEGIN
+        UPDATE sync_relay_workspace_usage
+        SET usage_bytes = usage_bytes + NEW.storage_bytes
+        WHERE workspace_id = (
+          SELECT workspace_id FROM sync_relay_shares WHERE share_id = NEW.share_id
+        );
+      END;
+      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_message_delete
+      AFTER DELETE ON sync_relay_share_discussion_messages
+      BEGIN
+        UPDATE sync_relay_workspace_usage
+        SET usage_bytes = usage_bytes - OLD.storage_bytes
+        WHERE workspace_id = (
+          SELECT workspace_id FROM sync_relay_shares WHERE share_id = OLD.share_id
+        );
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_principal_insert
+      AFTER INSERT ON sync_relay_link_principals
+      BEGIN
+        UPDATE sync_relay_workspace_usage
+        SET usage_bytes = usage_bytes + NEW.storage_bytes
+        WHERE workspace_id = (
+          SELECT share.workspace_id
+          FROM sync_relay_share_grants AS grant
+          JOIN sync_relay_shares AS share ON share.share_id = grant.share_id
+          WHERE grant.grant_id = NEW.grant_id
+        );
+      END;
+      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_principal_delete
+      AFTER DELETE ON sync_relay_link_principals
+      BEGIN
+        UPDATE sync_relay_workspace_usage
+        SET usage_bytes = usage_bytes - OLD.storage_bytes
+        WHERE workspace_id = (
+          SELECT share.workspace_id
+          FROM sync_relay_share_grants AS grant
+          JOIN sync_relay_shares AS share ON share.share_id = grant.share_id
+          WHERE grant.grant_id = OLD.grant_id
+        );
+      END;
+    `);
+    db.exec(`
+      DELETE FROM sync_relay_workspace_usage;
+      WITH usage_rows(workspace_id, bytes) AS (
+        SELECT workspace_id, byte_length FROM sync_relay_blobs
+        UNION ALL
+        SELECT workspace_id, length(CAST(payload_json AS BLOB)) FROM sync_relay_log
+        UNION ALL
+        SELECT workspace_id, length(CAST(envelope_json AS BLOB))
+        FROM sync_relay_key_envelopes
+        UNION ALL
+        SELECT workspace_id, length(CAST(envelope_json AS BLOB))
+        FROM sync_relay_key_envelope_history
+        UNION ALL
+        SELECT workspace_id,
+               length(CAST(replication_epoch AS BLOB)) +
+               length(CAST(stream_identity AS BLOB))
+        FROM sync_relay_epoch_supersessions
+        UNION ALL
+        SELECT share.workspace_id, message.storage_bytes
+        FROM sync_relay_share_discussion_messages AS message
+        JOIN sync_relay_shares AS share ON share.share_id = message.share_id
+        UNION ALL
+        SELECT share.workspace_id, principal.storage_bytes
+        FROM sync_relay_link_principals AS principal
+        JOIN sync_relay_share_grants AS grant ON grant.grant_id = principal.grant_id
+        JOIN sync_relay_shares AS share ON share.share_id = grant.share_id
+      )
+      INSERT INTO sync_relay_workspace_usage (workspace_id, usage_bytes)
+      SELECT workspace.workspace_id, COALESCE(SUM(usage_rows.bytes), 0)
+      FROM sync_relay_workspaces AS workspace
+      LEFT JOIN usage_rows ON usage_rows.workspace_id = workspace.workspace_id
+      GROUP BY workspace.workspace_id;
     `);
     // Lazy additive migration (0P sync-hardening item 4): dbs created before the
     // blob retention window gain created_at_ms on open. Existing rows default to
@@ -3077,80 +3292,17 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
 
   private workspaceUsageBytes(workspaceId: string): number {
-    const blobRow = this.db
+    const row = this.db
       .prepare(
-        `SELECT COALESCE(SUM(byte_length), 0) AS bytes
-         FROM sync_relay_blobs
+        `SELECT usage_bytes
+         FROM sync_relay_workspace_usage
          WHERE workspace_id = ?`,
       )
       .get(workspaceId);
-    const logRow = this.db
-      .prepare(
-        `SELECT COALESCE(SUM(length(CAST(payload_json AS BLOB))), 0) AS bytes
-         FROM sync_relay_log
-         WHERE workspace_id = ?`,
-      )
-      .get(workspaceId);
-    // Key envelopes count toward the quota too (CodeRabbit Stability): the
-    // current envelope plus the append-only history table can otherwise grow
-    // without bound across repeated CAS rotations, letting a workspace bypass
-    // its cap by replacing the envelope over and over.
-    const envelopeRow = this.db
-      .prepare(
-        `SELECT COALESCE(SUM(length(CAST(envelope_json AS BLOB))), 0) AS bytes
-         FROM sync_relay_key_envelopes
-         WHERE workspace_id = ?`,
-      )
-      .get(workspaceId);
-    const envelopeHistoryRow = this.db
-      .prepare(
-        `SELECT COALESCE(SUM(length(CAST(envelope_json AS BLOB))), 0) AS bytes
-         FROM sync_relay_key_envelope_history
-         WHERE workspace_id = ?`,
-      )
-      .get(workspaceId);
-    // Epoch supersessions are append-only identity history. Count both
-    // identifier payloads so repeated rotations cannot grow the relay DB
-    // outside the same per-workspace cap as log/blob/key-envelope history.
-    const supersessionRow = this.db
-      .prepare(
-        `SELECT COALESCE(
-           SUM(
-             length(CAST(replication_epoch AS BLOB)) +
-             length(CAST(stream_identity AS BLOB))
-           ),
-           0
-         ) AS bytes
-         FROM sync_relay_epoch_supersessions
-         WHERE workspace_id = ?`,
-      )
-      .get(workspaceId);
-    const discussionRow = this.db
-      .prepare(
-        `SELECT COALESCE(SUM(message.storage_bytes), 0) AS bytes
-         FROM sync_relay_share_discussion_messages AS message
-         JOIN sync_relay_shares AS share ON share.share_id = message.share_id
-         WHERE share.workspace_id = ?`,
-      )
-      .get(workspaceId);
-    const discussionPrincipalRow = this.db
-      .prepare(
-        `SELECT COALESCE(SUM(principal.storage_bytes), 0) AS bytes
-         FROM sync_relay_link_principals AS principal
-         JOIN sync_relay_share_grants AS grant ON grant.grant_id = principal.grant_id
-         JOIN sync_relay_shares AS share ON share.share_id = grant.share_id
-         WHERE share.workspace_id = ?`,
-      )
-      .get(workspaceId);
-    return (
-      Number(blobRow?.bytes ?? 0) +
-      Number(logRow?.bytes ?? 0) +
-      Number(envelopeRow?.bytes ?? 0) +
-      Number(envelopeHistoryRow?.bytes ?? 0) +
-      Number(supersessionRow?.bytes ?? 0) +
-      Number(discussionRow?.bytes ?? 0) +
-      Number(discussionPrincipalRow?.bytes ?? 0)
-    );
+    if (row === undefined) {
+      throw new Error("workspace usage counter is missing");
+    }
+    return Number(row.usage_bytes);
   }
 
   private assertWorkspaceQuota(workspaceId: string, addedBytes: number): void {
