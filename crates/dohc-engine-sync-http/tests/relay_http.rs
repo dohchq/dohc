@@ -8,12 +8,13 @@ use std::time::Duration;
 
 use dohc_engine_storage::{EngineStore, NoFaults, StorageError, TxnOutcome, hex_sha256};
 use dohc_engine_sync::{
-    BlobDownloadRequest, BlobHaveRequest, BlobKind, BlobUploadRequest, ClaimRequest, EpochRequest,
-    KeyEnvelopeDownloadRequest, KeyEnvelopeRequest, LogCoordinateRequest, LogCoordinateResponse,
-    NoLiveLeases, ObservedBytes, ProbeRequest, PullRequest, RelayError, RelaySyncClient,
-    RelayTransport, ReplicationEnvelope, ShareBlobRequest, ShareLogPushRequest,
-    ShareReplicationEnvelope, ShareViewRequest, SharedChannelRequest, SyncPassOutcome,
-    blob_ceiling, journal_local_replication_op, read_pushed_seq, read_relay_cursor,
+    BlobDownloadBatchRequest, BlobDownloadSpec, BlobHaveRequest, BlobKind, BlobUploadRequest,
+    ClaimRequest, EpochRequest, KeyEnvelopeDownloadRequest, KeyEnvelopeRequest,
+    LogCoordinateRequest, LogCoordinateResponse, NoLiveLeases, ObservedBytes, ProbeRequest,
+    PullRequest, RelayError, RelaySyncClient, RelayTransport, ReplicationEnvelope,
+    ShareBlobRequest, ShareLogPushRequest, ShareReplicationEnvelope, ShareViewRequest,
+    SharedChannelRequest, SyncPassOutcome, blob_ceiling, journal_local_replication_op,
+    read_pushed_seq, read_relay_cursor,
 };
 use dohc_engine_sync_http::HttpRelayTransport;
 use dohc_engine_testkit::ScratchDir;
@@ -1238,12 +1239,20 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
         .expect("blob upload");
     let (workspace_id, replication_epoch, stream_identity) = coordinate();
     transport
-        .download_blob(BlobDownloadRequest {
+        .download_blobs(BlobDownloadBatchRequest {
             workspace_id,
             replication_epoch,
             stream_identity,
-            sha256: "b".repeat(64),
+            blobs: vec![BlobDownloadSpec {
+                sha256: "b".repeat(64),
+                limit_bytes: dohc_engine_sync::MAX_INGEST_BLOB_BYTES,
+            }],
         })
+        .expect("blob download batch")
+        .results
+        .into_iter()
+        .next()
+        .expect("one blob result")
         .expect("blob download");
     let (workspace_id, replication_epoch, stream_identity) = coordinate();
     transport
@@ -1424,12 +1433,20 @@ fn key_envelope_upload_rejects_an_oversized_ack_body() {
 fn generic_blob_404_is_workspace_unavailable_not_blob_missing() {
     let server = FakeServer::start(|_| TestResponse::json(404, json!({"code": "not_found"})));
     let error = transport(&server)
-        .download_blob(BlobDownloadRequest {
+        .download_blobs(BlobDownloadBatchRequest {
             workspace_id: "ws".to_owned(),
             replication_epoch: "epoch".to_owned(),
             stream_identity: "stream".to_owned(),
-            sha256: "b".repeat(64),
+            blobs: vec![BlobDownloadSpec {
+                sha256: "b".repeat(64),
+                limit_bytes: dohc_engine_sync::MAX_INGEST_BLOB_BYTES,
+            }],
         })
+        .expect("batch reply")
+        .results
+        .into_iter()
+        .next()
+        .expect("one blob result")
         .expect_err("workspace-level blob 404");
     assert_eq!(error, RelayError::WorkspaceUnavailable);
 }
@@ -1448,12 +1465,20 @@ fn a_blob_at_the_ingest_ceiling_arrives_whole() {
         _ => TestResponse::json(500, json!({"code": "internal_error"})),
     });
     let response = transport(&server)
-        .download_blob(BlobDownloadRequest {
+        .download_blobs(BlobDownloadBatchRequest {
             workspace_id: "ws".to_owned(),
             replication_epoch: "epoch".to_owned(),
             stream_identity: "stream".to_owned(),
-            sha256: "b".repeat(64),
+            blobs: vec![BlobDownloadSpec {
+                sha256: "b".repeat(64),
+                limit_bytes,
+            }],
         })
+        .expect("batch reply")
+        .results
+        .into_iter()
+        .next()
+        .expect("one blob result")
         .expect("an at-ceiling blob downloads");
     assert_eq!(response.bytes.len(), limit_bytes);
 }
@@ -1516,7 +1541,7 @@ fn pull_names_the_text_ceiling_for_an_oversized_relay_blob() {
         Err(RelayError::BlobTooLarge {
             constraint,
             limit_bytes,
-            observed: ObservedBytes::Exact(limit_bytes + 1),
+            observed: ObservedBytes::AtLeast(limit_bytes + 1),
         })
     );
     assert!(read_relay_cursor(&engine, "ws").expect("cursor").is_none());
@@ -1524,18 +1549,13 @@ fn pull_names_the_text_ceiling_for_an_oversized_relay_blob() {
 
 #[test]
 fn a_blob_body_past_the_read_limit_still_names_the_ceiling() {
-    // A one-byte overage reaches ingest, which reports an exact size. A larger
-    // one never finishes reading, so the transport reports the floor it proved
-    // rather than inventing a total. Both name a constraint, a limit, and a
-    // unit; the diagnostic does not fall off a cliff at two bytes.
+    // The transport stops after proving one byte past this blob's requested
+    // ceiling. It reports the observed floor instead of buffering the rest or
+    // inventing a total.
     //
     // MUTATION: map the read failure back to a bare `RelayError::InvalidResponse`
     // and this fails — the caller learns nothing about which limit it broke.
     //
-    // The read limit derives from the WIDEST ingest ceiling, which is the Y.Doc
-    // payload bound since #549 — not the text ceiling this test used to read.
-    // Reading a kind's ceiling instead of the ingest one made this test pass
-    // only while text happened to be widest.
     let limit_bytes = dohc_engine_sync::MAX_INGEST_BLOB_BYTES;
     let far_over = limit_bytes + 4096;
     let server = FakeServer::start(move |request| match request.path() {
@@ -1543,19 +1563,27 @@ fn a_blob_body_past_the_read_limit_still_names_the_ceiling() {
         _ => TestResponse::json(500, json!({"code": "internal_error"})),
     });
     let error = transport(&server)
-        .download_blob(BlobDownloadRequest {
+        .download_blobs(BlobDownloadBatchRequest {
             workspace_id: "ws".to_owned(),
             replication_epoch: "epoch".to_owned(),
             stream_identity: "stream".to_owned(),
-            sha256: "b".repeat(64),
+            blobs: vec![BlobDownloadSpec {
+                sha256: "b".repeat(64),
+                limit_bytes,
+            }],
         })
+        .expect("batch reply")
+        .results
+        .into_iter()
+        .next()
+        .expect("one blob result")
         .expect_err("a body past the read limit is refused");
     assert_eq!(
         error,
         RelayError::BlobTooLarge {
             constraint: "MAX_INGEST_BLOB_BYTES",
             limit_bytes,
-            observed: ObservedBytes::AtLeast(limit_bytes + 2),
+            observed: ObservedBytes::AtLeast(limit_bytes + 1),
         }
     );
     assert_eq!(
@@ -1563,7 +1591,7 @@ fn a_blob_body_past_the_read_limit_still_names_the_ceiling() {
         format!(
             "relay blob exceeds MAX_INGEST_BLOB_BYTES: limit {limit_bytes} bytes, \
              observed at least {} bytes",
-            limit_bytes + 2
+            limit_bytes + 1
         )
     );
 }
@@ -1615,7 +1643,7 @@ fn a_binary_blob_past_the_read_limit_names_the_binary_ceiling() {
         RelayError::BlobTooLarge {
             constraint: binary_constraint,
             limit_bytes: binary_limit,
-            observed: ObservedBytes::AtLeast(ingest_limit + 2),
+            observed: ObservedBytes::AtLeast(binary_limit + 1),
         }
     );
     assert_ne!(

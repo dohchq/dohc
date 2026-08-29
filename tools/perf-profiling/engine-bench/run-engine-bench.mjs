@@ -195,10 +195,11 @@ async function runWorker() {
 
 function usage() {
   return [
-    "Usage: node tools/perf-profiling/engine-bench/run-engine-bench.mjs --debug-engine <path> --release-engine <path> --relay-tls-cert <path> --relay-tls-key <path> --relay-tls-host <hostname> [--output <directory>] [--benches b1,b2,b3] [--tiny]",
+    "Usage: node tools/perf-profiling/engine-bench/run-engine-bench.mjs --debug-engine <path> --release-engine <path> --relay-tls-cert <path> --relay-tls-key <path> --relay-tls-host <hostname> [--relay-latency-ms <milliseconds>] [--output <directory>] [--benches b1,b2,b3] [--tiny]",
     "",
     "The full run executes B1, B2, and B3 serially. --tiny checks plumbing with reduced curves.",
     "Use --benches to resume selected phases; omitted phases must already have compatible JSON in the output directory.",
+    "--relay-latency-ms delays each proxied relay response. It defaults to 0 (off).",
   ].join("\n");
 }
 
@@ -208,6 +209,7 @@ function parseArgs(argv) {
   let relayTlsCert = process.env.DOHC_BENCH_RELAY_TLS_CERT?.trim() || null;
   let relayTlsKey = process.env.DOHC_BENCH_RELAY_TLS_KEY?.trim() || null;
   let relayTlsHost = process.env.DOHC_BENCH_RELAY_TLS_HOST?.trim() || null;
+  let relayLatencyMs = 0;
   let output = join(repoRoot, "test-results", "engine-bench");
   let benches = ["b1", "b2", "b3"];
   let tiny = false;
@@ -225,6 +227,8 @@ function parseArgs(argv) {
       relayTlsKey = argv[++index] ?? null;
     } else if (arg === "--relay-tls-host") {
       relayTlsHost = argv[++index] ?? null;
+    } else if (arg === "--relay-latency-ms") {
+      relayLatencyMs = Number(argv[++index]);
     } else if (arg === "--benches") {
       benches = (argv[++index] ?? "")
         .split(",")
@@ -260,12 +264,18 @@ function parseArgs(argv) {
       `--benches must be a non-empty, duplicate-free subset of b1,b2,b3.\n\n${usage()}`,
     );
   }
+  if (!Number.isFinite(relayLatencyMs) || relayLatencyMs < 0) {
+    throw new Error(
+      `--relay-latency-ms must be a non-negative number.\n\n${usage()}`,
+    );
+  }
   return {
     debugEngine: resolve(debugEngine),
     releaseEngine: resolve(releaseEngine),
     relayTlsCert: resolve(relayTlsCert),
     relayTlsKey: resolve(relayTlsKey),
     relayTlsHost,
+    relayLatencyMs,
     output: resolve(output),
     benches,
     tiny,
@@ -701,6 +711,9 @@ async function runRelayCatchUpCurve({ options, modules, Y, run }) {
     relayTls: run.relayTls,
     config: {
       blobCounts,
+      ...(options.relayLatencyMs > 0
+        ? { relayLatencyMs: options.relayLatencyMs }
+        : {}),
       pageShape: "one cold relay page containing B distinct Y.Doc update blobs",
       catchUpTimer: "reader sync.pull through materialization and cursor commit",
       engine: "release",
@@ -728,6 +741,7 @@ async function openRelayFixture({ label, binary, modules, relayTls }) {
       certPath: relayTls.relayTlsCert,
       keyPath: relayTls.relayTlsKey,
       hostname: relayTls.relayTlsHost,
+      latencyMs: relayTls.relayLatencyMs,
     });
     relayConnection = {
       baseUrl: proxy.baseUrl,
@@ -957,7 +971,10 @@ function deferredRowCount(rootPath) {
   }
 }
 
-async function spawnTlsRelayProxy(targetBaseUrl, { certPath, keyPath, hostname }) {
+async function spawnTlsRelayProxy(
+  targetBaseUrl,
+  { certPath, keyPath, hostname, latencyMs = 0 },
+) {
   const target = new URL(targetBaseUrl);
   const counter = createRequestCounter();
   const cert = await readFile(certPath);
@@ -978,8 +995,15 @@ async function spawnTlsRelayProxy(targetBaseUrl, { certPath, keyPath, hostname }
         headers: { ...incoming.headers, host: target.host },
       },
       (response) => {
-        outgoing.writeHead(response.statusCode ?? 502, response.headers);
-        response.pipe(outgoing);
+        const forwardResponse = () => {
+          outgoing.writeHead(response.statusCode ?? 502, response.headers);
+          response.pipe(outgoing);
+        };
+        if (latencyMs === 0) {
+          forwardResponse();
+        } else {
+          setTimeout(forwardResponse, latencyMs);
+        }
       },
     );
     upstream.on("error", (error) => {

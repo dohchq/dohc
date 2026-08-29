@@ -128,17 +128,30 @@ pub struct BlobUploadRequest {
     pub bytes: Vec<u8>,
 }
 
+pub const MAX_BLOB_DOWNLOAD_BATCH: usize = 8;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BlobDownloadRequest {
+pub struct BlobDownloadSpec {
+    pub sha256: String,
+    pub limit_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlobDownloadBatchRequest {
     pub workspace_id: String,
     pub replication_epoch: String,
     pub stream_identity: String,
-    pub sha256: String,
+    pub blobs: Vec<BlobDownloadSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlobDownloadResponse {
     pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlobDownloadBatchResponse {
+    pub results: Vec<Result<BlobDownloadResponse, RelayError>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -526,7 +539,10 @@ pub trait RelayTransport {
     fn rotate_epoch(&self, req: EpochRequest) -> Result<EpochResponse, RelayError>;
     fn blobs_have(&self, req: BlobHaveRequest) -> Result<BlobHaveResponse, RelayError>;
     fn upload_blob(&self, req: BlobUploadRequest) -> Result<(), RelayError>;
-    fn download_blob(&self, req: BlobDownloadRequest) -> Result<BlobDownloadResponse, RelayError>;
+    fn download_blobs(
+        &self,
+        req: BlobDownloadBatchRequest,
+    ) -> Result<BlobDownloadBatchResponse, RelayError>;
     fn upload_key_envelope(
         &self,
         req: KeyEnvelopeRequest,
@@ -2317,6 +2333,14 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         ops: &[ReplicationEnvelope],
         faults: &dyn FaultInjector,
     ) -> Result<(), RelayError> {
+        struct MissingBlob {
+            sha256: String,
+            kinds: Vec<BlobKind>,
+            constraint: &'static str,
+            limit_bytes: usize,
+        }
+
+        let mut pending = Vec::new();
         for (sha256, kinds) in collect_blob_refs(ops)? {
             let mut missing = Vec::new();
             for kind in kinds {
@@ -2334,59 +2358,83 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             else {
                 continue;
             };
+            pending.push(MissingBlob {
+                sha256,
+                kinds: missing,
+                constraint,
+                limit_bytes,
+            });
+        }
+
+        for chunk in pending.chunks(MAX_BLOB_DOWNLOAD_BATCH) {
+            let first = chunk.first().ok_or(RelayError::InvalidResponse)?;
             let response = self
                 .transport
-                .download_blob(BlobDownloadRequest {
+                .download_blobs(BlobDownloadBatchRequest {
                     workspace_id: workspace_id.to_owned(),
                     replication_epoch: identity.replication_epoch.clone(),
                     stream_identity: identity.stream_identity.clone(),
-                    sha256: sha256.clone(),
+                    blobs: chunk
+                        .iter()
+                        .map(|blob| BlobDownloadSpec {
+                            sha256: blob.sha256.clone(),
+                            limit_bytes: blob.limit_bytes,
+                        })
+                        .collect(),
                 })
-                .map_err(|error| relabel_ceiling(error, constraint, limit_bytes))?;
-            // Refuse before hashing and before copying: a transport is not
-            // trusted to bound its own response, and no kind can accept this.
-            if response.bytes.len() > limit_bytes {
-                return Err(RelayError::BlobTooLarge {
-                    constraint,
-                    limit_bytes,
-                    observed: ObservedBytes::Exact(response.bytes.len()),
-                });
+                .map_err(|error| relabel_ceiling(error, first.constraint, first.limit_bytes))?;
+            if response.results.len() != chunk.len() {
+                return Err(RelayError::InvalidResponse);
             }
-            if hex_sha256(&response.bytes) != sha256 {
-                return Err(RelayError::BlobInvalid);
-            }
-            for kind in missing {
-                let content = match kind {
-                    BlobKind::Text => String::from_utf8(response.bytes.clone())
-                        .map(BlobContent::Text)
-                        .map_err(|_| RelayError::BlobInvalid)?,
-                    BlobKind::Binary => BlobContent::Binary(response.bytes.clone()),
-                    BlobKind::Ydoc => BlobContent::Ydoc(response.bytes.clone()),
-                };
-                match hydrate_blob_content(
-                    store,
-                    &BlobHydration {
-                        sha256: sha256.clone(),
-                        content,
-                    },
-                    faults,
-                )
-                .map_err(|error| match error {
-                    SyncError::BlobInvalid => RelayError::BlobInvalid,
-                    SyncError::BlobTooLarge {
-                        constraint,
-                        limit_bytes,
-                        observed_bytes,
-                    } => RelayError::BlobTooLarge {
-                        constraint,
-                        limit_bytes,
-                        observed: ObservedBytes::Exact(observed_bytes),
-                    },
-                    other => local(other),
-                })? {
-                    TxnOutcome::Committed(()) => {}
-                    TxnOutcome::Crashed { .. } => {
-                        return Err(RelayError::Local("injected-crash".to_owned()));
+
+            for (blob, result) in chunk.iter().zip(response.results) {
+                let response = result
+                    .map_err(|error| relabel_ceiling(error, blob.constraint, blob.limit_bytes))?;
+                // Refuse before hashing and before copying: a transport is not
+                // trusted to bound its own response, and no kind can accept this.
+                if response.bytes.len() > blob.limit_bytes {
+                    return Err(RelayError::BlobTooLarge {
+                        constraint: blob.constraint,
+                        limit_bytes: blob.limit_bytes,
+                        observed: ObservedBytes::Exact(response.bytes.len()),
+                    });
+                }
+                if hex_sha256(&response.bytes) != blob.sha256 {
+                    return Err(RelayError::BlobInvalid);
+                }
+                for kind in &blob.kinds {
+                    let content = match kind {
+                        BlobKind::Text => String::from_utf8(response.bytes.clone())
+                            .map(BlobContent::Text)
+                            .map_err(|_| RelayError::BlobInvalid)?,
+                        BlobKind::Binary => BlobContent::Binary(response.bytes.clone()),
+                        BlobKind::Ydoc => BlobContent::Ydoc(response.bytes.clone()),
+                    };
+                    match hydrate_blob_content(
+                        store,
+                        &BlobHydration {
+                            sha256: blob.sha256.clone(),
+                            content,
+                        },
+                        faults,
+                    )
+                    .map_err(|error| match error {
+                        SyncError::BlobInvalid => RelayError::BlobInvalid,
+                        SyncError::BlobTooLarge {
+                            constraint,
+                            limit_bytes,
+                            observed_bytes,
+                        } => RelayError::BlobTooLarge {
+                            constraint,
+                            limit_bytes,
+                            observed: ObservedBytes::Exact(observed_bytes),
+                        },
+                        other => local(other),
+                    })? {
+                        TxnOutcome::Committed(()) => {}
+                        TxnOutcome::Crashed { .. } => {
+                            return Err(RelayError::Local("injected-crash".to_owned()));
+                        }
                     }
                 }
             }
