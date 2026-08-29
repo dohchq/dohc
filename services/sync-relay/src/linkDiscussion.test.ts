@@ -11,6 +11,7 @@ import {
 } from "./storage";
 
 const OWNER = "owner-account-sentinel";
+const NEW_OWNER = "new-owner-account-sentinel";
 const COMMENTER = "commenter-account-sentinel";
 const VIEWER = "viewer-account-sentinel";
 const EDITOR = "editor-account-sentinel";
@@ -23,6 +24,7 @@ const PROFILE_B = "q".repeat(43);
 
 interface InspectionStatement {
   get(...params: unknown[]): Record<string, unknown> | undefined;
+  run(...params: unknown[]): { changes?: number | bigint };
 }
 
 interface InspectionDatabase {
@@ -60,6 +62,7 @@ type Fixture = {
   storage: SyncRelayStorage;
   dbPath: string;
   handler: SyncRelayHandler;
+  makeHandler: (storage: SyncRelayStorage) => SyncRelayHandler;
   view: LinkFixture;
   comment: LinkFixture;
   edit: LinkFixture;
@@ -196,26 +199,29 @@ async function fixture(
     [VIEWER]: "Viewer Name",
     [EDITOR]: "",
   };
-  const handler = createSyncRelayHandler({
-    storage,
-    resolveActor(request: Request, workspaceId: string) {
-      const match = /^Bearer user:([^ ]+)$/u.exec(
-        request.headers.get("authorization") ?? "",
-      );
-      if (!match) {
-        throw Object.assign(new Error("unauthorized"), { statusCode: 401 });
-      }
-      return { userId: match[1]!, workspaceId };
-    },
-    lookupUserEmail: (userId) => `${userId}@email-sentinel.test`,
-    lookupUserDisplayName:
-      overrides.lookupUserDisplayName ?? ((userId) => names[userId] ?? null),
-    nowMs: () => clock++,
-    newId: () => `http-id-${++id}`,
-    linkKey: LINK_KEY,
-    relayExchangeKey: RELAY_KEY,
-  });
-  return { storage, dbPath, handler, view, comment, edit };
+  const makeHandler = (targetStorage: SyncRelayStorage): SyncRelayHandler =>
+    createSyncRelayHandler({
+      storage: targetStorage,
+      resolveActor(request: Request, workspaceId: string) {
+        const match = /^Bearer user:([^ ]+)$/u.exec(
+          request.headers.get("authorization") ?? "",
+        );
+        if (!match) {
+          throw Object.assign(new Error("unauthorized"), { statusCode: 401 });
+        }
+        return { userId: match[1]!, workspaceId };
+      },
+      lookupUserEmail: (userId) => `${userId}@email-sentinel.test`,
+      lookupUserDisplayName:
+        overrides.lookupUserDisplayName ?? ((userId) => names[userId] ?? null),
+      nowMs: () => clock++,
+      newId: () => `http-id-${++id}`,
+      linkKey: LINK_KEY,
+      shareWebOrigin: "https://share.test",
+      relayExchangeKey: RELAY_KEY,
+    });
+  const handler = makeHandler(storage);
+  return { storage, dbPath, handler, makeHandler, view, comment, edit };
 }
 
 function request(
@@ -266,6 +272,35 @@ function trustedAppend(
   );
 }
 
+function moderationRequest(
+  userId: string | null,
+  action: Record<string, unknown>,
+  init: RequestInit = {},
+): Request {
+  return request(
+    userId,
+    `/sync/shares/${SHARE}/discussion/moderation`,
+    { ...jsonRequest(action), ...init },
+  );
+}
+
+async function exchangeLink(
+  test: Fixture,
+  linkSecret: string,
+): Promise<string> {
+  const response = await test.handler(
+    request(null, "/sync/link-exchange", {
+      ...jsonRequest({ secret: linkSecret }),
+      headers: {
+        "content-type": "application/json",
+        "x-dohc-relay-exchange-key": RELAY_KEY,
+      },
+    }),
+  );
+  expect(response.status).toBe(200);
+  return String((await body(response)).capabilityToken);
+}
+
 async function body(response: Response): Promise<Record<string, unknown>> {
   return (await response.json()) as Record<string, unknown>;
 }
@@ -281,6 +316,42 @@ function count(dbPath: string, table: string): number {
   }
 }
 
+function discussionUsage(dbPath: string): number {
+  const db = new InspectionDatabaseSync(dbPath, { readOnly: true });
+  try {
+    const messages = Number(
+      db
+        .prepare(
+          "SELECT COALESCE(SUM(storage_bytes), 0) AS bytes FROM sync_relay_share_discussion_messages",
+        )
+        .get()?.bytes ?? 0,
+    );
+    const principals = Number(
+      db
+        .prepare(
+          "SELECT COALESCE(SUM(storage_bytes), 0) AS bytes FROM sync_relay_link_principals",
+        )
+        .get()?.bytes ?? 0,
+    );
+    return messages + principals;
+  } finally {
+    db.close();
+  }
+}
+
+function updateWorkspaceOwner(dbPath: string, ownerUserId: string): void {
+  const db = new InspectionDatabaseSync(dbPath);
+  try {
+    db
+      .prepare(
+        "UPDATE sync_relay_workspaces SET owner_user_id = ? WHERE workspace_id = ?",
+      )
+      .run(ownerUserId, WORKSPACE);
+  } finally {
+    db.close();
+  }
+}
+
 function expectPrivate(response: Response): void {
   expect(response.headers.get("cache-control")).toBe("private, no-store");
 }
@@ -289,6 +360,24 @@ async function genericRefusal(response: Response): Promise<string> {
   expectPrivate(response);
   expect(response.status).toBe(404);
   return `${response.status}:${await response.text()}`;
+}
+
+async function discussionStateRefusal(
+  response: Response,
+  state: "blocked" | "paused",
+): Promise<string> {
+  expectPrivate(response);
+  expect(response.status).toBe(403);
+  const serialized = await response.text();
+  expect(JSON.parse(serialized)).toEqual({
+    ok: false,
+    error:
+      state === "blocked"
+        ? "link discussion writes are blocked"
+        : "link discussion writes are paused",
+    code: `link_discussion_${state}`,
+  });
+  return `${response.status}:${serialized}`;
 }
 
 function messages(responseBody: Record<string, unknown>): Array<Record<string, unknown>> {
@@ -349,6 +438,87 @@ function firstLinkAppendCharge(input: {
       input.body,
     ) + MESSAGE_FIXED_BYTES;
   return principal + message;
+}
+
+function seedCrossShareHandles(storage: SyncRelayStorage): {
+  principalId: string;
+  messageId: string;
+} {
+  const shareId = "cross-share-sentinel";
+  const grantId = "cross-share-link-grant-sentinel";
+  const capabilityToken = secret("y");
+  storage.createShare({
+    share: {
+      shareId,
+      workspaceId: WORKSPACE,
+      granterUserId: OWNER,
+      selectorJson: JSON.stringify({ paths: ["other"], versionId: null }),
+      createdAtMs: 2_000,
+    },
+    grant: {
+      grantId: "cross-share-named-grant-sentinel",
+      shareId,
+      principalKind: "user",
+      principalUserId: COMMENTER,
+      principalEmail: null,
+      access: "comment",
+      generation: 1,
+      status: "active",
+      createdAtMs: 2_000,
+      revokedAtMs: null,
+      parentGrantId: null,
+    },
+  });
+  expect(
+    storage.createLinkGrant({
+      grant: {
+        grantId,
+        shareId,
+        principalKind: "link",
+        principalUserId: null,
+        principalEmail: null,
+        access: "comment",
+        generation: 1,
+        status: "active",
+        createdAtMs: 2_001,
+        revokedAtMs: null,
+        parentGrantId: null,
+      },
+      credential: {
+        credentialId: "cross-share-credential-sentinel",
+        grantId,
+        secretHash: "cross-share-secret-hash",
+        generation: 1,
+        mintedAtMs: 2_001,
+        retiredAtMs: null,
+      },
+    }),
+  ).toBe(true);
+  expect(
+    storage.mintLinkSession({
+      session: {
+        sessionId: "cross-share-session-sentinel",
+        capabilityHash: hashLinkBearer(capabilityToken, LINK_KEY),
+        grantId,
+        generation: 1,
+        mintedAtMs: 2_002,
+        expiresAtMs: 1_000_000,
+      },
+    }),
+  ).toBe(true);
+  const appended = storage.appendLinkDiscussionMessage({
+    capabilityHash: hashLinkBearer(capabilityToken, LINK_KEY),
+    profileTokenHash: "cross-share-profile-hash",
+    body: "cross-share-body",
+    idempotencyKey: "cross-share-message",
+    createdAtMs: 2_003,
+  });
+  expect(appended.ok).toBe(true);
+  if (!appended.ok) throw new Error("cross-share principal did not seed");
+  return {
+    principalId: appended.principal.principalId,
+    messageId: appended.message.messageId,
+  };
 }
 
 describe("share discussion HTTP boundary", () => {
@@ -451,6 +621,7 @@ describe("share discussion HTTP boundary", () => {
       test.storage.setLinkPrincipalBlocked({
         shareId: SHARE,
         principalId: firstPrincipal!,
+        actorUserId: OWNER,
         blockedAtMs: 20_000,
       }),
     ).toBe(true);
@@ -458,6 +629,7 @@ describe("share discussion HTTP boundary", () => {
       test.storage.setLinkPrincipalBlocked({
         shareId: SHARE,
         principalId: firstPrincipal!,
+        actorUserId: OWNER,
         blockedAtMs: null,
       }),
     ).toBe(true);
@@ -742,12 +914,14 @@ describe("share discussion HTTP boundary", () => {
         } else if (transition === "pause") {
           test.storage.setShareLinkWritesPaused({
             shareId: SHARE,
+            actorUserId: OWNER,
             pausedAtMs: 20_000,
           });
         } else {
           test.storage.setLinkPrincipalBlocked({
             shareId: SHARE,
             principalId: principalId!,
+            actorUserId: OWNER,
             blockedAtMs: 20_000,
           });
         }
@@ -759,7 +933,14 @@ describe("share discussion HTTP boundary", () => {
           idempotencyKey: `race-${transition}`,
         }),
       );
-      expect(await genericRefusal(response), transition).toContain("404:");
+      if (transition === "pause" || transition === "block") {
+        await discussionStateRefusal(
+          response,
+          transition === "pause" ? "paused" : "blocked",
+        );
+      } else {
+        expect(await genericRefusal(response), transition).toContain("404:");
+      }
       expect(count(test.dbPath, "sync_relay_share_discussion_messages")).toBe(
         beforeRows,
       );
@@ -836,17 +1017,17 @@ describe("share discussion HTTP boundary", () => {
         shareId: SHARE,
         messageId: linkMessage.messageId,
         deletedAtMs: 40_000,
-        deletedByUserId: "x".repeat(DELETING_USER_ID_RESERVATION_BYTES + 1),
+        actorUserId: "x".repeat(DELETING_USER_ID_RESERVATION_BYTES + 1),
       }),
-    ).toBe(false);
+    ).toBeNull();
     expect(
       linkExact.storage.deleteShareDiscussionMessage({
         shareId: SHARE,
         messageId: linkMessage.messageId,
         deletedAtMs: 40_001,
-        deletedByUserId: OWNER,
+        actorUserId: OWNER,
       }),
-    ).toBe(true);
+    ).toMatchObject({ messageId: linkMessage.messageId });
     expect(
       linkExact.storage.listShareDiscussionMessages({ shareId: SHARE, limit: 100 })
         .messages[0]!.storageBytes,
@@ -932,9 +1113,9 @@ describe("share discussion HTTP boundary", () => {
         shareId: SHARE,
         messageId: tombstoneTarget.messageId,
         deletedAtMs: 50_000,
-        deletedByUserId: OWNER,
+        actorUserId: OWNER,
       }),
-    ).toBe(true);
+    ).toMatchObject({ messageId: tombstoneTarget.messageId });
 
     const collected: Array<Record<string, unknown>> = [];
     let cursor: string | null = null;
@@ -1026,22 +1207,43 @@ describe("share discussion HTTP boundary", () => {
       }
     }
 
-    const ownerJson = JSON.stringify(
-      await body(
-        await test.handler(request(OWNER, `/sync/shares/${SHARE}/discussion`)),
-      ),
+    const ownerPage = await body(
+      await test.handler(request(OWNER, `/sync/shares/${SHARE}/discussion`)),
     );
+    const ownerJson = JSON.stringify(ownerPage);
     expect(ownerJson).toContain(test.comment.grantId);
     expect(ownerJson).toContain(rawLink.linkPrincipalId!);
+    expect(ownerPage.linkCommentsPaused).toBe(false);
+    expect(messages(ownerPage)[0]!.moderation).toEqual({
+      linkGrantId: test.comment.grantId,
+      linkPrincipalId: rawLink.linkPrincipalId,
+      blocked: false,
+    });
+
+    expect(
+      (
+        await test.handler(
+          moderationRequest(OWNER, {
+            action: "block",
+            principalId: rawLink.linkPrincipalId,
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await test.handler(moderationRequest(OWNER, { action: "pause" }))
+      ).status,
+    ).toBe(200);
 
     expect(
       test.storage.deleteShareDiscussionMessage({
         shareId: SHARE,
         messageId: rawLink.messageId,
         deletedAtMs: 60_000,
-        deletedByUserId: OWNER,
+        actorUserId: OWNER,
       }),
-    ).toBe(true);
+    ).toMatchObject({ messageId: rawLink.messageId });
     const publicTombstone = messages(
       await body(
         await test.handler(linkRequest(test.view, "/sync/link/discussion")),
@@ -1053,6 +1255,114 @@ describe("share discussion HTTP boundary", () => {
       deleted: true,
     });
     expect(JSON.stringify(publicTombstone)).not.toContain("Public Link Name");
+
+    const pausedPublic = await body(
+      await test.handler(linkRequest(test.view, "/sync/link/discussion")),
+    );
+    const pausedNamed = await body(
+      await test.handler(request(COMMENTER, `/sync/shares/${SHARE}/discussion`)),
+    );
+    for (const page of [pausedPublic, pausedNamed]) {
+      expect(page).not.toHaveProperty("linkCommentsPaused");
+      expect(messages(page)[0]).not.toHaveProperty("moderation");
+    }
+
+    test.storage.close();
+    storages.splice(storages.indexOf(test.storage), 1);
+    const reopened = openSyncRelayStorage(test.dbPath);
+    storages.push(reopened);
+    const restarted = test.makeHandler(reopened);
+    const restartedPage = await body(
+      await restarted(request(OWNER, `/sync/shares/${SHARE}/discussion`)),
+    );
+    expect(restartedPage.linkCommentsPaused).toBe(true);
+    expect(messages(restartedPage)[0]).toMatchObject({
+      messageId: rawLink.messageId,
+      deleted: true,
+      moderation: {
+        linkGrantId: test.comment.grantId,
+        linkPrincipalId: rawLink.linkPrincipalId,
+        blocked: true,
+      },
+    });
+    for (const action of [
+      { action: "resume" },
+      { action: "unblock", principalId: rawLink.linkPrincipalId },
+    ]) {
+      expect((await restarted(moderationRequest(OWNER, action))).status).toBe(200);
+    }
+    const reversedPage = await body(
+      await restarted(request(OWNER, `/sync/shares/${SHARE}/discussion`)),
+    );
+    expect(reversedPage.linkCommentsPaused).toBe(false);
+    expect(messages(reversedPage)[0]!.moderation).toMatchObject({ blocked: false });
+  });
+
+  it("projects owner moderation state from the same storage page snapshot", async () => {
+    const test = await fixture();
+    const appended = await test.handler(
+      trustedAppend(test.comment, {
+        body: "snapshot message",
+        claimedName: "Snapshot Profile",
+        idempotencyKey: "snapshot-state",
+      }),
+    );
+    expect(appended.status).toBe(200);
+    await appended.arrayBuffer();
+    const principalId = test.storage.listShareDiscussionMessages({
+      shareId: SHARE,
+      limit: 100,
+    }).messages[0]!.linkPrincipalId!;
+    expect(
+      test.storage.setLinkPrincipalBlocked({
+        shareId: SHARE,
+        principalId,
+        actorUserId: OWNER,
+        blockedAtMs: 70_000,
+      }),
+    ).toBe(true);
+    expect(
+      test.storage.setShareLinkWritesPaused({
+        shareId: SHARE,
+        actorUserId: OWNER,
+        pausedAtMs: 70_001,
+      }),
+    ).toBe(true);
+
+    const listPage = test.storage.listShareDiscussionMessages.bind(test.storage);
+    test.storage.listShareDiscussionMessages = (input) => {
+      const page = listPage(input);
+      expect(
+        test.storage.setLinkPrincipalBlocked({
+          shareId: SHARE,
+          principalId,
+          actorUserId: OWNER,
+          blockedAtMs: null,
+        }),
+      ).toBe(true);
+      expect(
+        test.storage.setShareLinkWritesPaused({
+          shareId: SHARE,
+          actorUserId: OWNER,
+          pausedAtMs: null,
+        }),
+      ).toBe(true);
+      return page;
+    };
+
+    const response = await test.handler(
+      request(OWNER, `/sync/shares/${SHARE}/discussion`),
+    );
+    expect(response.status).toBe(200);
+    const page = await body(response);
+    expect(page.linkCommentsPaused).toBe(true);
+    expect(messages(page)[0]!.moderation).toEqual({
+      linkGrantId: test.comment.grantId,
+      linkPrincipalId: principalId,
+      blocked: true,
+    });
+    expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).toBeNull();
+    expect(test.storage.getLinkPrincipal(principalId)!.blockedAtMs).toBeNull();
   });
 
   it("projects an authenticated read with the final current relationship", async () => {
@@ -1105,6 +1415,801 @@ describe("share discussion HTTP boundary", () => {
     });
   });
 
+  it("lets only the current owner delete a message without changing its durable charge", async () => {
+    const test = await fixture();
+    const appended = await test.handler(
+      trustedAppend(test.comment, {
+        body: "delete-body-sentinel",
+        claimedName: "Delete Link",
+        idempotencyKey: "delete-target",
+      }),
+    );
+    expect(appended.status).toBe(200);
+    await appended.arrayBuffer();
+    const original = test.storage.listShareDiscussionMessages({
+      shareId: SHARE,
+      limit: 100,
+    }).messages[0]!;
+    const beforeUsage = discussionUsage(test.dbPath);
+
+    const deleted = await test.handler(
+      moderationRequest(OWNER, {
+        action: "delete",
+        messageId: original.messageId,
+      }),
+    );
+    expect(deleted.status).toBe(200);
+    expectPrivate(deleted);
+    expect(await body(deleted)).toEqual({
+      ok: true,
+      message: {
+        messageId: original.messageId,
+        createdAtMs: original.createdAtMs,
+        deleted: true,
+      },
+    });
+    expect(
+      await genericRefusal(
+        await test.handler(
+          moderationRequest(OWNER, {
+            action: "delete",
+            messageId: original.messageId,
+          }),
+        ),
+      ),
+    ).toContain("404:");
+
+    for (const pendingRead of [
+      test.handler(linkRequest(test.view, "/sync/link/discussion")),
+      test.handler(request(COMMENTER, `/sync/shares/${SHARE}/discussion`)),
+      test.handler(request(OWNER, `/sync/shares/${SHARE}/discussion`)),
+    ]) {
+      const response = await pendingRead;
+      expect(response.status).toBe(200);
+      const serialized = JSON.stringify(await body(response));
+      expect(serialized).not.toContain("delete-body-sentinel");
+      expect(serialized).toContain(`\"messageId\":\"${original.messageId}\"`);
+      expect(serialized).toContain("\"deleted\":true");
+    }
+    const stored = test.storage.listShareDiscussionMessages({
+      shareId: SHARE,
+      limit: 100,
+    }).messages[0]!;
+    expect(stored).toMatchObject({
+      messageId: original.messageId,
+      body: null,
+      deletedByUserId: OWNER,
+      storageBytes: original.storageBytes,
+    });
+    expect(discussionUsage(test.dbPath)).toBe(beforeUsage);
+
+    test.storage.close();
+    storages.splice(storages.indexOf(test.storage), 1);
+    const reopened = openSyncRelayStorage(test.dbPath);
+    storages.push(reopened);
+    const restarted = test.makeHandler(reopened);
+    for (const response of [
+      await restarted(linkRequest(test.view, "/sync/link/discussion")),
+      await restarted(request(COMMENTER, `/sync/shares/${SHARE}/discussion`)),
+      await restarted(request(OWNER, `/sync/shares/${SHARE}/discussion`)),
+    ]) {
+      expect(response.status).toBe(200);
+      const serialized = JSON.stringify(await body(response));
+      expect(serialized).not.toContain("delete-body-sentinel");
+      expect(serialized).toContain("\"deleted\":true");
+    }
+    expect(discussionUsage(test.dbPath)).toBe(beforeUsage);
+  });
+
+  it("keeps a blocked protected profile durable while preserving reads and fresh-profile access", async () => {
+    const test = await fixture();
+    const seeded = await test.handler(
+      trustedAppend(
+        test.comment,
+        {
+          body: "blocked-profile-body",
+          claimedName: "Blocked Profile",
+          idempotencyKey: "block-seed",
+        },
+        PROFILE_A,
+      ),
+    );
+    expect(seeded.status).toBe(200);
+    await seeded.arrayBuffer();
+    const principalId = test.storage.listShareDiscussionMessages({
+      shareId: SHARE,
+      limit: 100,
+    }).messages[0]!.linkPrincipalId!;
+
+    const blocked = await test.handler(
+      moderationRequest(OWNER, { action: "block", principalId }),
+    );
+    expect(blocked.status).toBe(200);
+    expect(await body(blocked)).toEqual({ ok: true, blocked: true });
+    expect(test.storage.getLinkPrincipal(principalId)).toMatchObject({
+      blockedAtMs: expect.any(Number),
+    });
+    expect(
+      test.storage.findLinkSessionByCapabilityHash(
+        hashLinkBearer(test.comment.capabilityToken, LINK_KEY),
+      ),
+    ).toMatchObject({ principalId: null });
+
+    for (const path of ["/sync/link/discussion", "/sync/link/share"]) {
+      const read = await test.handler(linkRequest(test.comment, path));
+      expect(read.status, path).toBe(200);
+      await read.arrayBuffer();
+    }
+    expect(
+      await discussionStateRefusal(
+        await test.handler(
+          trustedAppend(
+            test.comment,
+            { body: "blocked current", idempotencyKey: "blocked-current" },
+            PROFILE_A,
+          ),
+        ),
+        "blocked",
+      ),
+    ).toContain("link_discussion_blocked");
+
+    expect(
+      (
+        await test.handler(moderationRequest(OWNER, { action: "pause" }))
+      ).status,
+    ).toBe(200);
+    expect(
+      await discussionStateRefusal(
+        await test.handler(
+          trustedAppend(
+            test.comment,
+            {
+              body: "paused before blocked",
+              idempotencyKey: "paused-before-blocked",
+            },
+            PROFILE_A,
+          ),
+        ),
+        "paused",
+      ),
+    ).toContain("link_discussion_paused");
+    expect(
+      (
+        await test.handler(moderationRequest(OWNER, { action: "resume" }))
+      ).status,
+    ).toBe(200);
+
+    const refresh = await test.handler(
+      linkRequest(
+        test.comment,
+        "/sync/link-refresh",
+        { method: "POST" },
+        { relayKey: RELAY_KEY },
+      ),
+    );
+    expect(refresh.status).toBe(200);
+    test.comment.capabilityToken = String((await body(refresh)).capabilityToken);
+    expect(
+      await discussionStateRefusal(
+        await test.handler(
+          trustedAppend(
+            test.comment,
+            { body: "blocked refresh", idempotencyKey: "blocked-refresh" },
+            PROFILE_A,
+          ),
+        ),
+        "blocked",
+      ),
+    ).toContain("link_discussion_blocked");
+
+    test.comment.capabilityToken = await exchangeLink(test, test.comment.secret);
+    expect(
+      await discussionStateRefusal(
+        await test.handler(
+          trustedAppend(
+            test.comment,
+            { body: "blocked exchange", idempotencyKey: "blocked-exchange" },
+            PROFILE_A,
+          ),
+        ),
+        "blocked",
+      ),
+    ).toContain("link_discussion_blocked");
+
+    const rotated = await test.handler(
+      request(
+        OWNER,
+        `/sync/shares/${SHARE}/links/${test.comment.grantId}/rotate`,
+        jsonRequest({ workspaceId: WORKSPACE, expectedDependentGrantIds: [] }),
+      ),
+    );
+    expect(rotated.status).toBe(200);
+    const rotatedUrl = new URL(String((await body(rotated)).url));
+    const rotatedSecret = rotatedUrl.hash.slice(1);
+    test.comment.secret = rotatedSecret;
+    test.comment.capabilityToken = await exchangeLink(test, rotatedSecret);
+    expect(
+      await discussionStateRefusal(
+        await test.handler(
+          trustedAppend(
+            test.comment,
+            { body: "blocked rotation", idempotencyKey: "blocked-rotation" },
+            PROFILE_A,
+          ),
+        ),
+        "blocked",
+      ),
+    ).toContain("link_discussion_blocked");
+    expect(
+      (
+        await test.handler(
+          trustedAppend(
+            test.comment,
+            { body: "fresh profile", idempotencyKey: "block-fresh" },
+            PROFILE_B,
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    expect(count(test.dbPath, "sync_relay_link_principals")).toBe(2);
+
+    const unblocked = await test.handler(
+      moderationRequest(OWNER, { action: "unblock", principalId }),
+    );
+    expect(unblocked.status).toBe(200);
+    expect(await body(unblocked)).toEqual({ ok: true, blocked: false });
+    test.comment.capabilityToken = await exchangeLink(test, rotatedSecret);
+    expect(
+      (
+        await test.handler(
+          trustedAppend(
+            test.comment,
+            { body: "original restored", idempotencyKey: "block-restored" },
+            PROFILE_A,
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      test.storage.listShareDiscussionMessages({ shareId: SHARE, limit: 100 })
+        .messages.at(-1)!.linkPrincipalId,
+    ).toBe(principalId);
+
+    const revoked = await test.handler(
+      request(
+        OWNER,
+        `/sync/shares/${SHARE}/revoke`,
+        jsonRequest({
+          workspaceId: WORKSPACE,
+          grantId: test.comment.grantId,
+          expectedDependentGrantIds: [],
+        }),
+      ),
+    );
+    expect(revoked.status).toBe(200);
+    for (const action of ["block", "unblock"] as const) {
+      const response = await test.handler(
+        moderationRequest(OWNER, { action, principalId }),
+      );
+      expect(response.status, action).toBe(200);
+      await response.arrayBuffer();
+    }
+    expect(
+      await genericRefusal(
+        await test.handler(
+          trustedAppend(
+            test.comment,
+            { body: "revoked", idempotencyKey: "block-revoked" },
+            PROFILE_A,
+          ),
+        ),
+      ),
+    ).toContain("404:");
+  });
+
+  it("pauses only link-authored writes and resumes without rotating authority or charging debt", async () => {
+    const test = await fixture();
+    const seeded = await test.handler(
+      trustedAppend(test.comment, {
+        body: "pause seed",
+        claimedName: "Pause Profile",
+        idempotencyKey: "pause-seed",
+      }),
+    );
+    expect(seeded.status).toBe(200);
+    await seeded.arrayBuffer();
+    const principalId = test.storage.listShareDiscussionMessages({
+      shareId: SHARE,
+      limit: 100,
+    }).messages[0]!.linkPrincipalId;
+    const grantBefore = test.storage.getShareGrant(test.comment.grantId)!;
+    const usageBefore = discussionUsage(test.dbPath);
+    const principalCountBefore = count(test.dbPath, "sync_relay_link_principals");
+    const capabilityBefore = test.comment.capabilityToken;
+
+    const paused = await test.handler(
+      moderationRequest(OWNER, { action: "pause" }),
+    );
+    expect(paused.status).toBe(200);
+    expect(await body(paused)).toEqual({ ok: true, linkCommentsPaused: true });
+    expect(discussionUsage(test.dbPath)).toBe(usageBefore);
+    expect(test.storage.getShareGrant(test.comment.grantId)).toEqual(grantBefore);
+    expect(count(test.dbPath, "sync_relay_link_principals")).toBe(
+      principalCountBefore,
+    );
+    expect(test.comment.capabilityToken).toBe(capabilityBefore);
+
+    for (const link of [test.view, test.comment]) {
+      for (const path of ["/sync/link/discussion", "/sync/link/share"]) {
+        const read = await test.handler(linkRequest(link, path));
+        expect(read.status, `${link.access}:${path}`).toBe(200);
+        await read.arrayBuffer();
+      }
+    }
+    expect(
+      await discussionStateRefusal(
+        await test.handler(
+          trustedAppend(test.comment, {
+            body: "link paused",
+            idempotencyKey: "pause-link",
+          }),
+        ),
+        "paused",
+      ),
+    ).toContain("link_discussion_paused");
+    for (const [actor, key] of [
+      [OWNER, "pause-owner"],
+      [COMMENTER, "pause-named"],
+      [EDITOR, "pause-editor"],
+    ] as const) {
+      const response = await test.handler(
+        request(
+          actor,
+          `/sync/shares/${SHARE}/discussion`,
+          jsonRequest({ body: `write from ${actor}`, idempotencyKey: key }),
+        ),
+      );
+      expect(response.status, actor).toBe(200);
+      await response.arrayBuffer();
+    }
+
+    const beforeResumeUsage = discussionUsage(test.dbPath);
+    const resumed = await test.handler(
+      moderationRequest(OWNER, { action: "resume" }),
+    );
+    expect(resumed.status).toBe(200);
+    expect(await body(resumed)).toEqual({ ok: true, linkCommentsPaused: false });
+    expect(discussionUsage(test.dbPath)).toBe(beforeResumeUsage);
+    expect(test.storage.getShareGrant(test.comment.grantId)).toEqual(grantBefore);
+    expect(count(test.dbPath, "sync_relay_link_principals")).toBe(
+      principalCountBefore,
+    );
+    expect(test.comment.capabilityToken).toBe(capabilityBefore);
+    const restored = await test.handler(
+      trustedAppend(test.comment, {
+        body: "link resumed",
+        idempotencyKey: "resume-link",
+      }),
+    );
+    expect(restored.status).toBe(200);
+    await restored.arrayBuffer();
+    expect(
+      test.storage.listShareDiscussionMessages({ shareId: SHARE, limit: 100 })
+        .messages.at(-1)!.linkPrincipalId,
+    ).toBe(principalId);
+  });
+
+  it("serializes revoke, block, and pause against link append in both commit orders", async () => {
+    const runTransition = async (
+      test: Fixture,
+      transition: "revoke" | "block" | "pause",
+      principalId: string | null,
+    ): Promise<Response> =>
+      transition === "revoke"
+        ? test.handler(
+            request(
+              OWNER,
+              `/sync/shares/${SHARE}/revoke`,
+              jsonRequest({
+                workspaceId: WORKSPACE,
+                grantId: test.comment.grantId,
+                expectedDependentGrantIds: [],
+              }),
+            ),
+          )
+        : test.handler(
+            moderationRequest(
+              OWNER,
+              transition === "block"
+                ? { action: "block", principalId }
+                : { action: "pause" },
+            ),
+          );
+
+    const buffered = await fixture();
+    const originalAppend = buffered.storage.appendLinkDiscussionMessage.bind(
+      buffered.storage,
+    );
+    buffered.storage.appendLinkDiscussionMessage = (input) =>
+      originalAppend({
+        ...input,
+        guard: () => {
+          input.guard?.();
+          expect(
+            buffered.storage.setShareLinkWritesPaused({
+              shareId: SHARE,
+              actorUserId: OWNER,
+              pausedAtMs: 19_000,
+            }),
+          ).toBe(true);
+        },
+      });
+    expect(
+      await discussionStateRefusal(
+        await buffered.handler(
+          trustedAppend(buffered.comment, {
+            body: "buffered before pause",
+            idempotencyKey: "buffered-pause",
+          }),
+        ),
+        "paused",
+      ),
+    ).toContain("link_discussion_paused");
+    expect(count(buffered.dbPath, "sync_relay_share_discussion_messages")).toBe(0);
+    expect(count(buffered.dbPath, "sync_relay_link_principals")).toBe(0);
+
+    for (const transition of ["revoke", "block", "pause"] as const) {
+      const transitionFirst = await fixture();
+      let principalId: string | null = null;
+      if (transition === "block") {
+        const seed = await transitionFirst.handler(
+          trustedAppend(transitionFirst.comment, {
+            body: "race principal",
+            idempotencyKey: "race-principal",
+          }),
+        );
+        expect(seed.status).toBe(200);
+        await seed.arrayBuffer();
+        principalId = transitionFirst.storage.listShareDiscussionMessages({
+          shareId: SHARE,
+          limit: 100,
+        }).messages[0]!.linkPrincipalId;
+      }
+      const beforeMessages = count(
+        transitionFirst.dbPath,
+        "sync_relay_share_discussion_messages",
+      );
+      const beforePrincipals = count(
+        transitionFirst.dbPath,
+        "sync_relay_link_principals",
+      );
+      const transitionResponse = await runTransition(
+        transitionFirst,
+        transition,
+        principalId,
+      );
+      expect(transitionResponse.status, `${transition}:transition-first`).toBe(
+        200,
+      );
+      await transitionResponse.arrayBuffer();
+      const refused = await transitionFirst.handler(
+        trustedAppend(transitionFirst.comment, {
+          body: `transition first ${transition}`,
+          idempotencyKey: `transition-first-${transition}`,
+        }),
+      );
+      if (transition === "block" || transition === "pause") {
+        await discussionStateRefusal(
+          refused,
+          transition === "block" ? "blocked" : "paused",
+        );
+      } else {
+        expect(await genericRefusal(refused)).toContain("404:");
+      }
+      expect(
+        count(
+          transitionFirst.dbPath,
+          "sync_relay_share_discussion_messages",
+        ),
+      ).toBe(beforeMessages);
+      expect(
+        count(transitionFirst.dbPath, "sync_relay_link_principals"),
+      ).toBe(beforePrincipals);
+
+      const appendFirst = await fixture();
+      const accepted = await appendFirst.handler(
+        trustedAppend(appendFirst.comment, {
+          body: `append first ${transition}`,
+          idempotencyKey: `append-first-${transition}`,
+        }),
+      );
+      expect(accepted.status).toBe(200);
+      await accepted.arrayBuffer();
+      const appendedPrincipal = appendFirst.storage.listShareDiscussionMessages({
+        shareId: SHARE,
+        limit: 100,
+      }).messages[0]!.linkPrincipalId;
+      const response = await runTransition(
+        appendFirst,
+        transition,
+        appendedPrincipal,
+      );
+      expect(response.status, `${transition}:append-first`).toBe(200);
+      await response.arrayBuffer();
+      expect(
+        count(appendFirst.dbPath, "sync_relay_share_discussion_messages"),
+      ).toBe(1);
+      expect(count(appendFirst.dbPath, "sync_relay_link_principals")).toBe(1);
+    }
+  });
+
+  it("refuses every non-owner, malformed action, and unrelated handle without mutation", async () => {
+    const test = await fixture();
+    const seeded = await test.handler(
+      trustedAppend(test.comment, {
+        body: "moderation-secret-body-sentinel",
+        claimedName: "Moderation Secret Profile",
+        idempotencyKey: "moderation-refusal-seed",
+      }),
+    );
+    expect(seeded.status).toBe(200);
+    await seeded.arrayBuffer();
+    const target = test.storage.listShareDiscussionMessages({
+      shareId: SHARE,
+      limit: 100,
+    }).messages[0]!;
+    const crossShare = seedCrossShareHandles(test.storage);
+    const beforeUsage = discussionUsage(test.dbPath);
+    const beforeRows = count(test.dbPath, "sync_relay_share_discussion_messages");
+
+    const baseline = await genericRefusal(
+      await test.handler(moderationRequest(COMMENTER, { action: "pause" })),
+    );
+    const refusals = [
+      test.handler(
+        linkRequest(
+          test.comment,
+          `/sync/shares/${SHARE}/discussion/moderation`,
+          jsonRequest({ action: "pause" }),
+        ),
+      ),
+      test.handler(
+        moderationRequest(OWNER, {
+          action: "delete",
+          messageId: "unknown-message-handle",
+        }),
+      ),
+      test.handler(
+        moderationRequest(OWNER, {
+          action: "block",
+          principalId: crossShare.principalId,
+        }),
+      ),
+      test.handler(
+        moderationRequest(OWNER, {
+          action: "delete",
+          messageId: crossShare.messageId,
+        }),
+      ),
+      test.handler(
+        moderationRequest(OWNER, { action: "pause", workspaceId: WORKSPACE }),
+      ),
+      test.handler(moderationRequest(OWNER, { action: "mute" })),
+      test.handler(
+        moderationRequest(
+          OWNER,
+          { action: "pause" },
+          { method: "GET", body: null },
+        ),
+      ),
+    ];
+    for (const response of await Promise.all(refusals)) {
+      expect(await genericRefusal(response)).toBe(baseline);
+    }
+    expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).toBeNull();
+    expect(test.storage.getLinkPrincipal(target.linkPrincipalId!)!.blockedAtMs).toBeNull();
+    expect(test.storage.getLinkPrincipal(crossShare.principalId)!.blockedAtMs).toBeNull();
+    expect(count(test.dbPath, "sync_relay_share_discussion_messages")).toBe(beforeRows);
+    expect(discussionUsage(test.dbPath)).toBe(beforeUsage);
+
+    const originalPause = test.storage.setShareLinkWritesPaused.bind(test.storage);
+    test.storage.setShareLinkWritesPaused = (input) => {
+      updateWorkspaceOwner(test.dbPath, NEW_OWNER);
+      return originalPause(input);
+    };
+    expect(
+      await genericRefusal(
+        await test.handler(moderationRequest(OWNER, { action: "pause" })),
+      ),
+    ).toBe(baseline);
+    expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).toBeNull();
+    expect(
+      await genericRefusal(
+        await test.handler(
+          moderationRequest(OWNER, {
+            action: "delete",
+            messageId: target.messageId,
+          }),
+        ),
+      ),
+    ).toBe(baseline);
+
+    const currentOwner = await test.handler(
+      moderationRequest(NEW_OWNER, { action: "pause" }),
+    );
+    expect(currentOwner.status).toBe(200);
+    expectPrivate(currentOwner);
+    const serialized = JSON.stringify(await body(currentOwner));
+    expect(serialized).toBe('{"ok":true,"linkCommentsPaused":true}');
+    for (const sentinel of [
+      OWNER,
+      NEW_OWNER,
+      WORKSPACE,
+      SHARE,
+      test.comment.grantId,
+      target.messageId,
+      target.linkPrincipalId!,
+      test.comment.secret,
+      test.comment.capabilityToken,
+      PROFILE_A,
+      "moderation-secret-body-sentinel",
+      "Moderation Secret Profile",
+    ]) {
+      expect(serialized, sentinel).not.toContain(sentinel);
+    }
+
+    const newOwnerRead = await test.handler(
+      request(NEW_OWNER, `/sync/shares/${SHARE}/discussion`),
+    );
+    expect(newOwnerRead.status).toBe(200);
+    const newOwnerPage = await body(newOwnerRead);
+    expect(newOwnerPage.linkCommentsPaused).toBe(true);
+    expect(messages(newOwnerPage)[0]!.moderation).toMatchObject({
+      linkGrantId: test.comment.grantId,
+      linkPrincipalId: target.linkPrincipalId,
+      blocked: false,
+    });
+  });
+
+  it("rechecks current workspace ownership inside every moderation transaction", async () => {
+    for (const transition of ["delete", "block", "pause"] as const) {
+      const test = await fixture();
+      const seeded = await test.handler(
+        trustedAppend(test.comment, {
+          body: `ownership-race-${transition}`,
+          claimedName: "Ownership Race",
+          idempotencyKey: `ownership-race-${transition}`,
+        }),
+      );
+      expect(seeded.status).toBe(200);
+      await seeded.arrayBuffer();
+      const target = test.storage.listShareDiscussionMessages({
+        shareId: SHARE,
+        limit: 100,
+      }).messages[0]!;
+      const beforeUsage = discussionUsage(test.dbPath);
+      const baseline = await genericRefusal(
+        await test.handler(moderationRequest(COMMENTER, { action: "pause" })),
+      );
+
+      if (transition === "delete") {
+        const original = test.storage.deleteShareDiscussionMessage.bind(
+          test.storage,
+        );
+        test.storage.deleteShareDiscussionMessage = (input) => {
+          updateWorkspaceOwner(test.dbPath, NEW_OWNER);
+          return original(input);
+        };
+      } else if (transition === "block") {
+        const original = test.storage.setLinkPrincipalBlocked.bind(test.storage);
+        test.storage.setLinkPrincipalBlocked = (input) => {
+          updateWorkspaceOwner(test.dbPath, NEW_OWNER);
+          return original(input);
+        };
+      } else {
+        const original = test.storage.setShareLinkWritesPaused.bind(test.storage);
+        test.storage.setShareLinkWritesPaused = (input) => {
+          updateWorkspaceOwner(test.dbPath, NEW_OWNER);
+          return original(input);
+        };
+      }
+
+      const response = await test.handler(
+        moderationRequest(
+          OWNER,
+          transition === "delete"
+            ? { action: "delete", messageId: target.messageId }
+            : transition === "block"
+              ? { action: "block", principalId: target.linkPrincipalId }
+              : { action: "pause" },
+        ),
+      );
+      expect(await genericRefusal(response), transition).toBe(baseline);
+      expect(
+        test.storage.listShareDiscussionMessages({ shareId: SHARE, limit: 100 })
+          .messages[0],
+      ).toMatchObject({
+        messageId: target.messageId,
+        body: `ownership-race-${transition}`,
+        deletedAtMs: null,
+        linkPrincipalBlocked: false,
+      });
+      expect(test.storage.getLinkPrincipal(target.linkPrincipalId!)!.blockedAtMs).toBeNull();
+      expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).toBeNull();
+      expect(discussionUsage(test.dbPath)).toBe(beforeUsage);
+    }
+  });
+
+  it("keeps every non-state append result behind the generic accountless refusal", async () => {
+    const test = await fixture();
+    const baseline = await genericRefusal(
+      await test.handler(
+        linkRequest(
+          test.comment,
+          "/sync/link/discussion",
+          jsonRequest({ body: "baseline", idempotencyKey: "reason-baseline" }),
+          { relayKey: "wrong-key", profileSecret: PROFILE_A },
+        ),
+      ),
+    );
+    const original = test.storage.appendLinkDiscussionMessage.bind(test.storage);
+    const nonStateReasons = [
+      "not-authorized",
+      "name-already-set",
+      "idempotency-conflict",
+      "principal-limit",
+      "rate-limit",
+      "lifetime-limit",
+      "share-limit",
+      "workspace-quota",
+    ] as const;
+    for (const reason of nonStateReasons) {
+      test.storage.appendLinkDiscussionMessage = () => ({ ok: false, reason });
+      const response = await test.handler(
+        trustedAppend(test.comment, {
+          body: `valid trusted ${reason}`,
+          idempotencyKey: `reason-${reason}`,
+        }),
+      );
+      expect(await genericRefusal(response), reason).toBe(baseline);
+    }
+
+    test.storage.appendLinkDiscussionMessage = () => ({
+      ok: false,
+      reason: "invalid-input",
+    });
+    const invalidInput = await test.handler(
+      trustedAppend(test.comment, {
+        body: "valid trusted invalid-input control",
+        idempotencyKey: "reason-invalid-input",
+      }),
+    );
+    expect(invalidInput.status).toBe(400);
+    expectPrivate(invalidInput);
+    expect(await body(invalidInput)).toEqual({
+      ok: false,
+      error: "discussion message is invalid",
+      code: "bad_request",
+    });
+
+    for (const state of ["blocked", "paused"] as const) {
+      test.storage.appendLinkDiscussionMessage = () => ({
+        ok: false,
+        reason: state,
+      });
+      await discussionStateRefusal(
+        await test.handler(
+          trustedAppend(test.comment, {
+            body: `valid trusted ${state} control`,
+            idempotencyKey: `reason-${state}`,
+          }),
+        ),
+        state,
+      );
+    }
+    test.storage.appendLinkDiscussionMessage = original;
+  });
+
   it("sets private no-store on every discussion success and refusal and keeps invalid accountless refusals byte-comparable", async () => {
     const test = await fixture();
     const linkRead = await test.handler(
@@ -1132,6 +2237,26 @@ describe("share discussion HTTP boundary", () => {
       await response.arrayBuffer();
     }
 
+    const principalId = test.storage
+      .listShareDiscussionMessages({ shareId: SHARE, limit: 100 })
+      .messages.find((message) => message.authorKind === "link")!
+      .linkPrincipalId!;
+    for (const action of [
+      { action: "block", principalId },
+      { action: "pause" },
+    ]) {
+      expect((await test.handler(moderationRequest(OWNER, action))).status).toBe(200);
+    }
+    for (const read of [
+      await test.handler(linkRequest(test.comment, "/sync/link/discussion")),
+      await test.handler(request(COMMENTER, `/sync/shares/${SHARE}/discussion`)),
+    ]) {
+      expect(read.status).toBe(200);
+      const serialized = await read.text();
+      expect(serialized).not.toContain("link_discussion_paused");
+      expect(serialized).not.toContain("link_discussion_blocked");
+    }
+
     const invalids = await Promise.all([
       test.handler(
         linkRequest(
@@ -1157,9 +2282,55 @@ describe("share discussion HTTP boundary", () => {
           { relayKey: RELAY_KEY },
         ),
       ),
+      test.handler(
+        linkRequest(
+          { ...test.comment, capabilityToken: secret("z") },
+          "/sync/link/discussion",
+        ),
+      ),
     ]);
     const refusalBodies = await Promise.all(invalids.map(genericRefusal));
     expect(new Set(refusalBodies).size).toBe(1);
+    expect(refusalBodies[0]).not.toContain("link_discussion_paused");
+    expect(refusalBodies[0]).not.toContain("link_discussion_blocked");
+
+    const invalidInput = await test.handler(
+      trustedAppend(test.comment, {
+        body: "",
+        idempotencyKey: "trusted-invalid-input",
+      }),
+    );
+    expect(invalidInput.status).toBe(400);
+    expectPrivate(invalidInput);
+    expect(await body(invalidInput)).toEqual({
+      ok: false,
+      error: "discussion message is invalid",
+      code: "bad_request",
+    });
+
+    await discussionStateRefusal(
+      await test.handler(
+        trustedAppend(test.comment, {
+          body: "trusted paused",
+          idempotencyKey: "trusted-paused",
+        }),
+      ),
+      "paused",
+    );
+    expect(
+      (
+        await test.handler(moderationRequest(OWNER, { action: "resume" }))
+      ).status,
+    ).toBe(200);
+    await discussionStateRefusal(
+      await test.handler(
+        trustedAppend(test.comment, {
+          body: "trusted blocked",
+          idempotencyKey: "trusted-blocked",
+        }),
+      ),
+      "blocked",
+    );
 
     const unauthenticated = await test.handler(
       request(null, `/sync/shares/${SHARE}/discussion`),

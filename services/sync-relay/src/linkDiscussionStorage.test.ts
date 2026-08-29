@@ -246,6 +246,7 @@ describe("durable link discussion storage", () => {
     expect(storage.listShareDiscussionMessages({ shareId: seeded.shareId, limit: 50 })).toEqual({
       messages: [],
       nextCursor: null,
+      linkCommentsPaused: false,
     });
     expect(
       append(storage, seeded, { body: "", idempotencyKey: "refused" }),
@@ -361,6 +362,7 @@ describe("durable link discussion storage", () => {
       storage.setLinkPrincipalBlocked({
         shareId: seeded.shareId,
         principalId,
+        actorUserId: OWNER,
         blockedAtMs: 2_400,
       }),
     ).toBe(true);
@@ -368,6 +370,7 @@ describe("durable link discussion storage", () => {
       storage.setLinkPrincipalBlocked({
         shareId: seeded.shareId,
         principalId,
+        actorUserId: OWNER,
         blockedAtMs: null,
       }),
     ).toBe(true);
@@ -440,9 +443,13 @@ describe("durable link discussion storage", () => {
     });
 
     const paused = seedShare(storage, { suffix: "paused" });
-    expect(storage.setShareLinkWritesPaused({ shareId: paused.shareId, pausedAtMs: 1_500 })).toBe(
-      true,
-    );
+    expect(
+      storage.setShareLinkWritesPaused({
+        shareId: paused.shareId,
+        actorUserId: OWNER,
+        pausedAtMs: 1_500,
+      }),
+    ).toBe(true);
     expect(append(storage, paused, { profile: "paused" })).toMatchObject({
       ok: false,
       reason: "paused",
@@ -459,6 +466,7 @@ describe("durable link discussion storage", () => {
       storage.setLinkPrincipalBlocked({
         shareId: blocked.shareId,
         principalId: accepted.principal.principalId,
+        actorUserId: OWNER,
         blockedAtMs: 2_100,
       }),
     ).toBe(true);
@@ -810,9 +818,9 @@ describe("durable link discussion storage", () => {
         shareId: debtSeed.shareId,
         messageId: debtFirst.message.messageId,
         deletedAtMs: 2_100,
-        deletedByUserId: OWNER,
+        actorUserId: OWNER,
       }),
-    ).toBe(true);
+    ).toMatchObject({ messageId: debtFirst.message.messageId });
     expect(
       debtStore.storage.rotateLinkGrant({
         shareId: debtSeed.shareId,
@@ -904,9 +912,9 @@ describe("durable link discussion storage", () => {
         shareId: seeded.shareId,
         messageId: ids[2]!,
         deletedAtMs: 3_000,
-        deletedByUserId: OWNER,
+        actorUserId: OWNER,
       }),
-    ).toBe(true);
+    ).toMatchObject({ messageId: ids[2] });
 
     const first = storage.listShareDiscussionMessages({ shareId: seeded.shareId, limit: 2 });
     expect(first.messages.map((row) => row.messageId)).toEqual(ids.slice(0, 2));
@@ -986,19 +994,24 @@ describe("durable link discussion storage", () => {
         shareId: seeded.shareId,
         messageId: blocked.message.messageId,
         deletedAtMs: 2_100,
-        deletedByUserId: OWNER,
+        actorUserId: OWNER,
       }),
-    ).toBe(true);
+    ).toMatchObject({ messageId: blocked.message.messageId });
     expect(
       storage.setLinkPrincipalBlocked({
         shareId: seeded.shareId,
         principalId: blocked.principal.principalId,
+        actorUserId: OWNER,
         blockedAtMs: 2_200,
       }),
     ).toBe(true);
-    expect(storage.setShareLinkWritesPaused({ shareId: seeded.shareId, pausedAtMs: 2_300 })).toBe(
-      true,
-    );
+    expect(
+      storage.setShareLinkWritesPaused({
+        shareId: seeded.shareId,
+        actorUserId: OWNER,
+        pausedAtMs: 2_300,
+      }),
+    ).toBe(true);
 
     storage.close();
     storages.splice(storages.indexOf(storage), 1);
@@ -1020,6 +1033,7 @@ describe("durable link discussion storage", () => {
     });
     expect(reopened.getShareLinkWritesPausedAtMs(seeded.shareId)).toBe(2_300);
     expect(reopened.listShareDiscussionMessages({ shareId: seeded.shareId, limit: 50 })).toMatchObject({
+      linkCommentsPaused: true,
       messages: [
         {
           messageId: kept.message.messageId,
@@ -1027,12 +1041,14 @@ describe("durable link discussion storage", () => {
           linkPrincipalId: kept.principal.principalId,
           displayNameSnapshot: "Kept",
           body: "kept body",
+          linkPrincipalBlocked: false,
         },
         {
           messageId: blocked.message.messageId,
           linkGrantId: seeded.grantId,
           linkPrincipalId: blocked.principal.principalId,
           body: null,
+          linkPrincipalBlocked: true,
           deletedAtMs: 2_100,
           deletedByUserId: OWNER,
         },
@@ -1046,9 +1062,13 @@ describe("durable link discussion storage", () => {
         createdAtMs: 70_000,
       }),
     ).toMatchObject({ ok: false, reason: "paused" });
-    expect(reopened.setShareLinkWritesPaused({ shareId: seeded.shareId, pausedAtMs: null })).toBe(
-      true,
-    );
+    expect(
+      reopened.setShareLinkWritesPaused({
+        shareId: seeded.shareId,
+        actorUserId: OWNER,
+        pausedAtMs: null,
+      }),
+    ).toBe(true);
     expect(
       append(reopened, seeded, {
         profile: "kept",

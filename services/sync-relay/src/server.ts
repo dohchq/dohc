@@ -193,6 +193,7 @@ type SyncRelayRoute =
   | { route: "share-grant-revoke"; shareId: string; grantId: string }
   | { route: "share-log"; shareId: string }
   | { route: "share-discussion"; shareId: string }
+  | { route: "share-discussion-moderation"; shareId: string }
   | { route: "share-blob"; shareId: string; sha256: string }
   // #646 PR3a. The recipient's half of the proposal lane is share-scoped; the
   // granter's half is WORKSPACE-scoped, so its authorization is the one
@@ -251,6 +252,7 @@ export const DEFAULT_LOG_PAGE_SIZE = 100;
 export const MAX_LOG_PAGE_SIZE = 500;
 const DEFAULT_DISCUSSION_PAGE_SIZE = 50;
 const DISCUSSION_CURSOR_MAX_CHARS = 1_024;
+const DISCUSSION_MODERATION_HANDLE_MAX_CHARS = 512;
 const MAX_LINK_CURRENT_FILES = 5_000;
 // One accountless response may scan this many raw log rows for admitted ops.
 export const MAX_RAW_ROWS_PER_LINK_PAGE = 10_000;
@@ -724,7 +726,9 @@ export function createSyncRelayHandler({
     privateResponse(errorResponse(error));
 
   const projectDiscussionMessage = (
-    message: SyncRelayShareDiscussionMessageRow,
+    message: SyncRelayShareDiscussionMessageRow & {
+      linkPrincipalBlocked?: boolean | null;
+    },
     viewer: DiscussionViewer,
   ): Record<string, unknown> => {
     const base = {
@@ -756,6 +760,7 @@ export function createSyncRelayHandler({
             moderation: {
               linkGrantId: message.linkGrantId,
               linkPrincipalId: message.linkPrincipalId,
+              blocked: message.linkPrincipalBlocked === true,
             },
           }
         : {}),
@@ -770,7 +775,6 @@ export function createSyncRelayHandler({
     const share = storage.getShare(shareId);
     if (
       share &&
-      share.granterUserId === actorUserId &&
       storage.workspaceIsOwnedBy(share.workspaceId, actorUserId)
     ) {
       return { viewer: "owner" };
@@ -786,12 +790,26 @@ export function createSyncRelayHandler({
     return { viewer: "named" };
   };
 
+  const isCurrentDiscussionOwner = (
+    shareId: string,
+    actorUserId: string,
+  ): boolean => {
+    const share = storage.getShare(shareId);
+    return (
+      share !== null &&
+      storage.workspaceIsOwnedBy(share.workspaceId, actorUserId)
+    );
+  };
+
   const discussionPage = (
     page: SyncRelayShareDiscussionPage,
     viewer: DiscussionViewer,
   ): Record<string, unknown> => {
     return {
       ok: true,
+      ...(viewer === "owner"
+        ? { linkCommentsPaused: page.linkCommentsPaused }
+        : {}),
       messages: page.messages.map((message) =>
         projectDiscussionMessage(message, viewer),
       ),
@@ -1422,10 +1440,29 @@ export function createSyncRelayHandler({
         body: input.body,
         idempotencyKey: input.idempotencyKey,
         createdAtMs: nowMs(),
+        guard: () => {
+          requireFreshLinkRead(capabilityToken, capability);
+        },
       });
       if (!result.ok) {
         if (result.reason === "invalid-input") {
           return privateErrorResponse(badRequest("discussion message is invalid"));
+        }
+        if (result.reason === "paused") {
+          return privateErrorResponse(
+            relayHttpError(
+              RELAY_ERRORS.link_discussion_paused,
+              "link discussion writes are paused",
+            ),
+          );
+        }
+        if (result.reason === "blocked") {
+          return privateErrorResponse(
+            relayHttpError(
+              RELAY_ERRORS.link_discussion_blocked,
+              "link discussion writes are blocked",
+            ),
+          );
         }
         return refused();
       }
@@ -1517,6 +1554,80 @@ export function createSyncRelayHandler({
         ok: true,
         message: projectDiscussionMessage(result.message, authority.viewer),
       });
+    } catch (error) {
+      return privateErrorResponse(error);
+    }
+  };
+
+  const respondToShareDiscussionModeration = async (
+    request: Request,
+    shareId: string,
+  ): Promise<Response> => {
+    const refused = (): Response => privateErrorResponse(notFound());
+    if (request.method !== "POST") return refused();
+    let actorUserId: string;
+    let action: DiscussionModerationAction;
+    try {
+      const actor = await resolveActor(request, "");
+      if (
+        !actor.userId ||
+        Buffer.byteLength(actor.userId, "utf8") >
+          LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT ||
+        !isCurrentDiscussionOwner(shareId, actor.userId)
+      ) {
+        return refused();
+      }
+      actorUserId = actor.userId;
+      action = parseDiscussionModerationAction(
+        await readJsonObject(request),
+      );
+    } catch {
+      return refused();
+    }
+    try {
+      const changedAtMs = nowMs();
+      if (action.action === "delete") {
+        const deleted = storage.deleteShareDiscussionMessage({
+          shareId,
+          messageId: action.messageId,
+          deletedAtMs: changedAtMs,
+          actorUserId,
+        });
+        if (deleted === null) return refused();
+        return privateJsonResponse({
+          ok: true,
+          message: {
+            messageId: deleted.messageId,
+            createdAtMs: deleted.createdAtMs,
+            deleted: true,
+          },
+        });
+      }
+      if (action.action === "block" || action.action === "unblock") {
+        const blocked = action.action === "block";
+        if (
+          !storage.setLinkPrincipalBlocked({
+            shareId,
+            principalId: action.principalId,
+            actorUserId,
+            blockedAtMs: blocked ? changedAtMs : null,
+          })
+        ) {
+          return refused();
+        }
+        return privateJsonResponse({ ok: true, blocked });
+      }
+      const linkCommentsPaused = action.action === "pause";
+      if (
+        !storage.setShareLinkWritesPaused({
+          shareId,
+          actorUserId,
+          pausedAtMs: linkCommentsPaused ? changedAtMs : null,
+        })
+      ) {
+        return refused();
+      }
+      return privateJsonResponse({ ok: true, linkCommentsPaused });
     } catch (error) {
       return privateErrorResponse(error);
     }
@@ -1868,6 +1979,9 @@ export function createSyncRelayHandler({
       }
       if (route.route === "share-discussion") {
         return await respondToShareDiscussion(request, route.shareId);
+      }
+      if (route.route === "share-discussion-moderation") {
+        return await respondToShareDiscussionModeration(request, route.shareId);
       }
       if (
         route.route === "link-share" ||
@@ -3623,6 +3737,13 @@ function parseRoute(request: Request): SyncRelayRoute {
     if (parts.length === 4 && parts[3] === "discussion") {
       return { route: "share-discussion", shareId };
     }
+    if (
+      parts.length === 5 &&
+      parts[3] === "discussion" &&
+      parts[4] === "moderation"
+    ) {
+      return { route: "share-discussion-moderation", shareId };
+    }
     if (parts.length === 4 && parts[3] === "presence") return { route: "share-presence", shareId };
     if (parts.length === 5 && parts[3] === "blobs" && parts[4]) {
       return { route: "share-blob", shareId, sha256: parts[4] };
@@ -3899,6 +4020,43 @@ function parseNamedDiscussionAppendBody(input: Record<string, unknown>): {
     throw badRequest("discussion append body is invalid");
   }
   return { body: input.body, idempotencyKey: input.idempotencyKey };
+}
+
+type DiscussionModerationAction =
+  | { action: "delete"; messageId: string }
+  | { action: "block" | "unblock"; principalId: string }
+  | { action: "pause" | "resume" };
+
+function parseDiscussionModerationAction(
+  input: Record<string, unknown>,
+): DiscussionModerationAction {
+  const validHandle = (value: unknown): value is string =>
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= DISCUSSION_MODERATION_HANDLE_MAX_CHARS;
+  if (input.action === "delete") {
+    if (
+      Object.keys(input).sort().join("\0") !== ["action", "messageId"].join("\0") ||
+      !validHandle(input.messageId)
+    ) {
+      throw notFound();
+    }
+    return { action: "delete", messageId: input.messageId };
+  }
+  if (input.action === "block" || input.action === "unblock") {
+    if (
+      Object.keys(input).sort().join("\0") !== ["action", "principalId"].join("\0") ||
+      !validHandle(input.principalId)
+    ) {
+      throw notFound();
+    }
+    return { action: input.action, principalId: input.principalId };
+  }
+  if (input.action === "pause" || input.action === "resume") {
+    if (Object.keys(input).length !== 1) throw notFound();
+    return { action: input.action };
+  }
+  throw notFound();
 }
 
 function parseExpectedDependentGrantIds(
