@@ -233,6 +233,8 @@ test("keeps hostile comment text inert in the real viewer", async ({
   ].join("\n");
   const projectedBody = hostileBody.normalize("NFC");
   const context = await browser.newContext();
+  const controlPath = `/comment-egress-control-${randomBytes(8).toString("hex")}`;
+  const controlUrl = `${probe.url}${controlPath}`;
   const authoredProbeUrls: string[] = [];
   context.on("request", (request) => {
     if (request.url().startsWith(probe.url)) authoredProbeUrls.push(request.url());
@@ -266,8 +268,37 @@ test("keeps hostile comment text inert in the real viewer", async ({
     expect(page.url()).toBe(viewerUrl);
     expect(await page.evaluate((name) => Reflect.get(window, name), ATTACK_SENTINEL))
       .toBe(SENTINEL_BASELINE);
-    expect(authoredProbeUrls).toEqual([]);
-    expect(probe.requests).toEqual([]);
+    const browserControlRequest = context.waitForEvent(
+      "request",
+      (request) => request.url() === controlUrl,
+    );
+    await page.evaluate((url) => {
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.target = "_blank";
+      anchor.rel = "noopener";
+      anchor.textContent = "Comment egress control";
+      document.body.append(anchor);
+    }, controlUrl);
+    const controlPagePromise = context.waitForEvent("page");
+    await Promise.all([
+      browserControlRequest,
+      page.getByRole("link", { name: "Comment egress control" }).click(),
+    ]);
+    const controlPage = await controlPagePromise;
+    await controlPage.waitForLoadState("domcontentloaded");
+    await controlPage.close();
+    await expect.poll(
+      () => probe.requests.filter((request) => request.path === controlPath).length,
+    ).toBe(1);
+    expect({
+      browser: authoredProbeUrls.filter((url) => new URL(url).pathname === controlPath).length,
+      probe: probe.requests.filter((request) => request.path === controlPath).length,
+    }).toEqual({ browser: 1, probe: 1 });
+    expect(
+      authoredProbeUrls.filter((url) => new URL(url).pathname !== controlPath),
+    ).toEqual([]);
+    expect(probe.requests.filter((request) => request.path !== controlPath)).toEqual([]);
   } finally {
     await context.close();
   }
@@ -336,7 +367,14 @@ test("keeps a Comment version share pinned through a main-version rename", async
     "append live main rename",
   );
 
+  const forwardRefreshResponse = page.waitForResponse((response) => {
+    const pathname = new URL(response.url()).pathname;
+    return response.request().method() === "GET" &&
+      response.ok() &&
+      (pathname === "/api/view/current" || pathname === "/api/view/log");
+  });
   await page.clock.fastForward(4 * 60_000);
+  expect(await (await forwardRefreshResponse).finished()).toBeNull();
   await expect(page.getByRole("heading", { name: "docs/pinned.md" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Pinned version" })).toBeVisible();
   await expect(page.getByText("These bytes belong to the snapshot.", { exact: true })).toBeVisible();
