@@ -73,6 +73,55 @@ async function openLink(
   return page;
 }
 
+test("keeps two open public comment sessions current", async ({ browser, stack }) => {
+  const seeded = await seedShare({
+    access: "comment",
+    relayUrl: stack.relayUrl,
+    files: [{ path: "docs/live.md", content: "# Shared file\n" }],
+  });
+  const firstContext = await browser.newContext();
+  const secondContext = await browser.newContext();
+  try {
+    const firstPage = await openLink(firstContext, stack.shareWebUrl, seeded);
+    const secondPage = await openLink(secondContext, stack.shareWebUrl, seeded);
+    await expect(firstPage.getByText("No comments yet.", { exact: true })).toBeVisible();
+    await expect(secondPage.getByText("No comments yet.", { exact: true })).toBeVisible();
+
+    const liveBody = "Posted while both comment panels are open.";
+    await firstPage.getByLabel("Name (optional)").fill("First Reader");
+    await firstPage.getByLabel("Comment", { exact: true }).fill(liveBody);
+    const [appendResponse] = await Promise.all([
+      firstPage.waitForResponse((response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/api/view/discussion"
+      ),
+      firstPage.getByRole("button", { name: "Post comment" }).click(),
+    ]);
+    await expect(firstPage.getByText(liveBody, { exact: true })).toBeVisible();
+    await expect(secondPage.getByText(liveBody, { exact: true })).toBeVisible();
+
+    const appendBody = (await appendResponse.json()) as { message?: { messageId?: unknown } };
+    if (typeof appendBody.message?.messageId !== "string") {
+      throw new Error("public append returned no message id");
+    }
+    await deleteComment({
+      relayUrl: stack.relayUrl,
+      shareId: seeded.shareId,
+      ownerUserId: seeded.ownerUserId,
+      messageId: appendBody.message.messageId,
+    });
+
+    await expect(secondPage.getByText("Comment deleted by the owner", { exact: true }))
+      .toBeVisible();
+    await expect(secondPage.getByText(liveBody, { exact: true })).toHaveCount(0);
+    await expect(firstPage.getByText("Comment deleted by the owner", { exact: true }))
+      .toBeVisible();
+    await expect(firstPage.getByText(liveBody, { exact: true })).toHaveCount(0);
+  } finally {
+    await Promise.all([firstContext.close(), secondContext.close()]);
+  }
+});
+
 test("keeps mixed View and Comment links isolated over one committed discussion", async ({
   browser,
   stack,
