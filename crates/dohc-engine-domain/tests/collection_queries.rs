@@ -737,6 +737,81 @@ fn get_record_history_is_bounded_and_newest_first() {
 }
 
 #[test]
+fn before_history_id_cursor_pages_equal_timestamps_without_gaps_or_duplicates() {
+    let (_scratch, mut store) = seeded_store();
+    let seeded = store
+        .write_with(&NoFaults, |tx| -> Result<Vec<i64>, StorageError> {
+            let mut history_ids = Vec::new();
+            for field_name in ["Title", "Status", "Rank", "Owner"] {
+                tx.execute(
+                    "INSERT INTO collection_field_history \
+                     (workspace_id,version_id,record_id,field_name,previous_value_json,\
+                      next_value_json,author_origin_id,recorded_at_ms) \
+                     VALUES (?1,?2,?3,?4,NULL,'\"next\"','origin',200)",
+                    params![WORKSPACE_ID, VERSION_ID, FIRST_TASK_ID, field_name],
+                )
+                .map_err(StorageError::persist_public)?;
+                history_ids.push(tx.last_insert_rowid());
+            }
+            Ok(history_ids)
+        })
+        .expect("seed equal-timestamp history");
+    let TxnOutcome::Committed(mut expected_history_ids) = seeded else {
+        panic!("equal-timestamp history seed crashed");
+    };
+    expected_history_ids.sort_unstable_by(|left, right| right.cmp(left));
+
+    let mut before_history_id = None;
+    let mut pages = Vec::new();
+    for _ in 0..3 {
+        let record = store
+            .read_with(|conn| {
+                get_collection_record(
+                    conn,
+                    WORKSPACE_ID,
+                    "tasks",
+                    FIRST_TASK_ID,
+                    2,
+                    before_history_id,
+                )
+            })
+            .expect("get equal-timestamp history page")
+            .expect("record exists");
+        before_history_id = record.history.last().map(|entry| entry.history_id);
+        pages.push(record.history);
+    }
+
+    assert_eq!(
+        pages.iter().map(Vec::len).collect::<Vec<_>>(),
+        vec![2, 2, 0]
+    );
+    assert_eq!(
+        pages[0].last().expect("first page boundary").recorded_at_ms,
+        pages[1]
+            .first()
+            .expect("second page boundary")
+            .recorded_at_ms
+    );
+    let history_ids = pages
+        .iter()
+        .flatten()
+        .map(|entry| entry.history_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        history_ids, expected_history_ids,
+        "history cursor skipped rows"
+    );
+    let mut unique_history_ids = history_ids.clone();
+    unique_history_ids.sort_unstable();
+    unique_history_ids.dedup();
+    assert_eq!(
+        unique_history_ids.len(),
+        history_ids.len(),
+        "history cursor duplicated rows"
+    );
+}
+
+#[test]
 fn over_limit_record_history_is_clamped_and_pages_without_gaps() {
     let (_scratch, mut store) = seeded_store();
     let seeded = store
