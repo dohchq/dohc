@@ -6,15 +6,16 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use dohc_engine_sync::{
-    BlobDownloadRequest, BlobDownloadResponse, BlobHaveRequest, BlobHaveResponse,
-    BlobUploadRequest, ClaimRequest, ClaimResponse, EpochRequest, EpochResponse,
+    BlobDownloadBatchRequest, BlobDownloadBatchResponse, BlobDownloadResponse, BlobHaveRequest,
+    BlobHaveResponse, BlobUploadRequest, ClaimRequest, ClaimResponse, EpochRequest, EpochResponse,
     KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse, KeyEnvelopeRequest,
-    KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse, MAX_INGEST_BLOB_BYTES,
-    MAX_PAYLOAD_JSON_BYTES, MAX_PULL_OPS, ObservedBytes, ProbeRequest, ProbeResponse, PullRequest,
-    PullResponse, PushRequest, PushResponse, RelayError, RelayTransport, ReplicationEnvelope,
-    ShareBlobRequest, ShareBlobUploadRequest, ShareLogPushRequest, ShareProposalChange,
-    ShareProposalSubmitRequest, ShareProposalSubmitResponse, ShareReplicationEnvelope,
-    ShareViewRequest, ShareViewResponse, SharedChannelRequest, SharedChannelResponse,
+    KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse, MAX_BLOB_DOWNLOAD_BATCH,
+    MAX_INGEST_BLOB_BYTES, MAX_PAYLOAD_JSON_BYTES, MAX_PULL_OPS, ObservedBytes, ProbeRequest,
+    ProbeResponse, PullRequest, PullResponse, PushRequest, PushResponse, RelayError,
+    RelayTransport, ReplicationEnvelope, ShareBlobRequest, ShareBlobUploadRequest,
+    ShareLogPushRequest, ShareProposalChange, ShareProposalSubmitRequest,
+    ShareProposalSubmitResponse, ShareReplicationEnvelope, ShareViewRequest, ShareViewResponse,
+    SharedChannelRequest, SharedChannelResponse,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use ureq::http::{Response, Uri};
@@ -447,24 +448,49 @@ impl RelayTransport for HttpRelayTransport {
         Ok(())
     }
 
-    fn download_blob(&self, req: BlobDownloadRequest) -> Result<BlobDownloadResponse, RelayError> {
-        let url = self.workspace_url(
-            &req.workspace_id,
-            &format!("/blobs/{}", encode_segment(&req.sha256)),
-            &req.replication_epoch,
-            &req.stream_identity,
-            &[],
-        );
-        let (bytes, _) = self.bytes(
-            self.agent
-                .get(&url)
-                .header("authorization", &self.authorization())
-                .call(),
-            RequestContext::Blob,
-            BLOB_BODY_READ_LIMIT_BYTES,
-            blob_body_overflow(),
-        )?;
-        Ok(BlobDownloadResponse { bytes })
+    fn download_blobs(
+        &self,
+        req: BlobDownloadBatchRequest,
+    ) -> Result<BlobDownloadBatchResponse, RelayError> {
+        if req.blobs.is_empty() || req.blobs.len() > MAX_BLOB_DOWNLOAD_BATCH {
+            return Err(RelayError::InvalidResponse);
+        }
+
+        let mut results = Vec::with_capacity(req.blobs.len());
+        for blob in req.blobs {
+            let result = (|| {
+                if blob.limit_bytes > MAX_INGEST_BLOB_BYTES {
+                    return Err(RelayError::InvalidResponse);
+                }
+                let read_limit_bytes = blob
+                    .limit_bytes
+                    .checked_add(1)
+                    .ok_or(RelayError::InvalidResponse)?;
+                let url = self.workspace_url(
+                    &req.workspace_id,
+                    &format!("/blobs/{}", encode_segment(&blob.sha256)),
+                    &req.replication_epoch,
+                    &req.stream_identity,
+                    &[],
+                );
+                let (bytes, _) = self.bytes(
+                    self.agent
+                        .get(&url)
+                        .header("authorization", &self.authorization())
+                        .call(),
+                    RequestContext::Blob,
+                    read_limit_bytes,
+                    RelayError::BlobTooLarge {
+                        constraint: "MAX_INGEST_BLOB_BYTES",
+                        limit_bytes: blob.limit_bytes,
+                        observed: ObservedBytes::AtLeast(read_limit_bytes),
+                    },
+                )?;
+                Ok(BlobDownloadResponse { bytes })
+            })();
+            results.push(result);
+        }
+        Ok(BlobDownloadBatchResponse { results })
     }
 
     fn upload_key_envelope(

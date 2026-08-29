@@ -73,16 +73,16 @@ pub use outbound::{
 };
 pub use path_policy::{PathClass, classify_share_path};
 pub use relay::{
-    BlobDownloadRequest, BlobDownloadResponse, BlobHaveRequest, BlobHaveResponse,
-    BlobUploadRequest, ClaimRequest, ClaimResponse, EpochRequest, EpochResponse,
-    KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse, KeyEnvelopeRequest,
-    KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse, ProbeRequest, ProbeResponse,
-    PullRequest, PullResponse, PushRequest, PushResponse, RecoverResponse, RelaySyncClient,
-    RelayTransport, ShareBlobRequest, ShareBlobUploadRequest, ShareLogPushRequest,
-    ShareProposalChange, ShareProposalSubmitOutcome, ShareProposalSubmitRequest,
-    ShareProposalSubmitResponse, ShareReplicationEnvelope, ShareViewChangedPath,
-    ShareViewPullOutcome, ShareViewRefusal, ShareViewRequest, ShareViewResponse,
-    SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRejection,
+    BlobDownloadBatchRequest, BlobDownloadBatchResponse, BlobDownloadResponse, BlobDownloadSpec,
+    BlobHaveRequest, BlobHaveResponse, BlobUploadRequest, ClaimRequest, ClaimResponse,
+    EpochRequest, EpochResponse, KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse,
+    KeyEnvelopeRequest, KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse,
+    MAX_BLOB_DOWNLOAD_BATCH, ProbeRequest, ProbeResponse, PullRequest, PullResponse, PushRequest,
+    PushResponse, RecoverResponse, RelaySyncClient, RelayTransport, ShareBlobRequest,
+    ShareBlobUploadRequest, ShareLogPushRequest, ShareProposalChange, ShareProposalSubmitOutcome,
+    ShareProposalSubmitRequest, ShareProposalSubmitResponse, ShareReplicationEnvelope,
+    ShareViewChangedPath, ShareViewPullOutcome, ShareViewRefusal, ShareViewRequest,
+    ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRejection,
     SharedChannelRequest, SharedChannelResponse, SyncPassOutcome,
 };
 pub use router::{RoutedApply, apply_replication_envelope, apply_replication_envelope_with_cache};
