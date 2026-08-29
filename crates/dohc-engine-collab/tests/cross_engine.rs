@@ -432,6 +432,7 @@ fn replay_parity_rejects_parked_interior_split_on_dependency_arrival() {
             origin_seq: 1,
             bytes: split,
         },
+        None,
         &NoFaults,
         1_001,
     )
@@ -446,6 +447,7 @@ fn replay_parity_rejects_parked_interior_split_on_dependency_arrival() {
             origin_seq: 1,
             bytes: dependency,
         },
+        None,
         &NoFaults,
         1_002,
     )
@@ -519,6 +521,7 @@ fn assert_delete_boundary_rejected(tag: &str, base_hex: &str, candidate_hex: &st
             origin_seq: 1,
             bytes: base.clone(),
         },
+        None,
         &NoFaults,
         1_001,
     )
@@ -531,6 +534,7 @@ fn assert_delete_boundary_rejected(tag: &str, base_hex: &str, candidate_hex: &st
             origin_seq: 2,
             bytes: candidate.clone(),
         },
+        None,
         &NoFaults,
         1_002,
     )
@@ -579,6 +583,7 @@ fn replay_parity_rejects_parked_delete_in_dependency_scalar_on_dependency_arriva
             origin_seq: 1,
             bytes: delete,
         },
+        None,
         &NoFaults,
         1_001,
     )
@@ -599,6 +604,7 @@ fn replay_parity_rejects_parked_delete_in_dependency_scalar_on_dependency_arriva
             origin_seq: 1,
             bytes: dependency,
         },
+        None,
         &NoFaults,
         1_002,
     )
@@ -642,6 +648,7 @@ fn replay_parity_stays_fail_closed_on_multi_unit_pending_diff_inputs() {
             origin_seq: 1,
             bytes: base,
         },
+        None,
         &NoFaults,
         1_001,
     )
@@ -655,6 +662,7 @@ fn replay_parity_stays_fail_closed_on_multi_unit_pending_diff_inputs() {
             origin_seq: 2,
             bytes: follow,
         },
+        None,
         &NoFaults,
         1_002,
     );
@@ -704,6 +712,7 @@ fn replay_parity_rejects_overlap_slice_divergence_on_remote_path() {
             origin_seq: 1,
             bytes: u1,
         },
+        None,
         &NoFaults,
         1_001,
     )
@@ -720,6 +729,7 @@ fn replay_parity_rejects_overlap_slice_divergence_on_remote_path() {
             origin_seq: 2,
             bytes: u2,
         },
+        None,
         &NoFaults,
         1_002,
     )
@@ -790,6 +800,7 @@ fn replay_parity_rejects_mixed_parked_and_discarded_clocks_on_both_paths() {
             origin_seq: 1,
             bytes: overlap_base,
         },
+        None,
         &NoFaults,
         1_001,
     )
@@ -802,6 +813,7 @@ fn replay_parity_rejects_mixed_parked_and_discarded_clocks_on_both_paths() {
             origin_seq: 1,
             bytes: mixed,
         },
+        None,
         &NoFaults,
         1_002,
     )
@@ -912,6 +924,7 @@ fn replay_parity_parks_cross_origin_missing_dependency_then_converges() {
             origin_seq: 1,
             bytes: dependent,
         },
+        None,
         &NoFaults,
         1_001,
     )
@@ -930,6 +943,7 @@ fn replay_parity_parks_cross_origin_missing_dependency_then_converges() {
             origin_seq: 1,
             bytes: dependency,
         },
+        None,
         &NoFaults,
         1_002,
     )
@@ -962,6 +976,7 @@ fn compaction_preserves_parked_updates_until_dependency_arrives() {
             origin_seq: 1,
             bytes: dependent,
         },
+        None,
         &NoFaults,
         1_001,
     )
@@ -985,6 +1000,7 @@ fn compaction_preserves_parked_updates_until_dependency_arrives() {
             origin_seq: 1,
             bytes: dependency,
         },
+        None,
         &NoFaults,
         1_003,
     )
@@ -1286,6 +1302,7 @@ fn replay_parity_rejects_cross_type_redefinition_on_both_paths() {
                 origin_seq: 1,
                 bytes: base.clone(),
             },
+            None,
             &NoFaults,
             1_001,
         )
@@ -1298,6 +1315,7 @@ fn replay_parity_rejects_cross_type_redefinition_on_both_paths() {
                 origin_seq: 2,
                 bytes: candidate.clone(),
             },
+            None,
             &NoFaults,
             1_002,
         )
@@ -1472,6 +1490,7 @@ fn replay_parity_accepts_honest_delete_gc_resend_on_remote_path() {
             origin_seq: 1,
             bytes: insert,
         },
+        None,
         &NoFaults,
         1_001,
     )
@@ -1486,6 +1505,7 @@ fn replay_parity_accepts_honest_delete_gc_resend_on_remote_path() {
             origin_seq: 2,
             bytes: resend,
         },
+        None,
         &NoFaults,
         1_002,
     )

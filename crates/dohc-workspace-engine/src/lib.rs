@@ -21,13 +21,14 @@ use dohc_engine_domain::{
     ChatAgentReadState, ChatAttachment, ChatBookmark, ChatChannel, ChatChannelKind,
     ChatChannelSummary, ChatDecision, ChatDecisionState, ChatFeedReadState, ChatFileMention,
     ChatFollow, ChatMention, ChatMessage, ChatProjectionFileAccess, ChatReaction,
-    ChatReactionState, ChatThread, ChatThreadReadState, CollectionFilter, CollectionQuery,
-    CollectionQueryCursor, CollectionSort, CompareTextFileVersions, ComparisonStatus,
-    ConflictChoice, ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution,
-    ConflictStatus, CreateFileThread, CreateNamedVersion, DEFAULT_COLLECTION_QUERY_LIMIT,
-    DeleteTextFile, DispatchClaim, DispatchRecord, DomainError, FeedCursorValue, FollowState,
-    FollowTargetKind, LocalAttachmentInput, MAX_COLLECTION_HISTORY_LIMIT,
-    MAX_COLLECTION_QUERY_LIMIT, MentionCursor, MergeTextFileFromVersion, MergeTextFileResult,
+    ChatReactionState, ChatThread, ChatThreadReadState, CollectionFilter,
+    CollectionPendingAdoptionCursor, CollectionQuery, CollectionQueryCursor, CollectionSort,
+    CompareTextFileVersions, ComparisonStatus, ConflictChoice, ConflictContentKind,
+    ConflictFileState, ConflictMetadata, ConflictResolution, ConflictStatus, CreateFileThread,
+    CreateNamedVersion, DEFAULT_COLLECTION_QUERY_LIMIT, DeleteTextFile, DispatchClaim,
+    DispatchRecord, DomainError, FeedCursorValue, FollowState, FollowTargetKind,
+    LocalAttachmentInput, MAX_COLLECTION_HISTORY_LIMIT, MAX_COLLECTION_QUERY_LIMIT,
+    MAX_COLLECTION_QUERY_SORTS, MentionCursor, MergeTextFileFromVersion, MergeTextFileResult,
     MergeUnchangedReason, MomentOp, MomentPage, RenameTextFile, ResolveConflictKind,
     ResolveDecision, ResolveTextConflict, RollbackTextFileMutation, SaveBookmark, SecretDelete,
     SecretDiskIntent, SecretMomentRecord, SecretWrite, SendMessage, SetFollow, SetReaction,
@@ -139,10 +140,117 @@ const MAX_DESKTOP_CAPTURE_TEXT_BYTES: usize = 128 * 1024;
 const MAX_METADATA_FIELD_BYTES: usize = dohc_engine_domain::MAX_METADATA_FIELD_BYTES;
 const COLLECTION_RESPONSE_HARD_CAP_BYTES: usize =
     dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize - 64 * 1024;
+const COLLECTION_INTEGER_MARKER: &str = "$dohcInt64";
+
+fn encode_collection_wire_integers(value: &mut Value) {
+    match value {
+        Value::Number(number) => {
+            let decimal = number
+                .as_i64()
+                .filter(|number| number.unsigned_abs() > dohc_engine_protocol::MAX_WIRE_INTEGER)
+                .map(|number| number.to_string())
+                .or_else(|| {
+                    number
+                        .as_u64()
+                        .filter(|number| *number > dohc_engine_protocol::MAX_WIRE_INTEGER)
+                        .map(|number| number.to_string())
+                });
+            if let Some(decimal) = decimal {
+                *value = json!({ (COLLECTION_INTEGER_MARKER): decimal });
+            }
+        }
+        Value::Array(values) => values.iter_mut().for_each(encode_collection_wire_integers),
+        Value::Object(object) => object
+            .values_mut()
+            .for_each(encode_collection_wire_integers),
+        Value::Null | Value::Bool(_) | Value::String(_) => {}
+    }
+}
+
+fn decode_collection_wire_integer(value: &mut Value) -> Result<(), WireError> {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                decode_collection_wire_integer(value)?;
+            }
+        }
+        Value::Object(object) => {
+            if object.len() == 1 && object.contains_key(COLLECTION_INTEGER_MARKER) {
+                let decimal = object
+                    .get(COLLECTION_INTEGER_MARKER)
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        wire(
+                            ErrorCode::InvalidParams,
+                            "collection-integer-marker-invalid",
+                        )
+                    })?;
+                let canonical = decimal == "0"
+                    || decimal.strip_prefix('-').is_some_and(|digits| {
+                        !digits.is_empty()
+                            && !digits.starts_with('0')
+                            && digits.bytes().all(|byte| byte.is_ascii_digit())
+                    })
+                    || (!decimal.starts_with('0')
+                        && decimal.bytes().all(|byte| byte.is_ascii_digit()));
+                let number = if canonical && decimal.starts_with('-') {
+                    decimal
+                        .parse::<i64>()
+                        .ok()
+                        .filter(|number| {
+                            number.unsigned_abs() > dohc_engine_protocol::MAX_WIRE_INTEGER
+                        })
+                        .map(Value::from)
+                } else if canonical {
+                    decimal
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|number| *number > dohc_engine_protocol::MAX_WIRE_INTEGER)
+                        .map(Value::from)
+                } else {
+                    None
+                }
+                .ok_or_else(|| {
+                    wire(
+                        ErrorCode::InvalidParams,
+                        "collection-integer-marker-invalid",
+                    )
+                })?;
+                *value = number;
+            } else {
+                for value in object.values_mut() {
+                    decode_collection_wire_integer(value)?;
+                }
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+    Ok(())
+}
+
+fn decode_collection_query_wire_integers(
+    params: &mut CollectionsQueryParams,
+) -> Result<(), WireError> {
+    if let Some(filter) = params.filter.as_mut() {
+        decode_collection_wire_integer(&mut filter.value)?;
+    }
+    if let Some(cursor) = params.cursor.as_mut() {
+        for value in &mut cursor.sort_values {
+            decode_collection_wire_integer(&mut value.value)?;
+        }
+    }
+    Ok(())
+}
+
+fn collection_response_value(response: impl Serialize) -> Result<Value, WireError> {
+    let mut response =
+        serde_json::to_value(response).map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?;
+    encode_collection_wire_integers(&mut response);
+    Ok(response)
+}
 
 fn collection_response_json(response: impl Serialize) -> Result<Value, WireError> {
-    let response =
-        serde_json::to_value(response).map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?;
+    let response = collection_response_value(response)?;
     let encoded_len = serde_json::to_vec(&response)
         .map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?
         .len();
@@ -823,6 +931,51 @@ impl Default for EngineService {
 }
 
 impl EngineService {
+    async fn collection_response_with_blob(
+        &self,
+        ctx: &RequestContext,
+        cancellation: &OperationCancellation,
+        request_id: u64,
+        operation: &str,
+        response: impl Serialize,
+    ) -> Result<(Value, Option<BlobEgress>), WireError> {
+        let response = collection_response_value(response)?;
+        let bytes = serde_json::to_vec(&response)
+            .map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?;
+        if bytes.len() <= COLLECTION_RESPONSE_HARD_CAP_BYTES {
+            return Ok((response, None));
+        }
+        if !ctx.has_capability("blobs") {
+            return Err(wire(
+                ErrorCode::LimitExceeded,
+                "collection-response-exceeds-wire-limit",
+            ));
+        }
+        let byte_length =
+            i64::try_from(bytes.len()).map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?;
+        let byte_permit = self
+            .blob_egress_budget
+            .reserve(byte_length, cancellation, operation)
+            .await?;
+        let sha256 = dohc_engine_storage::hex_sha256(&bytes);
+        Ok((
+            json!({
+                "collectionJson": Value::Null,
+                "blobSha256": sha256,
+                "byteLength": byte_length,
+                "inbandLimitBytes": COLLECTION_RESPONSE_HARD_CAP_BYTES,
+            }),
+            Some(BlobEgress {
+                stream_id: request_id,
+                sha256,
+                bytes,
+                cancel: ctx.cancel.clone(),
+                deadline: ctx.deadline,
+                byte_permit: Some(byte_permit),
+            }),
+        ))
+    }
+
     pub fn new() -> Self {
         Self::with_supervisor(WorkspaceSupervisor::global())
     }
@@ -933,6 +1086,24 @@ impl EngineService {
             return Ok(ServiceResponse {
                 response: Response { id, result },
                 blob_egress: Some(blob_egress),
+            });
+        }
+        if request.method == "collections.query" {
+            let (result, blob_egress) = self
+                .collections_query(&ctx, request.workspace, request.params, id)
+                .await?;
+            return Ok(ServiceResponse {
+                response: Response { id, result },
+                blob_egress,
+            });
+        }
+        if request.method == "collections.getRecord" {
+            let (result, blob_egress) = self
+                .collections_get_record(&ctx, request.workspace, request.params, id)
+                .await?;
+            return Ok(ServiceResponse {
+                response: Response { id, result },
+                blob_egress,
             });
         }
         let result = match request.method.as_str() {
@@ -1101,14 +1272,6 @@ impl EngineService {
             }
             "collections.get" => {
                 self.collections_get(&ctx, request.workspace, request.params)
-                    .await?
-            }
-            "collections.query" => {
-                self.collections_query(&ctx, request.workspace, request.params)
-                    .await?
-            }
-            "collections.getRecord" => {
-                self.collections_get_record(&ctx, request.workspace, request.params)
                     .await?
             }
             "watcher.status" => self.watcher_status(request.workspace)?,
@@ -3781,17 +3944,26 @@ impl EngineService {
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
-        let _: CollectionsListParams = parse(params)?;
+        let params: CollectionsListPendingAdoptionsParams = parse(params)?;
+        if params.limit == 0 || params.limit > MAX_COLLECTION_QUERY_LIMIT {
+            return Err(wire(
+                ErrorCode::InvalidParams,
+                "collection-pending-adoptions-limit-out-of-range",
+            ));
+        }
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        let adoptions = Self::read_under_ctx(
+        let page = Self::read_under_ctx(
             &cancellation,
             "collections.listPendingAdoptions",
-            open.actor
-                .collections_list_pending_adoptions(open.workspace_id),
+            open.actor.collections_list_pending_adoptions(
+                open.workspace_id,
+                params.limit,
+                params.cursor,
+            ),
         )
         .await?;
-        collection_response_json(json!({ "adoptions": adoptions }))
+        collection_response_json(page)
     }
 
     async fn collections_get(
@@ -3819,14 +3991,22 @@ impl EngineService {
         ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
         params: Value,
-    ) -> Result<Value, WireError> {
-        let params: CollectionsQueryParams = parse(params)?;
+        request_id: u64,
+    ) -> Result<(Value, Option<BlobEgress>), WireError> {
+        let mut params: CollectionsQueryParams = parse(params)?;
         if params.limit == 0 || params.limit > MAX_COLLECTION_QUERY_LIMIT {
             return Err(wire(
                 ErrorCode::InvalidParams,
                 "collection-query-limit-out-of-range",
             ));
         }
+        if params.sort.len() > MAX_COLLECTION_QUERY_SORTS {
+            return Err(wire(
+                ErrorCode::InvalidParams,
+                "collection-query-sort-limit-exceeded",
+            ));
+        }
+        decode_collection_query_wire_integers(&mut params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let result = Self::read_under_ctx(
@@ -3847,7 +4027,14 @@ impl EngineService {
         )
         .await?
         .ok_or_else(|| wire(ErrorCode::InvalidParams, "collection-not-found"))?;
-        collection_response_json(result)
+        self.collection_response_with_blob(
+            ctx,
+            &cancellation,
+            request_id,
+            "collections.query",
+            result,
+        )
+        .await
     }
 
     async fn collections_get_record(
@@ -3855,7 +4042,8 @@ impl EngineService {
         ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
         params: Value,
-    ) -> Result<Value, WireError> {
+        request_id: u64,
+    ) -> Result<(Value, Option<BlobEgress>), WireError> {
         let params: CollectionsGetRecordParams = parse(params)?;
         if params.history_limit == 0 || params.history_limit > MAX_COLLECTION_HISTORY_LIMIT {
             return Err(wire(
@@ -3878,7 +4066,14 @@ impl EngineService {
         )
         .await?
         .ok_or_else(|| wire(ErrorCode::InvalidParams, "collection-record-not-found"))?;
-        collection_response_json(result)
+        self.collection_response_with_blob(
+            ctx,
+            &cancellation,
+            request_id,
+            "collections.getRecord",
+            result,
+        )
+        .await
     }
 
     fn watcher_status(&self, handle: Option<WorkspaceHandle>) -> Result<Value, WireError> {
@@ -10089,6 +10284,15 @@ struct SearchEnsureIndexParams {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CollectionsListParams {}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CollectionsListPendingAdoptionsParams {
+    #[serde(default = "default_collection_query_limit")]
+    limit: usize,
+    #[serde(default)]
+    cursor: Option<CollectionPendingAdoptionCursor>,
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

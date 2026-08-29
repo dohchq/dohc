@@ -7130,6 +7130,7 @@ fn lower_relay_base_recovers_the_loser_as_one_ordinary_sibling() {
                 origin_seq: 1,
                 bytes: loser_delta,
             },
+            None,
             &NoFaults,
             1_150,
         ),

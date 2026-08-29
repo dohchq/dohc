@@ -1642,6 +1642,7 @@ fn local_and_remote_different_field_edits_converge_in_both_collection_indexes() 
                 origin_seq: 1,
                 bytes: bob.clone(),
             },
+            None,
             &NoFaults,
             1_200,
         )
@@ -1656,6 +1657,7 @@ fn local_and_remote_different_field_edits_converge_in_both_collection_indexes() 
                 origin_seq: 1,
                 bytes: alice.clone(),
             },
+            None,
             &NoFaults,
             1_200,
         )
@@ -1728,6 +1730,7 @@ fn same_field_concurrent_edits_converge_and_keep_both_authored_writes() {
                 origin_seq: 1,
                 bytes: bob.clone(),
             },
+            None,
             &NoFaults,
             1_200,
         )
@@ -1742,6 +1745,7 @@ fn same_field_concurrent_edits_converge_and_keep_both_authored_writes() {
                 origin_seq: 1,
                 bytes: alice.clone(),
             },
+            None,
             &NoFaults,
             1_200,
         )
@@ -1810,6 +1814,7 @@ fn later_same_field_edit_wins_on_both_devices_and_keeps_earlier_history() {
                 origin_seq: 1,
                 bytes: alice.clone(),
             },
+            None,
             &NoFaults,
             1_200,
         )
@@ -1841,6 +1846,7 @@ fn later_same_field_edit_wins_on_both_devices_and_keeps_earlier_history() {
                 origin_seq: 1,
                 bytes: bob,
             },
+            None,
             &NoFaults,
             1_400,
         )
@@ -1924,6 +1930,7 @@ fn base_is_claimed_exactly_once() {
                 origin_seq: 1,
                 bytes: delta,
             },
+            None,
             &NoFaults,
             1_450,
         )
@@ -2162,6 +2169,7 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
                 origin_seq: 1,
                 bytes: delta,
             },
+            None,
             &NoFaults,
             1_100,
         )
@@ -2329,6 +2337,7 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
                 origin_seq: 2,
                 bytes: successor_delta,
             },
+            None,
             &NoFaults,
             1_225,
         )
@@ -2698,7 +2707,7 @@ fn remote_update_is_idempotent_and_echo_suppressed() {
     };
     // First apply: journaled, echo-suppressed (never re-emitted).
     let first = committed(
-        apply_remote_update(&mut ts.store, &key, &remote, &NoFaults, 1_100).expect("apply"),
+        apply_remote_update(&mut ts.store, &key, &remote, None, &NoFaults, 1_100).expect("apply"),
     );
     let seq = match first {
         ReplicationApplyOutcome::Applied { seq, emit_outbound } => {
@@ -2709,7 +2718,7 @@ fn remote_update_is_idempotent_and_echo_suppressed() {
     };
     // Redelivery of the same bytes is an idempotent no-op (content-addressed).
     let again = committed(
-        apply_remote_update(&mut ts.store, &key, &remote, &NoFaults, 1_200).expect("apply2"),
+        apply_remote_update(&mut ts.store, &key, &remote, None, &NoFaults, 1_200).expect("apply2"),
     );
     assert_eq!(
         again,
@@ -3000,6 +3009,7 @@ fn yrs_abort_witness_is_rejected_fail_closed_on_both_ingestion_paths() {
         &mut remote.store,
         &remote_key,
         &remote_update,
+        None,
         &NoFaults,
         1_000,
     );

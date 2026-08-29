@@ -43,6 +43,8 @@ import {
   YdocReleasedWithSettleFailureError,
   YdocAdapterError,
   type EngineStoreRefusal,
+  type CollectionPendingAdoptionCursor,
+  type CollectionPendingAdoptionsPage,
   type EngineYdocProviderSession,
   type EngineYdocProviderSessionOptions,
   type EngineTransport,
@@ -3337,31 +3339,41 @@ export function createWorkspaceEngineCapture(
   async function drainPendingCollectionAdoptions(
     engine: CaptureVersionedTextStore,
   ): Promise<void> {
-    const pending = await engine.listPendingCollectionAdoptions?.();
-    if (!pending || pending.adoptions.length === 0) return;
     const workspace = { workspaceId, rootPath, attachmentId };
-    for (const adoption of pending.adoptions) {
-      await options.rustEngineSessions.run(
-        workspace,
-        async (binding) => {
-          const provider = await openEngineYdocProviderSession({
-            transport: binding.client as EngineTransport,
-            workspace: binding.workspace,
-            versionId: adoption.versionId,
-            path: adoption.filePath,
-            expectedObjectId: adoption.objectId,
-            contentKind: "richdoc",
-            seedAbsentLineage: true,
-            onRemoteUpdate: () => undefined,
-          });
-          // Keep the imported lineage durable until reconciliation applies the
-          // record id. A seed-only settling close can prove the artifact already
-          // covers the document and prune the lineage before adoption uses it.
-          await provider.evict();
-        },
-        { retryTransportErrors: true },
-      );
-    }
+    let cursor: CollectionPendingAdoptionCursor | null = null;
+    let found = false;
+    do {
+      const pending: CollectionPendingAdoptionsPage | undefined =
+        await engine.listPendingCollectionAdoptions?.({
+          ...(cursor !== null ? { cursor } : {}),
+        });
+      if (!pending) return;
+      found ||= pending.adoptions.length > 0;
+      for (const adoption of pending.adoptions) {
+        await options.rustEngineSessions.run(
+          workspace,
+          async (binding) => {
+            const provider = await openEngineYdocProviderSession({
+              transport: binding.client as EngineTransport,
+              workspace: binding.workspace,
+              versionId: adoption.versionId,
+              path: adoption.filePath,
+              expectedObjectId: adoption.objectId,
+              contentKind: "richdoc",
+              seedAbsentLineage: true,
+              onRemoteUpdate: () => undefined,
+            });
+            // Keep the imported lineage durable until reconciliation applies the
+            // record id. A seed-only settling close can prove the artifact already
+            // covers the document and prune the lineage before adoption uses it.
+            await provider.evict();
+          },
+          { retryTransportErrors: true },
+        );
+      }
+      cursor = pending.nextCursor;
+    } while (cursor !== null);
+    if (!found) return;
     await engine.reconcileCapture?.();
   }
 

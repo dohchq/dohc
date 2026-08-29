@@ -1,10 +1,10 @@
 use dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD;
 use dohc_engine_collab::{
     CollabError, CompactOutcome, ContentKind, DocKey, RemoteAppendProbe, RemoteUpdate,
-    ReplicationApplyOutcome, WriterDocCache, apply_remote_update_for_deferred_drain_with_actor,
-    apply_remote_update_in_transaction_cached_with_projection_and_actor,
-    apply_remote_update_in_transaction_with_projection_and_actor, apply_remote_update_with_actor,
-    maybe_compact,
+    ReplicationApplyOutcome, WriterDocCache, apply_remote_update,
+    apply_remote_update_for_deferred_drain,
+    apply_remote_update_in_transaction_cached_with_projection,
+    apply_remote_update_in_transaction_with_projection, maybe_compact,
 };
 use dohc_engine_domain::{
     ConflictFileState, DomainError, WriteText, enqueue_write, select_snapshot_by_path_in_tx,
@@ -720,7 +720,7 @@ fn drain_deferred_ydoc(
             bytes,
         };
         let apply_result = if let Some(cache) = cache.as_deref_mut() {
-            apply_remote_update_for_deferred_drain_with_actor(
+            apply_remote_update_for_deferred_drain(
                 store,
                 cache,
                 key,
@@ -730,7 +730,7 @@ fn drain_deferred_ydoc(
                 recorded_at_ms,
             )
         } else {
-            apply_remote_update_with_actor(
+            apply_remote_update(
                 store,
                 key,
                 &remote,
@@ -2822,7 +2822,7 @@ fn apply_ydoc_envelope_inner(
     let outcome_result =
         crate::apply::apply_envelope_with_mutation_outcome(store, envelope, faults, |tx, op| {
             let projected = if let Some(cache) = cache.as_deref() {
-                apply_remote_update_in_transaction_cached_with_projection_and_actor(
+                apply_remote_update_in_transaction_cached_with_projection(
                     tx,
                     cache,
                     &mut cache_probe,
@@ -2832,7 +2832,7 @@ fn apply_ydoc_envelope_inner(
                     op.recorded_at_ms,
                 )
             } else {
-                apply_remote_update_in_transaction_with_projection_and_actor(
+                apply_remote_update_in_transaction_with_projection(
                     tx,
                     &key,
                     &remote,

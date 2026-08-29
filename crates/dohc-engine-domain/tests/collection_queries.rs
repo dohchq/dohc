@@ -1,9 +1,11 @@
 use dohc_engine_domain::{
-    CollectionFilter, CollectionFilterOperator, CollectionIndexedValueValidation, CollectionQuery,
-    CollectionSchemaReasonCode, CollectionSchemaStatus, CollectionSort, DomainError,
-    MAX_COLLECTION_HISTORY_LIMIT, NoFaults, TxnOutcome, VersionedTextStore, ViewSortDirection,
-    WriteText, get_collection, get_collection_record, list_collections, parse_collection_schema,
-    query_collection_records, reconcile_collections_in_tx, set_collection_adoption_state_in_tx,
+    CollectionFilter, CollectionFilterOperator, CollectionIndexedValueValidation,
+    CollectionPendingAdoptionCursor, CollectionQuery, CollectionSchemaReasonCode,
+    CollectionSchemaStatus, CollectionSort, DomainError, MAX_COLLECTION_HISTORY_LIMIT,
+    MAX_COLLECTION_QUERY_SORTS, NoFaults, TxnOutcome, VersionedTextStore, ViewSortDirection,
+    WriteText, get_collection, get_collection_record, list_collections,
+    list_pending_collection_adoptions, parse_collection_schema, query_collection_records,
+    reconcile_collections_in_tx, set_collection_adoption_state_in_tx,
     synchronize_collection_frontmatter_index_in_tx,
 };
 use dohc_engine_storage::{EngineStore, StorageError};
@@ -759,6 +761,118 @@ fn sorted_collection_query_cursor_pages_are_gapless_and_duplicate_free() {
 }
 
 #[test]
+fn pending_collection_adoptions_page_completely_past_the_protocol_collection_limit() {
+    const PENDING: usize = 16_385;
+    const PAGE_LIMIT: usize = 257;
+    const EMPTY_SHA: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    let (_scratch, mut store) = fresh_store();
+    let seeded = store
+        .write_with(&NoFaults, |tx| -> Result<(), StorageError> {
+            tx.execute(
+                "INSERT INTO collections \
+                 (workspace_id,version_id,collection_path,schema_path,schema_status,\
+                  degradation_reasons_json) \
+                 VALUES (?1,?2,'pending','pending/collection.yaml','valid','[]')",
+                params![WORKSPACE_ID, VERSION_ID],
+            )
+            .map_err(StorageError::persist_public)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO blobs (sha256,byte_length,text) VALUES (?1,0,'')",
+                [EMPTY_SHA],
+            )
+            .map_err(StorageError::persist_public)?;
+            for index in 0..PENDING {
+                let object_id = format!("pending-object-{index:05}");
+                let file_path = format!("pending/{index:05}.md");
+                let record_id = format!("rec_{index:026}");
+                tx.execute(
+                    "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) \
+                     VALUES (?1,?2,?3)",
+                    params![WORKSPACE_ID, object_id, index as i64],
+                )
+                .map_err(StorageError::persist_public)?;
+                tx.execute(
+                    "INSERT INTO snapshots \
+                     (workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,\
+                      latest_moment_id,metadata_origin) \
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,'capture')",
+                    params![
+                        WORKSPACE_ID,
+                        VERSION_ID,
+                        object_id,
+                        file_path,
+                        EMPTY_SHA,
+                        index as i64,
+                        format!("pending-moment-{index:05}")
+                    ],
+                )
+                .map_err(StorageError::persist_public)?;
+                tx.execute(
+                    "INSERT INTO collection_records \
+                     (workspace_id,version_id,record_id,collection_path,file_path,object_id,\
+                      adoption_state,index_initialized) \
+                     VALUES (?1,?2,?3,'pending',?4,?5,'pending',0)",
+                    params![WORKSPACE_ID, VERSION_ID, record_id, file_path, object_id],
+                )
+                .map_err(StorageError::persist_public)?;
+            }
+            Ok(())
+        })
+        .expect("seed pending adoption set");
+    assert!(matches!(seeded, TxnOutcome::Committed(())));
+
+    let mut cursor: Option<CollectionPendingAdoptionCursor> = None;
+    let mut record_ids = Vec::with_capacity(PENDING);
+    loop {
+        let page = store
+            .read_with(|conn| {
+                list_pending_collection_adoptions(conn, WORKSPACE_ID, PAGE_LIMIT, cursor.as_ref())
+            })
+            .expect("pending adoption page");
+        assert!(page.adoptions.len() <= PAGE_LIMIT);
+        record_ids.extend(page.adoptions.into_iter().map(|entry| entry.record_id));
+        let Some(next_cursor) = page.next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+    }
+
+    assert_eq!(record_ids.len(), PENDING);
+    assert!(record_ids.windows(2).all(|pair| pair[0] < pair[1]));
+    record_ids.dedup();
+    assert_eq!(record_ids.len(), PENDING);
+}
+
+#[test]
+fn collection_query_refuses_more_than_eight_sort_clauses() {
+    let (_scratch, store) = seeded_store();
+    let error = store
+        .read_with(|conn| {
+            query_collection_records(
+                conn,
+                WORKSPACE_ID,
+                "tasks",
+                &CollectionQuery {
+                    sort: (0..=MAX_COLLECTION_QUERY_SORTS)
+                        .map(|index| CollectionSort {
+                            field: format!("Sort {index}"),
+                            direction: ViewSortDirection::Asc,
+                        })
+                        .collect(),
+                    ..CollectionQuery::default()
+                },
+            )
+        })
+        .expect_err("the sort-clause bound must be enforced in the domain");
+    assert!(matches!(
+        error,
+        DomainError::InvalidInput {
+            reason: "collection query sort limit is exceeded"
+        }
+    ));
+}
+
+#[test]
 fn get_record_history_is_bounded_and_newest_first() {
     let (_scratch, mut store) = seeded_store();
     let seeded = store
@@ -1070,6 +1184,152 @@ fn conflicted_files_surface_the_pending_record_in_query_and_get_record() {
         .expect("get contended record")
         .expect("contended record exists");
     assert!(record.record.conflicted);
+}
+
+#[test]
+fn fresh_conflicted_record_keeps_its_id_and_relation_until_conflict_resolution() {
+    const TARGET_ID: &str = "rec_ffffffffffffffffffffffffff";
+    const TARGET_PATH: &str = "people/fresh.md";
+    const TARGET_OBJECT_ID: &str = "fresh-target-object";
+    let (_scratch, mut store) = seeded_store();
+    write_text_for_object(
+        &mut store,
+        TARGET_PATH,
+        &format!("---\nid: {TARGET_ID}\nName: Fresh target\n---\n"),
+        TARGET_OBJECT_ID,
+        "fresh-target-moment",
+        50,
+    )
+    .expect("fresh target record");
+    write_text_for_object(
+        &mut store,
+        "tasks/alpha.md",
+        &format!(
+            "---\nid: {FIRST_TASK_ID}\nTitle: Alpha\nStatus: Broken\nRank: 1\nOwner: {TARGET_ID}\n---\n"
+        ),
+        "object-6",
+        "retarget-fresh-record",
+        51,
+    )
+    .expect("relation to fresh target");
+    let indexed = store
+        .write_with(&NoFaults, |tx| {
+            synchronize_collection_frontmatter_index_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                "object-6",
+                &json!({
+                    "id": FIRST_TASK_ID,
+                    "Title": "Alpha",
+                    "Status": "Broken",
+                    "Rank": 1,
+                    "Owner": TARGET_ID,
+                }),
+            )
+        })
+        .expect("index relation to fresh target");
+    assert!(matches!(indexed, TxnOutcome::Committed(())));
+    let seeded = store
+        .write_with(&NoFaults, |tx| -> Result<(), StorageError> {
+            tx.execute(
+                "INSERT INTO conflicts (\
+                    workspace_id, conflict_id, path, target_version_id, source_version_id, \
+                    created_at_ms, updated_at_ms, status, chosen_from, metadata_origin, \
+                    base_exists, base_path, current_exists, current_path, current_object_id, \
+                    incoming_exists, incoming_path, incoming_object_id\
+                 ) VALUES (?1, 'fresh-target-conflict', ?2, ?3, ?3, \
+                    52, 52, 'open', 'current', 'sync', \
+                    0, ?2, 1, ?2, ?4, 1, ?2, ?4)",
+                params![WORKSPACE_ID, TARGET_PATH, VERSION_ID, TARGET_OBJECT_ID],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok(())
+        })
+        .expect("seed target conflict");
+    assert!(matches!(seeded, TxnOutcome::Committed(())));
+
+    let conflicted = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile fresh conflicted target");
+    let TxnOutcome::Committed(conflicted) = conflicted else {
+        panic!("fresh conflicted reconciliation crashed");
+    };
+    assert!(conflicted.relation_cleanups.is_empty());
+    let binding = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT record_id,adoption_state FROM collection_records \
+                 WHERE workspace_id=?1 AND version_id=?2 AND file_path=?3",
+                params![WORKSPACE_ID, VERSION_ID, TARGET_PATH],
+                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+            )
+        })
+        .expect("fresh conflicted target binding");
+    assert_eq!(
+        binding,
+        (Some(TARGET_ID.to_owned()), "deferred-conflict".to_owned())
+    );
+
+    let relation_count = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM collection_relation_edges \
+                 WHERE workspace_id=?1 AND version_id=?2 AND source_record_id=?3 \
+                   AND target_record_id=?4",
+                params![WORKSPACE_ID, VERSION_ID, FIRST_TASK_ID, TARGET_ID],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .expect("source relation survives conflict");
+    assert_eq!(relation_count, 1);
+
+    let conflict_resolved = store
+        .write_with(&NoFaults, |tx| -> Result<(), StorageError> {
+            tx.execute(
+                "UPDATE conflicts SET status='resolved' \
+                 WHERE workspace_id=?1 AND conflict_id='fresh-target-conflict'",
+                [WORKSPACE_ID],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok(())
+        })
+        .expect("resolve target conflict");
+    assert!(matches!(conflict_resolved, TxnOutcome::Committed(())));
+    let cleared = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile after target conflict clears");
+    let TxnOutcome::Committed(cleared) = cleared else {
+        panic!("cleared target reconciliation crashed");
+    };
+    assert!(
+        cleared
+            .adoptions
+            .iter()
+            .any(|candidate| candidate.record_id == TARGET_ID)
+    );
+    let adopted = store
+        .write_with(&NoFaults, |tx| {
+            set_collection_adoption_state_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                TARGET_PATH,
+                TARGET_ID,
+                "adopted",
+            )
+        })
+        .expect("finish target adoption");
+    assert!(matches!(adopted, TxnOutcome::Committed(())));
+    let resolved = store
+        .read_with(|conn| get_collection_record(conn, WORKSPACE_ID, "people", TARGET_ID, 10, None))
+        .expect("get resolved target")
+        .expect("resolved target remains indexed");
+    assert!(!resolved.record.conflicted);
 }
 
 #[test]

@@ -57,12 +57,9 @@ pub use lease::{Lease, LeaseRegistry};
 pub use replay_parity::{validate_replay_parity, validate_replay_parity_with_scratch};
 pub use replication::{
     apply_remote_update, apply_remote_update_for_deferred_drain,
-    apply_remote_update_for_deferred_drain_with_actor, apply_remote_update_in_transaction,
-    apply_remote_update_in_transaction_cached_with_projection,
-    apply_remote_update_in_transaction_cached_with_projection_and_actor,
-    apply_remote_update_in_transaction_with_projection,
-    apply_remote_update_in_transaction_with_projection_and_actor, apply_remote_update_with_actor,
-    RemoteApplyProjection, RemoteUpdate, ReplicationApplyOutcome, UpdateOrigin,
+    apply_remote_update_in_transaction, apply_remote_update_in_transaction_cached_with_projection,
+    apply_remote_update_in_transaction_with_projection, RemoteApplyProjection, RemoteUpdate,
+    ReplicationApplyOutcome, UpdateOrigin,
 };
 pub use scene::{
     encode_scene_asset_record, encode_scene_asset_records, fold_scene, import_portable_scene,

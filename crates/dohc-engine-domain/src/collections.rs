@@ -18,6 +18,7 @@ use crate::chats::{base32_lowercase_no_padding, is_js_trim_ws};
 pub const COLLECTION_SCHEMA_FILENAME: &str = "collection.yaml";
 pub const DEFAULT_COLLECTION_QUERY_LIMIT: usize = 100;
 pub const MAX_COLLECTION_QUERY_LIMIT: usize = 500;
+pub const MAX_COLLECTION_QUERY_SORTS: usize = 8;
 const ROOT_COLLECTION_DIAGNOSTIC_PATH: &str = ".";
 pub const RECORD_ID_FRONTMATTER_KEY: &str = "id";
 pub const RECORD_ID_PREFIX: &str = "rec_";
@@ -232,6 +233,20 @@ pub struct CollectionPendingAdoption {
     pub collection_path: String,
     pub file_path: String,
     pub object_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CollectionPendingAdoptionCursor {
+    pub file_path: String,
+    pub record_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionPendingAdoptionPage {
+    pub adoptions: Vec<CollectionPendingAdoption>,
+    pub next_cursor: Option<CollectionPendingAdoptionCursor>,
 }
 
 /// The local collection projection after one active-version reconciliation.
@@ -1615,7 +1630,7 @@ pub fn collection_record_id_mismatch_in_tx(
             .optional()
             .map_err(crate::DomainError::sql_corrupt)?;
         let Some((record_id, text)) = binding else {
-            continue;
+            return Ok(true);
         };
         let canonical_id = text.as_deref().and_then(markdown_record_id);
         if canonical_id.as_deref() != Some(record_id.as_str()) {
@@ -2153,7 +2168,8 @@ pub fn reconcile_collections_in_tx(
                     parsed_id
                         .as_ref()
                         .filter(|record_id| {
-                            absent_owners.contains(*record_id)
+                            (absent_owners.contains(*record_id)
+                                || !existing_by_record_id.contains_key(record_id.as_str()))
                                 && !claimed_ids.contains_key(record_id.as_str())
                         })
                         .cloned()
@@ -2481,7 +2497,19 @@ fn active_version_id(conn: &Connection, workspace_id: &str) -> Result<String, cr
 pub fn list_pending_collection_adoptions(
     conn: &Connection,
     workspace_id: &str,
-) -> Result<Vec<CollectionPendingAdoption>, crate::DomainError> {
+    limit: usize,
+    cursor: Option<&CollectionPendingAdoptionCursor>,
+) -> Result<CollectionPendingAdoptionPage, crate::DomainError> {
+    if limit == 0 || limit > MAX_COLLECTION_QUERY_LIMIT {
+        return Err(crate::DomainError::InvalidInput {
+            reason: "collection pending-adoption limit is invalid",
+        });
+    }
+    if cursor.is_some_and(|cursor| cursor.file_path.is_empty() || cursor.record_id.is_empty()) {
+        return Err(crate::DomainError::InvalidInput {
+            reason: "collection pending-adoption cursor is invalid",
+        });
+    }
     let version_id = active_version_id(conn, workspace_id)?;
     let mut statement = conn
         .prepare(
@@ -2493,22 +2521,46 @@ pub fn list_pending_collection_adoptions(
              WHERE r.workspace_id=?1 AND r.version_id=?2 \
                AND r.adoption_state IN ('pending', 'pending-lossless') \
                AND r.record_id IS NOT NULL \
-             ORDER BY r.file_path,r.record_id",
+               AND (?3 IS NULL OR r.file_path>?3 OR (r.file_path=?3 AND r.record_id>?4)) \
+             ORDER BY r.file_path,r.record_id LIMIT ?5",
         )
         .map_err(crate::DomainError::sql_corrupt)?;
-    statement
-        .query_map(params![workspace_id, version_id], |row| {
-            Ok(CollectionPendingAdoption {
-                version_id: version_id.clone(),
-                record_id: row.get(0)?,
-                collection_path: row.get(1)?,
-                file_path: row.get(2)?,
-                object_id: row.get(3)?,
-            })
-        })
+    let cursor_file_path = cursor.map(|cursor| cursor.file_path.as_str());
+    let cursor_record_id = cursor.map(|cursor| cursor.record_id.as_str());
+    let mut adoptions = statement
+        .query_map(
+            params![
+                workspace_id,
+                version_id,
+                cursor_file_path,
+                cursor_record_id,
+                i64::try_from(limit + 1).expect("bounded collection adoption page limit")
+            ],
+            |row| {
+                Ok(CollectionPendingAdoption {
+                    version_id: version_id.clone(),
+                    record_id: row.get(0)?,
+                    collection_path: row.get(1)?,
+                    file_path: row.get(2)?,
+                    object_id: row.get(3)?,
+                })
+            },
+        )
         .map_err(crate::DomainError::sql_corrupt)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(crate::DomainError::sql_corrupt)
+        .map_err(crate::DomainError::sql_corrupt)?;
+    let next_cursor = (adoptions.len() > limit).then(|| {
+        let last = &adoptions[limit - 1];
+        CollectionPendingAdoptionCursor {
+            file_path: last.file_path.clone(),
+            record_id: last.record_id.clone(),
+        }
+    });
+    adoptions.truncate(limit);
+    Ok(CollectionPendingAdoptionPage {
+        adoptions,
+        next_cursor,
+    })
 }
 
 fn stored_schema_status(value: &str) -> Result<CollectionSchemaStatus, crate::DomainError> {
@@ -3088,6 +3140,11 @@ pub fn query_collection_records(
     if query.limit == 0 || query.limit > MAX_COLLECTION_QUERY_LIMIT {
         return Err(crate::DomainError::InvalidInput {
             reason: "collection query limit is invalid",
+        });
+    }
+    if query.sort.len() > MAX_COLLECTION_QUERY_SORTS {
+        return Err(crate::DomainError::InvalidInput {
+            reason: "collection query sort limit is exceeded",
         });
     }
     let version_id = active_version_id(conn, workspace_id)?;

@@ -11,6 +11,7 @@ import type {
   CollectionListResult as CollectionListContractResult,
   CollectionQueryParams as CollectionQueryContractParams,
   CollectionQueryResult as CollectionQueryContractResult,
+  CollectionValue,
 } from "@dohc/workspace-contracts/collection";
 import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
 
@@ -57,8 +58,7 @@ export type WorkspaceOpenParams = WorkspaceJsonObject & {
 export type WorkspaceEmptyParams = WorkspaceJsonObject;
 export type CollectionGetParams =
   WorkspaceJsonObject & CollectionGetContractParams;
-export type CollectionQueryParams =
-  WorkspaceJsonObject & CollectionQueryContractParams;
+export type CollectionQueryParams = CollectionQueryContractParams;
 export type CollectionGetRecordParams =
   WorkspaceJsonObject & CollectionGetRecordContractParams;
 export type ConflictListParams = WorkspaceJsonObject & {
@@ -203,8 +203,17 @@ export type CollectionPendingAdoption = WorkspaceJsonObject & {
   filePath: string;
   objectId: string;
 };
-export type CollectionPendingAdoptionsResult = WorkspaceJsonObject & {
+export type CollectionPendingAdoptionCursor = WorkspaceJsonObject & {
+  filePath: string;
+  recordId: string;
+};
+export type CollectionPendingAdoptionsParams = WorkspaceJsonObject & {
+  limit?: number;
+  cursor?: CollectionPendingAdoptionCursor;
+};
+export type CollectionPendingAdoptionsPage = WorkspaceJsonObject & {
   adoptions: CollectionPendingAdoption[];
+  nextCursor: CollectionPendingAdoptionCursor | null;
 };
 export type CollectionGetResult = CollectionGetContractResult;
 export type CollectionQueryResult = CollectionQueryContractResult;
@@ -268,7 +277,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.conflictsOpen]: ConflictOpenParams;
   [WORKSPACE_METHOD.conflictsResolve]: ConflictResolveParams;
   [WORKSPACE_METHOD.collectionsList]: WorkspaceEmptyParams;
-  [WORKSPACE_METHOD.collectionsListPendingAdoptions]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.collectionsListPendingAdoptions]: CollectionPendingAdoptionsParams;
   [WORKSPACE_METHOD.collectionsGet]: CollectionGetParams;
   [WORKSPACE_METHOD.collectionsQuery]: CollectionQueryParams;
   [WORKSPACE_METHOD.collectionsGetRecord]: CollectionGetRecordParams;
@@ -288,7 +297,7 @@ export type WorkspaceMethodResultMap = {
   [WORKSPACE_METHOD.conflictsOpen]: ConflictOpenResult;
   [WORKSPACE_METHOD.conflictsResolve]: ConflictResolveResult;
   [WORKSPACE_METHOD.collectionsList]: CollectionListResult;
-  [WORKSPACE_METHOD.collectionsListPendingAdoptions]: CollectionPendingAdoptionsResult;
+  [WORKSPACE_METHOD.collectionsListPendingAdoptions]: CollectionPendingAdoptionsPage;
   [WORKSPACE_METHOD.collectionsGet]: CollectionGetResult;
   [WORKSPACE_METHOD.collectionsQuery]: CollectionQueryResult;
   [WORKSPACE_METHOD.collectionsGetRecord]: CollectionGetRecordResult;
@@ -306,6 +315,124 @@ export class WorkspaceProtocolShapeError extends Error {
     super(message);
     this.name = "WorkspaceProtocolShapeError";
   }
+}
+
+const COLLECTION_INTEGER_MARKER = "$dohcInt64";
+const MAX_SAFE_COLLECTION_INTEGER = BigInt(Number.MAX_SAFE_INTEGER);
+const MIN_COLLECTION_INTEGER = -(1n << 63n);
+const MAX_COLLECTION_INTEGER = (1n << 64n) - 1n;
+
+function collectionIntegerMarker(value: JsonValue): bigint | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const entries = Object.entries(value);
+  if (entries.length !== 1 || entries[0]?.[0] !== COLLECTION_INTEGER_MARKER) {
+    return null;
+  }
+  const decimal = entries[0]![1];
+  if (typeof decimal !== "string" || !/^-?(?:0|[1-9]\d*)$/.test(decimal)) {
+    throw new WorkspaceProtocolShapeError(
+      "A collection integer marker must contain a canonical decimal string.",
+    );
+  }
+  const integer = BigInt(decimal);
+  if (
+    integer < MIN_COLLECTION_INTEGER ||
+    integer > MAX_COLLECTION_INTEGER ||
+    (integer >= -MAX_SAFE_COLLECTION_INTEGER &&
+      integer <= MAX_SAFE_COLLECTION_INTEGER)
+  ) {
+    throw new WorkspaceProtocolShapeError(
+      "A collection integer marker must contain an out-of-safe-range engine integer.",
+    );
+  }
+  return integer;
+}
+
+export function decodeCollectionValue(value: JsonValue): CollectionValue {
+  const integer = collectionIntegerMarker(value);
+  if (integer !== null) return integer;
+  if (Array.isArray(value)) return value.map(decodeCollectionValue);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, child]) => [
+        key,
+        decodeCollectionValue(child!),
+      ]),
+    );
+  }
+  return value;
+}
+
+export function encodeCollectionValue(value: CollectionValue): JsonValue {
+  if (typeof value === "bigint") {
+    if (value < MIN_COLLECTION_INTEGER || value > MAX_COLLECTION_INTEGER) {
+      throw new WorkspaceProtocolShapeError(
+        "A collection integer must fit in the engine's 64-bit integer range.",
+      );
+    }
+    if (
+      value >= -MAX_SAFE_COLLECTION_INTEGER &&
+      value <= MAX_SAFE_COLLECTION_INTEGER
+    ) {
+      return Number(value);
+    }
+    return { [COLLECTION_INTEGER_MARKER]: value.toString() };
+  }
+  if (Array.isArray(value)) return value.map(encodeCollectionValue);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, child]) => [
+        key,
+        encodeCollectionValue(child),
+      ]),
+    );
+  }
+  return value;
+}
+
+export function encodeCollectionQueryParams(
+  input: CollectionQueryParams,
+): JsonValue {
+  return {
+    ...input,
+    ...(input.filter !== undefined
+      ? {
+          filter: {
+            ...input.filter,
+            value: encodeCollectionValue(input.filter.value),
+          },
+        }
+      : {}),
+    ...(input.cursor !== undefined
+      ? {
+          cursor: {
+            ...input.cursor,
+            sortValues: input.cursor.sortValues.map((value) => ({
+              ...value,
+              value: encodeCollectionValue(value.value),
+            })),
+          },
+        }
+      : {}),
+  } as unknown as JsonValue;
+}
+
+export type CollectionBlobResult = WorkspaceJsonObject & {
+  collectionJson: null;
+  blobSha256: string;
+  byteLength: number;
+  inbandLimitBytes: number;
+};
+
+export function collectionResultExpectsBlob(value: JsonValue): boolean {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    value.collectionJson === null
+  );
 }
 
 function mutableStruct<const Fields extends Schema.Struct.Fields>(fields: Fields) {
@@ -565,7 +692,12 @@ const CollectionQueryCursorSchema = mutableStruct({
   recordId: Schema.String,
 });
 
-const CollectionPendingAdoptionsResultSchema = mutableStruct({
+const CollectionPendingAdoptionCursorSchema = mutableStruct({
+  filePath: Schema.String,
+  recordId: Schema.String,
+});
+
+const CollectionPendingAdoptionsPageSchema = mutableStruct({
   adoptions: Schema.mutable(
     Schema.Array(
       mutableStruct({
@@ -577,6 +709,14 @@ const CollectionPendingAdoptionsResultSchema = mutableStruct({
       }),
     ),
   ),
+  nextCursor: Schema.NullOr(CollectionPendingAdoptionCursorSchema),
+});
+
+const CollectionBlobResultSchema = mutableStruct({
+  collectionJson: Schema.Null,
+  blobSha256: Schema.String,
+  byteLength: Schema.Int,
+  inbandLimitBytes: Schema.Int,
 });
 
 const CollectionQueryResultSchema = mutableStruct({
@@ -677,7 +817,7 @@ const WorkspaceResultSchemas = {
   ]),
   [WORKSPACE_METHOD.collectionsList]: CollectionListResultSchema,
   [WORKSPACE_METHOD.collectionsListPendingAdoptions]:
-    CollectionPendingAdoptionsResultSchema,
+    CollectionPendingAdoptionsPageSchema,
   [WORKSPACE_METHOD.collectionsGet]: CollectionDetailsSchema,
   [WORKSPACE_METHOD.collectionsQuery]: CollectionQueryResultSchema,
   [WORKSPACE_METHOD.collectionsGetRecord]: CollectionGetRecordResultSchema,
@@ -751,6 +891,75 @@ export function decodeGranularChatMessageSearchResponse(
   ) as GranularChatMessageSearchResponse;
 }
 
+export function decodeCollectionBlobResult(
+  value: JsonValue,
+): CollectionBlobResult {
+  return decodeWorkspaceSchema(
+    CollectionBlobResultSchema,
+    value,
+    "blob-backed collection result",
+  ) as CollectionBlobResult;
+}
+
+function decodeCollectionRecordValues(
+  record: CollectionQueryResult["records"][number],
+): CollectionQueryResult["records"][number] {
+  return {
+    ...record,
+    values: record.values.map((field) => ({
+      ...field,
+      value: decodeCollectionValue(field.value as JsonValue),
+    })),
+  };
+}
+
+function decodeCollectionQueryResultValues(
+  result: CollectionQueryResult,
+): CollectionQueryResult {
+  return {
+    ...result,
+    records: result.records.map(decodeCollectionRecordValues),
+    groups:
+      result.groups === null
+        ? null
+        : result.groups.map((group) => ({
+            ...group,
+            value: decodeCollectionValue(group.value as JsonValue),
+            records: group.records.map(decodeCollectionRecordValues),
+          })),
+    nextCursor:
+      result.nextCursor === null
+        ? null
+        : {
+            ...result.nextCursor,
+            sortValues: result.nextCursor.sortValues.map((value) => ({
+              ...value,
+              value: decodeCollectionValue(value.value as JsonValue),
+            })),
+          },
+  };
+}
+
+function decodeCollectionGetRecordResultValues(
+  result: CollectionGetRecordResult,
+): CollectionGetRecordResult {
+  return {
+    ...result,
+    record: decodeCollectionRecordValues(result.record),
+    history: result.history.map((entry) => ({
+      ...entry,
+      previous: {
+        ...entry.previous,
+        value: decodeCollectionValue(entry.previous.value as JsonValue),
+      },
+      next: {
+        ...entry.next,
+        value: decodeCollectionValue(entry.next.value as JsonValue),
+      },
+    })),
+  };
+}
+
 export function decodeWorkspaceResult<M extends WorkspaceMethod>(
   method: M,
   value: JsonValue,
@@ -761,10 +970,21 @@ export function decodeWorkspaceResult<M extends WorkspaceMethod>(
       `Unsupported workspace method: ${method}`,
     );
   }
-  return decodeWorkspaceSchema(
+  const decoded = decodeWorkspaceSchema(
     schema,
     value,
     `${method} result`,
     method !== WORKSPACE_METHOD.searchQuery,
   ) as WorkspaceMethodResultMap[M];
+  if (method === WORKSPACE_METHOD.collectionsQuery) {
+    return decodeCollectionQueryResultValues(
+      decoded as CollectionQueryResult,
+    ) as WorkspaceMethodResultMap[M];
+  }
+  if (method === WORKSPACE_METHOD.collectionsGetRecord) {
+    return decodeCollectionGetRecordResultValues(
+      decoded as CollectionGetRecordResult,
+    ) as WorkspaceMethodResultMap[M];
+  }
+  return decoded;
 }

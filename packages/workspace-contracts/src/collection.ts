@@ -112,13 +112,14 @@ export type FieldValueValidation =
   | { status: "valid" }
   | { status: "flagged"; reason: FieldValueReason };
 
-export type CollectionJsonValue =
+export type CollectionValue =
   | null
   | boolean
   | number
+  | bigint
   | string
-  | CollectionJsonValue[]
-  | { [key: string]: CollectionJsonValue };
+  | CollectionValue[]
+  | { [key: string]: CollectionValue };
 
 export type CollectionStatus = CollectionSchemaParseResult["status"];
 
@@ -144,7 +145,7 @@ export interface CollectionResolvedRelation {
 
 export interface CollectionIndexedValue {
   field: string;
-  value: CollectionJsonValue;
+  value: CollectionValue;
   validation: CollectionIndexedValueValidation;
   resolvedRelations: CollectionResolvedRelation[];
 }
@@ -157,7 +158,7 @@ export interface CollectionRecord {
 }
 
 export interface CollectionRecordGroup {
-  value: CollectionJsonValue;
+  value: CollectionValue;
   records: CollectionRecord[];
 }
 
@@ -166,7 +167,7 @@ export type CollectionFilterOperator = "equals" | "contains";
 export interface CollectionQueryFilter {
   field: string;
   operator: CollectionFilterOperator;
-  value: CollectionJsonValue;
+  value: CollectionValue;
 }
 
 export interface CollectionQuerySort {
@@ -176,7 +177,7 @@ export interface CollectionQuerySort {
 
 export interface CollectionQueryCursorValue {
   present: boolean;
-  value: CollectionJsonValue;
+  value: CollectionValue;
 }
 
 export interface CollectionQueryCursor {
@@ -221,7 +222,7 @@ export interface CollectionGetRecordParams {
 
 export interface CollectionHistoryValue {
   present: boolean;
-  value: CollectionJsonValue;
+  value: CollectionValue;
 }
 
 export interface CollectionFieldHistoryEntry {

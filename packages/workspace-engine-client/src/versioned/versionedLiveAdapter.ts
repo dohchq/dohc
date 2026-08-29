@@ -9,14 +9,18 @@ import {
 import type { WorkspaceHandle } from "../ydoc/generated/WorkspaceHandle";
 import {
   WORKSPACE_METHOD,
+  collectionResultExpectsBlob,
+  decodeCollectionBlobResult,
   decodeWorkspaceResult,
+  encodeCollectionQueryParams,
   type CaptureFlushResult,
   type CollectionGetParams,
   type CollectionGetRecordParams,
   type CollectionGetRecordResult,
   type CollectionGetResult,
   type CollectionListResult,
-  type CollectionPendingAdoptionsResult,
+  type CollectionPendingAdoptionsPage,
+  type CollectionPendingAdoptionsParams,
   type CollectionQueryParams,
   type CollectionQueryResult,
   type ConflictFileState,
@@ -34,6 +38,7 @@ import {
   type WorkspaceMethodResultMap,
   type WorkspaceOpenParams,
 } from "../workspace/workspaceWireContract";
+import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
 import {
   VERSIONED_METHOD,
   decodeVersionedResult,
@@ -198,11 +203,91 @@ export class VersionedLiveAdapter {
     params: WorkspaceMethodParamsMap[M],
     options?: { idempotencyKey?: string; deadlineMs?: number },
   ): Promise<WorkspaceMethodResultMap[M]> {
-    const raw = await this.requester.request(method, params, {
+    if (method === WORKSPACE_METHOD.collectionsQuery) {
+      return this.collectionRequest(
+        method,
+        encodeCollectionQueryParams(params as CollectionQueryParams),
+        options,
+      ) as Promise<WorkspaceMethodResultMap[M]>;
+    }
+    if (method === WORKSPACE_METHOD.collectionsGetRecord) {
+      return this.collectionRequest(
+        method,
+        params as unknown as JsonValue,
+        options,
+      ) as Promise<WorkspaceMethodResultMap[M]>;
+    }
+    const raw = await this.requester.request(method, params as JsonValue, {
       workspace: this.workspace,
       ...options,
     });
     return decodeWorkspaceResult(method, raw);
+  }
+
+  private async collectionRequest<
+    M extends
+      | typeof WORKSPACE_METHOD.collectionsQuery
+      | typeof WORKSPACE_METHOD.collectionsGetRecord,
+  >(
+    method: M,
+    params: JsonValue,
+    options?: { idempotencyKey?: string; deadlineMs?: number },
+  ): Promise<WorkspaceMethodResultMap[M]> {
+    let delivery: Awaited<
+      ReturnType<WorkspaceDaemonRequester["requestWithBlob"]>
+    >;
+    try {
+      delivery = await this.requester.requestWithBlob(
+        method,
+        params,
+        collectionResultExpectsBlob,
+        { workspace: this.workspace, ...options },
+      );
+    } catch (error) {
+      if (error instanceof DaemonClientCapabilityError) {
+        throw new VersionedAdapterCapabilityError(error.message);
+      }
+      throw error;
+    }
+    if (!collectionResultExpectsBlob(delivery.result)) {
+      return decodeWorkspaceResult(method, delivery.result);
+    }
+    const metadata = decodeCollectionBlobResult(delivery.result);
+    if (delivery.blob === null) {
+      throw new DaemonProtocolError(
+        "The daemon returned blob-backed collection metadata without a completed blob.",
+      );
+    }
+    if (delivery.blob.sha256 !== metadata.blobSha256) {
+      throw new DaemonProtocolError(
+        "The completed blob digest does not match the collection metadata.",
+      );
+    }
+    if (delivery.blob.bytes.byteLength !== metadata.byteLength) {
+      throw new DaemonProtocolError(
+        "The completed blob length does not match the collection metadata.",
+      );
+    }
+    let text: string;
+    try {
+      text = new TextDecoder("utf-8", {
+        fatal: true,
+        ignoreBOM: true,
+      }).decode(delivery.blob.bytes);
+    } catch {
+      throw new DaemonProtocolError(
+        "The blob-backed collection result is not valid UTF-8.",
+      );
+    }
+    let result: JsonValue;
+    try {
+      result = JSON.parse(text) as JsonValue;
+    } catch {
+      throw new DaemonProtocolError(
+        "The blob-backed collection result is not valid JSON.",
+      );
+    }
+    return decodeWorkspaceResult(method, result);
   }
 
   async ensureMainVersion(input: {
@@ -914,10 +999,12 @@ export class VersionedLiveAdapter {
     return this.workspaceRequest(WORKSPACE_METHOD.collectionsList, {});
   }
 
-  async listPendingCollectionAdoptions(): Promise<CollectionPendingAdoptionsResult> {
+  async listPendingCollectionAdoptions(
+    input: CollectionPendingAdoptionsParams = {},
+  ): Promise<CollectionPendingAdoptionsPage> {
     return this.workspaceRequest(
       WORKSPACE_METHOD.collectionsListPendingAdoptions,
-      {},
+      input,
     );
   }
 

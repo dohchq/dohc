@@ -671,8 +671,8 @@ export interface YDocUpdatePayload {
   contentKind: YDocReplicationContentKind;
   // The Yjs update bytes, content-addressed into binary_blobs(sha256).
   updateBlobSha256: string;
-  // The human or agent that authored the edit. When absent, older receivers
-  // attribute the update to the replication envelope's device origin.
+  // The human or agent that authored the edit. When absent, the receiver
+  // attributes the update to the replication envelope's device origin.
   actorOriginId?: string;
   // True for the full-state BASE op the driver emits when a live session's
   // replication baseline is established (`Y.encodeStateAsUpdate(seed)`). It is

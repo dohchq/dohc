@@ -499,14 +499,18 @@ async fn flush_capture(
     handle: &WorkspaceHandle,
     id: &mut u64,
 ) {
+    let mut state = Value::Null;
     for _ in 0..20 {
-        let status = call(transport, handle, id, "capture.flush", json!({})).await;
-        if status["settled"] == json!(true) {
+        state = call(transport, handle, id, "capture.flush", json!({})).await;
+        if state["settled"] == json!(true) {
             return;
+        }
+        if state["degraded"] == json!(true) {
+            break;
         }
         tokio::task::yield_now().await;
     }
-    panic!("capture did not settle");
+    panic!("capture did not settle: {state}");
 }
 
 fn workspace_row(

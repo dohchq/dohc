@@ -4,6 +4,7 @@ import {
   WorkspaceProtocolShapeError,
   decodeConflictRecord,
   decodeWorkspaceResult,
+  encodeCollectionQueryParams,
 } from "./workspaceWireContract";
 
 const snapshot = {
@@ -133,6 +134,103 @@ describe("workspace wire schemas", () => {
           },
         ],
         groups: null,
+      }),
+    ).toThrow(WorkspaceProtocolShapeError);
+  });
+
+  it("round-trips exact signed 64-bit collection integers", () => {
+    const markedInteger = { $dohcInt64: "9007199254740993" };
+    const record = {
+      id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      path: "projects/roadmap.md",
+      conflicted: false,
+      values: [
+        {
+          field: "estimate",
+          value: markedInteger,
+          validation: { status: "valid" },
+          resolvedRelations: [],
+        },
+      ],
+    };
+
+    const queried = decodeWorkspaceResult(WORKSPACE_METHOD.collectionsQuery, {
+      collection: { path: "projects", status: "valid", reasons: [] },
+      records: [record],
+      groups: [{ value: markedInteger, records: [record] }],
+      nextCursor: {
+        sortValues: [{ present: true, value: markedInteger }],
+        recordPath: record.path,
+        recordId: record.id,
+      },
+    });
+    expect(queried.records[0]?.values[0]?.value).toBe(9007199254740993n);
+    expect(queried.groups?.[0]?.value).toBe(9007199254740993n);
+    expect(queried.nextCursor?.sortValues[0]?.value).toBe(
+      9007199254740993n,
+    );
+
+    const fetched = decodeWorkspaceResult(
+      WORKSPACE_METHOD.collectionsGetRecord,
+      {
+        collection: { path: "projects", status: "valid", reasons: [] },
+        record,
+        history: [
+          {
+            historyId: 1,
+            field: "estimate",
+            previous: { present: false, value: null },
+            next: { present: true, value: markedInteger },
+            authorOriginId: null,
+            recordedAtMs: 1,
+          },
+        ],
+      },
+    );
+    expect(fetched.record.values[0]?.value).toBe(9007199254740993n);
+    expect(fetched.history[0]?.next.value).toBe(9007199254740993n);
+
+    expect(
+      encodeCollectionQueryParams({
+        collectionPath: "projects",
+        filter: {
+          field: "estimate",
+          operator: "equals",
+          value: 9007199254740993n,
+        },
+        cursor: {
+          sortValues: [{ present: true, value: 9007199254740993n }],
+          recordPath: record.path,
+          recordId: record.id,
+        },
+      }),
+    ).toMatchObject({
+      filter: { value: markedInteger },
+      cursor: { sortValues: [{ value: markedInteger }] },
+    });
+  });
+
+  it("rejects malformed collection integer markers", () => {
+    expect(() =>
+      decodeWorkspaceResult(WORKSPACE_METHOD.collectionsQuery, {
+        collection: { path: "projects", status: "valid", reasons: [] },
+        records: [
+          {
+            id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+            path: "projects/roadmap.md",
+            conflicted: false,
+            values: [
+              {
+                field: "estimate",
+                value: { $dohcInt64: "01" },
+                validation: { status: "valid" },
+                resolvedRelations: [],
+              },
+            ],
+          },
+        ],
+        groups: null,
+        nextCursor: null,
       }),
     ).toThrow(WorkspaceProtocolShapeError);
   });

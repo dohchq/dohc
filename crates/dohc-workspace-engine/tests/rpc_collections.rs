@@ -7,8 +7,10 @@ use dohc_engine_domain::{
 };
 use dohc_engine_protocol::{
     limits::WireLimits,
-    transport::{EngineTransport, InProcessTransport, RequestContext},
-    wire::{Request, WorkspaceHandle},
+    transport::{
+        EngineService as ProtocolEngineService, EngineTransport, InProcessTransport, RequestContext,
+    },
+    wire::{Envelope, Request, WorkspaceHandle, encode_control},
 };
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::ScratchDir;
@@ -787,4 +789,252 @@ async fn collection_larger_than_frame_cap_pages_completely_in_sorted_order() {
         "exclusive page boundaries must not duplicate records"
     );
     assert!(cursor.is_null(), "the final page must terminate the cursor");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unsafe_integer_round_trips_through_query_and_get_record_wire_results() {
+    const UNSAFE_INTEGER: i64 = 9_007_199_254_740_993;
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let db = scratch.engine_db_path().expect("engine db path");
+    let mut store = EngineStore::open(&db, 1).expect("open store");
+    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
+        .expect("main version");
+    let schema = "fields:\n  exact:\n    type: number\n";
+    let record = format!("---\nid: {RECORD_ID}\nexact: {UNSAFE_INTEGER}\n---\n");
+    seed_text(&mut store, "integers/collection.yaml", schema, 2);
+    seed_text(&mut store, "integers/record.md", &record, 3);
+    store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, "main")
+        })
+        .expect("reconcile unsafe integer collection");
+    drop(store);
+    let collection_dir = scratch.path().join("integers");
+    std::fs::create_dir_all(&collection_dir).expect("collection directory");
+    std::fs::write(collection_dir.join("collection.yaml"), schema).expect("schema file");
+    std::fs::write(collection_dir.join("record.md"), record).expect("record file");
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+
+    for (id, method, params) in [
+        (
+            10,
+            "collections.query",
+            json!({ "collectionPath": "integers" }),
+        ),
+        (
+            11,
+            "collections.getRecord",
+            json!({
+                "collectionPath": "integers",
+                "recordId": RECORD_ID,
+                "historyLimit": 10,
+            }),
+        ),
+    ] {
+        let output = ProtocolEngineService::call(
+            service.as_ref(),
+            RequestContext::unbounded().with_capability("blobs"),
+            request(id, method, Some(handle.clone()), params),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{method} failed: {error:?}"));
+        assert!(output.blob_egress.is_none());
+        let record = if method == "collections.query" {
+            &output.response.result["records"][0]
+        } else {
+            &output.response.result["record"]
+        };
+        let exact = record["values"]
+            .as_array()
+            .expect("record values")
+            .iter()
+            .find(|value| value["field"] == "exact")
+            .expect("exact indexed value");
+        assert_eq!(
+            exact["value"],
+            json!({ "$dohcInt64": UNSAFE_INTEGER.to_string() })
+        );
+        assert_eq!(exact["validation"]["status"], json!("valid"));
+        encode_control(
+            &Envelope::Response(output.response),
+            &WireLimits::SPIKE_DEFAULTS,
+        )
+        .unwrap_or_else(|error| panic!("{method} response must encode: {error:?}"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn near_limit_record_round_trips_via_query_and_get_record_blob_egress() {
+    const LARGE_FIELD_BYTES: usize = dohc_engine_domain::MAX_TEXT_BYTES - 1024;
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let db = scratch.engine_db_path().expect("engine db path");
+    let mut store = EngineStore::open(&db, 1).expect("open store");
+    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
+        .expect("main version");
+    let schema = "fields:\n  notes:\n    type: text\n";
+    let large_value = "x".repeat(LARGE_FIELD_BYTES);
+    let record = format!("---\nid: {RECORD_ID}\nnotes: {large_value}\n---\n");
+    assert!(record.len() < dohc_engine_domain::MAX_TEXT_BYTES);
+    seed_text(&mut store, "near-limit/collection.yaml", schema, 2);
+    seed_text(&mut store, "near-limit/record.md", &record, 3);
+    store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, "main")
+        })
+        .expect("reconcile near-limit collection");
+    drop(store);
+    let collection_dir = scratch.path().join("near-limit");
+    std::fs::create_dir_all(&collection_dir).expect("collection directory");
+    std::fs::write(collection_dir.join("collection.yaml"), schema).expect("schema file");
+    std::fs::write(collection_dir.join("record.md"), &record).expect("record file");
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+
+    for (id, method, params) in [
+        (
+            20,
+            "collections.query",
+            json!({ "collectionPath": "near-limit", "limit": 1 }),
+        ),
+        (
+            21,
+            "collections.getRecord",
+            json!({
+                "collectionPath": "near-limit",
+                "recordId": RECORD_ID,
+                "historyLimit": 10,
+            }),
+        ),
+    ] {
+        let output = ProtocolEngineService::call(
+            service.as_ref(),
+            RequestContext::unbounded().with_capability("blobs"),
+            request(id, method, Some(handle.clone()), params),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{method} failed: {error:?}"));
+        assert_eq!(output.response.result["collectionJson"], Value::Null);
+        encode_control(
+            &Envelope::Response(output.response.clone()),
+            &WireLimits::SPIKE_DEFAULTS,
+        )
+        .unwrap_or_else(|error| panic!("{method} metadata must encode: {error:?}"));
+        let egress = output
+            .blob_egress
+            .unwrap_or_else(|| panic!("{method} must return blob egress"));
+        assert_eq!(egress.stream_id, id);
+        assert_eq!(
+            output.response.result["blobSha256"].as_str(),
+            Some(egress.sha256.as_str())
+        );
+        assert_eq!(
+            output.response.result["byteLength"].as_u64(),
+            Some(egress.bytes.len() as u64)
+        );
+        let hydrated: Value =
+            serde_json::from_slice(&egress.bytes).expect("blob-backed collection JSON");
+        let hydrated_record = if method == "collections.query" {
+            &hydrated["records"][0]
+        } else {
+            &hydrated["record"]
+        };
+        let notes = hydrated_record["values"]
+            .as_array()
+            .expect("record values")
+            .iter()
+            .find(|value| value["field"] == "notes")
+            .expect("notes indexed value");
+        assert_eq!(
+            notes["value"].as_str().expect("notes text").len(),
+            LARGE_FIELD_BYTES
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn collection_query_refuses_a_ninth_sort_clause() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    seed_schema(&scratch, "fields:\n  title:\n    type: text\n");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+    let sorts = (0..9)
+        .map(|index| json!({ "field": format!("sort-{index}"), "direction": "asc" }))
+        .collect::<Vec<_>>();
+    let error = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                2,
+                "collections.query",
+                Some(handle),
+                json!({ "collectionPath": "tasks", "sort": sorts }),
+            ),
+        )
+        .await
+        .expect_err("a ninth sort clause must be refused");
+    assert_eq!(
+        error.code,
+        dohc_engine_protocol::error::ErrorCode::InvalidParams
+    );
+    assert_eq!(error.message, "collection-query-sort-limit-exceeded");
 }

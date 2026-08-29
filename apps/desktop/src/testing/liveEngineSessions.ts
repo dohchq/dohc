@@ -90,7 +90,10 @@ export function mockLiveSessions(
         };
       }
       if (request.method === "collections.listPendingAdoptions") {
-        return { id: request.id, result: { adoptions: [] } };
+        return {
+          id: request.id,
+          result: { adoptions: [], nextCursor: null },
+        };
       }
       const response = await loopback.sendRequest(request);
       if (request.method === VERSIONED_METHOD.textReadBlob) {

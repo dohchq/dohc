@@ -122,16 +122,6 @@ pub fn apply_remote_update(
     store: &mut EngineStore,
     key: &DocKey,
     remote: &RemoteUpdate,
-    faults: &dyn FaultInjector,
-    now_ms: i64,
-) -> Result<TxnOutcome<ReplicationApplyOutcome>, CollabError> {
-    apply_remote_update_outer(store, None, key, remote, None, faults, now_ms)
-}
-
-pub fn apply_remote_update_with_actor(
-    store: &mut EngineStore,
-    key: &DocKey,
-    remote: &RemoteUpdate,
     actor_origin_id: Option<&str>,
     faults: &dyn FaultInjector,
     now_ms: i64,
@@ -143,17 +133,6 @@ pub fn apply_remote_update_with_actor(
 /// aligned after the remote append commits. The deferred replay gate remains
 /// cold because its transaction boundary cannot satisfy #943's cache proof.
 pub fn apply_remote_update_for_deferred_drain(
-    store: &mut EngineStore,
-    cache: &mut WriterDocCache,
-    key: &DocKey,
-    remote: &RemoteUpdate,
-    faults: &dyn FaultInjector,
-    now_ms: i64,
-) -> Result<TxnOutcome<ReplicationApplyOutcome>, CollabError> {
-    apply_remote_update_outer(store, Some(cache), key, remote, None, faults, now_ms)
-}
-
-pub fn apply_remote_update_for_deferred_drain_with_actor(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
     key: &DocKey,
@@ -307,15 +286,6 @@ pub fn apply_remote_update_in_transaction_with_projection(
     tx: &Transaction<'_>,
     key: &DocKey,
     remote: &RemoteUpdate,
-    now_ms: i64,
-) -> Result<RemoteApplyProjection, CollabError> {
-    apply_remote_update_in_transaction_with_projection_and_actor(tx, key, remote, None, now_ms)
-}
-
-pub fn apply_remote_update_in_transaction_with_projection_and_actor(
-    tx: &Transaction<'_>,
-    key: &DocKey,
-    remote: &RemoteUpdate,
     actor_origin_id: Option<&str>,
     now_ms: i64,
 ) -> Result<RemoteApplyProjection, CollabError> {
@@ -372,19 +342,6 @@ pub fn apply_remote_update_in_transaction_with_projection_and_actor(
 /// returned projection remains a separate fresh full-content document, while
 /// `probe` carries cache advancement evidence out of the transaction.
 pub fn apply_remote_update_in_transaction_cached_with_projection(
-    tx: &Transaction<'_>,
-    cache: &WriterDocCache,
-    probe: &mut RemoteAppendProbe,
-    key: &DocKey,
-    remote: &RemoteUpdate,
-    now_ms: i64,
-) -> Result<RemoteApplyProjection, CollabError> {
-    apply_remote_update_in_transaction_cached_with_projection_and_actor(
-        tx, cache, probe, key, remote, None, now_ms,
-    )
-}
-
-pub fn apply_remote_update_in_transaction_cached_with_projection_and_actor(
     tx: &Transaction<'_>,
     cache: &WriterDocCache,
     probe: &mut RemoteAppendProbe,
@@ -618,7 +575,7 @@ mod dedupe_hoist_tests {
             bytes: delta,
         };
         let seq = match committed(
-            apply_remote_update(&mut store, &key, &remote, &NoFaults, 1_100).expect("apply"),
+            apply_remote_update(&mut store, &key, &remote, None, &NoFaults, 1_100).expect("apply"),
         ) {
             ReplicationApplyOutcome::Applied { seq, .. } => seq,
             ReplicationApplyOutcome::Deduped { .. } => panic!("first apply must land"),
@@ -631,9 +588,10 @@ mod dedupe_hoist_tests {
         let (_dir, mut store, key, remote, seq) =
             replicated_with_applied_delta("dedupe-hoist-remote");
 
-        let again =
-            with_armed_gate(|| apply_remote_update(&mut store, &key, &remote, &NoFaults, 1_200))
-                .expect("an in-log redelivery must dedupe without invoking the gate");
+        let again = with_armed_gate(|| {
+            apply_remote_update(&mut store, &key, &remote, None, &NoFaults, 1_200)
+        })
+        .expect("an in-log redelivery must dedupe without invoking the gate");
         assert_eq!(
             committed(again),
             ReplicationApplyOutcome::Deduped { seq },
@@ -696,7 +654,7 @@ mod dedupe_hoist_tests {
             replicated_with_applied_delta("dedupe-hoist-rot-remote");
         let sha = rot_stored_blob(&mut store, &remote.bytes);
 
-        let refused = apply_remote_update(&mut store, &key, &remote, &NoFaults, 1_200)
+        let refused = apply_remote_update(&mut store, &key, &remote, None, &NoFaults, 1_200)
             .expect_err("a redelivery over a rotted blob must surface Corrupt, not a false ack");
         assert!(
             matches!(&refused, CollabError::Corrupt { reason } if reason.contains(&sha)),
@@ -760,9 +718,10 @@ mod dedupe_hoist_tests {
 
         // Armed gate: a folded redelivery MUST reach the gate, which the armed
         // seam turns into a fail-closed refusal.
-        let refused =
-            with_armed_gate(|| apply_remote_update(&mut store, &key, &remote, &NoFaults, 1_400))
-                .expect_err("a folded redelivery must take the full gate");
+        let refused = with_armed_gate(|| {
+            apply_remote_update(&mut store, &key, &remote, None, &NoFaults, 1_400)
+        })
+        .expect_err("a folded redelivery must take the full gate");
         assert!(
             matches!(refused, CollabError::ReplayParityViolation { .. }),
             "expected the armed gate's fail-closed refusal: {refused:?}"
@@ -771,7 +730,8 @@ mod dedupe_hoist_tests {
         // Disarmed, the same redelivery passes the gate and re-appends as a
         // fresh row (a CRDT no-op; re-folded at the next compaction).
         let reapplied = committed(
-            apply_remote_update(&mut store, &key, &remote, &NoFaults, 1_500).expect("re-append"),
+            apply_remote_update(&mut store, &key, &remote, None, &NoFaults, 1_500)
+                .expect("re-append"),
         );
         assert!(
             matches!(

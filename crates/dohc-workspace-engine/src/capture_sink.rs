@@ -1779,7 +1779,7 @@ mod tests {
             let disk = std::fs::read(scratch.path().join("tasks/generated.md"))
                 .expect("read generated record");
             let stored = snapshot(&db, "tasks/generated.md").expect("generated snapshot");
-            let binding = original_binding;
+            let binding = collection_record(&db, "tasks/generated.md");
             let final_moments = moment_count(&db, "tasks/generated.md");
             let final_updates = ydoc_update_count(&db, "tasks/generated.md");
             drop(sink);

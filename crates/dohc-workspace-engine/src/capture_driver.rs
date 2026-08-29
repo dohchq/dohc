@@ -3702,6 +3702,250 @@ mod collection_reconcile_scheduling_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn watcher_repairing_malformed_collection_record_adopts_and_indexes_it() {
+        const RECORD_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const MALFORMED: &str = concat!(
+            "---\n",
+            "id: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+            "title: [\n",
+            "---\n",
+            "\n",
+            "Body\n",
+        );
+        const REPAIRED: &str = concat!(
+            "---\n",
+            "id: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+            "title: Repaired\n",
+            "---\n",
+            "\n",
+            "Body\n",
+        );
+
+        let scratch = ScratchDir::new().expect("scratch");
+        let collection_dir = scratch.path().join("tasks");
+        let record_path = collection_dir.join("alpha.md");
+        std::fs::create_dir_all(&collection_dir).expect("collection directory");
+        std::fs::write(
+            collection_dir.join("collection.yaml"),
+            b"fields:\n  title:\n    type: text\n",
+        )
+        .expect("collection schema");
+        std::fs::write(&record_path, MALFORMED).expect("malformed collection record");
+
+        let db = scratch.engine_db_path().expect("engine database path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        let leases = LeaseRegistry::new();
+        let self_writes = SelfWriteSuppression::default();
+        let seed_actor = actor.clone();
+        let seed_root = scratch.path().to_path_buf();
+        std::thread::spawn(move || {
+            let mut sink =
+                StoreCaptureSink::new(seed_actor, WORKSPACE_ID, "main", seed_root, 2, None);
+            for path in ["tasks/collection.yaml", "tasks/alpha.md"] {
+                sink.ingest(
+                    path,
+                    0,
+                    "advisory-sha",
+                    "text/markdown",
+                    IngestReason::Added,
+                )
+                .unwrap_or_else(|_| panic!("capture {path}"));
+            }
+            assert!(
+                sink.reconcile_collections()
+                    .expect("exclude malformed collection record")
+                    .is_empty()
+            );
+        })
+        .join()
+        .expect("malformed collection capture setup thread");
+        let binding_count = rusqlite::Connection::open(&db)
+            .expect("open binding observer")
+            .query_row(
+                "SELECT COUNT(*) FROM collection_records \
+                 WHERE workspace_id = ?1 AND version_id = 'main' \
+                   AND file_path = 'tasks/alpha.md'",
+                [WORKSPACE_ID],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count malformed record bindings");
+        assert_eq!(binding_count, 0, "malformed Markdown starts unbound");
+
+        let files = FilesActor::spawn_async(scratch.path().to_path_buf(), ScanBounds::default())
+            .await
+            .expect("files actor");
+        let files = FilesActorCloseGuard::new(files);
+        let handle = files.handle();
+        let ready = NativeWatcher::start(
+            scratch.path().to_path_buf(),
+            handle.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("watcher start");
+        let mut watcher = ready.watcher;
+        let status = Arc::new(DriverStatus::default());
+
+        let ReconcileRun::Completed(baseline_plan) = ready.initial_reconcile else {
+            panic!("the watcher must prepare its malformed-file baseline");
+        };
+        assert!(!baseline_plan.degraded);
+        let captured = baseline_plan
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                CaptureOp::Ingest {
+                    path, size, sha256, ..
+                } => Some(CapturedIngest {
+                    path: path.clone(),
+                    size: *size,
+                    sha256: sha256.clone(),
+                }),
+                CaptureOp::Retire { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(captured.len(), baseline_plan.ops.len());
+        handle
+            .acknowledge_capture(
+                baseline_plan.clone(),
+                CaptureApplyResult {
+                    applied_paths: baseline_plan
+                        .ops
+                        .iter()
+                        .map(|op| op.path().to_owned())
+                        .collect(),
+                    captured,
+                    not_owned_paths: Vec::new(),
+                    failed_applies: Vec::new(),
+                    crashed_after_apply: None,
+                    degraded: false,
+                },
+            )
+            .await
+            .expect("acknowledge the already-captured malformed-file baseline");
+
+        std::fs::write(&record_path, REPAIRED).expect("repair collection record frontmatter");
+        wait_for_watcher_dirty(&handle).await;
+        let changed = handle
+            .reconcile_if_dirty(CancellationToken::new())
+            .await
+            .expect("reconcile repaired frontmatter");
+        let ReconcileRun::Completed(changed_plan) = changed else {
+            panic!("the watcher repair must produce a completed capture plan");
+        };
+        assert!(
+            changed_plan.ops.iter().any(|op| matches!(
+                op,
+                CaptureOp::Ingest {
+                    path,
+                    reason: IngestReason::Changed,
+                    ..
+                } if path == "tasks/alpha.md"
+            )),
+            "repairing malformed frontmatter must travel through the Changed path"
+        );
+        assert!(
+            apply_run_with_handle(
+                ApplyRunContext {
+                    root: scratch.path(),
+                    actor: &actor,
+                    workspace_id: WORKSPACE_ID,
+                    leases: &leases,
+                    status: &status,
+                    self_writes: &self_writes,
+                    author_json: None,
+                    provenance: CaptureProvenance::default(),
+                    events: EngineEvents::default(),
+                },
+                &handle,
+                ReconcileRun::Completed(changed_plan),
+            )
+            .await,
+            "the repaired collection record capture settles cleanly"
+        );
+        let pending = rusqlite::Connection::open(&db)
+            .expect("open pending record observer")
+            .query_row(
+                "SELECT record_id,adoption_state,index_initialized FROM collection_records \
+                 WHERE workspace_id=?1 AND version_id='main' \
+                   AND file_path='tasks/alpha.md'",
+                [WORKSPACE_ID],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, bool>(2)?,
+                    ))
+                },
+            )
+            .expect("load repaired pending record");
+        assert_eq!(
+            pending,
+            (RECORD_ID.to_owned(), "pending".to_owned(), true),
+            "the Changed watcher pass must bind and index the repaired record"
+        );
+
+        // The desktop imports pending collection records into canonical
+        // rich-document lineage, then asks capture to reconcile again.
+        seed_plain_richdoc_lineage(&actor, "tasks/alpha.md", REPAIRED).await;
+        status.request_collection_reconcile();
+        assert!(
+            apply_run_with_handle(
+                ApplyRunContext {
+                    root: scratch.path(),
+                    actor: &actor,
+                    workspace_id: WORKSPACE_ID,
+                    leases: &leases,
+                    status: &status,
+                    self_writes: &self_writes,
+                    author_json: None,
+                    provenance: CaptureProvenance::default(),
+                    events: EngineEvents::default(),
+                },
+                &handle,
+                ReconcileRun::Converged,
+            )
+            .await,
+            "the imported repaired record adopts cleanly"
+        );
+        let indexed = rusqlite::Connection::open(&db)
+            .expect("open indexed record observer")
+            .query_row(
+                "SELECT r.record_id,r.adoption_state,r.index_initialized,f.value_json \
+                 FROM collection_records r \
+                 JOIN collection_record_fields f ON f.workspace_id=r.workspace_id \
+                   AND f.version_id=r.version_id AND f.record_id=r.record_id \
+                 WHERE r.workspace_id=?1 AND r.version_id='main' \
+                   AND r.file_path='tasks/alpha.md' AND f.field_name='title'",
+                [WORKSPACE_ID],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, bool>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .expect("load adopted indexed record");
+
+        watcher.stop().expect("stop watcher");
+        files.close().await;
+        supervisor.close(&db).expect("close actor");
+
+        assert_eq!(
+            indexed,
+            (
+                RECORD_ID.to_owned(),
+                "adopted".to_owned(),
+                true,
+                "\"Repaired\"".to_owned(),
+            )
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_converged_watcher_scan_does_not_rewrite_collection_state() {
         let scratch = ScratchDir::new().expect("scratch");
         let collection_dir = scratch.path().join("tasks");
