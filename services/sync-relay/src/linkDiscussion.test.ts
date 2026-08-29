@@ -224,6 +224,50 @@ async function fixture(
   return { storage, dbPath, handler, makeHandler, view, comment, edit };
 }
 
+function addIndependentCommentLink(storage: SyncRelayStorage): LinkFixture {
+  const grantId = "link-comment-peer-grant-sentinel";
+  const linkSecret = secret("g");
+  const capabilityToken = secret("h");
+  expect(
+    storage.createLinkGrant({
+      grant: {
+        grantId,
+        shareId: SHARE,
+        principalKind: "link",
+        principalUserId: null,
+        principalEmail: null,
+        access: "comment",
+        generation: 1,
+        status: "active",
+        createdAtMs: 1_012,
+        revokedAtMs: null,
+        parentGrantId: null,
+      },
+      credential: {
+        credentialId: "credential-comment-peer-sentinel",
+        grantId,
+        secretHash: hashLinkBearer(linkSecret, LINK_KEY),
+        generation: 1,
+        mintedAtMs: 1_012,
+        retiredAtMs: null,
+      },
+    }),
+  ).toBe(true);
+  expect(
+    storage.mintLinkSession({
+      session: {
+        sessionId: "session-comment-peer-sentinel",
+        capabilityHash: hashLinkBearer(capabilityToken, LINK_KEY),
+        grantId,
+        generation: 1,
+        mintedAtMs: 1_013,
+        expiresAtMs: 1_000_000,
+      },
+    }),
+  ).toBe(true);
+  return { access: "comment", grantId, secret: linkSecret, capabilityToken };
+}
+
 function request(
   userId: string | null,
   path: string,
@@ -1800,6 +1844,7 @@ describe("share discussion HTTP boundary", () => {
 
   it("pauses only link-authored writes and resumes without rotating authority or charging debt", async () => {
     const test = await fixture();
+    const commentPeer = addIndependentCommentLink(test.storage);
     const seeded = await test.handler(
       trustedAppend(test.comment, {
         body: "pause seed",
@@ -1809,14 +1854,41 @@ describe("share discussion HTTP boundary", () => {
     );
     expect(seeded.status).toBe(200);
     await seeded.arrayBuffer();
-    const principalId = test.storage.listShareDiscussionMessages({
+    const peerSeeded = await test.handler(
+      trustedAppend(
+        commentPeer,
+        {
+          body: "pause peer seed",
+          claimedName: "Pause Peer Profile",
+          idempotencyKey: "pause-peer-seed",
+        },
+        PROFILE_B,
+      ),
+    );
+    expect(peerSeeded.status).toBe(200);
+    await peerSeeded.arrayBuffer();
+    const seededMessages = test.storage.listShareDiscussionMessages({
       shareId: SHARE,
       limit: 100,
-    }).messages[0]!.linkPrincipalId;
-    const grantBefore = test.storage.getShareGrant(test.comment.grantId)!;
+    }).messages;
+    const principalId = seededMessages.find(
+      (message) => message.body === "pause seed",
+    )!.linkPrincipalId;
+    const peerPrincipalId = seededMessages.find(
+      (message) => message.body === "pause peer seed",
+    )!.linkPrincipalId;
+    expect(peerPrincipalId).not.toBe(principalId);
+    const grantBefore = new Map(
+      [test.comment, commentPeer].map((link) => [
+        link.grantId,
+        test.storage.getShareGrant(link.grantId)!,
+      ]),
+    );
     const usageBefore = discussionUsage(test.dbPath);
     const principalCountBefore = count(test.dbPath, "sync_relay_link_principals");
-    const capabilityBefore = test.comment.capabilityToken;
+    const capabilityBefore = new Map(
+      [test.comment, commentPeer].map((link) => [link.grantId, link.capabilityToken]),
+    );
 
     const paused = await test.handler(
       moderationRequest(OWNER, { action: "pause" }),
@@ -1824,30 +1896,43 @@ describe("share discussion HTTP boundary", () => {
     expect(paused.status).toBe(200);
     expect(await body(paused)).toEqual({ ok: true, linkCommentsPaused: true });
     expect(discussionUsage(test.dbPath)).toBe(usageBefore);
-    expect(test.storage.getShareGrant(test.comment.grantId)).toEqual(grantBefore);
+    for (const link of [test.comment, commentPeer]) {
+      expect(test.storage.getShareGrant(link.grantId)).toEqual(
+        grantBefore.get(link.grantId),
+      );
+      expect(link.capabilityToken).toBe(capabilityBefore.get(link.grantId));
+    }
     expect(count(test.dbPath, "sync_relay_link_principals")).toBe(
       principalCountBefore,
     );
-    expect(test.comment.capabilityToken).toBe(capabilityBefore);
 
-    for (const link of [test.view, test.comment]) {
+    for (const link of [test.comment, commentPeer]) {
       for (const path of ["/sync/link/discussion", "/sync/link/share"]) {
         const read = await test.handler(linkRequest(link, path));
         expect(read.status, `${link.access}:${path}`).toBe(200);
         await read.arrayBuffer();
       }
     }
-    expect(
-      await discussionStateRefusal(
-        await test.handler(
-          trustedAppend(test.comment, {
-            body: "link paused",
-            idempotencyKey: "pause-link",
-          }),
+    for (const [link, profileSecret, suffix] of [
+      [test.comment, PROFILE_A, "first"],
+      [commentPeer, PROFILE_B, "peer"],
+    ] as const) {
+      expect(
+        await discussionStateRefusal(
+          await test.handler(
+            trustedAppend(
+              link,
+              {
+                body: `${suffix} link paused`,
+                idempotencyKey: `pause-link-${suffix}`,
+              },
+              profileSecret,
+            ),
+          ),
+          "paused",
         ),
-        "paused",
-      ),
-    ).toContain("link_discussion_paused");
+      ).toContain("link_discussion_paused");
+    }
     for (const [actor, key] of [
       [OWNER, "pause-owner"],
       [COMMENTER, "pause-named"],
@@ -1871,23 +1956,39 @@ describe("share discussion HTTP boundary", () => {
     expect(resumed.status).toBe(200);
     expect(await body(resumed)).toEqual({ ok: true, linkCommentsPaused: false });
     expect(discussionUsage(test.dbPath)).toBe(beforeResumeUsage);
-    expect(test.storage.getShareGrant(test.comment.grantId)).toEqual(grantBefore);
+    for (const link of [test.comment, commentPeer]) {
+      expect(test.storage.getShareGrant(link.grantId)).toEqual(
+        grantBefore.get(link.grantId),
+      );
+      expect(link.capabilityToken).toBe(capabilityBefore.get(link.grantId));
+    }
     expect(count(test.dbPath, "sync_relay_link_principals")).toBe(
       principalCountBefore,
     );
-    expect(test.comment.capabilityToken).toBe(capabilityBefore);
-    const restored = await test.handler(
-      trustedAppend(test.comment, {
-        body: "link resumed",
-        idempotencyKey: "resume-link",
-      }),
-    );
-    expect(restored.status).toBe(200);
-    await restored.arrayBuffer();
-    expect(
-      test.storage.listShareDiscussionMessages({ shareId: SHARE, limit: 100 })
-        .messages.at(-1)!.linkPrincipalId,
-    ).toBe(principalId);
+    const restoredPrincipals: Array<string | null> = [];
+    for (const [link, profileSecret, suffix] of [
+      [test.comment, PROFILE_A, "first"],
+      [commentPeer, PROFILE_B, "peer"],
+    ] as const) {
+      const restored = await test.handler(
+        trustedAppend(
+          link,
+          {
+            body: `${suffix} link resumed`,
+            idempotencyKey: `resume-link-${suffix}`,
+          },
+          profileSecret,
+        ),
+      );
+      expect(restored.status, suffix).toBe(200);
+      await restored.arrayBuffer();
+      restoredPrincipals.push(
+        test.storage.listShareDiscussionMessages({ shareId: SHARE, limit: 100 })
+          .messages.find((message) => message.body === `${suffix} link resumed`)!
+          .linkPrincipalId,
+      );
+    }
+    expect(restoredPrincipals).toEqual([principalId, peerPrincipalId]);
   });
 
   it("serializes revoke, block, and pause against link append in both commit orders", async () => {
