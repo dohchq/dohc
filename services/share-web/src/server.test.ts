@@ -1658,6 +1658,119 @@ describe("share-web protected discussion proxy", () => {
     }
   });
 
+  it("proxies closed discussion activity with protected authority and client abort", async () => {
+    const relayKey = "activity-relay-key-sentinel";
+    const grant = "grant-activity-sentinel";
+    const activityRequests: Request[] = [];
+    let activityCalls = 0;
+    const publicActivity = {
+      ok: true,
+      latestRevision: 8,
+      cursorRevision: 8,
+      hasMore: false,
+      messages: [],
+      composerState: "available",
+    };
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      relayExchangeKey: relayKey,
+      publicHosts: new Set([HOST]),
+      nowMs: () => 1_000,
+      newSessionToken: () => Buffer.alloc(32, 57).toString("base64url"),
+      newProfileSecret: () => PROFILE_ALPHA,
+      fetchRelay: async (relayRequest) => {
+        const url = new URL(relayRequest.url);
+        if (url.pathname === "/sync/link-exchange") {
+          return Response.json({
+            ok: true,
+            grantId: grant,
+            capabilityToken: CAP_ALPHA_1,
+            capabilityExpiresAtMs: 901_000,
+          });
+        }
+        activityRequests.push(relayRequest);
+        activityCalls += 1;
+        if (activityCalls === 1) return Response.json(publicActivity);
+        if (activityCalls === 2) {
+          return await new Promise<Response>((_resolve, reject) => {
+            relayRequest.signal.addEventListener(
+              "abort",
+              () => reject(relayRequest.signal.reason),
+              { once: true },
+            );
+          });
+        }
+        return Response.json(
+          { ok: false, code: "internal_refusal", grantId: grant },
+          { status: 403 },
+        );
+      },
+    });
+    const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
+    const { session } = (await exchanged.clone().json()) as { session: string };
+    const cookies = cookieHeader(cookiePair(exchanged), profileCookiePair(exchanged));
+    const headers = sessionHeaders(session, cookies);
+    const path = "/api/view/discussion/activity?since=7&hold=30000&limit=100";
+
+    const accepted = await handler(request(path, { headers }));
+    expect({ status: accepted.status, body: await accepted.clone().json() }).toEqual({
+      status: 200,
+      body: publicActivity,
+    });
+    expect(activityRequests[0]!.url).toBe(
+      "http://relay.test/sync/link/discussion/activity?since=7&hold=30000&limit=100",
+    );
+    expect(activityRequests[0]!.method).toBe("GET");
+    expect(activityRequests[0]!.headers.get("authorization")).toBe(
+      `LinkCapability ${CAP_ALPHA_1}`,
+    );
+    expect(activityRequests[0]!.headers.get("x-dohc-link-profile-secret")).toBe(
+      PROFILE_ALPHA,
+    );
+    expect(activityRequests[0]!.headers.get("x-dohc-relay-exchange-key")).toBeNull();
+    expect(activityRequests[0]!.headers.get("cookie")).toBeNull();
+    expect(activityRequests[0]!.headers.get("x-dohc-link-session")).toBeNull();
+
+    const invalid = await handler(
+      request(`${path}&cursor=forged`, { headers }),
+    );
+    expect({ status: invalid.status, body: await invalid.clone().text() }).toEqual({
+      status: 404,
+      body: shareWebRefusalBody,
+    });
+    expect(activityCalls).toBe(1);
+
+    const controller = new AbortController();
+    const aborted = handler(request(path, { headers, signal: controller.signal }));
+    await vi.waitFor(() => expect(activityCalls).toBe(2));
+    controller.abort();
+    const abortedResponse = await aborted;
+    expect(activityRequests[1]!.signal.aborted).toBe(true);
+    expect({
+      status: abortedResponse.status,
+      body: await abortedResponse.clone().text(),
+    }).toEqual({
+      status: 503,
+      body: shareWebRefusalBody,
+    });
+
+    const refused = await handler(request(path, { headers }));
+    expect({ status: refused.status, body: await refused.clone().text() }).toEqual({
+      status: 404,
+      body: shareWebRefusalBody,
+    });
+    const browserText = [
+      await exchanged.clone().text(),
+      await accepted.clone().text(),
+      await invalid.clone().text(),
+      await abortedResponse.clone().text(),
+      await refused.clone().text(),
+    ].join("\n");
+    for (const internal of [relayKey, grant, CAP_ALPHA_1, PROFILE_ALPHA, SECRET_ALPHA]) {
+      expect(browserText).not.toContain(internal);
+    }
+  });
+
   it("refuses invalid append transports and session bindings before the relay", async () => {
     let now = 1_000;
     let discussionCalls = 0;

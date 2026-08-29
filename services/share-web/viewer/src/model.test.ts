@@ -5,6 +5,7 @@ import {
   foldLogOps,
   mergeDiscussionMessages,
   parseDiscussionAppendResult,
+  parseDiscussionActivity,
   parseDiscussionPage,
   type RelayOp,
   type SharedFile,
@@ -265,11 +266,13 @@ describe("public discussion projection", () => {
   it("parses only the exact public page and append unions", () => {
     expect(parseDiscussionPage({
       ok: true,
+      activityRevision: 7,
       messages: [named, link, tombstone],
       nextCursor: "cursor_1",
     })).toEqual({
       messages: [named, link, tombstone],
       nextCursor: "cursor_1",
+      activityRevision: 7,
     });
     expect(parseDiscussionAppendResult({ ok: true, message: link })).toEqual(link);
   });
@@ -281,33 +284,42 @@ describe("public discussion projection", () => {
   });
 
   it.each([
-    ["an internal page field", { ok: true, messages: [], nextCursor: null, shareId: "secret" }],
+    ["an internal page field", {
+      ok: true, activityRevision: 7, messages: [], nextCursor: null, shareId: "secret",
+    }],
     ["an internal message field", {
       ok: true,
+      activityRevision: 7,
       messages: [{ ...named, linkPrincipalId: "secret" }],
       nextCursor: null,
     }],
     ["a tombstone body", {
       ok: true,
+      activityRevision: 7,
       messages: [{ ...tombstone, body: "deleted body" }],
       nextCursor: null,
     }],
     ["a tombstone author", {
       ok: true,
+      activityRevision: 7,
       messages: [{ ...tombstone, author: named.author }],
       nextCursor: null,
     }],
     ["a live row without an exact author", {
       ok: true,
+      activityRevision: 7,
       messages: [{ ...link, author: { ...link.author, unverified: false } }],
       nextCursor: null,
     }],
     ["an out-of-order page", {
       ok: true,
+      activityRevision: 7,
       messages: [link, named],
       nextCursor: null,
     }],
-    ["a malformed cursor", { ok: true, messages: [], nextCursor: "cursor/value" }],
+    ["a malformed cursor", {
+      ok: true, activityRevision: 7, messages: [], nextCursor: "cursor/value",
+    }],
   ])("refuses %s", (_case, value) => {
     expect(parseDiscussionPage(value)).toBeNull();
   });
@@ -328,6 +340,20 @@ describe("public discussion projection", () => {
       deletedLink,
       tombstone,
     ]);
+  });
+
+  it("keeps an exact tombstone when its prior live representation arrives later", () => {
+    const deletedLink = {
+      messageId: link.messageId,
+      createdAtMs: link.createdAtMs,
+      deleted: true as const,
+    };
+
+    expect(mergeDiscussionMessages([deletedLink], [link])).toEqual([deletedLink]);
+    expect(mergeDiscussionMessages([deletedLink], [{
+      ...link,
+      createdAtMs: link.createdAtMs + 1,
+    }])).toBeNull();
   });
 
   it("refuses unseen rows that do not advance the accumulated keyset tail", () => {
@@ -364,9 +390,10 @@ describe("public discussion projection", () => {
 
     expect(parseDiscussionPage({
       ok: true,
+      activityRevision: 7,
       messages: [first, second],
       nextCursor: null,
-    })).toEqual({ messages: [first, second], nextCursor: null });
+    })).toEqual({ messages: [first, second], nextCursor: null, activityRevision: 7 });
     expect(mergeDiscussionMessages([first], [second])).toEqual([first, second]);
   });
 
@@ -374,5 +401,68 @@ describe("public discussion projection", () => {
     expect(mergeDiscussionMessages([link], [{ ...link, body: "forged" }])).toBeNull();
     expect(mergeDiscussionMessages([tombstone], [{ ...tombstone, createdAtMs: 4_000 }]))
       .toBeNull();
+  });
+
+  it("parses only an exact, ordered public discussion activity delta", () => {
+    expect(parseDiscussionActivity({
+      ok: true,
+      latestRevision: 9,
+      cursorRevision: 8,
+      hasMore: true,
+      messages: [named, link],
+      composerState: "blocked",
+    })).toEqual({
+      latestRevision: 9,
+      cursorRevision: 8,
+      hasMore: true,
+      messages: [named, link],
+      composerState: "blocked",
+    });
+
+    for (const value of [
+      {
+        ok: true,
+        latestRevision: 9,
+        cursorRevision: 8,
+        hasMore: true,
+        messages: [named, link],
+        composerState: "available",
+        grantId: "internal",
+      },
+      {
+        ok: true,
+        latestRevision: 8,
+        cursorRevision: 9,
+        hasMore: true,
+        messages: [],
+        composerState: "available",
+      },
+      {
+        ok: true,
+        latestRevision: 9,
+        cursorRevision: 8,
+        hasMore: "yes",
+        messages: [],
+        composerState: "available",
+      },
+      {
+        ok: true,
+        latestRevision: 9,
+        cursorRevision: 9,
+        hasMore: false,
+        messages: [link, named],
+        composerState: "available",
+      },
+      {
+        ok: true,
+        latestRevision: 9,
+        cursorRevision: 9,
+        hasMore: false,
+        messages: [],
+        composerState: "disabled",
+      },
+    ]) {
+      expect(parseDiscussionActivity(value)).toBeNull();
+    }
   });
 });

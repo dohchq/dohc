@@ -56,6 +56,17 @@ export type PublicDiscussionMessage =
 export interface PublicDiscussionPage {
   messages: PublicDiscussionMessage[];
   nextCursor: string | null;
+  activityRevision: number;
+}
+
+export type DiscussionComposerState = "available" | "blocked" | "paused";
+
+export interface PublicDiscussionActivity {
+  latestRevision: number;
+  cursorRevision: number;
+  hasMore: boolean;
+  messages: PublicDiscussionMessage[];
+  composerState: DiscussionComposerState;
 }
 
 export type FileAccumulator = Map<string, SharedFile>;
@@ -150,9 +161,10 @@ export function parseDiscussionPage(value: unknown): PublicDiscussionPage | null
   const page = record(value);
   if (
     !page ||
-    !hasExactKeys(page, ["ok", "messages", "nextCursor"]) ||
+    !hasExactKeys(page, ["ok", "messages", "nextCursor", "activityRevision"]) ||
     page.ok !== true ||
     !Array.isArray(page.messages) ||
+    !isRevision(page.activityRevision) ||
     (page.nextCursor !== null &&
       (typeof page.nextCursor !== "string" ||
         !/^[A-Za-z0-9_-]{1,1024}$/u.test(page.nextCursor)))
@@ -167,7 +179,59 @@ export function parseDiscussionPage(value: unknown): PublicDiscussionPage | null
     }
     messages.push(message);
   }
-  return { messages, nextCursor: page.nextCursor as string | null };
+  return {
+    messages,
+    nextCursor: page.nextCursor as string | null,
+    activityRevision: page.activityRevision,
+  };
+}
+
+function isRevision(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+export function parseDiscussionActivity(value: unknown): PublicDiscussionActivity | null {
+  const activity = record(value);
+  if (
+    !activity ||
+    !hasExactKeys(activity, [
+      "ok",
+      "latestRevision",
+      "cursorRevision",
+      "hasMore",
+      "messages",
+      "composerState",
+    ]) ||
+    activity.ok !== true ||
+    !isRevision(activity.latestRevision) ||
+    !isRevision(activity.cursorRevision) ||
+    activity.cursorRevision > activity.latestRevision ||
+    typeof activity.hasMore !== "boolean" ||
+    (activity.hasMore
+      ? activity.cursorRevision >= activity.latestRevision
+      : activity.cursorRevision !== activity.latestRevision) ||
+    !Array.isArray(activity.messages) ||
+    (activity.composerState !== "available" &&
+      activity.composerState !== "blocked" &&
+      activity.composerState !== "paused")
+  ) {
+    return null;
+  }
+  const messages: PublicDiscussionMessage[] = [];
+  for (const rawMessage of activity.messages) {
+    const message = discussionMessage(rawMessage);
+    if (!message || (messages.length > 0 && discussionOrder(messages.at(-1)!, message) >= 0)) {
+      return null;
+    }
+    messages.push(message);
+  }
+  return {
+    latestRevision: activity.latestRevision,
+    cursorRevision: activity.cursorRevision,
+    hasMore: activity.hasMore,
+    messages,
+    composerState: activity.composerState,
+  };
 }
 
 export function parseDiscussionAppendResult(value: unknown): PublicDiscussionMessage | null {
@@ -231,6 +295,13 @@ export function mergeDiscussionMessages(
     }
     const existing = merged[existingIndex]!;
     if (sameDiscussionMessage(existing, message)) continue;
+    if (
+      existing.deleted &&
+      !message.deleted &&
+      existing.createdAtMs === message.createdAtMs
+    ) {
+      continue;
+    }
     if (
       !existing.deleted &&
       message.deleted &&

@@ -33,6 +33,9 @@ const SESSION_DISCRIMINATOR = /^[A-Za-z0-9_-]{12}$/u;
 const PROFILE_SECRET = /^[A-Za-z0-9_-]{43}$/u;
 const DISCUSSION_CURSOR = /^[A-Za-z0-9_-]{1,1024}$/u;
 const DISCUSSION_LIMIT = /^[1-9][0-9]{0,2}$/u;
+const DISCUSSION_REVISION = /^(?:0|[1-9][0-9]{0,15})$/u;
+const DISCUSSION_HOLD = /^(?:0|[1-9][0-9]{0,4})$/u;
+const MAX_DISCUSSION_ACTIVITY_HOLD_MS = 30_000;
 const SHA256_HEX = /^[a-f0-9]{64}$/u;
 
 type RelayFetch = (request: Request) => Promise<Response>;
@@ -375,6 +378,35 @@ function discussionRelayPath(request: Request): string | null {
   if (limit !== null) relaySearch.set("limit", limit);
   const serialized = relaySearch.toString();
   return `/sync/link/discussion${serialized ? `?${serialized}` : ""}`;
+}
+
+function discussionActivityRelayPath(request: Request): string | null {
+  const url = new URL(request.url);
+  if (
+    [...url.searchParams.keys()].some(
+      (key) => key !== "since" && key !== "hold" && key !== "limit",
+    ) ||
+    url.searchParams.getAll("since").length !== 1 ||
+    url.searchParams.getAll("hold").length !== 1 ||
+    url.searchParams.getAll("limit").length !== 1
+  ) {
+    return null;
+  }
+  const since = url.searchParams.get("since")!;
+  const hold = url.searchParams.get("hold")!;
+  const limit = url.searchParams.get("limit")!;
+  if (
+    !DISCUSSION_REVISION.test(since) ||
+    !Number.isSafeInteger(Number(since)) ||
+    !DISCUSSION_HOLD.test(hold) ||
+    Number(hold) > MAX_DISCUSSION_ACTIVITY_HOLD_MS ||
+    !DISCUSSION_LIMIT.test(limit) ||
+    Number(limit) > 100
+  ) {
+    return null;
+  }
+  const relaySearch = new URLSearchParams({ since, hold, limit });
+  return `/sync/link/discussion/activity?${relaySearch}`;
 }
 
 function hasOnlySessionQuery(request: Request, discriminator: string): boolean {
@@ -917,15 +949,32 @@ export function createShareWebHandler({
       }
     }
 
-    if (pathname === "/api/view/discussion") {
-      if (request.method !== "GET" && request.method !== "POST") return refused();
+    if (
+      pathname === "/api/view/discussion" ||
+      pathname === "/api/view/discussion/activity"
+    ) {
+      const isActivity = pathname === "/api/view/discussion/activity";
+      if (
+        (isActivity && request.method !== "GET") ||
+        (!isActivity && request.method !== "GET" && request.method !== "POST")
+      ) {
+        return refused();
+      }
       const authenticated = await readSession(request);
       if (!authenticated) return refused();
 
       let relayPath: string;
       let appendBody: string | null = null;
       let profileSecret: string | null = null;
-      if (request.method === "GET") {
+      if (isActivity) {
+        const parsedPath = discussionActivityRelayPath(request);
+        if (!parsedPath) return refused();
+        relayPath = parsedPath;
+        profileSecret = parseCookies(request.headers.get("cookie")).get(
+          profileCookieName(authenticated.discriminator),
+        ) ?? null;
+        if (!profileSecret || !PROFILE_SECRET.test(profileSecret)) return refused();
+      } else if (request.method === "GET") {
         const parsedPath = discussionRelayPath(request);
         if (!parsedPath) return refused();
         relayPath = parsedPath;
@@ -957,7 +1006,9 @@ export function createShareWebHandler({
             method: request.method,
             headers: {
               authorization: `LinkCapability ${capabilityToken}`,
-              ...(request.method === "POST"
+              ...(isActivity
+                ? { "x-dohc-link-profile-secret": profileSecret! }
+                : request.method === "POST"
                 ? {
                     "content-type": "application/json",
                     "x-dohc-link-profile-secret": profileSecret!,
@@ -988,7 +1039,7 @@ export function createShareWebHandler({
             },
           });
         }
-        if (relayResponse.status === 403) {
+        if (relayResponse.status === 403 && !isActivity) {
           const state = await discussionState(relayResponse);
           return state
             ? jsonResponse(

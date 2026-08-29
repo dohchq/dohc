@@ -67,7 +67,15 @@ function discussionPage(
   messages: readonly unknown[] = [],
   nextCursor: string | null = null,
 ): Response {
-  return jsonResponse({ ok: true, messages, nextCursor });
+  return jsonResponse({ ok: true, activityRevision: 7, messages, nextCursor });
+}
+
+function discussionPageAt(
+  activityRevision: number,
+  messages: readonly unknown[] = [],
+  nextCursor: string | null = null,
+): Response {
+  return jsonResponse({ ok: true, activityRevision, messages, nextCursor });
 }
 
 function requestPath(input: RequestInfo | URL): string {
@@ -357,6 +365,78 @@ describe("CommentsPanel", () => {
     expect(container.querySelectorAll(".comment-row")).toHaveLength(1);
   });
 
+  it("absorbs a late successful append after activity already tombstoned it", async () => {
+    const posted = {
+      ...LINK_MESSAGE,
+      messageId: "message-post-delete-race",
+      createdAtMs: 4_000,
+      body: "Deleted before acknowledgment",
+    };
+    const deleted = {
+      messageId: posted.messageId,
+      createdAtMs: posted.createdAtMs,
+      deleted: true as const,
+    };
+    const heldPost = heldJsonResponse(200);
+    const heldDeletion = heldJsonResponse(200);
+    let finalParkSignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/view/discussion" && init?.method === "POST") {
+        return heldPost.response;
+      }
+      if (path === "/api/view/discussion") return discussionPageAt(7);
+      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        return jsonResponse({
+          ok: true,
+          latestRevision: 7,
+          cursorRevision: 7,
+          hasMore: false,
+          messages: [],
+          composerState: "available",
+        });
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
+        return heldDeletion.response;
+      }
+      if (path === "/api/view/discussion/activity?since=8&hold=30000&limit=100") {
+        finalParkSignal = init?.signal ?? undefined;
+        return await new Promise<Response>(() => undefined);
+      }
+      throw new Error(`unexpected request: ${path}`);
+    }));
+
+    await render("comment");
+    await settle(heldDeletion.bodyStarted);
+    setControlValue(bodyInput(), posted.body);
+    submit();
+    await settle(heldPost.bodyStarted);
+
+    heldDeletion.release({
+      ok: true,
+      latestRevision: 8,
+      cursorRevision: 8,
+      hasMore: false,
+      messages: [deleted],
+      composerState: "available",
+    });
+    await settle(() =>
+      container.textContent?.includes("Comment deleted by the owner") === true &&
+      finalParkSignal !== undefined
+    );
+
+    heldPost.release({ ok: true, message: posted });
+    await settle(() =>
+      bodyInput().value === "" ||
+      container.textContent?.includes("The comment didn't post. Try again.") === true
+    );
+
+    expect(bodyInput().value).toBe("");
+    expect(container.textContent).not.toContain("Deleted before acknowledgment");
+    expect(container.textContent).not.toContain("The comment didn't post. Try again.");
+    expect(container.querySelectorAll(".comment-row.comment-deleted")).toHaveLength(1);
+  });
+
   it.each([
     ["blocked", "The owner turned off comments for this browser."],
     ["paused", "The owner paused comments. You can still read everything."],
@@ -392,6 +472,7 @@ describe("CommentsPanel", () => {
     expect(paths).toEqual([
       "/api/view/discussion",
       "/api/view/discussion?cursor=cursor_one",
+      "/api/view/discussion/activity?since=7&hold=0&limit=100",
     ]);
     expect([...container.querySelectorAll(".comment-row")].map((row) => row.textContent))
       .toEqual([
@@ -399,6 +480,278 @@ describe("CommentsPanel", () => {
         "Link PersonUnverifiedLink body",
         "Comment deleted by the owner",
       ]);
+  });
+
+  it("converges ordered activity from the first-page revision without duplicates or hot loops", async () => {
+    const external = {
+      ...LINK_MESSAGE,
+      messageId: "message-external",
+      createdAtMs: 2_500,
+      body: "External body",
+    };
+    const deletedExternal = {
+      messageId: external.messageId,
+      createdAtMs: external.createdAtMs,
+      deleted: true as const,
+    };
+    const appendDelta = heldJsonResponse(200);
+    const deleteDelta = heldJsonResponse(200);
+    const pausedDelta = heldJsonResponse(200);
+    const availableDelta = heldJsonResponse(200);
+    const timeoutDelta = heldJsonResponse(200);
+    const paths: string[] = [];
+    let finalParkSignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      paths.push(path);
+      if (path === "/api/view/discussion") {
+        return discussionPageAt(7, [NAMED_MESSAGE], "page_two");
+      }
+      if (path === "/api/view/discussion?cursor=page_two") {
+        return discussionPageAt(8, [LINK_MESSAGE, external]);
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        return appendDelta.response;
+      }
+      if (path === "/api/view/discussion/activity?since=8&hold=30000&limit=100") {
+        return deleteDelta.response;
+      }
+      if (path === "/api/view/discussion/activity?since=9&hold=30000&limit=100") {
+        return pausedDelta.response;
+      }
+      if (path === "/api/view/discussion/activity?since=10&hold=0&limit=100") {
+        return availableDelta.response;
+      }
+      if (path === "/api/view/discussion/activity?since=11&hold=30000&limit=100") {
+        if (!timeoutDelta.bodyStarted()) return timeoutDelta.response;
+        finalParkSignal = init?.signal ?? undefined;
+        return await new Promise<Response>(() => undefined);
+      }
+      throw new Error(`unexpected request: ${path}`);
+    }));
+
+    await render("comment");
+    await settle(appendDelta.bodyStarted);
+    expect([...container.querySelectorAll(".comment-body")]
+      .filter((row) => row.textContent === "External body")).toHaveLength(1);
+    appendDelta.release({
+      ok: true,
+      latestRevision: 8,
+      cursorRevision: 8,
+      hasMore: false,
+      messages: [external],
+      composerState: "available",
+    });
+    await settle(deleteDelta.bodyStarted);
+    expect([...container.querySelectorAll(".comment-body")]
+      .filter((row) => row.textContent === "External body")).toHaveLength(1);
+    deleteDelta.release({
+      ok: true,
+      latestRevision: 9,
+      cursorRevision: 9,
+      hasMore: false,
+      messages: [deletedExternal],
+      composerState: "blocked",
+    });
+    await settle(() =>
+      deleteDelta.bodyStarted() &&
+      container.textContent?.includes("The owner turned off comments for this browser.") === true
+    );
+    await settle(pausedDelta.bodyStarted);
+    expect(bodyInput().disabled).toBe(true);
+    pausedDelta.release({
+      ok: true,
+      latestRevision: 11,
+      cursorRevision: 10,
+      hasMore: true,
+      messages: [],
+      composerState: "paused",
+    });
+    await settle(() =>
+      container.textContent?.includes("The owner paused comments. You can still read everything.") ===
+      true
+    );
+    await settle(availableDelta.bodyStarted);
+    expect(bodyInput().disabled).toBe(true);
+    availableDelta.release({
+      ok: true,
+      latestRevision: 11,
+      cursorRevision: 11,
+      hasMore: false,
+      messages: [],
+      composerState: "available",
+    });
+    await settle(() => bodyInput().disabled === false);
+    await settle(timeoutDelta.bodyStarted);
+    timeoutDelta.release({
+      ok: true,
+      latestRevision: 11,
+      cursorRevision: 11,
+      hasMore: false,
+      messages: [],
+      composerState: "available",
+    });
+    await settle(() => finalParkSignal !== undefined);
+
+    expect(paths.slice(0, 7)).toEqual([
+      "/api/view/discussion",
+      "/api/view/discussion?cursor=page_two",
+      "/api/view/discussion/activity?since=7&hold=0&limit=100",
+      "/api/view/discussion/activity?since=8&hold=30000&limit=100",
+      "/api/view/discussion/activity?since=9&hold=30000&limit=100",
+      "/api/view/discussion/activity?since=10&hold=0&limit=100",
+      "/api/view/discussion/activity?since=11&hold=30000&limit=100",
+    ]);
+    expect(paths.at(-1)).toBe(
+      "/api/view/discussion/activity?since=11&hold=30000&limit=100",
+    );
+    expect([...container.querySelectorAll(".comment-row")].map((row) => row.textContent))
+      .toEqual([
+        "Named PersonNamed body",
+        "Link PersonUnverifiedLink body",
+        "Comment deleted by the owner",
+      ]);
+    expect(container.textContent).not.toContain("External body");
+    expect(bodyInput().disabled).toBe(false);
+  });
+
+  it("synchronizes the current composer state before the first activity park", async () => {
+    const paths: string[] = [];
+    let parkedSignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      paths.push(path);
+      if (path === "/api/view/discussion") {
+        return discussionPageAt(7, [NAMED_MESSAGE]);
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        return jsonResponse({
+          ok: true,
+          latestRevision: 7,
+          cursorRevision: 7,
+          hasMore: false,
+          messages: [],
+          composerState: "blocked",
+        });
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
+        parkedSignal = init?.signal ?? undefined;
+        return await new Promise<Response>(() => undefined);
+      }
+      throw new Error(`unexpected request: ${path}`);
+    }));
+
+    await render("comment");
+    await settle(() => parkedSignal !== undefined);
+
+    expect(paths.slice(0, 3)).toEqual([
+      "/api/view/discussion",
+      "/api/view/discussion/activity?since=7&hold=0&limit=100",
+      "/api/view/discussion/activity?since=7&hold=30000&limit=100",
+    ]);
+    expect(container.textContent).toContain(
+      "The owner turned off comments for this browser.",
+    );
+    expect(bodyInput().disabled).toBe(true);
+  });
+
+  it("backs off transport and relay failures without leaving the current session", async () => {
+    vi.useFakeTimers();
+    let activityAttempts = 0;
+    let recoveredSignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/view/discussion") return discussionPageAt(7);
+      if (path !== "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        throw new Error(`unexpected request: ${path}`);
+      }
+      activityAttempts += 1;
+      if (activityAttempts === 1) return new Response(null, { status: 429 });
+      if (activityAttempts === 2) return new Response(null, { status: 503 });
+      if (activityAttempts === 3) throw new Error("transport failed");
+      recoveredSignal = init?.signal ?? undefined;
+      return await new Promise<Response>(() => undefined);
+    }));
+
+    await render("view");
+    await settle(() => activityAttempts === 1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(999);
+    });
+    expect(activityAttempts).toBe(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(activityAttempts).toBe(2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_999);
+    });
+    expect(activityAttempts).toBe(2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(activityAttempts).toBe(3);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_999);
+    });
+    expect(activityAttempts).toBe(3);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(activityAttempts).toBe(4);
+    expect(recoveredSignal?.aborted).toBe(false);
+  });
+
+  it("fences an activity body after session replacement and aborts every parked lifecycle", async () => {
+    const heldOldActivity = heldJsonResponse(200);
+    let oldActivitySignal: AbortSignal | undefined;
+    let replacementParkSignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      const session = requestSession(init);
+      if (path === "/api/view/discussion") {
+        return session === FIRST_SESSION
+          ? discussionPageAt(7, [NAMED_MESSAGE])
+          : discussionPageAt(20, [{ ...NAMED_MESSAGE, body: "Replacement timeline" }]);
+      }
+      if (session === FIRST_SESSION) {
+        oldActivitySignal = init?.signal ?? undefined;
+        return heldOldActivity.response;
+      }
+      replacementParkSignal = init?.signal ?? undefined;
+      return await new Promise<Response>(() => undefined);
+    }));
+
+    await render("comment");
+    await settle(heldOldActivity.bodyStarted);
+    await act(async () => {
+      root.render(<CommentsPanel access="comment" session={SECOND_SESSION} />);
+    });
+    await settle(() => replacementParkSignal !== undefined);
+    expect(oldActivitySignal?.aborted).toBe(true);
+
+    heldOldActivity.release({
+      ok: true,
+      latestRevision: 8,
+      cursorRevision: 8,
+      hasMore: false,
+      messages: [{ ...LINK_MESSAGE, body: "Old activity body" }],
+      composerState: "blocked",
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("Replacement timeline");
+    expect(container.textContent).not.toContain("Old activity body");
+    expect(container.textContent).not.toContain(
+      "The owner turned off comments for this browser.",
+    );
+    expect(bodyInput().disabled).toBe(false);
+
+    act(() => root.unmount());
+    expect(replacementParkSignal?.aborted).toBe(true);
+    root = createRoot(container);
   });
 
   it("does not apply a held page from a replaced session even when the mock ignores abort", async () => {

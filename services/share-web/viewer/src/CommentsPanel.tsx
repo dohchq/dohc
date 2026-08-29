@@ -7,6 +7,7 @@ import {
 import {
   mergeDiscussionMessages,
   parseDiscussionAppendResult,
+  parseDiscussionActivity,
   parseDiscussionPage,
   parseDiscussionWriteState,
   type PublicDiscussionMessage,
@@ -20,6 +21,8 @@ import {
 
 const SESSION_HEADER = "x-dohc-link-session";
 const MAX_DISCUSSION_PAGES = 100;
+const DISCUSSION_ACTIVITY_HOLD_MS = 30_000;
+const DISCUSSION_ACTIVITY_LIMIT = 100;
 const SUBMIT_STATUS_ID = "comment-submit-status";
 const NAME_HELP_ID = "comment-name-help";
 
@@ -94,8 +97,10 @@ function discussionRequest(
 async function loadDiscussion(
   session: string,
   signal: AbortSignal,
-): Promise<PublicDiscussionMessage[]> {
+  isCurrent: () => boolean,
+): Promise<{ messages: PublicDiscussionMessage[]; activityRevision: number }> {
   let messages: PublicDiscussionMessage[] = [];
+  let activityRevision: number | null = null;
   let cursor: string | null = null;
   const seenCursors = new Set<string>();
   for (let pageNumber = 0; pageNumber < MAX_DISCUSSION_PAGES; pageNumber += 1) {
@@ -108,18 +113,93 @@ async function loadDiscussion(
       false,
       signal,
     );
+    if (!isCurrent()) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error("cancelled");
+    }
     if (!response.ok) throw new Error("refused");
-    const page = parseDiscussionPage(await response.json());
+    const body: unknown = await response.json();
+    if (!isCurrent()) throw new Error("cancelled");
+    const page = parseDiscussionPage(body);
     if (!page) throw new Error("refused");
+    activityRevision ??= page.activityRevision;
     const merged = mergeDiscussionMessages(messages, page.messages);
     if (!merged) throw new Error("refused");
     messages = merged;
-    if (page.nextCursor === null) return messages;
+    if (page.nextCursor === null) {
+      return { messages, activityRevision };
+    }
     if (seenCursors.has(page.nextCursor)) throw new Error("refused");
     seenCursors.add(page.nextCursor);
     cursor = page.nextCursor;
   }
   throw new Error("refused");
+}
+
+async function followDiscussionActivity(
+  session: string,
+  baselineRevision: number,
+  signal: AbortSignal,
+  isCurrent: () => boolean,
+  apply: (activity: NonNullable<ReturnType<typeof parseDiscussionActivity>>) => boolean,
+): Promise<void> {
+  let since = baselineRevision;
+  let holdMs = 0;
+  let retryDelayMs = RETRY_INITIAL_MS;
+  while (isCurrent() && !signal.aborted) {
+    const search = new URLSearchParams({
+      since: String(since),
+      hold: String(holdMs),
+      limit: String(DISCUSSION_ACTIVITY_LIMIT),
+    });
+    let response: Response;
+    try {
+      response = await discussionRequest(
+        session,
+        `/api/view/discussion/activity?${search}`,
+        {},
+        signal,
+      );
+    } catch {
+      if (!isCurrent() || signal.aborted) return;
+      await waitForRetry(retryDelayMs, signal).catch(() => undefined);
+      retryDelayMs = Math.min(retryDelayMs * 2, RETRY_MAX_MS);
+      continue;
+    }
+    if (!isCurrent()) {
+      await response.body?.cancel().catch(() => undefined);
+      return;
+    }
+    if (response.status === 429 || response.status >= 500) {
+      await response.body?.cancel().catch(() => undefined);
+      await waitForRetry(retryDelayMs, signal).catch(() => undefined);
+      retryDelayMs = Math.min(retryDelayMs * 2, RETRY_MAX_MS);
+      continue;
+    }
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      return;
+    }
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch {
+      return;
+    }
+    if (!isCurrent()) return;
+    const activity = parseDiscussionActivity(body);
+    if (
+      !activity ||
+      activity.cursorRevision < since ||
+      (activity.hasMore && activity.cursorRevision === since) ||
+      !apply(activity)
+    ) {
+      return;
+    }
+    since = activity.cursorRevision;
+    holdMs = activity.hasMore ? 0 : DISCUSSION_ACTIVITY_HOLD_MS;
+    retryDelayMs = RETRY_INITIAL_MS;
+  }
 }
 
 function newIdempotencyKey(): string {
@@ -196,16 +276,31 @@ export function CommentsPanel(props: { access: ShareAccess; session: string }) {
     setPending(false);
     setComposerState("available");
     setSubmitError(false);
-    void loadDiscussion(props.session, controller.signal)
+    const isCurrent = () =>
+      pageTokenRef.current === token && sessionRef.current === props.session;
+    void loadDiscussion(props.session, controller.signal, isCurrent)
       .then((loaded) => {
-        if (
-          pageTokenRef.current !== token ||
-          sessionRef.current !== props.session
-        ) {
-          return;
-        }
-        messagesRef.current = loaded;
-        setMessages(loaded);
+        if (!isCurrent()) return;
+        messagesRef.current = loaded.messages;
+        setMessages(loaded.messages);
+        void followDiscussionActivity(
+          props.session,
+          loaded.activityRevision,
+          controller.signal,
+          isCurrent,
+          (activity) => {
+            if (!messagesRef.current) return false;
+            const merged = mergeDiscussionMessages(
+              messagesRef.current,
+              activity.messages,
+            );
+            if (!merged) return false;
+            messagesRef.current = merged;
+            setMessages(merged);
+            setComposerState(activity.composerState);
+            return true;
+          },
+        );
       })
       .catch(() => undefined);
     return () => {

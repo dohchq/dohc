@@ -3338,6 +3338,7 @@ describe("App", () => {
       if (path === "/api/view/discussion") {
         return jsonResponse({
           ok: true,
+          activityRevision: 7,
           messages: [{
             messageId: "comment-app",
             createdAtMs: 1,
@@ -3393,6 +3394,7 @@ describe("App", () => {
       if (path === "/api/view/discussion") {
         return jsonResponse({
           ok: true,
+          activityRevision: 7,
           messages: [{
             messageId: "readable-comment",
             createdAtMs: 1,
