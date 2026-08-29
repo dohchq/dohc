@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 import { type CDPSession, type Page } from "@playwright/test";
 import {
   expect,
@@ -107,6 +108,18 @@ function expectNoCorsPermission(response: ObservedNetworkResponse): void {
   expect(response.responseHeaders["access-control-allow-credentials"]).toBeUndefined();
 }
 
+function handoffCodeCount(relayDbPath: string): number {
+  const database = new DatabaseSync(relayDbPath, { readOnly: true });
+  try {
+    const row = database
+      .prepare("SELECT COUNT(*) AS count FROM sync_relay_link_handoff_codes")
+      .get() as { count: number };
+    return row.count;
+  } finally {
+    database.close();
+  }
+}
+
 test("separates cross-site Strict-cookie withholding from same-site CORS protection", async ({
   browser,
   probe,
@@ -165,6 +178,59 @@ test("separates cross-site Strict-cookie withholding from same-site CORS protect
   } finally {
     await cdp?.send("Fetch.disable").catch(() => {});
     await cdp?.detach().catch(() => {});
+    await context.close();
+  }
+});
+
+test("blocks a cross-origin handoff mint without disturbing the viewer", async ({
+  browser,
+  probe,
+  stack,
+}) => {
+  const seeded = await seedShare({
+    relayUrl: stack.relayUrl,
+    paths: ["docs"],
+    files: [{ path: "docs/handoff-target.md", content: "# Handoff target\n" }],
+  });
+  const context = await browser.newContext();
+  try {
+    const viewer = await context.newPage();
+    await viewer.goto(`${stack.shareWebUrl}/s/#${seeded.secret}`);
+    const fileButton = viewer
+      .getByRole("navigation", { name: "Shared files" })
+      .getByRole("button", { name: "handoff-target.md", exact: true });
+    await expect(fileButton).toBeVisible();
+    const session = new URL(viewer.url()).pathname.slice("/s/".length);
+    expect(session).toMatch(/^[A-Za-z0-9_-]{12}$/u);
+    expect(handoffCodeCount(stack.relayDbPath)).toBe(0);
+
+    const hostile = await context.newPage();
+    await hostile.goto(probe.sameHostnameUrl);
+    const attempt = await hostile.evaluate(
+      async ({ handoffUrl, session }) => {
+        try {
+          const response = await fetch(handoffUrl, {
+            method: "POST",
+            credentials: "include",
+            headers: { "x-dohc-link-session": session },
+          });
+          return { rejected: false as const, status: response.status };
+        } catch (error) {
+          return {
+            errorName: error instanceof Error ? error.name : typeof error,
+            rejected: true as const,
+          };
+        }
+      },
+      { handoffUrl: `${stack.shareWebUrl}/api/handoff`, session },
+    );
+
+    expect(handoffCodeCount(stack.relayDbPath)).toBe(0);
+    expect(attempt).toMatchObject({ errorName: "TypeError", rejected: true });
+    await expect(fileButton).toBeVisible();
+    await fileButton.click();
+    await expect(viewer.getByRole("heading", { name: "Handoff target" })).toBeVisible();
+  } finally {
     await context.close();
   }
 });

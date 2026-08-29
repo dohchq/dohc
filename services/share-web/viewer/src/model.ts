@@ -52,6 +52,17 @@ function storedFile(value: unknown): SharedFile | null {
   };
 }
 
+export function accumulatorFromCurrentFiles(value: unknown): FileAccumulator | null {
+  if (!Array.isArray(value)) return null;
+  const files: FileAccumulator = new Map();
+  for (const rawFile of value) {
+    const file = storedFile(rawFile);
+    if (!file || files.has(file.path)) return null;
+    files.set(file.path, file);
+  }
+  return files;
+}
+
 function path(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
@@ -72,7 +83,7 @@ export function foldLogOps(
     if (op.opKind === "version.create" && Array.isArray(payload.forkSnapshots)) {
       for (const snapshot of payload.forkSnapshots) {
         const file = storedFile(snapshot);
-        if (file) files.set(file.path, file);
+        if (file && !files.has(file.path)) files.set(file.path, file);
       }
       continue;
     }
@@ -140,6 +151,10 @@ export function filesFromLog(ops: readonly RelayOp[]): SharedFile[] {
 
 export function isMarkdown(path: string): boolean {
   return /\.(?:md|markdown)$/iu.test(path);
+}
+
+export function isExcalidraw(path: string): boolean {
+  return /\.excalidraw$/iu.test(path);
 }
 
 export function isRasterImage(path: string): boolean {

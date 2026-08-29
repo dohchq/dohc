@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  accumulatorFromCurrentFiles,
   filesFromAccumulator,
   foldLogOps,
   type FileAccumulator,
@@ -11,7 +13,11 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   hashLinkBearer,
+  LinkEgressRateLimiter,
+  LinkExchangeRateLimiter,
   LinkReadRateLimiter,
+  LINK_GRANT_EGRESS_BUCKET_CAPACITY_BYTES,
+  LINK_GRANT_EGRESS_REFILL_BYTES_PER_SECOND,
   LINK_GRANT_LOG_READ_BUCKET_CAPACITY,
   LINK_GRANT_READ_BUCKET_CAPACITY,
   LINK_LOG_READ_BUCKET_CAPACITY,
@@ -19,7 +25,11 @@ import {
   LINK_SESSION_TTL_MS,
 } from "./linkSecurity";
 import { linkSecret } from "./linkTestHelpers";
-import { filterOpForShare, type ShareSelector } from "./shareFilter";
+import {
+  filterOpForShare,
+  hasValidShareMomentShape,
+  type ShareSelector,
+} from "./shareFilter";
 import {
   createSyncRelayHandler,
   LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET,
@@ -28,10 +38,28 @@ import {
   type SyncRelayHandler,
 } from "./server";
 import {
+  currentFileBlobByteLengthQuery,
+  currentFileStateQuery,
   openSyncRelayStorage,
   SHARED_BLOB_CANDIDATE_LIMIT,
   type SyncRelayStorage,
 } from "./storage";
+
+interface InspectionDatabase {
+  close(): void;
+  exec(sql: string): void;
+  prepare(sql: string): {
+    all(...params: unknown[]): Array<Record<string, unknown>>;
+    iterate(...params: unknown[]): IterableIterator<Record<string, unknown>>;
+    run(...params: unknown[]): unknown;
+  };
+}
+
+const { DatabaseSync: InspectionDatabaseSync } = createRequire(import.meta.url)(
+  "node:sqlite",
+) as {
+  DatabaseSync: new (path: string, options?: { readOnly?: boolean }) => InspectionDatabase;
+};
 
 const OWNER = "owner";
 const RECIPIENT = "recipient";
@@ -51,6 +79,7 @@ type TestWorkspaceIdentity = {
 
 const roots: string[] = [];
 const storages: SyncRelayStorage[] = [];
+const storagePaths = new WeakMap<SyncRelayStorage, string>();
 
 afterEach(async () => {
   for (const storage of storages.splice(0)) storage.close();
@@ -60,40 +89,25 @@ afterEach(async () => {
 async function newStorage(): Promise<SyncRelayStorage> {
   const root = await mkdtemp(join(tmpdir(), "dohc-link-reads-"));
   roots.push(root);
-  const storage = openSyncRelayStorage(join(root, "relay.sqlite"));
+  const dbPath = join(root, "relay.sqlite");
+  const storage = openSyncRelayStorage(dbPath);
+  storagePaths.set(storage, dbPath);
   storages.push(storage);
   return storage;
-}
-
-function forceBlobFallback(
-  storage: SyncRelayStorage,
-  onFetchLogPage: () => void = () => {},
-): SyncRelayStorage {
-  return new Proxy(storage, {
-    get(target, property, receiver) {
-      if (property === "latestLogRowForObjectInVersion") return () => null;
-      if (property === "objectIdAtPathInVersion") return () => undefined;
-      if (property === "fetchLogPage") {
-        return (input: Parameters<SyncRelayStorage["fetchLogPage"]>[0]) => {
-          onFetchLogPage();
-          return target.fetchLogPage(input);
-        };
-      }
-      const value = Reflect.get(target, property, receiver) as unknown;
-      return typeof value === "function" ? value.bind(target) : value;
-    },
-  });
 }
 
 function handler(
   storage: SyncRelayStorage,
   options: {
     nowMs?: () => number;
+    linkExchangeRateLimiter?: LinkExchangeRateLimiter;
     linkReadRateLimiter?: LinkReadRateLimiter;
     linkGrantReadRateLimiter?: LinkReadRateLimiter;
     linkLogReadRateLimiter?: LinkReadRateLimiter;
     linkGrantLogReadRateLimiter?: LinkReadRateLimiter;
+    linkGrantEgressRateLimiter?: LinkEgressRateLimiter;
     linkCapabilityReadFallbackPageSize?: number;
+    linkCurrentFileLimit?: number;
     newLinkBearer?: () => string;
   } = {},
 ): SyncRelayHandler {
@@ -111,12 +125,15 @@ function handler(
     newId: () => `id-${id++}`,
     linkKey: LINK_KEY,
     shareWebOrigin: "https://share.example.test",
+    linkExchangeRateLimiter: options.linkExchangeRateLimiter,
     linkReadRateLimiter: options.linkReadRateLimiter,
     linkGrantReadRateLimiter: options.linkGrantReadRateLimiter,
     linkLogReadRateLimiter: options.linkLogReadRateLimiter,
     linkGrantLogReadRateLimiter: options.linkGrantLogReadRateLimiter,
+    linkGrantEgressRateLimiter: options.linkGrantEgressRateLimiter,
     linkCapabilityReadFallbackPageSize:
       options.linkCapabilityReadFallbackPageSize,
+    linkCurrentFileLimit: options.linkCurrentFileLimit,
     newLinkBearer: options.newLinkBearer,
   };
   return createSyncRelayHandler(handlerOptions);
@@ -145,6 +162,12 @@ function jsonBody(body: unknown): RequestInit {
 
 async function json(response: Response): Promise<Record<string, unknown>> {
   return (await response.json()) as Record<string, unknown>;
+}
+
+class KeyIgnoringLinkReadRateLimiter extends LinkReadRateLimiter {
+  override allow(_key: string, nowMs: number): boolean {
+    return super.allow("shared-test-bucket", nowMs);
+  }
 }
 
 describe("linkSecret", () => {
@@ -471,7 +494,1229 @@ async function readRemainingBytes(
   return bytes;
 }
 
+describe("LinkEgressRateLimiter", () => {
+  const emit = (
+    limiter: LinkEgressRateLimiter,
+    grantId: string,
+    byteLength: number,
+    nowMs: number,
+  ): boolean => {
+    const settle = limiter.reserve(grantId, byteLength, nowMs);
+    if (!settle) return false;
+    settle(byteLength, nowMs);
+    return true;
+  };
+
+  it("evicts a fully refilled bucket without resetting active grant debt", () => {
+    const limiter = new LinkEgressRateLimiter(10, 1, 2);
+
+    expect(emit(limiter, "target", 10, 0)).toBe(true);
+    expect(emit(limiter, "refilled", 1, 1_000)).toBe(true);
+    expect(emit(limiter, "newcomer", 1, 2_000)).toBe(true);
+
+    expect(emit(limiter, "target", 10, 2_000)).toBe(false);
+    expect(emit(limiter, "target", 2, 2_000)).toBe(true);
+  });
+
+  it("refuses a new grant while every tracked bucket carries debt", () => {
+    const limiter = new LinkEgressRateLimiter(10, 1, 2);
+
+    expect(emit(limiter, "target", 10, 0)).toBe(true);
+    expect(emit(limiter, "other", 10, 1_000)).toBe(true);
+
+    expect(emit(limiter, "newcomer", 1, 2_000)).toBe(false);
+    expect(emit(limiter, "target", 10, 2_000)).toBe(false);
+    expect(emit(limiter, "target", 2, 2_000)).toBe(true);
+    expect(emit(limiter, "other", 1, 2_000)).toBe(true);
+  });
+});
+
 describe("relay capability reads", () => {
+  it("projects only the selected current files from a fresh view capability", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h);
+
+    const response = await h(
+      linkRequest(seeded.capability, "/sync/link/current"),
+    );
+
+    expect(response.status).toBe(200);
+    const projection = await json(response);
+    expect(projection).toMatchObject({
+      ok: true,
+      access: "view",
+      effectiveSelector: {
+        paths: ["docs"],
+        versionId: null,
+        access: "view",
+      },
+      files: [{
+        path: "docs/shared.md",
+        blobSha256: seeded.sharedSha,
+        contentKind: "text",
+      }],
+      nextCursor: 3,
+      epochLogFloor: 0,
+      lastSettledAtMs: 1_100,
+      lastSettledKnown: true,
+    });
+    expect(Object.keys(projection).sort()).toEqual([
+      "access",
+      "effectiveSelector",
+      "epochLogFloor",
+      "files",
+      "lastSettledAtMs",
+      "lastSettledKnown",
+      "nextCursor",
+      "ok",
+    ]);
+    expect(Object.keys((projection.files as Array<Record<string, unknown>>)[0]!).sort())
+      .toEqual(["blobSha256", "contentKind", "path"]);
+    const serialized = JSON.stringify(projection);
+    for (const privateValue of [
+      "private/hidden.md",
+      seeded.hiddenSha,
+      "object-shared",
+      "moment-1",
+      "owner",
+    ]) {
+      expect(serialized).not.toContain(privateValue);
+    }
+  });
+
+  it("materializes the viewer CAS fold per version and uses the selected path index", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h);
+    const acceptedContent = "accepted\n";
+    const staleContent = "stale\n";
+    const neighborContent = "neighbor\n";
+    const sideContent = "side version\n";
+    const acceptedSha = await putBlob(h, acceptedContent);
+    const staleSha = await putBlob(h, staleContent);
+    const neighborSha = await putBlob(h, neighborContent);
+    const sideSha = await putBlob(h, sideContent);
+    await appendMoments(h, [
+      moment(3, "docs/shared.md", acceptedContent, 1_300, {
+        objectId: "object-shared",
+        beforePath: "docs/shared.md",
+        beforeContent: "# shared\n",
+      }),
+      moment(4, "docs/shared.md", staleContent, 1_400, {
+        objectId: "object-shared",
+        beforePath: "docs/shared.md",
+        beforeContent: "# shared\n",
+      }),
+      moment(5, "docs/😀.md", acceptedContent, 1_500, {
+        objectId: "object-shared",
+        operation: "rename",
+        beforePath: "docs/shared.md",
+        beforeContent: acceptedContent,
+      }),
+      moment(6, "docs-private/neighbor.md", neighborContent, 1_600, {
+        objectId: "object-neighbor",
+      }),
+      moment(7, "docs/😀.md", sideContent, 1_700, {
+        versionId: "side-version",
+        objectId: "object-side",
+      }),
+    ]);
+
+    const response = await h(linkRequest(seeded.capability, "/sync/link/current"));
+    expect(response.status).toBe(200);
+    const current = await json(response);
+    expect(current.files).toEqual([{
+      path: "docs/😀.md",
+      blobSha256: acceptedSha,
+      contentKind: "text",
+    }]);
+    expect(JSON.stringify(current)).not.toContain(staleSha);
+    expect(JSON.stringify(current)).not.toContain(neighborSha);
+    expect(JSON.stringify(current)).not.toContain(sideSha);
+
+    const historical = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100")),
+    );
+    const replayed: FileAccumulator = new Map();
+    foldLogOps(replayed, historical.ops as RelayOp[]);
+    expect(filesFromAccumulator(replayed)).toEqual(current.files);
+
+    const dbPath = storagePaths.get(storage);
+    if (!dbPath) throw new Error("missing inspection path");
+    const inspection = new InspectionDatabaseSync(dbPath, { readOnly: true });
+    try {
+      const query = currentFileStateQuery(["docs"]);
+      const plan = inspection.prepare(`EXPLAIN QUERY PLAN ${query.sql}`).all(
+        WORKSPACE,
+        "main",
+        0,
+        Number.MAX_SAFE_INTEGER,
+        ...query.selectorParams,
+        5_001,
+      );
+      const details = plan.map((row) => String(row.detail)).join("\n");
+      expect(details).toMatch(
+        /SEARCH sync_relay_current_files USING INDEX idx_sync_relay_current_files_path/u,
+      );
+      expect(details).not.toContain("sync_relay_log");
+      expect(details).not.toContain("sync_relay_object_moments");
+
+      const blobQuery = currentFileBlobByteLengthQuery(["docs"]);
+      const blobPlan = inspection.prepare(`EXPLAIN QUERY PLAN ${blobQuery.sql}`).all(
+        WORKSPACE,
+        "main",
+        acceptedSha,
+        0,
+        ...blobQuery.selectorParams,
+      );
+      const blobDetails = blobPlan.map((row) => String(row.detail)).join("\n");
+      expect(blobDetails).toMatch(
+        /SEARCH sync_relay_current_files USING COVERING INDEX idx_sync_relay_current_files_blob/u,
+      );
+      expect(blobDetails).toMatch(
+        /SEARCH blob USING INDEX sqlite_autoindex_sync_relay_blobs_1/u,
+      );
+    } finally {
+      inspection.close();
+    }
+  });
+
+  it("preserves a write that reaches a path before a later fork snapshot chunk", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    expect(
+      (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
+    ).toBe(200);
+    const firstSnapshotSha = await putBlob(h, "first snapshot\n");
+    const pendingSnapshotSha = await putBlob(h, "pending snapshot\n");
+    const localWriteSha = await putBlob(h, "local write\n");
+    const versionCreate = (
+      originSeq: number,
+      path: string,
+      blobSha256: string,
+    ) => ({
+      originSeq,
+      opKind: "version.create",
+      payload: {
+        versionId: "chunked-version",
+        forkSnapshots: [{ path, blobSha256 }],
+      },
+      recordedAtMs: 1_100 + originSeq,
+    });
+
+    expect(
+      (
+        await h(
+          request(
+            OWNER,
+            `/sync/${WORKSPACE}/log`,
+            jsonBody({
+              originId: "fork-origin",
+              ops: [versionCreate(0, "docs/first.md", firstSnapshotSha)],
+            }),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    await appendMoments(
+      h,
+      [
+        moment(0, "docs/pending.md", "local write\n", 1_200, {
+          versionId: "chunked-version",
+          objectId: "local-pending-object",
+        }),
+      ],
+      { originId: "local-origin" },
+    );
+    expect(
+      (
+        await h(
+          request(
+            OWNER,
+            `/sync/${WORKSPACE}/log`,
+            jsonBody({
+              originId: "fork-origin",
+              ops: [versionCreate(1, "docs/pending.md", pendingSnapshotSha)],
+            }),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    const link = await createLink(h, {
+      paths: ["docs"],
+      versionId: "chunked-version",
+      access: "view",
+    });
+
+    const forward = await json(
+      await h(linkRequest(link.capability, "/sync/link/current")),
+    );
+    const dbPath = storagePaths.get(storage);
+    if (!dbPath) throw new Error("missing inspection path");
+    storage.close();
+    storages.splice(storages.indexOf(storage), 1);
+    const legacy = new InspectionDatabaseSync(dbPath);
+    legacy.exec("DROP TABLE sync_relay_current_files");
+    legacy.prepare(
+      "DELETE FROM sync_relay_migrations WHERE migration_id = ?",
+    ).run("current-files-seed-v1");
+    legacy.close();
+    const reopened = openSyncRelayStorage(dbPath);
+    storages.push(reopened);
+    storagePaths.set(reopened, dbPath);
+    const replayed = await json(
+      await handler(reopened)(linkRequest(link.capability, "/sync/link/current")),
+    );
+    const expectedFiles = [
+      {
+        path: "docs/first.md",
+        blobSha256: firstSnapshotSha,
+        contentKind: "text",
+      },
+      {
+        path: "docs/pending.md",
+        blobSha256: localWriteSha,
+        contentKind: "text",
+      },
+    ];
+
+    expect({ forward: forward.files, replayed: replayed.files }).toEqual({
+      forward: expectedFiles,
+      replayed: expectedFiles,
+    });
+  });
+
+  it("refuses contradictory path aliases from current state and startup replay", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h);
+    const initialLog = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100")),
+    );
+    const forgedContent = "forged\n";
+    const forgedSha = await putBlob(h, forgedContent);
+    const mismatchedWrite = moment(3, "docs/forged.md", forgedContent, 1_300, {
+      objectId: "object-forged",
+    });
+    mismatchedWrite.payload.path = "private/forged.md";
+    const mismatchedDelete = moment(4, "docs/shared.md", "# shared\n", 1_400, {
+      objectId: "object-shared",
+      operation: "delete",
+      beforePath: "docs/shared.md",
+      beforeContent: "# shared\n",
+      afterPath: null,
+      afterContent: null,
+    });
+    Object.assign(mismatchedDelete.payload, { beforePath: "private/shared.md" });
+
+    for (const malformed of [mismatchedWrite, mismatchedDelete]) {
+      expect(
+        filterOpForShare(
+          { paths: ["docs"], versionId: null, access: "view" },
+          malformed.opKind,
+          JSON.stringify(malformed.payload),
+        ).allowed,
+      ).toBe(false);
+    }
+    await appendMoments(h, [mismatchedWrite, mismatchedDelete]);
+
+    const expectConsistentDenial = async (currentHandler: SyncRelayHandler) => {
+      const delta = await json(
+        await currentHandler(
+          linkRequest(
+            seeded.capability,
+            `/sync/link/log?since=${String(initialLog.nextCursor)}&limit=100`,
+          ),
+        ),
+      );
+      expect(delta).toMatchObject({ ops: [], nextCursor: 5, hasMore: false });
+
+      const current = await json(
+        await currentHandler(linkRequest(seeded.capability, "/sync/link/current")),
+      );
+      const expectedFiles = [{
+        path: "docs/shared.md",
+        blobSha256: seeded.sharedSha,
+        contentKind: "text",
+      }];
+      expect(current).toMatchObject({ files: expectedFiles, nextCursor: 5 });
+
+      const fullReplay = await json(
+        await currentHandler(
+          linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100"),
+        ),
+      );
+      const replayed: FileAccumulator = new Map();
+      foldLogOps(replayed, fullReplay.ops as RelayOp[]);
+      expect(filesFromAccumulator(replayed)).toEqual(expectedFiles);
+
+      const missingSha = sha256("missing");
+      const missing = await denialBytes(
+        await currentHandler(
+          linkRequest(seeded.capability, `/sync/link/blobs/${missingSha}`),
+        ),
+      );
+      expect(
+        await denialBytes(
+          await currentHandler(
+            linkRequest(seeded.capability, `/sync/link/blobs/${forgedSha}`),
+          ),
+        ),
+      ).toBe(missing);
+      const sharedBlob = await currentHandler(
+        linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`),
+      );
+      expect(sharedBlob.status).toBe(200);
+      expect(await sharedBlob.text()).toBe("# shared\n");
+    };
+
+    await expectConsistentDenial(h);
+
+    const dbPath = storagePaths.get(storage);
+    if (!dbPath) throw new Error("missing inspection path");
+    storage.close();
+    storages.splice(storages.indexOf(storage), 1);
+    const legacy = new InspectionDatabaseSync(dbPath);
+    legacy.exec("DROP TABLE sync_relay_current_files");
+    legacy.prepare(
+      "DELETE FROM sync_relay_migrations WHERE migration_id = ?",
+    ).run("current-files-seed-v1");
+    legacy.close();
+
+    const reopened = openSyncRelayStorage(dbPath);
+    storages.push(reopened);
+    storagePaths.set(reopened, dbPath);
+    await expectConsistentDenial(handler(reopened));
+  });
+
+  it.each(["path", "beforePath"] as const)(
+    "refuses a contradictory visible %s alias from every accountless view",
+    async (alias) => {
+      const storage = await newStorage();
+      const h = handler(storage);
+      const seeded = await seed(h);
+      const initialLog = await json(
+        await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100")),
+      );
+      const forwardFiles: FileAccumulator = new Map();
+      foldLogOps(forwardFiles, initialLog.ops as RelayOp[]);
+
+      const forgedContent = `forged ${alias}\n`;
+      const forgedSha = await putBlob(h, forgedContent);
+      const forgedMoment = alias === "path"
+        ? moment(3, "docs/path-target.md", forgedContent, 1_300, {
+            objectId: "object-forged-path",
+          })
+        : moment(3, "docs/renamed.md", forgedContent, 1_300, {
+            objectId: "object-shared",
+            operation: "rename",
+            beforePath: "docs/shared.md",
+            beforeContent: "# shared\n",
+          });
+      Object.assign(
+        forgedMoment.payload,
+        alias === "path"
+          ? { path: "docs/path-alias.md" }
+          : { beforePath: "docs/renamed.md" },
+      );
+      await appendMoments(h, [forgedMoment]);
+
+      const delta = await json(
+        await h(
+          linkRequest(
+            seeded.capability,
+            `/sync/link/log?since=${String(initialLog.nextCursor)}&limit=100`,
+          ),
+        ),
+      );
+      foldLogOps(forwardFiles, delta.ops as RelayOp[]);
+      const fullLog = await json(
+        await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100")),
+      );
+      const fullFiles: FileAccumulator = new Map();
+      foldLogOps(fullFiles, fullLog.ops as RelayOp[]);
+      const current = await json(
+        await h(linkRequest(seeded.capability, "/sync/link/current")),
+      );
+      const forgedBlob = await denialBytes(
+        await h(linkRequest(seeded.capability, `/sync/link/blobs/${forgedSha}`)),
+      );
+      const expectedFiles = [{
+        path: "docs/shared.md",
+        blobSha256: seeded.sharedSha,
+        contentKind: "text",
+      }];
+      expect({
+        current: current.files,
+        fullReplay: filesFromAccumulator(fullFiles),
+        forwardReplay: filesFromAccumulator(forwardFiles),
+        deltaOps: delta.ops,
+        forgedBlob,
+      }).toEqual({
+        current: expectedFiles,
+        fullReplay: expectedFiles,
+        forwardReplay: expectedFiles,
+        deltaOps: [],
+        forgedBlob: `404:${LINK_REFUSAL_BODY}`,
+      });
+
+      const sharedBlob = await h(
+        linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`),
+      );
+      expect(sharedBlob.status).toBe(200);
+      expect(await sharedBlob.text()).toBe("# shared\n");
+
+      const dbPath = storagePaths.get(storage);
+      if (!dbPath) throw new Error("missing inspection path");
+      storage.close();
+      storages.splice(storages.indexOf(storage), 1);
+      const legacy = new InspectionDatabaseSync(dbPath);
+      legacy.exec("DROP TABLE sync_relay_current_files");
+      legacy.prepare(
+        "DELETE FROM sync_relay_migrations WHERE migration_id = ?",
+      ).run("current-files-seed-v1");
+      legacy.close();
+
+      const reopened = openSyncRelayStorage(dbPath);
+      storages.push(reopened);
+      storagePaths.set(reopened, dbPath);
+      const reopenedHandler = handler(reopened);
+      const restartedCurrent = await json(
+        await reopenedHandler(linkRequest(seeded.capability, "/sync/link/current")),
+      );
+      expect(restartedCurrent.files).toEqual(expectedFiles);
+      expect(
+        await denialBytes(
+          await reopenedHandler(
+            linkRequest(seeded.capability, `/sync/link/blobs/${forgedSha}`),
+          ),
+        ),
+      ).toBe(`404:${LINK_REFUSAL_BODY}`);
+      const restartedSharedBlob = await reopenedHandler(
+        linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`),
+      );
+      expect(restartedSharedBlob.status).toBe(200);
+      expect(await restartedSharedBlob.text()).toBe("# shared\n");
+    },
+  );
+
+  it("refuses an all-visible cross-path write from every accountless view", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h);
+    const initialLog = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100")),
+    );
+    const forwardFiles: FileAccumulator = new Map();
+    foldLogOps(forwardFiles, initialLog.ops as RelayOp[]);
+
+    const forgedContent = "forged cross-path write\n";
+    const forgedSha = await putBlob(h, forgedContent);
+    const forgedWrite = moment(3, "docs/moved.md", forgedContent, 1_300, {
+      objectId: "object-shared",
+      operation: "write",
+      beforePath: "docs/shared.md",
+      beforeContent: "# shared\n",
+    });
+    await appendMoments(h, [forgedWrite]);
+
+    const expectedFiles = [{
+      path: "docs/shared.md",
+      blobSha256: seeded.sharedSha,
+      contentKind: "text",
+    }];
+    const assertReadAgreement = async (
+      readHandler: SyncRelayHandler,
+      openedFiles?: FileAccumulator,
+    ) => {
+      const delta = await json(
+        await readHandler(
+          linkRequest(
+            seeded.capability,
+            `/sync/link/log?since=${String(initialLog.nextCursor)}&limit=100`,
+          ),
+        ),
+      );
+      if (openedFiles) foldLogOps(openedFiles, delta.ops as RelayOp[]);
+      const fullLog = await json(
+        await readHandler(
+          linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100"),
+        ),
+      );
+      const fullFiles: FileAccumulator = new Map();
+      foldLogOps(fullFiles, fullLog.ops as RelayOp[]);
+      const current = await json(
+        await readHandler(linkRequest(seeded.capability, "/sync/link/current")),
+      );
+      expect({
+        current: current.files,
+        deltaOps: delta.ops,
+        forward: openedFiles ? filesFromAccumulator(openedFiles) : expectedFiles,
+        fullReplay: filesFromAccumulator(fullFiles),
+      }).toEqual({
+        current: expectedFiles,
+        deltaOps: [],
+        forward: expectedFiles,
+        fullReplay: expectedFiles,
+      });
+      expect(
+        await denialBytes(
+          await readHandler(
+            linkRequest(seeded.capability, `/sync/link/blobs/${forgedSha}`),
+          ),
+        ),
+      ).toBe(`404:${LINK_REFUSAL_BODY}`);
+      const sharedBlob = await readHandler(
+        linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`),
+      );
+      expect(sharedBlob.status).toBe(200);
+      expect(await sharedBlob.text()).toBe("# shared\n");
+    };
+
+    await assertReadAgreement(h, forwardFiles);
+
+    const dbPath = storagePaths.get(storage);
+    if (!dbPath) throw new Error("missing inspection path");
+    storage.close();
+    storages.splice(storages.indexOf(storage), 1);
+    const legacy = new InspectionDatabaseSync(dbPath);
+    legacy.exec("DROP TABLE sync_relay_current_files");
+    legacy.prepare(
+      "DELETE FROM sync_relay_migrations WHERE migration_id = ?",
+    ).run("current-files-seed-v1");
+    legacy.close();
+
+    const reopened = openSyncRelayStorage(dbPath);
+    storages.push(reopened);
+    storagePaths.set(reopened, dbPath);
+    await assertReadAgreement(handler(reopened));
+  });
+
+  it.each([
+    ["unsupported operation", "unsupported"],
+    ["one-sided before path", "before-path-only"],
+    ["one-sided before digest", "before-digest-only"],
+    ["missing rename after path", "missing-after-path"],
+  ] as const)(
+    "does not expose a historical blob from a moment with %s",
+    async (_case, shape) => {
+      const storage = await newStorage();
+      const h = handler(storage);
+      const wholeVersion = shape === "missing-after-path";
+      const versionId = wholeVersion ? "snapshot-malformed" : "main";
+      const seeded = await seed(
+        h,
+        "view",
+        wholeVersion
+          ? { paths: [], versionId, sharedVersionId: versionId }
+          : {},
+      );
+      const opened = await json(
+        await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100")),
+      );
+      const forgedContent = `${shape}\n`;
+      const forgedSha = await putBlob(h, forgedContent);
+      const malformed = moment(3, "docs/shared.md", forgedContent, 1_300, {
+        versionId,
+        objectId: "object-shared",
+        ...(shape === "missing-after-path"
+          ? {
+              operation: "rename" as const,
+              beforePath: "docs/shared.md",
+              beforeContent: "# shared\n",
+            }
+          : {}),
+      });
+      if (shape === "unsupported") {
+        Object.assign(malformed.payload, { operation: "copy" });
+      } else if (shape === "before-path-only") {
+        Object.assign(malformed.payload, { payloadBeforePath: "docs/shared.md" });
+      } else if (shape === "before-digest-only") {
+        Object.assign(malformed.payload, {
+          payloadBeforeBlobSha256: seeded.sharedSha,
+        });
+      } else {
+        Object.assign(malformed.payload, { path: null, payloadAfterPath: null });
+      }
+      appendStoredMoments(storage, [malformed]);
+
+      const since = String(opened.nextCursor);
+      const [namedLog, viewLog] = await Promise.all([
+        json(
+          await h(
+            request(
+              RECIPIENT,
+              `/sync/shares/share-0/log?since=${since}&limit=100`,
+            ),
+          ),
+        ),
+        json(
+          await h(
+            linkRequest(
+              seeded.capability,
+              `/sync/link/log?since=${since}&limit=100`,
+            ),
+          ),
+        ),
+      ]);
+      const missingSha = sha256(`missing ${shape}`);
+      const [missingNamed, missingView] = await Promise.all([
+        denialBytes(
+          await h(request(RECIPIENT, `/sync/shares/share-0/blobs/${missingSha}`)),
+        ),
+        denialBytes(
+          await h(linkRequest(seeded.capability, `/sync/link/blobs/${missingSha}`)),
+        ),
+      ]);
+      await Promise.all([
+        expect(
+          denialBytes(
+            await h(request(RECIPIENT, `/sync/shares/share-0/blobs/${forgedSha}`)),
+          ),
+        ).resolves.toBe(missingNamed),
+        expect(
+          denialBytes(
+            await h(linkRequest(seeded.capability, `/sync/link/blobs/${forgedSha}`)),
+          ),
+        ).resolves.toBe(missingView),
+      ]);
+      expect(namedLog.ops).toEqual([]);
+      expect(viewLog.ops).toEqual([]);
+      expect(hasValidShareMomentShape(malformed.payload)).toBe(false);
+    },
+  );
+
+  it.each([
+    [
+      "uppercase before digest",
+      {
+        operation: "write",
+        path: "docs/shared.md",
+        payloadBeforePath: "docs/shared.md",
+        payloadBeforeBlobSha256: "A".repeat(64),
+        payloadAfterPath: "docs/shared.md",
+        payloadAfterBlobSha256: "b".repeat(64),
+      },
+    ],
+    [
+      "missing write after digest",
+      {
+        operation: "write",
+        path: "docs/shared.md",
+        payloadBeforePath: null,
+        payloadBeforeBlobSha256: null,
+        payloadAfterPath: "docs/shared.md",
+        payloadAfterBlobSha256: null,
+      },
+    ],
+    [
+      "delete without a before pair",
+      {
+        operation: "delete",
+        path: null,
+        payloadBeforePath: null,
+        payloadBeforeBlobSha256: null,
+        payloadAfterPath: null,
+        payloadAfterBlobSha256: "b".repeat(64),
+      },
+    ],
+  ] as const)("refuses a share moment with %s", (_case, payload) => {
+    expect(hasValidShareMomentShape(payload)).toBe(false);
+  });
+
+  it("ignores a delete after digest without granting blob authority", () => {
+    const payload = {
+      operation: "delete",
+      versionId: "main",
+      path: "docs/shared.md",
+      payloadBeforePath: "docs/shared.md",
+      payloadBeforeBlobSha256: "a".repeat(64),
+      payloadAfterPath: null,
+      payloadAfterBlobSha256: "not-a-digest",
+    };
+    expect(hasValidShareMomentShape(payload)).toBe(true);
+    const decision = filterOpForShare(
+      { paths: ["docs"], versionId: null, access: "view" },
+      "moment.append",
+      JSON.stringify(payload),
+    );
+    expect(decision.allowed).toBe(true);
+    if (decision.allowed) expect(decision.blobSha256s).toEqual([]);
+  });
+
+  it.each([
+    ["moment payloadAfterPath", "after"],
+    ["moment payloadBeforePath", "before"],
+    ["version.create snapshot path", "snapshot"],
+  ] as const)(
+    "does not materialize a canonical current file from a noncanonical %s",
+    async (_field, shape) => {
+      const storage = await newStorage();
+      const h = handler(storage);
+      expect(
+        (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
+      ).toBe(200);
+
+      const canonicalPath = `docs/noncanonical-${shape}.md`;
+      const noncanonicalPath = `docs//noncanonical-${shape}.md`;
+      const content = `noncanonical ${shape}\n`;
+      const blobSha256 = await putBlob(h, content);
+      const versionId = shape === "snapshot" ? "snapshot-noncanonical" : "main";
+      const payload = shape === "snapshot"
+        ? {
+            versionId,
+            forkSnapshots: [{ path: noncanonicalPath, blobSha256 }],
+          }
+        : shape === "after"
+          ? moment(0, noncanonicalPath, content, 1_100).payload
+          : moment(0, canonicalPath, content, 1_100, {
+              operation: "rename",
+              beforePath: noncanonicalPath,
+              beforeContent: content,
+            }).payload;
+      expect(
+        (
+          await h(
+            request(
+              OWNER,
+              `/sync/${WORKSPACE}/log`,
+              jsonBody({
+                originId: "origin-a",
+                ops: [{
+                  originSeq: 0,
+                  opKind: shape === "snapshot" ? "version.create" : "moment.append",
+                  payload,
+                  recordedAtMs: 1_100,
+                }],
+              }),
+            ),
+          )
+        ).status,
+      ).toBe(200);
+      const link = await createLink(h, {
+        paths: [canonicalPath],
+        ...(shape === "snapshot" ? { versionId } : {}),
+        access: "view",
+      });
+
+      const assertNoInventedFile = async (readHandler: SyncRelayHandler) => {
+        const fullReplay = await json(
+          await readHandler(
+            linkRequest(link.capability, "/sync/link/log?since=0&limit=100"),
+          ),
+        );
+        const replayed: FileAccumulator = new Map();
+        foldLogOps(replayed, fullReplay.ops as RelayOp[]);
+        const replayedFiles = filesFromAccumulator(replayed);
+        expect(replayedFiles).toEqual([]);
+
+        const current = await json(
+          await readHandler(linkRequest(link.capability, "/sync/link/current")),
+        );
+        expect(current.files).toEqual(replayedFiles);
+        expect(
+          await denialBytes(
+            await readHandler(
+              linkRequest(link.capability, `/sync/link/blobs/${blobSha256}`),
+            ),
+          ),
+        ).toBe(`404:${LINK_REFUSAL_BODY}`);
+      };
+
+      await assertNoInventedFile(h);
+
+      const dbPath = storagePaths.get(storage);
+      if (!dbPath) throw new Error("missing inspection path");
+      storage.close();
+      storages.splice(storages.indexOf(storage), 1);
+      const legacy = new InspectionDatabaseSync(dbPath);
+      legacy.exec("DROP TABLE sync_relay_current_files");
+      legacy.prepare(
+        "DELETE FROM sync_relay_migrations WHERE migration_id = ?",
+      ).run("current-files-seed-v1");
+      legacy.close();
+
+      const reopened = openSyncRelayStorage(dbPath);
+      storages.push(reopened);
+      storagePaths.set(reopened, dbPath);
+      await assertNoInventedFile(handler(reopened));
+    },
+  );
+
+  it.each([
+    ["folder moment", "moment", ["docs"], null],
+    ["folder fork snapshot", "snapshot", ["docs"], "snapshot-folder"],
+    ["whole-version fork snapshot", "snapshot", [], "snapshot-whole"],
+    ["boundary rename", "boundary", ["docs"], null],
+  ] as const)(
+    "refuses noncanonical viewer paths in a %s",
+    async (_case, shape, paths, versionId) => {
+      const storage = await newStorage();
+      const h = handler(storage);
+      expect(
+        (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
+      ).toBe(200);
+
+      const noncanonicalPath = shape === "boundary" ? "private//hidden.md" : "docs//x.md";
+      const content = `${shape} with a noncanonical path\n`;
+      const blobSha256 = await putBlob(h, content);
+      if (shape === "boundary") await putBlob(h, "hidden\n");
+      const link = await createLink(h, {
+        paths: [...paths],
+        ...(versionId === null ? {} : { versionId }),
+        access: "view",
+      });
+      const openedCurrent = await json(
+        await h(linkRequest(link.capability, "/sync/link/current")),
+      );
+      const liveFiles = accumulatorFromCurrentFiles(openedCurrent.files);
+      if (!liveFiles) throw new Error("initial current state was malformed");
+      expect(filesFromAccumulator(liveFiles)).toEqual([]);
+      const openedLog = await json(
+        await h(linkRequest(link.capability, "/sync/link/log?since=0&limit=100")),
+      );
+
+      const payload = shape === "moment"
+        ? moment(0, noncanonicalPath, content, 1_100).payload
+        : shape === "boundary"
+          ? moment(0, "docs/arrived.md", content, 1_100, {
+              operation: "rename",
+              beforePath: noncanonicalPath,
+              beforeContent: "hidden\n",
+            }).payload
+          : {
+              versionId,
+              forkSnapshots: [{ path: noncanonicalPath, blobSha256 }],
+            };
+      expect(
+        (
+          await h(
+            request(
+              OWNER,
+              `/sync/${WORKSPACE}/log`,
+              jsonBody({
+                originId: "origin-a",
+                ops: [{
+                  originSeq: 0,
+                  opKind: shape === "snapshot" ? "version.create" : "moment.append",
+                  payload,
+                  recordedAtMs: 1_100,
+                }],
+              }),
+            ),
+          )
+        ).status,
+      ).toBe(200);
+
+      const assertReadAgreement = async (readHandler: SyncRelayHandler) => {
+        const current = await json(
+          await readHandler(linkRequest(link.capability, "/sync/link/current")),
+        );
+        const fullReplay = await json(
+          await readHandler(
+            linkRequest(link.capability, "/sync/link/log?since=0&limit=100"),
+          ),
+        );
+        const replayed: FileAccumulator = new Map();
+        foldLogOps(replayed, fullReplay.ops as RelayOp[]);
+        expect(current.files).toEqual([]);
+        expect(filesFromAccumulator(replayed)).toEqual(current.files);
+        expect(JSON.stringify({ current, fullReplay })).not.toContain(noncanonicalPath);
+        expect(
+          await denialBytes(
+            await readHandler(
+              linkRequest(link.capability, `/sync/link/blobs/${blobSha256}`),
+            ),
+          ),
+        ).toBe(`404:${LINK_REFUSAL_BODY}`);
+      };
+
+      const delta = await json(
+        await h(
+          linkRequest(
+            link.capability,
+            `/sync/link/log?since=${String(openedLog.nextCursor)}&limit=100`,
+          ),
+        ),
+      );
+      foldLogOps(liveFiles, delta.ops as RelayOp[]);
+      expect(filesFromAccumulator(liveFiles)).toEqual([]);
+      expect(JSON.stringify(delta)).not.toContain(noncanonicalPath);
+      await assertReadAgreement(h);
+
+      const dbPath = storagePaths.get(storage);
+      if (!dbPath) throw new Error("missing inspection path");
+      storage.close();
+      storages.splice(storages.indexOf(storage), 1);
+      const legacy = new InspectionDatabaseSync(dbPath);
+      legacy.exec("DROP TABLE sync_relay_current_files");
+      legacy.prepare(
+        "DELETE FROM sync_relay_migrations WHERE migration_id = ?",
+      ).run("current-files-seed-v1");
+      legacy.close();
+
+      const reopened = openSyncRelayStorage(dbPath);
+      storages.push(reopened);
+      storagePaths.set(reopened, dbPath);
+      await assertReadAgreement(handler(reopened));
+    },
+  );
+
+  it("applies the current-file cap after selector filtering and refuses overflow generically", async () => {
+    const storage = await newStorage();
+    const h = handler(storage, { linkCurrentFileLimit: 1 });
+    const seeded = await seed(h);
+
+    const oneSelected = await h(linkRequest(seeded.capability, "/sync/link/current"));
+    expect(oneSelected.status).toBe(200);
+    expect((await json(oneSelected)).files).toEqual([{
+      path: "docs/shared.md",
+      blobSha256: seeded.sharedSha,
+      contentKind: "text",
+    }]);
+
+    const secondContent = "second selected\n";
+    await putBlob(h, secondContent);
+    await appendMoments(h, [
+      moment(3, "docs/second.md", secondContent, 1_300, {
+        objectId: "object-second",
+      }),
+    ]);
+    const overflow = await denialBytes(
+      await h(linkRequest(seeded.capability, "/sync/link/current")),
+    );
+    const missing = await denialBytes(
+      await h(
+        linkRequest(seeded.capability, `/sync/link/blobs/${"f".repeat(64)}`),
+      ),
+    );
+    expect(overflow).toBe(missing);
+  });
+
+  it("keeps current-state freshness equal to metadata after a selected delete", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h);
+    await appendMoments(h, [
+      moment(3, "docs/shared.md", "# shared\n", 1_300, {
+        objectId: "object-shared",
+        operation: "delete",
+        beforePath: "docs/shared.md",
+        beforeContent: "# shared\n",
+        afterContent: null,
+        afterPath: null,
+      }),
+    ]);
+
+    const metadata = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/share")),
+    );
+    const current = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/current")),
+    );
+    expect(current.files).toEqual([]);
+    expect({
+      lastSettledAtMs: current.lastSettledAtMs,
+      lastSettledKnown: current.lastSettledKnown,
+    }).toEqual({
+      lastSettledAtMs: metadata.lastSettledAtMs,
+      lastSettledKnown: metadata.lastSettledKnown,
+    });
+    expect(current.lastSettledAtMs).toBe(1_300);
+  });
+
+  it("revalidates the capability generation after reading current state", async () => {
+    const storage = await newStorage();
+    let revokeOnRead = false;
+    let grantId = "";
+    const storageWithRace = new Proxy(storage, {
+      get(target, property, receiver) {
+        if (property === "readCurrentFileState") {
+          return (input: Parameters<SyncRelayStorage["readCurrentFileState"]>[0]) => {
+            const snapshot = target.readCurrentFileState(input);
+            if (revokeOnRead) {
+              target.revokeShareGrant({
+                shareId: "share-0",
+                grantId,
+                revokedAtMs: 2_000,
+                expectedDependentGrantIds: [],
+              });
+            }
+            return snapshot;
+          };
+        }
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const h = handler(storageWithRace);
+    const seeded = await seed(h);
+    grantId = seeded.grantId;
+    revokeOnRead = true;
+
+    const response = await h(
+      linkRequest(seeded.capability, "/sync/link/current"),
+    );
+    expect(await capabilityRefusalBody(response)).toBe(
+      await capabilityRefusalBody(
+        await h(linkRequest(UNKNOWN_CAPABILITY, "/sync/link/current")),
+      ),
+    );
+  });
+
+  it("streams the accepted current fold once when reopening a pre-table database", async () => {
+    const originalStorage = await newStorage();
+    const originalHandler = handler(originalStorage);
+    const seeded = await seed(originalHandler);
+    const acceptedContent = "accepted before migration\n";
+    const staleContent = "stale before migration\n";
+    const acceptedSha = await putBlob(originalHandler, acceptedContent);
+    await putBlob(originalHandler, staleContent);
+    await appendMoments(originalHandler, [
+      moment(3, "docs/shared.md", acceptedContent, 1_300, {
+        objectId: "object-shared",
+        beforePath: "docs/shared.md",
+        beforeContent: "# shared\n",
+      }),
+      moment(4, "docs/shared.md", staleContent, 1_400, {
+        objectId: "object-shared",
+        beforePath: "docs/shared.md",
+        beforeContent: "# shared\n",
+      }),
+    ]);
+    const dbPath = storagePaths.get(originalStorage);
+    if (!dbPath) throw new Error("missing inspection path");
+    originalStorage.close();
+    storages.splice(storages.indexOf(originalStorage), 1);
+
+    const legacy = new InspectionDatabaseSync(dbPath);
+    legacy.exec("DROP TABLE sync_relay_current_files");
+    legacy.prepare(
+      "DELETE FROM sync_relay_migrations WHERE migration_id = ?",
+    ).run("current-files-seed-v1");
+    legacy.close();
+
+    const databasePrototype = InspectionDatabaseSync.prototype as InspectionDatabase;
+    const nativePrepare = databasePrototype.prepare;
+    const migrationAll = vi.fn(() => {
+      throw new Error("current-files migration materialized its full result set");
+    });
+    let migrationStatement: ReturnType<InspectionDatabase["prepare"]> | undefined;
+    const migrationIterate = vi.fn((...params: unknown[]) => {
+      if (!migrationStatement) throw new Error("migration iterator has no statement");
+      return migrationStatement.iterate(...params);
+    });
+    const prepareSpy = vi
+      .spyOn(databasePrototype, "prepare")
+      .mockImplementation(function (this: InspectionDatabase, sql: string) {
+        const statement = nativePrepare.call(this, sql);
+        if (
+          !sql.includes("FROM sync_relay_log log") ||
+          !sql.includes("ORDER BY log.relay_seq")
+        ) {
+          return statement;
+        }
+        migrationStatement = statement;
+        return new Proxy(statement, {
+          get(target, property) {
+            if (property === "all") return migrationAll;
+            if (property === "iterate") return migrationIterate;
+            const value = Reflect.get(target, property, target) as unknown;
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+      });
+    let reopened: SyncRelayStorage;
+    try {
+      reopened = openSyncRelayStorage(dbPath);
+    } finally {
+      prepareSpy.mockRestore();
+    }
+    expect(migrationAll).not.toHaveBeenCalled();
+    expect(migrationIterate).toHaveBeenCalledOnce();
+    storages.push(reopened);
+    storagePaths.set(reopened, dbPath);
+    const reopenedHandler = handler(reopened);
+    const firstProjection = await json(
+      await reopenedHandler(
+        linkRequest(seeded.capability, "/sync/link/current"),
+      ),
+    );
+    expect(firstProjection.files).toEqual([{
+      path: "docs/shared.md",
+      blobSha256: acceptedSha,
+      contentKind: "text",
+    }]);
+    reopened.close();
+    storages.splice(storages.indexOf(reopened), 1);
+
+    const openedAgain = openSyncRelayStorage(dbPath);
+    storages.push(openedAgain);
+    storagePaths.set(openedAgain, dbPath);
+    const secondProjection = await json(
+      await handler(openedAgain)(
+        linkRequest(seeded.capability, "/sync/link/current"),
+      ),
+    );
+    expect(secondProjection.files).toEqual(firstProjection.files);
+    const inspection = new InspectionDatabaseSync(dbPath, { readOnly: true });
+    try {
+      expect(inspection.prepare(
+        `SELECT migration_id FROM sync_relay_migrations
+         WHERE migration_id = 'current-files-seed-v1'`,
+      ).all()).toHaveLength(1);
+    } finally {
+      inspection.close();
+    }
+  });
+
+  it("backfills only rows above a preexisting epoch floor", async () => {
+    const originalStorage = await newStorage();
+    const originalHandler = handler(originalStorage);
+    const seeded = await seedThenRotate(originalHandler);
+    const recreatedContent = "recreated before migration\n";
+    const recreatedSha = await putBlob(originalHandler, recreatedContent);
+    await appendMoments(
+      originalHandler,
+      [
+        moment(0, "docs/shared.md", recreatedContent, 1_300, {
+          objectId: "object-recreated-before-migration",
+        }),
+      ],
+      {
+        originId: "origin-b",
+        identity: { replicationEpoch: EPOCH_2, streamIdentity: STREAM_2 },
+      },
+    );
+    const dbPath = storagePaths.get(originalStorage);
+    if (!dbPath) throw new Error("missing inspection path");
+    originalStorage.close();
+    storages.splice(storages.indexOf(originalStorage), 1);
+
+    const legacy = new InspectionDatabaseSync(dbPath);
+    legacy.exec("DROP TABLE sync_relay_current_files");
+    legacy.prepare(
+      "DELETE FROM sync_relay_migrations WHERE migration_id = ?",
+    ).run("current-files-seed-v1");
+    legacy.close();
+
+    const reopened = openSyncRelayStorage(dbPath);
+    storages.push(reopened);
+    storagePaths.set(reopened, dbPath);
+    const projection = await json(
+      await handler(reopened)(
+        linkRequest(seeded.capability, "/sync/link/current"),
+      ),
+    );
+    expect(projection.files).toEqual([{
+      path: "docs/shared.md",
+      blobSha256: recreatedSha,
+      contentKind: "text",
+    }]);
+    expect(JSON.stringify(projection)).not.toContain(seeded.sharedSha);
+  });
+
   it("gives each grant four capability buckets of read capacity", () => {
     expect(LINK_GRANT_READ_BUCKET_CAPACITY).toBe(LINK_READ_BUCKET_CAPACITY * 4);
     expect(LINK_GRANT_LOG_READ_BUCKET_CAPACITY).toBe(
@@ -510,6 +1755,7 @@ describe("relay capability reads", () => {
 
   it("bounds retained link blob bytes per grant and releases every stream charge", async () => {
     const storage = await newStorage();
+    const getBlob = vi.spyOn(storage, "getBlob");
     const h = handler(storage);
     const largeContent = "l".repeat(MAX_BLOB_BYTES);
     const smallContent = "s".repeat(4 * 1024 * 1024);
@@ -536,10 +1782,16 @@ describe("relay capability reads", () => {
         linkRequest(link.capability, `/sync/link/blobs/${largeSha}`),
       );
       opened.push(overBudget);
+      expect(getBlob).toHaveBeenCalledTimes(3);
       const small = await h(
         linkRequest(link.capability, `/sync/link/blobs/${smallSha}`),
       );
       opened.push(small);
+      const current = await h(
+        linkRequest(link.capability, "/sync/link/current"),
+      );
+      opened.push(current);
+      expect(await current.text()).toContain("docs/large.bin");
 
       await overBudget.body?.cancel();
       await small.body?.cancel();
@@ -553,11 +1805,13 @@ describe("relay capability reads", () => {
         held: held.map((response) => response.status),
         overBudget: overBudget.status,
         small: small.status,
+        current: current.status,
         restored: restored.status,
       }).toEqual({
         held: [200, 200, 200],
         overBudget: 429,
         small: 200,
+        current: 200,
         restored: 200,
       });
     } finally {
@@ -570,6 +1824,498 @@ describe("relay capability reads", () => {
           }
         }),
       );
+    }
+  });
+
+  it("releases pre-stream blob admissions on every load failure", async () => {
+    const cases = ["missing", "throwing", "length-mismatch", "rotation"] as const;
+    for (const failure of cases) {
+      const storage = await newStorage();
+      const targetContent = "t".repeat(4 * 1024 * 1024);
+      const targetSha = sha256(targetContent);
+      const rotatedSecret = "r".repeat(43);
+      let failTargetLoad = false;
+      let grantId = "";
+      const racedStorage = new Proxy(storage, {
+        get(target, property, receiver) {
+          const value = Reflect.get(target, property, receiver) as unknown;
+          if (property !== "getBlob" || typeof value !== "function") {
+            return typeof value === "function" ? value.bind(target) : value;
+          }
+          return (workspaceId: string, blobSha256: string) => {
+            if (!failTargetLoad || blobSha256 !== targetSha) {
+              return target.getBlob(workspaceId, blobSha256);
+            }
+            failTargetLoad = false;
+            if (failure === "missing") return null;
+            if (failure === "throwing") throw new Error("injected blob load failure");
+            if (failure === "length-mismatch") {
+              return new Uint8Array(targetContent.length - 1);
+            }
+            const blob = target.getBlob(workspaceId, blobSha256);
+            const rotation = target.rotateLinkGrant({
+              shareId: "share-0",
+              grantId,
+              rotatedAtMs: 2_001,
+              expectedDependentGrantIds: [],
+              guard: () => undefined,
+              mintCredential: () => ({
+                credentialId: `raced-${failure}`,
+                secretHash: hashLinkBearer(rotatedSecret, LINK_KEY),
+              }),
+            });
+            expect(rotation.ok).toBe(true);
+            return blob;
+          };
+        },
+      });
+      const h = handler(racedStorage, {
+        linkGrantEgressRateLimiter: new LinkEgressRateLimiter(
+          3 * MAX_BLOB_BYTES + targetContent.length,
+          0.000_001,
+          10,
+        ),
+      });
+      const seeded = await seed(h);
+      grantId = seeded.grantId;
+      const largeContent = "l".repeat(MAX_BLOB_BYTES);
+      const largeSha = await putBlob(h, largeContent);
+      await putBlob(h, targetContent);
+      const probeContent = "p";
+      const probeSha = await putBlob(h, probeContent);
+      await appendMoments(h, [
+        moment(3, "docs/held.bin", largeContent, 1_300),
+        moment(4, "docs/failure.bin", targetContent, 1_400),
+        moment(5, "docs/probe.bin", probeContent, 1_500),
+      ]);
+      const held = await Promise.all(
+        Array.from({ length: 3 }, () =>
+          h(linkRequest(seeded.capability, `/sync/link/blobs/${largeSha}`)),
+        ),
+      );
+      expect(held.map((response) => response.status)).toEqual([200, 200, 200]);
+
+      let consoleError: ReturnType<typeof vi.spyOn> | undefined;
+      if (failure === "throwing") {
+        consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      }
+      failTargetLoad = true;
+      const failed = await h(
+        linkRequest(seeded.capability, `/sync/link/blobs/${targetSha}`),
+      );
+      consoleError?.mockRestore();
+
+      let capability = seeded.capability;
+      if (failure === "rotation") {
+        expect(await capabilityRefusalBody(failed)).toBe(LINK_REFUSAL_BODY);
+        const exchange = await json(
+          await h(
+            request(null, "/sync/link-exchange", jsonBody({ secret: rotatedSecret })),
+          ),
+        );
+        expect(exchange.grantId).toBe(seeded.grantId);
+        capability = String(exchange.capabilityToken);
+      } else if (failure === "throwing") {
+        expect(failed.status).toBe(500);
+        expect(await json(failed)).toEqual({
+          ok: false,
+          error: "internal error",
+          code: "internal_error",
+        });
+      } else {
+        expect(failed.status).toBe(404);
+        expect(await failed.text()).toBe(LINK_REFUSAL_BODY);
+      }
+
+      const probe = await h(
+        linkRequest(capability, `/sync/link/blobs/${probeSha}`),
+      );
+      expect(probe.status, failure).toBe(200);
+      expect(await probe.text()).toBe(probeContent);
+      await Promise.all(held.map(async (response) => await response.body?.cancel()));
+    }
+  });
+
+  it.each([-1, MAX_BLOB_BYTES + 1, Number.MAX_SAFE_INTEGER + 1])(
+    "refuses corrupt current blob byte length %s without loading content",
+    async (byteLength) => {
+      const storage = await newStorage();
+      const h = handler(storage);
+      const seeded = await seed(h);
+      const dbPath = storagePaths.get(storage);
+      if (!dbPath) throw new Error("missing inspection path");
+      const inspection = new InspectionDatabaseSync(dbPath);
+      try {
+        inspection.prepare(
+          `UPDATE sync_relay_blobs SET byte_length = ?
+           WHERE workspace_id = ? AND sha256 = ?`,
+        ).run(byteLength, WORKSPACE, seeded.sharedSha);
+      } finally {
+        inspection.close();
+      }
+      const getBlob = vi.spyOn(storage, "getBlob");
+
+      const response = await h(
+        linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`),
+      );
+
+      expect(response.status).toBe(404);
+      expect(await response.text()).toBe(LINK_REFUSAL_BODY);
+      expect(getBlob).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["cancel", "rotate"] as const)(
+    "charges only emitted blob bytes after stream %s",
+    async (interruption) => {
+      const chunkBytes = 64 * 1024;
+      const largeContent = "l".repeat(3 * chunkBytes);
+      const exactRefundContent = "r".repeat(2 * chunkBytes);
+      const finalByteContent = "f";
+      const storage = await newStorage();
+      const egress = new LinkEgressRateLimiter(largeContent.length, 0.000_001, 10);
+      const h = handler(storage, {
+        nowMs: () => 2_000,
+        linkGrantEgressRateLimiter: egress,
+      });
+      const seeded = await seed(h);
+      const largeSha = await putBlob(h, largeContent);
+      const exactRefundSha = await putBlob(h, exactRefundContent);
+      const finalByteSha = await putBlob(h, finalByteContent);
+      await appendMoments(h, [
+        moment(3, "docs/large.bin", largeContent, 1_300),
+        moment(4, "docs/refund.bin", exactRefundContent, 1_400),
+        moment(5, "docs/final-byte.bin", finalByteContent, 1_500),
+      ]);
+
+      const largePath = `/sync/link/blobs/${largeSha}`;
+      const partial = await h(linkRequest(seeded.capability, largePath));
+      expect(partial.status).toBe(200);
+      const reader = partial.body!.getReader();
+      const first = await reader.read();
+      expect(first.done).toBe(false);
+      if (first.done) return;
+      expect(first.value.byteLength).toBe(chunkBytes);
+
+      let capability = seeded.capability;
+      if (interruption === "cancel") {
+        await reader.cancel();
+        await reader.cancel();
+      } else {
+        const rotation = await json(
+          await h(
+            request(
+              OWNER,
+              `/sync/shares/share-0/links/${seeded.grantId}/rotate`,
+              jsonBody({ workspaceId: WORKSPACE, expectedDependentGrantIds: [] }),
+            ),
+          ),
+        );
+        const terminated = await reader.read().then(
+          () => ({ kind: "delivered" as const }),
+          (error: unknown) => ({
+            kind: "terminated" as const,
+            message: error instanceof Error ? error.message : String(error),
+          }),
+        );
+        expect(terminated).toEqual({
+          kind: "terminated",
+          message: "link grant changed during stream",
+        });
+        await reader.cancel().catch(() => undefined);
+        const exchange = await json(
+          await h(
+            request(
+              null,
+              "/sync/link-exchange",
+              jsonBody({ secret: linkSecret(rotation.url) }),
+            ),
+          ),
+        );
+        expect(exchange.grantId).toBe(seeded.grantId);
+        capability = String(exchange.capabilityToken);
+      }
+
+      const overRefunded = await h(linkRequest(capability, largePath));
+      expect(overRefunded.status).toBe(429);
+      expect(await json(overRefunded)).toMatchObject({
+        code: "link_read_rate_limited",
+      });
+
+      const exactRefund = await h(
+        linkRequest(capability, `/sync/link/blobs/${exactRefundSha}`),
+      );
+      expect(exactRefund.status).toBe(200);
+      expect(new Uint8Array(await exactRefund.arrayBuffer())).toHaveLength(
+        exactRefundContent.length,
+      );
+
+      const completionRefunded = await h(
+        linkRequest(capability, `/sync/link/blobs/${finalByteSha}`),
+      );
+      expect(completionRefunded.status).toBe(429);
+      expect(await json(completionRefunded)).toMatchObject({
+        code: "link_read_rate_limited",
+      });
+    },
+  );
+
+  it.each(["cancel", "complete", "rotate"] as const)(
+    "settles emitted UTF-8 link JSON bytes after stream %s",
+    async (interruption) => {
+      const chunkBytes = 64 * 1024;
+      const storage = await newStorage();
+      const setupHandler = handler(storage);
+      const seeded = await seed(setupHandler);
+      const content = "streamed JSON 界\n";
+      await putBlob(setupHandler, content);
+      await appendMoments(
+        setupHandler,
+        Array.from({ length: 450 }, (_, index) =>
+          moment(
+            index + 3,
+            `docs/${String(index).padStart(3, "0")}-${"界".repeat(64)}.md`,
+            content,
+            1_300 + index,
+            { objectId: `object-json-stream-${index}` },
+          ),
+        ),
+      );
+      const route = interruption === "complete"
+        ? "/sync/link/log?since=0&limit=500"
+        : "/sync/link/current";
+
+      const measuringHandler = handler(storage, {
+        linkGrantEgressRateLimiter: new LinkEgressRateLimiter(
+          LINK_GRANT_EGRESS_BUCKET_CAPACITY_BYTES,
+          0.000_001,
+          10,
+        ),
+      });
+      const measured = await measuringHandler(
+        linkRequest(seeded.capability, route),
+      );
+      expect(measured.status).toBe(200);
+      const expectedBody = await measured.text();
+      const exactBodyBytes = Buffer.byteLength(expectedBody);
+      expect(exactBodyBytes).toBeGreaterThan(2 * chunkBytes);
+      expect(expectedBody).toContain("界");
+
+      const egress = new LinkEgressRateLimiter(
+        exactBodyBytes,
+        0.000_001,
+        10,
+      );
+      const originalReserve = egress.reserve.bind(egress);
+      const settlements: Array<[number, number]> = [];
+      const reserve = vi.spyOn(egress, "reserve").mockImplementation(
+        (grantId, byteLength, reservedAtMs) => {
+          const settle = originalReserve(grantId, byteLength, reservedAtMs);
+          if (!settle) return null;
+          return (emittedByteLength, settledAtMs) => {
+            settlements.push([emittedByteLength, settledAtMs]);
+            settle(emittedByteLength, settledAtMs);
+          };
+        },
+      );
+      const h = handler(storage, { linkGrantEgressRateLimiter: egress });
+      const response = await h(linkRequest(seeded.capability, route));
+      expect(response.status).toBe(200);
+      expect(reserve).toHaveBeenNthCalledWith(
+        1,
+        seeded.grantId,
+        exactBodyBytes,
+        2_000,
+      );
+      expect(egress.reserve(seeded.grantId, 1, 2_000)).toBeNull();
+
+      if (interruption === "complete") {
+        expect(await response.text()).toBe(expectedBody);
+        expect(settlements).toEqual([[exactBodyBytes, 2_000]]);
+        expect(egress.reserve(seeded.grantId, 1, 2_000)).toBeNull();
+        return;
+      }
+
+      const reader = response.body!.getReader();
+      const first = await reader.read();
+      expect(first.done).toBe(false);
+      if (first.done) return;
+      expect(first.value.byteLength).toBe(chunkBytes);
+
+      if (interruption === "cancel") {
+        await reader.cancel();
+        await reader.cancel();
+      } else {
+        const rotation = await h(
+          request(
+            OWNER,
+            `/sync/shares/share-0/links/${seeded.grantId}/rotate`,
+            jsonBody({ workspaceId: WORKSPACE, expectedDependentGrantIds: [] }),
+          ),
+        );
+        expect(rotation.status).toBe(200);
+        const terminated = await reader.read().then(
+          () => ({ kind: "delivered" as const }),
+          (error: unknown) => ({
+            kind: "terminated" as const,
+            message: error instanceof Error ? error.message : String(error),
+          }),
+        );
+        expect(terminated).toEqual({
+          kind: "terminated",
+          message: "link grant changed during stream",
+        });
+        await reader.cancel().catch(() => undefined);
+      }
+
+      expect(settlements).toEqual([[chunkBytes, 2_000]]);
+      const refunded = egress.reserve(
+        seeded.grantId,
+        exactBodyBytes - chunkBytes,
+        2_000,
+      );
+      expect(refunded).not.toBeNull();
+      refunded?.(exactBodyBytes - chunkBytes, 2_000);
+      expect(egress.reserve(seeded.grantId, 1, 2_000)).toBeNull();
+    },
+  );
+
+  it("terminates same-grant JSON and blob streams together", async () => {
+    const chunkBytes = 64 * 1024;
+    const storage = await newStorage();
+    const setupHandler = handler(storage);
+    const seeded = await seed(setupHandler);
+    const jsonContent = "mixed stream 界\n";
+    await putBlob(setupHandler, jsonContent);
+    const largeContent = "m".repeat(MAX_BLOB_BYTES);
+    const largeSha = await putBlob(setupHandler, largeContent);
+    await appendMoments(setupHandler, [
+      moment(3, "docs/mixed-large.bin", largeContent, 1_300),
+      ...Array.from({ length: 450 }, (_, index) =>
+        moment(
+          index + 4,
+          `docs/${String(index).padStart(3, "0")}-${"界".repeat(64)}.md`,
+          jsonContent,
+          1_400 + index,
+          { objectId: `object-mixed-stream-${index}` },
+        ),
+      ),
+    ]);
+
+    const egress = new LinkEgressRateLimiter(
+      LINK_GRANT_EGRESS_BUCKET_CAPACITY_BYTES,
+      0.000_001,
+      10,
+    );
+    const originalReserve = egress.reserve.bind(egress);
+    const settlements: Array<{
+      reservedByteLength: number;
+      emittedByteLength: number;
+    }> = [];
+    const reserve = vi.spyOn(egress, "reserve").mockImplementation(
+      (grantId, byteLength, reservedAtMs) => {
+        const settle = originalReserve(grantId, byteLength, reservedAtMs);
+        if (!settle) return null;
+        return (emittedByteLength, settledAtMs) => {
+          settlements.push({ reservedByteLength: byteLength, emittedByteLength });
+          settle(emittedByteLength, settledAtMs);
+        };
+      },
+    );
+    const h = handler(storage, { linkGrantEgressRateLimiter: egress });
+    const current = await h(
+      linkRequest(seeded.capability, "/sync/link/current"),
+    );
+    const blob = await h(
+      linkRequest(seeded.capability, `/sync/link/blobs/${largeSha}`),
+    );
+    expect([current.status, blob.status]).toEqual([200, 200]);
+    expect(reserve.mock.calls).toHaveLength(2);
+    const currentReservedByteLength = reserve.mock.calls[0]![1];
+    expect(currentReservedByteLength).toBeGreaterThan(2 * chunkBytes);
+    expect(reserve.mock.calls[1]![1]).toBe(MAX_BLOB_BYTES);
+    const currentReader = current.body!.getReader();
+    const blobReader = blob.body!.getReader();
+    const [currentFirst, blobFirst] = await Promise.all([
+      currentReader.read(),
+      blobReader.read(),
+    ]);
+    expect(currentFirst.done).toBe(false);
+    expect(blobFirst.done).toBe(false);
+    if (currentFirst.done || blobFirst.done) return;
+    expect(currentFirst.value.byteLength).toBe(chunkBytes);
+    expect(blobFirst.value.byteLength).toBe(chunkBytes);
+
+    const rotation = await json(
+      await h(
+        request(
+          OWNER,
+          `/sync/shares/share-0/links/${seeded.grantId}/rotate`,
+          jsonBody({ workspaceId: WORKSPACE, expectedDependentGrantIds: [] }),
+        ),
+      ),
+    );
+    const outcomes = await Promise.all(
+      [currentReader, blobReader].map(async (reader) =>
+        await reader.read().then(
+          () => ({ kind: "delivered" as const }),
+          (error: unknown) => ({
+            kind: "terminated" as const,
+            message: error instanceof Error ? error.message : String(error),
+          }),
+        ),
+      ),
+    );
+    expect(outcomes).toEqual([
+      { kind: "terminated", message: "link grant changed during stream" },
+      { kind: "terminated", message: "link grant changed during stream" },
+    ]);
+    expect(settlements).toEqual(expect.arrayContaining([
+      {
+        reservedByteLength: currentReservedByteLength,
+        emittedByteLength: chunkBytes,
+      },
+      {
+        reservedByteLength: MAX_BLOB_BYTES,
+        emittedByteLength: chunkBytes,
+      },
+    ]));
+    expect(settlements).toHaveLength(2);
+
+    const unavailable = egress.reserve(
+      seeded.grantId,
+      LINK_GRANT_EGRESS_BUCKET_CAPACITY_BYTES - 2 * chunkBytes + 1,
+      2_000,
+    );
+    expect(unavailable).toBeNull();
+    const exactAvailable = egress.reserve(
+      seeded.grantId,
+      LINK_GRANT_EGRESS_BUCKET_CAPACITY_BYTES - 2 * chunkBytes,
+      2_000,
+    );
+    expect(exactAvailable).not.toBeNull();
+    exactAvailable?.(0, 2_000);
+
+    const exchange = await json(
+      await h(
+        request(
+          null,
+          "/sync/link-exchange",
+          jsonBody({ secret: linkSecret(rotation.url) }),
+        ),
+      ),
+    );
+    expect(exchange.grantId).toBe(seeded.grantId);
+    const rotatedCapability = String(exchange.capabilityToken);
+    const held = await Promise.all(
+      Array.from({ length: 3 }, () =>
+        h(linkRequest(rotatedCapability, `/sync/link/blobs/${largeSha}`)),
+      ),
+    );
+    try {
+      expect(held.map((response) => response.status)).toEqual([200, 200, 200]);
+    } finally {
+      await Promise.all(held.map(async (response) => await response.body?.cancel()));
     }
   });
 
@@ -701,7 +2447,7 @@ describe("relay capability reads", () => {
       );
       expect(targetOutcome).toEqual({
         kind: "terminated",
-        message: "link grant changed during blob stream",
+        message: "link grant changed during stream",
       });
       const untouchedBytes = await readRemainingBytes(
         untouchedReader,
@@ -1233,7 +2979,7 @@ describe("relay capability reads", () => {
     expect(metadata.lastSettledKnown).toBe(true);
   });
 
-  it("keeps an inward move hidden until the next in-boundary write", async () => {
+  it("projects an inward move as an accountless arrival so current and replay converge", async () => {
     const storage = await newStorage();
     const h = handler(storage);
     const seeded = await seed(h);
@@ -1248,22 +2994,16 @@ describe("relay capability reads", () => {
     const initialOps = initialLog.ops as RelayOp[];
     const initialFiles: FileAccumulator = new Map();
     foldLogOps(initialFiles, initialOps);
-    const updated = "arrived and updated\n";
-    await putBlob(h, updated);
+    const arrived = "arrived\n";
+    const arrivedSha = await putBlob(h, arrived);
     const inwardMove = moment(3, "docs/arrived.md", "hidden\n", 1_300, {
       objectId: "object-2",
       operation: "rename",
       beforePath: "private/hidden.md",
       beforeContent: "hidden\n",
+      afterContent: arrived,
     });
-    await appendMoments(h, [
-      inwardMove,
-      moment(4, "docs/arrived.md", updated, 1_400, {
-        objectId: "object-2",
-        beforePath: "docs/arrived.md",
-        beforeContent: "hidden\n",
-      }),
-    ]);
+    await appendMoments(h, [inwardMove]);
 
     expect(
       filterOpForShare(
@@ -1272,7 +3012,7 @@ describe("relay capability reads", () => {
         JSON.stringify(inwardMove.payload),
       ).allowed,
     ).toBe(false);
-    const accountlessInward = await json(
+    const accountlessDelta = await json(
       await h(
         linkRequest(
           seeded.capability,
@@ -1280,16 +3020,68 @@ describe("relay capability reads", () => {
         ),
       ),
     );
-    const accountlessWriteOps = accountlessInward.ops as RelayOp[];
-    expect(accountlessInward).toMatchObject({ nextCursor: 5, hasMore: false });
-    expect(accountlessWriteOps).toHaveLength(1);
-    expect(accountlessWriteOps[0]).toMatchObject({ originSeq: 4 });
-    const accountlessFiles = new Map(initialFiles);
-    foldLogOps(accountlessFiles, accountlessWriteOps);
-    expect(filesFromAccumulator(accountlessFiles).map(({ path }) => path)).toEqual([
-      "docs/arrived.md",
-      "docs/shared.md",
+    const accountlessOps = accountlessDelta.ops as RelayOp[];
+    expect(accountlessDelta).toMatchObject({ nextCursor: 4, hasMore: false });
+    expect(accountlessOps).toEqual([
+      {
+        relaySeq: 4,
+        originSeq: 3,
+        opKind: "moment.append",
+        payload: {
+          operation: "write",
+          versionId: "main",
+          metadata: { origin: "sync" },
+          path: "docs/arrived.md",
+          payloadBeforeBlobSha256: null,
+          payloadAfterBlobSha256: arrivedSha,
+          payloadAfterPath: "docs/arrived.md",
+        },
+        recordedAtMs: 1_300,
+      },
     ]);
+
+    const current = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/current")),
+    );
+    const expectedFiles = [
+      {
+        path: "docs/arrived.md",
+        blobSha256: arrivedSha,
+        contentKind: "text",
+      },
+      {
+        path: "docs/shared.md",
+        blobSha256: seeded.sharedSha,
+        contentKind: "text",
+      },
+    ];
+    expect(current).toMatchObject({ files: expectedFiles, nextCursor: 4 });
+
+    const alreadyOpenFiles = new Map(initialFiles);
+    foldLogOps(alreadyOpenFiles, accountlessOps);
+    expect(filesFromAccumulator(alreadyOpenFiles)).toEqual(expectedFiles);
+
+    const fullReplay = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100")),
+    );
+    const freshFiles: FileAccumulator = new Map();
+    foldLogOps(freshFiles, fullReplay.ops as RelayOp[]);
+    expect(filesFromAccumulator(freshFiles)).toEqual(expectedFiles);
+
+    const serializedAccountless = JSON.stringify({
+      current,
+      delta: accountlessDelta,
+      fullReplay,
+    });
+    for (const privateValue of [
+      "private/hidden.md",
+      seeded.hiddenSha,
+      "object-2",
+      "moment-3",
+      "origin-a",
+    ]) {
+      expect(serializedAccountless).not.toContain(privateValue);
+    }
 
     const authenticatedInward = await json(
       await h(
@@ -1300,21 +3092,6 @@ describe("relay capability reads", () => {
       ),
     );
     expect(authenticatedInward.ops).toEqual([]);
-    const authenticatedWrite = await json(
-      await h(
-        request(
-          RECIPIENT,
-          `/sync/shares/share-0/log?since=${String(authenticatedInward.nextCursor)}&limit=1`,
-        ),
-      ),
-    );
-    const authenticatedWriteOps = authenticatedWrite.ops as RelayOp[];
-    const authenticatedFiles = new Map(initialFiles);
-    foldLogOps(authenticatedFiles, authenticatedWriteOps);
-    expect(filesFromAccumulator(authenticatedFiles).map(({ path }) => path)).toEqual([
-      "docs/arrived.md",
-      "docs/shared.md",
-    ]);
   });
 
   it("keeps a nested folder's visible name as its accountless root", async () => {
@@ -1701,6 +3478,47 @@ describe("relay capability reads", () => {
     expect(await currentBlob.text()).toBe("# after rotation\n");
   });
 
+  it("recreates a pre-reset path from empty current state after epoch rotation", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seedThenRotate(h);
+    const recreatedContent = "# recreated after reset\n";
+    const recreatedSha = await putBlob(h, recreatedContent);
+    await appendMoments(
+      h,
+      [
+        moment(0, "docs/shared.md", recreatedContent, 1_300, {
+          objectId: "object-recreated",
+        }),
+      ],
+      {
+        originId: "origin-b",
+        identity: { replicationEpoch: EPOCH_2, streamIdentity: STREAM_2 },
+      },
+    );
+
+    const current = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/current")),
+    );
+    expect(current.files).toEqual([{
+      path: "docs/shared.md",
+      blobSha256: recreatedSha,
+      contentKind: "text",
+    }]);
+    const recreatedBlob = await h(
+      linkRequest(seeded.capability, `/sync/link/blobs/${recreatedSha}`),
+    );
+    expect(recreatedBlob.status).toBe(200);
+    expect(await recreatedBlob.text()).toBe(recreatedContent);
+    expect(
+      await denialBytes(
+        await h(
+          linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`),
+        ),
+      ),
+    ).toBe(`404:${LINK_REFUSAL_BODY}`);
+  });
+
   it("refuses a path-shared blob after a later delete supersedes its file", async () => {
     const storage = await newStorage();
     const h = handler(storage);
@@ -1790,6 +3608,50 @@ describe("relay capability reads", () => {
     );
     expect(untouchedResponse.status).toBe(200);
     expect(await untouchedResponse.text()).toBe(untouched);
+  });
+
+  it("serves only the different object recreated at a selected path", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h);
+    const replacement = "# recreated object\n";
+    const replacementSha = await putBlob(h, replacement);
+    await appendMoments(h, [
+      moment(3, "docs/shared.md", "# shared\n", 1_300, {
+        objectId: "object-shared",
+        operation: "delete",
+        beforePath: "docs/shared.md",
+        beforeContent: "# shared\n",
+      }),
+      moment(4, "docs/shared.md", replacement, 1_400, {
+        objectId: "object-recreated",
+      }),
+    ]);
+
+    const missing = await denialBytes(
+      await h(
+        linkRequest(
+          seeded.capability,
+          `/sync/link/blobs/${sha256("missing")}`,
+        ),
+      ),
+    );
+    expect(
+      await denialBytes(
+        await h(
+          linkRequest(
+            seeded.capability,
+            `/sync/link/blobs/${seeded.sharedSha}`,
+          ),
+        ),
+      ),
+    ).toBe(missing);
+
+    const current = await h(
+      linkRequest(seeded.capability, `/sync/link/blobs/${replacementSha}`),
+    );
+    expect(current.status).toBe(200);
+    expect(await current.text()).toBe(replacement);
   });
 
   it("refuses a blob after its file moves outside a path selector", async () => {
@@ -1967,6 +3829,14 @@ describe("relay capability reads", () => {
     );
     expect(covered.status).toBe(200);
     expect(await covered.text()).toBe(snapshotContent);
+    const current = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/current")),
+    );
+    expect(current.files).toEqual([{
+      path: "docs/snapshot-only.md",
+      blobSha256: snapshotSha,
+      contentKind: "text",
+    }]);
     expect(
       await denialBytes(
         await h(
@@ -2174,7 +4044,7 @@ describe("relay capability reads", () => {
       ).status,
     ).toBe(200);
     expect(
-      await capabilityRefusalBody(await h(linkRequest(first.capability, "/sync/link/share"))),
+      await capabilityRefusalBody(await h(linkRequest(first.capability, "/sync/link/current"))),
     ).toBe(unknown);
 
     const secondLink = await json(
@@ -2210,7 +4080,7 @@ describe("relay capability reads", () => {
     ).toBe(200);
     expect(
       await capabilityRefusalBody(
-        await h(linkRequest(String(secondExchange.capabilityToken), "/sync/link/log")),
+        await h(linkRequest(String(secondExchange.capabilityToken), "/sync/link/current")),
       ),
     ).toBe(unknown);
 
@@ -2306,10 +4176,10 @@ describe("relay capability reads", () => {
     expect(metadata.lastSettledKnown).toBe(false);
   });
 
-  it("refuses a fallback blob when the forward walk exceeds the page budget", async () => {
+  it("serves a current blob without walking forward history", async () => {
     const pageSize = 2;
     const storage = await newStorage();
-    const h = handler(forceBlobFallback(storage), {
+    const h = handler(storage, {
       linkCapabilityReadFallbackPageSize: pageSize,
     });
     const seeded = await seed(h);
@@ -2327,70 +4197,16 @@ describe("relay capability reads", () => {
       ),
     );
 
-    expect(
-      await denialBytes(
-        await h(
-          linkRequest(
-            seeded.capability,
-            `/sync/link/blobs/${seeded.sharedSha}`,
-          ),
-        ),
-      ),
-    ).toBe(`404:${LINK_REFUSAL_BODY}`);
-  });
-
-  it("shares one fallback page budget across all blob candidates", async () => {
-    const pageSize = 2;
-    const storage = await newStorage();
-    let fallbackPages = 0;
-    const h = handler(
-      forceBlobFallback(storage, () => {
-        fallbackPages += 1;
-      }),
-      { linkCapabilityReadFallbackPageSize: pageSize },
-    );
-    const seeded = await seed(h);
-    const prefixNoise = Array.from({ length: 8 }, (_, index) =>
-      moment(
-        index + 3,
-        `private/blob-prefix-noise-${index}.md`,
-        "hidden\n",
-        1_300 + index,
-      ),
-    );
-    const suffixNoise = Array.from({ length: 19 }, (_, index) =>
-      moment(
-        index + 13,
-        `private/blob-suffix-noise-${index}.md`,
-        "hidden\n",
-        2_300 + index,
-      ),
-    );
-    await appendMoments(h, [
-      ...prefixNoise,
-      moment(11, "docs/decoy.md", "# shared\n", 2_100, {
-        objectId: "object-decoy-a",
-      }),
-      moment(12, "docs/decoy.md", "hidden\n", 2_200, {
-        objectId: "object-decoy-b",
-        beforePath: "docs/decoy.md",
-        beforeContent: "# shared\n",
-      }),
-      ...suffixNoise,
-    ]);
-    fallbackPages = 0;
-
     const response = await h(
       linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`),
     );
-
-    expect.soft(fallbackPages).toBe(LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET);
-    expect(await denialBytes(response)).toBe(`404:${LINK_REFUSAL_BODY}`);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("# shared\n");
   });
 
-  it("keeps freshness and fallback blobs unchanged when the log fits the page budget", async () => {
+  it("keeps freshness and materialized blobs unchanged when the log fits the page budget", async () => {
     const storage = await newStorage();
-    const h = handler(forceBlobFallback(storage), {
+    const h = handler(storage, {
       linkCapabilityReadFallbackPageSize: 2,
     });
     const seeded = await seed(h);
@@ -2673,5 +4489,154 @@ describe("relay capability reads", () => {
       error: "too many link reads",
       code: "link_read_rate_limited",
     });
+  });
+
+  it("keeps total blob egress on the grant across rotation and refills it", async () => {
+    expect(LINK_GRANT_EGRESS_BUCKET_CAPACITY_BYTES).toBe(5 * MAX_BLOB_BYTES);
+    expect(LINK_GRANT_EGRESS_REFILL_BYTES_PER_SECOND).toBe(
+      LINK_GRANT_EGRESS_BUCKET_CAPACITY_BYTES / (24 * 60 * 60),
+    );
+    let now = 2_000;
+    const storage = await newStorage();
+    const getBlob = vi.spyOn(storage, "getBlob");
+    const h = handler(storage, {
+      nowMs: () => now,
+      linkGrantEgressRateLimiter: new LinkEgressRateLimiter(18, 9, 10),
+    });
+    const seeded = await seed(h);
+    const blobPath = `/sync/link/blobs/${seeded.sharedSha}`;
+
+    for (let reads = 0; reads < 2; reads += 1) {
+      const response = await h(linkRequest(seeded.capability, blobPath));
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("# shared\n");
+    }
+    const exhausted = await h(linkRequest(seeded.capability, blobPath));
+    expect(exhausted.status).toBe(429);
+    expect(await json(exhausted)).toMatchObject({ code: "link_read_rate_limited" });
+    expect(getBlob).toHaveBeenCalledTimes(2);
+
+    const rotation = await json(
+      await h(
+        request(
+          OWNER,
+          `/sync/shares/share-0/links/${seeded.grantId}/rotate`,
+          jsonBody({ workspaceId: WORKSPACE, expectedDependentGrantIds: [] }),
+        ),
+      ),
+    );
+    const exchange = await json(
+      await h(
+        request(
+          null,
+          "/sync/link-exchange",
+          jsonBody({ secret: linkSecret(rotation.url) }),
+        ),
+      ),
+    );
+    expect(exchange.grantId).toBe(seeded.grantId);
+    const rotatedCapability = String(exchange.capabilityToken);
+    const stillExhausted = await h(linkRequest(rotatedCapability, blobPath));
+    expect(stillExhausted.status).toBe(429);
+    expect(await json(stillExhausted)).toMatchObject({
+      code: "link_read_rate_limited",
+    });
+    expect(getBlob).toHaveBeenCalledTimes(2);
+
+    now += 1_000;
+    const refilled = await h(linkRequest(rotatedCapability, blobPath));
+    expect(refilled.status).toBe(200);
+    expect(await refilled.text()).toBe("# shared\n");
+    expect(getBlob).toHaveBeenCalledTimes(3);
+  });
+
+  it("reserves exact metadata and log response bytes on the same grant", async () => {
+    const storage = await newStorage();
+    const budget = new LinkEgressRateLimiter(10_000, 1, 10);
+    const reserve = vi.spyOn(budget, "reserve");
+    const h = handler(storage, { linkGrantEgressRateLimiter: budget });
+    const seeded = await seed(h);
+
+    const metadata = await h(linkRequest(seeded.capability, "/sync/link/share"));
+    expect(metadata.status).toBe(200);
+    const metadataBody = await metadata.text();
+    const current = await h(linkRequest(seeded.capability, "/sync/link/current"));
+    expect(current.status).toBe(200);
+    const currentBody = await current.text();
+    const log = await h(linkRequest(seeded.capability, "/sync/link/log"));
+    expect(log.status).toBe(200);
+    const logBody = await log.text();
+
+    expect(reserve.mock.calls).toEqual([
+      [seeded.grantId, Buffer.byteLength(metadataBody), 2_000],
+      [seeded.grantId, Buffer.byteLength(currentBody), 2_000],
+      [seeded.grantId, Buffer.byteLength(logBody), 2_000],
+    ]);
+  });
+
+  it("keeps exhausted public link controls off the owner sync path", async () => {
+    const exchangeLimiter = new LinkExchangeRateLimiter(1, 0.000_001, 10);
+    const readLimiter = new LinkReadRateLimiter(1, 0.000_001, 10);
+    const grantReadLimiter = new LinkReadRateLimiter(1, 0.000_001, 10);
+    const logLimiter = new KeyIgnoringLinkReadRateLimiter(1, 0.000_001, 10);
+    const grantLogLimiter = new LinkReadRateLimiter(1, 0.000_001, 10);
+    const egressLimiter = new LinkEgressRateLimiter(9, 0.000_001, 10);
+    const limiterCalls = [
+      vi.spyOn(exchangeLimiter, "allow"),
+      vi.spyOn(readLimiter, "allow"),
+      vi.spyOn(grantReadLimiter, "allow"),
+      vi.spyOn(logLimiter, "allow"),
+      vi.spyOn(grantLogLimiter, "allow"),
+      vi.spyOn(egressLimiter, "reserve"),
+    ];
+    const storage = await newStorage();
+    const h = handler(storage, {
+      linkExchangeRateLimiter: exchangeLimiter,
+      linkReadRateLimiter: readLimiter,
+      linkGrantReadRateLimiter: grantReadLimiter,
+      linkLogReadRateLimiter: logLimiter,
+      linkGrantLogReadRateLimiter: grantLogLimiter,
+      linkGrantEgressRateLimiter: egressLimiter,
+    });
+    const seeded = await seed(h);
+    const blobPath = `/sync/link/blobs/${seeded.sharedSha}`;
+
+    const publicBlob = await h(linkRequest(seeded.capability, blobPath));
+    expect(publicBlob.status).toBe(200);
+    expect(await publicBlob.text()).toBe("# shared\n");
+    expect((await h(linkRequest(seeded.capability, blobPath))).status).toBe(429);
+    expect((await h(linkRequest(seeded.capability, "/sync/link/log"))).status).toBe(429);
+    expect(
+      (
+        await h(
+          request(null, "/sync/link-exchange", jsonBody({ secret: seeded.secret })),
+        )
+      ).status,
+    ).toBe(404);
+    const callsAfterPublicExhaustion = limiterCalls.map(
+      (spy) => spy.mock.calls.length,
+    );
+
+    const ownerContent = "# owner still syncing\n";
+    const ownerSha = await putBlob(h, ownerContent);
+    await appendMoments(h, [
+      moment(3, "docs/owner.md", ownerContent, 2_100, {
+        objectId: "object-owner",
+      }),
+    ]);
+    const ownerBlob = await h(
+      request(OWNER, `/sync/${WORKSPACE}/blobs/${ownerSha}`),
+    );
+    expect(ownerBlob.status).toBe(200);
+    expect(await ownerBlob.text()).toBe(ownerContent);
+    const ownerLog = await h(
+      request(OWNER, `/sync/${WORKSPACE}/log?since=0&limit=100`),
+    );
+    expect(ownerLog.status).toBe(200);
+    expect(((await json(ownerLog)).ops as unknown[]).length).toBeGreaterThan(0);
+
+    expect(limiterCalls.map((spy) => spy.mock.calls.length)).toEqual(
+      callsAfterPublicExhaustion,
+    );
   });
 });

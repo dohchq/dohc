@@ -76,6 +76,16 @@ pnpm dev:workspace-api
 pnpm --filter @dohc/sync-relay dev
 ```
 
+For a self-hosted browser viewer, copy `.env.self-host.example` to
+`.env.self-host`, replace every `change-me` value, and run
+`docker compose --env-file .env.self-host -f docker-compose.self-host.yml up`.
+The deployment runs one `share-web` instance and keeps relay state in the
+`dohc_self_host_sync_relay` volume. Read the
+[`share-web` operations contract](services/share-web/README.md) before making
+the viewer public. It defines the HTTPS proxy, exact Host and trusted-proxy
+settings, backup and restore procedure, log hygiene, retention, and v1 restart
+behavior.
+
 ## Repository map
 
 ```text

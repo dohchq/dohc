@@ -94,11 +94,12 @@ use dohc_engine_storage::{
     StorageError, TxnOutcome, WriteOutcome, hex_sha256, put_binary_blob, upsert_projection_job,
 };
 use dohc_engine_sync::{
-    ApplyOutcome, BlobDownloadRequest, BlobDownloadResponse, BlobHaveRequest, BlobHaveResponse,
-    BlobUploadRequest, ClaimRequest, ClaimResponse, ConflictApplyResult, EpochRequest,
-    EpochResponse, KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse, KeyEnvelopeRequest,
-    KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse, ProbeRequest, ProbeResponse,
-    PullRequest, PullResponse, PushRequest, PushResponse, RecoverResponse, RelayCursor, RelayError,
+    ApplyOutcome, BlobDownloadBatchRequest, BlobDownloadBatchResponse, BlobDownloadResponse,
+    BlobHaveRequest, BlobHaveResponse, BlobUploadRequest, ClaimRequest, ClaimResponse,
+    ConflictApplyResult, EpochRequest, EpochResponse, KeyEnvelopeDownloadRequest,
+    KeyEnvelopeDownloadResponse, KeyEnvelopeRequest, KeyEnvelopeResponse, LogCoordinateRequest,
+    LogCoordinateResponse, MAX_BLOB_DOWNLOAD_BATCH, ProbeRequest, ProbeResponse, PullRequest,
+    PullResponse, PushRequest, PushResponse, RecoverResponse, RelayCursor, RelayError,
     RelaySyncClient, RelayTransport, ReplicationEnvelope, ShareBlobRequest, ShareBlobUploadRequest,
     ShareCursor, ShareLogPushRequest, ShareProposalSubmitOutcome, ShareProposalSubmitRequest,
     ShareProposalSubmitResponse, ShareViewPullOutcome, ShareViewRequest, ShareViewResponse,
@@ -436,7 +437,7 @@ enum RelayIoRequest {
     RotateEpoch(EpochRequest),
     BlobsHave(BlobHaveRequest),
     UploadBlob(BlobUploadRequest),
-    DownloadBlob(BlobDownloadRequest),
+    DownloadBlobs(BlobDownloadBatchRequest),
     UploadKeyEnvelope(KeyEnvelopeRequest),
     DownloadKeyEnvelope(KeyEnvelopeDownloadRequest),
     SharedChannelPull(SharedChannelRequest),
@@ -457,7 +458,7 @@ enum RelayIoResponse {
     RotateEpoch(EpochResponse),
     BlobsHave(BlobHaveResponse),
     UploadBlob,
-    DownloadBlob(BlobDownloadResponse),
+    DownloadBlobs(BlobDownloadBatchResponse),
     UploadKeyEnvelope(KeyEnvelopeResponse),
     DownloadKeyEnvelope(KeyEnvelopeDownloadResponse),
     SharedChannelPull(SharedChannelResponse),
@@ -501,7 +502,7 @@ impl DeferredRelayTransport {
                 RelayIoRequest::Push(_)
                     | RelayIoRequest::ShareLogPush(_)
                     | RelayIoRequest::UploadBlob(_)
-                    | RelayIoRequest::DownloadBlob(_)
+                    | RelayIoRequest::DownloadBlobs(_)
                     | RelayIoRequest::UploadKeyEnvelope(_)
                     | RelayIoRequest::DownloadKeyEnvelope(_)
                     | RelayIoRequest::ShareBlob(_)
@@ -627,11 +628,11 @@ impl RelayTransport for DeferredRelayTransport {
     }
 
     relay_transport_method!(
-        download_blob,
-        BlobDownloadRequest,
-        DownloadBlob,
-        BlobDownloadResponse,
-        DownloadBlob
+        download_blobs,
+        BlobDownloadBatchRequest,
+        DownloadBlobs,
+        BlobDownloadBatchResponse,
+        DownloadBlobs
     );
     relay_transport_method!(
         upload_key_envelope,
@@ -776,14 +777,78 @@ mod deferred_relay_tests {
             .completed
             .iter()
             .filter_map(|(_, result)| match result {
-                Ok(RelayIoResponse::DownloadBlob(response))
-                | Ok(RelayIoResponse::ShareBlob(response)) => Some(response.bytes.len()),
+                Ok(RelayIoResponse::DownloadBlobs(response)) => Some(
+                    response
+                        .results
+                        .iter()
+                        .filter_map(|result| result.as_ref().ok())
+                        .map(|response| response.bytes.len())
+                        .sum(),
+                ),
+                Ok(RelayIoResponse::ShareBlob(response)) => Some(response.bytes.len()),
                 _ => None,
             })
             .sum::<usize>();
         assert_eq!(
             retained, 0,
             "persisted blob responses must be released before the RPC completes"
+        );
+    }
+
+    #[test]
+    fn completed_blob_batch_replays_in_request_order_and_releases_the_slot() {
+        let transport = DeferredRelayTransport::default();
+        let request = BlobDownloadBatchRequest {
+            workspace_id: "workspace".to_owned(),
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            blobs: vec![
+                dohc_engine_sync::BlobDownloadSpec {
+                    sha256: "a".repeat(64),
+                    limit_bytes: 5,
+                },
+                dohc_engine_sync::BlobDownloadSpec {
+                    sha256: "b".repeat(64),
+                    limit_bytes: 7,
+                },
+            ],
+        };
+
+        assert_eq!(
+            transport.download_blobs(request.clone()),
+            Err(RelayError::Local(RELAY_IO_PENDING.to_owned()))
+        );
+        assert_eq!(
+            transport.take_pending(),
+            Some(RelayIoRequest::DownloadBlobs(request.clone()))
+        );
+        let response = BlobDownloadBatchResponse {
+            results: vec![
+                Ok(BlobDownloadResponse {
+                    bytes: b"first".to_vec(),
+                }),
+                Err(RelayError::BlobMissing),
+            ],
+        };
+        transport.complete(
+            RelayIoRequest::DownloadBlobs(request.clone()),
+            Ok(RelayIoResponse::DownloadBlobs(response.clone())),
+        );
+
+        assert_eq!(
+            transport
+                .download_blobs(request)
+                .expect("replay completed blob batch"),
+            response
+        );
+        assert!(
+            transport
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .completed
+                .is_empty(),
+            "a consumed blob batch must release its ordered request and response"
         );
     }
 
@@ -883,6 +948,117 @@ mod deferred_relay_tests {
             scheduled, 4,
             "each distinct HTTP page adds one actor turn; replay does not schedule a quadratic number"
         );
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum BlobWorkerEvent {
+        Started(usize),
+        Completed(usize),
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blob_batch_fanout_is_bound_to_four_and_reassembles_request_order() {
+        use std::sync::{Condvar, mpsc};
+        use std::time::Duration;
+
+        fn release(gates: &[(Mutex<bool>, Condvar)], index: usize) {
+            let (released, condition) = &gates[index];
+            *released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+            condition.notify_one();
+        }
+
+        let gates = Arc::new(
+            (0..5)
+                .map(|_| (Mutex::new(false), Condvar::new()))
+                .collect::<Vec<_>>(),
+        );
+        let (events, event_rx) = mpsc::channel();
+        let worker_gates = Arc::clone(&gates);
+        let request = BlobDownloadBatchRequest {
+            workspace_id: "workspace".to_owned(),
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            blobs: (0..5)
+                .map(|index| dohc_engine_sync::BlobDownloadSpec {
+                    sha256: index.to_string(),
+                    limit_bytes: 1,
+                })
+                .collect(),
+        };
+        let task = tokio::spawn(execute_blob_download_batch(request, move |request| {
+            let index = request.blobs[0]
+                .sha256
+                .parse::<usize>()
+                .expect("test blob index");
+            events
+                .send(BlobWorkerEvent::Started(index))
+                .expect("started event");
+            let (released, condition) = &worker_gates[index];
+            let mut released = released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while !*released {
+                released = condition
+                    .wait(released)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+            events
+                .send(BlobWorkerEvent::Completed(index))
+                .expect("completed event");
+            Ok(BlobDownloadBatchResponse {
+                results: vec![Ok(BlobDownloadResponse {
+                    bytes: vec![u8::try_from(index).expect("test byte")],
+                })],
+            })
+        }));
+
+        let mut started = std::collections::BTreeSet::new();
+        for _ in 0..MAX_CONCURRENT_BLOB_DOWNLOADS {
+            match event_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("four workers start")
+            {
+                BlobWorkerEvent::Started(index) => {
+                    started.insert(index);
+                }
+                event => panic!("unexpected worker event: {event:?}"),
+            }
+        }
+        assert_eq!(started, [0, 1, 2, 3].into_iter().collect());
+        assert!(
+            event_rx.try_recv().is_err(),
+            "the fifth GET must wait for one of the first four"
+        );
+
+        release(&gates, 3);
+        assert_eq!(
+            event_rx.recv_timeout(Duration::from_secs(2)),
+            Ok(BlobWorkerEvent::Completed(3))
+        );
+        assert_eq!(
+            event_rx.recv_timeout(Duration::from_secs(2)),
+            Ok(BlobWorkerEvent::Started(4))
+        );
+        for index in [4, 2, 1, 0] {
+            release(&gates, index);
+            assert_eq!(
+                event_rx.recv_timeout(Duration::from_secs(2)),
+                Ok(BlobWorkerEvent::Completed(index))
+            );
+        }
+
+        let response = task
+            .await
+            .expect("batch task")
+            .expect("ordered batch response");
+        let bytes = response
+            .results
+            .into_iter()
+            .map(|result| result.expect("blob result").bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(bytes, vec![vec![0], vec![1], vec![2], vec![3], vec![4]]);
     }
 }
 
@@ -5648,12 +5824,8 @@ impl ActorHandle {
                         .ok_or(RuntimeError::Relay(RelayError::InvalidResponse))?;
                     let http_transport = Arc::clone(&http_transport);
                     let io_request = request.clone();
-                    let task = tokio::task::spawn_blocking(move || {
-                        execute_http_request(&http_transport, io_request)
-                    });
                     let result = tokio::select! {
-                        result = task => result
-                            .map_err(|_| RuntimeError::Relay(RelayError::Partitioned))?,
+                        result = execute_http_request(http_transport, io_request) => result,
                         () = token.cancelled() => return Err(RuntimeError::Cancelled),
                     };
                     transport.complete(request, result);
@@ -6934,7 +7106,90 @@ fn build_http_transport(
     }
 }
 
-fn execute_http_request(
+const MAX_CONCURRENT_BLOB_DOWNLOADS: usize = 4;
+
+async fn execute_http_request(
+    transport: Arc<HttpRelayTransport>,
+    request: RelayIoRequest,
+) -> Result<RelayIoResponse, RelayError> {
+    if let RelayIoRequest::DownloadBlobs(request) = request {
+        let download_transport = Arc::clone(&transport);
+        return execute_blob_download_batch(request, move |request| {
+            download_transport.download_blobs(request)
+        })
+        .await
+        .map(RelayIoResponse::DownloadBlobs);
+    }
+
+    tokio::task::spawn_blocking(move || execute_blocking_http_request(&transport, request))
+        .await
+        .map_err(|_| RelayError::Partitioned)?
+}
+
+/// Fan one deterministic bridge request into bounded blocking GETs. At the
+/// 20 MiB widest ceiling, four active bodies plus eight capped ordered replies
+/// bound blob bytes held here to 240 MiB, plus allocator and request overhead.
+async fn execute_blob_download_batch<F>(
+    request: BlobDownloadBatchRequest,
+    download: F,
+) -> Result<BlobDownloadBatchResponse, RelayError>
+where
+    F: Fn(BlobDownloadBatchRequest) -> Result<BlobDownloadBatchResponse, RelayError>
+        + Clone
+        + Send
+        + 'static,
+{
+    if request.blobs.is_empty() || request.blobs.len() > MAX_BLOB_DOWNLOAD_BATCH {
+        return Err(RelayError::InvalidResponse);
+    }
+
+    let result_count = request.blobs.len();
+    let mut results = vec![None; result_count];
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut next = 0;
+
+    while next < result_count || !tasks.is_empty() {
+        while next < result_count && tasks.len() < MAX_CONCURRENT_BLOB_DOWNLOADS {
+            let index = next;
+            let single = BlobDownloadBatchRequest {
+                workspace_id: request.workspace_id.clone(),
+                replication_epoch: request.replication_epoch.clone(),
+                stream_identity: request.stream_identity.clone(),
+                blobs: vec![request.blobs[index].clone()],
+            };
+            let download = download.clone();
+            tasks.spawn_blocking(move || {
+                let result = match download(single) {
+                    Ok(response) => {
+                        let mut results = response.results.into_iter();
+                        match (results.next(), results.next()) {
+                            (Some(result), None) => result,
+                            _ => Err(RelayError::InvalidResponse),
+                        }
+                    }
+                    Err(error) => Err(error),
+                };
+                (index, result)
+            });
+            next += 1;
+        }
+
+        let (index, result) = tasks
+            .join_next()
+            .await
+            .ok_or(RelayError::InvalidResponse)?
+            .map_err(|_| RelayError::Partitioned)?;
+        results[index] = Some(result);
+    }
+
+    let results = results
+        .into_iter()
+        .map(|result| result.ok_or(RelayError::InvalidResponse))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(BlobDownloadBatchResponse { results })
+}
+
+fn execute_blocking_http_request(
     transport: &HttpRelayTransport,
     request: RelayIoRequest,
 ) -> Result<RelayIoResponse, RelayError> {
@@ -6957,9 +7212,7 @@ fn execute_http_request(
         RelayIoRequest::UploadBlob(request) => transport
             .upload_blob(request)
             .map(|()| RelayIoResponse::UploadBlob),
-        RelayIoRequest::DownloadBlob(request) => transport
-            .download_blob(request)
-            .map(RelayIoResponse::DownloadBlob),
+        RelayIoRequest::DownloadBlobs(_) => Err(RelayError::InvalidResponse),
         RelayIoRequest::UploadKeyEnvelope(request) => transport
             .upload_key_envelope(request)
             .map(RelayIoResponse::UploadKeyEnvelope),

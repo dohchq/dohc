@@ -1,3 +1,6 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadShareWebConfig } from "./config";
 import {
@@ -99,6 +102,34 @@ afterEach(() => {
 });
 
 describe("share-web sessions", () => {
+  it("keeps valid and garbage viewer entries uniformly unindexable", async () => {
+    const viewerAssetsDir = await mkdtemp(join(tmpdir(), "dohc-share-web-unfurl-"));
+    try {
+      await writeFile(
+        join(viewerAssetsDir, "index.html"),
+        "<!doctype html><title>dohc shared work</title><main id=\"root\"></main>",
+      );
+      const handler = createShareWebHandler({
+        relayUrl: "http://relay.test",
+        publicHosts: new Set([HOST]),
+        fetchRelay: vi.fn(),
+        viewerAssetsDir,
+      });
+      const valid = await handler(
+        request("/s/abcdefghijkl", { headers: { "user-agent": "ExampleBot/1.0" } }),
+      );
+      const garbage = await handler(
+        request("/s/not-a-session", { headers: { "user-agent": "Mozilla/5.0" } }),
+      );
+
+      expect(valid.headers.get("x-robots-tag")).toBe("noindex, nofollow, noarchive");
+      expect(garbage.headers.get("x-robots-tag")).toBe("noindex, nofollow, noarchive");
+      expect(await valid.text()).toBe(await garbage.text());
+    } finally {
+      await rm(viewerAssetsDir, { recursive: true, force: true });
+    }
+  });
+
   it.each([
     {
       description: "a mixed-case configured host with a lowercase Host header",

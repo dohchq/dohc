@@ -6053,8 +6053,17 @@ impl RelayTransport for FakeRelay {
     fn upload_blob(&self, _req: BlobUploadRequest) -> Result<(), RelayError> {
         Ok(())
     }
-    fn download_blob(&self, _req: BlobDownloadRequest) -> Result<BlobDownloadResponse, RelayError> {
-        Err(RelayError::BlobMissing)
+    fn download_blobs(
+        &self,
+        req: BlobDownloadBatchRequest,
+    ) -> Result<BlobDownloadBatchResponse, RelayError> {
+        Ok(BlobDownloadBatchResponse {
+            results: req
+                .blobs
+                .iter()
+                .map(|_| Err(RelayError::BlobMissing))
+                .collect(),
+        })
     }
     fn upload_key_envelope(
         &self,
@@ -6132,7 +6141,10 @@ impl RelayTransport for KeyConflictRelay {
     fn upload_blob(&self, _req: BlobUploadRequest) -> Result<(), RelayError> {
         Err(RelayError::InvalidResponse)
     }
-    fn download_blob(&self, _req: BlobDownloadRequest) -> Result<BlobDownloadResponse, RelayError> {
+    fn download_blobs(
+        &self,
+        _req: BlobDownloadBatchRequest,
+    ) -> Result<BlobDownloadBatchResponse, RelayError> {
         Err(RelayError::InvalidResponse)
     }
     fn upload_key_envelope(
@@ -6236,6 +6248,7 @@ struct PagedRelay {
     blobs: BTreeMap<String, Vec<u8>>,
     coordinates: Mutex<BTreeMap<(String, i64), LogCoordinateResponse>>,
     pulls: Mutex<Vec<(i64, usize)>>,
+    download_batches: Mutex<Vec<BlobDownloadBatchRequest>>,
 }
 
 impl PagedRelay {
@@ -6252,6 +6265,7 @@ impl PagedRelay {
             blobs: BTreeMap::new(),
             coordinates: Mutex::new(BTreeMap::new()),
             pulls: Mutex::new(Vec::new()),
+            download_batches: Mutex::new(Vec::new()),
         }
     }
 
@@ -6347,12 +6361,27 @@ impl RelayTransport for PagedRelay {
         Ok(())
     }
 
-    fn download_blob(&self, req: BlobDownloadRequest) -> Result<BlobDownloadResponse, RelayError> {
-        self.blobs
-            .get(&req.sha256)
-            .cloned()
-            .map(|bytes| BlobDownloadResponse { bytes })
-            .ok_or(RelayError::BlobMissing)
+    fn download_blobs(
+        &self,
+        req: BlobDownloadBatchRequest,
+    ) -> Result<BlobDownloadBatchResponse, RelayError> {
+        self.download_batches
+            .lock()
+            .expect("blob download batches")
+            .push(req.clone());
+        Ok(BlobDownloadBatchResponse {
+            results: req
+                .blobs
+                .into_iter()
+                .map(|blob| {
+                    self.blobs
+                        .get(&blob.sha256)
+                        .cloned()
+                        .map(|bytes| BlobDownloadResponse { bytes })
+                        .ok_or(RelayError::BlobMissing)
+                })
+                .collect(),
+        })
     }
 
     fn upload_key_envelope(
@@ -6491,7 +6520,10 @@ impl RelayTransport for PagedShareRelay {
         Err(RelayError::InvalidResponse)
     }
 
-    fn download_blob(&self, _req: BlobDownloadRequest) -> Result<BlobDownloadResponse, RelayError> {
+    fn download_blobs(
+        &self,
+        _req: BlobDownloadBatchRequest,
+    ) -> Result<BlobDownloadBatchResponse, RelayError> {
         Err(RelayError::InvalidResponse)
     }
 
@@ -20634,6 +20666,177 @@ fn share_view_actor_replay_does_not_redownload_completed_blob_prefixes() {
         "MUTATION: fetching before the idempotency lookup redownloads the completed prefix"
     );
 }
+
+#[test]
+fn invalid_blob_in_batch_stops_before_later_collection_order_hydration() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let mut ordered = [
+        b"first batch blob".to_vec(),
+        b"middle batch blob".to_vec(),
+        b"last batch blob".to_vec(),
+    ]
+    .into_iter()
+    .map(|bytes| (dohc_engine_storage::hex_sha256(&bytes), bytes))
+    .collect::<Vec<_>>();
+    ordered.sort_by(|left, right| left.0.cmp(&right.0));
+    let snapshots = ordered
+        .iter()
+        .enumerate()
+        .map(|(index, (sha256, _))| {
+            shipped_text_snapshot(
+                &format!("batch-invalid-object-{index}"),
+                &format!("batch-invalid-{index}.md"),
+                sha256,
+            )
+        })
+        .collect();
+    let op = version_create_with_shipped_snapshots(
+        "batch-invalid-peer",
+        "batch-invalid-version",
+        snapshots,
+    );
+    let mut relay = PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: vec![op],
+            next_cursor: 1,
+            has_more: false,
+        },
+    )]);
+    relay
+        .blobs
+        .insert(ordered[0].0.clone(), ordered[0].1.clone());
+    relay.blobs.insert(
+        ordered[1].0.clone(),
+        b"wrong bytes for requested sha".to_vec(),
+    );
+    relay
+        .blobs
+        .insert(ordered[2].0.clone(), ordered[2].1.clone());
+    let client = RelaySyncClient::new(relay);
+
+    assert_eq!(
+        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000),
+        Err(RelayError::BlobInvalid)
+    );
+    let present = ordered
+        .iter()
+        .map(|(sha256, _)| {
+            engine
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM blobs WHERE sha256=?1",
+                        [sha256],
+                        |row| row.get::<_, i64>(0),
+                    )
+                })
+                .expect("blob presence")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        present,
+        vec![1, 0, 0],
+        "only the valid prefix before the earliest invalid response may hydrate"
+    );
+    let batches = client
+        .transport()
+        .download_batches
+        .lock()
+        .expect("blob download batches");
+    assert_eq!(batches.len(), 1);
+    assert_eq!(
+        batches[0]
+            .blobs
+            .iter()
+            .map(|blob| blob.sha256.as_str())
+            .collect::<Vec<_>>(),
+        ordered
+            .iter()
+            .map(|(sha256, _)| sha256.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(read_relay_cursor(&engine, "ws").expect("cursor").is_none());
+}
+
+#[test]
+fn crashed_blob_batch_reconstructs_the_same_request_after_reopen() {
+    let (_scratch, path, mut engine) = store();
+    seed_identity(&mut engine);
+    seed_replication_version(&mut engine, "main", "main");
+    let blobs = [
+        b"crash batch one".to_vec(),
+        b"crash batch two".to_vec(),
+        b"crash batch three".to_vec(),
+    ];
+    let snapshots = blobs
+        .iter()
+        .enumerate()
+        .map(|(index, bytes)| {
+            shipped_text_snapshot(
+                &format!("crash-batch-object-{index}"),
+                &format!("crash-batch-{index}.md"),
+                &dohc_engine_storage::hex_sha256(bytes),
+            )
+        })
+        .collect();
+    let op =
+        version_create_with_shipped_snapshots("crash-batch-peer", "crash-batch-version", snapshots);
+    let mut relay = PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: vec![op],
+            next_cursor: 1,
+            has_more: false,
+        },
+    )]);
+    for bytes in &blobs {
+        relay
+            .blobs
+            .insert(dohc_engine_storage::hex_sha256(bytes), bytes.clone());
+    }
+    let client = RelaySyncClient::new(relay);
+    let faults = ScriptedFaults::crash_at(FaultPoint::SyncBeforeBlobHydrateCommit);
+
+    assert_eq!(
+        client.pull_chat_workspace(&mut engine, "ws", faults.as_ref(), &NoLiveLeases, 1_000,),
+        Err(RelayError::Local("injected-crash".to_owned()))
+    );
+    drop(engine);
+    let mut reopened = EngineStore::open(&path, 2_000).expect("reopen after hydration crash");
+    assert!(matches!(
+        client.pull_chat_workspace(&mut reopened, "ws", faults.as_ref(), &NoLiveLeases, 2_000,),
+        Ok(SyncPassOutcome::Complete { .. })
+    ));
+
+    let batches = client
+        .transport()
+        .download_batches
+        .lock()
+        .expect("blob download batches");
+    assert_eq!(batches.len(), 2);
+    assert_eq!(
+        batches[0], batches[1],
+        "crash replay must reconstruct the same ordered sha and ceiling batch"
+    );
+    assert_eq!(batches[0].blobs.len(), blobs.len());
+    drop(batches);
+    for bytes in &blobs {
+        let sha256 = dohc_engine_storage::hex_sha256(bytes);
+        let present = reopened
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM blobs WHERE sha256=?1",
+                    [&sha256],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .expect("replayed blob presence");
+        assert_eq!(present, 1, "crash replay must hydrate every batch member");
+    }
+}
+
 #[test]
 fn relay_hydration_failure_mid_page_leaves_no_cursor_and_applies_nothing() {
     let (_scratch, _path, mut engine) = store();
@@ -20804,6 +21007,15 @@ fn pull_blob_existence_probe_does_not_read_and_rehash_present_content() {
         crate::relay::take_local_blob_bytes_call_count(),
         0,
         "MUTATION: using the blob reader as an existence probe reads and hashes present content"
+    );
+    assert!(
+        client
+            .transport()
+            .download_batches
+            .lock()
+            .expect("blob download batches")
+            .is_empty(),
+        "an all-present pull must not issue an empty or redundant download batch"
     );
 }
 

@@ -11,6 +11,7 @@ import {
   LinkReadRateLimiter,
   LINK_SESSION_RENEWAL_GRACE_MS,
   LINK_SESSION_TTL_MS,
+  mintLinkBearer,
   validateLinkCapability,
   verifyRelayExchangeKey,
 } from "./linkSecurity";
@@ -790,13 +791,12 @@ describe("Phase 2 owner link contract", () => {
     });
   });
 
-  it("mints on rotate but retunes View without minting or exposing credentials", async () => {
+  it("uses the 32-byte CSPRNG bearer seam for create and rotate", async () => {
     const storage = await newStorage();
     let bearerByte = 1;
     let credentialId = 0;
-    const newLinkBearer = vi.fn(() =>
-      Buffer.alloc(32, bearerByte++).toString("base64url"),
-    );
+    const random = vi.fn((size: number) => Buffer.alloc(size, bearerByte++));
+    const newLinkBearer = vi.fn(() => mintLinkBearer(random));
     const newId = vi.fn(() => `handler-credential-${credentialId++}`);
     const h = handler(storage, { newId, newLinkBearer });
     await seedFileShare(h);
@@ -806,6 +806,8 @@ describe("Phase 2 owner link contract", () => {
     const attachedSecret = linkSecret(attached.url);
     const grantId = String(attached.grantId);
     expect(JSON.stringify(attached).split(attachedSecret)).toHaveLength(2);
+    expect(random).toHaveBeenCalledTimes(1);
+    expect(random).toHaveBeenNthCalledWith(1, 32);
     newLinkBearer.mockClear();
     newId.mockClear();
 
@@ -820,6 +822,8 @@ describe("Phase 2 owner link contract", () => {
     const rotated = await json(rotateResponse);
     expect(rotated).not.toHaveProperty("secret");
     expect(newLinkBearer).toHaveBeenCalledTimes(1);
+    expect(random).toHaveBeenCalledTimes(2);
+    expect(random).toHaveBeenNthCalledWith(2, 32);
     expect(newId).toHaveBeenCalledTimes(1);
     const rotatedSecret = linkSecret(rotated.url);
     expect(rotatedSecret).not.toBe(attachedSecret);

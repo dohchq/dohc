@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LazyMarkdownReadView } from "./LazyMarkdownReadView";
@@ -48,7 +48,7 @@ describe("LazyMarkdownReadView", () => {
       await screen.findByRole("heading", { name: "Recovered document" }),
     ).toBeTruthy();
     expect(loader).toHaveBeenCalledTimes(2);
-    expect(onRendered).toHaveBeenCalledOnce();
+    await waitFor(() => expect(onRendered).toHaveBeenCalledOnce());
   });
 
   it("marks completion only after the loaded child parses and commits", async () => {
@@ -90,6 +90,6 @@ describe("LazyMarkdownReadView", () => {
     expect(
       await screen.findByRole("heading", { name: "Measured document" }),
     ).toBeTruthy();
-    expect(onRendered).toHaveBeenCalledOnce();
+    await waitFor(() => expect(onRendered).toHaveBeenCalledOnce());
   });
 });

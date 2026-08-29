@@ -44,6 +44,8 @@ The hostname must resolve to `127.0.0.1`. A self-signed certificate and a local
 trust-store change do not satisfy the release transport. The runner terminates
 TLS in a local proxy and forwards every request to the real HTTP relay. It
 records the certificate fingerprint and validity period, but never the key.
+Set `--relay-latency-ms` to delay each proxied relay response by that many
+milliseconds. Omit the flag, or set it to `0`, to leave responses unchanged.
 
 ## Check the plumbing
 

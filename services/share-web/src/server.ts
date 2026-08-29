@@ -4,8 +4,15 @@ import { extname, join } from "node:path";
 
 export const LINK_SESSION_HEADER = "x-dohc-link-session";
 export const SHARE_WEB_CSP =
-  "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; " +
+  "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; " +
   "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+export const SHARE_WEB_SECURITY_HEADERS = Object.freeze({
+  "content-security-policy": SHARE_WEB_CSP,
+  "referrer-policy": "no-referrer",
+  "x-content-type-options": "nosniff",
+  "x-robots-tag": "noindex, nofollow, noarchive",
+  "cache-control": "private, no-store",
+});
 
 const REFUSAL_BODY = JSON.stringify({ ok: false, error: "not found" });
 const MAX_EXCHANGE_BODY_BYTES = 8 * 1024;
@@ -240,21 +247,19 @@ function cookieName(discriminator: string): string {
   return `dohc_share_${discriminator}`;
 }
 
-function securityHeaders(): Headers {
-  return new Headers({
-    "content-security-policy": SHARE_WEB_CSP,
-    "referrer-policy": "no-referrer",
-    "x-content-type-options": "nosniff",
-    "cache-control": "private, no-store",
-  });
+function securityHeaders(init: HeadersInit = {}): Headers {
+  const headers = new Headers(init);
+  for (const [key, value] of Object.entries(SHARE_WEB_SECURITY_HEADERS)) {
+    headers.set(key, value);
+  }
+  return headers;
 }
 
 function response(
   body: BodyInit | null,
   init: { status?: number; headers?: HeadersInit } = {},
 ): Response {
-  const headers = securityHeaders();
-  for (const [key, value] of new Headers(init.headers)) headers.set(key, value);
+  const headers = securityHeaders(init.headers);
   return new Response(body, { status: init.status ?? 200, headers });
 }
 
@@ -402,6 +407,8 @@ function contentTypeForAsset(path: string): string {
       return "text/javascript; charset=utf-8";
     case ".map":
       return "application/json";
+    case ".woff2":
+      return "font/woff2";
     default:
       return "application/octet-stream";
   }
@@ -802,6 +809,8 @@ export function createShareWebHandler({
       let relayPath: string | null = null;
       if (request.method === "GET" && pathname === "/api/view/meta") {
         relayPath = "/sync/link/share";
+      } else if (request.method === "GET" && pathname === "/api/view/current") {
+        relayPath = "/sync/link/current";
       } else if (request.method === "GET" && pathname === "/api/view/log") {
         relayPath = `/sync/link/log${search}`;
       } else if (request.method === "GET" && pathname.startsWith("/api/view/blob/")) {

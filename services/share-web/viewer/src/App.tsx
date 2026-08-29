@@ -1,4 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Component,
+  lazy,
+  Suspense,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { parsePublicExcalidrawScene } from "./excalidraw";
 import { useImageRetryHandlers } from "./imageRetry";
 import { MarkdownContent } from "./MarkdownContent";
 import {
@@ -7,8 +18,10 @@ import {
   RETRY_MAX_MS,
 } from "./retry";
 import {
+  accumulatorFromCurrentFiles,
   filesFromAccumulator,
   foldLogOps,
+  isExcalidraw,
   isMarkdown,
   isRasterImage,
   isSvg,
@@ -19,6 +32,23 @@ import {
   type SharedFile,
   type ViewMeta,
 } from "./model";
+
+const ExcalidrawView = lazy(() => import("./ExcalidrawView"));
+
+class ExcalidrawRenderBoundary extends Component<
+  { children: ReactNode; fallback: ReactNode },
+  { failed: boolean }
+> {
+  state = { failed: false };
+
+  static getDerivedStateFromError(): { failed: true } {
+    return { failed: true };
+  }
+
+  render(): ReactNode {
+    return this.state.failed ? this.props.fallback : this.props.children;
+  }
+}
 
 const SESSION_HEADER = "x-dohc-link-session";
 const SESSION_PATH = /^\/s\/([A-Za-z0-9_-]{12})\/?$/u;
@@ -49,9 +79,19 @@ interface LoadedLog {
   epochLogFloor: number;
 }
 
+interface LoadedCurrentState extends LoadedLog {
+  meta: ViewMeta;
+}
+
 class ViewResponseError extends Error {
   constructor(readonly status: number) {
     super("refused");
+  }
+}
+
+class EpochFloorChangedError extends Error {
+  constructor() {
+    super("epoch floor changed");
   }
 }
 
@@ -212,6 +252,7 @@ export async function loadLog(
   fileAccumulator: FileAccumulator,
   maxPages?: number,
   signal?: AbortSignal,
+  expectedEpochLogFloor?: number,
 ): Promise<LoadedLog> {
   let cursor = initialCursor;
   let pageNumber = 0;
@@ -232,7 +273,9 @@ export async function loadLog(
     };
     if (
       !Array.isArray(page.ops) ||
+      page.ops.some((op) => !relayOp(op)) ||
       typeof page.nextCursor !== "number" ||
+      typeof page.hasMore !== "boolean" ||
       typeof page.epochLogFloor !== "number" ||
       !Number.isSafeInteger(page.epochLogFloor) ||
       page.epochLogFloor < 0
@@ -246,13 +289,23 @@ export async function loadLog(
     ) {
       throw new Error("refused");
     }
+    let previousRelaySeq = cursor;
+    for (const op of page.ops as RelayOp[]) {
+      if (op.relaySeq <= previousRelaySeq || op.relaySeq > page.nextCursor) {
+        throw new Error("refused");
+      }
+      previousRelaySeq = op.relaySeq;
+    }
+    if (
+      expectedEpochLogFloor !== undefined &&
+      page.epochLogFloor !== expectedEpochLogFloor
+    ) {
+      throw new EpochFloorChangedError();
+    }
     if (foldEpochLogFloor === undefined) {
       foldEpochLogFloor = page.epochLogFloor;
     } else if (page.epochLogFloor !== foldEpochLogFloor) {
-      fileAccumulator = new Map();
-      cursor = page.epochLogFloor;
-      foldEpochLogFloor = page.epochLogFloor;
-      continue;
+      throw new EpochFloorChangedError();
     }
     foldLogOps(fileAccumulator, page.ops as RelayOp[]);
     if (page.hasMore !== true) {
@@ -263,6 +316,106 @@ export async function loadLog(
       };
     }
     cursor = page.nextCursor;
+  }
+  throw new Error("refused");
+}
+
+function relayOp(value: unknown): value is RelayOp {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.relaySeq === "number" &&
+    Number.isSafeInteger(record.relaySeq) &&
+    record.relaySeq >= 0 &&
+    (record.opKind === "workspace.init" ||
+      record.opKind === "moment.append" ||
+      record.opKind === "version.create") &&
+    typeof record.recordedAtMs === "number" &&
+    Number.isSafeInteger(record.recordedAtMs)
+  );
+}
+
+function viewMeta(value: unknown): ViewMeta | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const selector = record.effectiveSelector;
+  if (!selector || typeof selector !== "object" || Array.isArray(selector)) return null;
+  const selectorRecord = selector as Record<string, unknown>;
+  if (
+    record.access !== "view" ||
+    selectorRecord.access !== "view" ||
+    !Array.isArray(selectorRecord.paths) ||
+    selectorRecord.paths.some((path) => typeof path !== "string") ||
+    (selectorRecord.versionId !== null && typeof selectorRecord.versionId !== "string") ||
+    typeof record.lastSettledKnown !== "boolean" ||
+    (record.lastSettledAtMs !== null &&
+      (typeof record.lastSettledAtMs !== "number" ||
+        !Number.isSafeInteger(record.lastSettledAtMs)))
+  ) {
+    return null;
+  }
+  return {
+    access: "view",
+    effectiveSelector: {
+      paths: selectorRecord.paths as string[],
+      versionId: selectorRecord.versionId as string | null,
+      access: "view",
+    },
+    lastSettledAtMs: record.lastSettledAtMs as number | null,
+    lastSettledKnown: record.lastSettledKnown,
+  };
+}
+
+async function loadCurrentProjection(
+  session: string,
+  signal?: AbortSignal,
+): Promise<LoadedCurrentState> {
+  const response = await apiWithThrottleRetry(session, "/api/view/current", signal);
+  if (!response.ok) throw new ViewResponseError(response.status);
+  const body = await response.json() as Record<string, unknown>;
+  const meta = viewMeta(body);
+  const fileAccumulator = accumulatorFromCurrentFiles(body.files);
+  if (
+    body.ok !== true ||
+    !fileAccumulator ||
+    typeof body.nextCursor !== "number" ||
+    !Number.isSafeInteger(body.nextCursor) ||
+    body.nextCursor < 0 ||
+    typeof body.epochLogFloor !== "number" ||
+    !Number.isSafeInteger(body.epochLogFloor) ||
+    body.epochLogFloor < 0 ||
+    body.nextCursor < body.epochLogFloor ||
+    !meta
+  ) {
+    throw new Error("refused");
+  }
+  return {
+    meta,
+    fileAccumulator,
+    nextCursor: body.nextCursor,
+    epochLogFloor: body.epochLogFloor,
+  };
+}
+
+export async function loadCurrentState(
+  session: string,
+  signal?: AbortSignal,
+): Promise<LoadedCurrentState> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const projection = await loadCurrentProjection(session, signal);
+    try {
+      const caughtUp = await loadLog(
+        session,
+        projection.nextCursor,
+        projection.fileAccumulator,
+        MAX_LOG_PAGES,
+        signal,
+        projection.epochLogFloor,
+      );
+      return { ...caughtUp, meta: projection.meta };
+    } catch (error: unknown) {
+      if (!(error instanceof EpochFloorChangedError)) throw error;
+    }
   }
   throw new Error("refused");
 }
@@ -439,22 +592,25 @@ function FileView(props: {
   onSelect: (path: string) => void;
   onStaleBlob: (path: string, blobSha256: string) => Promise<boolean>;
 }) {
-  const [markdown, setMarkdown] = useState<string | null>(null);
-  const [markdownTooLarge, setMarkdownTooLarge] = useState(false);
+  const [previewText, setPreviewText] = useState<string | null>(null);
+  const [previewTooLarge, setPreviewTooLarge] = useState(false);
   const [fileStatus, setFileStatus] = useState<
     "ready" | "refreshing" | "unavailable"
   >("ready");
   const rendersMarkdown = props.file.contentKind === "text" && isMarkdown(props.file.path);
+  const rendersExcalidraw =
+    props.file.contentKind === "text" && isExcalidraw(props.file.path);
+  const rendersTextPreview = rendersMarkdown || rendersExcalidraw;
   const fileMap = useMemo(
     () => new Map(props.files.map((file) => [file.path, file])),
     [props.files],
   );
   useEffect(() => {
     let current = true;
-    setMarkdown(null);
-    setMarkdownTooLarge(false);
+    setPreviewText(null);
+    setPreviewTooLarge(false);
     setFileStatus("ready");
-    if (!rendersMarkdown) return () => { current = false; };
+    if (!rendersTextPreview) return () => { current = false; };
     const abortController = new AbortController();
     void apiWithThrottleRetry(
       props.session,
@@ -466,9 +622,9 @@ function FileView(props: {
         const preview = await readMarkdownPreview(response);
         if (!current) return;
         if (preview.status === "too-large") {
-          setMarkdownTooLarge(true);
+          setPreviewTooLarge(true);
         } else {
-          setMarkdown(preview.markdown);
+          setPreviewText(preview.markdown);
         }
       })
       .catch(async (error: unknown) => {
@@ -495,7 +651,7 @@ function FileView(props: {
     props.file.path,
     props.onStaleBlob,
     props.session,
-    rendersMarkdown,
+    rendersTextPreview,
   ]);
 
   if (fileStatus !== "ready") {
@@ -508,13 +664,13 @@ function FileView(props: {
     );
   }
   if (rendersMarkdown) {
-    if (markdownTooLarge) {
+    if (previewTooLarge) {
       return <DownloadCard file={props.file} session={props.session} />;
     }
-    if (markdown === null) return <p className="muted">Loading file</p>;
+    if (previewText === null) return <p className="muted">Loading file</p>;
     return (
       <MarkdownContent
-        markdown={markdown}
+        markdown={previewText}
         resolveImage={(href) =>
           resolveSharedImage(href, props.file.path, fileMap, props.session)
         }
@@ -523,6 +679,24 @@ function FileView(props: {
         }
         onNavigate={props.onSelect}
       />
+    );
+  }
+  if (rendersExcalidraw) {
+    if (previewTooLarge) {
+      return <DownloadCard file={props.file} session={props.session} />;
+    }
+    if (previewText === null) return <p className="muted">Loading file</p>;
+    const scene = parsePublicExcalidrawScene(previewText);
+    if (!scene) return <DownloadCard file={props.file} session={props.session} />;
+    return (
+      <ExcalidrawRenderBoundary
+        key={props.file.blobSha256}
+        fallback={<DownloadCard file={props.file} session={props.session} />}
+      >
+        <Suspense fallback={<p className="muted">Loading file</p>}>
+          <ExcalidrawView scene={scene} />
+        </Suspense>
+      </ExcalidrawRenderBoundary>
     );
   }
   if (isRasterImage(props.file.path)) {
@@ -816,17 +990,14 @@ export function App() {
     void (async () => {
       try {
         const session = await establishSession(controller.signal);
-        const [meta, log] = await Promise.all([
-          loadMeta(session, controller.signal),
-          loadLog(session, 0, new Map(), MAX_LOG_PAGES, controller.signal),
-        ]);
+        const log = await loadCurrentState(session, controller.signal);
         const files = filesFromAccumulator(log.fileAccumulator);
         if (current) {
           setSelectedPath(files[0]?.path ?? "");
           setState({
             status: "ready",
             session,
-            meta,
+            meta: log.meta,
             fileAccumulator: log.fileAccumulator,
             files,
             nextCursor: log.nextCursor,
@@ -880,26 +1051,17 @@ export function App() {
               fileAccumulator,
               MAX_LOG_PAGES,
               controller.signal,
+              previous.epochLogFloor,
             ),
           ]);
-          if (!current) return null;
-          const currentLog = log.epochLogFloor === previous.epochLogFloor
-            ? log
-            : await loadLog(
-                readySession,
-                log.epochLogFloor,
-                new Map(),
-                MAX_LOG_PAGES,
-                controller.signal,
-              );
           if (!current) return null;
           const nextState: ReadyState = {
             ...previous,
             meta,
-            fileAccumulator: currentLog.fileAccumulator,
-            files: filesFromAccumulator(currentLog.fileAccumulator),
-            nextCursor: currentLog.nextCursor,
-            epochLogFloor: currentLog.epochLogFloor,
+            fileAccumulator: log.fileAccumulator,
+            files: filesFromAccumulator(log.fileAccumulator),
+            nextCursor: log.nextCursor,
+            epochLogFloor: log.epochLogFloor,
           };
           readyStateRef.current = nextState;
           setState((value) =>
@@ -909,6 +1071,29 @@ export function App() {
           );
           return nextState;
         } catch (error: unknown) {
+          if (error instanceof EpochFloorChangedError) {
+            try {
+              const reloaded = await loadCurrentState(readySession, controller.signal);
+              if (!current) return null;
+              const nextState: ReadyState = {
+                ...previous,
+                meta: reloaded.meta,
+                fileAccumulator: reloaded.fileAccumulator,
+                files: filesFromAccumulator(reloaded.fileAccumulator),
+                nextCursor: reloaded.nextCursor,
+                epochLogFloor: reloaded.epochLogFloor,
+              };
+              readyStateRef.current = nextState;
+              setState((value) =>
+                value.status === "ready" && value.session === readySession
+                  ? nextState
+                  : value
+              );
+              return nextState;
+            } catch (reloadError: unknown) {
+              error = reloadError;
+            }
+          }
           if (
             current &&
             error instanceof ViewResponseError &&

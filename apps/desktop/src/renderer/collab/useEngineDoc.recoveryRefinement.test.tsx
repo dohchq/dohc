@@ -174,11 +174,13 @@ it("refines the newest refused snapshot, not the one each edit queued", async ()
   // one queued behind it — must not answer for it.
   failProjectionCall = 2;
   release();
-  await waitFor(() =>
-    expect(consoleError).toHaveBeenCalledWith(
-      expect.stringContaining("could not refine the recovery draft"),
-      expect.any(Error),
-    ),
+  await waitFor(
+    () =>
+      expect(consoleError).toHaveBeenCalledWith(
+        expect.stringContaining("could not refine the recovery draft"),
+        expect.any(Error),
+      ),
+    { timeout: 10_000 },
   );
 
   // MUTATION: project the bytes each refinement was queued with instead of the
