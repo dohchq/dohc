@@ -1556,6 +1556,7 @@ mod tests {
         let request_cancelled = Arc::clone(&cancelled);
         let checks = Arc::new(AtomicUsize::new(0));
         let request_checks = Arc::clone(&checks);
+        const MID_BODY_CHECK_THRESHOLD: usize = 7;
         let request_thread = thread::spawn(move || {
             let outcome = transport.download_blobs_cancellable(
                 BlobDownloadBatchRequest {
@@ -1569,8 +1570,8 @@ mod tests {
                 },
                 || {
                     let cancelled = request_cancelled.load(Ordering::SeqCst);
-                    let check = request_checks.fetch_add(1, Ordering::SeqCst);
-                    if check == 6 {
+                    let check_count = request_checks.fetch_add(1, Ordering::SeqCst) + 1;
+                    if check_count >= MID_BODY_CHECK_THRESHOLD {
                         mid_body_tx.send(()).expect("mid-body signal");
                     }
                     cancelled

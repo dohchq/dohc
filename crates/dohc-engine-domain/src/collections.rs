@@ -310,6 +310,7 @@ pub enum FieldValueReasonCode {
     ExpectedText,
     ExpectedNumber,
     NumberNotFinite,
+    UnsupportedTag,
     ExpectedBoolean,
     ExpectedSequence,
     InvalidDate,
@@ -1184,6 +1185,24 @@ fn yaml_value_is_non_finite_number(value: &YamlOwned) -> bool {
     }
 }
 
+fn yaml_value_has_unsupported_tag(value: &YamlOwned) -> bool {
+    match value {
+        YamlOwned::Tagged(tag, value) => {
+            !(tag.is_yaml_core_schema()
+                && matches!(
+                    tag.suffix.as_str(),
+                    "str" | "seq" | "map" | "null" | "bool" | "int" | "float"
+                ))
+                || yaml_value_has_unsupported_tag(value)
+        }
+        YamlOwned::Sequence(values) => values.iter().any(yaml_value_has_unsupported_tag),
+        YamlOwned::Mapping(mapping) => mapping.iter().any(|(key, value)| {
+            yaml_value_has_unsupported_tag(key) || yaml_value_has_unsupported_tag(value)
+        }),
+        _ => false,
+    }
+}
+
 fn yaml_to_json(value: &YamlOwned) -> Value {
     match value {
         YamlOwned::Value(ScalarOwned::Null) => Value::Null,
@@ -1222,6 +1241,7 @@ struct ParsedMarkdownFrontmatter<'a> {
     value: Value,
     body: &'a str,
     non_finite_fields: HashSet<String>,
+    unsupported_tag_fields: HashSet<String>,
 }
 
 fn parse_markdown_frontmatter(markdown: &str) -> Option<ParsedMarkdownFrontmatter<'_>> {
@@ -1232,6 +1252,7 @@ fn parse_markdown_frontmatter(markdown: &str) -> Option<ParsedMarkdownFrontmatte
             value: Value::Object(serde_json::Map::new()),
             body: markdown,
             non_finite_fields: HashSet::new(),
+            unsupported_tag_fields: HashSet::new(),
         });
     }
     let yaml_start = first.len();
@@ -1256,7 +1277,7 @@ fn parse_markdown_frontmatter(markdown: &str) -> Option<ParsedMarkdownFrontmatte
         [document] => Some(document),
         _ => return None,
     };
-    let (value, non_finite_fields) = if let Some(document) = document {
+    let (value, non_finite_fields, unsupported_tag_fields) = if let Some(document) = document {
         if let Some(mapping) = document.as_mapping() {
             let non_finite_fields = mapping
                 .iter()
@@ -1266,19 +1287,40 @@ fn parse_markdown_frontmatter(markdown: &str) -> Option<ParsedMarkdownFrontmatte
                         .flatten()
                 })
                 .collect();
-            (yaml_to_json(document), non_finite_fields)
+            let unsupported_tag_fields = mapping
+                .iter()
+                .filter_map(|(key, value)| {
+                    yaml_value_has_unsupported_tag(value)
+                        .then(|| yaml_key_text(key))
+                        .flatten()
+                })
+                .collect();
+            (
+                yaml_to_json(document),
+                non_finite_fields,
+                unsupported_tag_fields,
+            )
         } else if document.is_null() && yaml_is_empty {
-            (Value::Object(serde_json::Map::new()), HashSet::new())
+            (
+                Value::Object(serde_json::Map::new()),
+                HashSet::new(),
+                HashSet::new(),
+            )
         } else {
             return None;
         }
     } else {
-        (Value::Object(serde_json::Map::new()), HashSet::new())
+        (
+            Value::Object(serde_json::Map::new()),
+            HashSet::new(),
+            HashSet::new(),
+        )
     };
     Some(ParsedMarkdownFrontmatter {
         value,
         body: &markdown[body_start..],
         non_finite_fields,
+        unsupported_tag_fields,
     })
 }
 
@@ -1430,7 +1472,20 @@ fn validation_columns(
     field: Option<&FieldDefinition>,
     value: &Value,
     non_finite_number: bool,
+    unsupported_tag: bool,
 ) -> Result<(&'static str, Option<String>), crate::DomainError> {
+    if unsupported_tag {
+        let reason = FieldValueReason {
+            code: FieldValueReasonCode::UnsupportedTag,
+            path: String::new(),
+        };
+        return Ok((
+            "flagged",
+            Some(serde_json::to_string(&reason).map_err(|error| {
+                crate::DomainError::Storage(StorageError::persist_public(error))
+            })?),
+        ));
+    }
     let Some(field) = field else {
         return Ok(("untyped", None));
     };
@@ -1502,8 +1557,11 @@ fn insert_relation_edges(
 }
 
 #[derive(Clone, Copy)]
-enum NonFiniteFieldProvenance<'a> {
-    Parsed(&'a HashSet<String>),
+enum FieldProvenance<'a> {
+    Parsed {
+        non_finite_fields: &'a HashSet<String>,
+        unsupported_tag_fields: &'a HashSet<String>,
+    },
     PreserveStored,
 }
 
@@ -1514,21 +1572,21 @@ fn replace_index_for_record(
     record_id: &str,
     schema: &CollectionSchema,
     frontmatter: &Value,
-    non_finite_provenance: NonFiniteFieldProvenance<'_>,
+    field_provenance: FieldProvenance<'_>,
 ) -> Result<(), crate::DomainError> {
     let index_initialized = frontmatter.as_object().is_some_and(|values| {
         values
             .keys()
             .any(|field_name| field_name != RECORD_ID_FRONTMATTER_KEY)
     });
-    let mut non_finite_fields = match non_finite_provenance {
-        NonFiniteFieldProvenance::Parsed(fields) => fields.clone(),
-        NonFiniteFieldProvenance::PreserveStored => HashSet::new(),
+    let (mut non_finite_fields, mut unsupported_tag_fields) = match field_provenance {
+        FieldProvenance::Parsed {
+            non_finite_fields,
+            unsupported_tag_fields,
+        } => (non_finite_fields.clone(), unsupported_tag_fields.clone()),
+        FieldProvenance::PreserveStored => (HashSet::new(), HashSet::new()),
     };
-    if matches!(
-        non_finite_provenance,
-        NonFiniteFieldProvenance::PreserveStored
-    ) {
+    if matches!(field_provenance, FieldProvenance::PreserveStored) {
         let mut statement = conn
             .prepare(
                 "SELECT field_name,value_json,validation_reason_json \
@@ -1564,6 +1622,8 @@ fn replace_index_for_record(
             })?;
             if reason.code == FieldValueReasonCode::NumberNotFinite {
                 non_finite_fields.insert(field_name);
+            } else if reason.code == FieldValueReasonCode::UnsupportedTag {
+                unsupported_tag_fields.insert(field_name);
             }
         }
     }
@@ -1590,8 +1650,12 @@ fn replace_index_for_record(
                 continue;
             }
             let field = fields.get(field_name.as_str()).copied();
-            let (validation_status, validation_reason_json) =
-                validation_columns(field, value, non_finite_fields.contains(field_name))?;
+            let (validation_status, validation_reason_json) = validation_columns(
+                field,
+                value,
+                non_finite_fields.contains(field_name),
+                unsupported_tag_fields.contains(field_name),
+            )?;
             conn.execute(
                 "INSERT INTO collection_record_fields \
                  (workspace_id,version_id,record_id,field_name,value_json, \
@@ -1608,7 +1672,9 @@ fn replace_index_for_record(
                 ],
             )
             .map_err(crate::DomainError::sql_persist)?;
-            if let Some(field) = field {
+            if let Some(field) = field
+                && !unsupported_tag_fields.contains(field_name)
+            {
                 insert_relation_edges(conn, workspace_id, version_id, record_id, field, value)?;
             }
         }
@@ -1709,7 +1775,7 @@ pub fn synchronize_collection_frontmatter_index_in_tx(
         &record_id,
         &schema,
         frontmatter,
-        NonFiniteFieldProvenance::PreserveStored,
+        FieldProvenance::PreserveStored,
     )
 }
 
@@ -1849,7 +1915,7 @@ pub fn index_collection_frontmatter_apply_in_tx(
         &record_id,
         &schema,
         after,
-        NonFiniteFieldProvenance::PreserveStored,
+        FieldProvenance::PreserveStored,
     )
 }
 
@@ -1904,7 +1970,7 @@ fn revalidate_collection_index_in_tx(
             &record_id,
             schema,
             &Value::Object(values),
-            NonFiniteFieldProvenance::PreserveStored,
+            FieldProvenance::PreserveStored,
         )?;
     }
     Ok(())
@@ -2187,6 +2253,12 @@ pub fn reconcile_collections_in_tx(
 ) -> Result<CollectionReconcileResult, crate::DomainError> {
     let snapshots = load_collection_snapshots(tx, workspace_id, version_id)?;
     let existing = load_record_bindings(tx, workspace_id, version_id)?;
+    let mut existing_by_object_id = HashMap::with_capacity(existing.len());
+    for binding in &existing {
+        existing_by_object_id
+            .entry(binding.object_id.as_str())
+            .or_insert(binding);
+    }
     let mut declined_adoption_paths = Vec::new();
     {
         let mut statement = tx
@@ -2304,10 +2376,9 @@ pub fn reconcile_collections_in_tx(
         .collect();
     let mut present_malformed_owners = HashMap::new();
     for snapshot in &present_malformed_records {
-        let existing_owner = existing
-            .iter()
-            .filter(|binding| binding.object_id == snapshot.object_id)
-            .find_map(|binding| {
+        let existing_owner = existing_by_object_id
+            .get(snapshot.object_id.as_str())
+            .and_then(|binding| {
                 binding.record_id.as_ref().map(|record_id| {
                     (
                         record_id.clone(),
@@ -2396,11 +2467,12 @@ pub fn reconcile_collections_in_tx(
         let Some(record_id) = current_ids.get(record.path.as_str()) else {
             continue;
         };
-        let established_owner = existing.iter().any(|binding| {
-            binding.object_id == record.object_id
-                && (binding.adoption_state == "adopted"
-                    || binding.adoption_state.starts_with("deferred-conflict"))
-        });
+        let established_owner = existing_by_object_id
+            .get(record.object_id.as_str())
+            .is_some_and(|binding| {
+                binding.adoption_state == "adopted"
+                    || binding.adoption_state.starts_with("deferred-conflict")
+            });
         if current_id_counts.get(record_id.as_str()) == Some(&1)
             || current_owners.contains_key(record_id)
             || !established_owner
@@ -2416,9 +2488,7 @@ pub fn reconcile_collections_in_tx(
         };
         if current_id_counts.get(record_id.as_str()) == Some(&1)
             || current_owners.contains_key(record_id)
-            || existing
-                .iter()
-                .any(|binding| binding.object_id == record.object_id)
+            || existing_by_object_id.contains_key(record.object_id.as_str())
         {
             continue;
         }
@@ -2443,9 +2513,9 @@ pub fn reconcile_collections_in_tx(
             continue;
         }
         let existing_at_path = existing_by_path.get(record.path.as_str()).copied();
-        let existing_same_object = existing
-            .iter()
-            .find(|binding| binding.object_id == record.object_id);
+        let existing_same_object = existing_by_object_id
+            .get(record.object_id.as_str())
+            .copied();
         let lossless_insertion_required = parsed_id.is_none()
             && existing_same_object.is_none_or(|binding| {
                 matches!(
@@ -2589,6 +2659,27 @@ pub fn reconcile_collections_in_tx(
         });
     }
 
+    for binding in &desired {
+        let Some(existing_binding) = existing_by_object_id.get(binding.object_id.as_str()) else {
+            continue;
+        };
+        let (Some(previous_record_id), Some(record_id)) = (
+            existing_binding.record_id.as_deref(),
+            binding.record_id.as_deref(),
+        ) else {
+            continue;
+        };
+        if previous_record_id == record_id {
+            continue;
+        }
+        tx.execute(
+            "UPDATE collection_field_history SET record_id=?4 \
+             WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3",
+            params![workspace_id, version_id, previous_record_id, record_id],
+        )
+        .map_err(crate::DomainError::sql_persist)?;
+    }
+
     tx.execute(
         "DELETE FROM collection_records WHERE workspace_id = ?1 AND version_id = ?2",
         params![workspace_id, version_id],
@@ -2669,7 +2760,10 @@ pub fn reconcile_collections_in_tx(
             record_id,
             schema,
             &frontmatter.value,
-            NonFiniteFieldProvenance::Parsed(&frontmatter.non_finite_fields),
+            FieldProvenance::Parsed {
+                non_finite_fields: &frontmatter.non_finite_fields,
+                unsupported_tag_fields: &frontmatter.unsupported_tag_fields,
+            },
         )?;
     }
     tx.execute(

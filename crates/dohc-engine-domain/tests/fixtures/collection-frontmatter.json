@@ -53,6 +53,13 @@
           "$dohcInt64": "9007199254740993"
         }
       }
+    },
+    {
+      "name": "unsupported-explicit-tag-keeps-raw-value",
+      "markdown": "---\npriority: !custom high\n---\n\n# Body",
+      "expected": {
+        "priority": "high"
+      }
     }
   ]
 }

@@ -95,6 +95,7 @@ export type FieldValueReasonCode =
   | "expected-text"
   | "expected-number"
   | "number-not-finite"
+  | "unsupported-tag"
   | "expected-boolean"
   | "expected-sequence"
   | "invalid-date"

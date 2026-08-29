@@ -3366,7 +3366,7 @@ export function createWorkspaceEngineCapture(
     const workspace = { workspaceId, rootPath, attachmentId };
     let cursor: CollectionPendingAdoptionCursor | null = null;
     let found = false;
-    const pendingPaths = new Set<string>();
+    const pendingAdoptionKeys = new Set<string>();
     do {
       const pending: CollectionPendingAdoptionsPage | undefined =
         await engine.listPendingCollectionAdoptions?.({
@@ -3375,10 +3375,10 @@ export function createWorkspaceEngineCapture(
       if (!pending) return;
       found ||= pending.adoptions.length > 0;
       for (const adoption of pending.adoptions) {
-        pendingPaths.add(adoption.filePath);
         const adoptionKey =
           `${adoption.versionId}\0${adoption.recordId}\0` +
           `${adoption.objectId}\0${adoption.filePath}`;
+        pendingAdoptionKeys.add(adoptionKey);
         let retained = pendingCollectionAdoptionProviders.get(adoptionKey);
         try {
           await options.rustEngineSessions.run(
@@ -3437,16 +3437,16 @@ export function createWorkspaceEngineCapture(
       }
       cursor = pending.nextCursor;
     } while (cursor !== null);
-    await releaseRetainedCollectionAdoptionProviders(pendingPaths);
+    await releaseRetainedCollectionAdoptionProviders(pendingAdoptionKeys);
     if (!found) return;
     await engine.reconcileCapture?.();
   }
 
   async function releaseRetainedCollectionAdoptionProviders(
-    pendingPaths: ReadonlySet<string>,
+    pendingAdoptionKeys: ReadonlySet<string>,
   ): Promise<void> {
     for (const [adoptionKey, retained] of pendingCollectionAdoptionProviders) {
-      if (pendingPaths.has(retained.provider.path)) continue;
+      if (pendingAdoptionKeys.has(adoptionKey)) continue;
       try {
         await retained.provider.evict();
         if (pendingCollectionAdoptionProviders.get(adoptionKey) === retained) {

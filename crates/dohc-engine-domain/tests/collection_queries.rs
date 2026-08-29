@@ -447,6 +447,69 @@ fn reconcile_indexes_fields_added_after_frontmatterless_record_adoption() {
 }
 
 #[test]
+fn reconcile_indexes_unsupported_tag_as_flagged_without_rewriting_record() {
+    let (_scratch, mut store) = fresh_store();
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/collection-frontmatter.json"))
+            .expect("frontmatter fixture parses");
+    let tagged_markdown = fixture["vectors"]
+        .as_array()
+        .expect("frontmatter vectors")
+        .iter()
+        .find(|vector| vector["name"].as_str() == Some("unsupported-explicit-tag-keeps-raw-value"))
+        .and_then(|vector| vector["markdown"].as_str())
+        .expect("unsupported-tag vector")
+        .replacen("---\n", &format!("---\nid: {FIRST_TASK_ID}\n"), 1);
+    write_text(
+        &mut store,
+        "tasks/collection.yaml",
+        "fields:\n  priority:\n    type: select\n    options: [high]\n",
+        2,
+    )
+    .expect("task schema");
+    write_text(&mut store, "tasks/tagged.md", &tagged_markdown, 3).expect("tagged record");
+
+    let reconciled = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile tagged record");
+    assert!(matches!(reconciled, TxnOutcome::Committed(_)));
+
+    let query = store
+        .read_with(|conn| {
+            query_collection_records(conn, WORKSPACE_ID, "tasks", &CollectionQuery::default())
+        })
+        .expect("query tagged record")
+        .expect("tasks collection");
+    let priority = query.records[0]
+        .values
+        .iter()
+        .find(|value| value.field == "priority")
+        .expect("tagged priority value");
+    assert_eq!(priority.value, json!("high"));
+    assert_eq!(
+        serde_json::to_value(&priority.validation).expect("serialize validation"),
+        json!({
+            "status": "flagged",
+            "reason": { "code": "unsupported-tag", "path": "" }
+        })
+    );
+
+    let stored = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 \
+                 WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.path='tasks/tagged.md'",
+                params![WORKSPACE_ID, VERSION_ID],
+                |row| row.get::<_, String>(0),
+            )
+        })
+        .expect("read tagged record after reconciliation");
+    assert_eq!(stored, tagged_markdown);
+}
+
+#[test]
 fn empty_frontmatter_record_is_adopted_with_only_the_minted_id() {
     let (_scratch, mut store) = fresh_store();
     write_text(&mut store, "tasks/collection.yaml", "name: Tasks\n", 2).expect("task schema");
@@ -555,6 +618,118 @@ fn changing_an_adopted_record_id_rebuilds_its_field_index_under_the_new_id() {
         .expect("status indexed under replacement id");
     assert_eq!(status.value, json!("after"));
     assert_eq!(status.validation, CollectionIndexedValueValidation::Valid);
+}
+
+#[test]
+fn changing_an_adopted_record_id_preserves_full_authored_history_under_the_new_id() {
+    const RECORD_OBJECT_ID: &str = "changed-id-history-record-object";
+    let (_scratch, mut store) = fresh_store();
+    write_text(
+        &mut store,
+        "tasks/collection.yaml",
+        "fields:\n  status:\n    type: text\n",
+        2,
+    )
+    .expect("task schema");
+    write_text_for_object(
+        &mut store,
+        "tasks/alpha.md",
+        &format!("---\nid: {FIRST_TASK_ID}\nstatus: draft\n---\n"),
+        RECORD_OBJECT_ID,
+        "changed-id-history-record",
+        3,
+    )
+    .expect("record with original id");
+
+    store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)?;
+            set_collection_adoption_state_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                "tasks/alpha.md",
+                FIRST_TASK_ID,
+                "adopted",
+            )
+        })
+        .expect("index and adopt record with original id");
+
+    let draft = json!({ "id": FIRST_TASK_ID, "status": "draft" });
+    let review = json!({ "id": FIRST_TASK_ID, "status": "review" });
+    let done = json!({ "id": FIRST_TASK_ID, "status": "done" });
+    store
+        .write_with(&NoFaults, |tx| {
+            index_collection_frontmatter_apply_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                RECORD_OBJECT_ID,
+                &draft,
+                &review,
+                &draft,
+                &review,
+                Some("human-editor"),
+                10,
+            )?;
+            index_collection_frontmatter_apply_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                RECORD_OBJECT_ID,
+                &review,
+                &done,
+                &review,
+                &done,
+                Some("agent-editor"),
+                20,
+            )
+        })
+        .expect("record history before id change");
+
+    write_text_for_object(
+        &mut store,
+        "tasks/alpha.md",
+        &format!("---\nid: {SECOND_TASK_ID}\nstatus: done\n---\n"),
+        RECORD_OBJECT_ID,
+        "replace-record-id-with-history",
+        30,
+    )
+    .expect("replace record id after history exists");
+    store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile record id change with history");
+
+    let details = store
+        .read_with(|conn| {
+            get_collection_record(conn, WORKSPACE_ID, "tasks", SECOND_TASK_ID, 10, None)
+        })
+        .expect("get record under replacement id")
+        .expect("replacement id remains the same record");
+    assert_eq!(details.history.len(), 2);
+    assert_eq!(details.history[0].recorded_at_ms, 20);
+    assert_eq!(
+        details.history[0].author_origin_id.as_deref(),
+        Some("agent-editor")
+    );
+    assert_eq!(details.history[0].previous.value, Some(json!("review")));
+    assert_eq!(details.history[0].next.value, Some(json!("done")));
+    assert_eq!(details.history[1].recorded_at_ms, 10);
+    assert_eq!(
+        details.history[1].author_origin_id.as_deref(),
+        Some("human-editor")
+    );
+    assert_eq!(details.history[1].previous.value, Some(json!("draft")));
+    assert_eq!(details.history[1].next.value, Some(json!("review")));
+
+    let old_id = store
+        .read_with(|conn| {
+            get_collection_record(conn, WORKSPACE_ID, "tasks", FIRST_TASK_ID, 10, None)
+        })
+        .expect("query original id after replacement");
+    assert!(old_id.is_none());
 }
 
 #[test]

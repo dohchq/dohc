@@ -318,6 +318,10 @@ const frontmatter = [
     name: "unsafe-integer-is-exact",
     markdown: "---\nexact: 9007199254740993\n---",
   },
+  {
+    name: "unsupported-explicit-tag-keeps-raw-value",
+    markdown: "---\npriority: !custom high\n---\n\n# Body",
+  },
 ].map(({ name, markdown }) => ({
   name,
   markdown,

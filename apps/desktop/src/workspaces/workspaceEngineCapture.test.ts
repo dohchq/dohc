@@ -643,6 +643,83 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(evictionAttemptsAfterDeletionPass).toBe(2);
   });
 
+  it("releases a retained collection adoption when its provider path matches a renamed pending item", async () => {
+    const root = await tempRoot();
+    const originalAdoption = {
+      versionId: "main",
+      recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      collectionPath: "projects",
+      filePath: "projects/original.md",
+      objectId: "object-renamed",
+    };
+    const renamedAdoption = {
+      ...originalAdoption,
+      filePath: "projects/renamed.md",
+    };
+    let pendingAdoption = originalAdoption;
+    const store = {
+      ensureMainVersion: async () => undefined,
+      flushCapture: async () => undefined,
+      reconcileCapture: async () => undefined,
+      listPendingCollectionAdoptions: async () => ({
+        adoptions: [pendingAdoption],
+        nextCursor: null,
+      }),
+    } as unknown as CaptureVersionedTextStore;
+    const busy = new DaemonRefusalError(
+      {
+        code: "OVERLOADED",
+        message: "engine-store-busy",
+        retry: "afterBackoff",
+      },
+      undefined,
+    );
+    const sessions = {
+      run: async (_workspace: unknown, task: (binding: unknown) => unknown) =>
+        await task({ client: {}, workspace: "workspace" }),
+    } as unknown as EngineWorkspaceSessions;
+    let originalProviderPath = originalAdoption.filePath;
+    let originalEvictionAttempts = 0;
+    let renamedEvictionAttempts = 0;
+    const engine = capture(root, {
+      store,
+      rustEngineSessions: sessions,
+      daemonOwnsCapture: true,
+      openRustYDocProviderSession: async (options) => {
+        if (options.path === originalAdoption.filePath) {
+          return {
+            get path() {
+              return originalProviderPath;
+            },
+            evict: async () => {
+              originalEvictionAttempts += 1;
+              if (originalEvictionAttempts === 1) throw busy;
+            },
+          } as EngineYdocProviderSession;
+        }
+        return {
+          path: options.path,
+          evict: async () => {
+            renamedEvictionAttempts += 1;
+          },
+        } as EngineYdocProviderSession;
+      },
+    });
+
+    await engine.flush();
+    expect(originalEvictionAttempts).toBe(1);
+
+    pendingAdoption = renamedAdoption;
+    originalProviderPath = renamedAdoption.filePath;
+    await engine.flush();
+    const originalEvictionsAfterRenamePass = originalEvictionAttempts;
+    const renamedEvictionsAfterRenamePass = renamedEvictionAttempts;
+    await engine.stop();
+
+    expect(renamedEvictionsAfterRenamePass).toBe(1);
+    expect(originalEvictionsAfterRenamePass).toBe(2);
+  });
+
   it("releases the old collection adoption provider before reopening after a transport rebind", async () => {
     const root = await tempRoot();
     const adoption = {

@@ -85,6 +85,21 @@ describe('Y.Doc markdown import/export', () => {
       .toEqual(decodeFixtureIntegers(expected))
   })
 
+  it('round-trips unsupported tagged frontmatter until its raw value changes', () => {
+    const vector = frontmatterVectors.find(
+      candidate => candidate.name === 'unsupported-explicit-tag-keeps-raw-value',
+    )
+    expect(vector).toBeDefined()
+    const doc = markdownToYDoc(vector!.markdown)
+
+    expect(yDocToMarkdown(doc)).toBe(vector!.markdown)
+
+    doc.getMap('frontmatter').set('priority', 'low')
+    const changed = yDocToMarkdown(doc)
+    expect(changed).toContain('priority: low')
+    expect(changed).not.toContain('!custom high')
+  })
+
   it('seeds and round-trips an unsafe frontmatter integer exactly', () => {
     const input = ['---', 'exact: 9007199254740993', 'status: open', '---', '', '# Body'].join('\n')
     const doc = markdownToYDoc(input)
