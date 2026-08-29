@@ -893,10 +893,10 @@ impl Ydoc {
         value: &str,
         markdown: &str,
     ) -> Result<Vec<u8>, CollabError> {
-        let before = self.doc.transact().state_vector();
-        let _ = self.frontmatter_set(key, value);
-        self.record_markdown_source_reference(markdown)?;
-        Ok(self.doc.transact().encode_state_as_update_v1(&before))
+        self.stage_source_preserving_edit(markdown, |staged| {
+            let _ = staged.frontmatter_set(key, value);
+            Ok(())
+        })
     }
 
     /// Rewrite a source-preserving rich document and advance its exact-source
@@ -906,12 +906,13 @@ impl Ydoc {
         content_kind: ContentKind,
         markdown: &str,
     ) -> Result<Vec<u8>, CollabError> {
-        let before = self.doc.transact().state_vector();
-        let _ = self.rewrite_content_to_markdown(content_kind, markdown)?;
-        if content_kind == ContentKind::Richdoc {
-            self.record_markdown_source_reference(markdown)?;
+        if content_kind != ContentKind::Richdoc {
+            return self.rewrite_content_to_markdown(content_kind, markdown);
         }
-        Ok(self.doc.transact().encode_state_as_update_v1(&before))
+        self.stage_source_preserving_edit(markdown, |staged| {
+            let _ = staged.rewrite_content_to_markdown(content_kind, markdown)?;
+            Ok(())
+        })
     }
 
     /// Set a top-level [`ROOT_FRONTMATTER`] nested map and return the encoded
@@ -975,13 +976,47 @@ impl Ydoc {
         self.doc.transact().encode_state_as_update_v1(&before)
     }
 
-    fn record_markdown_source_reference(&self, markdown: &str) -> Result<(), CollabError> {
+    fn stage_source_preserving_edit(
+        &self,
+        markdown: &str,
+        edit: impl FnOnce(&Ydoc) -> Result<(), CollabError>,
+    ) -> Result<Vec<u8>, CollabError> {
         if markdown.len() > dohc_engine_domain::MAX_TEXT_BYTES {
             return Err(CollabError::ProjectionTooLarge {
                 actual: markdown.len(),
                 max: dohc_engine_domain::MAX_TEXT_BYTES,
             });
         }
+
+        let before = self.doc.transact().state_vector();
+        let staged = Ydoc::wire();
+        staged.apply(&self.encode_full_state())?;
+        edit(&staged)?;
+        staged.record_validated_markdown_source_reference(markdown)?;
+        let update = staged.doc.transact().encode_state_as_update_v1(&before);
+        if update.len() > crate::limits::MAX_YDOC_UPDATE_BYTES {
+            return Err(CollabError::UpdateTooLarge {
+                actual: update.len(),
+                max: crate::limits::MAX_YDOC_UPDATE_BYTES,
+            });
+        }
+        let full_state_len = staged.encode_full_state().len();
+        if full_state_len > crate::limits::MAX_YDOC_UPDATE_BYTES {
+            return Err(CollabError::UpdateTooLarge {
+                actual: full_state_len,
+                max: crate::limits::MAX_YDOC_UPDATE_BYTES,
+            });
+        }
+        Ydoc::validate_update(&update)?;
+
+        self.apply(&update)?;
+        Ok(update)
+    }
+
+    fn record_validated_markdown_source_reference(
+        &self,
+        markdown: &str,
+    ) -> Result<(), CollabError> {
         let projection_sha256 = crate::hex_sha256(self.project_richdoc()?.as_bytes());
         let source_sha256 = crate::hex_sha256(markdown.as_bytes());
         let meta = self.doc.get_or_insert_map(ROOT_META);
@@ -4019,6 +4054,42 @@ mod projection_tests {
             .rewrite_content_to_markdown(ContentKind::Scene, "not a scene")
             .expect_err("scene replacement must use a scene operation");
         assert_eq!(error.code(), "markdown-rewrite-unsupported");
+    }
+
+    #[test]
+    fn oversized_source_preserving_edits_leave_ydoc_byte_identical() {
+        let oversized = " ".repeat(dohc_engine_domain::MAX_TEXT_BYTES + 1);
+
+        let frontmatter_doc = Ydoc::wire();
+        frontmatter_doc
+            .rewrite_content_to_markdown(ContentKind::Richdoc, "body")
+            .expect("seed document");
+        let before = frontmatter_doc.encode_full_state();
+
+        assert!(matches!(
+            frontmatter_doc.frontmatter_set_preserving_markdown_source("id", "record", &oversized),
+            Err(CollabError::ProjectionTooLarge { actual, max })
+                if actual == dohc_engine_domain::MAX_TEXT_BYTES + 1
+                    && max == dohc_engine_domain::MAX_TEXT_BYTES
+        ));
+        assert_eq!(frontmatter_doc.encode_full_state(), before);
+
+        let rewrite_doc = Ydoc::wire();
+        rewrite_doc
+            .rewrite_content_to_markdown(ContentKind::Richdoc, "original")
+            .expect("seed document");
+        let before = rewrite_doc.encode_full_state();
+
+        assert!(matches!(
+            rewrite_doc.rewrite_content_to_markdown_preserving_source(
+                ContentKind::Richdoc,
+                &oversized,
+            ),
+            Err(CollabError::ProjectionTooLarge { actual, max })
+                if actual == dohc_engine_domain::MAX_TEXT_BYTES + 1
+                    && max == dohc_engine_domain::MAX_TEXT_BYTES
+        ));
+        assert_eq!(rewrite_doc.encode_full_state(), before);
     }
 
     fn xml_text(value: impl Into<String>) -> XmlIn {

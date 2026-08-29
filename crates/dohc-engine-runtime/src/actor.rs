@@ -13334,19 +13334,19 @@ fn ensure_collection_record_id_on_store(
     }
 
     let update = match preserved_markdown {
-        Some(markdown) => doc.frontmatter_set_preserving_markdown_source(
+        Some(markdown) => match doc.frontmatter_set_preserving_markdown_source(
             RECORD_ID_FRONTMATTER_KEY,
             record_id,
             markdown,
-        )?,
+        ) {
+            Ok(update) => update,
+            Err(CollabError::ProjectionTooLarge { .. } | CollabError::UpdateTooLarge { .. }) => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error.into()),
+        },
         None => doc.frontmatter_set(RECORD_ID_FRONTMATTER_KEY, record_id),
     };
-    if preserved_markdown.is_some()
-        && (update.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES
-            || doc.encode_full_state().len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES)
-    {
-        return Ok(None);
-    }
     let lineage_claim_id = ydoc_record_update_on_store(
         store,
         doc_cache,
@@ -13457,10 +13457,7 @@ fn adopt_collection_record_on_store(
                 _ => None,
             };
         match preserved {
-            Some(preserved) if preserved.len() <= dohc_engine_domain::MAX_TEXT_BYTES => {
-                Some(preserved)
-            }
-            Some(_) => return Ok(Some(CollectionAdoptionExecution::DeclinedOversized)),
+            Some(preserved) => Some(preserved),
             None if doc.markdown_source_reference().is_some_and(|reference| {
                 doc.project(ContentKind::Richdoc).is_ok_and(|projection| {
                     reference.projection_sha256 == hex_sha256(projection.content.as_bytes())

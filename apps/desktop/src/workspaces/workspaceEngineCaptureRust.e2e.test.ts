@@ -127,6 +127,8 @@ it.skipIf(engine.missing)(
             workspaceId: workspace.workspaceId,
           }).queryCollectionRecords({ collectionPath: "tasks" }),
       );
+      expect(query.records).toHaveLength(1);
+      expect(query.records[0]?.path).toBe("tasks/rich.md");
       const recordId = query.records[0]?.id;
       expect(recordId).toBeTruthy();
       const settled = await readFile(join(root, "tasks", "rich.md"), "utf8");
