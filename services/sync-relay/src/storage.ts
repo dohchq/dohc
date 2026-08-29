@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
@@ -127,7 +127,68 @@ export interface SyncRelayLinkSessionRow {
   generation: number;
   mintedAtMs: number;
   expiresAtMs: number;
+  principalId: string | null;
 }
+
+export interface SyncRelayLinkPrincipalRow {
+  principalId: string;
+  grantId: string;
+  mintGeneration: number;
+  profileTokenHash: string;
+  displayName: string | null;
+  createdAtMs: number;
+  blockedAtMs: number | null;
+}
+
+export interface SyncRelayShareDiscussionMessageRow {
+  messageId: string;
+  shareId: string;
+  idempotencyKey: string;
+  requestHash: string;
+  authorKind: "named" | "link";
+  authorUserId: string | null;
+  linkGrantId: string | null;
+  linkPrincipalId: string | null;
+  displayNameSnapshot: string;
+  body: string | null;
+  createdAtMs: number;
+  deletedAtMs: number | null;
+  deletedByUserId: string | null;
+  storageBytes: number;
+}
+
+export interface SyncRelayShareDiscussionCursor {
+  createdAtMs: number;
+  messageId: string;
+}
+
+export interface SyncRelayShareDiscussionPage {
+  messages: SyncRelayShareDiscussionMessageRow[];
+  nextCursor: SyncRelayShareDiscussionCursor | null;
+}
+
+export type AppendLinkDiscussionMessageResult =
+  | {
+      ok: true;
+      replayed: boolean;
+      principal: SyncRelayLinkPrincipalRow;
+      message: SyncRelayShareDiscussionMessageRow;
+    }
+  | {
+      ok: false;
+      reason:
+        | "invalid-input"
+        | "not-authorized"
+        | "paused"
+        | "blocked"
+        | "name-already-set"
+        | "idempotency-conflict"
+        | "principal-limit"
+        | "rate-limit"
+        | "lifetime-limit"
+        | "share-limit"
+        | "workspace-quota";
+    };
 
 export interface SyncRelayLinkHandoffCodeRow {
   codeId: string;
@@ -431,17 +492,47 @@ export interface SyncRelayStorage {
     grantId: string;
   }): ShareGrantTransitionResult;
   mintLinkSession(input: {
-    session: SyncRelayLinkSessionRow;
+    session: Omit<SyncRelayLinkSessionRow, "principalId">;
     guard?: () => void;
   }): boolean;
   replaceLinkSession(input: {
     currentSession: SyncRelayLinkSessionRow;
-    session: SyncRelayLinkSessionRow;
+    session: Omit<SyncRelayLinkSessionRow, "principalId">;
     guard: () => void;
   }): boolean;
   findLinkSessionByCapabilityHash(
     capabilityHash: string,
   ): SyncRelayLinkSessionRow | null;
+  appendLinkDiscussionMessage(input: {
+    capabilityHash: string;
+    profileTokenHash: string;
+    claimedName?: string | null;
+    body: string;
+    idempotencyKey: string;
+    createdAtMs: number;
+  }): AppendLinkDiscussionMessageResult;
+  listShareDiscussionMessages(input: {
+    shareId: string;
+    after?: SyncRelayShareDiscussionCursor | null;
+    limit: number;
+  }): SyncRelayShareDiscussionPage;
+  getLinkPrincipal(principalId: string): SyncRelayLinkPrincipalRow | null;
+  setLinkPrincipalBlocked(input: {
+    shareId: string;
+    principalId: string;
+    blockedAtMs: number | null;
+  }): boolean;
+  setShareLinkWritesPaused(input: {
+    shareId: string;
+    pausedAtMs: number | null;
+  }): boolean;
+  getShareLinkWritesPausedAtMs(shareId: string): number | null;
+  deleteShareDiscussionMessage(input: {
+    shareId: string;
+    messageId: string;
+    deletedAtMs: number;
+    deletedByUserId: string;
+  }): boolean;
   mintLinkHandoffCode(input: {
     code: SyncRelayLinkHandoffCodeRow;
     guard: () => boolean;
@@ -657,6 +748,17 @@ function nodeSqlite(): SqliteModule {
 
 export const SYNC_RELAY_BUSY_TIMEOUT_MS = 5_000;
 export const DEFAULT_WORKSPACE_QUOTA_BYTES = 2 * 1024 * 1024 * 1024;
+export const LINK_DISCUSSION_BODY_CODE_POINT_LIMIT = 2_000;
+export const LINK_DISCUSSION_BODY_INPUT_BYTE_LIMIT = 8_000;
+export const LINK_DISCUSSION_NAME_CODE_POINT_LIMIT = 40;
+export const LINK_DISCUSSION_NAME_BYTE_LIMIT = 160;
+export const LINK_DISCUSSION_IDEMPOTENCY_KEY_LIMIT = 64;
+export const LINK_DISCUSSION_PRINCIPAL_LIMIT = 100;
+export const LINK_DISCUSSION_MESSAGE_RATE_LIMIT = 10;
+export const LINK_DISCUSSION_MESSAGE_RATE_WINDOW_MS = 60_000;
+export const LINK_DISCUSSION_LIFETIME_MESSAGE_LIMIT = 500;
+export const LINK_DISCUSSION_SHARE_ROW_LIMIT = 5_000;
+export const LINK_DISCUSSION_PAGE_LIMIT = 100;
 // Retention grace for freshly-uploaded blobs (0P sync-hardening item 4). Blob
 // upload is two-phase (PUT /blobs/:sha, then POST /log referencing it); GC that
 // runs between the two must NOT reclaim the blob just because no log row
@@ -684,6 +786,11 @@ export interface OpenSyncRelayStorageOptions {
   workspaceQuotaBytes?: number;
   blobGraceMs?: number;
   linkSessionsPerGrantLimit?: number;
+  linkDiscussionPrincipalLimit?: number;
+  linkDiscussionMessageRateLimit?: number;
+  linkDiscussionLifetimeMessageLimit?: number;
+  linkDiscussionShareRowLimit?: number;
+  newDiscussionId?: () => string;
 }
 
 const NORMALIZED_SHARE_SCHEMA_SQL = `
@@ -693,6 +800,7 @@ const NORMALIZED_SHARE_SCHEMA_SQL = `
     granter_user_id TEXT NOT NULL,
     selector_json TEXT NOT NULL,
     created_at_ms INTEGER NOT NULL,
+    link_writes_paused_at_ms INTEGER,
     FOREIGN KEY (workspace_id)
       REFERENCES sync_relay_workspaces(workspace_id)
       ON DELETE CASCADE
@@ -738,6 +846,8 @@ const NORMALIZED_SHARE_SCHEMA_SQL = `
     ON sync_relay_share_grants(principal_user_id, created_at_ms);
   CREATE INDEX IF NOT EXISTS idx_sync_relay_share_grants_email
     ON sync_relay_share_grants(principal_email, created_at_ms);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_relay_share_grants_grant_share
+    ON sync_relay_share_grants(grant_id, share_id);
   CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_relay_share_grants_active_dependent
     ON sync_relay_share_grants(parent_grant_id, principal_user_id)
     WHERE status = 'active' AND parent_grant_id IS NOT NULL;
@@ -765,6 +875,28 @@ const NORMALIZED_SHARE_SCHEMA_SQL = `
       REFERENCES sync_relay_share_grants(grant_id) ON DELETE CASCADE
   ) STRICT;
 
+  CREATE TABLE IF NOT EXISTS sync_relay_link_principals (
+    principal_id TEXT PRIMARY KEY,
+    grant_id TEXT NOT NULL,
+    mint_generation INTEGER NOT NULL CHECK (mint_generation >= 1),
+    profile_token_hash TEXT NOT NULL CHECK (length(profile_token_hash) > 0),
+    display_name TEXT CHECK (
+      display_name IS NULL OR (
+        length(display_name) BETWEEN 1 AND 40
+        AND length(CAST(display_name AS BLOB)) <= 160
+      )
+    ),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    blocked_at_ms INTEGER,
+    UNIQUE (grant_id, profile_token_hash),
+    FOREIGN KEY (grant_id)
+      REFERENCES sync_relay_share_grants(grant_id) ON DELETE CASCADE
+  ) STRICT;
+  CREATE INDEX IF NOT EXISTS idx_sync_relay_link_principals_budget
+    ON sync_relay_link_principals(grant_id, mint_generation, created_at_ms, principal_id);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_relay_link_principals_principal_grant
+    ON sync_relay_link_principals(principal_id, grant_id);
+
   CREATE TABLE IF NOT EXISTS sync_relay_link_sessions (
     session_id TEXT PRIMARY KEY,
     capability_hash TEXT NOT NULL UNIQUE,
@@ -772,12 +904,72 @@ const NORMALIZED_SHARE_SCHEMA_SQL = `
     generation INTEGER NOT NULL CHECK (generation >= 1),
     minted_at_ms INTEGER NOT NULL,
     expires_at_ms INTEGER NOT NULL,
+    principal_id TEXT,
     CHECK (expires_at_ms > minted_at_ms),
     FOREIGN KEY (grant_id)
-      REFERENCES sync_relay_share_grants(grant_id) ON DELETE CASCADE
+      REFERENCES sync_relay_share_grants(grant_id) ON DELETE CASCADE,
+    FOREIGN KEY (principal_id, grant_id)
+      REFERENCES sync_relay_link_principals(principal_id, grant_id) ON DELETE CASCADE
   ) STRICT;
   CREATE INDEX IF NOT EXISTS idx_sync_relay_link_sessions_grant
     ON sync_relay_link_sessions(grant_id, generation, expires_at_ms);
+
+  CREATE TABLE IF NOT EXISTS sync_relay_share_discussion_messages (
+    message_id TEXT PRIMARY KEY,
+    share_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 64),
+    request_hash TEXT NOT NULL CHECK (length(request_hash) > 0),
+    author_kind TEXT NOT NULL CHECK (author_kind IN ('named', 'link')),
+    author_user_id TEXT,
+    link_grant_id TEXT,
+    link_principal_id TEXT,
+    display_name_snapshot TEXT NOT NULL CHECK (length(display_name_snapshot) > 0),
+    body TEXT CHECK (
+      body IS NULL OR (
+        length(body) BETWEEN 1 AND 2000
+        AND length(CAST(body AS BLOB)) <= 8000
+      )
+    ),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    deleted_at_ms INTEGER,
+    deleted_by_user_id TEXT,
+    storage_bytes INTEGER NOT NULL CHECK (storage_bytes > 0),
+    CHECK (
+      (author_kind = 'named'
+       AND author_user_id IS NOT NULL
+       AND link_grant_id IS NULL
+       AND link_principal_id IS NULL)
+      OR
+      (author_kind = 'link'
+       AND author_user_id IS NULL
+       AND link_grant_id IS NOT NULL
+       AND link_principal_id IS NOT NULL)
+    ),
+    CHECK (
+      (deleted_at_ms IS NULL AND deleted_by_user_id IS NULL AND body IS NOT NULL)
+      OR
+      (deleted_at_ms IS NOT NULL AND deleted_by_user_id IS NOT NULL AND body IS NULL)
+    ),
+    FOREIGN KEY (share_id)
+      REFERENCES sync_relay_shares(share_id) ON DELETE CASCADE,
+    FOREIGN KEY (link_grant_id, share_id)
+      REFERENCES sync_relay_share_grants(grant_id, share_id) ON DELETE CASCADE,
+    FOREIGN KEY (link_principal_id, link_grant_id)
+      REFERENCES sync_relay_link_principals(principal_id, grant_id) ON DELETE CASCADE
+  ) STRICT;
+  CREATE INDEX IF NOT EXISTS idx_sync_relay_share_discussion_page
+    ON sync_relay_share_discussion_messages(share_id, created_at_ms, message_id);
+  CREATE INDEX IF NOT EXISTS idx_sync_relay_share_discussion_principal_budget
+    ON sync_relay_share_discussion_messages(
+      link_principal_id, created_at_ms, message_id
+    ) WHERE author_kind = 'link';
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_relay_share_discussion_named_replay
+    ON sync_relay_share_discussion_messages(share_id, author_user_id, idempotency_key)
+    WHERE author_kind = 'named';
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_relay_share_discussion_link_replay
+    ON sync_relay_share_discussion_messages(
+      share_id, link_principal_id, idempotency_key
+    ) WHERE author_kind = 'link';
 
   CREATE TABLE IF NOT EXISTS sync_relay_link_handoff_codes (
     code_id TEXT PRIMARY KEY,
@@ -1089,33 +1281,35 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       .prepare("PRAGMA table_info(sync_relay_shares)")
       .all()
       .map((row) => String(row.name));
-    if (shareColumns.includes("recipient_user_id")) {
-      // Pre-launch replacement. Dropping the old parent also clears its
-      // proposal rows through the existing cascade. No legacy grant data is
-      // carried into the new authority model.
+    const sessionColumns = db
+      .prepare("PRAGMA table_info(sync_relay_link_sessions)")
+      .all()
+      .map((row) => String(row.name));
+    const grantSchema = db
+      .prepare(
+        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'sync_relay_share_grants'",
+      )
+      .get();
+    if (
+      shareColumns.includes("recipient_user_id") ||
+      !String(grantSchema?.sql ?? "").includes("'link'") ||
+      !shareColumns.includes("link_writes_paused_at_ms") ||
+      !sessionColumns.includes("principal_id")
+    ) {
+      // Pre-launch replacement. Discussion authority is one normalized model:
+      // the share pause, grant, protected principal, session binding, and
+      // message provenance must never exist in mixed schema generations.
       db.exec(`
+        DROP TABLE IF EXISTS sync_relay_share_discussion_messages;
+        DROP TABLE IF EXISTS sync_relay_link_handoff_codes;
+        DROP TABLE IF EXISTS sync_relay_link_sessions;
+        DROP TABLE IF EXISTS sync_relay_link_principals;
         DROP TABLE IF EXISTS sync_relay_link_usage;
-        DROP TABLE sync_relay_share_grants;
-        DROP TABLE sync_relay_shares;
+        DROP TABLE IF EXISTS sync_relay_link_credentials;
+        DROP TABLE IF EXISTS sync_relay_share_grants;
+        DROP TABLE IF EXISTS sync_relay_shares;
         ${NORMALIZED_SHARE_SCHEMA_SQL}
       `);
-    } else {
-      const grantSchema = db
-        .prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'sync_relay_share_grants'")
-        .get();
-      if (!String(grantSchema?.sql ?? "").includes("'link'")) {
-        // Pre-launch replacement of the first normalized grant table. SQLite
-        // cannot alter a CHECK constraint in place, and there is no shipped
-        // data contract to migrate. Recreate the authority model as one unit.
-        db.exec(`
-          DROP TABLE sync_relay_link_sessions;
-          DROP TABLE IF EXISTS sync_relay_link_usage;
-          DROP TABLE sync_relay_link_credentials;
-          DROP TABLE sync_relay_share_grants;
-          DROP TABLE sync_relay_shares;
-          ${NORMALIZED_SHARE_SCHEMA_SQL}
-        `);
-      }
     }
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_sync_relay_link_handoff_codes_result_grant
@@ -1690,6 +1884,66 @@ const OBJECT_PATH_UPSERT_SQL = `
     SET path = excluded.path, relay_seq = excluded.relay_seq
     WHERE excluded.relay_seq > sync_relay_object_paths.relay_seq`;
 
+const LINK_DISCUSSION_NAME_REMOVALS =
+  /[\p{Cc}\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu;
+
+function codePointLength(value: string): number {
+  return Array.from(value).length;
+}
+
+function normalizeLinkDiscussionBody(value: unknown): string | null {
+  if (
+    typeof value !== "string" ||
+    Buffer.byteLength(value, "utf8") > LINK_DISCUSSION_BODY_INPUT_BYTE_LIMIT
+  ) {
+    return null;
+  }
+  const normalized = value.normalize("NFC");
+  const points = codePointLength(normalized);
+  return points >= 1 && points <= LINK_DISCUSSION_BODY_CODE_POINT_LIMIT
+    ? normalized
+    : null;
+}
+
+function normalizeLinkDiscussionName(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value
+    .normalize("NFC")
+    .replace(LINK_DISCUSSION_NAME_REMOVALS, "")
+    .trim()
+    .replace(/\s+/gu, " ");
+  if (
+    normalized.length === 0 ||
+    codePointLength(normalized) > LINK_DISCUSSION_NAME_CODE_POINT_LIMIT ||
+    Buffer.byteLength(normalized, "utf8") > LINK_DISCUSSION_NAME_BYTE_LIMIT
+  ) {
+    return null;
+  }
+  return normalized;
+}
+
+function validLinkDiscussionIdempotencyKey(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length >= 1 &&
+    value.length <= LINK_DISCUSSION_IDEMPOTENCY_KEY_LIMIT &&
+    /^[\x20-\x7e]+$/u.test(value)
+  );
+}
+
+function linkDiscussionRequestHash(body: string, claimedName: string | null): string {
+  return createHash("sha256")
+    .update(JSON.stringify({ body, claimedName }))
+    .digest("base64url");
+}
+
+function utf8Bytes(...values: Array<string | null>): number {
+  return values.reduce(
+    (total, value) => total + (value === null ? 0 : Buffer.byteLength(value, "utf8")),
+    0,
+  );
+}
+
 export function openSyncRelayStorage(
   dbPath: string,
   options: OpenSyncRelayStorageOptions = {},
@@ -1725,6 +1979,26 @@ export function openSyncRelayStorage(
       `linkSessionsPerGrantLimit must be a positive safe integer, got ${String(linkSessionsPerGrantLimit)}`,
     );
   }
+  const linkDiscussionPrincipalLimit =
+    options.linkDiscussionPrincipalLimit ?? LINK_DISCUSSION_PRINCIPAL_LIMIT;
+  const linkDiscussionMessageRateLimit =
+    options.linkDiscussionMessageRateLimit ?? LINK_DISCUSSION_MESSAGE_RATE_LIMIT;
+  const linkDiscussionLifetimeMessageLimit =
+    options.linkDiscussionLifetimeMessageLimit ??
+    LINK_DISCUSSION_LIFETIME_MESSAGE_LIMIT;
+  const linkDiscussionShareRowLimit =
+    options.linkDiscussionShareRowLimit ?? LINK_DISCUSSION_SHARE_ROW_LIMIT;
+  for (const [name, value] of [
+    ["linkDiscussionPrincipalLimit", linkDiscussionPrincipalLimit],
+    ["linkDiscussionMessageRateLimit", linkDiscussionMessageRateLimit],
+    ["linkDiscussionLifetimeMessageLimit", linkDiscussionLifetimeMessageLimit],
+    ["linkDiscussionShareRowLimit", linkDiscussionShareRowLimit],
+  ] as const) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new Error(`${name} must be a positive safe integer, got ${String(value)}`);
+    }
+  }
+  const newDiscussionId = options.newDiscussionId ?? randomUUID;
   const db = new DatabaseSync(resolved);
   try {
     db.exec(`PRAGMA busy_timeout = ${SYNC_RELAY_BUSY_TIMEOUT_MS}`);
@@ -1736,6 +2010,11 @@ export function openSyncRelayStorage(
       workspaceQuotaBytes,
       blobGraceMs,
       linkSessionsPerGrantLimit,
+      linkDiscussionPrincipalLimit,
+      linkDiscussionMessageRateLimit,
+      linkDiscussionLifetimeMessageLimit,
+      linkDiscussionShareRowLimit,
+      newDiscussionId,
     );
   } catch (error) {
     try {
@@ -1751,6 +2030,11 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     private readonly workspaceQuotaBytes: number,
     private readonly blobGraceMs: number,
     private readonly linkSessionsPerGrantLimit: number,
+    private readonly linkDiscussionPrincipalLimit: number,
+    private readonly linkDiscussionMessageRateLimit: number,
+    private readonly linkDiscussionLifetimeMessageLimit: number,
+    private readonly linkDiscussionShareRowLimit: number,
+    private readonly newDiscussionId: () => string,
   ) {}
 
   close(): void {
@@ -2660,12 +2944,39 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
          WHERE workspace_id = ?`,
       )
       .get(workspaceId);
+    const discussionRow = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(message.storage_bytes), 0) AS bytes
+         FROM sync_relay_share_discussion_messages AS message
+         JOIN sync_relay_shares AS share ON share.share_id = message.share_id
+         WHERE share.workspace_id = ?`,
+      )
+      .get(workspaceId);
+    const discussionPrincipalRow = this.db
+      .prepare(
+        `SELECT COALESCE(
+           SUM(
+             length(CAST(principal.principal_id AS BLOB)) +
+             length(CAST(principal.grant_id AS BLOB)) +
+             length(CAST(principal.profile_token_hash AS BLOB)) +
+             COALESCE(length(CAST(principal.display_name AS BLOB)), 0)
+           ),
+           0
+         ) AS bytes
+         FROM sync_relay_link_principals AS principal
+         JOIN sync_relay_share_grants AS grant ON grant.grant_id = principal.grant_id
+         JOIN sync_relay_shares AS share ON share.share_id = grant.share_id
+         WHERE share.workspace_id = ?`,
+      )
+      .get(workspaceId);
     return (
       Number(blobRow?.bytes ?? 0) +
       Number(logRow?.bytes ?? 0) +
       Number(envelopeRow?.bytes ?? 0) +
       Number(envelopeHistoryRow?.bytes ?? 0) +
-      Number(supersessionRow?.bytes ?? 0)
+      Number(supersessionRow?.bytes ?? 0) +
+      Number(discussionRow?.bytes ?? 0) +
+      Number(discussionPrincipalRow?.bytes ?? 0)
     );
   }
 
@@ -3077,7 +3388,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
 
   mintLinkSession(input: {
-    session: SyncRelayLinkSessionRow;
+    session: Omit<SyncRelayLinkSessionRow, "principalId">;
     guard?: () => void;
   }): boolean {
     const { session } = input;
@@ -3128,8 +3439,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       this.db
         .prepare(
           `INSERT INTO sync_relay_link_sessions (
-             session_id, capability_hash, grant_id, generation, minted_at_ms, expires_at_ms
-           ) VALUES (?, ?, ?, ?, ?, ?)`,
+             session_id, capability_hash, grant_id, generation, minted_at_ms,
+             expires_at_ms, principal_id
+           ) VALUES (?, ?, ?, ?, ?, ?, NULL)`,
         )
         .run(
           session.sessionId,
@@ -3146,7 +3458,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   replaceLinkSession(input: {
     currentSession: SyncRelayLinkSessionRow;
-    session: SyncRelayLinkSessionRow;
+    session: Omit<SyncRelayLinkSessionRow, "principalId">;
     guard: () => void;
   }): boolean {
     const { currentSession, session } = input;
@@ -3166,6 +3478,24 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     }
     return this.tx(() => {
       input.guard();
+      const storedCurrent = this.db
+        .prepare(
+          `SELECT principal_id
+           FROM sync_relay_link_sessions
+           WHERE session_id = ?
+             AND capability_hash = ?
+             AND grant_id = ?
+             AND generation = ?
+             AND expires_at_ms >= ?`,
+        )
+        .get(
+          currentSession.sessionId,
+          currentSession.capabilityHash,
+          currentSession.grantId,
+          currentSession.generation,
+          Math.trunc(session.mintedAtMs - LINK_SESSION_RENEWAL_GRACE_MS),
+        );
+      if (!storedCurrent) return false;
       const retired = this.db
         .prepare(
           `DELETE FROM sync_relay_link_sessions
@@ -3186,8 +3516,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       this.db
         .prepare(
           `INSERT INTO sync_relay_link_sessions (
-             session_id, capability_hash, grant_id, generation, minted_at_ms, expires_at_ms
-           ) VALUES (?, ?, ?, ?, ?, ?)`,
+             session_id, capability_hash, grant_id, generation, minted_at_ms,
+             expires_at_ms, principal_id
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           session.sessionId,
@@ -3196,6 +3527,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           session.generation,
           Math.trunc(session.mintedAtMs),
           Math.trunc(session.expiresAtMs),
+          storedCurrent.principal_id ?? null,
         );
       this.upsertLinkUsage(session.grantId, session.mintedAtMs);
       return true;
@@ -3207,11 +3539,494 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   ): SyncRelayLinkSessionRow | null {
     const row = this.db
       .prepare(
-        `SELECT session_id, capability_hash, grant_id, generation, minted_at_ms, expires_at_ms
+        `SELECT session_id, capability_hash, grant_id, generation, minted_at_ms,
+                expires_at_ms, principal_id
          FROM sync_relay_link_sessions WHERE capability_hash = ? LIMIT 1`,
       )
       .get(capabilityHash);
     return row ? rowToLinkSessionRow(row) : null;
+  }
+
+  appendLinkDiscussionMessage(input: {
+    capabilityHash: string;
+    profileTokenHash: string;
+    claimedName?: string | null;
+    body: string;
+    idempotencyKey: string;
+    createdAtMs: number;
+  }): AppendLinkDiscussionMessageResult {
+    const body = normalizeLinkDiscussionBody(input.body);
+    const hasClaimedName =
+      input.claimedName !== undefined && input.claimedName !== null;
+    const claimedName = hasClaimedName
+      ? normalizeLinkDiscussionName(input.claimedName)
+      : null;
+    if (
+      body === null ||
+      (hasClaimedName && claimedName === null) ||
+      !validLinkDiscussionIdempotencyKey(input.idempotencyKey) ||
+      !input.capabilityHash ||
+      !input.profileTokenHash ||
+      !Number.isSafeInteger(input.createdAtMs) ||
+      input.createdAtMs < 0
+    ) {
+      return { ok: false, reason: "invalid-input" };
+    }
+    const createdAtMs = Math.trunc(input.createdAtMs);
+    const requestHash = linkDiscussionRequestHash(body, claimedName);
+
+    return this.tx(() => {
+      // This is the final authority read. The same BEGIN IMMEDIATE transaction
+      // holds the write lock through principal mint, binding, budget charge,
+      // and message insert.
+      const authority = this.db
+        .prepare(
+          `SELECT session.session_id, session.principal_id AS session_principal_id,
+                  session.grant_id, session.generation AS session_generation,
+                  session.minted_at_ms, session.expires_at_ms,
+                  grant.share_id, grant.generation AS grant_generation,
+                  grant.access, grant.status, grant.revoked_at_ms,
+                  share.workspace_id, share.granter_user_id,
+                  share.link_writes_paused_at_ms,
+                  workspace.owner_user_id
+           FROM sync_relay_link_sessions AS session
+           JOIN sync_relay_share_grants AS grant ON grant.grant_id = session.grant_id
+           JOIN sync_relay_shares AS share ON share.share_id = grant.share_id
+           JOIN sync_relay_workspaces AS workspace
+             ON workspace.workspace_id = share.workspace_id
+           WHERE session.capability_hash = ?
+           LIMIT 1`,
+        )
+        .get(input.capabilityHash);
+      if (
+        !authority ||
+        authority.status !== "active" ||
+        authority.revoked_at_ms !== null ||
+        authority.access !== "comment" ||
+        Number(authority.session_generation) !== Number(authority.grant_generation) ||
+        Number(authority.minted_at_ms) > createdAtMs ||
+        Number(authority.expires_at_ms) <= createdAtMs ||
+        authority.owner_user_id !== authority.granter_user_id
+      ) {
+        return { ok: false, reason: "not-authorized" };
+      }
+      if (authority.link_writes_paused_at_ms !== null) {
+        return { ok: false, reason: "paused" };
+      }
+
+      const grantId = String(authority.grant_id);
+      const shareId = String(authority.share_id);
+      const workspaceId = String(authority.workspace_id);
+      const existingPrincipalRow = this.db
+        .prepare(
+          `SELECT principal_id, grant_id, mint_generation, profile_token_hash,
+                  display_name, created_at_ms, blocked_at_ms
+           FROM sync_relay_link_principals
+           WHERE grant_id = ? AND profile_token_hash = ?
+           LIMIT 1`,
+        )
+        .get(grantId, input.profileTokenHash);
+      let principal = existingPrincipalRow
+        ? rowToLinkPrincipalRow(existingPrincipalRow)
+        : null;
+      const sessionPrincipalId = nullableText(authority.session_principal_id);
+      if (
+        (principal && sessionPrincipalId !== null && sessionPrincipalId !== principal.principalId) ||
+        (!principal && sessionPrincipalId !== null)
+      ) {
+        return { ok: false, reason: "not-authorized" };
+      }
+      if (principal && principal.blockedAtMs !== null) {
+        return { ok: false, reason: "blocked" };
+      }
+
+      if (principal) {
+        const replayRow = this.db
+          .prepare(
+            `SELECT message_id, share_id, idempotency_key, request_hash,
+                    author_kind, author_user_id, link_grant_id, link_principal_id,
+                    display_name_snapshot, body, created_at_ms, deleted_at_ms,
+                    deleted_by_user_id, storage_bytes
+             FROM sync_relay_share_discussion_messages
+             WHERE share_id = ?
+               AND author_kind = 'link'
+               AND link_principal_id = ?
+               AND idempotency_key = ?
+             LIMIT 1`,
+          )
+          .get(shareId, principal.principalId, input.idempotencyKey);
+        if (replayRow) {
+          if (replayRow.request_hash !== requestHash) {
+            return { ok: false, reason: "idempotency-conflict" };
+          }
+          return {
+            ok: true,
+            replayed: true,
+            principal,
+            message: rowToShareDiscussionMessageRow(replayRow),
+          };
+        }
+        if (
+          claimedName !== null &&
+          principal.displayName !== null &&
+          claimedName !== principal.displayName
+        ) {
+          return { ok: false, reason: "name-already-set" };
+        }
+      }
+
+      if (!principal) {
+        const principalCount = Number(
+          this.db
+            .prepare(
+              `SELECT COUNT(*) AS count
+               FROM sync_relay_link_principals
+               WHERE grant_id = ? AND mint_generation = ?`,
+            )
+            .get(grantId, Number(authority.grant_generation))?.count ?? 0,
+        );
+        if (principalCount >= this.linkDiscussionPrincipalLimit) {
+          return { ok: false, reason: "principal-limit" };
+        }
+      }
+
+      if (principal) {
+        const rateCount = Number(
+          this.db
+            .prepare(
+              `SELECT COUNT(*) AS count
+               FROM sync_relay_share_discussion_messages
+               WHERE author_kind = 'link'
+                 AND link_principal_id = ?
+                 AND created_at_ms > ?`,
+            )
+            .get(
+              principal.principalId,
+              createdAtMs - LINK_DISCUSSION_MESSAGE_RATE_WINDOW_MS,
+            )?.count ?? 0,
+        );
+        if (rateCount >= this.linkDiscussionMessageRateLimit) {
+          return { ok: false, reason: "rate-limit" };
+        }
+        const lifetimeCount = Number(
+          this.db
+            .prepare(
+              `SELECT COUNT(*) AS count
+               FROM sync_relay_share_discussion_messages
+               WHERE author_kind = 'link' AND link_principal_id = ?`,
+            )
+            .get(principal.principalId)?.count ?? 0,
+        );
+        if (lifetimeCount >= this.linkDiscussionLifetimeMessageLimit) {
+          return { ok: false, reason: "lifetime-limit" };
+        }
+      }
+      const shareRowCount = Number(
+        this.db
+          .prepare(
+            `SELECT COUNT(*) AS count
+             FROM sync_relay_share_discussion_messages
+             WHERE share_id = ? AND author_kind = 'link'`,
+          )
+          .get(shareId)?.count ?? 0,
+      );
+      if (shareRowCount >= this.linkDiscussionShareRowLimit) {
+        return { ok: false, reason: "share-limit" };
+      }
+
+      const principalId = principal?.principalId ?? this.newDiscussionId();
+      const messageId = this.newDiscussionId();
+      if (!principalId || !messageId || principalId === messageId) {
+        throw new Error("discussion id generator returned an invalid identifier");
+      }
+      const committedName = principal?.displayName ?? claimedName;
+      const displayNameSnapshot = committedName ?? "Anonymous";
+      const principalAddedBytes = principal
+        ? principal.displayName === null && committedName !== null
+          ? Buffer.byteLength(committedName, "utf8")
+          : 0
+        : utf8Bytes(principalId, grantId, input.profileTokenHash, committedName);
+      const messageStorageBytes = utf8Bytes(
+        messageId,
+        shareId,
+        input.idempotencyKey,
+        requestHash,
+        "link",
+        grantId,
+        principalId,
+        displayNameSnapshot,
+        body,
+      );
+      if (
+        this.workspaceUsageBytes(workspaceId) + principalAddedBytes + messageStorageBytes >
+        this.workspaceQuotaBytes
+      ) {
+        return { ok: false, reason: "workspace-quota" };
+      }
+
+      if (!principal) {
+        this.db
+          .prepare(
+            `INSERT INTO sync_relay_link_principals (
+               principal_id, grant_id, mint_generation, profile_token_hash,
+               display_name, created_at_ms, blocked_at_ms
+             ) VALUES (?, ?, ?, ?, ?, ?, NULL)`,
+          )
+          .run(
+            principalId,
+            grantId,
+            Number(authority.grant_generation),
+            input.profileTokenHash,
+            committedName,
+            createdAtMs,
+          );
+        principal = this.getLinkPrincipal(principalId)!;
+      } else if (principal.displayName === null && committedName !== null) {
+        this.db
+          .prepare(
+            `UPDATE sync_relay_link_principals
+             SET display_name = ?
+             WHERE principal_id = ? AND display_name IS NULL`,
+          )
+          .run(committedName, principal.principalId);
+        principal = this.getLinkPrincipal(principal.principalId)!;
+      }
+
+      if (sessionPrincipalId === null) {
+        const bound = this.db
+          .prepare(
+            `UPDATE sync_relay_link_sessions
+             SET principal_id = ?
+             WHERE session_id = ? AND capability_hash = ? AND principal_id IS NULL`,
+          )
+          .run(principal.principalId, authority.session_id, input.capabilityHash);
+        if (Number(bound.changes ?? 0) !== 1) {
+          throw new Error("link discussion session binding changed inside transaction");
+        }
+      }
+
+      this.db
+        .prepare(
+          `INSERT INTO sync_relay_share_discussion_messages (
+             message_id, share_id, idempotency_key, request_hash, author_kind,
+             author_user_id, link_grant_id, link_principal_id,
+             display_name_snapshot, body, created_at_ms, deleted_at_ms,
+             deleted_by_user_id, storage_bytes
+           ) VALUES (?, ?, ?, ?, 'link', NULL, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
+        )
+        .run(
+          messageId,
+          shareId,
+          input.idempotencyKey,
+          requestHash,
+          grantId,
+          principal.principalId,
+          displayNameSnapshot,
+          body,
+          createdAtMs,
+          messageStorageBytes,
+        );
+      const message = this.db
+        .prepare(
+          `SELECT message_id, share_id, idempotency_key, request_hash,
+                  author_kind, author_user_id, link_grant_id, link_principal_id,
+                  display_name_snapshot, body, created_at_ms, deleted_at_ms,
+                  deleted_by_user_id, storage_bytes
+           FROM sync_relay_share_discussion_messages
+           WHERE message_id = ?`,
+        )
+        .get(messageId);
+      if (!message) throw new Error("inserted discussion message is missing");
+      return {
+        ok: true,
+        replayed: false,
+        principal,
+        message: rowToShareDiscussionMessageRow(message),
+      };
+    });
+  }
+
+  listShareDiscussionMessages(input: {
+    shareId: string;
+    after?: SyncRelayShareDiscussionCursor | null;
+    limit: number;
+  }): SyncRelayShareDiscussionPage {
+    if (
+      !Number.isSafeInteger(input.limit) ||
+      input.limit < 1 ||
+      input.limit > LINK_DISCUSSION_PAGE_LIMIT
+    ) {
+      throw new Error(`discussion page limit must be between 1 and ${LINK_DISCUSSION_PAGE_LIMIT}`);
+    }
+    const after = input.after ?? null;
+    if (
+      after !== null &&
+      (!Number.isSafeInteger(after.createdAtMs) || !after.messageId)
+    ) {
+      throw new Error("discussion page cursor is invalid");
+    }
+    const rows = (
+      after === null
+        ? this.db
+            .prepare(
+              `SELECT message_id, share_id, idempotency_key, request_hash,
+                      author_kind, author_user_id, link_grant_id, link_principal_id,
+                      display_name_snapshot, body, created_at_ms, deleted_at_ms,
+                      deleted_by_user_id, storage_bytes
+               FROM sync_relay_share_discussion_messages
+               WHERE share_id = ?
+               ORDER BY created_at_ms, message_id
+               LIMIT ?`,
+            )
+            .all(input.shareId, input.limit + 1)
+        : this.db
+            .prepare(
+              `SELECT message_id, share_id, idempotency_key, request_hash,
+                      author_kind, author_user_id, link_grant_id, link_principal_id,
+                      display_name_snapshot, body, created_at_ms, deleted_at_ms,
+                      deleted_by_user_id, storage_bytes
+               FROM sync_relay_share_discussion_messages
+               WHERE share_id = ?
+                 AND (created_at_ms > ? OR (created_at_ms = ? AND message_id > ?))
+               ORDER BY created_at_ms, message_id
+               LIMIT ?`,
+            )
+            .all(
+              input.shareId,
+              after.createdAtMs,
+              after.createdAtMs,
+              after.messageId,
+              input.limit + 1,
+            )
+    ).map(rowToShareDiscussionMessageRow);
+    const hasMore = rows.length > input.limit;
+    const messages = hasMore ? rows.slice(0, input.limit) : rows;
+    const last = messages.at(-1);
+    return {
+      messages,
+      nextCursor:
+        hasMore && last
+          ? { createdAtMs: last.createdAtMs, messageId: last.messageId }
+          : null,
+    };
+  }
+
+  getLinkPrincipal(principalId: string): SyncRelayLinkPrincipalRow | null {
+    const row = this.db
+      .prepare(
+        `SELECT principal_id, grant_id, mint_generation, profile_token_hash,
+                display_name, created_at_ms, blocked_at_ms
+         FROM sync_relay_link_principals
+         WHERE principal_id = ?`,
+      )
+      .get(principalId);
+    return row ? rowToLinkPrincipalRow(row) : null;
+  }
+
+  setLinkPrincipalBlocked(input: {
+    shareId: string;
+    principalId: string;
+    blockedAtMs: number | null;
+  }): boolean {
+    if (
+      input.blockedAtMs !== null &&
+      (!Number.isSafeInteger(input.blockedAtMs) || input.blockedAtMs < 0)
+    ) {
+      return false;
+    }
+    return this.tx(() => {
+      const principal = this.db
+        .prepare(
+          `SELECT principal.principal_id
+           FROM sync_relay_link_principals AS principal
+           JOIN sync_relay_share_grants AS grant ON grant.grant_id = principal.grant_id
+           WHERE principal.principal_id = ? AND grant.share_id = ?`,
+        )
+        .get(input.principalId, input.shareId);
+      if (!principal) return false;
+      this.db
+        .prepare(
+          `UPDATE sync_relay_link_principals
+           SET blocked_at_ms = ?
+           WHERE principal_id = ?`,
+        )
+        .run(input.blockedAtMs === null ? null : Math.trunc(input.blockedAtMs), input.principalId);
+      if (input.blockedAtMs !== null) {
+        this.db
+          .prepare(
+            `UPDATE sync_relay_link_sessions
+             SET principal_id = NULL
+             WHERE principal_id = ?`,
+          )
+          .run(input.principalId);
+      }
+      return true;
+    });
+  }
+
+  setShareLinkWritesPaused(input: {
+    shareId: string;
+    pausedAtMs: number | null;
+  }): boolean {
+    if (
+      input.pausedAtMs !== null &&
+      (!Number.isSafeInteger(input.pausedAtMs) || input.pausedAtMs < 0)
+    ) {
+      return false;
+    }
+    const updated = this.db
+      .prepare(
+        `UPDATE sync_relay_shares
+         SET link_writes_paused_at_ms = ?
+         WHERE share_id = ?`,
+      )
+      .run(input.pausedAtMs === null ? null : Math.trunc(input.pausedAtMs), input.shareId);
+    return Number(updated.changes ?? 0) === 1;
+  }
+
+  getShareLinkWritesPausedAtMs(shareId: string): number | null {
+    const row = this.db
+      .prepare(
+        `SELECT link_writes_paused_at_ms
+         FROM sync_relay_shares
+         WHERE share_id = ?`,
+      )
+      .get(shareId);
+    return row ? nullableInt(row.link_writes_paused_at_ms) : null;
+  }
+
+  deleteShareDiscussionMessage(input: {
+    shareId: string;
+    messageId: string;
+    deletedAtMs: number;
+    deletedByUserId: string;
+  }): boolean {
+    if (
+      !Number.isSafeInteger(input.deletedAtMs) ||
+      input.deletedAtMs < 0 ||
+      !input.deletedByUserId
+    ) {
+      return false;
+    }
+    return this.tx(() => {
+      const deleted = this.db
+        .prepare(
+          `UPDATE sync_relay_share_discussion_messages
+           SET body = NULL,
+               deleted_at_ms = ?,
+               deleted_by_user_id = ?,
+               storage_bytes = storage_bytes + ?
+           WHERE share_id = ? AND message_id = ? AND deleted_at_ms IS NULL`,
+        )
+        .run(
+          Math.trunc(input.deletedAtMs),
+          input.deletedByUserId,
+          Buffer.byteLength(input.deletedByUserId, "utf8"),
+          input.shareId,
+          input.messageId,
+        );
+      return Number(deleted.changes ?? 0) === 1;
+    });
   }
 
   mintLinkHandoffCode(input: {
@@ -4716,6 +5531,45 @@ function rowToLinkCredentialRow(
   };
 }
 
+function rowToLinkPrincipalRow(
+  row: Record<string, unknown>,
+): SyncRelayLinkPrincipalRow {
+  return {
+    principalId: String(row.principal_id),
+    grantId: String(row.grant_id),
+    mintGeneration: Number(row.mint_generation),
+    profileTokenHash: String(row.profile_token_hash),
+    displayName: nullableText(row.display_name),
+    createdAtMs: Number(row.created_at_ms),
+    blockedAtMs: nullableInt(row.blocked_at_ms),
+  };
+}
+
+function rowToShareDiscussionMessageRow(
+  row: Record<string, unknown>,
+): SyncRelayShareDiscussionMessageRow {
+  const authorKind = String(row.author_kind);
+  if (authorKind !== "named" && authorKind !== "link") {
+    throw new Error("stored discussion message has an invalid author kind");
+  }
+  return {
+    messageId: String(row.message_id),
+    shareId: String(row.share_id),
+    idempotencyKey: String(row.idempotency_key),
+    requestHash: String(row.request_hash),
+    authorKind,
+    authorUserId: nullableText(row.author_user_id),
+    linkGrantId: nullableText(row.link_grant_id),
+    linkPrincipalId: nullableText(row.link_principal_id),
+    displayNameSnapshot: String(row.display_name_snapshot),
+    body: nullableText(row.body),
+    createdAtMs: Number(row.created_at_ms),
+    deletedAtMs: nullableInt(row.deleted_at_ms),
+    deletedByUserId: nullableText(row.deleted_by_user_id),
+    storageBytes: Number(row.storage_bytes),
+  };
+}
+
 function rowToLinkSessionRow(row: Record<string, unknown>): SyncRelayLinkSessionRow {
   return {
     sessionId: String(row.session_id),
@@ -4724,6 +5578,7 @@ function rowToLinkSessionRow(row: Record<string, unknown>): SyncRelayLinkSession
     generation: Number(row.generation),
     mintedAtMs: Number(row.minted_at_ms),
     expiresAtMs: Number(row.expires_at_ms),
+    principalId: nullableText(row.principal_id),
   };
 }
 
