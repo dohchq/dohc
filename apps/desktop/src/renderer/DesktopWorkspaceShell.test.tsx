@@ -10238,6 +10238,7 @@ describe("history page", () => {
   // displayed is still dropped, so a slow response cannot move the timeline
   // backward.
   it("ignores a history page that resolves after a newer one committed", async () => {
+    const previousOrdinal = rendererMarks.readSwitchTimeline().at(-1)?.ordinal ?? 0;
     const older = deferred<ListEngineMomentsResult>();
     const newer = deferred<ListEngineMomentsResult>();
     let issued = 0;
@@ -10260,6 +10261,12 @@ describe("history page", () => {
       await newer.promise;
     });
     expect(await screen.findByText("Added the launch checklist")).toBeTruthy();
+    await waitFor(() => {
+      const timeline = rendererMarks
+        .readSwitchTimeline()
+        .find((entry) => entry.ordinal > previousOrdinal);
+      expect(timeline?.phases["history-ready"]).toEqual(expect.any(Number));
+    });
 
     await act(async () => {
       older.resolve(historyPage([historyMoment("m-older", "Reordered the plan")]));

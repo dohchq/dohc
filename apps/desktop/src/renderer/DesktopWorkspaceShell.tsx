@@ -3071,6 +3071,11 @@ export function DesktopWorkspaceShell(props: {
           latestMomentOrder: page.latestMomentOrder,
           protectedTruncated: page.protectedTruncated,
         });
+        // Readiness belongs to the page that actually commits. A newer
+        // activity refresh can beat the workspace-open refresh; marking only
+        // the caller's promise then left the profiler waiting even though the
+        // current History page was already visible.
+        markCurrentSwitchPhase("history-ready");
       };
       // Blocked by a newer pagination: hold this answer instead of throwing it
       // away, and let the pagination's settlement decide (keeping the newest
@@ -3102,11 +3107,13 @@ export function DesktopWorkspaceShell(props: {
     ]);
     syncStatusLane.commit(token, status);
     agentActiveLane.commit(token, agent.activeRun !== null);
+    markCurrentSwitchPhase("history-ready");
     return "ready" as const;
   }, [
     agentActiveLane,
     engineEnabled,
     isShareView,
+    markCurrentSwitchPhase,
     readAgentStatusForHistory,
     reportLaneFailure,
     reportShellError,
@@ -3284,14 +3291,11 @@ export function DesktopWorkspaceShell(props: {
   // changed `refreshHistory` and re-ran the whole workspace-open effect.
   useEffect(() => {
     if (!workspaceIsReady || engineReadForWorkspace === null) return;
-    void refreshHistory()
-      .then((outcome) => {
-        if (outcome === "ready") markCurrentSwitchPhase("history-ready");
-      })
-      .catch((error) => reportShellError("Could not refresh history.", error));
+    void refreshHistory().catch((error) =>
+      reportShellError("Could not refresh history.", error),
+    );
   }, [
     engineReadForWorkspace,
-    markCurrentSwitchPhase,
     refreshHistory,
     reportShellError,
     workspaceIsReady,
