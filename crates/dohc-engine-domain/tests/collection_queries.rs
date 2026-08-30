@@ -447,7 +447,7 @@ fn reconcile_indexes_fields_added_after_frontmatterless_record_adoption() {
 }
 
 #[test]
-fn reconcile_indexes_unsupported_tag_as_flagged_without_rewriting_record() {
+fn reconcile_clears_unsupported_tag_flag_after_tag_is_removed() {
     let (_scratch, mut store) = fresh_store();
     let fixture: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/collection-frontmatter.json"))
@@ -467,7 +467,15 @@ fn reconcile_indexes_unsupported_tag_as_flagged_without_rewriting_record() {
         2,
     )
     .expect("task schema");
-    write_text(&mut store, "tasks/tagged.md", &tagged_markdown, 3).expect("tagged record");
+    write_text_for_object(
+        &mut store,
+        "tasks/tagged.md",
+        &tagged_markdown,
+        "tagged-record-object",
+        "tagged-record",
+        3,
+    )
+    .expect("tagged record");
 
     let reconciled = store
         .write_with(&NoFaults, |tx| {
@@ -507,6 +515,117 @@ fn reconcile_indexes_unsupported_tag_as_flagged_without_rewriting_record() {
         })
         .expect("read tagged record after reconciliation");
     assert_eq!(stored, tagged_markdown);
+
+    let untagged_markdown =
+        format!("---\nid: {FIRST_TASK_ID}\npriority: high\n---\n\nUntagged priority\n");
+    write_text_for_object(
+        &mut store,
+        "tasks/tagged.md",
+        &untagged_markdown,
+        "tagged-record-object",
+        "untagged-record",
+        4,
+    )
+    .expect("remove unsupported tag");
+    let reconciled = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile untagged record");
+    assert!(matches!(reconciled, TxnOutcome::Committed(_)));
+
+    let query = store
+        .read_with(|conn| {
+            query_collection_records(conn, WORKSPACE_ID, "tasks", &CollectionQuery::default())
+        })
+        .expect("query untagged record")
+        .expect("tasks collection");
+    let priority = query.records[0]
+        .values
+        .iter()
+        .find(|value| value.field == "priority")
+        .expect("untagged priority value");
+    assert_eq!(priority.value, json!("high"));
+    assert_eq!(
+        priority.validation,
+        CollectionIndexedValueValidation::Valid,
+        "removing an unsupported tag must revalidate the unchanged raw value",
+    );
+}
+
+#[test]
+fn reconcile_flags_only_frontmatter_values_beyond_depth_limit_and_keeps_raw_values() {
+    let (_scratch, mut store) = fresh_store();
+    write_text(
+        &mut store,
+        "depth/collection.yaml",
+        "name: Depth boundary\n",
+        2,
+    )
+    .expect("depth schema");
+
+    let at_limit_yaml = format!("{}\"leaf\"{}", "[".repeat(23), "]".repeat(23));
+    let over_limit_yaml = format!("{}\"leaf\"{}", "[".repeat(24), "]".repeat(24));
+    write_text(
+        &mut store,
+        "depth/sample.md",
+        &format!(
+            "---\nid: {FIRST_TASK_ID}\natLimit: {at_limit_yaml}\noverLimit: {over_limit_yaml}\n---\n"
+        ),
+        3,
+    )
+    .expect("depth boundary record");
+
+    let reconciled = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile depth boundary record");
+    assert!(matches!(reconciled, TxnOutcome::Committed(_)));
+
+    let query = store
+        .read_with(|conn| {
+            query_collection_records(conn, WORKSPACE_ID, "depth", &CollectionQuery::default())
+        })
+        .expect("query depth boundary record")
+        .expect("depth collection");
+    let record = &query.records[0];
+    let nested_value = |containers: usize| {
+        let mut value = json!("leaf");
+        for _ in 0..containers {
+            value = json!([value]);
+        }
+        value
+    };
+    let at_limit = record
+        .values
+        .iter()
+        .find(|value| value.field == "atLimit")
+        .expect("at-limit value");
+    assert_eq!(at_limit.value, nested_value(23));
+    assert_eq!(
+        at_limit.validation,
+        CollectionIndexedValueValidation::Untyped,
+        "a 24-level field value remains indexable",
+    );
+
+    let over_limit = record
+        .values
+        .iter()
+        .find(|value| value.field == "overLimit")
+        .expect("over-limit value");
+    assert_eq!(
+        over_limit.value,
+        nested_value(24),
+        "depth validation must retain the raw value",
+    );
+    assert_eq!(
+        serde_json::to_value(&over_limit.validation).expect("serialize depth validation"),
+        json!({
+            "status": "flagged",
+            "reason": { "code": "value-depth-exceeded", "path": "" }
+        }),
+    );
 }
 
 #[test]

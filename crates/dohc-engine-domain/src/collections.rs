@@ -9,7 +9,10 @@ use std::collections::{HashMap, HashSet};
 
 use dohc_engine_storage::StorageError;
 use rusqlite::{Connection, OptionalExtension, params};
-use saphyr::{LoadableYamlNode, MappingOwned, ScalarOwned, YamlOwned};
+use saphyr::{
+    LoadableYamlNode, MappingOwned, MarkedYamlOwned, ScalarOwned, ScalarStyle, YamlDataOwned,
+    YamlOwned,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -177,9 +180,21 @@ pub enum CollectionSchemaStatus {
     Degraded,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum CollectionSchemaReasonCode {
+macro_rules! reason_code {
+    ($name:ident { $($variant:ident),+ $(,)? }) => {
+        #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+        #[serde(rename_all = "kebab-case")]
+        pub enum $name {
+            $($variant),+
+        }
+
+        impl $name {
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+        }
+    };
+}
+
+reason_code!(CollectionSchemaReasonCode {
     InvalidYaml,
     RootNotMapping,
     RootCollectionUnsupported,
@@ -194,12 +209,13 @@ pub enum CollectionSchemaReasonCode {
     InvalidSortDirection,
     EmptyValue,
     DuplicateValue,
+    FieldNameCollision,
     ReservedFieldName,
     InvalidRelationTarget,
     UnknownFieldReference,
     SchemaCollectionLimitExceeded,
     RecordTooLargeForAdoption,
-}
+});
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CollectionSchemaReason {
@@ -304,13 +320,12 @@ pub enum CollectionFieldValue {
     Mapping,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum FieldValueReasonCode {
+reason_code!(FieldValueReasonCode {
     ExpectedText,
     ExpectedNumber,
     NumberNotFinite,
     UnsupportedTag,
+    ValueDepthExceeded,
     ExpectedBoolean,
     ExpectedSequence,
     InvalidDate,
@@ -319,7 +334,7 @@ pub enum FieldValueReasonCode {
     EmptyPersonId,
     InvalidRecordId,
     InvalidUrl,
-}
+});
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FieldValueReason {
@@ -492,6 +507,7 @@ pub const MAX_COLLECTION_HISTORY_LIMIT: usize = 500;
 // Collection schemas cross the default engine wire as arrays. Capping them
 // while parsing prevents those arrays from exceeding the wire collection limit.
 const MAX_SCHEMA_COLLECTION_ITEMS: usize = 16_384;
+const MAX_COLLECTION_FIELD_VALUE_DEPTH: usize = 24;
 
 fn pointer_segment(value: &str) -> String {
     value.replace('~', "~0").replace('/', "~1")
@@ -686,6 +702,13 @@ fn parse_fields(
         return Vec::new();
     };
 
+    let mut normalized_name_counts = HashMap::<String, usize>::new();
+    for (name, _) in mapping {
+        if let Some(name) = yaml_key_text(name) {
+            *normalized_name_counts.entry(name).or_default() += 1;
+        }
+    }
+
     let mut fields = Vec::new();
     for (name, raw_field) in mapping {
         let Some(name) = yaml_key_text(name) else {
@@ -697,6 +720,18 @@ fn parse_fields(
             continue;
         };
         let path = property_path("/fields", &name);
+        if normalized_name_counts
+            .get(&name)
+            .copied()
+            .unwrap_or_default()
+            > 1
+        {
+            push_reason(
+                reasons,
+                CollectionSchemaReasonCode::FieldNameCollision,
+                &path,
+            );
+        }
         if name.is_empty() {
             push_reason(reasons, CollectionSchemaReasonCode::EmptyValue, &path);
             continue;
@@ -1219,9 +1254,12 @@ fn yaml_to_json(value: &YamlOwned) -> Value {
                 |value| Value::String(value.to_owned()),
             )
         }
-        YamlOwned::Value(ScalarOwned::String(value)) | YamlOwned::Representation(value, _, _) => {
-            Value::String(value.clone())
+        YamlOwned::Value(ScalarOwned::String(value)) => Value::String(value.clone()),
+        YamlOwned::Representation(value, ScalarStyle::Plain, None) if value.contains('_') => {
+            separated_decimal_integer(value)
+                .map_or_else(|| Value::String(value.clone()), Value::from)
         }
+        YamlOwned::Representation(value, _, _) => Value::String(value.clone()),
         YamlOwned::Sequence(values) => Value::Array(values.iter().map(yaml_to_json).collect()),
         YamlOwned::Mapping(mapping) => {
             let mut object = serde_json::Map::new();
@@ -1234,6 +1272,72 @@ fn yaml_to_json(value: &YamlOwned) -> Value {
         }
         YamlOwned::Tagged(_, value) => yaml_to_json(value),
         YamlOwned::Alias(_) | YamlOwned::BadValue => Value::Null,
+    }
+}
+
+fn separated_decimal_integer(value: &str) -> Option<i64> {
+    if !value.contains('_') {
+        return None;
+    }
+    let normalized = value.replace('_', "");
+    let digits = normalized
+        .strip_prefix('+')
+        .or_else(|| normalized.strip_prefix('-'))
+        .unwrap_or(normalized.as_str());
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    normalized.parse::<i64>().ok()
+}
+
+fn marked_yaml_key_text(value: &MarkedYamlOwned) -> Option<String> {
+    match &value.data {
+        YamlDataOwned::Value(ScalarOwned::String(value))
+        | YamlDataOwned::Representation(value, _, _) => Some(value.clone()),
+        YamlDataOwned::Value(ScalarOwned::Integer(value)) => Some(value.to_string()),
+        YamlDataOwned::Value(ScalarOwned::Boolean(value)) => Some(value.to_string()),
+        YamlDataOwned::Value(ScalarOwned::Null) => Some("null".to_owned()),
+        YamlDataOwned::Tagged(_, value) => marked_yaml_key_text(value),
+        _ => None,
+    }
+}
+
+fn normalize_separated_yaml_integers(value: &mut Value, marked: &MarkedYamlOwned, source: &str) {
+    if let (Value::String(current), YamlDataOwned::Value(ScalarOwned::String(marked_value))) =
+        (&*value, &marked.data)
+        && current == marked_value
+    {
+        let start = marked.span.start.index();
+        let end = marked.span.end.index();
+        if let Some(representation) = source.get(start..end)
+            && representation == marked_value
+            && let Some(integer) = separated_decimal_integer(representation)
+        {
+            *value = Value::from(integer);
+        }
+        return;
+    }
+
+    match (value, &marked.data) {
+        (Value::Array(values), YamlDataOwned::Sequence(marked_values)) => {
+            for (value, marked) in values.iter_mut().zip(marked_values) {
+                normalize_separated_yaml_integers(value, marked, source);
+            }
+        }
+        (Value::Object(values), YamlDataOwned::Mapping(marked_values)) => {
+            for (key, marked_value) in marked_values {
+                let Some(key) = marked_yaml_key_text(key) else {
+                    continue;
+                };
+                if let Some(value) = values.get_mut(&key) {
+                    normalize_separated_yaml_integers(value, marked_value, source);
+                }
+            }
+        }
+        (value, YamlDataOwned::Tagged(_, marked)) => {
+            normalize_separated_yaml_integers(value, marked, source);
+        }
+        _ => {}
     }
 }
 
@@ -1268,6 +1372,11 @@ fn parse_markdown_frontmatter(markdown: &str) -> Option<ParsedMarkdownFrontmatte
     let body_start = body_start?;
     let yaml_source = &markdown[yaml_start..yaml_end];
     let documents = YamlOwned::load_from_str(yaml_source).ok()?;
+    let marked_documents = yaml_source
+        .contains('_')
+        .then(|| MarkedYamlOwned::load_from_str(yaml_source))
+        .transpose()
+        .ok()?;
     let yaml_is_empty = yaml_source.lines().all(|line| {
         let content = line.trim_start_matches([' ', '\t', '\r']);
         content.is_empty() || content.starts_with('#')
@@ -1276,6 +1385,12 @@ fn parse_markdown_frontmatter(markdown: &str) -> Option<ParsedMarkdownFrontmatte
         [] if yaml_is_empty => None,
         [document] => Some(document),
         _ => return None,
+    };
+    let marked_document = match marked_documents.as_deref() {
+        None | Some([]) if yaml_is_empty => None,
+        None => None,
+        Some([document]) => Some(document),
+        Some(_) => return None,
     };
     let (value, non_finite_fields, unsupported_tag_fields) = if let Some(document) = document {
         if let Some(mapping) = document.as_mapping() {
@@ -1295,11 +1410,11 @@ fn parse_markdown_frontmatter(markdown: &str) -> Option<ParsedMarkdownFrontmatte
                         .flatten()
                 })
                 .collect();
-            (
-                yaml_to_json(document),
-                non_finite_fields,
-                unsupported_tag_fields,
-            )
+            let mut value = yaml_to_json(document);
+            if let Some(marked_document) = marked_document {
+                normalize_separated_yaml_integers(&mut value, marked_document, yaml_source);
+            }
+            (value, non_finite_fields, unsupported_tag_fields)
         } else if document.is_null() && yaml_is_empty {
             (
                 Value::Object(serde_json::Map::new()),
@@ -1443,6 +1558,25 @@ fn json_field_value(value: &Value) -> CollectionFieldValue {
     }
 }
 
+fn json_value_exceeds_depth(value: &Value, maximum: usize) -> bool {
+    let mut pending = vec![(value, 1_usize)];
+    while let Some((value, depth)) = pending.pop() {
+        if depth > maximum {
+            return true;
+        }
+        match value {
+            Value::Array(values) => {
+                pending.extend(values.iter().map(|value| (value, depth + 1)));
+            }
+            Value::Object(values) => {
+                pending.extend(values.values().map(|value| (value, depth + 1)));
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 fn json_text(value: &Value) -> Result<String, crate::DomainError> {
     serde_json::to_string(value)
         .map_err(|error| crate::DomainError::Storage(StorageError::persist_public(error)))
@@ -1474,6 +1608,18 @@ fn validation_columns(
     non_finite_number: bool,
     unsupported_tag: bool,
 ) -> Result<(&'static str, Option<String>), crate::DomainError> {
+    if json_value_exceeds_depth(value, MAX_COLLECTION_FIELD_VALUE_DEPTH) {
+        let reason = FieldValueReason {
+            code: FieldValueReasonCode::ValueDepthExceeded,
+            path: String::new(),
+        };
+        return Ok((
+            "flagged",
+            Some(serde_json::to_string(&reason).map_err(|error| {
+                crate::DomainError::Storage(StorageError::persist_public(error))
+            })?),
+        ));
+    }
     if unsupported_tag {
         let reason = FieldValueReason {
             code: FieldValueReasonCode::UnsupportedTag,
@@ -1639,11 +1785,17 @@ fn replace_index_for_record(
         params![workspace_id, version_id, record_id],
     )
     .map_err(crate::DomainError::sql_persist)?;
-    let fields: HashMap<&str, &FieldDefinition> = schema
-        .fields
-        .iter()
-        .map(|field| (field.name(), field))
-        .collect();
+    let mut fields = HashMap::<&str, &FieldDefinition>::new();
+    let mut colliding_fields = HashSet::<&str>::new();
+    for field in &schema.fields {
+        if colliding_fields.contains(field.name()) {
+            continue;
+        }
+        if fields.insert(field.name(), field).is_some() {
+            fields.remove(field.name());
+            colliding_fields.insert(field.name());
+        }
+    }
     if let Some(values) = frontmatter.as_object() {
         for (field_name, value) in values {
             if field_name == RECORD_ID_FRONTMATTER_KEY {
@@ -1686,6 +1838,27 @@ fn replace_index_for_record(
     )
     .map_err(crate::DomainError::sql_persist)?;
     Ok(())
+}
+
+fn record_has_unsupported_tag_flag(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    record_id: &str,
+) -> Result<bool, crate::DomainError> {
+    let reason = serde_json::to_string(&FieldValueReason {
+        code: FieldValueReasonCode::UnsupportedTag,
+        path: String::new(),
+    })
+    .map_err(|error| crate::DomainError::Storage(StorageError::persist_public(error)))?;
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM collection_record_fields \
+         WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3 \
+           AND validation_status='flagged' AND validation_reason_json=?4)",
+        params![workspace_id, version_id, record_id, reason],
+        |row| row.get(0),
+    )
+    .map_err(crate::DomainError::sql_corrupt)
 }
 
 fn bound_record(
@@ -2738,7 +2911,9 @@ pub fn reconcile_collections_in_tx(
         let Some(record_id) = binding.record_id.as_deref() else {
             continue;
         };
-        if binding.index_initialized {
+        if binding.index_initialized
+            && !record_has_unsupported_tag_flag(tx, workspace_id, version_id, record_id)?
+        {
             continue;
         }
         let Some(snapshot) = snapshots_by_path.get(binding.file_path.as_str()).copied() else {

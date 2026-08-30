@@ -3,15 +3,17 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as SchemaGetter from "effect/SchemaGetter";
 import * as Struct from "effect/Struct";
-import type {
-  CollectionGetParams as CollectionGetContractParams,
-  CollectionGetRecordParams as CollectionGetRecordContractParams,
-  CollectionGetRecordResult as CollectionGetRecordContractResult,
-  CollectionGetResult as CollectionGetContractResult,
-  CollectionListResult as CollectionListContractResult,
-  CollectionQueryParams as CollectionQueryContractParams,
-  CollectionQueryResult as CollectionQueryContractResult,
-  CollectionValue,
+import {
+  COLLECTION_SCHEMA_REASON_CODES,
+  FIELD_VALUE_REASON_CODES,
+  type CollectionGetParams as CollectionGetContractParams,
+  type CollectionGetRecordParams as CollectionGetRecordContractParams,
+  type CollectionGetRecordResult as CollectionGetRecordContractResult,
+  type CollectionGetResult as CollectionGetContractResult,
+  type CollectionListResult as CollectionListContractResult,
+  type CollectionQueryParams as CollectionQueryContractParams,
+  type CollectionQueryResult as CollectionQueryContractResult,
+  type CollectionValue,
 } from "@dohc/workspace-contracts/collection";
 import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
 
@@ -582,27 +584,7 @@ type _ReplicatedConflictResultSchemaMatchesPublicType = Assert<
 >;
 
 const CollectionSchemaReasonSchema = mutableStruct({
-  code: Schema.Literals([
-    "invalid-yaml",
-    "root-not-mapping",
-    "root-collection-unsupported",
-    "unknown-property",
-    "expected-text",
-    "expected-mapping",
-    "expected-sequence",
-    "expected-boolean",
-    "missing-property",
-    "unknown-field-type",
-    "unknown-view-kind",
-    "invalid-sort-direction",
-    "empty-value",
-    "duplicate-value",
-    "reserved-field-name",
-    "invalid-relation-target",
-    "unknown-field-reference",
-    "schema-collection-limit-exceeded",
-    "record-too-large-for-adoption",
-  ]),
+  code: Schema.Literals(COLLECTION_SCHEMA_REASON_CODES),
   path: Schema.String,
 });
 
@@ -673,19 +655,7 @@ const CollectionDetailsSchema = mutableStruct({
 });
 
 const CollectionFieldValueReasonSchema = mutableStruct({
-  code: Schema.Literals([
-    "expected-text",
-    "expected-number",
-    "number-not-finite",
-    "expected-boolean",
-    "expected-sequence",
-    "invalid-date",
-    "unknown-option",
-    "duplicate-value",
-    "empty-person-id",
-    "invalid-record-id",
-    "invalid-url",
-  ]),
+  code: Schema.Literals(FIELD_VALUE_REASON_CODES),
   path: Schema.String,
 });
 

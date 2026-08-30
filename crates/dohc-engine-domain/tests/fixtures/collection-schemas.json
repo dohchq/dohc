@@ -1,6 +1,38 @@
 {
   "vectors": [
     {
+      "name": "normalized-field-name-collision-flags-and-keeps-both",
+      "yaml": "fields:\n  true:\n    type: text\n  \"true\":\n    type: number\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [
+            {
+              "name": "true",
+              "type": "text"
+            },
+            {
+              "name": "true",
+              "type": "number"
+            }
+          ],
+          "views": []
+        },
+        "reasons": [
+          {
+            "code": "field-name-collision",
+            "path": "/fields/true"
+          },
+          {
+            "code": "field-name-collision",
+            "path": "/fields/true"
+          }
+        ]
+      }
+    },
+    {
       "name": "valid-all-v1-types-and-views",
       "yaml": "name: Projects\ndescription: Work in flight\nfields:\n  title:\n    type: text\n  estimate:\n    type: number\n  done:\n    type: checkbox\n  due:\n    type: date\n  status:\n    type: select\n    options: [Planned, Active, Done]\n  labels:\n    type: multi-select\n    options: [Backend, Frontend]\n  owner:\n    type: person\n  parent:\n    type: relation\n    collection: planning/projects\n    many: false\n  dependencies:\n    type: relation\n    collection: planning/projects\n    many: true\n  website:\n    type: url\nviews:\n  - name: All projects\n    kind: table\n    sort:\n      - field: due\n        direction: asc\n    visibleFields: [title, status, owner, due]\n  - name: Status board\n    kind: board\n    groupBy: status\n    visibleFields: [title, owner]\n  - name: Delivery calendar\n    kind: calendar\n    dateField: due\n",
       "expected": {

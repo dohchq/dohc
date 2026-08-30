@@ -133,3 +133,10 @@ fn check_identifier(value: &str, reason: &'static str) -> Result<(), CollabError
     }
     Ok(())
 }
+
+pub(crate) fn validate_actor_origin_id(value: &str) -> Result<(), CollabError> {
+    check_identifier(
+        value,
+        "actor_origin_id must be non-empty, bounded, and contain no control bytes",
+    )
+}

@@ -55,6 +55,22 @@
       }
     },
     {
+      "name": "separated-unsafe-integer-is-exact",
+      "markdown": "---\nexact: 1_000_000_000_000_000_003\n---",
+      "expected": {
+        "exact": {
+          "$dohcInt64": "1000000000000000003"
+        }
+      }
+    },
+    {
+      "name": "quoted-separated-integer-stays-text",
+      "markdown": "---\nexact: \"1_000_000_000_000_000_003\"\n---",
+      "expected": {
+        "exact": "1_000_000_000_000_000_003"
+      }
+    },
+    {
       "name": "unsupported-explicit-tag-keeps-raw-value",
       "markdown": "---\npriority: !custom high\n---\n\n# Body",
       "expected": {

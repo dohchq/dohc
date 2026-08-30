@@ -59,26 +59,31 @@ export interface CollectionSchema {
   views: ViewDefinition[];
 }
 
+export const COLLECTION_SCHEMA_REASON_CODES = [
+  "invalid-yaml",
+  "root-not-mapping",
+  "root-collection-unsupported",
+  "unknown-property",
+  "expected-text",
+  "expected-mapping",
+  "expected-sequence",
+  "expected-boolean",
+  "missing-property",
+  "unknown-field-type",
+  "unknown-view-kind",
+  "invalid-sort-direction",
+  "empty-value",
+  "duplicate-value",
+  "field-name-collision",
+  "reserved-field-name",
+  "invalid-relation-target",
+  "unknown-field-reference",
+  "schema-collection-limit-exceeded",
+  "record-too-large-for-adoption",
+] as const;
+
 export type CollectionSchemaReasonCode =
-  | "invalid-yaml"
-  | "root-not-mapping"
-  | "root-collection-unsupported"
-  | "unknown-property"
-  | "expected-text"
-  | "expected-mapping"
-  | "expected-sequence"
-  | "expected-boolean"
-  | "missing-property"
-  | "unknown-field-type"
-  | "unknown-view-kind"
-  | "invalid-sort-direction"
-  | "empty-value"
-  | "duplicate-value"
-  | "reserved-field-name"
-  | "invalid-relation-target"
-  | "unknown-field-reference"
-  | "schema-collection-limit-exceeded"
-  | "record-too-large-for-adoption";
+  (typeof COLLECTION_SCHEMA_REASON_CODES)[number];
 
 export interface CollectionSchemaReason {
   code: CollectionSchemaReasonCode;
@@ -91,19 +96,23 @@ export interface CollectionSchemaParseResult {
   reasons: CollectionSchemaReason[];
 }
 
-export type FieldValueReasonCode =
-  | "expected-text"
-  | "expected-number"
-  | "number-not-finite"
-  | "unsupported-tag"
-  | "expected-boolean"
-  | "expected-sequence"
-  | "invalid-date"
-  | "unknown-option"
-  | "duplicate-value"
-  | "empty-person-id"
-  | "invalid-record-id"
-  | "invalid-url";
+export const FIELD_VALUE_REASON_CODES = [
+  "expected-text",
+  "expected-number",
+  "number-not-finite",
+  "unsupported-tag",
+  "value-depth-exceeded",
+  "expected-boolean",
+  "expected-sequence",
+  "invalid-date",
+  "unknown-option",
+  "duplicate-value",
+  "empty-person-id",
+  "invalid-record-id",
+  "invalid-url",
+] as const;
+
+export type FieldValueReasonCode = (typeof FIELD_VALUE_REASON_CODES)[number];
 
 export interface FieldValueReason {
   code: FieldValueReasonCode;

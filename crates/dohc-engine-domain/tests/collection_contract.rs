@@ -1,8 +1,8 @@
 use dohc_engine_domain::collections::markdown_frontmatter_json;
 use dohc_engine_domain::{
     CollectionFieldValue, CollectionSchemaParseResult, CollectionSchemaReasonCode,
-    CollectionSchemaStatus, FieldDefinition, FieldValueValidation, is_record_id,
-    parse_collection_schema, validate_field_value,
+    CollectionSchemaStatus, FieldDefinition, FieldValueReasonCode, FieldValueValidation,
+    is_record_id, parse_collection_schema, validate_field_value,
 };
 use saphyr::{LoadableYamlNode, ScalarOwned, YamlOwned};
 use serde::Deserialize;
@@ -11,6 +11,7 @@ const SCHEMA_FIXTURE: &str = include_str!("fixtures/collection-schemas.json");
 const FIELD_VALUE_FIXTURE: &str = include_str!("fixtures/collection-field-values.json");
 const RECORD_ID_FIXTURE: &str = include_str!("fixtures/collection-record-ids.json");
 const FRONTMATTER_FIXTURE: &str = include_str!("fixtures/collection-frontmatter.json");
+const REASON_CODE_FIXTURE: &str = include_str!("fixtures/collection-reason-codes.json");
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -48,6 +49,36 @@ struct FrontmatterVector {
     name: String,
     markdown: String,
     expected: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReasonCodeFixture {
+    schema_reason_codes: Vec<String>,
+    field_value_reason_codes: Vec<String>,
+}
+
+#[test]
+fn collection_reason_code_enums_accept_the_shared_full_set() {
+    let fixture: ReasonCodeFixture =
+        serde_json::from_str(REASON_CODE_FIXTURE).expect("reason-code fixture parses");
+    let schema_reason_codes = CollectionSchemaReasonCode::ALL
+        .iter()
+        .map(|code| serde_json::to_value(code).expect("serialize schema reason"))
+        .map(|code| code.as_str().expect("schema reason is text").to_owned())
+        .collect::<Vec<_>>();
+    let field_value_reason_codes = FieldValueReasonCode::ALL
+        .iter()
+        .map(|code| serde_json::to_value(code).expect("serialize field-value reason"))
+        .map(|code| {
+            code.as_str()
+                .expect("field-value reason is text")
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(schema_reason_codes, fixture.schema_reason_codes);
+    assert_eq!(field_value_reason_codes, fixture.field_value_reason_codes);
 }
 
 fn field_value_from_yaml(raw: &str) -> CollectionFieldValue {

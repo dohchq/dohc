@@ -1,4 +1,4 @@
-import { CORE_SCHEMA, load } from "js-yaml";
+import { CORE_SCHEMA, load, realMapTag } from "js-yaml";
 import {
   RECORD_ID_FRONTMATTER_KEY,
   type CollectionFieldType,
@@ -16,6 +16,8 @@ import {
 const RECORD_ID_PATTERN = /^rec_[a-z2-7]{26}$/;
 const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
 const URL_PATTERN = /^[A-Za-z][A-Za-z0-9+.-]*:\S+$/;
+const MAX_COLLECTION_FIELD_VALUE_DEPTH = 24;
+const COLLECTION_SCHEMA = CORE_SCHEMA.withTags(realMapTag);
 
 const FIELD_TYPES = new Set<CollectionFieldType>([
   "text",
@@ -49,6 +51,31 @@ function propertyPath(parent: string, property: string): string {
 
 function isMapping(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function yamlKeyText(value: unknown): string | null {
+  if (
+    typeof value === "string" ||
+    typeof value === "bigint" ||
+    typeof value === "boolean"
+  ) {
+    return String(value);
+  }
+  if (typeof value === "number" && Number.isInteger(value)) return String(value);
+  return value === null ? "null" : null;
+}
+
+function yamlToPlain(value: unknown): unknown {
+  if (value instanceof Map) {
+    const result: Record<string, unknown> = {};
+    for (const [key, entry] of value) {
+      const text = yamlKeyText(key);
+      if (text !== null) result[text] = yamlToPlain(entry);
+    }
+    return result;
+  }
+  if (Array.isArray(value)) return value.map(yamlToPlain);
+  return value;
 }
 
 function reason(
@@ -166,6 +193,7 @@ function parseOptions(
 function parseFields(
   raw: unknown,
   reasons: CollectionSchemaReason[],
+  preservedEntries?: readonly (readonly [unknown, unknown])[],
 ): FieldDefinition[] {
   if (raw === undefined) return [];
   if (!isMapping(raw)) {
@@ -173,9 +201,25 @@ function parseFields(
     return [];
   }
 
+  const entries = preservedEntries ?? Object.entries(raw);
+  const nameCounts = new Map<string, number>();
+  for (const [rawName] of entries) {
+    const name = yamlKeyText(rawName);
+    if (name !== null) nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
+  }
+
   const fields: FieldDefinition[] = [];
-  for (const [name, field] of Object.entries(raw)) {
+  for (const [rawName, rawField] of entries) {
+    const name = yamlKeyText(rawName);
+    if (name === null) {
+      reason(reasons, "expected-text", "/fields/<non-text-key>");
+      continue;
+    }
+    const field = yamlToPlain(rawField);
     const path = propertyPath("/fields", name);
+    if ((nameCounts.get(name) ?? 0) > 1) {
+      reason(reasons, "field-name-collision", path);
+    }
     if (name.length === 0) {
       reason(reasons, "empty-value", path);
       continue;
@@ -400,8 +444,17 @@ export function parseCollectionSchema(yamlText: string): CollectionSchemaParseRe
   }
 
   let raw: unknown;
+  let preservedFieldEntries: readonly (readonly [unknown, unknown])[] | undefined;
   try {
-    raw = load(yamlText, { schema: CORE_SCHEMA, json: true, maxAliases: 100, maxDepth: 100 });
+    const loaded = load(yamlText, {
+      schema: COLLECTION_SCHEMA,
+      json: true,
+      maxAliases: 100,
+      maxDepth: 100,
+    });
+    const fields = loaded instanceof Map ? loaded.get("fields") : undefined;
+    preservedFieldEntries = fields instanceof Map ? [...fields.entries()] : undefined;
+    raw = yamlToPlain(loaded);
   } catch {
     return {
       status: "degraded",
@@ -424,7 +477,7 @@ export function parseCollectionSchema(yamlText: string): CollectionSchemaParseRe
     "",
     reasons,
   );
-  const fields = parseFields(raw.fields, reasons);
+  const fields = parseFields(raw.fields, reasons, preservedFieldEntries);
   const schema: CollectionSchema = {
     name: readOptionalText(raw, "name", "", reasons),
     description: readOptionalText(raw, "description", "", reasons),
@@ -466,10 +519,27 @@ function validateMany(
   return { status: "valid" };
 }
 
+function valueExceedsDepth(value: unknown, maximum: number): boolean {
+  const pending: Array<readonly [unknown, number]> = [[value, 1]];
+  while (pending.length > 0) {
+    const [candidate, depth] = pending.pop()!;
+    if (depth > maximum) return true;
+    if (Array.isArray(candidate)) {
+      pending.push(...candidate.map((entry) => [entry, depth + 1] as const));
+    } else if (isMapping(candidate)) {
+      pending.push(...Object.values(candidate).map((entry) => [entry, depth + 1] as const));
+    }
+  }
+  return false;
+}
+
 export function validateFieldValue(
   field: FieldDefinition,
   value: unknown,
 ): FieldValueValidation {
+  if (valueExceedsDepth(value, MAX_COLLECTION_FIELD_VALUE_DEPTH)) {
+    return flag("value-depth-exceeded");
+  }
   if (value === null || value === undefined) return { status: "valid" };
 
   switch (field.type) {

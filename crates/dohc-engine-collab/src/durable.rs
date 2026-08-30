@@ -991,6 +991,9 @@ fn append_local_update(
     actor_origin_id: Option<&str>,
     now_ms: i64,
 ) -> Result<AppendOutcome, CollabError> {
+    if let Some(actor_origin_id) = actor_origin_id {
+        crate::validate_actor_origin_id(actor_origin_id)?;
+    }
     // Dedup BEFORE the gate — `blob_seq_in_log`'s doc explains the order.
     if let Some(existing) = blob_seq_in_log(conn, key, sha, update)? {
         return Ok(AppendOutcome {
@@ -1039,6 +1042,9 @@ fn append_local_update_cached(
     cache: &WriterDocCache,
     probe: &mut GateBaseProbe,
 ) -> Result<AppendOutcome, CollabError> {
+    if let Some(actor_origin_id) = actor_origin_id {
+        crate::validate_actor_origin_id(actor_origin_id)?;
+    }
     // Dedup BEFORE the gate — `blob_seq_in_log`'s doc explains the order. A
     // dedupe changes no durable state, so it never touches the cache.
     if let Some(existing) = blob_seq_in_log(conn, key, sha, update)? {

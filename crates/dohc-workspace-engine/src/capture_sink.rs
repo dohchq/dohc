@@ -2423,6 +2423,83 @@ mod tests {
     }
 
     #[test]
+    fn relation_cleanup_preserves_source_backed_body_bytes() {
+        const TARGET_ID: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
+        const BODY: &[u8] = concat!(
+            "\r\n",
+            "| Metric | Value |\r\n",
+            "| ------ | ----- |\r\n",
+            "| apples | 10    |\r\n",
+            "\r\n",
+            "- parent\r\n",
+            "  - nested with **bold** and [details](https://example.com)"
+        )
+        .as_bytes();
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        write_file(
+            scratch.path(),
+            "tasks/collection.yaml",
+            b"name: Tasks\nfields:\n  related:\n    type: relation\n    collection: tasks\n    many: false\n",
+        );
+        let mut source = format!("--- \r\nrelated:   {TARGET_ID}\r\n---\t\r\n").into_bytes();
+        source.extend_from_slice(BODY);
+        write_file(scratch.path(), "tasks/source.md", &source);
+        write_file(
+            scratch.path(),
+            "tasks/target.md",
+            format!("---\nid: {TARGET_ID}\n---\n\nTarget\n").as_bytes(),
+        );
+        for path in [
+            "tasks/collection.yaml",
+            "tasks/source.md",
+            "tasks/target.md",
+        ] {
+            ingest(&mut sink, path).unwrap_or_else(|_| panic!("capture {path}"));
+        }
+        for path in ["tasks/source.md", "tasks/target.md"] {
+            seed_captured_richdoc_lineage(&sink, path);
+        }
+
+        sink.reconcile_collections().expect("adopt records");
+        let adopted = std::fs::read(scratch.path().join("tasks/source.md"))
+            .expect("read source-preserved record");
+        assert!(
+            adopted.ends_with(BODY),
+            "adoption must establish the source-preserved body fixture"
+        );
+        assert_eq!(
+            relation_edge_count(&db, "tasks/source.md", "related", TARGET_ID),
+            1
+        );
+
+        std::fs::remove_file(scratch.path().join("tasks/target.md")).expect("delete target");
+        sink.retire("tasks/target.md").expect("retire target");
+        assert_eq!(
+            sink.reconcile_collections().expect("drop inbound relation"),
+            ["tasks/source.md"]
+        );
+
+        let cleaned =
+            std::fs::read(scratch.path().join("tasks/source.md")).expect("read settled referrer");
+        assert_ne!(cleaned, adopted, "cleanup must remove the relation field");
+        assert!(
+            !String::from_utf8(cleaned.clone())
+                .expect("rich-document artifact remains UTF-8")
+                .contains("related:"),
+            "the settled frontmatter must drop the relation"
+        );
+        assert!(
+            cleaned.ends_with(BODY),
+            "a frontmatter-only cleanup must keep the source-backed body byte-identical"
+        );
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+    }
+
+    #[test]
     fn changing_relation_target_id_writes_back_an_attributed_edge_drop() {
         const SOURCE_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
         const TARGET_ID: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";

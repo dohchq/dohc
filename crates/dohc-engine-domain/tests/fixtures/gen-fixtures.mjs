@@ -42,6 +42,9 @@ const { isRecordId, parseCollectionSchema, validateFieldValue } = await import(
     join(repoRoot, "packages/workspace-contracts/src/collectionValues.ts"),
   ).href
 );
+const { COLLECTION_SCHEMA_REASON_CODES, FIELD_VALUE_REASON_CODES } = await import(
+  pathToFileURL(join(repoRoot, "packages/workspace-contracts/src/collection.ts")).href
+);
 const { getDohcYDocFrontmatter, markdownToYDoc } = await import(
   pathToFileURL(
     join(repoRoot, "packages/ydoc-projection/src/import-export.ts"),
@@ -55,6 +58,10 @@ const workspaceContractsRequire = createRequire(
 const { CORE_SCHEMA, load } = workspaceContractsRequire("js-yaml");
 
 const schemas = [
+  {
+    name: "normalized-field-name-collision-flags-and-keeps-both",
+    yaml: 'fields:\n  true:\n    type: text\n  "true":\n    type: number\n',
+  },
   {
     name: "valid-all-v1-types-and-views",
     yaml: `name: Projects
@@ -319,6 +326,14 @@ const frontmatter = [
     markdown: "---\nexact: 9007199254740993\n---",
   },
   {
+    name: "separated-unsafe-integer-is-exact",
+    markdown: "---\nexact: 1_000_000_000_000_000_003\n---",
+  },
+  {
+    name: "quoted-separated-integer-stays-text",
+    markdown: '---\nexact: "1_000_000_000_000_000_003"\n---',
+  },
+  {
     name: "unsupported-explicit-tag-keeps-raw-value",
     markdown: "---\npriority: !custom high\n---\n\n# Body",
   },
@@ -350,3 +365,7 @@ writeFixture("collection-schemas.json", {
 writeFixture("collection-field-values.json", { vectors: fieldValues });
 writeFixture("collection-record-ids.json", { vectors: recordIds });
 writeFixture("collection-frontmatter.json", { vectors: frontmatter });
+writeFixture("collection-reason-codes.json", {
+  schemaReasonCodes: COLLECTION_SCHEMA_REASON_CODES,
+  fieldValueReasonCodes: FIELD_VALUE_REASON_CODES,
+});

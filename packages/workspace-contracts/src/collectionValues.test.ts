@@ -2,11 +2,16 @@ import { CORE_SCHEMA, load } from "js-yaml";
 import { describe, expect, it } from "vitest";
 import fieldValueFixtureJson from "../../../crates/dohc-engine-domain/tests/fixtures/collection-field-values.json";
 import recordIdFixtureJson from "../../../crates/dohc-engine-domain/tests/fixtures/collection-record-ids.json";
+import reasonCodeFixtureJson from "../../../crates/dohc-engine-domain/tests/fixtures/collection-reason-codes.json";
 import schemaFixtureJson from "../../../crates/dohc-engine-domain/tests/fixtures/collection-schemas.json";
 import type {
   CollectionSchemaParseResult,
   FieldDefinition,
   FieldValueValidation,
+} from "./collection";
+import {
+  COLLECTION_SCHEMA_REASON_CODES,
+  FIELD_VALUE_REASON_CODES,
 } from "./collection";
 import {
   isRecordId,
@@ -35,6 +40,17 @@ interface RecordIdVector {
 const schemaVectors = schemaFixtureJson.vectors as SchemaVector[];
 const fieldValueVectors = fieldValueFixtureJson.vectors as FieldValueVector[];
 const recordIdVectors = recordIdFixtureJson.vectors as RecordIdVector[];
+
+describe("Collection reason-code contract", () => {
+  it("matches the shared full reason-code set", () => {
+    expect(COLLECTION_SCHEMA_REASON_CODES).toEqual(
+      reasonCodeFixtureJson.schemaReasonCodes,
+    );
+    expect(FIELD_VALUE_REASON_CODES).toEqual(
+      reasonCodeFixtureJson.fieldValueReasonCodes,
+    );
+  });
+});
 
 describe("Collection schema contract vectors", () => {
   it.each(schemaVectors)("matches $name", ({ yaml, expected }) => {

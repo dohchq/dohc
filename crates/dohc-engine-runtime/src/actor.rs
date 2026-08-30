@@ -14018,11 +14018,12 @@ fn cleanup_collection_relation_on_store(
         )?
         .lineage_claim_id;
     }
-    let Some(update) = doc.frontmatter_drop_relation_target(
+    let Some(update) = doc.frontmatter_drop_relation_target_preserving_markdown_source(
         &candidate.field_name,
         &candidate.target_record_id,
         candidate.many,
-    ) else {
+    )?
+    else {
         match store.write_with(faults, |tx| {
             synchronize_collection_frontmatter_index_in_tx(
                 tx,

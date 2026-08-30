@@ -59,10 +59,13 @@ const losslessIntegerTag = defineScalarTag('tag:yaml.org,2002:int', {
   implicit: true,
   implicitFirstChars: ['-', '+', ...'0123456789'],
   resolve: (source, isExplicit, tagName) => {
-    if (intCoreTag.resolve(source, isExplicit, tagName) === NOT_RESOLVED) {
+    const normalizedSource = source.replaceAll('_', '')
+    if (
+      intCoreTag.resolve(normalizedSource, isExplicit, tagName) === NOT_RESOLVED
+    ) {
       return NOT_RESOLVED
     }
-    let magnitude = source
+    let magnitude = normalizedSource
     let sign = 1n
     if (magnitude[0] === '-' || magnitude[0] === '+') {
       if (magnitude[0] === '-') sign = -1n

@@ -967,6 +967,62 @@ impl Ydoc {
         }
     }
 
+    /// Remove one relation target while keeping the current exact Markdown
+    /// body source when its projection witness is still valid.
+    pub fn frontmatter_drop_relation_target_preserving_markdown_source(
+        &self,
+        key: &str,
+        target_record_id: &str,
+        many: bool,
+    ) -> Result<Option<Vec<u8>>, CollabError> {
+        let Some(reference) = self.markdown_source_reference() else {
+            return Ok(self.frontmatter_drop_relation_target(key, target_record_id, many));
+        };
+        let projection = self.project_richdoc()?;
+        if reference.projection_sha256 != crate::hex_sha256(projection.as_bytes()) {
+            return Ok(self.frontmatter_drop_relation_target(key, target_record_id, many));
+        }
+        let Some(source) = self.markdown_source(&reference) else {
+            return Ok(self.frontmatter_drop_relation_target(key, target_record_id, many));
+        };
+        let Some((_, source_body)) =
+            dohc_engine_domain::collections::markdown_frontmatter_json_with_body(&source)
+        else {
+            return Ok(self.frontmatter_drop_relation_target(key, target_record_id, many));
+        };
+
+        let staged = Ydoc::wire();
+        staged.apply(&self.encode_full_state())?;
+        if staged
+            .frontmatter_drop_relation_target(key, target_record_id, many)
+            .is_none()
+        {
+            return Ok(None);
+        }
+        let projected = staged.project_richdoc()?;
+        let Some((_, projected_body)) =
+            dohc_engine_domain::collections::markdown_frontmatter_json_with_body(&projected)
+        else {
+            return Err(CollabError::Corrupt {
+                reason: "relation cleanup projection lost record frontmatter".to_owned(),
+            });
+        };
+        let frontmatter_end = projected.len() - projected_body.len();
+        let mut preserved = String::with_capacity(frontmatter_end + source_body.len());
+        preserved.push_str(&projected[..frontmatter_end]);
+        preserved.push_str(source_body);
+
+        self.stage_source_preserving_edit(&preserved, |staged| {
+            staged
+                .frontmatter_drop_relation_target(key, target_record_id, many)
+                .ok_or_else(|| CollabError::Corrupt {
+                    reason: "relation cleanup target disappeared while staging".to_owned(),
+                })?;
+            Ok(())
+        })
+        .map(Some)
+    }
+
     fn with_delta(&self, edit: impl FnOnce(&mut yrs::TransactionMut)) -> Vec<u8> {
         let before = self.doc.transact().state_vector();
         {

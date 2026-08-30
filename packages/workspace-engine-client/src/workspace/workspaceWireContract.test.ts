@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import reasonCodes from "../../../../crates/dohc-engine-domain/tests/fixtures/collection-reason-codes.json";
 import {
   WORKSPACE_METHOD,
   WorkspaceProtocolShapeError,
@@ -138,6 +139,53 @@ describe("workspace wire schemas", () => {
         groups: null,
       }),
     ).toThrow(WorkspaceProtocolShapeError);
+  });
+
+  it("accepts the shared full collection reason-code set", () => {
+    for (const code of reasonCodes.schemaReasonCodes) {
+      expect(() =>
+        decodeWorkspaceResult(WORKSPACE_METHOD.collectionsList, {
+          collections: [
+            {
+              path: "projects",
+              status: "degraded",
+              reasons: [{ code, path: "/fields" }],
+            },
+          ],
+        }),
+      ).not.toThrow();
+    }
+
+    for (const code of reasonCodes.fieldValueReasonCodes) {
+      const result = decodeWorkspaceResult(WORKSPACE_METHOD.collectionsQuery, {
+        collection: { path: "projects", status: "valid", reasons: [] },
+        records: [
+          {
+            id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+            path: "projects/roadmap.md",
+            conflicted: false,
+            values: [
+              {
+                field: "status",
+                value: "active",
+                validation: {
+                  status: "flagged",
+                  reason: { code, path: "" },
+                },
+                resolvedRelations: [],
+              },
+            ],
+          },
+        ],
+        groups: null,
+        nextCursor: null,
+      });
+
+      expect(result.records[0]?.values[0]?.validation).toEqual({
+        status: "flagged",
+        reason: { code, path: "" },
+      });
+    }
   });
 
   it("round-trips exact signed 64-bit collection integers", () => {
