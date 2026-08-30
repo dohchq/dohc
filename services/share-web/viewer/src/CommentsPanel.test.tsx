@@ -874,7 +874,7 @@ describe("CommentsPanel", () => {
       if (path === "/api/view/discussion?direction=newest-first") {
         return discussionPageAt(
           7,
-          [stalePageMessage, initialTail],
+          [initialTail],
           "cursor_concurrent",
         );
       }
@@ -910,9 +910,15 @@ describe("CommentsPanel", () => {
     });
     await settle(() =>
       parkedSignal !== undefined &&
-      container.textContent?.includes("Concurrent activity") === true &&
-      container.textContent?.includes("Comment deleted by the owner") === true
+      container.textContent?.includes("Concurrent activity") === true
     );
+    expect([...container.querySelectorAll(".comment-row")].map((row) => row.textContent))
+      .toEqual([
+        "Named PersonInitial tail",
+        "Link PersonUnverifiedConcurrent activity",
+      ]);
+    expect(container.textContent).not.toContain("Comment deleted by the owner");
+    expect(container.textContent).not.toContain("Stale page body");
 
     earlierPage.release({
       ok: true,

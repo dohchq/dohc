@@ -349,14 +349,22 @@ export function mergeDiscussionMessages(
 export function mergeDiscussionWindowMessages(
   current: readonly PublicDiscussionMessage[],
   incoming: readonly PublicDiscussionMessage[],
-): PublicDiscussionMessage[] | null {
+): {
+  messages: PublicDiscussionMessage[];
+  withheldTombstones: DeletedDiscussionMessage[];
+} | null {
   const loadedIds = new Set(current.map((message) => message.messageId));
-  return mergeDiscussionMessages(
-    current,
-    incoming.filter((message) =>
-      loadedIds.has(message.messageId) || !message.deleted
-    ),
-  );
+  const visible: PublicDiscussionMessage[] = [];
+  const withheldTombstones: DeletedDiscussionMessage[] = [];
+  for (const message of incoming) {
+    if (loadedIds.has(message.messageId) || !message.deleted) {
+      visible.push(message);
+    } else {
+      withheldTombstones.push(message);
+    }
+  }
+  const messages = mergeDiscussionMessages(current, visible);
+  return messages === null ? null : { messages, withheldTombstones };
 }
 
 function storedFile(value: unknown): SharedFile | null {

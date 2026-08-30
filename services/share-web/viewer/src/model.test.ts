@@ -557,7 +557,10 @@ describe("public discussion projection", () => {
       [link],
       [unseenTombstone, olderUnseen, newerUnseen],
     ))
-      .toEqual([olderUnseen, link, newerUnseen]);
+      .toEqual({
+        messages: [olderUnseen, link, newerUnseen],
+        withheldTombstones: [unseenTombstone],
+      });
     expect(mergeDiscussionWindowMessages([link], [{ ...link, body: "conflict" }]))
       .toBeNull();
   });

@@ -11,6 +11,7 @@ import {
   parseDiscussionActivity,
   parseDiscussionPage,
   parseDiscussionWriteState,
+  type DeletedDiscussionMessage,
   type PublicDiscussionMessage,
   type PublicDiscussionPage,
   type ShareAccess,
@@ -256,6 +257,9 @@ export function CommentsPanel(props: {
   const earlierPendingRef = useRef(false);
   const hasEarlierHistoryRef = useRef(false);
   const seenEarlierCursorsRef = useRef(new Set<string>());
+  const withheldTombstonesRef = useRef(
+    new Map<string, DeletedDiscussionMessage>(),
+  );
   const submitTokenRef = useRef<symbol | null>(null);
   const submitControllerRef = useRef<AbortController | null>(null);
   const pendingRef = useRef(false);
@@ -279,6 +283,7 @@ export function CommentsPanel(props: {
     earlierPendingRef.current = false;
     hasEarlierHistoryRef.current = false;
     seenEarlierCursorsRef.current = new Set();
+    withheldTombstonesRef.current = new Map();
     setMessages(null);
     setLoadState("loading");
     setLoadStateSession(props.session);
@@ -313,12 +318,33 @@ export function CommentsPanel(props: {
           isCurrent,
           (activity) => {
             if (!messagesRef.current) return false;
-            const merged = hasEarlierHistoryRef.current
-              ? mergeDiscussionWindowMessages(
-                  messagesRef.current,
-                  activity.messages,
-                )
-              : mergeDiscussionMessages(messagesRef.current, activity.messages);
+            let merged: PublicDiscussionMessage[] | null;
+            if (hasEarlierHistoryRef.current) {
+              const windowMerge = mergeDiscussionWindowMessages(
+                messagesRef.current,
+                activity.messages,
+              );
+              if (!windowMerge) return false;
+              const retained = mergeDiscussionMessages(
+                [...withheldTombstonesRef.current.values()],
+                windowMerge.withheldTombstones,
+              );
+              if (!retained) return false;
+              const retainedTombstones: DeletedDiscussionMessage[] = [];
+              for (const message of retained) {
+                if (!message.deleted) return false;
+                retainedTombstones.push(message);
+              }
+              withheldTombstonesRef.current = new Map(
+                retainedTombstones.map((message) => [message.messageId, message]),
+              );
+              merged = windowMerge.messages;
+            } else {
+              merged = mergeDiscussionMessages(
+                messagesRef.current,
+                activity.messages,
+              );
+            }
             if (!merged) return false;
             onAccessChangeRef.current?.(props.session, activity.access);
             messagesRef.current = merged;
@@ -377,12 +403,22 @@ export function CommentsPanel(props: {
       ) {
         throw new Error("refused");
       }
-      const merged = mergeDiscussionMessages(page.messages, messagesRef.current);
+      const pageIds = new Set(page.messages.map((message) => message.messageId));
+      const retained = [...withheldTombstonesRef.current.values()].filter(
+        (message) => pageIds.has(message.messageId),
+      );
+      const merged = mergeDiscussionMessages(
+        page.messages,
+        [...messagesRef.current, ...retained],
+      );
       if (!merged) throw new Error("refused");
       if (page.nextCursor !== null) {
         seenEarlierCursorsRef.current.add(page.nextCursor);
       }
       messagesRef.current = merged;
+      for (const message of retained) {
+        withheldTombstonesRef.current.delete(message.messageId);
+      }
       hasEarlierHistoryRef.current = page.nextCursor !== null;
       setMessages(merged);
       setEarlierCursor(page.nextCursor);
