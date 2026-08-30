@@ -74,6 +74,20 @@
       }
     },
     {
+      "name": "constructor-map-and-unsafe-integer-share-array",
+      "markdown": "---\nsequence:\n  - constructor: hostile-constructor\n  - 9007199254740993\n---",
+      "expected": {
+        "sequence": [
+          {
+            "constructor": "hostile-constructor"
+          },
+          {
+            "$dohcInt64": "9007199254740993"
+          }
+        ]
+      }
+    },
+    {
       "name": "integral-float-outside-int64-remains-a-number",
       "markdown": "---\nexact: 1e20\n---",
       "expected": {

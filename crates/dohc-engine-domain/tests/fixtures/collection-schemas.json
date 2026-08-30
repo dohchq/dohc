@@ -15,6 +15,63 @@
       }
     },
     {
+      "name": "scalar-root-is-rejected",
+      "yaml": "collection\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [],
+          "views": []
+        },
+        "reasons": [
+          {
+            "code": "root-not-mapping",
+            "path": ""
+          }
+        ]
+      }
+    },
+    {
+      "name": "sequence-root-is-rejected",
+      "yaml": "- collection\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [],
+          "views": []
+        },
+        "reasons": [
+          {
+            "code": "root-not-mapping",
+            "path": ""
+          }
+        ]
+      }
+    },
+    {
+      "name": "multi-document-input-is-rejected",
+      "yaml": "---\nfields: {}\n---\nfields: {}\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [],
+          "views": []
+        },
+        "reasons": [
+          {
+            "code": "invalid-yaml",
+            "path": ""
+          }
+        ]
+      }
+    },
+    {
       "name": "non-text-root-key-is-unknown-property",
       "yaml": "? [unexpected, key]\n: ignored\n",
       "expected": {
@@ -87,6 +144,25 @@
             "path": "/fields/true"
           }
         ]
+      }
+    },
+    {
+      "name": "unquoted-floating-point-field-name-is-text",
+      "yaml": "fields:\n  1.5:\n    type: text\n",
+      "expected": {
+        "status": "valid",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [
+            {
+              "name": "1.5",
+              "type": "text"
+            }
+          ],
+          "views": []
+        },
+        "reasons": []
       }
     },
     {
@@ -509,6 +585,39 @@
           {
             "code": "unknown-view-kind",
             "path": "/views/0/kind"
+          }
+        ]
+      }
+    },
+    {
+      "name": "duplicate-view-name-suppresses-inner-reasons",
+      "yaml": "fields:\n  title:\n    type: text\nviews:\n  - name: Primary\n    kind: table\n  - name: Primary\n    kind: calendar\n    groupBy: missing\n    sort: invalid\n    visibleFields: invalid\n    dateField: missing\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [
+            {
+              "name": "title",
+              "type": "text"
+            }
+          ],
+          "views": [
+            {
+              "name": "Primary",
+              "kind": "table",
+              "groupBy": null,
+              "sort": [],
+              "visibleFields": null,
+              "dateField": null
+            }
+          ]
+        },
+        "reasons": [
+          {
+            "code": "duplicate-value",
+            "path": "/views/1/name"
           }
         ]
       }

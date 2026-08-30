@@ -322,6 +322,29 @@ describe('Y.Doc markdown import/export', () => {
     expect(roundTripped).toEqual(frontmatter)
   })
 
+  it('keeps an unsafe integer as Yjs Any beside a constructor-keyed map', () => {
+    const vector = frontmatterVectors.find(
+      candidate => candidate.name === 'constructor-map-and-unsafe-integer-share-array',
+    )
+    expect(vector).toBeDefined()
+    const source = markdownToYDoc(vector!.markdown)
+    const doc = new Y.Doc()
+    Y.applyUpdate(doc, Y.encodeStateAsUpdate(source))
+    const sequence = doc.getMap<unknown>('frontmatter').get('sequence')
+
+    expect(sequence).toBeInstanceOf(Y.Array)
+    expect((sequence as Y.Array<unknown>).get(0)).toBeInstanceOf(Y.Map)
+    const integer = (sequence as Y.Array<unknown>).get(1)
+    expect(integer).toBeInstanceOf(Y.Map)
+    expect(integer).not.toBeInstanceOf(Y.Text)
+    expect((integer as Y.Map<unknown>).get('$dohcBigInt')).toBe(9007199254740993n)
+    expect(getDohcYDocFrontmatter(doc).sequence).toEqual([
+      { constructor: 'hostile-constructor' },
+      9007199254740993n,
+    ])
+    expect(yDocToMarkdown(doc)).toContain('9007199254740993')
+  })
+
   it('keeps hostile keys in unsupported tagged frontmatter mappings', () => {
     const input = [
       '---',

@@ -1,9 +1,12 @@
 //! Collection reads through the real in-process daemon request path.
 
 use base64::Engine as _;
-use dohc_engine_collab::{ContentKind, Ydoc};
+use dohc_engine_collab::{
+    BaseRelayCoordinate, ClaimOutcome, ContentKind, DocKey, Ydoc, claim_base_at_relay,
+};
 use dohc_engine_domain::{
     CaptureIngest, NoFaults, TxnOutcome, VersionedTextStore, reconcile_collections_in_tx,
+    set_collection_adoption_state_in_tx,
 };
 use dohc_engine_protocol::{
     limits::WireLimits,
@@ -13,6 +16,7 @@ use dohc_engine_protocol::{
     wire::{Envelope, Request, WorkspaceHandle, encode_control},
 };
 use dohc_engine_storage::EngineStore;
+use dohc_engine_sync::{LeaseProbe, ReplicationEnvelope, apply_ydoc_envelope};
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
 use serde_json::{Value, json};
@@ -111,6 +115,26 @@ async fn call(
         .await
         .unwrap_or_else(|error| panic!("{method} failed: {error:?}"))
         .result
+}
+
+async fn call_ydoc_with_blob(
+    service: &EngineService,
+    handle: &WorkspaceHandle,
+    id: u64,
+    method: &str,
+    params: Value,
+) -> (Value, Vec<u8>) {
+    let output = ProtocolEngineService::call(
+        service,
+        RequestContext::unbounded().with_capability("blobs"),
+        request(id, method, Some(handle.clone()), params),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{method} failed: {error:?}"));
+    let blob = output
+        .blob_egress
+        .unwrap_or_else(|| panic!("{method} did not return Y.Doc state"));
+    (output.response.result, blob.bytes)
 }
 
 async fn reconcile_capture(
@@ -574,6 +598,469 @@ async fn capture_authored_record_edit_keeps_the_agent_in_field_history() {
         .find(|entry| entry["field"] == json!("status") && entry["next"]["value"] == json!("done"))
         .expect("captured status edit in history");
     assert_eq!(authored_edit["authorOriginId"], json!(agent_id));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn local_live_id_edit_reasserts_engine_identity_and_keeps_history() {
+    const EDITED_ID: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    seed_schema(
+        &scratch,
+        "name: Tasks\nfields:\n  status:\n    type: text\n",
+    );
+    let markdown = format!("---\nid: {RECORD_ID}\nstatus: open\n---\n\nAlpha\n");
+    let db = scratch.engine_db_path().expect("engine db path");
+    let mut store = EngineStore::open(&db, 1).expect("open store");
+    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    seed_text(&mut store, "tasks/alpha.md", &markdown, 3);
+    store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, "main")?;
+            set_collection_adoption_state_in_tx(
+                tx,
+                WORKSPACE_ID,
+                "main",
+                "tasks/alpha.md",
+                RECORD_ID,
+                "adopted",
+            )
+        })
+        .expect("bind adopted collection record");
+    drop(store);
+    std::fs::write(scratch.path().join("tasks/alpha.md"), &markdown).expect("record file");
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+
+    let first = call(
+        &transport,
+        &handle,
+        10,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": "tasks/alpha.md",
+            "contentKind": "richdoc",
+        }),
+    )
+    .await;
+    let seed_doc = Ydoc::wire();
+    seed_doc
+        .rewrite_content_to_markdown(ContentKind::Richdoc, &markdown)
+        .expect("seed rich document");
+    call(
+        &transport,
+        &handle,
+        11,
+        "ydoc.recordUpdate",
+        json!({
+            "sessionId": first["sessionId"],
+            "updateBase64": base64::engine::general_purpose::STANDARD
+                .encode(seed_doc.encode_full_state()),
+            "seed": true,
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        12,
+        "ydoc.close",
+        json!({ "sessionId": first["sessionId"] }),
+    )
+    .await;
+
+    let (second, initial_update) = call_ydoc_with_blob(
+        service.as_ref(),
+        &handle,
+        13,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": "tasks/alpha.md",
+            "contentKind": "richdoc",
+        }),
+    )
+    .await;
+    let edited = Ydoc::wire();
+    edited.apply(&initial_update).expect("load adopted record");
+    for (id, update) in [
+        (14, edited.frontmatter_set("id", EDITED_ID)),
+        (15, edited.frontmatter_set("status", "done")),
+    ] {
+        call(
+            &transport,
+            &handle,
+            id,
+            "ydoc.recordUpdate",
+            json!({
+                "sessionId": second["sessionId"],
+                "updateBase64": base64::engine::general_purpose::STANDARD.encode(update),
+            }),
+        )
+        .await;
+    }
+    call(
+        &transport,
+        &handle,
+        16,
+        "ydoc.close",
+        json!({ "sessionId": second["sessionId"] }),
+    )
+    .await;
+    reconcile_capture(&transport, &handle, 20).await;
+
+    // The settling close pruned the local-only lineage, so the engine parks
+    // the id re-assertion as a pending adoption that needs a rich-document
+    // seed. Mirror the desktop's adoption drain: re-import the artifact into
+    // a fresh lineage and EVICT the session (never a settling close, which
+    // would prune the seed before reconciliation can use it).
+    let interim = std::fs::read_to_string(scratch.path().join("tasks/alpha.md"))
+        .expect("interim artifact after the id edit settled");
+    assert!(interim.contains(EDITED_ID), "interim artifact: {interim}");
+    let reseed = call(
+        &transport,
+        &handle,
+        30,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": "tasks/alpha.md",
+            "contentKind": "richdoc",
+        }),
+    )
+    .await;
+    let reseed_doc = Ydoc::wire();
+    reseed_doc
+        .rewrite_content_to_markdown(ContentKind::Richdoc, &interim)
+        .expect("reseed rich document from the artifact");
+    call(
+        &transport,
+        &handle,
+        31,
+        "ydoc.recordUpdate",
+        json!({
+            "sessionId": reseed["sessionId"],
+            "updateBase64": base64::engine::general_purpose::STANDARD
+                .encode(reseed_doc.encode_full_state()),
+            "seed": true,
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        32,
+        "ydoc.evict",
+        json!({ "sessionId": reseed["sessionId"] }),
+    )
+    .await;
+    reconcile_capture(&transport, &handle, 40).await;
+
+    let settled =
+        std::fs::read_to_string(scratch.path().join("tasks/alpha.md")).expect("settled record");
+    assert!(
+        settled.contains(&format!("id: {RECORD_ID}")),
+        "settled artifact: {settled}"
+    );
+    assert!(!settled.contains(EDITED_ID), "settled artifact: {settled}");
+    assert!(
+        settled.contains("status: done"),
+        "settled artifact: {settled}"
+    );
+    let record = call(
+        &transport,
+        &handle,
+        50,
+        "collections.getRecord",
+        json!({
+            "collectionPath": "tasks",
+            "recordId": RECORD_ID,
+            "historyLimit": 20,
+        }),
+    )
+    .await;
+    assert_eq!(record["record"]["id"], json!(RECORD_ID));
+    assert!(
+        record["history"]
+            .as_array()
+            .expect("history")
+            .iter()
+            .any(|entry| {
+                entry["field"] == json!("status") && entry["next"]["value"] == json!("done")
+            })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remote_id_edit_converges_on_both_devices_under_the_original_identity() {
+    const EDITED_ID: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const REMOTE_ORIGIN: &str = "remote-collection-editor";
+
+    #[derive(Debug, Clone, Copy)]
+    struct AlwaysLive;
+
+    impl LeaseProbe for AlwaysLive {
+        fn is_live(&self, _key: &DocKey) -> bool {
+            true
+        }
+    }
+
+    let markdown = format!("---\nid: {RECORD_ID}\nstatus: open\n---\n\nAlpha\n");
+    let seed_doc = Ydoc::wire();
+    seed_doc
+        .rewrite_content_to_markdown(ContentKind::Richdoc, &markdown)
+        .expect("seed shared rich document");
+    let seed_update = seed_doc.encode_full_state();
+    let mut shared_remote_updates: Option<Vec<Vec<u8>>> = None;
+
+    for device in ["a", "b"] {
+        let scratch = ScratchDir::new().expect("scratch");
+        write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+        seed_schema(
+            &scratch,
+            "name: Tasks\nfields:\n  status:\n    type: text\n",
+        );
+        let db = scratch.engine_db_path().expect("engine db path");
+        let mut store = EngineStore::open(&db, 1).expect("open store");
+        store.bind_shadow_clone_token(TOKEN).expect("bind token");
+        seed_text(&mut store, "tasks/alpha.md", &markdown, 3);
+        store
+            .write_with(&NoFaults, |tx| {
+                reconcile_collections_in_tx(tx, WORKSPACE_ID, "main")?;
+                set_collection_adoption_state_in_tx(
+                    tx,
+                    WORKSPACE_ID,
+                    "main",
+                    "tasks/alpha.md",
+                    RECORD_ID,
+                    "adopted",
+                )
+            })
+            .expect("bind adopted collection record");
+        drop(store);
+        let connection = rusqlite::Connection::open(&db).expect("open identity connection");
+        connection
+            .execute(
+                "INSERT INTO sync_identity \
+                 (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+                 VALUES (?1,?2,?3,?4,1)",
+                rusqlite::params![
+                    WORKSPACE_ID,
+                    format!("local-{device}"),
+                    format!("epoch-{device}"),
+                    format!("stream-{device}")
+                ],
+            )
+            .expect("seed sync identity");
+        connection
+            .execute(
+                "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) \
+                 VALUES (?1,?2,0)",
+                rusqlite::params![WORKSPACE_ID, format!("local-{device}")],
+            )
+            .expect("enable sync");
+        drop(connection);
+        std::fs::write(scratch.path().join("tasks/alpha.md"), &markdown).expect("record file");
+
+        let service = Arc::new(EngineService::new());
+        let transport = InProcessTransport::new(Arc::clone(&service));
+        let opened = transport
+            .call(
+                RequestContext::unbounded(),
+                request(
+                    100,
+                    "workspace.open",
+                    None,
+                    json!({
+                        "rootDir": scratch.path().to_string_lossy(),
+                        "workspaceId": WORKSPACE_ID,
+                    }),
+                ),
+            )
+            .await
+            .expect("open device");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+        let seeded = call(
+            &transport,
+            &handle,
+            101,
+            "ydoc.open",
+            json!({
+                "versionId": "main",
+                "path": "tasks/alpha.md",
+                "contentKind": "richdoc",
+            }),
+        )
+        .await;
+        call(
+            &transport,
+            &handle,
+            102,
+            "ydoc.recordUpdate",
+            json!({
+                "sessionId": seeded["sessionId"],
+                "updateBase64": base64::engine::general_purpose::STANDARD.encode(&seed_update),
+                "seed": true,
+            }),
+        )
+        .await;
+        call(
+            &transport,
+            &handle,
+            103,
+            "ydoc.close",
+            json!({ "sessionId": seeded["sessionId"] }),
+        )
+        .await;
+
+        let object_id = seeded["objectId"].as_str().expect("seeded object id");
+        let key = DocKey::new(WORKSPACE_ID, "main", object_id).expect("document key");
+        let mut store = EngineStore::open(&db, 2).expect("open base claim store");
+        let persisted = dohc_engine_collab::load_persisted(&store, &key)
+            .expect("load local collection lineage")
+            .expect("collection lineage exists");
+        let base = persisted.doc.encode_full_state();
+        let base_origin = persisted
+            .marker
+            .base_origin_id
+            .expect("local collection base origin");
+        let base_seq = persisted
+            .marker
+            .base_origin_seq
+            .expect("local collection base sequence");
+        assert!(matches!(
+            claim_base_at_relay(
+                &mut store,
+                &key,
+                ContentKind::Richdoc,
+                &base,
+                &BaseRelayCoordinate::new(base_origin, base_seq, 10).expect("base coordinate"),
+                &NoFaults,
+                10,
+            ),
+            Ok(TxnOutcome::Committed(ClaimOutcome::Resumed))
+        ));
+        drop(store);
+
+        let (live, initial_update) = call_ydoc_with_blob(
+            service.as_ref(),
+            &handle,
+            104,
+            "ydoc.open",
+            json!({
+                "versionId": "main",
+                "path": "tasks/alpha.md",
+                "contentKind": "richdoc",
+            }),
+        )
+        .await;
+        let updates = shared_remote_updates.get_or_insert_with(|| {
+            let remote = Ydoc::wire();
+            remote.apply(&initial_update).expect("load shared base");
+            vec![
+                remote.frontmatter_set("id", EDITED_ID),
+                remote.frontmatter_set("status", "remote"),
+            ]
+        });
+        let object_id = live["objectId"].as_str().expect("object id");
+        let lineage_claim_id = live["lineageClaimId"]
+            .as_str()
+            .expect("replicated lineage claim")
+            .to_owned();
+        let mut store = EngineStore::open(&db, 2).expect("open remote apply store");
+        for (origin_seq, update) in updates.iter().enumerate() {
+            let update_sha = store.put_binary_blob(update).expect("store remote update");
+            let envelope = ReplicationEnvelope {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                origin_id: REMOTE_ORIGIN.to_owned(),
+                origin_seq: i64::try_from(origin_seq).expect("remote sequence"),
+                relay_seq: Some(i64::try_from(origin_seq + 1).expect("relay sequence")),
+                op_kind: "ydoc.update".to_owned(),
+                payload: json!({
+                    "versionId": "main",
+                    "objectId": object_id,
+                    "path": "tasks/alpha.md",
+                    "contentKind": "richdoc",
+                    "updateBlobSha256": update_sha,
+                    "lineageClaimId": lineage_claim_id,
+                    "isBaseState": false,
+                    "actorOriginId": REMOTE_ORIGIN,
+                }),
+                recorded_at_ms: 200 + i64::try_from(origin_seq).expect("recorded time"),
+            };
+            let applied = apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &AlwaysLive)
+                .expect("queue remote collection update");
+            assert!(
+                matches!(applied, dohc_engine_sync::ApplyOutcome::Applied(result) if result.deferred),
+                "the live device must defer the remote update"
+            );
+        }
+        drop(store);
+
+        call(
+            &transport,
+            &handle,
+            105,
+            "ydoc.close",
+            json!({ "sessionId": live["sessionId"] }),
+        )
+        .await;
+        reconcile_capture(&transport, &handle, 110).await;
+
+        let settled = std::fs::read_to_string(scratch.path().join("tasks/alpha.md"))
+            .expect("settled remote record");
+        assert!(
+            settled.contains(&format!("id: {RECORD_ID}")),
+            "device {device}"
+        );
+        assert!(!settled.contains(EDITED_ID), "device {device}");
+        assert!(settled.contains("status: remote"), "device {device}");
+        let record = call(
+            &transport,
+            &handle,
+            150,
+            "collections.getRecord",
+            json!({
+                "collectionPath": "tasks",
+                "recordId": RECORD_ID,
+                "historyLimit": 20,
+            }),
+        )
+        .await;
+        assert_eq!(record["record"]["id"], json!(RECORD_ID), "device {device}");
+        assert!(
+            record["history"]
+                .as_array()
+                .expect("history")
+                .iter()
+                .any(|entry| {
+                    entry["field"] == json!("status")
+                        && entry["next"]["value"] == json!("remote")
+                        && entry["authorOriginId"] == json!(REMOTE_ORIGIN)
+                })
+        );
+        call(&transport, &handle, 151, "workspace.close", json!({})).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

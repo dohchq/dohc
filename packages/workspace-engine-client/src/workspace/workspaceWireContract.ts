@@ -321,10 +321,19 @@ export class WorkspaceProtocolShapeError extends Error {
 
 const COLLECTION_INTEGER_MARKER = "$dohcInt64";
 const COLLECTION_FLOAT_MARKER = "$dohcFloat64";
-const COLLECTION_ESCAPED_MARKER = "$dohcEscaped";
 const MAX_SAFE_COLLECTION_INTEGER = BigInt(Number.MAX_SAFE_INTEGER);
 const MIN_COLLECTION_INTEGER = -(1n << 63n);
 const MAX_COLLECTION_INTEGER = (1n << 64n) - 1n;
+
+function isCollectionMarkerSpelling(key: string): boolean {
+  return /^\$+dohc(?:Int64|Float64)$/.test(key);
+}
+
+function unescapeCollectionMarkerKey(key: string): string | null {
+  return key.startsWith("$$") && isCollectionMarkerSpelling(key)
+    ? key.slice(1)
+    : null;
+}
 
 function collectionWireObject(
   value: JsonValue | undefined,
@@ -398,26 +407,9 @@ function collectionFloatMarker(value: JsonValue): number | null {
 
 export function decodeCollectionValue(value: JsonValue): CollectionValue {
   const entry = singleCollectionWireEntry(value);
-  if (entry?.[0] === COLLECTION_ESCAPED_MARKER) {
-    const escaped = collectionWireObject(entry[1]);
-    const escapedEntry =
-      entry[1] === undefined ? null : singleCollectionWireEntry(entry[1]);
-    if (
-      escaped === null ||
-      (escapedEntry?.[0] !== COLLECTION_INTEGER_MARKER &&
-        escapedEntry?.[0] !== COLLECTION_FLOAT_MARKER &&
-        escapedEntry?.[0] !== COLLECTION_ESCAPED_MARKER)
-    ) {
-      throw new WorkspaceProtocolShapeError(
-        "A collection escape marker must contain one reserved-marker object.",
-      );
-    }
-    return Object.fromEntries(
-      Object.entries(escaped).map(([key, child]) => [
-        key,
-        decodeCollectionValue(child!),
-      ]),
-    );
+  const unescapedKey = entry === null ? null : unescapeCollectionMarkerKey(entry[0]);
+  if (entry !== null && unescapedKey !== null) {
+    return { [unescapedKey]: decodeCollectionValue(entry[1]!) };
   }
   const integer = collectionIntegerMarker(value);
   if (integer !== null) return integer;
@@ -467,11 +459,9 @@ export function encodeCollectionValue(value: CollectionValue): JsonValue {
       ]),
     );
     const entry = Object.entries(encoded);
-    return entry.length === 1 &&
-      (entry[0]?.[0] === COLLECTION_INTEGER_MARKER ||
-        entry[0]?.[0] === COLLECTION_FLOAT_MARKER ||
-        entry[0]?.[0] === COLLECTION_ESCAPED_MARKER)
-      ? { [COLLECTION_ESCAPED_MARKER]: encoded }
+    const key = entry.length === 1 ? entry[0]?.[0] : undefined;
+    return key !== undefined && isCollectionMarkerSpelling(key)
+      ? { [`$${key}`]: entry[0]![1] }
       : encoded;
   }
   return value;

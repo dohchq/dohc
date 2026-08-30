@@ -1476,6 +1476,11 @@ fn insert_moment(
         ],
     )
     .map_err(SyncError::persist)?;
+    dohc_engine_domain::collections::index_historical_record_owner_moment_in_tx(
+        tx,
+        workspace_id,
+        order,
+    )?;
     Ok(())
 }
 

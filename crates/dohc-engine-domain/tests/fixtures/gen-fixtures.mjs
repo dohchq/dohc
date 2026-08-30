@@ -77,6 +77,18 @@ const schemas = [
     },
   },
   {
+    name: "scalar-root-is-rejected",
+    yaml: "collection\n",
+  },
+  {
+    name: "sequence-root-is-rejected",
+    yaml: "- collection\n",
+  },
+  {
+    name: "multi-document-input-is-rejected",
+    yaml: "---\nfields: {}\n---\nfields: {}\n",
+  },
+  {
     name: "non-text-root-key-is-unknown-property",
     yaml: "? [unexpected, key]\n: ignored\n",
     expected: {
@@ -102,6 +114,10 @@ const schemas = [
   {
     name: "normalized-field-name-collision-flags-and-keeps-both",
     yaml: 'fields:\n  true:\n    type: text\n  "true":\n    type: number\n',
+  },
+  {
+    name: "unquoted-floating-point-field-name-is-text",
+    yaml: "fields:\n  1.5:\n    type: text\n",
   },
   {
     name: "valid-all-v1-types-and-views",
@@ -296,6 +312,22 @@ views:
 `,
   },
   {
+    name: "duplicate-view-name-suppresses-inner-reasons",
+    yaml: `fields:
+  title:
+    type: text
+views:
+  - name: Primary
+    kind: table
+  - name: Primary
+    kind: calendar
+    groupBy: missing
+    sort: invalid
+    visibleFields: invalid
+    dateField: missing
+`,
+  },
+  {
     name: "view-sort-one-over-query-limit-flags-and-keeps-first-eight",
     yaml: `fields:
   title:
@@ -366,6 +398,15 @@ const relationSingle = {
   many: false,
 };
 const relationMany = { ...relationSingle, name: "projects", many: true };
+function loadFixtureYamlValue(valueYaml) {
+  const loadedValue = load(valueYaml, { schema: CORE_SCHEMA, json: true });
+  return /^-?\d+$/.test(valueYaml) &&
+    typeof loadedValue === "number" &&
+    !Number.isSafeInteger(loadedValue)
+    ? BigInt(valueYaml)
+    : loadedValue;
+}
+
 const fieldValues = [
   ["text-valid", { name: "title", type: "text" }, "hello"],
   ["text-flagged", { name: "title", type: "text" }, "42"],
@@ -428,18 +469,16 @@ const fieldValues = [
   ["url-flagged", { name: "website", type: "url" }, "dohc.dev/path"],
   ["null-valid-for-every-field", { name: "title", type: "text" }, "null"],
 ].map(([name, field, valueYaml]) => {
-  const loadedValue = load(valueYaml, { schema: CORE_SCHEMA, json: true });
-  const value =
-    /^-?\d+$/.test(valueYaml) &&
-    typeof loadedValue === "number" &&
-    !Number.isSafeInteger(loadedValue)
-      ? BigInt(valueYaml)
-      : loadedValue;
+  const value = loadFixtureYamlValue(valueYaml);
   return { name, field, valueYaml, expected: validateFieldValue(field, value) };
 });
 
 const pipelineTargetA = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
 const pipelineTargetB = "rec_77777777777777777777777774";
+let markerDepthBoundaryYaml = "true";
+for (let depth = 1; depth < 24; depth += 1) {
+  markerDepthBoundaryYaml = `{ $dohcInt64: ${markerDepthBoundaryYaml} }`;
+}
 const pipelineValues = [
   ["text-typical", "typical", { type: "text" }, '"café 🙂"'],
   ["text-edge", "edge", { type: "text" }, '""'],
@@ -518,16 +557,16 @@ const pipelineValues = [
   ],
   ["url-edge", "edge", { type: "url" }, '"mailto:user@example.com"'],
   ["url-flagged", "flagged", { type: "url" }, '"dohc.dev/path"'],
+  [
+    "text-marker-depth-boundary",
+    "edge",
+    { type: "text" },
+    markerDepthBoundaryYaml,
+  ],
 ].map(([name, valueClass, definition, valueYaml]) => {
   const fieldName = name.replaceAll("-", "_");
   const field = { name: fieldName, ...definition };
-  const loadedValue = load(valueYaml, { schema: CORE_SCHEMA, json: true });
-  const value =
-    /^-?\d+$/.test(valueYaml) &&
-    typeof loadedValue === "number" &&
-    !Number.isSafeInteger(loadedValue)
-      ? BigInt(valueYaml)
-      : loadedValue;
+  const value = loadFixtureYamlValue(valueYaml);
   const wireValue = encodeCollectionValue(value);
   return {
     name,
@@ -577,6 +616,16 @@ function pipelineRecordMarkdown(vectors) {
   return lines.join("\n");
 }
 
+function plainFixtureValue(value) {
+  if (Array.isArray(value)) return value.map(plainFixtureValue);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, child]) => [key, plainFixtureValue(child)]),
+    );
+  }
+  return value;
+}
+
 const pipelineRecord = pipelineRecordMarkdown(pipelineValues);
 const pipelineFrontmatter = getDohcYDocFrontmatter(
   markdownToYDoc(pipelineRecord),
@@ -584,8 +633,8 @@ const pipelineFrontmatter = getDohcYDocFrontmatter(
 for (const vector of pipelineValues) {
   if (
     !isDeepStrictEqual(
-      pipelineFrontmatter[vector.fieldName],
-      vector.expectedSemantic,
+      plainFixtureValue(pipelineFrontmatter[vector.fieldName]),
+      plainFixtureValue(vector.expectedSemantic),
     )
   ) {
     throw new Error(`pipeline fixture ${vector.name} disagrees with markdownToYDoc`);
@@ -649,6 +698,16 @@ const frontmatter = [
       "nested:",
       "  exact: 9007199254740993",
       "sequence:",
+      "  - 9007199254740993",
+      "---",
+    ].join("\n"),
+  },
+  {
+    name: "constructor-map-and-unsafe-integer-share-array",
+    markdown: [
+      "---",
+      "sequence:",
+      "  - constructor: hostile-constructor",
       "  - 9007199254740993",
       "---",
     ].join("\n"),

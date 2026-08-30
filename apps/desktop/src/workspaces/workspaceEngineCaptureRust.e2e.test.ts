@@ -29,6 +29,9 @@ import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import { createRealDaemonWorkspaceSessions } from "../testing/realDaemonWorkspaceSessions";
 import { createTestScratch } from "./testTemp";
 import { waitForPathMoments } from "./waitForPathMoments";
+import { encodeFixtureBigInts } from "../../../../packages/workspace-engine-client/src/workspace/collectionFieldPipeline.testSupport";
+import { decodeCollectionValue } from "../../../../packages/workspace-engine-client/src/workspace/workspaceWireContract";
+import type { JsonValue } from "../../../../packages/workspace-engine-client/src/ydoc/generated/serde_json/JsonValue";
 
 function createWorkspaceEngineCapture(
   options: Omit<WorkspaceEngineCaptureOptions, "attachmentId">,
@@ -52,20 +55,6 @@ function decodePipelineFixtureValue(value: unknown): unknown {
     }
     return Object.fromEntries(
       entries.map(([key, child]) => [key, decodePipelineFixtureValue(child)]),
-    );
-  }
-  return value;
-}
-
-function encodePipelineFixtureValue(value: unknown): unknown {
-  if (typeof value === "bigint") return { $dohcInt64: value.toString() };
-  if (Array.isArray(value)) return value.map(encodePipelineFixtureValue);
-  if (value !== null && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, child]) => [
-        key,
-        encodePipelineFixtureValue(child),
-      ]),
     );
   }
   return value;
@@ -304,10 +293,19 @@ it.skipIf(engine.missing)(
         expect(editedValue?.validation, `${vector.name} edited`).toEqual(
           vector.expectedValidation,
         );
+        // The daemon escapes marker-spelled keys on the wire and the client
+        // decode unescapes them, so the round-tripped value must match the
+        // DECODED expected wire form, not the wire bytes themselves.
         expect(
-          JSON.stringify(encodePipelineFixtureValue(importedValue?.value)),
-          `${vector.name} wire JSON`,
-        ).toBe(vector.expectedWireJson);
+          JSON.stringify(encodeFixtureBigInts(importedValue?.value)),
+          `${vector.name} round-trip JSON`,
+        ).toBe(
+          JSON.stringify(
+            encodeFixtureBigInts(
+              decodeCollectionValue(vector.expectedWireValue as JsonValue),
+            ),
+          ),
+        );
       }
     } finally {
       await capture.stop().catch(() => undefined);

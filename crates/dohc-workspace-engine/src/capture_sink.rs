@@ -2507,7 +2507,7 @@ mod tests {
     }
 
     #[test]
-    fn changing_relation_target_id_writes_back_an_attributed_edge_drop() {
+    fn changing_relation_target_id_reasserts_the_engine_id_and_keeps_the_edge() {
         const SOURCE_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
         const TARGET_ID: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
         const NEW_TARGET_ID: &str = "rec_cccccccccccccccccccccccccc";
@@ -2550,48 +2550,47 @@ mod tests {
         );
         let changed = sink
             .reconcile_collections()
-            .expect("drop relation to replaced target id");
+            .expect("re-assert the engine-owned target id");
 
         assert_eq!(
             adopted_record_id(&db, "tasks/target.md"),
-            NEW_TARGET_ID,
-            "the explicit unclaimed id replaces the target's old binding"
+            TARGET_ID,
+            "the engine-owned id survives the live id rewrite"
         );
         assert!(
-            changed.iter().any(|path| path == "tasks/source.md"),
-            "the referrer must settle through the attributed Y.Doc write"
+            changed.iter().any(|path| path == "tasks/target.md"),
+            "the target must settle through the attributed engine write-back"
+        );
+        assert!(
+            std::fs::read_to_string(scratch.path().join("tasks/target.md"))
+                .expect("read re-asserted target")
+                .contains(&format!("id: {TARGET_ID}")),
+            "the write-back restores the engine id in the settled file"
         );
         assert_eq!(
             relation_edge_count(&db, "tasks/source.md", "related", TARGET_ID),
-            0
-        );
-        assert_eq!(
-            indexed_collection_field(&db, "tasks/source.md", "related"),
-            None
+            1,
+            "the inbound relation stays valid because its target never departed"
         );
         assert!(
-            !std::fs::read_to_string(scratch.path().join("tasks/source.md"))
-                .expect("read cleaned referrer after target id change")
-                .contains("related:"),
-            "the historical target id is removed through projected frontmatter"
-        );
-        assert_eq!(
-            latest_field_history(&db, "tasks/source.md", "related"),
-            (
-                Some(format!("\"{TARGET_ID}\"")),
-                None,
-                Some("engine".to_owned())
-            )
+            std::fs::read_to_string(scratch.path().join("tasks/source.md"))
+                .expect("read untouched referrer after target id re-assertion")
+                .contains(&format!("related: {TARGET_ID}")),
+            "the referrer keeps its relation untouched"
         );
         let relation_history_count = get_record(&db, "tasks", SOURCE_ID)
             .history
             .iter()
             .filter(|entry| entry.field == "related")
             .count();
-        assert_eq!(relation_history_count, 1);
         assert_eq!(
-            latest_ydoc_actor_origin(&db, "tasks/source.md").as_deref(),
-            Some("engine")
+            relation_history_count, 0,
+            "no engine-authored relation drop is recorded"
+        );
+        assert_eq!(
+            latest_ydoc_actor_origin(&db, "tasks/target.md").as_deref(),
+            Some("engine"),
+            "the id write-back is an engine-attributed Y.Doc write"
         );
 
         drop(sink);

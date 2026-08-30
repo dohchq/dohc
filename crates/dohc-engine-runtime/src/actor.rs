@@ -73,8 +73,8 @@ use dohc_engine_domain::{
     delete_secret_file_keyless_with, derive_capture_object_id, enqueue_binary_delete,
     enqueue_binary_rename, enqueue_write, fork_version_keyless_with, get_collection,
     get_collection_record, get_secret_moment_keyless, has_secret_state,
-    insert_text_conflict_if_absent, list_collections, list_pending_collection_adoptions,
-    list_secret_files_keyless, list_secret_files_keyless_page,
+    insert_text_conflict_if_absent, is_collection_record_bound_in_tx, list_collections,
+    list_pending_collection_adoptions, list_secret_files_keyless, list_secret_files_keyless_page,
     list_secret_moments_in_time_window_keyless, list_secret_moments_page_keyless,
     query_collection_records, reconcile_collections_in_tx,
     restore_secret_file_verbatim_with_metadata_and_after, rollback_compensating_moment_id,
@@ -294,6 +294,9 @@ pub struct YdocSettlement {
     /// retry and the artifact on disk is still the old one. Callers must not
     /// report the document as saved on a `false`.
     pub materialized: bool,
+    /// The settled rich-document head changed an engine-owned collection
+    /// record id and must run through ordinary collection reconciliation.
+    pub collection_reconcile_required: bool,
     pub projection: Projection,
 }
 
@@ -11146,6 +11149,31 @@ fn ydoc_settle_disk_preimage(
     }
 }
 
+fn settled_collection_record_id_mismatch(
+    store: &EngineStore,
+    key: &DocKey,
+    path: &str,
+) -> Result<bool, RuntimeError> {
+    store
+        .read_with(|conn| {
+            if !is_collection_record_bound_in_tx(
+                conn,
+                &key.workspace_id,
+                &key.version_id,
+                &key.object_id,
+            )? {
+                return Ok(false);
+            }
+            collection_record_id_mismatch_in_tx(
+                conn,
+                &key.workspace_id,
+                &key.version_id,
+                &[path.to_owned()],
+            )
+        })
+        .map_err(RuntimeError::from)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn ydoc_settle_on_store(
     store: &mut EngineStore,
@@ -11421,6 +11449,7 @@ fn ydoc_settle_on_store(
             // Any pending job for this head was replayed above, and a Blocked
             // replay returns Err rather than reaching here.
             materialized: true,
+            collection_reconcile_required: settled_collection_record_id_mismatch(store, key, path)?,
             projection,
         });
     }
@@ -11449,6 +11478,7 @@ fn ydoc_settle_on_store(
             content: inband_settled_content(current.text),
             sha256: current.blob_sha256,
             materialized: true,
+            collection_reconcile_required: settled_collection_record_id_mismatch(store, key, path)?,
             projection,
         });
     }
@@ -11696,6 +11726,7 @@ fn ydoc_settle_on_store(
         content,
         sha256: write.snapshot.blob_sha256,
         materialized,
+        collection_reconcile_required: settled_collection_record_id_mismatch(store, key, path)?,
         projection,
     })
 }

@@ -2601,6 +2601,139 @@ fn load_record_bindings(
         .map_err(crate::DomainError::sql_corrupt)
 }
 
+/// Append the record identity observed by one newly inserted text moment. The
+/// caller owns the transaction that inserted the moment, so the maintenance row
+/// commits or rolls back with history itself.
+#[doc(hidden)]
+pub fn index_historical_record_owner_moment_in_tx(
+    tx: &Connection,
+    workspace_id: &str,
+    moment_order: i64,
+) -> Result<(), StorageError> {
+    let moment = tx
+        .query_row(
+            "SELECT m.version_id,m.object_id,m.path,b.text FROM moments m \
+             JOIN blobs b ON b.sha256=m.after_blob_sha256 \
+             WHERE m.workspace_id=?1 AND m.moment_order=?2 \
+               AND m.after_content_kind='text'",
+            params![workspace_id, moment_order],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(StorageError::corrupt_public)?;
+    let Some((version_id, object_id, path, text)) = moment else {
+        return Ok(());
+    };
+    if !is_collection_markdown_path(&path) {
+        return Ok(());
+    }
+    let Some(record_id) = markdown_record_id(&text).filter(|value| is_record_id(value)) else {
+        return Ok(());
+    };
+    tx.execute(
+        "INSERT OR IGNORE INTO collection_historical_record_owners \
+         (workspace_id,version_id,object_id,moment_order,record_id,collection_path) \
+         VALUES (?1,?2,?3,?4,?5,?6)",
+        params![
+            workspace_id,
+            version_id,
+            object_id,
+            moment_order,
+            record_id,
+            parent_path(&path),
+        ],
+    )
+    .map_err(StorageError::persist_public)?;
+    Ok(())
+}
+
+fn ensure_historical_record_owners_backfilled(
+    tx: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+) -> Result<(), crate::DomainError> {
+    let complete = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM collection_historical_record_owner_backfills \
+             WHERE workspace_id=?1 AND version_id=?2 AND index_version=1)",
+            params![workspace_id, version_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(crate::DomainError::sql_corrupt)?;
+    if complete {
+        return Ok(());
+    }
+    // A workspace can reconcile before its versioning bootstrap has run. The
+    // marker row references `versions`, and a version that does not exist has
+    // no moments to index, so defer the backfill until the row exists.
+    let version_exists = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM versions WHERE workspace_id=?1 AND version_id=?2)",
+            params![workspace_id, version_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(crate::DomainError::sql_corrupt)?;
+    if !version_exists {
+        return Ok(());
+    }
+
+    let mut statement = tx
+        .prepare(
+            "SELECT m.moment_order,m.object_id,m.path,b.text FROM moments m \
+             JOIN blobs b ON b.sha256=m.after_blob_sha256 \
+             WHERE m.workspace_id=?1 AND m.version_id=?2 \
+               AND m.after_content_kind='text' AND lower(substr(m.path,-3))='.md' \
+             ORDER BY m.moment_order",
+        )
+        .map_err(crate::DomainError::sql_corrupt)?;
+    let moments = statement
+        .query_map(params![workspace_id, version_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(crate::DomainError::sql_corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(crate::DomainError::sql_corrupt)?;
+    drop(statement);
+    for (moment_order, object_id, path, text) in moments {
+        let Some(record_id) = markdown_record_id(&text).filter(|value| is_record_id(value)) else {
+            continue;
+        };
+        tx.execute(
+            "INSERT OR IGNORE INTO collection_historical_record_owners \
+             (workspace_id,version_id,object_id,moment_order,record_id,collection_path) \
+             VALUES (?1,?2,?3,?4,?5,?6)",
+            params![
+                workspace_id,
+                version_id,
+                object_id,
+                moment_order,
+                record_id,
+                parent_path(&path),
+            ],
+        )
+        .map_err(crate::DomainError::sql_persist)?;
+    }
+    tx.execute(
+        "INSERT INTO collection_historical_record_owner_backfills \
+         (workspace_id,version_id,index_version) VALUES (?1,?2,1)",
+        params![workspace_id, version_id],
+    )
+    .map_err(crate::DomainError::sql_persist)?;
+    Ok(())
+}
+
 fn load_historical_record_owners(
     conn: &Connection,
     workspace_id: &str,
@@ -2608,10 +2741,8 @@ fn load_historical_record_owners(
 ) -> Result<HashMap<String, HashSet<String>>, crate::DomainError> {
     let mut statement = conn
         .prepare(
-            "SELECT m.object_id,b.text FROM moments m \
-             JOIN blobs b ON b.sha256=m.after_blob_sha256 \
-             WHERE m.workspace_id=?1 AND m.version_id=?2 \
-               AND m.after_content_kind='text' AND lower(substr(m.path,-3))='.md'",
+            "SELECT record_id,object_id FROM collection_historical_record_owners \
+             WHERE workspace_id=?1 AND version_id=?2",
         )
         .map_err(crate::DomainError::sql_corrupt)?;
     let rows = statement
@@ -2621,13 +2752,11 @@ fn load_historical_record_owners(
         .map_err(crate::DomainError::sql_corrupt)?;
     let mut owners_by_record_id: HashMap<String, HashSet<String>> = HashMap::new();
     for row in rows {
-        let (object_id, text) = row.map_err(crate::DomainError::sql_corrupt)?;
-        if let Some(record_id) = markdown_record_id(&text).filter(|value| is_record_id(value)) {
-            owners_by_record_id
-                .entry(record_id)
-                .or_default()
-                .insert(object_id);
-        }
+        let (record_id, object_id) = row.map_err(crate::DomainError::sql_corrupt)?;
+        owners_by_record_id
+            .entry(record_id)
+            .or_default()
+            .insert(object_id);
     }
     Ok(owners_by_record_id)
 }
@@ -2638,26 +2767,15 @@ fn latest_historical_record_id(
     version_id: &str,
     object_id: &str,
 ) -> Result<Option<(String, String)>, crate::DomainError> {
-    let mut statement = conn
-        .prepare(
-            "SELECT m.path,b.text FROM moments m \
-             JOIN blobs b ON b.sha256=m.after_blob_sha256 \
-             WHERE m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 \
-               AND m.after_content_kind='text' \
-             ORDER BY m.moment_order DESC",
-        )
-        .map_err(crate::DomainError::sql_corrupt)?;
-    let mut rows = statement
-        .query(params![workspace_id, version_id, object_id])
-        .map_err(crate::DomainError::sql_corrupt)?;
-    while let Some(row) = rows.next().map_err(crate::DomainError::sql_corrupt)? {
-        let path: String = row.get(0).map_err(crate::DomainError::sql_corrupt)?;
-        let text: String = row.get(1).map_err(crate::DomainError::sql_corrupt)?;
-        if let Some(record_id) = markdown_record_id(&text).filter(|value| is_record_id(value)) {
-            return Ok(Some((record_id, parent_path(&path).to_owned())));
-        }
-    }
-    Ok(None)
+    conn.query_row(
+        "SELECT record_id,collection_path FROM collection_historical_record_owners \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
+         ORDER BY moment_order DESC LIMIT 1",
+        params![workspace_id, version_id, object_id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    )
+    .optional()
+    .map_err(crate::DomainError::sql_corrupt)
 }
 
 fn has_open_file_conflict(
@@ -2698,6 +2816,7 @@ pub fn reconcile_collections_in_tx(
 ) -> Result<CollectionReconcileResult, crate::DomainError> {
     let snapshots = load_collection_snapshots(tx, workspace_id, version_id)?;
     let existing = load_record_bindings(tx, workspace_id, version_id)?;
+    ensure_historical_record_owners_backfilled(tx, workspace_id, version_id)?;
     let historical_record_owners = load_historical_record_owners(tx, workspace_id, version_id)?;
     let mut existing_by_object_id = HashMap::with_capacity(existing.len());
     for binding in &existing {
@@ -3015,6 +3134,37 @@ pub fn reconcile_collections_in_tx(
                     "deferred-conflict"
                 },
                 index_initialized,
+            });
+            continue;
+        }
+
+        // The id is engine-owned. Once this object has a binding, rewriting the
+        // canonical frontmatter to another valid id keeps the established
+        // identity and schedules an engine-authored write-back, exactly like
+        // the id-removal repair below. In particular, do not let a Y.Doc
+        // settlement rebind field history to the user-supplied replacement.
+        // A missing or invalid id falls through to that existing repair path,
+        // which owns the lossless/deferred adoption semantics.
+        if let Some(bound_id) = existing_same_object
+            .and_then(|binding| binding.record_id.as_ref())
+            .filter(|bound_id| parsed_id.as_ref().is_some_and(|parsed| parsed != *bound_id))
+        {
+            claimed_ids.insert(bound_id.clone(), record.path.clone());
+            desired.push(DesiredRecordBinding {
+                record_id: Some(bound_id.clone()),
+                collection_path: collection_path.clone(),
+                file_path: record.path.clone(),
+                object_id: record.object_id.clone(),
+                adoption_state: "pending",
+                index_initialized: existing_same_object
+                    .is_some_and(|binding| binding.index_initialized),
+            });
+            adoptions.push(CollectionAdoptionCandidate {
+                record_id: bound_id.clone(),
+                collection_path,
+                file_path: record.path.clone(),
+                object_id: record.object_id.clone(),
+                lossless_insertion_required: false,
             });
             continue;
         }
@@ -3589,7 +3739,59 @@ fn load_collection_records(
     collection_path: &str,
     record_id: Option<&str>,
 ) -> Result<Vec<CollectionRecord>, crate::DomainError> {
-    let record_predicate = record_id.map_or("", |_| " AND r.record_id=?4");
+    let record_ids = record_id.map(|record_id| vec![record_id.to_owned()]);
+    load_collection_records_selected(
+        conn,
+        workspace_id,
+        version_id,
+        collection_path,
+        record_ids.as_deref(),
+        None,
+    )
+}
+
+fn load_collection_records_selected(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    collection_path: &str,
+    record_ids: Option<&[String]>,
+    field_names: Option<&[String]>,
+) -> Result<Vec<CollectionRecord>, crate::DomainError> {
+    if record_ids.is_some_and(|record_ids| record_ids.is_empty()) {
+        return Ok(Vec::new());
+    }
+    let mut parameters = vec![
+        rusqlite::types::Value::Text(workspace_id.to_owned()),
+        rusqlite::types::Value::Text(version_id.to_owned()),
+        rusqlite::types::Value::Text(collection_path.to_owned()),
+    ];
+    let field_predicate = match field_names {
+        None => String::new(),
+        Some([]) => " AND 0".to_owned(),
+        Some(field_names) => {
+            let placeholders = field_names
+                .iter()
+                .map(|field| {
+                    parameters.push(rusqlite::types::Value::Text(field.clone()));
+                    format!("?{}", parameters.len())
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(" AND f.field_name IN ({placeholders})")
+        }
+    };
+    let record_predicate = record_ids.map_or_else(String::new, |record_ids| {
+        let placeholders = record_ids
+            .iter()
+            .map(|record_id| {
+                parameters.push(rusqlite::types::Value::Text(record_id.clone()));
+                format!("?{}", parameters.len())
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(" AND r.record_id IN ({placeholders})")
+    });
     let mut statement = conn
         .prepare(&format!(
             "SELECT r.record_id,r.file_path,r.adoption_state,f.field_name,f.value_json,\
@@ -3597,31 +3799,20 @@ fn load_collection_records(
              FROM collection_records r \
              LEFT JOIN collection_record_fields f \
                ON f.workspace_id=r.workspace_id AND f.version_id=r.version_id \
-              AND f.record_id=r.record_id \
+              AND f.record_id=r.record_id{field_predicate} \
              WHERE r.workspace_id=?1 AND r.version_id=?2 AND r.collection_path=?3 \
                AND r.record_id IS NOT NULL{record_predicate} \
              ORDER BY r.file_path,r.record_id,f.field_name"
         ))
         .map_err(crate::DomainError::sql_corrupt)?;
-    let rows = if let Some(record_id) = record_id {
-        statement
-            .query_map(
-                params![workspace_id, version_id, collection_path, record_id],
-                collection_record_row,
-            )
-            .map_err(crate::DomainError::sql_corrupt)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(crate::DomainError::sql_corrupt)?
-    } else {
-        statement
-            .query_map(
-                params![workspace_id, version_id, collection_path],
-                collection_record_row,
-            )
-            .map_err(crate::DomainError::sql_corrupt)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(crate::DomainError::sql_corrupt)?
-    };
+    let rows = statement
+        .query_map(
+            rusqlite::params_from_iter(parameters.iter()),
+            collection_record_row,
+        )
+        .map_err(crate::DomainError::sql_corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(crate::DomainError::sql_corrupt)?;
     let mut records = Vec::<CollectionRecord>::new();
     let mut record_indexes = HashMap::<String, usize>::new();
     for (record_id, file_path, adoption_state, field, value, validation, reason) in rows {
@@ -3702,19 +3893,38 @@ fn resolve_record_relations(
     collection_path: &str,
     records: &mut [CollectionRecord],
 ) -> Result<(), crate::DomainError> {
+    if records.is_empty() {
+        return Ok(());
+    }
+    let mut parameters = vec![
+        rusqlite::types::Value::Text(workspace_id.to_owned()),
+        rusqlite::types::Value::Text(version_id.to_owned()),
+        rusqlite::types::Value::Text(collection_path.to_owned()),
+    ];
+    let source_placeholders = records
+        .iter()
+        .map(|record| {
+            parameters.push(rusqlite::types::Value::Text(record.id.clone()));
+            format!("?{}", parameters.len())
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let source_predicate = format!(" AND e.source_record_id IN ({source_placeholders})");
+    let edge_sql = format!(
+        "SELECT e.source_record_id,e.field_name,e.target_record_id,\
+                e.target_collection_path \
+         FROM collection_relation_edges e \
+         JOIN collection_records r ON r.workspace_id=e.workspace_id \
+           AND r.version_id=e.version_id AND r.record_id=e.source_record_id \
+         WHERE e.workspace_id=?1 AND e.version_id=?2 AND r.collection_path=?3\
+         {source_predicate} \
+         ORDER BY e.source_record_id,e.field_name,e.target_record_id"
+    );
     let mut statement = conn
-        .prepare(
-            "SELECT e.source_record_id,e.field_name,e.target_record_id,\
-                    e.target_collection_path \
-             FROM collection_relation_edges e \
-             JOIN collection_records r ON r.workspace_id=e.workspace_id \
-               AND r.version_id=e.version_id AND r.record_id=e.source_record_id \
-             WHERE e.workspace_id=?1 AND e.version_id=?2 AND r.collection_path=?3 \
-             ORDER BY e.source_record_id,e.field_name,e.target_record_id",
-        )
+        .prepare(&edge_sql)
         .map_err(crate::DomainError::sql_corrupt)?;
     let edges = statement
-        .query_map(params![workspace_id, version_id, collection_path], |row| {
+        .query_map(rusqlite::params_from_iter(parameters.iter()), |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -3726,25 +3936,27 @@ fn resolve_record_relations(
         .collect::<Result<Vec<_>, _>>()
         .map_err(crate::DomainError::sql_corrupt)?;
     drop(statement);
+    let target_sql = format!(
+        "SELECT DISTINCT e.target_collection_path,e.target_record_id,target.file_path,\
+                f.field_name,f.value_json \
+         FROM collection_relation_edges e \
+         JOIN collection_records source ON source.workspace_id=e.workspace_id \
+           AND source.version_id=e.version_id AND source.record_id=e.source_record_id \
+         JOIN collection_records target ON target.workspace_id=e.workspace_id \
+           AND target.version_id=e.version_id AND target.record_id=e.target_record_id \
+           AND target.collection_path=e.target_collection_path \
+         LEFT JOIN collection_record_fields f ON f.workspace_id=target.workspace_id \
+           AND f.version_id=target.version_id AND f.record_id=target.record_id \
+           AND (f.field_name='title' COLLATE NOCASE \
+                OR f.field_name='name' COLLATE NOCASE) \
+         WHERE e.workspace_id=?1 AND e.version_id=?2 AND source.collection_path=?3\
+         {source_predicate}"
+    );
     let mut statement = conn
-        .prepare(
-            "SELECT DISTINCT e.target_collection_path,e.target_record_id,target.file_path,\
-                    f.field_name,f.value_json \
-             FROM collection_relation_edges e \
-             JOIN collection_records source ON source.workspace_id=e.workspace_id \
-               AND source.version_id=e.version_id AND source.record_id=e.source_record_id \
-             JOIN collection_records target ON target.workspace_id=e.workspace_id \
-               AND target.version_id=e.version_id AND target.record_id=e.target_record_id \
-               AND target.collection_path=e.target_collection_path \
-             LEFT JOIN collection_record_fields f ON f.workspace_id=target.workspace_id \
-               AND f.version_id=target.version_id AND f.record_id=target.record_id \
-               AND (f.field_name='title' COLLATE NOCASE \
-                    OR f.field_name='name' COLLATE NOCASE) \
-             WHERE e.workspace_id=?1 AND e.version_id=?2 AND source.collection_path=?3",
-        )
+        .prepare(&target_sql)
         .map_err(crate::DomainError::sql_corrupt)?;
     let target_rows = statement
-        .query_map(params![workspace_id, version_id, collection_path], |row| {
+        .query_map(rusqlite::params_from_iter(parameters.iter()), |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -4209,17 +4421,23 @@ pub fn query_collection_records(
     else {
         return Ok(None);
     };
-    let mut records =
-        load_collection_records(conn, workspace_id, &version_id, collection_path, None)?;
-    if query.resolve_relations {
-        resolve_record_relations(
-            conn,
-            workspace_id,
-            &version_id,
-            collection_path,
-            &mut records,
-        )?;
-    }
+    let candidate_fields = query.filter.as_ref().map(|filter| {
+        let mut fields = vec![filter.field.clone()];
+        for sort in &query.sort {
+            if !fields.contains(&sort.field) {
+                fields.push(sort.field.clone());
+            }
+        }
+        fields
+    });
+    let mut records = load_collection_records_selected(
+        conn,
+        workspace_id,
+        &version_id,
+        collection_path,
+        None,
+        candidate_fields.as_deref(),
+    )?;
     if let Some(filter) = &query.filter {
         records.retain(|record| matches_collection_filter(record, filter));
     }
@@ -4243,6 +4461,40 @@ pub fn query_collection_records(
     } else {
         None
     };
+    if query.filter.is_some() {
+        let selected_ids = records
+            .iter()
+            .map(|record| record.id.clone())
+            .collect::<Vec<_>>();
+        let selected_order = selected_ids
+            .iter()
+            .enumerate()
+            .map(|(index, record_id)| (record_id.as_str(), index))
+            .collect::<HashMap<_, _>>();
+        records = load_collection_records_selected(
+            conn,
+            workspace_id,
+            &version_id,
+            collection_path,
+            Some(&selected_ids),
+            None,
+        )?;
+        records.sort_by_key(|record| {
+            selected_order
+                .get(record.id.as_str())
+                .copied()
+                .unwrap_or(usize::MAX)
+        });
+    }
+    if query.resolve_relations {
+        resolve_record_relations(
+            conn,
+            workspace_id,
+            &version_id,
+            collection_path,
+            &mut records,
+        )?;
+    }
     let groups = query
         .group_by
         .as_deref()
@@ -4584,7 +4836,9 @@ mod tests {
         CollectionRecord, CollectionSort, FieldDefinition, FieldValueReason, FieldValueReasonCode,
         FieldValueValidation, MAX_COLLECTION_FIELD_VALUE_DEPTH, ViewSortDirection,
         collection_value_key, collection_values_equal, compare_collection_records, compare_json,
-        compare_record_to_cursor, group_collection_records, is_record_id, markdown_record_id,
+        compare_record_to_cursor, ensure_historical_record_owners_backfilled,
+        group_collection_records, index_historical_record_owner_moment_in_tx, is_record_id,
+        latest_historical_record_id, load_historical_record_owners, markdown_record_id,
         mint_record_id, parse_markdown_frontmatter, query_cursor_for_record, record_id_from_random,
         unindexed_or_conflicted_relation_targets_still_present, validate_field_value,
     };
@@ -4758,6 +5012,97 @@ mod tests {
         assert!(
             elapsed <= SCALE_BUDGET,
             "linear collection sweeps took {elapsed:?} (group {group_elapsed:?}, options {options_elapsed:?}, relations {relations_elapsed:?}); budget {SCALE_BUDGET:?}"
+        );
+    }
+
+    #[test]
+    fn historical_record_owner_backfill_runs_once_then_moments_append_incrementally() {
+        const FIRST_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const RAW_AFTER_MARKER_ID: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
+        const APPENDED_ID: &str = "rec_cccccccccccccccccccccccccc";
+        let connection = Connection::open_in_memory().expect("open owner index database");
+        connection
+            .execute_batch(
+                "CREATE TABLE blobs(sha256 TEXT PRIMARY KEY,text TEXT NOT NULL);\
+                 CREATE TABLE versions(\
+                   workspace_id TEXT NOT NULL,version_id TEXT NOT NULL,\
+                   PRIMARY KEY(workspace_id,version_id)\
+                 );\
+                 CREATE TABLE moments(\
+                   workspace_id TEXT NOT NULL,version_id TEXT NOT NULL,object_id TEXT NOT NULL,\
+                   path TEXT NOT NULL,after_blob_sha256 TEXT,after_content_kind TEXT NOT NULL,\
+                   moment_order INTEGER NOT NULL,PRIMARY KEY(workspace_id,moment_order)\
+                 );\
+                 CREATE TABLE collection_historical_record_owners(\
+                   workspace_id TEXT NOT NULL,version_id TEXT NOT NULL,object_id TEXT NOT NULL,\
+                   moment_order INTEGER NOT NULL,record_id TEXT NOT NULL,\
+                   collection_path TEXT NOT NULL,PRIMARY KEY(workspace_id,moment_order)\
+                 );\
+                 CREATE TABLE collection_historical_record_owner_backfills(\
+                   workspace_id TEXT NOT NULL,version_id TEXT NOT NULL,index_version INTEGER NOT NULL,\
+                   PRIMARY KEY(workspace_id,version_id)\
+                 );\
+                 INSERT INTO versions(workspace_id,version_id) VALUES('workspace','version');\
+                 INSERT INTO blobs(sha256,text) VALUES\
+                   ('first','---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\n'),\
+                   ('raw','---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\n'),\
+                   ('appended','---\nid: rec_cccccccccccccccccccccccccc\n---\n');\
+                 INSERT INTO moments(\
+                   workspace_id,version_id,object_id,path,after_blob_sha256,\
+                   after_content_kind,moment_order\
+                 ) VALUES ('workspace','version','first-object','tasks/first.md','first','text',1);",
+            )
+            .expect("create and seed owner index database");
+
+        ensure_historical_record_owners_backfilled(&connection, "workspace", "version")
+            .expect("backfill historical owners");
+        let first = load_historical_record_owners(&connection, "workspace", "version")
+            .expect("read first backfill");
+        assert!(first[FIRST_ID].contains("first-object"));
+
+        connection
+            .execute(
+                "INSERT INTO moments(\
+                   workspace_id,version_id,object_id,path,after_blob_sha256,\
+                   after_content_kind,moment_order\
+                 ) VALUES ('workspace','version','raw-object','tasks/raw.md','raw','text',2)",
+                [],
+            )
+            .expect("seed an unindexed moment after the marker");
+        ensure_historical_record_owners_backfilled(&connection, "workspace", "version")
+            .expect("observe completed backfill marker");
+        let after_marker = load_historical_record_owners(&connection, "workspace", "version")
+            .expect("read marker-protected owners");
+        assert!(
+            !after_marker.contains_key(RAW_AFTER_MARKER_ID),
+            "a completed version marker must prevent another full moment scan"
+        );
+        assert_eq!(
+            latest_historical_record_id(&connection, "workspace", "version", "raw-object")
+                .expect("read the unindexed object identity"),
+            None,
+            "latest_historical_record_id must read the index, not rescan moments"
+        );
+
+        connection
+            .execute(
+                "INSERT INTO moments(\
+                   workspace_id,version_id,object_id,path,after_blob_sha256,\
+                   after_content_kind,moment_order\
+                 ) VALUES ('workspace','version','appended-object','tasks/appended.md',\
+                           'appended','text',3)",
+                [],
+            )
+            .expect("append a new text moment");
+        index_historical_record_owner_moment_in_tx(&connection, "workspace", 3)
+            .expect("index the appended text moment");
+        let appended = load_historical_record_owners(&connection, "workspace", "version")
+            .expect("read incrementally maintained owners");
+        assert!(appended[APPENDED_ID].contains("appended-object"));
+        assert_eq!(
+            latest_historical_record_id(&connection, "workspace", "version", "appended-object",)
+                .expect("read latest indexed identity"),
+            Some((APPENDED_ID.to_owned(), "tasks".to_owned()))
         );
     }
 

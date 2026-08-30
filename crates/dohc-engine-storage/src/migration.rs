@@ -3012,6 +3012,45 @@ CREATE TABLE collection_relation_edges (
 
 pub(crate) const COLLECTION_INDEX_MIGRATION_ID: &str = "v1-collection-index";
 
+/// Ordinal 43. Cache record-id ownership observed in text moments. Reconciliation
+/// backfills each version once, then every new text moment appends to this table
+/// inside the moment transaction.
+const V1_COLLECTION_HISTORICAL_OWNERS_DDL: &str = "\
+CREATE TABLE collection_historical_record_owners (
+    workspace_id          TEXT NOT NULL,
+    version_id            TEXT NOT NULL,
+    object_id             TEXT NOT NULL,
+    moment_order          INTEGER NOT NULL CHECK (moment_order >= 0),
+    record_id             TEXT NOT NULL,
+    collection_path       TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, moment_order),
+    FOREIGN KEY (workspace_id, moment_order)
+      REFERENCES moments(workspace_id, moment_order) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id, version_id)
+      REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX collection_historical_record_owners_by_record
+    ON collection_historical_record_owners(
+      workspace_id, version_id, record_id, object_id
+    );
+CREATE INDEX collection_historical_record_owners_by_object
+    ON collection_historical_record_owners(
+      workspace_id, version_id, object_id, moment_order DESC
+    );
+
+CREATE TABLE collection_historical_record_owner_backfills (
+    workspace_id          TEXT NOT NULL,
+    version_id            TEXT NOT NULL,
+    index_version         INTEGER NOT NULL CHECK (index_version = 1),
+    PRIMARY KEY (workspace_id, version_id),
+    FOREIGN KEY (workspace_id, version_id)
+      REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE
+) STRICT;
+";
+
+pub(crate) const COLLECTION_HISTORICAL_OWNERS_MIGRATION_ID: &str =
+    "v1-collection-historical-owners";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -3318,6 +3357,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: COLLECTION_INDEX_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_COLLECTION_INDEX_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 43,
+        id: COLLECTION_HISTORICAL_OWNERS_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_COLLECTION_HISTORICAL_OWNERS_DDL,
         sets_user_version: None,
     },
 ];
@@ -3771,6 +3817,70 @@ mod tests {
                 deleted_version_rows, 0,
                 "{table} must cascade with its version"
             );
+        }
+    }
+
+    #[test]
+    fn historical_record_owner_migration_upgrades_and_cascades_with_versions() {
+        let dir = tempdir();
+        let path = dir.join("collection-historical-owner-upgrade.db");
+        let ctx = MigrationContext::current(1_101);
+        let mut conn = open_bare(&path);
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("enable foreign keys");
+        let migration_index = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == COLLECTION_HISTORICAL_OWNERS_MIGRATION_ID)
+            .expect("historical owner migration is registered");
+        run_migrations(
+            &mut conn,
+            &BASELINE_MIGRATIONS[..migration_index],
+            &ctx,
+            &NoFaults,
+        )
+        .expect("apply migrations before the historical owner index");
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
+                 VALUES ('ws', 'main');
+             INSERT INTO versions (workspace_id, version_id, name, kind, created_at_ms)
+                 VALUES ('ws', 'main', 'Main', 'main', 1),
+                        ('ws', 'feature', 'Feature', 'named', 2);",
+        )
+        .expect("seed an existing store");
+
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+            .expect("apply the historical owner migration");
+        conn.execute_batch(
+            "INSERT INTO file_objects (workspace_id, object_id, created_at_ms)
+                 VALUES ('ws', 'object', 3);
+             INSERT INTO blobs (sha256, byte_length, text)
+                 VALUES ('sha', 49, '---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\n');
+             INSERT INTO moments (
+                 workspace_id, moment_order, moment_id, version_id, object_id, path,
+                 recorded_at_ms, operation, after_blob_sha256, before_present, metadata_origin
+             ) VALUES ('ws', 7, 'moment', 'feature', 'object', 'tasks/item.md',
+                       4, 'write', 'sha', 1, 'test');
+             INSERT INTO collection_historical_record_owners (
+                 workspace_id, version_id, object_id, moment_order, record_id, collection_path
+             ) VALUES ('ws', 'feature', 'object', 7,
+                       'rec_aaaaaaaaaaaaaaaaaaaaaaaaaa', 'tasks');
+             INSERT INTO collection_historical_record_owner_backfills (
+                 workspace_id, version_id, index_version
+             ) VALUES ('ws', 'feature', 1);
+             DELETE FROM versions WHERE workspace_id='ws' AND version_id='feature';",
+        )
+        .expect("seed and delete version-scoped historical ownership");
+
+        for table in [
+            "collection_historical_record_owners",
+            "collection_historical_record_owner_backfills",
+        ] {
+            let rows: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("count historical owner rows");
+            assert_eq!(rows, 0, "{table} must cascade with its version");
         }
     }
 

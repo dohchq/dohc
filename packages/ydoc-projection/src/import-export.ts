@@ -1265,10 +1265,15 @@ function frontmatterValueToAny(value: unknown): unknown {
   )
 }
 
+const FRONTMATTER_SHARED_BIGINT_KEY = '$dohcBigInt'
+
 function frontmatterValueToY(value: unknown): unknown {
   if (typeof value === 'bigint') {
-    const integer = new Y.Text()
-    integer.insert(0, value.toString())
+    // Y.Map stores bigint through ContentAny, while Y.Array rejects bigint as
+    // a direct item in Yjs 13. Keep the exact value in Any instead of changing
+    // its scalar kind to a collaborative text node.
+    const integer = new Y.Map<unknown>()
+    integer.set(FRONTMATTER_SHARED_BIGINT_KEY, value)
     return integer
   }
   if (Array.isArray(value)) {
@@ -1285,6 +1290,13 @@ function frontmatterValueToY(value: unknown): unknown {
 }
 
 function yFrontmatterValueToPlain(value: unknown): unknown {
+  if (
+    value instanceof Y.Map
+    && value.size === 1
+    && typeof value.get(FRONTMATTER_SHARED_BIGINT_KEY) === 'bigint'
+  ) {
+    return value.get(FRONTMATTER_SHARED_BIGINT_KEY)
+  }
   if (value instanceof Y.Map) return mapToObject(value)
   if (value instanceof Y.Array) {
     return value.toArray().map(yFrontmatterValueToPlain)

@@ -282,6 +282,19 @@ fn apply_event(
                 &record_text(state.target_id(), "Target repaired"),
             )?;
             state.target_valid = true;
+            // The malformed interlude dropped the binding row, so the repaired
+            // file's id is the only identity thread the engine can re-bind
+            // from. With an unchanged id this is a no-op; after ChangeId the
+            // identity legitimately migrates to the repaired file's id — but
+            // only when no other object already owns that id (otherwise the
+            // engine remints the repaired file a fresh one).
+            state
+                .owners
+                .retain(|_, owner_object| owner_object != TARGET_OBJECT);
+            state
+                .owners
+                .entry(state.target_id().to_owned())
+                .or_insert_with(|| TARGET_OBJECT.to_owned());
         }
         Event::Rename => {
             let old_path = state.target_path();
@@ -386,13 +399,10 @@ fn apply_event(
                 .retain(|_, owner_object| owner_object != TARGET_OBJECT);
         }
         Event::ChangeId => {
-            state
-                .owners
-                .retain(|_, owner_object| owner_object != TARGET_OBJECT);
+            // The id is engine-owned: rewriting the file's id never moves the
+            // record identity. The binding keeps TARGET_ID and the engine
+            // schedules a write-back, so ownership is unchanged in the model.
             state.target_id_changed = true;
-            state
-                .owners
-                .insert(CHANGED_TARGET_ID.to_owned(), TARGET_OBJECT.to_owned());
             replace_target_text(
                 conn,
                 state,
@@ -435,9 +445,11 @@ fn apply_event(
                 .owners
                 .retain(|_, owner_object| owner_object != TARGET_OBJECT);
             if state.target_present && state.target_valid {
+                // The engine identity survives a file-level id rewrite, so the
+                // resolved target always re-claims TARGET_ID.
                 state
                     .owners
-                    .insert(state.target_id().to_owned(), TARGET_OBJECT.to_owned());
+                    .insert(TARGET_ID.to_owned(), TARGET_OBJECT.to_owned());
             }
         }
     }
@@ -750,4 +762,91 @@ fn replacing_an_adopted_path_keeps_the_departed_objects_id_and_remints_the_repla
             lossless_insertion_required: true,
         }]
     );
+}
+
+#[test]
+fn an_adopted_object_reasserts_its_bound_id_without_moving_history() {
+    let (_scratch, mut store) = fresh_store();
+    write_text_for_object(
+        &mut store,
+        "records/collection.yaml",
+        "fields:\n  Name:\n    type: text\n",
+        "model-schema-object",
+        "model-schema-moment",
+        2,
+    );
+    write_text_for_object(
+        &mut store,
+        TARGET_PATH,
+        &record_text(TARGET_ID, "Target"),
+        TARGET_OBJECT,
+        "model-target-moment",
+        3,
+    );
+    store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)?;
+            set_collection_adoption_state_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                TARGET_PATH,
+                TARGET_ID,
+                "adopted",
+            )?;
+            tx.execute(
+                "INSERT INTO collection_field_history \
+                 (workspace_id,version_id,record_id,field_name,previous_value_json, \
+                  next_value_json,recorded_at_ms) \
+                 VALUES (?1,?2,?3,'Name','\"Before\"','\"Target\"',3)",
+                params![WORKSPACE_ID, VERSION_ID, TARGET_ID],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, DomainError>(())
+        })
+        .expect("seed adopted target with history");
+
+    let reconciled = store
+        .write_with(&NoFaults, |tx| {
+            let state = ModelState::initial();
+            replace_target_text(tx, &state, &record_text(CHANGED_TARGET_ID, "Changed id"))?;
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile edited engine-owned id");
+    let TxnOutcome::Committed(result) = reconciled else {
+        panic!("id reconciliation crashed");
+    };
+
+    assert_eq!(
+        result.adoptions,
+        [dohc_engine_domain::CollectionAdoptionCandidate {
+            record_id: TARGET_ID.to_owned(),
+            collection_path: "records".to_owned(),
+            file_path: TARGET_PATH.to_owned(),
+            object_id: TARGET_OBJECT.to_owned(),
+            lossless_insertion_required: false,
+        }]
+    );
+    let binding = store
+        .read_with(load_bindings)
+        .expect("read reassertion binding")
+        .into_iter()
+        .find(|binding| binding.object_id == TARGET_OBJECT)
+        .expect("target binding");
+    assert_eq!(binding.record_id.as_deref(), Some(TARGET_ID));
+    assert_eq!(binding.adoption_state, "pending");
+    let history_ids = store
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT record_id FROM collection_field_history \
+                 WHERE workspace_id=?1 AND version_id=?2 ORDER BY history_id",
+            )?;
+            statement
+                .query_map(params![WORKSPACE_ID, VERSION_ID], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .expect("read retained history identity");
+    assert_eq!(history_ids, [TARGET_ID]);
 }

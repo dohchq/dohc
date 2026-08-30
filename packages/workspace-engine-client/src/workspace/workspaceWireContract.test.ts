@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { validateFieldValue } from "@dohc/workspace-contracts/collection-values";
 import type { CollectionValue } from "@dohc/workspace-contracts/collection";
+import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
 import pipelineFixture from "../../../../crates/dohc-engine-domain/tests/fixtures/collection-field-pipeline.json";
 import reasonCodes from "../../../../crates/dohc-engine-domain/tests/fixtures/collection-reason-codes.json";
 import {
@@ -12,6 +13,7 @@ import {
   encodeCollectionValue,
   encodeCollectionQueryParams,
 } from "./workspaceWireContract";
+import { encodeFixtureBigInts } from "./collectionFieldPipeline.testSupport";
 
 const snapshot = {
   workspaceId: "workspace",
@@ -59,23 +61,36 @@ const conflict = {
   incoming: state,
 };
 
-const reservedCollectionMarkerObjects: CollectionValue[] = [
-  { $dohcInt64: "9007199254740993" },
-  { $dohcFloat64: "100000000000000000000" },
-  { $dohcEscaped: { $dohcFloat64: "100000000000000000000" } },
+const reservedCollectionMarkerObjects: Array<{
+  value: CollectionValue;
+  encoded: JsonValue;
+}> = [
+  {
+    value: { $dohcInt64: "9007199254740993" },
+    encoded: { $$dohcInt64: "9007199254740993" },
+  },
+  {
+    value: { $dohcFloat64: "100000000000000000000" },
+    encoded: { $$dohcFloat64: "100000000000000000000" },
+  },
+  {
+    value: { $$dohcInt64: "literal" },
+    encoded: { $$$dohcInt64: "literal" },
+  },
+  {
+    value: { $dohcEscaped: { $dohcFloat64: "100000000000000000000" } },
+    encoded: { $dohcEscaped: { $$dohcFloat64: "100000000000000000000" } },
+  },
 ];
 
-function fixtureValue(value: unknown): unknown {
-  if (typeof value === "bigint") {
-    return { $dohcInt64: value.toString() };
+function collectionValueDepth(value: CollectionValue): number {
+  if (Array.isArray(value)) {
+    return 1 + Math.max(0, ...value.map(collectionValueDepth));
   }
-  if (Array.isArray(value)) return value.map(fixtureValue);
   if (value !== null && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, child]) => [key, fixtureValue(child)]),
-    );
+    return 1 + Math.max(0, ...Object.values(value).map(collectionValueDepth));
   }
-  return value;
+  return 1;
 }
 
 describe("workspace wire schemas", () => {
@@ -240,7 +255,7 @@ describe("workspace wire schemas", () => {
     for (const [index, vector] of pipelineFixture.vectors.entries()) {
       const value = decoded.records[0]?.values[index];
       expect(value?.field, vector.name).toBe(vector.fieldName);
-      expect(fixtureValue(value?.value), vector.name).toEqual(
+      expect(encodeFixtureBigInts(value?.value), vector.name).toEqual(
         vector.expectedSemantic,
       );
       expect(value?.validation, vector.name).toEqual(
@@ -377,10 +392,24 @@ describe("workspace wire schemas", () => {
     },
   );
 
-  it.each(reservedCollectionMarkerObjects)("round-trips reserved marker-shaped user object %j unchanged", (value) => {
+  it.each(reservedCollectionMarkerObjects)(
+    "round-trips reserved marker-shaped user object $value unchanged",
+    ({ value, encoded }) => {
+      expect(encodeCollectionValue(value)).toEqual(encoded);
+      expect(decodeCollectionValue(encoded)).toEqual(value);
+    },
+  );
+
+  it("keeps reserved marker escaping depth-neutral at the collection depth boundary", () => {
+    let value: CollectionValue = "leaf";
+    for (let depth = 1; depth < 24; depth += 1) {
+      value = { $dohcInt64: value };
+    }
+
     const encoded = encodeCollectionValue(value);
 
-    expect(encoded).toHaveProperty("$dohcEscaped");
+    expect(collectionValueDepth(value)).toBe(24);
+    expect(collectionValueDepth(encoded as CollectionValue)).toBe(24);
     expect(decodeCollectionValue(encoded)).toEqual(value);
   });
 
@@ -436,12 +465,6 @@ describe("workspace wire schemas", () => {
     expect(encodeCollectionValue(-9007199254740991n)).toBe(
       -Number.MAX_SAFE_INTEGER,
     );
-  });
-
-  it("rejects collection escape markers the encoder does not produce", () => {
-    expect(() =>
-      decodeCollectionValue({ $dohcEscaped: { plain: true } }),
-    ).toThrow(WorkspaceProtocolShapeError);
   });
 
   it("rejects malformed collection integer markers", () => {

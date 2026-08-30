@@ -67,11 +67,11 @@ function yamlKeyText(value: unknown): string | null {
   if (
     typeof value === "string" ||
     typeof value === "bigint" ||
-    typeof value === "boolean"
+    typeof value === "boolean" ||
+    typeof value === "number"
   ) {
     return String(value);
   }
-  if (typeof value === "number" && Number.isInteger(value)) return String(value);
   return value === null ? "null" : null;
 }
 

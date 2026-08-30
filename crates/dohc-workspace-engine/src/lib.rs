@@ -143,13 +143,16 @@ const COLLECTION_RESPONSE_HARD_CAP_BYTES: usize =
     dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize - 64 * 1024;
 const COLLECTION_INTEGER_MARKER: &str = "$dohcInt64";
 const COLLECTION_FLOAT_MARKER: &str = "$dohcFloat64";
-const COLLECTION_ESCAPED_MARKER: &str = "$dohcEscaped";
 
-fn is_collection_reserved_marker(marker: &str) -> bool {
-    matches!(
-        marker,
-        COLLECTION_INTEGER_MARKER | COLLECTION_FLOAT_MARKER | COLLECTION_ESCAPED_MARKER
-    )
+fn is_collection_marker_spelling(marker: &str) -> bool {
+    let Some(marker) = marker.strip_prefix('$') else {
+        return false;
+    };
+    matches!(marker.trim_start_matches('$'), "dohcInt64" | "dohcFloat64")
+}
+
+fn unescape_collection_marker_key(marker: &str) -> Option<&str> {
+    (marker.starts_with("$$") && is_collection_marker_spelling(marker)).then(|| &marker[1..])
 }
 
 fn canonical_collection_decimal(decimal: &str) -> bool {
@@ -191,14 +194,14 @@ fn encode_collection_wire_numbers(value: &mut Value) {
         Value::Array(values) => values.iter_mut().for_each(encode_collection_wire_numbers),
         Value::Object(object) => {
             object.values_mut().for_each(encode_collection_wire_numbers);
-            if object.len() == 1
-                && object
-                    .keys()
-                    .next()
-                    .is_some_and(|key| is_collection_reserved_marker(key))
-            {
-                let escaped = std::mem::take(object);
-                object.insert(COLLECTION_ESCAPED_MARKER.to_owned(), Value::Object(escaped));
+            let marker = (object.len() == 1)
+                .then(|| object.keys().next())
+                .flatten()
+                .filter(|key| is_collection_marker_spelling(key))
+                .cloned();
+            if let Some(marker) = marker {
+                let child = object.remove(&marker).expect("singleton marker child");
+                object.insert(format!("${marker}"), child);
             }
         }
         Value::Null | Value::Bool(_) | Value::String(_) => {}
@@ -213,29 +216,19 @@ fn decode_collection_wire_numbers(value: &mut Value) -> Result<(), WireError> {
             }
         }
         Value::Object(object) => {
-            if object.len() == 1 && object.contains_key(COLLECTION_ESCAPED_MARKER) {
-                let Some(Value::Object(mut escaped)) = object.remove(COLLECTION_ESCAPED_MARKER)
-                else {
-                    return Err(wire(
-                        ErrorCode::InvalidParams,
-                        "collection-escape-marker-invalid",
-                    ));
-                };
-                if escaped.len() != 1
-                    || !escaped
-                        .keys()
-                        .next()
-                        .is_some_and(|key| is_collection_reserved_marker(key))
-                {
-                    return Err(wire(
-                        ErrorCode::InvalidParams,
-                        "collection-escape-marker-invalid",
-                    ));
-                }
-                for child in escaped.values_mut() {
-                    decode_collection_wire_numbers(child)?;
-                }
-                *value = Value::Object(escaped);
+            let escaped_marker = (object.len() == 1)
+                .then(|| object.keys().next())
+                .flatten()
+                .and_then(|key| {
+                    unescape_collection_marker_key(key)
+                        .map(|unescaped| (key.clone(), unescaped.to_owned()))
+                });
+            if let Some((marker, unescaped)) = escaped_marker {
+                let mut child = object
+                    .remove(&marker)
+                    .expect("singleton escaped marker child");
+                decode_collection_wire_numbers(&mut child)?;
+                object.insert(unescaped, child);
             } else if object.len() == 1 && object.contains_key(COLLECTION_INTEGER_MARKER) {
                 let decimal = object
                     .get(COLLECTION_INTEGER_MARKER)
@@ -8308,6 +8301,9 @@ impl EngineService {
                     map_runtime(error)
                 }
             })?;
+        if settled.collection_reconcile_required {
+            open.request_collection_reconcile();
+        }
         if let Some(session) = lock(&self.sessions).get_mut(session_id) {
             session.last_settled_sha = Some(settled.sha256.clone());
         }
@@ -9424,6 +9420,9 @@ async fn settle_ydoc_session_for_version_fence(
                 map_runtime(error)
             }
         })?;
+    if settled.collection_reconcile_required {
+        open.request_collection_reconcile();
+    }
     if let Some(session) = lock(sessions).get_mut(session_id) {
         session.last_settled_sha = Some(settled.sha256);
     }
@@ -12967,43 +12966,52 @@ mod tests {
     const SHADOW_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     #[test]
-    fn collection_number_marker_shaped_user_objects_use_the_shared_escape_vector() {
-        for literal in [
-            json!({ "$dohcInt64": "9007199254740993" }),
-            json!({ "$dohcFloat64": "100000000000000000000" }),
+    fn collection_number_marker_shaped_user_objects_use_depth_neutral_key_escaping() {
+        for (literal, expected) in [
+            (
+                json!({ "$dohcInt64": "9007199254740993" }),
+                json!({ "$$dohcInt64": "9007199254740993" }),
+            ),
+            (
+                json!({ "$dohcFloat64": "100000000000000000000" }),
+                json!({ "$$dohcFloat64": "100000000000000000000" }),
+            ),
+            (
+                json!({ "$$dohcInt64": "literal" }),
+                json!({ "$$$dohcInt64": "literal" }),
+            ),
         ] {
             let mut encoded = literal.clone();
             encode_collection_wire_numbers(&mut encoded);
-            assert_eq!(encoded, json!({ "$dohcEscaped": literal }));
+            assert_eq!(encoded, expected);
 
             decode_collection_wire_numbers(&mut encoded).expect("decode escaped collection object");
             assert_eq!(encoded, literal);
         }
 
         let nested_literal = json!({
-            "$dohcEscaped": { "integer": 9_007_199_254_740_993_i64 }
+            "$dohcInt64": { "$dohcFloat64": "literal" }
         });
         let mut nested_integer = nested_literal.clone();
         encode_collection_wire_numbers(&mut nested_integer);
         assert_eq!(
             nested_integer,
             json!({
-                "$dohcEscaped": {
-                    "$dohcEscaped": {
-                        "integer": { "$dohcInt64": "9007199254740993" }
-                    }
-                }
+                "$$dohcInt64": { "$$dohcFloat64": "literal" }
             })
         );
         decode_collection_wire_numbers(&mut nested_integer)
-            .expect("decode integer nested below a literal escaped root");
+            .expect("decode nested marker-shaped literals");
         assert_eq!(nested_integer, nested_literal);
 
-        let mut noncanonical = json!({ "$dohcEscaped": { "plain": true } });
-        let error = decode_collection_wire_numbers(&mut noncanonical)
-            .expect_err("an escape the encoder cannot produce must be refused");
-        assert_eq!(error.code, ErrorCode::InvalidParams);
-        assert_eq!(error.message, "collection-escape-marker-invalid");
+        let mut former_escape_marker = json!({
+            "$dohcEscaped": { "integer": 9_007_199_254_740_993_i64 }
+        });
+        encode_collection_wire_numbers(&mut former_escape_marker);
+        assert_eq!(
+            former_escape_marker,
+            json!({ "$dohcEscaped": { "integer": { "$dohcInt64": "9007199254740993" } } })
+        );
     }
 
     #[test]

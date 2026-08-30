@@ -1,9 +1,9 @@
 {
   "version": 1,
   "collectionPath": "pipeline",
-  "schemaYaml": "name: Field pipeline\nfields:\n  text_typical:\n    type: text\n  text_edge:\n    type: text\n  text_flagged:\n    type: text\n  number_typical:\n    type: number\n  number_edge:\n    type: number\n  number_flagged:\n    type: number\n  checkbox_typical:\n    type: checkbox\n  checkbox_edge:\n    type: checkbox\n  checkbox_flagged:\n    type: checkbox\n  date_typical:\n    type: date\n  date_edge:\n    type: date\n  date_flagged:\n    type: date\n  select_typical:\n    type: select\n    options: [\"Planned\",\"Active\",\"true\"]\n  select_edge:\n    type: select\n    options: [\"Planned\",\"Active\",\"true\"]\n  select_flagged:\n    type: select\n    options: [\"Planned\",\"Active\",\"true\"]\n  multi_select_typical:\n    type: multi-select\n    options: [\"A\",\"B\"]\n  multi_select_edge:\n    type: multi-select\n    options: [\"A\",\"B\"]\n  multi_select_flagged:\n    type: multi-select\n    options: [\"A\",\"B\"]\n  person_typical:\n    type: person\n  person_edge:\n    type: person\n  person_flagged:\n    type: person\n  relation_typical:\n    type: relation\n    collection: pipeline-targets\n    many: false\n  relation_edge:\n    type: relation\n    collection: pipeline-targets\n    many: true\n  relation_flagged:\n    type: relation\n    collection: pipeline-targets\n    many: false\n  url_typical:\n    type: url\n  url_edge:\n    type: url\n  url_flagged:\n    type: url\n",
-  "recordMarkdown": "---\ntext_typical: \"café 🙂\"\ntext_edge: \"\"\ntext_flagged: 42\nnumber_typical: 42.5\nnumber_edge: 9007199254740993\nnumber_flagged: \"42\"\ncheckbox_typical: true\ncheckbox_edge: false\ncheckbox_flagged: \"true\"\ndate_typical: \"2026-08-30\"\ndate_edge: \"2000-02-29\"\ndate_flagged: \"2023-02-29\"\nselect_typical: Active\nselect_edge: \"true\"\nselect_flagged: Done\nmulti_select_typical: [A, B]\nmulti_select_edge: []\nmulti_select_flagged: [A, A]\nperson_typical: user_123\nperson_edge: \"  user_123  \"\nperson_flagged: \"   \"\nrelation_typical: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nrelation_edge: [rec_aaaaaaaaaaaaaaaaaaaaaaaaaa, rec_77777777777777777777777774]\nrelation_flagged: record_123\nurl_typical: \"https://dohc.dev/path?x=1#frag\"\nurl_edge: \"mailto:user@example.com\"\nurl_flagged: \"dohc.dev/path\"\n---\n\nPipeline record",
-  "recordMarkdownSha256": "3844685b8f94cc21cb62562a362e35aed20198b77b27f5cb6eb29e7f1aca59b7",
+  "schemaYaml": "name: Field pipeline\nfields:\n  text_typical:\n    type: text\n  text_edge:\n    type: text\n  text_flagged:\n    type: text\n  number_typical:\n    type: number\n  number_edge:\n    type: number\n  number_flagged:\n    type: number\n  checkbox_typical:\n    type: checkbox\n  checkbox_edge:\n    type: checkbox\n  checkbox_flagged:\n    type: checkbox\n  date_typical:\n    type: date\n  date_edge:\n    type: date\n  date_flagged:\n    type: date\n  select_typical:\n    type: select\n    options: [\"Planned\",\"Active\",\"true\"]\n  select_edge:\n    type: select\n    options: [\"Planned\",\"Active\",\"true\"]\n  select_flagged:\n    type: select\n    options: [\"Planned\",\"Active\",\"true\"]\n  multi_select_typical:\n    type: multi-select\n    options: [\"A\",\"B\"]\n  multi_select_edge:\n    type: multi-select\n    options: [\"A\",\"B\"]\n  multi_select_flagged:\n    type: multi-select\n    options: [\"A\",\"B\"]\n  person_typical:\n    type: person\n  person_edge:\n    type: person\n  person_flagged:\n    type: person\n  relation_typical:\n    type: relation\n    collection: pipeline-targets\n    many: false\n  relation_edge:\n    type: relation\n    collection: pipeline-targets\n    many: true\n  relation_flagged:\n    type: relation\n    collection: pipeline-targets\n    many: false\n  url_typical:\n    type: url\n  url_edge:\n    type: url\n  url_flagged:\n    type: url\n  text_marker_depth_boundary:\n    type: text\n",
+  "recordMarkdown": "---\ntext_typical: \"café 🙂\"\ntext_edge: \"\"\ntext_flagged: 42\nnumber_typical: 42.5\nnumber_edge: 9007199254740993\nnumber_flagged: \"42\"\ncheckbox_typical: true\ncheckbox_edge: false\ncheckbox_flagged: \"true\"\ndate_typical: \"2026-08-30\"\ndate_edge: \"2000-02-29\"\ndate_flagged: \"2023-02-29\"\nselect_typical: Active\nselect_edge: \"true\"\nselect_flagged: Done\nmulti_select_typical: [A, B]\nmulti_select_edge: []\nmulti_select_flagged: [A, A]\nperson_typical: user_123\nperson_edge: \"  user_123  \"\nperson_flagged: \"   \"\nrelation_typical: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nrelation_edge: [rec_aaaaaaaaaaaaaaaaaaaaaaaaaa, rec_77777777777777777777777774]\nrelation_flagged: record_123\nurl_typical: \"https://dohc.dev/path?x=1#frag\"\nurl_edge: \"mailto:user@example.com\"\nurl_flagged: \"dohc.dev/path\"\ntext_marker_depth_boundary: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: true } } } } } } } } } } } } } } } } } } } } } } }\n---\n\nPipeline record",
+  "recordMarkdownSha256": "b45b3afd2312a5b5e3810ab76875f4f312e76fb7d2ba43ae93ac3dadb7b35343",
   "supportFiles": [
     {
       "path": "pipeline-targets/collection.yaml",
@@ -595,6 +595,120 @@
       },
       "expectedWireValue": "dohc.dev/path",
       "expectedWireJson": "\"dohc.dev/path\""
+    },
+    {
+      "name": "text-marker-depth-boundary",
+      "class": "edge",
+      "fieldName": "text_marker_depth_boundary",
+      "field": {
+        "name": "text_marker_depth_boundary",
+        "type": "text"
+      },
+      "valueYaml": "{ $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: true } } } } } } } } } } } } } } } } } } } } } } }",
+      "valueYamlUtf8Hex": "7b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a2074727565207d207d207d207d207d207d207d207d207d207d207d207d207d207d207d207d207d207d207d207d207d207d207d",
+      "expectedSemantic": {
+        "$dohcInt64": {
+          "$dohcInt64": {
+            "$dohcInt64": {
+              "$dohcInt64": {
+                "$dohcInt64": {
+                  "$dohcInt64": {
+                    "$dohcInt64": {
+                      "$dohcInt64": {
+                        "$dohcInt64": {
+                          "$dohcInt64": {
+                            "$dohcInt64": {
+                              "$dohcInt64": {
+                                "$dohcInt64": {
+                                  "$dohcInt64": {
+                                    "$dohcInt64": {
+                                      "$dohcInt64": {
+                                        "$dohcInt64": {
+                                          "$dohcInt64": {
+                                            "$dohcInt64": {
+                                              "$dohcInt64": {
+                                                "$dohcInt64": {
+                                                  "$dohcInt64": {
+                                                    "$dohcInt64": true
+                                                  }
+                                                }
+                                              }
+                                            }
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "expectedIndexJson": "{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":true}}}}}}}}}}}}}}}}}}}}}}}",
+      "expectedValidation": {
+        "status": "flagged",
+        "reason": {
+          "code": "expected-text",
+          "path": ""
+        }
+      },
+      "expectedWireValue": {
+        "$$dohcInt64": {
+          "$$dohcInt64": {
+            "$$dohcInt64": {
+              "$$dohcInt64": {
+                "$$dohcInt64": {
+                  "$$dohcInt64": {
+                    "$$dohcInt64": {
+                      "$$dohcInt64": {
+                        "$$dohcInt64": {
+                          "$$dohcInt64": {
+                            "$$dohcInt64": {
+                              "$$dohcInt64": {
+                                "$$dohcInt64": {
+                                  "$$dohcInt64": {
+                                    "$$dohcInt64": {
+                                      "$$dohcInt64": {
+                                        "$$dohcInt64": {
+                                          "$$dohcInt64": {
+                                            "$$dohcInt64": {
+                                              "$$dohcInt64": {
+                                                "$$dohcInt64": {
+                                                  "$$dohcInt64": {
+                                                    "$$dohcInt64": true
+                                                  }
+                                                }
+                                              }
+                                            }
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "expectedWireJson": "{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":true}}}}}}}}}}}}}}}}}}}}}}}"
     }
   ]
 }

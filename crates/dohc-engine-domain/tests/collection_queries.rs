@@ -1211,7 +1211,7 @@ fn empty_frontmatter_record_is_adopted_with_only_the_minted_id() {
 }
 
 #[test]
-fn changing_an_adopted_record_id_rebuilds_its_field_index_under_the_new_id() {
+fn changing_an_adopted_record_id_keeps_the_query_surface_on_the_engine_id() {
     const RECORD_OBJECT_ID: &str = "changed-id-record-object";
     let (_scratch, mut store) = fresh_store();
     write_text(
@@ -1271,23 +1271,19 @@ fn changing_an_adopted_record_id_rebuilds_its_field_index_under_the_new_id() {
         .read_with(|conn| {
             query_collection_records(conn, WORKSPACE_ID, "tasks", &CollectionQuery::default())
         })
-        .expect("query record under replacement id")
+        .expect("query record after id edit")
         .expect("tasks collection");
     assert_eq!(query.records.len(), 1);
     let record = &query.records[0];
-    assert_eq!(record.id, SECOND_TASK_ID);
+    assert_eq!(
+        record.id, FIRST_TASK_ID,
+        "the engine-owned id survives a frontmatter rewrite"
+    );
     assert_eq!(record.path, "tasks/alpha.md");
-    let status = record
-        .values
-        .iter()
-        .find(|value| value.field == "status")
-        .expect("status indexed under replacement id");
-    assert_eq!(status.value, json!("after"));
-    assert_eq!(status.validation, CollectionIndexedValueValidation::Valid);
 }
 
 #[test]
-fn changing_an_adopted_record_id_preserves_full_authored_history_under_the_new_id() {
+fn changing_an_adopted_record_id_keeps_authored_history_under_the_engine_id() {
     const RECORD_OBJECT_ID: &str = "changed-id-history-record-object";
     let (_scratch, mut store) = fresh_store();
     write_text(
@@ -1372,10 +1368,10 @@ fn changing_an_adopted_record_id_preserves_full_authored_history_under_the_new_i
 
     let details = store
         .read_with(|conn| {
-            get_collection_record(conn, WORKSPACE_ID, "tasks", SECOND_TASK_ID, 10, None)
+            get_collection_record(conn, WORKSPACE_ID, "tasks", FIRST_TASK_ID, 10, None)
         })
-        .expect("get record under replacement id")
-        .expect("replacement id remains the same record");
+        .expect("get record under the engine-owned id")
+        .expect("the engine-owned id remains the same record");
     assert_eq!(details.history.len(), 2);
     assert_eq!(details.history[0].recorded_at_ms, 20);
     assert_eq!(
@@ -1392,12 +1388,15 @@ fn changing_an_adopted_record_id_preserves_full_authored_history_under_the_new_i
     assert_eq!(details.history[1].previous.value, Some(json!("draft")));
     assert_eq!(details.history[1].next.value, Some(json!("review")));
 
-    let old_id = store
+    let replacement_id = store
         .read_with(|conn| {
-            get_collection_record(conn, WORKSPACE_ID, "tasks", FIRST_TASK_ID, 10, None)
+            get_collection_record(conn, WORKSPACE_ID, "tasks", SECOND_TASK_ID, 10, None)
         })
-        .expect("query original id after replacement");
-    assert!(old_id.is_none());
+        .expect("query the user-supplied replacement id");
+    assert!(
+        replacement_id.is_none(),
+        "the user-supplied replacement id never becomes a record"
+    );
 }
 
 #[test]
@@ -1485,7 +1484,10 @@ fn deleted_record_id_without_field_history_stays_reserved() {
         .find(|candidate| candidate.object_id == SURVIVING_OBJECT_ID)
         .expect("surviving record receives a replacement id");
     assert_ne!(replacement.record_id, FIRST_TASK_ID);
-    assert_ne!(replacement.record_id, SECOND_TASK_ID);
+    assert_eq!(
+        replacement.record_id, SECOND_TASK_ID,
+        "the survivor keeps its own engine-owned id instead of a remint"
+    );
 }
 
 #[test]
@@ -1595,7 +1597,10 @@ fn deleted_record_id_stays_reserved_and_keeps_its_history() {
         .find(|candidate| candidate.object_id == SURVIVING_OBJECT_ID)
         .expect("surviving record receives a replacement id");
     assert_ne!(replacement.record_id, FIRST_TASK_ID);
-    assert_ne!(replacement.record_id, SECOND_TASK_ID);
+    assert_eq!(
+        replacement.record_id, SECOND_TASK_ID,
+        "the survivor keeps its own engine-owned id instead of a remint"
+    );
 
     let replacement_details = store
         .read_with(|conn| {
@@ -2290,6 +2295,169 @@ fn query_uses_indexed_values_flags_filter_sort_group_and_relation_labels() {
 }
 
 #[test]
+fn filtered_query_does_not_hydrate_unrelated_fields_for_dropped_records() {
+    let (_scratch, mut store) = seeded_store();
+    let poisoned = store
+        .write_with(&NoFaults, |tx| -> Result<(), StorageError> {
+            let updated = tx
+                .execute(
+                    "UPDATE collection_record_fields SET validation_reason_json='{}' \
+                     WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3 \
+                       AND field_name='Rank'",
+                    params![WORKSPACE_ID, VERSION_ID, FIRST_TASK_ID],
+                )
+                .map_err(StorageError::persist_public)?;
+            assert_eq!(updated, 1, "the dropped record must have a poisoned field");
+            Ok(())
+        })
+        .expect("poison an unrelated field on the nonmatching record");
+    assert!(matches!(poisoned, TxnOutcome::Committed(())));
+
+    let filtered = store
+        .read_with(|conn| {
+            query_collection_records(
+                conn,
+                WORKSPACE_ID,
+                "tasks",
+                &CollectionQuery {
+                    filter: Some(CollectionFilter {
+                        field: "Status".to_owned(),
+                        operator: CollectionFilterOperator::Equals,
+                        value: json!("Todo"),
+                    }),
+                    ..CollectionQuery::default()
+                },
+            )
+        })
+        .expect("query without hydrating the dropped record")
+        .expect("tasks collection");
+    assert_eq!(
+        filtered
+            .records
+            .iter()
+            .map(|record| record.id.as_str())
+            .collect::<Vec<_>>(),
+        [SECOND_TASK_ID]
+    );
+    assert!(
+        filtered.records[0]
+            .values
+            .iter()
+            .any(|value| value.field == "Rank" && value.value == json!(1)),
+        "the matching record still hydrates its complete field set"
+    );
+}
+
+#[test]
+fn relation_resolution_only_reads_records_on_the_selected_page() {
+    let (_scratch, mut store) = seeded_store();
+    let sort = vec![CollectionSort {
+        field: "Title".to_owned(),
+        direction: ViewSortDirection::Asc,
+    }];
+    let poisoned = store
+        .write_with(&NoFaults, |tx| -> Result<(), StorageError> {
+            let updated = tx
+                .execute(
+                    "UPDATE collection_relation_edges \
+                     SET target_collection_path=CAST(x'80' AS TEXT) \
+                     WHERE workspace_id=?1 AND version_id=?2 AND source_record_id=?3 \
+                       AND field_name='Owner'",
+                    params![WORKSPACE_ID, VERSION_ID, SECOND_TASK_ID],
+                )
+                .map_err(StorageError::persist_public)?;
+            assert_eq!(
+                updated, 1,
+                "the later page must have a poisoned relation edge"
+            );
+            Ok(())
+        })
+        .expect("poison the relation edge after the first page");
+    assert!(matches!(poisoned, TxnOutcome::Committed(())));
+
+    let first_page = store
+        .read_with(|conn| {
+            query_collection_records(
+                conn,
+                WORKSPACE_ID,
+                "tasks",
+                &CollectionQuery {
+                    sort: sort.clone(),
+                    limit: 1,
+                    resolve_relations: true,
+                    ..CollectionQuery::default()
+                },
+            )
+        })
+        .expect("resolve only the first page")
+        .expect("tasks collection");
+    assert_eq!(first_page.records.len(), 1);
+    assert_eq!(first_page.records[0].id, FIRST_TASK_ID);
+    let first_owner = first_page.records[0]
+        .values
+        .iter()
+        .find(|value| value.field == "Owner")
+        .expect("first-page owner");
+    assert_eq!(first_owner.resolved_relations[0].label, "Alice");
+    let cursor = first_page.next_cursor.expect("second page cursor");
+
+    let repaired_and_poisoned = store
+        .write_with(&NoFaults, |tx| -> Result<(), StorageError> {
+            let repaired = tx
+                .execute(
+                    "UPDATE collection_relation_edges SET target_collection_path='people' \
+                     WHERE workspace_id=?1 AND version_id=?2 AND source_record_id=?3 \
+                       AND field_name='Owner'",
+                    params![WORKSPACE_ID, VERSION_ID, SECOND_TASK_ID],
+                )
+                .map_err(StorageError::persist_public)?;
+            assert_eq!(repaired, 1);
+            let poisoned = tx
+                .execute(
+                    "UPDATE collection_relation_edges \
+                     SET target_collection_path=CAST(x'80' AS TEXT) \
+                     WHERE workspace_id=?1 AND version_id=?2 AND source_record_id=?3 \
+                       AND field_name='Owner'",
+                    params![WORKSPACE_ID, VERSION_ID, FIRST_TASK_ID],
+                )
+                .map_err(StorageError::persist_public)?;
+            assert_eq!(
+                poisoned, 1,
+                "the prior page must have a poisoned relation edge"
+            );
+            Ok(())
+        })
+        .expect("move the relation poison behind the cursor");
+    assert!(matches!(repaired_and_poisoned, TxnOutcome::Committed(())));
+
+    let second_page = store
+        .read_with(|conn| {
+            query_collection_records(
+                conn,
+                WORKSPACE_ID,
+                "tasks",
+                &CollectionQuery {
+                    sort,
+                    limit: 1,
+                    cursor: Some(cursor),
+                    resolve_relations: true,
+                    ..CollectionQuery::default()
+                },
+            )
+        })
+        .expect("resolve only the page after the cursor")
+        .expect("tasks collection");
+    assert_eq!(second_page.records.len(), 1);
+    assert_eq!(second_page.records[0].id, SECOND_TASK_ID);
+    let second_owner = second_page.records[0]
+        .values
+        .iter()
+        .find(|value| value.field == "Owner")
+        .expect("second-page owner");
+    assert_eq!(second_owner.resolved_relations[0].label, "bob");
+}
+
+#[test]
 fn sorted_collection_query_cursor_pages_are_gapless_and_duplicate_free() {
     let (_scratch, store) = seeded_store();
     let sort = vec![
@@ -2966,7 +3134,7 @@ fn malformed_relation_target_renamed_within_its_collection_preserves_inbound_rel
 }
 
 #[test]
-fn valid_target_id_change_emits_old_relation_cleanup_and_resolves_new_id() {
+fn valid_target_id_change_keeps_inbound_relations_on_the_engine_id() {
     const CHANGED_PERSON_ID: &str = "rec_ffffffffffffffffffffffffff";
     const NEW_REFERRER_ID: &str = "rec_yyyyyyyyyyyyyyyyyyyyyyyyyy";
     let (_scratch, mut store) = seeded_store();
@@ -3013,12 +3181,11 @@ fn valid_target_id_change_emits_old_relation_cleanup_and_resolves_new_id() {
     let TxnOutcome::Committed(reconciled) = reconciled else {
         panic!("changed relation target id reconciliation crashed");
     };
-    assert_eq!(reconciled.relation_cleanups.len(), 1);
-    let cleanup = &reconciled.relation_cleanups[0];
-    assert_eq!(cleanup.source_record_id, FIRST_TASK_ID);
-    assert_eq!(cleanup.source_file_path, "tasks/alpha.md");
-    assert_eq!(cleanup.field_name, "Owner");
-    assert_eq!(cleanup.target_record_id, PERSON_ID);
+    assert!(
+        reconciled.relation_cleanups.is_empty(),
+        "the engine-owned id never departs, so no inbound relation needs cleanup: {:?}",
+        reconciled.relation_cleanups
+    );
 
     let tasks = store
         .read_with(|conn| {
@@ -3034,6 +3201,17 @@ fn valid_target_id_change_emits_old_relation_cleanup_and_resolves_new_id() {
         })
         .expect("query referrers after target id change")
         .expect("tasks collection");
+    let original_owner = tasks
+        .records
+        .iter()
+        .find(|record| record.id == FIRST_TASK_ID)
+        .expect("original referrer")
+        .values
+        .iter()
+        .find(|value| value.field == "Owner")
+        .expect("original relation");
+    assert_eq!(original_owner.resolved_relations.len(), 1);
+    assert_eq!(original_owner.resolved_relations[0].record_id, PERSON_ID);
     let new_owner = tasks
         .records
         .iter()
@@ -3043,9 +3221,15 @@ fn valid_target_id_change_emits_old_relation_cleanup_and_resolves_new_id() {
         .iter()
         .find(|value| value.field == "Owner")
         .expect("new-id relation");
+    // Until the engine write-back reverts the file, the raw frontmatter still
+    // claims the replacement id, so the edge survives as an unindexed
+    // placeholder: the raw id is its label because no record backs it.
     assert_eq!(new_owner.resolved_relations.len(), 1);
     assert_eq!(new_owner.resolved_relations[0].record_id, CHANGED_PERSON_ID);
-    assert_eq!(new_owner.resolved_relations[0].label, "Alice changed id");
+    assert_eq!(
+        new_owner.resolved_relations[0].label, CHANGED_PERSON_ID,
+        "the user-supplied replacement id never becomes a record-backed resolution"
+    );
 }
 
 #[test]
@@ -3179,7 +3363,7 @@ fn repaired_malformed_owner_keeps_its_id_from_a_same_id_copy() {
 }
 
 #[test]
-fn resolving_a_conflict_after_an_id_change_cleans_the_original_inbound_relation() {
+fn resolving_a_conflict_after_an_id_change_keeps_the_engine_id_and_inbound_relation() {
     const TARGET_PATH: &str = "people/alice.md";
     const TARGET_OBJECT_ID: &str = "object-3";
     const CHANGED_ID: &str = "rec_ffffffffffffffffffffffffff";
@@ -3258,13 +3442,11 @@ fn resolving_a_conflict_after_an_id_change_cleans_the_original_inbound_relation(
         let TxnOutcome::Committed(resolved) = resolved else {
             panic!("resolved changed-id reconciliation crashed");
         };
-        assert_eq!(
-            resolved.relation_cleanups.len(),
-            1,
-            "pass {pass} must clean the original id after the conflict no longer retains it: {:?}",
+        assert!(
+            resolved.relation_cleanups.is_empty(),
+            "pass {pass}: the engine-owned id never departs, so nothing needs cleanup: {:?}",
             resolved.relation_cleanups
         );
-        assert_eq!(resolved.relation_cleanups[0].target_record_id, PERSON_ID);
     }
     let binding = store
         .read_with(|conn| {
@@ -3276,7 +3458,10 @@ fn resolving_a_conflict_after_an_id_change_cleans_the_original_inbound_relation(
             )
         })
         .expect("load resolved changed-id target binding");
-    assert_eq!(binding, CHANGED_ID);
+    assert_eq!(
+        binding, PERSON_ID,
+        "the binding keeps its engine-owned id through the resolved conflict"
+    );
     let relation_count = store
         .read_with(|conn| {
             conn.query_row(
@@ -3287,7 +3472,7 @@ fn resolving_a_conflict_after_an_id_change_cleans_the_original_inbound_relation(
                 |row| row.get::<_, i64>(0),
             )
         })
-        .expect("count original relation awaiting attributed cleanup");
+        .expect("count original relation that stays valid");
     assert_eq!(relation_count, 1);
 }
 
