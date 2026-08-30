@@ -765,7 +765,13 @@ impl Ydoc {
                 source_text_bytes = checked_projection_len(source_text_bytes, k.len())?;
                 entries.insert(
                     k.to_string(),
-                    projection_out_json(&txn, v, 0, &mut remaining_nodes, &mut source_text_bytes)?,
+                    projection_frontmatter_value(
+                        &txn,
+                        v,
+                        0,
+                        &mut remaining_nodes,
+                        &mut source_text_bytes,
+                    )?,
                 );
             }
             out.push_str("---\n")?;
@@ -2066,16 +2072,82 @@ impl ProjectionBuffer {
     }
 }
 
-fn project_frontmatter(key: &str, value: &Value) -> ProjectionResult<String> {
-    match value {
-        Value::Object(map) if map.get("type") == Some(&json!("any")) => {
-            scalar_line(key, map.get("value").unwrap_or(&Value::Null))
-        }
-        other => scalar_line(key, other),
+/// yjs cannot place a bigint directly in a `Y.Array`, so its shared-type
+/// frontmatter branch stores one as a singleton `Y.Map` under this key.
+/// Literal user keys spelled like the sentinel arrive prefix-escaped with one
+/// extra `$` (any escape depth), mirroring the `$dohcInt64` wire markers.
+const FRONTMATTER_SHARED_BIGINT_KEY: &str = "$dohcBigInt";
+
+fn is_frontmatter_shared_bigint_spelling(key: &str) -> bool {
+    key.strip_prefix('$')
+        .is_some_and(|rest| rest.trim_start_matches('$') == "dohcBigInt")
+}
+
+fn unescape_frontmatter_shared_bigint_key(key: &str) -> &str {
+    if key.starts_with("$$") && is_frontmatter_shared_bigint_spelling(key) {
+        &key[1..]
+    } else {
+        key
     }
 }
 
-fn scalar_line(key: &str, value: &Value) -> ProjectionResult<String> {
+/// One frontmatter value as the plain JSON both engines settle. Shared-type
+/// values (yjs writes them for maps with a `constructor` key and for bigints
+/// in arrays) must render exactly like their plain-`Any` twins: the bigint
+/// sentinel becomes its integer and escaped sentinel keys lose one `$`.
+fn projection_frontmatter_value<T: ReadTxn>(
+    txn: &T,
+    out: Out,
+    depth: usize,
+    remaining_nodes: &mut usize,
+    source_bytes: &mut usize,
+) -> ProjectionResult<Value> {
+    match out {
+        Out::YMap(map) => {
+            consume_projection_value_node(depth, remaining_nodes)?;
+            if map.len(txn) == 1 {
+                if let Some(Out::Any(Any::BigInt(integer))) =
+                    map.get(txn, FRONTMATTER_SHARED_BIGINT_KEY)
+                {
+                    return Ok(json!(integer));
+                }
+            }
+            let mut entries = BTreeMap::new();
+            for (key, value) in map.iter(txn) {
+                *source_bytes = checked_projection_len(*source_bytes, key.len())?;
+                entries.insert(
+                    unescape_frontmatter_shared_bigint_key(key).to_owned(),
+                    projection_frontmatter_value(
+                        txn,
+                        value,
+                        depth + 1,
+                        remaining_nodes,
+                        source_bytes,
+                    )?,
+                );
+            }
+            Ok(Value::Object(entries.into_iter().collect()))
+        }
+        Out::YArray(array) => {
+            consume_projection_value_node(depth, remaining_nodes)?;
+            let mut items = Vec::new();
+            for value in array.iter(txn) {
+                items.push(projection_frontmatter_value(
+                    txn,
+                    value,
+                    depth + 1,
+                    remaining_nodes,
+                    source_bytes,
+                )?);
+            }
+            Ok(Value::Array(items))
+        }
+        Out::Any(any) => projection_any_to_json(&any, depth, remaining_nodes, source_bytes),
+        other => projection_out_json(txn, other, depth, remaining_nodes, source_bytes),
+    }
+}
+
+fn project_frontmatter(key: &str, value: &Value) -> ProjectionResult<String> {
     let mut output = ProjectionBuffer::new();
     write_yaml_mapping_entry(&mut output, key, value, 0)?;
     Ok(output.into_string())
@@ -5264,6 +5336,169 @@ fn main() {}
         assert_eq!(
             loaded.frontmatter_json()["debt"],
             json!(-9_007_199_254_740_993_i64)
+        );
+    }
+
+    fn decode_fixture_int64_markers(value: &mut Value) {
+        match value {
+            Value::Array(values) => values.iter_mut().for_each(decode_fixture_int64_markers),
+            Value::Object(values) => {
+                let decoded = if values.len() == 1 {
+                    values
+                        .get("$dohcInt64")
+                        .and_then(Value::as_str)
+                        .map(|decimal| decimal.parse::<i64>().expect("fixture int64 is valid"))
+                } else {
+                    None
+                };
+                if let Some(integer) = decoded {
+                    *value = json!(integer);
+                } else {
+                    values.values_mut().for_each(decode_fixture_int64_markers);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn frontmatter_fixture_expectation(name: &str) -> Value {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../dohc-engine-domain/tests/fixtures/collection-frontmatter.json"
+        ))
+        .expect("frontmatter fixture parses");
+        let mut expected = fixture["vectors"]
+            .as_array()
+            .expect("frontmatter vectors")
+            .iter()
+            .find(|vector| vector["name"] == name)
+            .unwrap_or_else(|| panic!("fixture vector {name} exists"))["expected"]
+            .clone();
+        decode_fixture_int64_markers(&mut expected);
+        expected
+    }
+
+    /// The yjs shared-type frontmatter branch for the fixture markdown
+    /// `sequence: [{constructor: hostile-constructor}, <second item>]`: a
+    /// `Y.Array` holding real `Y.Map`s, with the second map carrying one
+    /// bigint under the chosen key.
+    fn shared_branch_sequence_doc(second_item_key: &str) -> Ydoc {
+        let doc = Ydoc::wire();
+        let frontmatter = doc.doc.get_or_insert_map(ROOT_FRONTMATTER);
+        let mut txn = doc.doc.transact_mut();
+        frontmatter.insert(
+            &mut txn,
+            "sequence",
+            yrs::ArrayPrelim::from([
+                yrs::In::from(yrs::MapPrelim::from_iter([(
+                    "constructor",
+                    Any::from("hostile-constructor"),
+                )])),
+                yrs::In::from(yrs::MapPrelim::from_iter([(
+                    second_item_key,
+                    Any::BigInt(9_007_199_254_740_993),
+                )])),
+            ]),
+        );
+        drop(txn);
+        doc
+    }
+
+    #[test]
+    fn shared_branch_bigint_sentinel_projects_as_the_plain_branch_scalar() {
+        let plain = Ydoc::wire();
+        let frontmatter = plain.doc.get_or_insert_map(ROOT_FRONTMATTER);
+        {
+            let mut txn = plain.doc.transact_mut();
+            frontmatter.insert(
+                &mut txn,
+                "sequence",
+                Any::from(vec![
+                    Any::from(HashMap::from([(
+                        "constructor".to_string(),
+                        Any::from("hostile-constructor"),
+                    )])),
+                    Any::BigInt(9_007_199_254_740_993),
+                ]),
+            );
+        }
+        let expected = plain
+            .project(ContentKind::Richdoc)
+            .expect("plain-branch projection")
+            .content;
+
+        let shared = shared_branch_sequence_doc(FRONTMATTER_SHARED_BIGINT_KEY);
+        let projected = shared
+            .project(ContentKind::Richdoc)
+            .expect("shared-branch projection")
+            .content;
+
+        assert!(
+            projected.contains("9007199254740993"),
+            "the sentinel decodes to its integer: {projected}"
+        );
+        assert_eq!(
+            projected, expected,
+            "both frontmatter branches settle identically"
+        );
+        assert_eq!(
+            dohc_engine_domain::collections::markdown_frontmatter_json(&projected),
+            Some(frontmatter_fixture_expectation(
+                "constructor-map-and-unsafe-integer-share-array"
+            )),
+            "the settled artifact parses to the shared vector expectation"
+        );
+    }
+
+    #[test]
+    fn escaped_shared_bigint_key_unescapes_and_projects_as_a_map() {
+        let plain = Ydoc::wire();
+        let frontmatter = plain.doc.get_or_insert_map(ROOT_FRONTMATTER);
+        {
+            let mut txn = plain.doc.transact_mut();
+            frontmatter.insert(
+                &mut txn,
+                "sequence",
+                Any::from(vec![
+                    Any::from(HashMap::from([(
+                        "constructor".to_string(),
+                        Any::from("hostile-constructor"),
+                    )])),
+                    Any::from(HashMap::from([(
+                        FRONTMATTER_SHARED_BIGINT_KEY.to_string(),
+                        Any::BigInt(9_007_199_254_740_993),
+                    )])),
+                ]),
+            );
+        }
+        let expected = plain
+            .project(ContentKind::Richdoc)
+            .expect("plain-branch projection")
+            .content;
+
+        let shared = shared_branch_sequence_doc("$$dohcBigInt");
+        let projected = shared
+            .project(ContentKind::Richdoc)
+            .expect("shared-branch projection")
+            .content;
+
+        assert!(
+            projected.contains("\"$dohcBigInt\""),
+            "the escaped key loses exactly one `$`: {projected}"
+        );
+        assert!(
+            !projected.contains("$$dohcBigInt"),
+            "no escape depth survives projection: {projected}"
+        );
+        assert_eq!(
+            projected, expected,
+            "the literal collision map survives both branches as a map"
+        );
+        assert_eq!(
+            dohc_engine_domain::collections::markdown_frontmatter_json(&projected),
+            Some(frontmatter_fixture_expectation(
+                "literal-shared-bigint-key-map-survives-the-shared-branch"
+            )),
+            "the settled artifact parses to the shared vector expectation"
         );
     }
 

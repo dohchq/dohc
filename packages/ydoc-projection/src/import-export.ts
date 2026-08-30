@@ -1237,10 +1237,14 @@ function isEmptyFrontmatter(raw: string): boolean {
   })
 }
 
-function writeMap(map: Y.Map<unknown>, values: Record<string, unknown>): void {
+function writeMap(
+  map: Y.Map<unknown>,
+  values: Record<string, unknown>,
+  escapeSharedBigIntKeys = false,
+): void {
   for (const [key, value] of Object.entries(values)) {
     map.set(
-      key,
+      escapeSharedBigIntKeys ? escapeSharedBigIntKey(key) : key,
       frontmatterValueNeedsSharedType(value)
         ? frontmatterValueToY(value)
         : frontmatterValueToAny(value),
@@ -1266,6 +1270,20 @@ function frontmatterValueToAny(value: unknown): unknown {
 }
 
 const FRONTMATTER_SHARED_BIGINT_KEY = '$dohcBigInt'
+// The sentinel spelling and every extra-`$` escape depth of it. Literal keys
+// spelled this way gain one `$` when a shared map is built and lose one when
+// it is read, so only a real sentinel ever carries the unescaped key.
+const SHARED_BIGINT_KEY_SPELLING = /^\$+dohcBigInt$/
+
+function escapeSharedBigIntKey(key: string): string {
+  return SHARED_BIGINT_KEY_SPELLING.test(key) ? `$${key}` : key
+}
+
+function unescapeSharedBigIntKey(key: string): string {
+  return key.startsWith('$$') && SHARED_BIGINT_KEY_SPELLING.test(key)
+    ? key.slice(1)
+    : key
+}
 
 function frontmatterValueToY(value: unknown): unknown {
   if (typeof value === 'bigint') {
@@ -1283,7 +1301,7 @@ function frontmatterValueToY(value: unknown): unknown {
   }
   if (isFrontmatterMap(value)) {
     const map = new Y.Map<unknown>()
-    writeMap(map, value)
+    writeMap(map, value, true)
     return map
   }
   return value
@@ -1297,7 +1315,7 @@ function yFrontmatterValueToPlain(value: unknown): unknown {
   ) {
     return value.get(FRONTMATTER_SHARED_BIGINT_KEY)
   }
-  if (value instanceof Y.Map) return mapToObject(value)
+  if (value instanceof Y.Map) return mapToObject(value, true)
   if (value instanceof Y.Array) {
     return value.toArray().map(yFrontmatterValueToPlain)
   }
@@ -1305,10 +1323,13 @@ function yFrontmatterValueToPlain(value: unknown): unknown {
   return normalizeFrontmatterValue(value)
 }
 
-function mapToObject(map: Y.Map<unknown>): Record<string, unknown> {
+function mapToObject(
+  map: Y.Map<unknown>,
+  unescapeSharedBigIntKeys = false,
+): Record<string, unknown> {
   return Object.fromEntries(
     Array.from(map.entries(), ([key, child]) => [
-      key,
+      unescapeSharedBigIntKeys ? unescapeSharedBigIntKey(key) : key,
       yFrontmatterValueToPlain(child),
     ]),
   )

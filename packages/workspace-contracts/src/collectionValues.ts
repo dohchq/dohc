@@ -63,12 +63,35 @@ function isMapping(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// Rust normalizes numeric mapping keys through f64 Display
+// (`value.to_string()`): shortest round-trip digits, never exponent notation,
+// and "inf"/"-inf"/"NaN" for the non-finite values. `String(value)` disagrees
+// ("1e+21", "1e-7", "Infinity"), so reproduce the Rust rendering here.
+function rustF64Text(value: number): string {
+  if (Number.isNaN(value)) return "NaN";
+  if (value === Number.POSITIVE_INFINITY) return "inf";
+  if (value === Number.NEGATIVE_INFINITY) return "-inf";
+  if (Object.is(value, -0)) return "-0";
+  const shortest = String(value);
+  const exponentForm = /^(-?)(\d+)(?:\.(\d+))?e([+-]\d+)$/.exec(shortest);
+  if (exponentForm === null) return shortest;
+  const [, sign = "", whole = "", fraction = "", exponentText = "0"] =
+    exponentForm;
+  const digits = whole + fraction;
+  const point = Number(exponentText) + whole.length;
+  if (point <= 0) return `${sign}0.${"0".repeat(-point)}${digits}`;
+  if (point >= digits.length) {
+    return `${sign}${digits}${"0".repeat(point - digits.length)}`;
+  }
+  return `${sign}${digits.slice(0, point)}.${digits.slice(point)}`;
+}
+
 function yamlKeyText(value: unknown): string | null {
+  if (typeof value === "number") return rustF64Text(value);
   if (
     typeof value === "string" ||
     typeof value === "bigint" ||
-    typeof value === "boolean" ||
-    typeof value === "number"
+    typeof value === "boolean"
   ) {
     return String(value);
   }

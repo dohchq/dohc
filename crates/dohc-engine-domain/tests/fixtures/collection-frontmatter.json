@@ -88,6 +88,22 @@
       }
     },
     {
+      "name": "literal-shared-bigint-key-map-survives-the-shared-branch",
+      "markdown": "---\nsequence:\n  - constructor: hostile-constructor\n  - $dohcBigInt: 9007199254740993\n---",
+      "expected": {
+        "sequence": [
+          {
+            "constructor": "hostile-constructor"
+          },
+          {
+            "$dohcBigInt": {
+              "$dohcInt64": "9007199254740993"
+            }
+          }
+        ]
+      }
+    },
+    {
       "name": "integral-float-outside-int64-remains-a-number",
       "markdown": "---\nexact: 1e20\n---",
       "expected": {

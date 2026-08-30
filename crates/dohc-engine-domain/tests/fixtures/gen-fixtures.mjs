@@ -120,6 +120,72 @@ const schemas = [
     yaml: "fields:\n  1.5:\n    type: text\n",
   },
   {
+    name: "integral-float-key-at-1e21-normalizes-without-exponent",
+    yaml: "fields:\n  1e21:\n    type: text\n",
+    expected: {
+      status: "valid",
+      schema: {
+        name: null,
+        description: null,
+        fields: [{ name: "1000000000000000000000", type: "text" }],
+        views: [],
+      },
+      reasons: [],
+    },
+  },
+  {
+    name: "small-fraction-key-normalizes-without-exponent",
+    yaml: "fields:\n  0.0000001:\n    type: text\n",
+    expected: {
+      status: "valid",
+      schema: {
+        name: null,
+        description: null,
+        fields: [{ name: "0.0000001", type: "text" }],
+        views: [],
+      },
+      reasons: [],
+    },
+  },
+  {
+    name: "non-finite-keys-use-rust-f64-spellings",
+    yaml: "fields:\n  .inf:\n    type: text\n  -.inf:\n    type: number\n  .nan:\n    type: checkbox\n",
+    expected: {
+      status: "valid",
+      schema: {
+        name: null,
+        description: null,
+        fields: [
+          { name: "inf", type: "text" },
+          { name: "-inf", type: "number" },
+          { name: "NaN", type: "checkbox" },
+        ],
+        views: [],
+      },
+      reasons: [],
+    },
+  },
+  {
+    name: "numeric-key-spellings-normalize-to-one-text-and-collide",
+    yaml: 'fields:\n  1e21:\n    type: text\n  "1000000000000000000000":\n    type: number\n',
+    expected: {
+      status: "degraded",
+      schema: {
+        name: null,
+        description: null,
+        fields: [
+          { name: "1000000000000000000000", type: "text" },
+          { name: "1000000000000000000000", type: "number" },
+        ],
+        views: [],
+      },
+      reasons: [
+        { code: "field-name-collision", path: "/fields/1000000000000000000000" },
+        { code: "field-name-collision", path: "/fields/1000000000000000000000" },
+      ],
+    },
+  },
+  {
     name: "valid-all-v1-types-and-views",
     yaml: `name: Projects
 description: Work in flight
@@ -709,6 +775,16 @@ const frontmatter = [
       "sequence:",
       "  - constructor: hostile-constructor",
       "  - 9007199254740993",
+      "---",
+    ].join("\n"),
+  },
+  {
+    name: "literal-shared-bigint-key-map-survives-the-shared-branch",
+    markdown: [
+      "---",
+      "sequence:",
+      "  - constructor: hostile-constructor",
+      "  - $dohcBigInt: 9007199254740993",
       "---",
     ].join("\n"),
   },

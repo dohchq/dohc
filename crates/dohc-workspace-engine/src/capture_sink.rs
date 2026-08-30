@@ -2592,6 +2592,22 @@ mod tests {
             Some("engine"),
             "the id write-back is an engine-attributed Y.Doc write"
         );
+        assert_eq!(
+            engine_ydoc_update_count(&db, "tasks/target.md"),
+            1,
+            "the id write-back lands exactly one engine Y.Doc update"
+        );
+        assert!(
+            sink.reconcile_collections()
+                .expect("idempotent reconciliation after the id write-back")
+                .is_empty(),
+            "the re-asserted id must not keep settling"
+        );
+        assert_eq!(
+            engine_ydoc_update_count(&db, "tasks/target.md"),
+            1,
+            "re-running reconciliation must not loop engine updates onto the target"
+        );
 
         drop(sink);
         supervisor.close(&db).expect("close actor");

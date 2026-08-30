@@ -166,6 +166,103 @@
       }
     },
     {
+      "name": "integral-float-key-at-1e21-normalizes-without-exponent",
+      "yaml": "fields:\n  1e21:\n    type: text\n",
+      "expected": {
+        "status": "valid",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [
+            {
+              "name": "1000000000000000000000",
+              "type": "text"
+            }
+          ],
+          "views": []
+        },
+        "reasons": []
+      }
+    },
+    {
+      "name": "small-fraction-key-normalizes-without-exponent",
+      "yaml": "fields:\n  0.0000001:\n    type: text\n",
+      "expected": {
+        "status": "valid",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [
+            {
+              "name": "0.0000001",
+              "type": "text"
+            }
+          ],
+          "views": []
+        },
+        "reasons": []
+      }
+    },
+    {
+      "name": "non-finite-keys-use-rust-f64-spellings",
+      "yaml": "fields:\n  .inf:\n    type: text\n  -.inf:\n    type: number\n  .nan:\n    type: checkbox\n",
+      "expected": {
+        "status": "valid",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [
+            {
+              "name": "inf",
+              "type": "text"
+            },
+            {
+              "name": "-inf",
+              "type": "number"
+            },
+            {
+              "name": "NaN",
+              "type": "checkbox"
+            }
+          ],
+          "views": []
+        },
+        "reasons": []
+      }
+    },
+    {
+      "name": "numeric-key-spellings-normalize-to-one-text-and-collide",
+      "yaml": "fields:\n  1e21:\n    type: text\n  \"1000000000000000000000\":\n    type: number\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [
+            {
+              "name": "1000000000000000000000",
+              "type": "text"
+            },
+            {
+              "name": "1000000000000000000000",
+              "type": "number"
+            }
+          ],
+          "views": []
+        },
+        "reasons": [
+          {
+            "code": "field-name-collision",
+            "path": "/fields/1000000000000000000000"
+          },
+          {
+            "code": "field-name-collision",
+            "path": "/fields/1000000000000000000000"
+          }
+        ]
+      }
+    },
+    {
       "name": "valid-all-v1-types-and-views",
       "yaml": "name: Projects\ndescription: Work in flight\nfields:\n  title:\n    type: text\n  estimate:\n    type: number\n  done:\n    type: checkbox\n  due:\n    type: date\n  status:\n    type: select\n    options: [Planned, Active, Done]\n  labels:\n    type: multi-select\n    options: [Backend, Frontend]\n  owner:\n    type: person\n  parent:\n    type: relation\n    collection: planning/projects\n    many: false\n  dependencies:\n    type: relation\n    collection: planning/projects\n    many: true\n  website:\n    type: url\nviews:\n  - name: All projects\n    kind: table\n    sort:\n      - field: due\n        direction: asc\n    visibleFields: [title, status, owner, due]\n  - name: Status board\n    kind: board\n    groupBy: status\n    visibleFields: [title, owner]\n  - name: Delivery calendar\n    kind: calendar\n    dateField: due\n",
       "expected": {

@@ -345,6 +345,35 @@ describe('Y.Doc markdown import/export', () => {
     expect(yDocToMarkdown(doc)).toContain('9007199254740993')
   })
 
+  it('escapes literal keys spelled like the bigint sentinel on the shared branch', () => {
+    const vector = frontmatterVectors.find(
+      candidate =>
+        candidate.name === 'literal-shared-bigint-key-map-survives-the-shared-branch',
+    )
+    expect(vector).toBeDefined()
+    const source = markdownToYDoc(vector!.markdown)
+    const doc = new Y.Doc()
+    Y.applyUpdate(doc, Y.encodeStateAsUpdate(source))
+    const sequence = doc.getMap<unknown>('frontmatter').get('sequence')
+
+    expect(sequence).toBeInstanceOf(Y.Array)
+    const literal = (sequence as Y.Array<unknown>).get(1)
+    expect(literal).toBeInstanceOf(Y.Map)
+    expect((literal as Y.Map<unknown>).get('$$dohcBigInt')).toBe(9007199254740993n)
+    const expectedSequence: Record<string, unknown>[] = [
+      { constructor: 'hostile-constructor' },
+      { $dohcBigInt: 9007199254740993n },
+    ]
+    expect(getDohcYDocFrontmatter(doc).sequence).toEqual(expectedSequence)
+
+    const settled = yDocToMarkdown(doc)
+    expect(settled).toContain('$dohcBigInt')
+    expect(settled).not.toContain('$$dohcBigInt')
+    expect(getDohcYDocFrontmatter(markdownToYDoc(settled))).toEqual(
+      getDohcYDocFrontmatter(doc),
+    )
+  })
+
   it('keeps hostile keys in unsupported tagged frontmatter mappings', () => {
     const input = [
       '---',
