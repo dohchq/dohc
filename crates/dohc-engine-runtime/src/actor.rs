@@ -28,11 +28,12 @@
 
 use crate::error::RuntimeError;
 use crate::identity::EngineDbIdentity;
+use crate::search::index::update_file_search_index_for_capture;
 use crate::search::{
     GranularChatMessageSearchBatch, SearchPageBatch, SearchResult, SearchResultKey,
     delete_file_search_index, ensure_search_index_for_version,
     query_chat_messages_granular_bounded, search_workspace, search_workspace_page,
-    upsert_file_search_index, upsert_file_search_index_with_policy,
+    upsert_file_search_index,
 };
 use crate::search::{SearchPolicySnapshot, read_engine_search_policy, resolve_effective_policy};
 use dohc_engine_collab::{
@@ -14435,7 +14436,7 @@ fn capture_ingest_in_tx(
                 &result.snapshot.text,
             )
             .map_err(RuntimeError::from)?,
-            CaptureIndexing::UseSnapshot(policy) => upsert_file_search_index_with_policy(
+            CaptureIndexing::UseSnapshot(policy) => update_file_search_index_for_capture(
                 tx,
                 policy,
                 &input.workspace_id,
@@ -14443,6 +14444,7 @@ fn capture_ingest_in_tx(
                 &result.snapshot.object_id,
                 &result.snapshot.path,
                 &result.snapshot.text,
+                result.moment.before_present,
             )
             .map_err(RuntimeError::from)?,
         }

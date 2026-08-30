@@ -235,7 +235,11 @@ fn bounded_capture_batch_contains_a_leased_path_and_replays_without_duplicates()
         )
         .expect("commit successful siblings");
     assert_eq!(first.len(), 3);
-    assert!(first[0].as_ref().is_ok_and(|write| !write.deduped));
+    assert!(
+        first[0]
+            .as_ref()
+            .is_ok_and(|write| !write.deduped && !write.moment.before_present)
+    );
     assert!(matches!(
         &first[1],
         Err(RuntimeError::Sync(
@@ -244,7 +248,11 @@ fn bounded_capture_batch_contains_a_leased_path_and_replays_without_duplicates()
             }
         ))
     ));
-    assert!(first[2].as_ref().is_ok_and(|write| !write.deduped));
+    assert!(
+        first[2]
+            .as_ref()
+            .is_ok_and(|write| !write.deduped && !write.moment.before_present)
+    );
     supervisor.close(&db).expect("close after partial batch");
 
     let state = |expected_paths: &[&str]| {
@@ -291,6 +299,163 @@ fn bounded_capture_batch_contains_a_leased_path_and_replays_without_duplicates()
     assert!(replay[2].as_ref().is_ok_and(|write| write.deduped));
     supervisor.close(&db).expect("close after replay");
     state(&["notes/a.md", "notes/b.md", "notes/c.md"]);
+}
+
+#[test]
+fn capture_batch_replaces_a_duplicate_path_without_duplicate_fts_rows() {
+    const WORKSPACE_ID: &str = "ws-capture-batch-duplicate";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let policy = Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
+        scratch.path(),
+    ));
+    let input = |text: &str, now_ms: i64| CaptureIngest {
+        workspace_id: WORKSPACE_ID.to_owned(),
+        version_id: "main".to_owned(),
+        path: "notes/repeated.md".to_owned(),
+        text: text.to_owned(),
+        metadata_origin: "capture".to_owned(),
+        metadata_summary: Some("Reconciled offline edits".to_owned()),
+        metadata_correlation_id: Some("duplicate-path".to_owned()),
+        author_json: None,
+        now_ms,
+        request_id: None,
+        claim_foreign_head: false,
+    };
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let results = handle
+        .capture_ingest_batch_blocking(
+            vec![
+                input("alpha-only search body", 10),
+                input("bravo-only search body", 20),
+            ],
+            policy,
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+        )
+        .expect("capture duplicate path batch");
+    assert!(
+        results[0]
+            .as_ref()
+            .is_ok_and(|write| !write.deduped && !write.moment.before_present)
+    );
+    assert!(
+        results[1]
+            .as_ref()
+            .is_ok_and(|write| !write.deduped && write.moment.before_present)
+    );
+    supervisor.close(&db).expect("close actor");
+
+    let store = EngineStore::open(&db, 100).expect("inspect duplicate batch");
+    let (moments, rows, indexed): (i64, i64, String) = store
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM moments WHERE workspace_id=?1",
+                    [WORKSPACE_ID],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM engine_search_files_fts WHERE workspace_id=?1",
+                    [WORKSPACE_ID],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT text FROM engine_search_files_fts WHERE workspace_id=?1",
+                    [WORKSPACE_ID],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("read duplicate batch state");
+    assert_eq!((moments, rows), (2, 1));
+    assert_eq!(indexed, "bravo-only search body");
+}
+
+#[test]
+fn added_batch_preserves_a_foreign_head_and_indexes_its_new_sibling() {
+    const WORKSPACE_ID: &str = "ws-capture-batch-foreign";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let policy = Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
+        scratch.path(),
+    ));
+    let input = |path: &str, text: &str, origin: &str, claim_foreign_head: bool| CaptureIngest {
+        workspace_id: WORKSPACE_ID.to_owned(),
+        version_id: "main".to_owned(),
+        path: path.to_owned(),
+        text: text.to_owned(),
+        metadata_origin: origin.to_owned(),
+        metadata_summary: Some("Reconciled offline edits".to_owned()),
+        metadata_correlation_id: Some("foreign-head".to_owned()),
+        author_json: None,
+        now_ms: 10,
+        request_id: None,
+        claim_foreign_head,
+    };
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let foreign = handle
+        .capture_ingest_with_search_policy_blocking(
+            input(
+                "notes/foreign.md",
+                "foreign authoritative body",
+                "api",
+                true,
+            ),
+            Arc::clone(&policy),
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+        )
+        .expect("seed foreign head");
+    assert!(!foreign.moment.before_present);
+
+    let results = handle
+        .capture_ingest_batch_blocking(
+            vec![
+                input("notes/foreign.md", "stale disk body", "capture", false),
+                input("notes/new.md", "new sibling body", "capture", false),
+            ],
+            policy,
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+        )
+        .expect("capture added batch around foreign head");
+    assert!(matches!(
+        &results[0],
+        Err(RuntimeError::Domain(
+            dohc_engine_domain::DomainError::CaptureNotOwned
+        ))
+    ));
+    assert!(
+        results[1]
+            .as_ref()
+            .is_ok_and(|write| !write.deduped && !write.moment.before_present)
+    );
+    supervisor.close(&db).expect("close actor");
+
+    let store = EngineStore::open(&db, 100).expect("inspect foreign batch");
+    let indexed = store
+        .read_with(|conn| {
+            conn.prepare(
+                "SELECT path,text FROM engine_search_files_fts \
+                 WHERE workspace_id=?1 ORDER BY path",
+            )?
+            .query_map([WORKSPACE_ID], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<(String, String)>>>()
+        })
+        .expect("read foreign batch FTS");
+    assert_eq!(
+        indexed,
+        vec![
+            (
+                "notes/foreign.md".to_owned(),
+                "foreign authoritative body".to_owned(),
+            ),
+            ("notes/new.md".to_owned(), "new sibling body".to_owned()),
+        ]
+    );
 }
 
 #[test]
