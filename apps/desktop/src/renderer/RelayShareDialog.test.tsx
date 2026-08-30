@@ -2473,6 +2473,60 @@ describe("RelayShareDialog", () => {
     expect(within(group).getAllByText("Keep this draft!")).toHaveLength(1);
   });
 
+  it("keeps an activity tombstone when a stale owner post settles later", async () => {
+    const append = controllable<{ message: RelayShareDiscussionMessage }>();
+    const activity = controllable<DiscussionActivity>();
+    const staleBody = "Stale posted body";
+    const staleLive = namedComment("message-1", staleBody);
+    const tombstone: RelayShareDiscussionMessage = {
+      messageId: "message-1",
+      createdAtMs: CREATED_MS,
+      deleted: true,
+      author: { kind: "named", displayName: "Owner Name" },
+    };
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("link-1", { shareId: "share-1" })],
+    });
+    bridgeMock.appendRelayShareDiscussion.mockReturnValueOnce(append.promise);
+    bridgeMock.pollRelayShareDiscussionActivity.mockReturnValueOnce(
+      activity.promise,
+    );
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await openOwnerComments(user, "share-1");
+    const field = within(group).getByRole("textbox", { name: "Add a comment" });
+    await user.type(field, staleBody);
+    await user.click(within(group).getByRole("button", { name: "Post" }));
+    await vi.waitFor(() => {
+      expect(bridgeMock.pollRelayShareDiscussionActivity).toHaveBeenCalledTimes(1);
+      expect(bridgeMock.appendRelayShareDiscussion).toHaveBeenCalledTimes(1);
+    });
+
+    await act(async () => {
+      activity.resolve(
+        discussionActivity(2, {
+          messages: [tombstone],
+        }),
+      );
+    });
+    const row = await within(group).findByTestId("share-comment-message-1");
+    expect(within(row).getByText("Comment deleted by the owner")).toBeTruthy();
+    expect(within(row).queryByText(staleBody)).toBeNull();
+
+    await act(async () => {
+      append.resolve({ message: staleLive });
+    });
+    expect(within(row).getByText("Comment deleted by the owner")).toBeTruthy();
+    expect(within(row).queryByText(staleBody)).toBeNull();
+  });
+
   it.each([
     {
       label: "more than 2,000 normalized code points",

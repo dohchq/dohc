@@ -238,7 +238,11 @@ function mergeDiscussionMessages(
   const byId = new Map(
     current.map((message) => [message.messageId, message] as const),
   );
-  for (const message of incoming) byId.set(message.messageId, message);
+  for (const message of incoming) {
+    const existing = byId.get(message.messageId);
+    if (existing?.deleted && !message.deleted) continue;
+    byId.set(message.messageId, message);
+  }
   return [...byId.values()].sort(
     (left, right) =>
       left.createdAtMs - right.createdAtMs ||
