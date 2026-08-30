@@ -10,7 +10,7 @@ pub mod rehearsal_harness;
 pub mod shadow_fence;
 
 #[cfg(feature = "harness")]
-pub use capture_driver::CaptureApplyProbe;
+pub use capture_driver::{CaptureApplyProbe, EARLY_IMPORT_MIN_ADDED_FILES};
 pub use capture_sink::{SelfWriteSuppression, StoreCaptureSink};
 
 use base64::Engine as _;
@@ -12982,7 +12982,7 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
     method.starts_with("sync.")
         || method.starts_with("share.")
         || method.starts_with("search.")
-        || method.starts_with("versions.")
+        || (method.starts_with("versions.") && method != "versions.ensureMain")
         || method.starts_with("conflicts.")
         || matches!(
             method,
@@ -13321,6 +13321,21 @@ mod tests {
             if !input.to_string().contains("value-depth-exceeded") {
                 assert_eq!(response, input, "{surface} has no dynamic value to elide");
             }
+        }
+    }
+
+    #[test]
+    fn only_idempotent_version_bootstrap_bypasses_the_initial_capture_fence() {
+        assert!(!method_requires_initial_capture_ready(
+            "versions.ensureMain"
+        ));
+        for method in [
+            "versions.active",
+            "versions.list",
+            "versions.createNamed",
+            "versions.setActive",
+        ] {
+            assert!(method_requires_initial_capture_ready(method), "{method}");
         }
     }
 

@@ -11,8 +11,8 @@ use dohc_engine_protocol::{
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::{
-    CAPTURE_MOMENT_RECORDED_EVENT, CaptureApplyProbe, EngineEventNotice, EngineService,
-    shadow_fence::write_shadow_marker_for_harness,
+    CAPTURE_MOMENT_RECORDED_EVENT, CaptureApplyProbe, EARLY_IMPORT_MIN_ADDED_FILES,
+    EngineEventNotice, EngineService, shadow_fence::write_shadow_marker_for_harness,
 };
 use serde_json::{Value, json};
 use std::path::Path;
@@ -1089,11 +1089,75 @@ async fn watcher_status_reports_a_live_driver_and_flush_settles() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_small_fresh_workspace_waits_for_its_complete_baseline() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), "seed.md", b"small baseline");
+
+    let probe = CaptureApplyProbe::default();
+    probe.pause_next_apply();
+    let transport = Arc::new(InProcessTransport::new(Arc::new(
+        EngineService::with_capture_apply_probe_for_harness(probe.clone()),
+    )));
+    let opening_transport = Arc::clone(&transport);
+    let root = scratch.path().to_path_buf();
+    let mut opening = tokio::spawn(async move {
+        opening_transport
+            .call(
+                RequestContext::unbounded(),
+                request(
+                    1,
+                    "workspace.open",
+                    None,
+                    json!({
+                        "rootDir": root.to_string_lossy(),
+                        "workspaceId": WORKSPACE_ID
+                    }),
+                ),
+            )
+            .await
+    });
+    probe.wait_until_paused().await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut opening)
+            .await
+            .is_err(),
+        "a small baseline must finish before workspace.open returns"
+    );
+
+    probe.release();
+    let opened = opening
+        .await
+        .expect("open task")
+        .expect("workspace open after baseline");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
+    let status = transport
+        .call(
+            RequestContext::unbounded(),
+            request(2, "watcher.status", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("watcher.status");
+    assert_eq!(status.result["phase"], json!("ready"));
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(3, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fresh_import_opens_early_fences_partial_reads_and_preserves_foreign_heads() {
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     write_file(scratch.path(), "same.md", b"same bytes");
     write_file(scratch.path(), "different.md", b"disk bytes");
+    for index in 2..EARLY_IMPORT_MIN_ADDED_FILES {
+        write_file(scratch.path(), &format!("bulk/seed-{index:04}.md"), b"seed");
+    }
 
     let probe = CaptureApplyProbe::default();
     probe.pause_next_apply();
@@ -1126,10 +1190,20 @@ async fn fresh_import_opens_early_fences_partial_reads_and_preserves_foreign_hea
         .expect("capture.flush answers while importing");
     assert_eq!(flush.result["settled"], json!(false));
 
+    let main = transport
+        .call(
+            RequestContext::unbounded(),
+            request(4, "versions.ensureMain", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("idempotent main bootstrap stays available while importing");
+    assert_eq!(main.result["id"], json!("main"));
+    assert_eq!(main.result["kind"], json!("main"));
+
     for (id, method) in [
-        (4, "history.page"),
-        (5, "search.query"),
-        (6, "versions.list"),
+        (5, "history.page"),
+        (6, "search.query"),
+        (7, "versions.list"),
     ] {
         let error = transport
             .call(
@@ -1146,7 +1220,7 @@ async fn fresh_import_opens_early_fences_partial_reads_and_preserves_foreign_hea
         .call(
             RequestContext::unbounded(),
             request(
-                7,
+                8,
                 "ydoc.open",
                 Some(handle.clone()),
                 json!({
@@ -1164,7 +1238,7 @@ async fn fresh_import_opens_early_fences_partial_reads_and_preserves_foreign_hea
         .call(
             RequestContext::unbounded(),
             request(
-                8,
+                9,
                 "ydoc.open",
                 Some(handle.clone()),
                 json!({
@@ -1179,9 +1253,9 @@ async fn fresh_import_opens_early_fences_partial_reads_and_preserves_foreign_hea
     assert_eq!(absent_ydoc.result["head"], json!("absent"));
 
     for (id, path, text, object, moment) in [
-        (9, "same.md", "same bytes", "rpc-same", "moment-same"),
+        (10, "same.md", "same bytes", "rpc-same", "moment-same"),
         (
-            10,
+            11,
             "different.md",
             "rpc bytes",
             "rpc-different",

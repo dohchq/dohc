@@ -43,6 +43,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// opposite side of that transaction.
 pub(crate) type ApplyGate = Arc<tokio::sync::Mutex<()>>;
 
+/// Small workspaces finish their baseline quickly and gain nothing from a
+/// partially ready shell. Reserve early import for workspaces whose per-file
+/// actor work is large enough for the background tail to be user-visible.
+pub const EARLY_IMPORT_MIN_ADDED_FILES: usize = 1_000;
+
 /// Deterministic integration-test seam for proving a switch drains an apply
 /// that has already prepared a reconcile plan. Production builds do not
 /// compile the seam.
@@ -633,11 +638,11 @@ impl DriverStatus {
 mod startup_contract_tests {
     use super::*;
 
-    fn plan(op: CaptureOp) -> ReconcileRun {
+    fn plan_with_ops(ops: Vec<CaptureOp>) -> ReconcileRun {
         ReconcileRun::Completed(ReconcilePlan {
             from_generation: ScanGeneration(0),
             to_generation: ScanGeneration(1),
-            ops: vec![op],
+            ops,
             retained_over_cap: Vec::new(),
             unconfirmed_removed: Vec::new(),
             degraded: false,
@@ -647,9 +652,9 @@ mod startup_contract_tests {
         })
     }
 
-    fn ingest(reason: IngestReason) -> CaptureOp {
+    fn ingest(index: usize, reason: IngestReason) -> CaptureOp {
         CaptureOp::Ingest {
-            path: "note.md".to_owned(),
+            path: format!("note-{index}.md"),
             size: 4,
             sha256: "a".repeat(64),
             mtime_ms: 1,
@@ -658,20 +663,41 @@ mod startup_contract_tests {
         }
     }
 
+    fn added_plan(count: usize) -> ReconcileRun {
+        plan_with_ops(
+            (0..count)
+                .map(|index| ingest(index, IngestReason::Added))
+                .collect(),
+        )
+    }
+
     #[test]
-    fn only_a_nonempty_all_added_clean_plan_can_import_early() {
-        assert!(is_safe_fresh_import_plan(&plan(ingest(
-            IngestReason::Added
-        ))));
-        assert!(!is_safe_fresh_import_plan(&plan(ingest(
-            IngestReason::Changed
-        ))));
-        assert!(!is_safe_fresh_import_plan(&plan(CaptureOp::Retire {
-            path: "note.md".to_owned(),
-        })));
+    fn early_import_starts_at_the_named_file_count_boundary() {
+        assert!(!is_safe_fresh_import_plan(&added_plan(
+            EARLY_IMPORT_MIN_ADDED_FILES - 1
+        )));
+        assert!(is_safe_fresh_import_plan(&added_plan(
+            EARLY_IMPORT_MIN_ADDED_FILES
+        )));
+        assert!(is_safe_fresh_import_plan(&added_plan(
+            EARLY_IMPORT_MIN_ADDED_FILES + 1
+        )));
+    }
+
+    #[test]
+    fn only_a_large_all_added_clean_plan_can_import_early() {
+        let changed = (0..EARLY_IMPORT_MIN_ADDED_FILES)
+            .map(|index| ingest(index, IngestReason::Changed))
+            .collect();
+        assert!(!is_safe_fresh_import_plan(&plan_with_ops(changed)));
+        assert!(!is_safe_fresh_import_plan(&plan_with_ops(vec![
+            CaptureOp::Retire {
+                path: "note.md".to_owned(),
+            }
+        ])));
         assert!(!is_safe_fresh_import_plan(&ReconcileRun::Converged));
 
-        let ReconcileRun::Completed(mut degraded) = plan(ingest(IngestReason::Added)) else {
+        let ReconcileRun::Completed(mut degraded) = added_plan(EARLY_IMPORT_MIN_ADDED_FILES) else {
             unreachable!();
         };
         degraded.degraded = true;
@@ -1892,7 +1918,7 @@ fn is_safe_fresh_import_plan(run: &ReconcileRun) -> bool {
     let ReconcileRun::Completed(plan) = run else {
         return false;
     };
-    !plan.ops.is_empty()
+    plan.ops.len() >= EARLY_IMPORT_MIN_ADDED_FILES
         && !plan.degraded
         && plan.degraded_paths.is_empty()
         && plan.unconfirmed_removed.is_empty()
