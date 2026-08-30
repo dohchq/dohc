@@ -3435,6 +3435,74 @@ describe("App", () => {
     expect(activitySignal?.aborted).toBe(true);
   });
 
+  it("applies narrowed View access from activity and ignores stale Comment metadata", async () => {
+    vi.useFakeTimers();
+    const file: SharedFile = {
+      path: "docs/narrowed.md",
+      blobSha256: "7".repeat(64),
+      contentKind: "text",
+    };
+    const commentMeta: ViewMeta = {
+      ...DEFAULT_META,
+      access: "comment",
+      effectiveSelector: { ...DEFAULT_META.effectiveSelector, access: "comment" },
+    };
+    let metaCalls = 0;
+    let parkedSignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/view/current") return currentPage([file], 1, 0, commentMeta);
+      if (path === "/api/view/log?since=1&limit=500") return logOpsPage([], 1);
+      if (path === "/api/view/meta") {
+        metaCalls += 1;
+        return jsonResponse(commentMeta);
+      }
+      if (path === "/api/view/discussion?direction=newest-first") {
+        return jsonResponse({
+          ok: true,
+          activityRevision: 7,
+          messages: [],
+          nextCursor: null,
+          profileName: null,
+        });
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        return jsonResponse({
+          ok: true,
+          access: "view",
+          latestRevision: 7,
+          cursorRevision: 7,
+          hasMore: false,
+          messages: [],
+          composerState: "available",
+        });
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
+        parkedSignal = init?.signal ?? undefined;
+        return await new Promise<Response>(() => undefined);
+      }
+      if (path === `/api/view/blob/${file.blobSha256}`) {
+        return new Response("# Narrowed link");
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+
+    await renderApp();
+    await settle(() =>
+      parkedSignal !== undefined &&
+      container.querySelector(".badge")?.textContent === "View"
+    );
+
+    expect(container.querySelector(".comments-panel form")).toBeNull();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+    });
+    await settle(() => metaCalls === 1);
+
+    expect(container.querySelector(".badge")?.textContent).toBe("View");
+    expect(container.querySelector(".comments-panel form")).toBeNull();
+  });
+
   it.each([
     ["blocked", "The owner turned off comments for this browser."],
     ["paused", "The owner paused comments. You can still read everything."],

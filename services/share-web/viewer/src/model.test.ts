@@ -546,12 +546,14 @@ describe("public discussion projection", () => {
   it("parses only an exact, ordered public discussion activity delta", () => {
     expect(parseDiscussionActivity({
       ok: true,
+      access: "comment",
       latestRevision: 9,
       cursorRevision: 8,
       hasMore: true,
       messages: [named, link],
       composerState: "blocked",
     })).toEqual({
+      access: "comment",
       latestRevision: 9,
       cursorRevision: 8,
       hasMore: true,
@@ -562,6 +564,7 @@ describe("public discussion projection", () => {
     for (const value of [
       {
         ok: true,
+        access: "comment",
         latestRevision: 9,
         cursorRevision: 8,
         hasMore: true,
@@ -571,6 +574,7 @@ describe("public discussion projection", () => {
       },
       {
         ok: true,
+        access: "comment",
         latestRevision: 8,
         cursorRevision: 9,
         hasMore: true,
@@ -579,6 +583,7 @@ describe("public discussion projection", () => {
       },
       {
         ok: true,
+        access: "comment",
         latestRevision: 9,
         cursorRevision: 8,
         hasMore: "yes",
@@ -587,6 +592,7 @@ describe("public discussion projection", () => {
       },
       {
         ok: true,
+        access: "comment",
         latestRevision: 9,
         cursorRevision: 9,
         hasMore: false,
@@ -595,11 +601,29 @@ describe("public discussion projection", () => {
       },
       {
         ok: true,
+        access: "comment",
         latestRevision: 9,
         cursorRevision: 9,
         hasMore: false,
         messages: [],
         composerState: "disabled",
+      },
+      {
+        ok: true,
+        latestRevision: 9,
+        cursorRevision: 9,
+        hasMore: false,
+        messages: [],
+        composerState: "available",
+      },
+      {
+        ok: true,
+        access: "edit",
+        latestRevision: 9,
+        cursorRevision: 9,
+        hasMore: false,
+        messages: [],
+        composerState: "available",
       },
     ]) {
       expect(parseDiscussionActivity(value)).toBeNull();

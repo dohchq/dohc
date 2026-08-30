@@ -228,7 +228,11 @@ function CommentRow({ message }: { message: PublicDiscussionMessage }) {
   );
 }
 
-export function CommentsPanel(props: { access: ShareAccess; session: string }) {
+export function CommentsPanel(props: {
+  access: ShareAccess;
+  session: string;
+  onAccessChange?: (session: string, access: ShareAccess) => void;
+}) {
   const [messages, setMessages] = useState<PublicDiscussionMessage[] | null>(null);
   const [loadState, setLoadState] = useState<InitialLoadState>("loading");
   const [loadStateSession, setLoadStateSession] = useState(props.session);
@@ -254,7 +258,9 @@ export function CommentsPanel(props: { access: ShareAccess; session: string }) {
   const submitControllerRef = useRef<AbortController | null>(null);
   const pendingRef = useRef(false);
   const intentRef = useRef<SubmitIntent | null>(null);
+  const onAccessChangeRef = useRef(props.onAccessChange);
   sessionRef.current = props.session;
+  onAccessChangeRef.current = props.onAccessChange;
 
   useEffect(() => {
     const token = Symbol("discussion-page");
@@ -314,6 +320,7 @@ export function CommentsPanel(props: { access: ShareAccess; session: string }) {
                 )
               : mergeDiscussionMessages(messagesRef.current, activity.messages);
             if (!merged) return false;
+            onAccessChangeRef.current?.(props.session, activity.access);
             messagesRef.current = merged;
             activityRevisionRef.current = activity.cursorRevision;
             setMessages(merged);

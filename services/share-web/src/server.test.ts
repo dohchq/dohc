@@ -1889,6 +1889,7 @@ describe("share-web protected discussion proxy", () => {
     let activityCalls = 0;
     const publicActivity = {
       ok: true,
+      access: "comment",
       latestRevision: 8,
       cursorRevision: 8,
       hasMore: false,
@@ -2347,6 +2348,7 @@ describe("share-web protected discussion proxy", () => {
     let sessionNumber = 0;
     const activityBody = {
       ok: true,
+      access: "comment",
       latestRevision: 0,
       cursorRevision: 0,
       hasMore: false,

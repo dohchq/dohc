@@ -840,7 +840,6 @@ export function createSyncRelayHandler({
   const discussionActivityPage = (
     page: SyncRelayShareDiscussionActivityPage,
     viewer: DiscussionViewer,
-    composerState?: "available" | "blocked" | "paused",
   ): Record<string, unknown> => ({
     ok: true,
     latestRevision: page.latestRevision,
@@ -849,9 +848,6 @@ export function createSyncRelayHandler({
     messages: page.messages.map((message) =>
       projectDiscussionMessage(message, viewer),
     ),
-    ...(viewer === "public"
-      ? { composerState: composerState ?? "available" }
-      : {}),
     ...(viewer === "owner"
       ? {
           linkCommentsPaused: page.linkCommentsPaused,
@@ -861,6 +857,16 @@ export function createSyncRelayHandler({
           })),
         }
       : {}),
+  });
+
+  const publicDiscussionActivityPage = (
+    page: SyncRelayShareDiscussionActivityPage,
+    access: "view" | "comment",
+    composerState: "available" | "blocked" | "paused",
+  ): Record<string, unknown> => ({
+    ...discussionActivityPage(page, "public"),
+    access,
+    composerState,
   });
 
   function requireOwnedLinkGrant(
@@ -1615,12 +1621,13 @@ export function createSyncRelayHandler({
         : principal !== null && principal.blockedAtMs !== null
           ? "blocked"
           : "available";
-      requireFreshLinkRead(capabilityToken, capability);
+      const fresh = requireFreshLinkRead(capabilityToken, capability);
+      if (!isPublicLinkAccess(fresh.access)) return refused();
       return privateResponse(
         linkJsonResponse(
           capability.shareId,
           capability.grantId,
-          discussionActivityPage(page, "public", composerState),
+          publicDiscussionActivityPage(page, fresh.access, composerState),
         ),
       );
     } catch (error) {

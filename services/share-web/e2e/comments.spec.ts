@@ -134,6 +134,7 @@ test("keeps a narrowed Comment link readable without weakening transition invali
     expect(new URL(page.url()).hash).toBe("");
     expect(sessionPath).toMatch(/^\/s\/[A-Za-z0-9_-]{12}$/u);
     await expect(page.locator(".badge")).toHaveText("Comment");
+    await expect(page.getByRole("button", { name: "Post comment" })).toBeVisible();
 
     const narrowed = await retuneLink({
       access: "view",
@@ -143,6 +144,8 @@ test("keeps a narrowed Comment link readable without weakening transition invali
     });
     expect(narrowed).toMatchObject({ access: "view", grantId: seeded.grantId });
     expect(narrowed).not.toHaveProperty("url");
+    await expect(page.locator(".badge")).toHaveText("View");
+    await expect(page.getByRole("button", { name: "Post comment" })).toHaveCount(0);
 
     const current = await viewerRequest(page, { path: "/api/view/current" });
     expect(current.status).toBe(200);

@@ -435,6 +435,22 @@ function accessLabel(access: ShareAccess): string {
   return access === "comment" ? "Comment" : "View";
 }
 
+function metaAtAccess(meta: ViewMeta, access: ShareAccess): ViewMeta {
+  return meta.access === access
+    ? meta
+    : {
+        ...meta,
+        access,
+        effectiveSelector: { ...meta.effectiveSelector, access },
+      };
+}
+
+function retainNarrowedAccess(current: ViewMeta, incoming: ViewMeta): ViewMeta {
+  return current.access === "view"
+    ? metaAtAccess(incoming, "view")
+    : incoming;
+}
+
 function scrubFragment(): void {
   history.replaceState(history.state, "", `${location.pathname}${location.search}`);
 }
@@ -989,6 +1005,25 @@ export function App() {
     },
     [],
   );
+  const applyDiscussionAccess = useCallback(
+    (session: string, access: ShareAccess): void => {
+      const previous = readyStateRef.current;
+      if (!previous || previous.session !== session) return;
+      const meta = metaAtAccess(
+        previous.meta,
+        previous.meta.access === "view" ? "view" : access,
+      );
+      if (meta === previous.meta) return;
+      const nextState = { ...previous, meta };
+      readyStateRef.current = nextState;
+      setState((value) =>
+        value.status === "ready" && value.session === session
+          ? { ...value, meta }
+          : value
+      );
+    },
+    [],
+  );
   useEffect(() => {
     let current = true;
     const controller = new AbortController();
@@ -1060,9 +1095,12 @@ export function App() {
             ),
           ]);
           if (!current) return null;
+          const latest = readyStateRef.current;
           const nextState: ReadyState = {
             ...previous,
-            meta,
+            meta: latest?.session === readySession
+              ? retainNarrowedAccess(latest.meta, meta)
+              : meta,
             fileAccumulator: log.fileAccumulator,
             files: filesFromAccumulator(log.fileAccumulator),
             nextCursor: log.nextCursor,
@@ -1080,9 +1118,12 @@ export function App() {
             try {
               const reloaded = await loadCurrentState(readySession, controller.signal);
               if (!current) return null;
+              const latest = readyStateRef.current;
               const nextState: ReadyState = {
                 ...previous,
-                meta: reloaded.meta,
+                meta: latest?.session === readySession
+                  ? retainNarrowedAccess(latest.meta, reloaded.meta)
+                  : reloaded.meta,
                 fileAccumulator: reloaded.fileAccumulator,
                 files: filesFromAccumulator(reloaded.fileAccumulator),
                 nextCursor: reloaded.nextCursor,
@@ -1187,7 +1228,11 @@ export function App() {
             <p>No files in this share yet.</p>
           )}
         </main>
-        <CommentsPanel access={state.meta.access} session={state.session} />
+        <CommentsPanel
+          access={state.meta.access}
+          session={state.session}
+          onAccessChange={applyDiscussionAccess}
+        />
       </div>
     </div>
   );

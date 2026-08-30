@@ -63,6 +63,7 @@ export interface PublicDiscussionPage {
 export type DiscussionComposerState = "available" | "blocked" | "paused";
 
 export interface PublicDiscussionActivity {
+  access: ShareAccess;
   latestRevision: number;
   cursorRevision: number;
   hasMore: boolean;
@@ -212,6 +213,7 @@ export function parseDiscussionActivity(value: unknown): PublicDiscussionActivit
     !activity ||
     !hasExactKeys(activity, [
       "ok",
+      "access",
       "latestRevision",
       "cursorRevision",
       "hasMore",
@@ -219,6 +221,7 @@ export function parseDiscussionActivity(value: unknown): PublicDiscussionActivit
       "composerState",
     ]) ||
     activity.ok !== true ||
+    (activity.access !== "view" && activity.access !== "comment") ||
     !isRevision(activity.latestRevision) ||
     !isRevision(activity.cursorRevision) ||
     activity.cursorRevision > activity.latestRevision ||
@@ -242,6 +245,7 @@ export function parseDiscussionActivity(value: unknown): PublicDiscussionActivit
     messages.push(message);
   }
   return {
+    access: activity.access,
     latestRevision: activity.latestRevision,
     cursorRevision: activity.cursorRevision,
     hasMore: activity.hasMore,

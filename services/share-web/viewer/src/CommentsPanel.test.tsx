@@ -614,6 +614,7 @@ describe("CommentsPanel", () => {
       if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
         return jsonResponse({
           ok: true,
+          access: "comment",
           latestRevision: 7,
           cursorRevision: 7,
           hasMore: false,
@@ -639,6 +640,7 @@ describe("CommentsPanel", () => {
 
     heldDeletion.release({
       ok: true,
+      access: "comment",
       latestRevision: 8,
       cursorRevision: 8,
       hasMore: false,
@@ -737,6 +739,7 @@ describe("CommentsPanel", () => {
 
     initialActivity.release({
       ok: true,
+      access: "comment",
       latestRevision: 7,
       cursorRevision: 7,
       hasMore: false,
@@ -956,6 +959,7 @@ describe("CommentsPanel", () => {
       .filter((row) => row.textContent === "External body")).toHaveLength(1);
     appendDelta.release({
       ok: true,
+      access: "comment",
       latestRevision: 8,
       cursorRevision: 8,
       hasMore: false,
@@ -967,6 +971,7 @@ describe("CommentsPanel", () => {
       .filter((row) => row.textContent === "External body")).toHaveLength(1);
     deleteDelta.release({
       ok: true,
+      access: "comment",
       latestRevision: 9,
       cursorRevision: 9,
       hasMore: false,
@@ -981,6 +986,7 @@ describe("CommentsPanel", () => {
     expect(bodyInput().disabled).toBe(true);
     pausedDelta.release({
       ok: true,
+      access: "comment",
       latestRevision: 11,
       cursorRevision: 10,
       hasMore: true,
@@ -995,6 +1001,7 @@ describe("CommentsPanel", () => {
     expect(bodyInput().disabled).toBe(true);
     availableDelta.release({
       ok: true,
+      access: "comment",
       latestRevision: 11,
       cursorRevision: 11,
       hasMore: false,
@@ -1005,6 +1012,7 @@ describe("CommentsPanel", () => {
     await settle(timeoutDelta.bodyStarted);
     timeoutDelta.release({
       ok: true,
+      access: "comment",
       latestRevision: 11,
       cursorRevision: 11,
       hasMore: false,
@@ -1046,6 +1054,7 @@ describe("CommentsPanel", () => {
       if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
         return jsonResponse({
           ok: true,
+          access: "comment",
           latestRevision: 7,
           cursorRevision: 7,
           hasMore: false,
@@ -1072,6 +1081,46 @@ describe("CommentsPanel", () => {
       "The owner turned off comments for this browser.",
     );
     expect(bodyInput().disabled).toBe(true);
+  });
+
+  it("reports the exact current link access from fresh activity", async () => {
+    const onAccessChange = vi.fn();
+    let parkedSignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/view/discussion?direction=newest-first") {
+        return discussionPageAt(7, [NAMED_MESSAGE]);
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        return jsonResponse({
+          ok: true,
+          access: "view",
+          latestRevision: 7,
+          cursorRevision: 7,
+          hasMore: false,
+          messages: [],
+          composerState: "available",
+        });
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
+        parkedSignal = init?.signal ?? undefined;
+        return await new Promise<Response>(() => undefined);
+      }
+      throw new Error(`unexpected request: ${path}`);
+    }));
+
+    await act(async () => {
+      root.render(
+        <CommentsPanel
+          access="comment"
+          session={FIRST_SESSION}
+          onAccessChange={onAccessChange}
+        />,
+      );
+    });
+    await settle(() => parkedSignal !== undefined);
+
+    expect(onAccessChange.mock.calls).toEqual([[FIRST_SESSION, "view"]]);
   });
 
   it("backs off transport and relay failures without leaving the current session", async () => {
@@ -1144,6 +1193,7 @@ describe("CommentsPanel", () => {
           ? new Response(null, { status: 409 })
           : jsonResponse({
               ok: true,
+              access: "comment",
               latestRevision: 8,
               cursorRevision: 8,
               hasMore: false,
@@ -1205,6 +1255,7 @@ describe("CommentsPanel", () => {
 
     heldOldActivity.release({
       ok: true,
+      access: "comment",
       latestRevision: 8,
       cursorRevision: 8,
       hasMore: false,

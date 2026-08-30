@@ -710,6 +710,7 @@ describe("share discussion HTTP boundary", () => {
     const publicActivity = await body(await publicWait);
     expect(publicActivity).toMatchObject({
       ok: true,
+      access: "comment",
       latestRevision: 4,
       cursorRevision: 4,
       hasMore: false,
@@ -735,6 +736,7 @@ describe("share discussion HTTP boundary", () => {
       linkCommentsPaused: false,
     });
     expect(messages(ownerActivity)).toEqual([appended.message]);
+    expect(ownerActivity).not.toHaveProperty("access");
     expect(first.message).toMatchObject({ body: "activity first" });
     expect(activityHub.stats()).toEqual({ shares: 0, waiters: 0 });
 
@@ -774,7 +776,11 @@ describe("share discussion HTTP boundary", () => {
       ).status,
     ).toBe(200);
     const deleted = await changedPublic(4);
-    expect(deleted).toMatchObject({ cursorRevision: 5, composerState: "available" });
+    expect(deleted).toMatchObject({
+      access: "comment",
+      cursorRevision: 5,
+      composerState: "available",
+    });
     expect(messages(deleted)).toEqual([
       {
         messageId: (appended.message as Record<string, unknown>).messageId,
@@ -795,6 +801,7 @@ describe("share discussion HTTP boundary", () => {
     ).toBe(200);
     const blocked = await changedPublic(5);
     expect(blocked).toMatchObject({
+      access: "comment",
       cursorRevision: 6,
       messages: [],
       composerState: "blocked",
@@ -808,6 +815,7 @@ describe("share discussion HTTP boundary", () => {
       (await test.handler(moderationRequest(OWNER, { action: "pause" }))).status,
     ).toBe(200);
     expect(await changedPublic(6)).toMatchObject({
+      access: "comment",
       cursorRevision: 7,
       messages: [],
       composerState: "paused",
@@ -828,6 +836,7 @@ describe("share discussion HTTP boundary", () => {
       principals: [{ principalId: rawLink.linkPrincipalId, blocked: false }],
     });
     expect(await changedPublic(7)).toMatchObject({
+      access: "comment",
       cursorRevision: 8,
       composerState: "paused",
     });
@@ -837,6 +846,7 @@ describe("share discussion HTTP boundary", () => {
     ).toBe(200);
     const resumed = await changedPublic(8);
     expect(resumed).toMatchObject({
+      access: "comment",
       latestRevision: 9,
       cursorRevision: 9,
       messages: [],
@@ -1114,6 +1124,7 @@ describe("share discussion HTTP boundary", () => {
       if (transition === "retune") {
         expect(settled.status).toBe(200);
         expect(await body(settled)).toMatchObject({
+          access: "view",
           cursorRevision: 0,
           messages: [],
         });
