@@ -169,8 +169,11 @@ async function followDiscussionActivity(
     let body: unknown;
     try {
       body = await response.json();
-    } catch {
-      return;
+    } catch (error: unknown) {
+      if (!isCurrent() || signal.aborted || error instanceof SyntaxError) return;
+      await waitForRetry(retryDelayMs, signal).catch(() => undefined);
+      retryDelayMs = Math.min(retryDelayMs * 2, RETRY_MAX_MS);
+      continue;
     }
     if (!isCurrent()) return;
     const activity = parseDiscussionActivity(body);

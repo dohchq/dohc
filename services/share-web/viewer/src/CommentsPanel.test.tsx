@@ -40,6 +40,20 @@ function jsonResponse(value: unknown, status = 200): Response {
   });
 }
 
+function failedBodyResponse(): Response {
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new TypeError("activity body interrupted"));
+      },
+    }),
+    {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    },
+  );
+}
+
 function heldJsonResponse(status: number): {
   bodyStarted: () => boolean;
   release: (value: unknown) => void;
@@ -1299,6 +1313,181 @@ describe("CommentsPanel", () => {
     });
     expect(activityAttempts).toBe(4);
     expect(recoveredSignal?.aborted).toBe(false);
+  });
+
+  it("retries a failed 200 activity body from the same cursor and applies recovery", async () => {
+    vi.useFakeTimers();
+    const recovered = {
+      ...LINK_MESSAGE,
+      messageId: "message-after-body-retry",
+      createdAtMs: 4_000,
+      body: "Body retry stayed live",
+    };
+    const paths: string[] = [];
+    let activityAttempts = 0;
+    let parkedSignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      paths.push(path);
+      if (path === "/api/view/discussion?direction=newest-first") {
+        return discussionPageAt(7);
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        activityAttempts += 1;
+        return activityAttempts === 1
+          ? failedBodyResponse()
+          : jsonResponse({
+              ok: true,
+              access: "view",
+              latestRevision: 8,
+              cursorRevision: 8,
+              hasMore: false,
+              messages: [recovered],
+              composerState: "available",
+            });
+      }
+      if (path === "/api/view/discussion/activity?since=8&hold=30000&limit=100") {
+        parkedSignal = init?.signal ?? undefined;
+        return await new Promise<Response>(() => undefined);
+      }
+      throw new Error(`unexpected request: ${path}`);
+    }));
+
+    await render("view");
+    await settle(() => activityAttempts === 1);
+    await settle(() => vi.getTimerCount() > 0);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(999);
+    });
+    expect(activityAttempts).toBe(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    await settle(() => parkedSignal !== undefined);
+
+    expect(activityAttempts).toBe(2);
+    expect(paths.filter((path) =>
+      path === "/api/view/discussion/activity?since=7&hold=0&limit=100"
+    )).toHaveLength(2);
+    expect(paths.at(-1)).toBe(
+      "/api/view/discussion/activity?since=8&hold=30000&limit=100",
+    );
+    expect(container.textContent).toContain("Body retry stayed live");
+    expect(parkedSignal?.aborted).toBe(false);
+  });
+
+  it.each([
+    [
+      "malformed JSON",
+      () => new Response("{", {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    ],
+    [
+      "schema-invalid JSON",
+      () => jsonResponse({
+        ok: true,
+        access: "comment",
+        latestRevision: 7,
+        cursorRevision: 7,
+        hasMore: false,
+        messages: [],
+        composerState: "blocked",
+        internal: true,
+      }),
+    ],
+  ])("keeps %s activity terminal", async (_label, activityResponse) => {
+    vi.useFakeTimers();
+    let activityAttempts = 0;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/discussion?direction=newest-first") {
+        return discussionPageAt(7, [NAMED_MESSAGE]);
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        activityAttempts += 1;
+        return activityResponse();
+      }
+      throw new Error(`unexpected request: ${path}`);
+    }));
+
+    await render("comment");
+    await settle(() => activityAttempts === 1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+
+    expect(activityAttempts).toBe(1);
+    expect(container.textContent).toContain("Named body");
+    expect(container.textContent).not.toContain(
+      "The owner turned off comments for this browser.",
+    );
+    expect(bodyInput().disabled).toBe(false);
+  });
+
+  it("cancels a pending body retry across session replacement and unmount", async () => {
+    vi.useFakeTimers();
+    let oldActivityAttempts = 0;
+    let oldActivitySignal: AbortSignal | undefined;
+    let replacementParkSignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      const session = requestSession(init);
+      if (path === "/api/view/discussion?direction=newest-first") {
+        return session === FIRST_SESSION
+          ? discussionPageAt(7)
+          : discussionPageAt(20, [{ ...NAMED_MESSAGE, body: "Replacement timeline" }]);
+      }
+      if (
+        session === FIRST_SESSION &&
+        path === "/api/view/discussion/activity?since=7&hold=0&limit=100"
+      ) {
+        oldActivityAttempts += 1;
+        oldActivitySignal = init?.signal ?? undefined;
+        return failedBodyResponse();
+      }
+      if (
+        session === SECOND_SESSION &&
+        path === "/api/view/discussion/activity?since=20&hold=0&limit=100"
+      ) {
+        return jsonResponse({
+          ok: true,
+          access: "comment",
+          latestRevision: 20,
+          cursorRevision: 20,
+          hasMore: false,
+          messages: [],
+          composerState: "available",
+        });
+      }
+      if (
+        session === SECOND_SESSION &&
+        path === "/api/view/discussion/activity?since=20&hold=30000&limit=100"
+      ) {
+        replacementParkSignal = init?.signal ?? undefined;
+        return await new Promise<Response>(() => undefined);
+      }
+      throw new Error(`unexpected request: ${session} ${path}`);
+    }));
+
+    await render("comment");
+    await settle(() => oldActivityAttempts === 1 && vi.getTimerCount() > 0);
+    await act(async () => {
+      root.render(<CommentsPanel access="comment" session={SECOND_SESSION} />);
+    });
+    await settle(() => replacementParkSignal !== undefined);
+
+    expect(oldActivitySignal?.aborted).toBe(true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(oldActivityAttempts).toBe(1);
+    expect(container.textContent).toContain("Replacement timeline");
+
+    act(() => root.unmount());
+    expect(replacementParkSignal?.aborted).toBe(true);
+    root = createRoot(container);
   });
 
   it("resumes activity after a superseded viewer capability response", async () => {
