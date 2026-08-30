@@ -2493,7 +2493,7 @@ describe("RelayShareDialog", () => {
     await user.click(within(linkRow).getByRole("button", { name: "Block" }));
     confirmation = within(group).getByTestId("owner-comments-confirmation");
     expect(confirmation.querySelector("p")?.textContent).toBe(
-      "Block Link Visitor? They can't comment on this share from that browser until you unblock them. The same person can still comment from another browser with this link. To stop everyone with this link, reset it.",
+      "Block Link Visitor? They can't comment through this link from this browser until you unblock them. They can still comment from another browser or another link. To stop everyone with this link, reset it.",
     );
     await user.click(within(confirmation).getByRole("button", { name: "Block" }));
     expect(bridgeMock.blockRelayShareDiscussionPrincipal).toHaveBeenCalledWith({

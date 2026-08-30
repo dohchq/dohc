@@ -2208,7 +2208,7 @@ export function RelayShareDialog(props: {
                                 {ownerConfirmation.kind === "delete"
                                   ? "Delete this comment? Its text is removed for everyone right away and can't be brought back. Readers see that a comment was deleted."
                                   : ownerConfirmation.kind === "block"
-                                    ? `Block ${ownerConfirmation.name}? They can't comment on this share from that browser until you unblock them. The same person can still comment from another browser with this link. To stop everyone with this link, reset it.`
+                                    ? `Block ${ownerConfirmation.name}? They can't comment through this link from this browser until you unblock them. They can still comment from another browser or another link. To stop everyone with this link, reset it.`
                                     : ownerConfirmation.kind === "promote"
                                       ? `Make ${ownerConfirmation.name}'s access independent of this link? This is permanent. Resetting or ending the link no longer affects their access. You can end their access here at any time.`
                                       : `End ${ownerConfirmation.name}'s access? They lose access right away. Copies they already made stay with them.`}
