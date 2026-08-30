@@ -14220,10 +14220,7 @@ mod tests {
         ] {
             let wire = map_runtime(RuntimeError::Relay(relay));
             assert_eq!(wire.code, ErrorCode::Overloaded);
-            assert_eq!(
-                wire.retry,
-                dohc_engine_protocol::Retryability::AfterBackoff
-            );
+            assert_eq!(wire.retry, dohc_engine_protocol::Retryability::AfterBackoff);
         }
         let permanent_limit = map_runtime(RuntimeError::Relay(RelayError::QuotaExceeded));
         assert_eq!(permanent_limit.code, ErrorCode::QuotaExceeded);
