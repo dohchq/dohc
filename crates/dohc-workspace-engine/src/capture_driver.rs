@@ -3235,7 +3235,7 @@ async fn ack_all_failed(files: &FilesHandle, plan: ReconcilePlan, status: &Arc<D
         captured: Vec::new(),
         not_owned_paths: Vec::new(),
         failed_applies: failed,
-        crashed_after_apply: None,
+        crashed_after_durable_boundary: None,
         degraded: true,
     };
     if files.acknowledge_capture(plan, receipt).await.is_err() {

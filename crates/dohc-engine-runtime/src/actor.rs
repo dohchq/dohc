@@ -1231,6 +1231,12 @@ struct YdocCloseMaterialization {
     self_writes: Arc<dyn SelfWriteRecorder>,
 }
 
+enum CaptureIndexing {
+    Skip,
+    ReadRoot(PathBuf),
+    UseSnapshot(Arc<SearchPolicySnapshot>),
+}
+
 enum Command {
     Write {
         write: CompoundWrite,
@@ -1318,8 +1324,7 @@ enum Command {
     },
     CaptureIngest {
         input: CaptureIngest,
-        root_dir: Option<PathBuf>,
-        search_policy: Option<Arc<SearchPolicySnapshot>>,
+        indexing: CaptureIndexing,
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
@@ -2518,7 +2523,7 @@ impl ActorHandle {
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<WriteResult, RuntimeError> {
-        self.capture_ingest_blocking_with_root(input, None, leases, faults)
+        self.capture_ingest_blocking_with_indexing(input, CaptureIndexing::Skip, leases, faults)
     }
 
     /// Capture and index a text file when the owning workspace session can
@@ -2530,7 +2535,12 @@ impl ActorHandle {
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<WriteResult, RuntimeError> {
-        self.capture_ingest_blocking_with_search(input, Some(root_dir), None, leases, faults)
+        self.capture_ingest_blocking_with_indexing(
+            input,
+            CaptureIndexing::ReadRoot(root_dir),
+            leases,
+            faults,
+        )
     }
 
     /// Capture and index text against one reconcile-owned policy snapshot.
@@ -2541,7 +2551,12 @@ impl ActorHandle {
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<WriteResult, RuntimeError> {
-        self.capture_ingest_blocking_with_search(input, None, Some(search_policy), leases, faults)
+        self.capture_ingest_blocking_with_indexing(
+            input,
+            CaptureIndexing::UseSnapshot(search_policy),
+            leases,
+            faults,
+        )
     }
 
     /// Capture a bounded text chunk in one durable transaction. Each item is
@@ -2571,21 +2586,10 @@ impl ActorHandle {
             .map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
-    fn capture_ingest_blocking_with_root(
+    fn capture_ingest_blocking_with_indexing(
         &self,
         input: CaptureIngest,
-        root_dir: Option<PathBuf>,
-        leases: LeaseRegistry,
-        faults: Arc<dyn FaultInjector>,
-    ) -> Result<WriteResult, RuntimeError> {
-        self.capture_ingest_blocking_with_search(input, root_dir, None, leases, faults)
-    }
-
-    fn capture_ingest_blocking_with_search(
-        &self,
-        input: CaptureIngest,
-        root_dir: Option<PathBuf>,
-        search_policy: Option<Arc<SearchPolicySnapshot>>,
+        indexing: CaptureIndexing,
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<WriteResult, RuntimeError> {
@@ -2594,8 +2598,7 @@ impl ActorHandle {
         self.tx
             .blocking_send(Command::CaptureIngest {
                 input,
-                root_dir,
-                search_policy,
+                indexing,
                 leases,
                 faults,
                 token: CancellationToken::new(),
@@ -3099,12 +3102,12 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<WriteResult, RuntimeError> {
+        let indexing = root_dir.map_or(CaptureIndexing::Skip, CaptureIndexing::ReadRoot);
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::CaptureIngest {
                 input,
-                root_dir,
-                search_policy: None,
+                indexing,
                 leases,
                 faults,
                 token,
@@ -7924,8 +7927,7 @@ fn worker_main(
             }
             Command::CaptureIngest {
                 input,
-                root_dir,
-                search_policy,
+                indexing,
                 leases,
                 faults,
                 token,
@@ -7935,8 +7937,7 @@ fn worker_main(
                     capture_ingest_on_store(
                         &mut store,
                         &input,
-                        root_dir.as_deref(),
-                        search_policy.as_deref(),
+                        &indexing,
                         &leases,
                         faults.as_ref(),
                         &token,
@@ -14366,8 +14367,7 @@ fn capture_agent_origin_id(author_json: Option<&str>) -> Option<String> {
 fn capture_ingest_on_store(
     store: &mut EngineStore,
     input: &CaptureIngest,
-    root_dir: Option<&std::path::Path>,
-    search_policy: Option<&SearchPolicySnapshot>,
+    indexing: &CaptureIndexing,
     leases: &LeaseRegistry,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
@@ -14386,7 +14386,7 @@ fn capture_ingest_on_store(
         return Err(RuntimeError::Cancelled);
     }
     let outcome = store.write_with(faults, |tx| {
-        capture_ingest_in_tx(tx, input, root_dir, search_policy, leases)
+        capture_ingest_in_tx(tx, input, indexing, leases)
     })?;
     match outcome {
         TxnOutcome::Committed(result) => Ok(result),
@@ -14397,8 +14397,7 @@ fn capture_ingest_on_store(
 fn capture_ingest_in_tx(
     tx: &Transaction<'_>,
     input: &CaptureIngest,
-    root_dir: Option<&std::path::Path>,
-    search_policy: Option<&SearchPolicySnapshot>,
+    indexing: &CaptureIndexing,
     leases: &LeaseRegistry,
 ) -> Result<WriteResult, RuntimeError> {
     let actor_origin_id = capture_agent_origin_id(input.author_json.as_deref());
@@ -14424,19 +14423,9 @@ fn capture_ingest_in_tx(
         )?;
     }
     if !result.deduped {
-        if let Some(policy) = search_policy {
-            upsert_file_search_index_with_policy(
-                tx,
-                policy,
-                &input.workspace_id,
-                &input.version_id,
-                &result.snapshot.object_id,
-                &result.snapshot.path,
-                &result.snapshot.text,
-            )
-            .map_err(RuntimeError::from)?;
-        } else if let Some(root_dir) = root_dir {
-            upsert_file_search_index(
+        match indexing {
+            CaptureIndexing::Skip => {}
+            CaptureIndexing::ReadRoot(root_dir) => upsert_file_search_index(
                 tx,
                 root_dir,
                 &input.workspace_id,
@@ -14445,7 +14434,17 @@ fn capture_ingest_in_tx(
                 &result.snapshot.path,
                 &result.snapshot.text,
             )
-            .map_err(RuntimeError::from)?;
+            .map_err(RuntimeError::from)?,
+            CaptureIndexing::UseSnapshot(policy) => upsert_file_search_index_with_policy(
+                tx,
+                policy,
+                &input.workspace_id,
+                &input.version_id,
+                &result.snapshot.object_id,
+                &result.snapshot.path,
+                &result.snapshot.text,
+            )
+            .map_err(RuntimeError::from)?,
         }
     }
     journal_moment_outbound_in_tx(
@@ -14461,7 +14460,7 @@ fn capture_ingest_in_tx(
 fn capture_ingest_batch_on_store(
     store: &mut EngineStore,
     inputs: &[CaptureIngest],
-    search_policy: &SearchPolicySnapshot,
+    search_policy: &Arc<SearchPolicySnapshot>,
     leases: &LeaseRegistry,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
@@ -14505,10 +14504,11 @@ fn capture_ingest_batch_on_store(
 
     let outcome = store.write_with(faults, |tx| {
         let mut results = Vec::with_capacity(inputs.len());
+        let indexing = CaptureIndexing::UseSnapshot(Arc::clone(search_policy));
         for input in inputs {
             tx.execute_batch("SAVEPOINT dohc_capture_batch_item")
                 .map_err(StorageError::persist_public)?;
-            match capture_ingest_in_tx(tx, input, None, Some(search_policy), leases) {
+            match capture_ingest_in_tx(tx, input, &indexing, leases) {
                 Ok(result) => {
                     tx.execute_batch("RELEASE dohc_capture_batch_item")
                         .map_err(StorageError::persist_public)?;

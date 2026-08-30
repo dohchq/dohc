@@ -6,8 +6,8 @@ use dohc_engine_domain::{COLLECTION_SCHEMA_FILENAME, DomainError};
 use dohc_engine_files::media::is_text_media_type;
 use dohc_engine_files::policy::{PathClassification, classify_engine_file_path_normalized};
 use dohc_engine_files::{
-    CaptureError, CaptureOp, CaptureSink, IngestOutcome, IngestReason, MAX_CAPTURE_BINARY_BYTES,
-    MAX_CAPTURE_TEXT_BYTES,
+    BatchIngestResult, CaptureError, CaptureOp, CaptureSink, IngestOutcome, IngestReason,
+    MAX_CAPTURE_BINARY_BYTES, MAX_CAPTURE_TEXT_BYTES,
 };
 use dohc_engine_runtime::search::{
     FilesPolicyRule, SearchPolicySnapshot, read_engine_search_policy, resolve_effective_policy,
@@ -792,15 +792,7 @@ impl StoreCaptureSink {
         })
     }
 
-    fn flush_added_text_batch(
-        &self,
-        pending: &mut Vec<PreparedTextCapture>,
-        outcomes: &mut Vec<Result<IngestOutcome, CaptureError>>,
-    ) {
-        if pending.is_empty() {
-            return;
-        }
-        let batch = std::mem::take(pending);
+    fn commit_added_text_batch(&self, batch: Vec<PreparedTextCapture>) -> BatchIngestResult {
         let mut inputs = Vec::with_capacity(batch.len());
         let mut identities = Vec::with_capacity(batch.len());
         for prepared in batch {
@@ -815,6 +807,7 @@ impl StoreCaptureSink {
         );
         match results {
             Ok(results) if results.len() == identities.len() => {
+                let mut outcomes = Vec::with_capacity(results.len());
                 for (result, (size, sha256)) in results.into_iter().zip(identities) {
                     outcomes.push(match result {
                         Ok(_) | Err(RuntimeError::Domain(DomainError::CaptureNotOwned)) => {
@@ -826,10 +819,11 @@ impl StoreCaptureSink {
                         Err(_) => Err(INGEST_FAILED),
                     });
                 }
+                BatchIngestResult::Committed(outcomes)
             }
-            Ok(_) | Err(_) => {
-                outcomes.extend(identities.into_iter().map(|_| Err(INGEST_FAILED)));
-            }
+            Ok(_) | Err(_) => BatchIngestResult::Uncertain {
+                attempted: identities.len(),
+            },
         }
     }
 
@@ -854,10 +848,7 @@ impl StoreCaptureSink {
 }
 
 impl CaptureSink for StoreCaptureSink {
-    fn ingest_batch(
-        &mut self,
-        ops: &[CaptureOp],
-    ) -> Option<Vec<Result<IngestOutcome, CaptureError>>> {
+    fn ingest_batch(&mut self, ops: &[CaptureOp]) -> Option<BatchIngestResult> {
         if ops.len() < 2
             || ops.iter().any(|op| {
                 !matches!(
@@ -872,7 +863,6 @@ impl CaptureSink for StoreCaptureSink {
             return None;
         }
 
-        let mut outcomes = Vec::with_capacity(ops.len());
         let mut pending = Vec::with_capacity(MAX_CAPTURE_INGEST_BATCH_OPS);
         let mut pending_bytes = 0usize;
         for op in ops {
@@ -888,30 +878,38 @@ impl CaptureSink for StoreCaptureSink {
                 unreachable!("all operations were checked as Added ingests");
             };
             let Some(prepared) = self.prepare_added_text(path, media_type) else {
-                self.flush_added_text_batch(&mut pending, &mut outcomes);
-                pending_bytes = 0;
-                outcomes.push(self.ingest(path, *size, sha256, media_type, *reason));
-                continue;
+                if pending.is_empty() {
+                    return Some(
+                        match self.ingest(path, *size, sha256, media_type, *reason) {
+                            Ok(outcome) => BatchIngestResult::Committed(vec![Ok(outcome)]),
+                            Err(_) => BatchIngestResult::Uncertain { attempted: 1 },
+                        },
+                    );
+                }
+                break;
             };
             let text_bytes = prepared.input.text.len();
             if text_bytes > MAX_CAPTURE_INGEST_BATCH_BYTES {
-                self.flush_added_text_batch(&mut pending, &mut outcomes);
-                pending_bytes = 0;
-                outcomes.push(self.ingest(path, *size, sha256, media_type, *reason));
-                continue;
+                if pending.is_empty() {
+                    return Some(
+                        match self.ingest(path, *size, sha256, media_type, *reason) {
+                            Ok(outcome) => BatchIngestResult::Committed(vec![Ok(outcome)]),
+                            Err(_) => BatchIngestResult::Uncertain { attempted: 1 },
+                        },
+                    );
+                }
+                break;
             }
             if !pending.is_empty()
                 && (pending.len() >= MAX_CAPTURE_INGEST_BATCH_OPS
                     || pending_bytes.saturating_add(text_bytes) > MAX_CAPTURE_INGEST_BATCH_BYTES)
             {
-                self.flush_added_text_batch(&mut pending, &mut outcomes);
-                pending_bytes = 0;
+                break;
             }
             pending_bytes = pending_bytes.saturating_add(text_bytes);
             pending.push(prepared);
         }
-        self.flush_added_text_batch(&mut pending, &mut outcomes);
-        Some(outcomes)
+        Some(self.commit_added_text_batch(pending))
     }
 
     fn ingest(

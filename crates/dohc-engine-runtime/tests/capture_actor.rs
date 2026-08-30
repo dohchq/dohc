@@ -1,9 +1,135 @@
+use dohc_engine_domain::VersionedTextStore;
 use dohc_engine_runtime::{
     CancellationToken, CaptureIngest, CaptureRetire, NoFaults, RuntimeError, WorkspaceSupervisor,
 };
-use dohc_engine_storage::EngineStore;
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
+use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
+use std::path::Path;
 use std::sync::Arc;
+
+const BATCH_WORKSPACE_ID: &str = "ws-capture-batch-fault";
+
+fn capture_batch_inputs() -> Vec<CaptureIngest> {
+    [
+        ("notes/a.md", "alpha"),
+        ("notes/b.md", "bravo"),
+        ("notes/c.md", "charlie"),
+    ]
+    .into_iter()
+    .map(|(path, text)| CaptureIngest {
+        workspace_id: BATCH_WORKSPACE_ID.to_owned(),
+        version_id: "main".to_owned(),
+        path: path.to_owned(),
+        text: text.to_owned(),
+        metadata_origin: "capture".to_owned(),
+        metadata_summary: Some("Reconciled offline edits".to_owned()),
+        metadata_correlation_id: Some("batch-fault".to_owned()),
+        author_json: None,
+        now_ms: 10,
+        request_id: None,
+        claim_foreign_head: false,
+    })
+    .collect()
+}
+
+fn initialize_replicating_workspace(db: &Path) {
+    let mut store = EngineStore::open(db, 1).expect("open store");
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(BATCH_WORKSPACE_ID, "main", 1, &NoFaults)
+        .expect("ensure main version");
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO sync_identity \
+                 (workspace_id, origin_id, replication_epoch, stream_identity, created_at_ms) \
+                 VALUES (?1, 'origin-local', 'epoch-local', 'stream-local', 1)",
+                [BATCH_WORKSPACE_ID],
+            )
+            .map_err(StorageError::persist_public)?;
+            tx.execute(
+                "INSERT INTO sync_relay_push_state (workspace_id, origin_id, pushed_seq) \
+                 VALUES (?1, 'origin-local', 0)",
+                [BATCH_WORKSPACE_ID],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("seed sync state");
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CaptureBatchState {
+    snapshots: Vec<(String, String)>,
+    moments: Vec<String>,
+    search: Vec<(String, String)>,
+    outbound: Vec<String>,
+}
+
+fn capture_batch_state(db: &Path) -> CaptureBatchState {
+    let store = EngineStore::open(db, 100).expect("inspect batch state");
+    store
+        .read_with(|conn| {
+            let snapshots = conn
+                .prepare(
+                    "SELECT s.path,b.text FROM snapshots s \
+                     JOIN blobs b ON b.sha256=s.blob_sha256 \
+                     WHERE s.workspace_id=?1 ORDER BY s.path",
+                )?
+                .query_map([BATCH_WORKSPACE_ID], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let moments = conn
+                .prepare("SELECT path FROM moments WHERE workspace_id=?1 ORDER BY moment_order")?
+                .query_map([BATCH_WORKSPACE_ID], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let search = conn
+                .prepare(
+                    "SELECT path,text FROM engine_search_files_fts \
+                     WHERE workspace_id=?1 ORDER BY path",
+                )?
+                .query_map([BATCH_WORKSPACE_ID], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let outbound = conn
+                .prepare(
+                    "SELECT json_extract(payload_json,'$.path') FROM replication_log \
+                     WHERE workspace_id=?1 AND imported=0 AND op_kind='moment.append' \
+                     ORDER BY origin_seq",
+                )?
+                .query_map([BATCH_WORKSPACE_ID], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok::<_, rusqlite::Error>(CaptureBatchState {
+                snapshots,
+                moments,
+                search,
+                outbound,
+            })
+        })
+        .expect("query batch state")
+}
+
+fn expected_capture_batch_state() -> CaptureBatchState {
+    CaptureBatchState {
+        snapshots: vec![
+            ("notes/a.md".to_owned(), "alpha".to_owned()),
+            ("notes/b.md".to_owned(), "bravo".to_owned()),
+            ("notes/c.md".to_owned(), "charlie".to_owned()),
+        ],
+        moments: vec![
+            "notes/a.md".to_owned(),
+            "notes/b.md".to_owned(),
+            "notes/c.md".to_owned(),
+        ],
+        search: vec![
+            ("notes/a.md".to_owned(), "alpha".to_owned()),
+            ("notes/b.md".to_owned(), "bravo".to_owned()),
+            ("notes/c.md".to_owned(), "charlie".to_owned()),
+        ],
+        outbound: vec![
+            "notes/a.md".to_owned(),
+            "notes/b.md".to_owned(),
+            "notes/c.md".to_owned(),
+        ],
+    }
+}
 
 #[test]
 fn blocking_capture_variants_round_trip_through_the_actor() {
@@ -165,6 +291,109 @@ fn bounded_capture_batch_contains_a_leased_path_and_replays_without_duplicates()
     assert!(replay[2].as_ref().is_ok_and(|write| write.deduped));
     supervisor.close(&db).expect("close after replay");
     state(&["notes/a.md", "notes/b.md", "notes/c.md"]);
+}
+
+#[test]
+fn capture_batch_storage_before_persist_rolls_back_the_whole_chunk() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    initialize_replicating_workspace(&db);
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let policy = Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
+        scratch.path(),
+    ));
+    let faults = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
+
+    let error = handle
+        .capture_ingest_batch_blocking(
+            capture_batch_inputs(),
+            Arc::clone(&policy),
+            dohc_engine_collab::LeaseRegistry::new(),
+            faults.clone(),
+        )
+        .expect_err("pre-persist fault reports an uncertain batch");
+    assert!(matches!(error, RuntimeError::OperationCrashed));
+    assert!(faults.fired());
+    supervisor.close(&db).expect("close after rollback");
+    assert_eq!(
+        capture_batch_state(&db),
+        CaptureBatchState {
+            snapshots: Vec::new(),
+            moments: Vec::new(),
+            search: Vec::new(),
+            outbound: Vec::new(),
+        },
+        "snapshots, history, FTS, and outbound rows roll back together"
+    );
+
+    let handle = supervisor.open(&db, 2).expect("reopen actor").actor;
+    let replay = handle
+        .capture_ingest_batch_blocking(
+            capture_batch_inputs(),
+            policy,
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+        )
+        .expect("replay rolled-back batch");
+    assert!(
+        replay
+            .iter()
+            .all(|result| result.as_ref().is_ok_and(|write| !write.deduped))
+    );
+    supervisor.close(&db).expect("close after replay");
+    assert_eq!(capture_batch_state(&db), expected_capture_batch_state());
+}
+
+#[test]
+fn capture_batch_storage_after_commit_replays_without_duplicate_side_effects() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    initialize_replicating_workspace(&db);
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let policy = Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
+        scratch.path(),
+    ));
+    let faults = ScriptedFaults::crash_at(FaultPoint::StorageAfterCommitBeforeAck);
+
+    let error = handle
+        .capture_ingest_batch_blocking(
+            capture_batch_inputs(),
+            Arc::clone(&policy),
+            dohc_engine_collab::LeaseRegistry::new(),
+            faults.clone(),
+        )
+        .expect_err("post-commit fault reports an uncertain batch");
+    assert!(matches!(error, RuntimeError::OperationCrashed));
+    assert!(faults.fired());
+    supervisor.close(&db).expect("close after uncertain commit");
+    assert_eq!(
+        capture_batch_state(&db),
+        expected_capture_batch_state(),
+        "the whole batch committed before the acknowledgement was lost"
+    );
+
+    let handle = supervisor.open(&db, 2).expect("reopen actor").actor;
+    let replay = handle
+        .capture_ingest_batch_blocking(
+            capture_batch_inputs(),
+            policy,
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+        )
+        .expect("replay uncertain batch");
+    assert!(
+        replay
+            .iter()
+            .all(|result| result.as_ref().is_ok_and(|write| write.deduped))
+    );
+    supervisor.close(&db).expect("close after replay");
+    assert_eq!(
+        capture_batch_state(&db),
+        expected_capture_batch_state(),
+        "replay must not duplicate moments, outbound rows, or FTS entries"
+    );
 }
 
 #[tokio::test]

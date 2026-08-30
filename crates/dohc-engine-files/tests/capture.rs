@@ -2,8 +2,9 @@ mod common;
 
 use common::Scratch;
 use dohc_engine_files::{
-    CancellationToken, CaptureError, CaptureOp, CaptureSink, FilesError, IngestOutcome,
-    IngestReason, ReconcileController, ReconcileRun, ScanBounds, Scanner, apply_then_ack,
+    BatchIngestResult, CancellationToken, CaptureError, CaptureOp, CaptureSink, FilesError,
+    IngestOutcome, IngestReason, ReconcileController, ReconcileRun, ScanBounds, Scanner,
+    apply_then_ack,
 };
 use dohc_engine_storage::NoFaults;
 use std::collections::{BTreeMap, BTreeSet};
@@ -59,6 +60,47 @@ impl CaptureSink for IdempotentSink {
         }
         self.content.remove(path);
         Ok(())
+    }
+}
+
+#[derive(Default)]
+struct TwoAtATimeSink(IdempotentSink);
+
+impl CaptureSink for TwoAtATimeSink {
+    fn ingest(
+        &mut self,
+        path: &str,
+        size: u64,
+        sha256: &str,
+        media_type: &str,
+        reason: IngestReason,
+    ) -> Result<IngestOutcome, CaptureError> {
+        self.0.ingest(path, size, sha256, media_type, reason)
+    }
+
+    fn retire(&mut self, path: &str) -> Result<(), CaptureError> {
+        self.0.retire(path)
+    }
+
+    fn ingest_batch(&mut self, ops: &[CaptureOp]) -> Option<BatchIngestResult> {
+        if ops.len() < 2 || ops.iter().any(|op| !matches!(op, CaptureOp::Ingest { .. })) {
+            return None;
+        }
+        let outcomes = ops[..2]
+            .iter()
+            .map(|op| match op {
+                CaptureOp::Ingest {
+                    path,
+                    size,
+                    sha256,
+                    media_type,
+                    reason,
+                    ..
+                } => self.0.ingest(path, *size, sha256, media_type, *reason),
+                CaptureOp::Retire { .. } => unreachable!("batch prefix was checked"),
+            })
+            .collect();
+        Some(BatchIngestResult::Committed(outcomes))
     }
 }
 
@@ -324,7 +366,10 @@ fn crash_after_op_apply_before_ack_restarts_without_lost_or_double_applied_captu
         faults.as_ref(),
     )
     .expect("simulated crash result");
-    assert_eq!(crashed.crashed_after_apply.as_deref(), Some("a.md"));
+    assert_eq!(
+        crashed.crashed_after_durable_boundary.as_deref(),
+        Some("a.md")
+    );
     assert_eq!(sink.moments, 1, "domain transaction committed once");
     assert_eq!(
         first_controller.generation().0,
@@ -348,5 +393,62 @@ fn crash_after_op_apply_before_ack_restarts_without_lost_or_double_applied_captu
         "redundant replay must not double-journal history"
     );
     assert_eq!(restarted.tracked_len(), 1);
+    assert!(!restarted.is_dirty());
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn batch_crash_seam_fires_once_after_the_committed_prefix() {
+    use dohc_engine_storage::FaultPoint;
+    use dohc_engine_testkit::ScriptedFaults;
+
+    let ws = Scratch::new();
+    ws.write("a.md", b"alpha");
+    ws.write("b.md", b"bravo");
+    ws.write("c.md", b"charlie");
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut first_controller = ReconcileController::new();
+    let first_plan = completed(
+        first_controller
+            .reconcile(&scanner, ws.path(), &CancellationToken::new())
+            .expect("prepare"),
+    );
+    let faults = ScriptedFaults::crash_at(FaultPoint::CaptureAfterOpApplyBeforeAck);
+    let mut sink = TwoAtATimeSink::default();
+    let crashed = apply_then_ack(
+        &mut first_controller,
+        &first_plan,
+        &mut sink,
+        faults.as_ref(),
+    )
+    .expect("simulated crash result");
+
+    assert_eq!(
+        crashed.crashed_after_durable_boundary.as_deref(),
+        Some("b.md"),
+        "the seam labels the last path in the committed batch, not its first outcome"
+    );
+    assert_eq!(sink.0.moments, 2, "one two-path batch committed");
+    assert_eq!(sink.0.calls, ["a.md", "b.md"]);
+    assert_eq!(
+        first_controller.generation().0,
+        0,
+        "no ack crossed the seam"
+    );
+
+    let mut restarted = ReconcileController::new();
+    let retry_plan = completed(
+        restarted
+            .reconcile(&scanner, ws.path(), &CancellationToken::new())
+            .expect("restart prepare"),
+    );
+    let retried = apply_then_ack(&mut restarted, &retry_plan, &mut sink, &NoFaults)
+        .expect("restart apply/ack");
+    assert!(retried.failed_applies.is_empty());
+    assert_eq!(
+        sink.0.moments, 3,
+        "replay dedupes the committed prefix and appends only the remaining path"
+    );
+    assert_eq!(restarted.tracked_len(), 3);
     assert!(!restarted.is_dirty());
 }
