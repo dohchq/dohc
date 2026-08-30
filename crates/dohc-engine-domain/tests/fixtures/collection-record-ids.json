@@ -1,0 +1,56 @@
+{
+  "vectors": [
+    {
+      "value": "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "valid": true
+    },
+    {
+      "value": "rec_77777777777777777777777774",
+      "valid": true
+    },
+    {
+      "value": "rec_abcdefghijklmnopqrstuvwxyz",
+      "valid": true
+    },
+    {
+      "value": "rec_aaaaaaaaaaaaaaaaaaaaaaaaa",
+      "valid": false
+    },
+    {
+      "value": "rec_aaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "valid": false
+    },
+    {
+      "value": "REC_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "valid": false
+    },
+    {
+      "value": "rec_Aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "valid": false
+    },
+    {
+      "value": "rec_00000000000000000000000000",
+      "valid": false
+    },
+    {
+      "value": "rec_11111111111111111111111111",
+      "valid": false
+    },
+    {
+      "value": "rec_88888888888888888888888888",
+      "valid": false
+    },
+    {
+      "value": "rec_aaaaaaaaaaaaaaaaaaaaaaaaa=",
+      "valid": false
+    },
+    {
+      "value": "record_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "valid": false
+    },
+    {
+      "value": "rec_😀😀😀😀😀😀😀😀😀😀😀😀😀",
+      "valid": false
+    }
+  ]
+}

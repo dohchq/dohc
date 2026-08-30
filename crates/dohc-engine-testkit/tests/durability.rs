@@ -362,9 +362,11 @@ fn close_reopen_mutate_cycle_stays_writable() {
     // the share-view file lane (ordinal 36, #646 PR3-1), the
     // share-proposal submit scan position (ordinal 37, #646 PR3a), the Y.Doc
     // seed-source provenance (ordinal 38, #815), the protected-history
-    // time-window index (ordinal 39), and per-conversation chat content
-    // revisions (ordinal 40).
-    assert_eq!(store.migration_ledger_len().expect("ledger"), 41);
+    // time-window index (ordinal 39), per-conversation chat content revisions
+    // (ordinal 40), collection adoption (ordinal 41), the collection
+    // index (ordinal 42), and the collection historical record-owner
+    // index (ordinal 43).
+    assert_eq!(store.migration_ledger_len().expect("ledger"), 44);
     let conflict_objects = store
         .read_with(|conn| {
             conn.query_row(

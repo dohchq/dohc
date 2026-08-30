@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { JSONContent } from '@tiptap/core'
+import pipelineFixtureJson from '../../../crates/dohc-engine-domain/tests/fixtures/collection-field-pipeline.json'
+import frontmatterFixtureJson from '../../../crates/dohc-engine-domain/tests/fixtures/collection-frontmatter.json'
 import {
   prosemirrorJSONToYXmlFragment,
   yXmlFragmentToProseMirrorRootNode,
@@ -17,6 +19,56 @@ import {
 } from './import-export.js'
 
 type ExpectedMarkdownFragment = string | RegExp
+
+interface FrontmatterVector {
+  name: string
+  markdown: string
+  expected: Record<string, unknown> | null
+}
+
+interface PipelineVector {
+  name: string
+  class: 'typical' | 'edge' | 'flagged'
+  fieldName: string
+  field: { type: string }
+  valueYaml: string
+  valueYamlUtf8Hex: string
+  expectedSemantic: unknown
+  expectedIndexJson: string
+}
+
+function decodeFixtureIntegers(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(decodeFixtureIntegers)
+  if (value !== null && typeof value === 'object') {
+    const entries = Object.entries(value)
+    if (
+      entries.length === 1
+      && entries[0]?.[0] === '$dohcInt64'
+      && typeof entries[0][1] === 'string'
+    ) {
+      return BigInt(entries[0][1])
+    }
+    return Object.fromEntries(
+      entries.map(([key, child]) => [key, decodeFixtureIntegers(child)]),
+    )
+  }
+  return value
+}
+
+const frontmatterVectors = frontmatterFixtureJson.vectors as FrontmatterVector[]
+const pipelineVectors = pipelineFixtureJson.vectors as PipelineVector[]
+
+function indexJson(value: unknown): string {
+  if (typeof value === 'bigint') return value.toString()
+  if (Array.isArray(value)) return `[${value.map(indexJson).join(',')}]`
+  return JSON.stringify(value)
+}
+
+function utf8Hex(value: string): string {
+  return Array.from(new TextEncoder().encode(value), byte =>
+    byte.toString(16).padStart(2, '0'),
+  ).join('')
+}
 
 function yDocFromBody(content: JSONContent[]): Y.Doc {
   const doc = new Y.Doc()
@@ -53,12 +105,312 @@ function expectStableMarkdownRoundTrip(
 }
 
 describe('Y.Doc markdown import/export', () => {
+  it.each(frontmatterVectors)('matches the shared frontmatter vector $name', ({ markdown, expected }) => {
+    const doc = markdownToYDoc(markdown)
+    expect(getDohcYDocFrontmatter(doc))
+      .toEqual(expected === null ? {} : decodeFixtureIntegers(expected))
+    if (expected === null) {
+      const output = yDocToMarkdown(doc)
+      for (const line of markdown.split('\n').slice(1, -1)) {
+        expect(output).toContain(line)
+      }
+    }
+  })
+
+  it('encodes imported frontmatter as JSON-compatible Yjs Any values', () => {
+    const vector = frontmatterVectors.find(
+      candidate => candidate.name === 'unsafe-integer-nesting-is-exact',
+    )
+    expect(vector).toBeDefined()
+    const doc = markdownToYDoc(vector!.markdown)
+    const replica = new Y.Doc()
+    Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc))
+
+    const frontmatter = replica.getMap<unknown>('frontmatter')
+    const nested = frontmatter.get('nested')
+    const sequence = frontmatter.get('sequence')
+    expect(nested).not.toBeInstanceOf(Y.Map)
+    expect(sequence).not.toBeInstanceOf(Y.Array)
+    expect(nested).toEqual({ exact: 9007199254740993n })
+    expect(sequence).toEqual([9007199254740993n])
+    const integers = [
+      frontmatter.get('exact'),
+      (nested as Record<string, unknown>).exact,
+      (sequence as unknown[])[0],
+    ]
+    for (const integer of integers) {
+      expect(typeof integer).toBe('bigint')
+      expect(integer).toBe(9007199254740993n)
+    }
+    expect(getDohcYDocFrontmatter(replica)).toEqual({
+      exact: 9007199254740993n,
+      nested: { exact: 9007199254740993n },
+      sequence: [9007199254740993n],
+    })
+  })
+
+  it('imports every v1 collection field pipeline vector with exact semantics', () => {
+    const imported = markdownToYDoc(pipelineFixtureJson.recordMarkdown)
+    const update = Y.encodeStateAsUpdate(imported)
+    const replica = new Y.Doc()
+    Y.applyUpdate(replica, update)
+    const frontmatter = getDohcYDocFrontmatter(replica)
+    const replicatedMap = replica.getMap<unknown>('frontmatter')
+
+    expect(update.byteLength).toBeGreaterThan(0)
+    expect(new Set(pipelineVectors.map(vector => vector.field.type))).toEqual(
+      new Set([
+        'text',
+        'number',
+        'checkbox',
+        'date',
+        'select',
+        'multi-select',
+        'person',
+        'relation',
+        'url',
+      ]),
+    )
+    for (const type of new Set(pipelineVectors.map(vector => vector.field.type))) {
+      expect(
+        new Set(
+          pipelineVectors
+            .filter(vector => vector.field.type === type)
+            .map(vector => vector.class),
+        ),
+        type,
+      ).toEqual(new Set(['typical', 'edge', 'flagged']))
+    }
+
+    for (const vector of pipelineVectors) {
+      const expected = decodeFixtureIntegers(vector.expectedSemantic)
+      const replicated = replicatedMap.get(vector.fieldName)
+      expect(frontmatter[vector.fieldName], vector.name).toEqual(expected)
+      expect(replicated, vector.name).toEqual(expected)
+      expect(replicated, vector.name).not.toBeInstanceOf(Y.Array)
+      expect(replicated, vector.name).not.toBeInstanceOf(Y.Map)
+      expect(indexJson(frontmatter[vector.fieldName]), vector.name).toBe(
+        vector.expectedIndexJson,
+      )
+      expect(utf8Hex(vector.valueYaml), vector.name).toBe(
+        vector.valueYamlUtf8Hex,
+      )
+    }
+  })
+
+  it('round-trips unsupported tagged frontmatter until its raw value changes', () => {
+    const vector = frontmatterVectors.find(
+      candidate => candidate.name === 'unsupported-explicit-tag-keeps-raw-value',
+    )
+    expect(vector).toBeDefined()
+    const doc = markdownToYDoc(vector!.markdown)
+
+    expect(yDocToMarkdown(doc)).toBe(vector!.markdown)
+
+    doc.getMap('frontmatter').set('priority', 'low')
+    const changed = yDocToMarkdown(doc)
+    expect(changed).toContain('priority: low')
+    expect(changed).not.toContain('!custom high')
+  })
+
+  it.each([
+    {
+      name: 'out-of-safe-range integer',
+      source: '9007199254740993',
+      value: 9007199254740993n,
+      settledSource: '9007199254740993',
+    },
+    {
+      name: 'out-of-int64 integral float',
+      source: '1e20',
+      value: 1e20,
+      settledSource: '100000000000000000000.0',
+    },
+  ])('seeds and settles $name without changing its numeric kind', ({
+    source,
+    value,
+    settledSource,
+  }) => {
+    const input = ['---', `exact: ${source}`, 'status: open', '---', '', '# Body'].join('\n')
+    const doc = markdownToYDoc(input)
+    const replica = new Y.Doc()
+    Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc))
+
+    expect(getDohcYDocFrontmatter(replica).exact).toBe(value)
+    replica.getMap('frontmatter').set('status', 'closed')
+    const settled = yDocToMarkdown(replica)
+
+    expect(settled).toContain(`exact: ${settledSource}`)
+    expect(getDohcYDocFrontmatter(markdownToYDoc(settled)).exact)
+      .toBe(value)
+  })
+
+  it('round-trips CRLF richdoc frontmatter through the internal line-ending hint', () => {
+    const input = [
+      '---',
+      'id: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa',
+      'done: false',
+      'priority: 3',
+      'status: open',
+      '---',
+      '',
+      '# Body',
+      '',
+      'body text',
+    ].join('\r\n')
+    const doc = markdownToYDoc(input)
+
+    expect(doc.getMap('meta').get('dohcMarkdownCrlf')).toBe(true)
+    expect(getDohcYDocMeta(doc)).toEqual({
+      schemaVersion: 1,
+      contentKind: undefined,
+    })
+    expect(getDohcYDocFrontmatter(doc)).toMatchObject({
+      done: false,
+      priority: 3,
+      status: 'open',
+    })
+    expect(yDocToMarkdown(doc)).toBe(input)
+  })
+
   it('keeps comment-only frontmatter empty under the js-yaml 5 parser', () => {
     const input = ['---', '# metadata', '', '---', '# Body'].join('\n')
     const doc = markdownToYDoc(input)
 
     expect(getDohcYDocFrontmatter(doc)).toEqual({})
     expect(yDocToMarkdown(doc)).toBe('# Body')
+  })
+
+  it('round-trips hostile frontmatter keys as own data properties', () => {
+    const input = [
+      '---',
+      '__proto__: top-proto',
+      'constructor: top-constructor',
+      'prototype: top-prototype',
+      'nested:',
+      '  __proto__: nested-proto',
+      '  constructor: nested-constructor',
+      '  prototype: nested-prototype',
+      'sequence:',
+      '  - __proto__: sequence-proto',
+      '    constructor: sequence-constructor',
+      '    prototype: sequence-prototype',
+      '---',
+      '# Body',
+    ].join('\n')
+    const source = markdownToYDoc(input)
+    const doc = new Y.Doc()
+    Y.applyUpdate(doc, Y.encodeStateAsUpdate(source))
+    const frontmatter = getDohcYDocFrontmatter(doc)
+    const nested = frontmatter.nested as Record<string, unknown>
+    const sequenceEntry = (frontmatter.sequence as Record<string, unknown>[])[0]!
+
+    for (const key of ['__proto__', 'constructor', 'prototype']) {
+      expect(Object.hasOwn(frontmatter, key)).toBe(true)
+      expect(Object.hasOwn(nested, key)).toBe(true)
+      expect(Object.hasOwn(sequenceEntry, key)).toBe(true)
+    }
+    expect(frontmatter.__proto__).toBe('top-proto')
+    expect(nested.__proto__).toBe('nested-proto')
+    expect(sequenceEntry.__proto__).toBe('sequence-proto')
+    expect(Object.getPrototypeOf(frontmatter)).toBe(Object.prototype)
+    expect(Object.getPrototypeOf(nested)).toBe(Object.prototype)
+    expect(Object.getPrototypeOf(sequenceEntry)).toBe(Object.prototype)
+
+    const settled = yDocToMarkdown(doc)
+    const roundTripped = getDohcYDocFrontmatter(markdownToYDoc(settled))
+    expect(roundTripped).toEqual(frontmatter)
+  })
+
+  it('keeps an unsafe integer as Yjs Any beside a constructor-keyed map', () => {
+    const vector = frontmatterVectors.find(
+      candidate => candidate.name === 'constructor-map-and-unsafe-integer-share-array',
+    )
+    expect(vector).toBeDefined()
+    const source = markdownToYDoc(vector!.markdown)
+    const doc = new Y.Doc()
+    Y.applyUpdate(doc, Y.encodeStateAsUpdate(source))
+    const sequence = doc.getMap<unknown>('frontmatter').get('sequence')
+
+    expect(sequence).toBeInstanceOf(Y.Array)
+    expect((sequence as Y.Array<unknown>).get(0)).toBeInstanceOf(Y.Map)
+    const integer = (sequence as Y.Array<unknown>).get(1)
+    expect(integer).toBeInstanceOf(Y.Map)
+    expect(integer).not.toBeInstanceOf(Y.Text)
+    expect((integer as Y.Map<unknown>).get('$dohcBigInt')).toBe(9007199254740993n)
+    expect(getDohcYDocFrontmatter(doc).sequence).toEqual([
+      { constructor: 'hostile-constructor' },
+      9007199254740993n,
+    ])
+    expect(yDocToMarkdown(doc)).toContain('9007199254740993')
+  })
+
+  it('degrades a foreign frontmatter Y.Text to its string instead of throwing', () => {
+    const doc = markdownToYDoc('---\ntitle: ok\n---\nbody\n')
+    const planted = new Y.Text()
+    doc.getMap<unknown>('frontmatter').set('planted', planted)
+    planted.insert(0, 'not a number')
+
+    expect(getDohcYDocFrontmatter(doc).planted).toBe('not a number')
+    expect(() => yDocToMarkdown(doc)).not.toThrow()
+  })
+
+  it('escapes literal keys spelled like the bigint sentinel on the shared branch', () => {
+    const vector = frontmatterVectors.find(
+      candidate =>
+        candidate.name === 'literal-shared-bigint-key-map-survives-the-shared-branch',
+    )
+    expect(vector).toBeDefined()
+    const source = markdownToYDoc(vector!.markdown)
+    const doc = new Y.Doc()
+    Y.applyUpdate(doc, Y.encodeStateAsUpdate(source))
+    const sequence = doc.getMap<unknown>('frontmatter').get('sequence')
+
+    expect(sequence).toBeInstanceOf(Y.Array)
+    const literal = (sequence as Y.Array<unknown>).get(1)
+    expect(literal).toBeInstanceOf(Y.Map)
+    expect((literal as Y.Map<unknown>).get('$$dohcBigInt')).toBe(9007199254740993n)
+    const expectedSequence: Record<string, unknown>[] = [
+      { constructor: 'hostile-constructor' },
+      { $dohcBigInt: 9007199254740993n },
+    ]
+    expect(getDohcYDocFrontmatter(doc).sequence).toEqual(expectedSequence)
+
+    const settled = yDocToMarkdown(doc)
+    expect(settled).toContain('$dohcBigInt')
+    expect(settled).not.toContain('$$dohcBigInt')
+    expect(getDohcYDocFrontmatter(markdownToYDoc(settled))).toEqual(
+      getDohcYDocFrontmatter(doc),
+    )
+  })
+
+  it('keeps hostile keys in unsupported tagged frontmatter mappings', () => {
+    const input = [
+      '---',
+      'tagged: !custom',
+      '  __proto__: tagged-proto',
+      '  constructor: tagged-constructor',
+      '  prototype: tagged-prototype',
+      '---',
+      '# Body',
+    ].join('\n')
+    const source = markdownToYDoc(input)
+    const doc = new Y.Doc()
+    Y.applyUpdate(doc, Y.encodeStateAsUpdate(source))
+    const tagged = getDohcYDocFrontmatter(doc).tagged as Record<string, unknown>
+
+    for (const key of ['__proto__', 'constructor', 'prototype']) {
+      expect(Object.hasOwn(tagged, key)).toBe(true)
+    }
+    expect(Object.getPrototypeOf(tagged)).toBe(Object.prototype)
+
+    doc.getMap('frontmatter').set('changed', true)
+    const settled = getDohcYDocFrontmatter(markdownToYDoc(yDocToMarkdown(doc)))
+    const settledTagged = settled.tagged as Record<string, unknown>
+    expect(settled.changed).toBe(true)
+    for (const key of ['__proto__', 'constructor', 'prototype']) {
+      expect(Object.hasOwn(settledTagged, key)).toBe(true)
+    }
   })
 
   it('keeps literal punctuation and explicit escapes byte-stable', () => {
@@ -974,6 +1326,28 @@ describe('Y.Doc markdown import/export', () => {
         '~~obsolete note~~',
       ],
     )
+  })
+
+  it('keeps one blank separator between a table and a following nested list', () => {
+    const input = [
+      '---',
+      'status: open',
+      '---',
+      '',
+      '| Metric | Value |',
+      '| ------ | ----- |',
+      '| apples | 10    |',
+      '',
+      '- parent',
+      '  - nested with **bold** and [details](https://example.com)',
+    ].join('\n')
+
+    const doc = markdownToYDoc(input)
+    expect(yDocBodyJSON(doc).content?.map(node => node.type)).toEqual([
+      'table',
+      'bulletList',
+    ])
+    expect(yDocToMarkdown(doc)).toBe(input)
   })
 
   it('escapes literal table-cell pipes before computing column widths', () => {

@@ -19,6 +19,8 @@ import {
   DaemonRefusalError,
   VersionedLiveAdapter,
   type AgentAuthor,
+  type CollectionPendingAdoptionCursor,
+  type CollectionPendingAdoptionsPage,
   type ConflictFileState,
   type ConflictRecord,
   type MomentRecord,
@@ -133,6 +135,10 @@ export interface CaptureTextFileMetadata {
 }
 
 export type CaptureVersionedTextStore = VersionedTextStore & {
+  listPendingCollectionAdoptions?(input?: {
+    limit?: number;
+    cursor?: CollectionPendingAdoptionCursor;
+  }): Promise<CollectionPendingAdoptionsPage>;
   listTextFileMetadata(input: {
     workspaceId: string;
     versionId: string;
@@ -1273,6 +1279,12 @@ export function createCaptureLiveStores(
           `Engine capture for ${workspace.workspaceId} did not settle.`,
         );
       }
+    },
+
+    async listPendingCollectionAdoptions(input = {}) {
+      return await runRead(async (adapter) =>
+        await adapter.listPendingCollectionAdoptions(input),
+      );
     },
 
     async reconcileCapture() {

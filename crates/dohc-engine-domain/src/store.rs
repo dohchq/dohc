@@ -393,6 +393,7 @@ impl<'a> VersionedTextStore<'a> {
                 ],
             )
             .map_err(DomainError::sql_persist)?;
+            crate::collections::index_historical_record_owner_moment_in_tx(tx, ws, moment_order)?;
             tx.execute(
                 "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
                  VALUES (?1, 'moment.append', ?2)",
@@ -874,6 +875,11 @@ impl<'a> VersionedTextStore<'a> {
                 ],
             )
             .map_err(DomainError::sql_persist)?;
+            crate::collections::index_historical_record_owner_moment_in_tx(
+                tx,
+                ws,
+                restore_generation,
+            )?;
             tx.execute(
                 "INSERT INTO replication_journal (doc_id,op_kind,created_at_ms) \
                  VALUES (?1,'moment.append',?2)",
@@ -3302,6 +3308,7 @@ fn write_normalized_text_in_tx_with_journal(
         ],
     )
     .map_err(DomainError::sql_persist)?;
+    crate::collections::index_historical_record_owner_moment_in_tx(tx, ws, moment_order)?;
     tx.execute(
         "INSERT INTO snapshots \
          (workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms, \
@@ -3955,6 +3962,7 @@ fn delete_text_in_tx_with_journal(
         ],
     )
     .map_err(DomainError::sql_persist)?;
+    crate::collections::index_historical_record_owner_moment_in_tx(tx, ws, moment_order)?;
     if journal {
         tx.execute(
             "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \

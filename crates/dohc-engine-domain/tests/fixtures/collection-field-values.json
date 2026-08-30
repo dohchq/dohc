@@ -1,0 +1,350 @@
+{
+  "vectors": [
+    {
+      "name": "text-valid",
+      "field": {
+        "name": "title",
+        "type": "text"
+      },
+      "valueYaml": "hello",
+      "expected": {
+        "status": "valid"
+      }
+    },
+    {
+      "name": "text-flagged",
+      "field": {
+        "name": "title",
+        "type": "text"
+      },
+      "valueYaml": "42",
+      "expected": {
+        "status": "flagged",
+        "reason": {
+          "code": "expected-text",
+          "path": ""
+        }
+      }
+    },
+    {
+      "name": "number-valid",
+      "field": {
+        "name": "estimate",
+        "type": "number"
+      },
+      "valueYaml": "42.5",
+      "expected": {
+        "status": "valid"
+      }
+    },
+    {
+      "name": "number-flagged-type",
+      "field": {
+        "name": "estimate",
+        "type": "number"
+      },
+      "valueYaml": "\"42\"",
+      "expected": {
+        "status": "flagged",
+        "reason": {
+          "code": "expected-number",
+          "path": ""
+        }
+      }
+    },
+    {
+      "name": "number-flagged-non-finite",
+      "field": {
+        "name": "estimate",
+        "type": "number"
+      },
+      "valueYaml": ".nan",
+      "expected": {
+        "status": "flagged",
+        "reason": {
+          "code": "number-not-finite",
+          "path": ""
+        }
+      }
+    },
+    {
+      "name": "checkbox-valid",
+      "field": {
+        "name": "done",
+        "type": "checkbox"
+      },
+      "valueYaml": "true",
+      "expected": {
+        "status": "valid"
+      }
+    },
+    {
+      "name": "checkbox-flagged",
+      "field": {
+        "name": "done",
+        "type": "checkbox"
+      },
+      "valueYaml": "\"true\"",
+      "expected": {
+        "status": "flagged",
+        "reason": {
+          "code": "expected-boolean",
+          "path": ""
+        }
+      }
+    },
+    {
+      "name": "date-valid",
+      "field": {
+        "name": "due",
+        "type": "date"
+      },
+      "valueYaml": "2024-02-29",
+      "expected": {
+        "status": "valid"
+      }
+    },
+    {
+      "name": "date-flagged",
+      "field": {
+        "name": "due",
+        "type": "date"
+      },
+      "valueYaml": "2023-02-29",
+      "expected": {
+        "status": "flagged",
+        "reason": {
+          "code": "invalid-date",
+          "path": ""
+        }
+      }
+    },
+    {
+      "name": "select-valid",
+      "field": {
+        "name": "status",
+        "type": "select",
+        "options": [
+          "Planned",
+          "Active"
+        ]
+      },
+      "valueYaml": "Active",
+      "expected": {
+        "status": "valid"
+      }
+    },
+    {
+      "name": "select-flagged",
+      "field": {
+        "name": "status",
+        "type": "select",
+        "options": [
+          "Planned",
+          "Active"
+        ]
+      },
+      "valueYaml": "Done",
+      "expected": {
+        "status": "flagged",
+        "reason": {
+          "code": "unknown-option",
+          "path": ""
+        }
+      }
+    },
+    {
+      "name": "multi-select-valid",
+      "field": {
+        "name": "labels",
+        "type": "multi-select",
+        "options": [
+          "A",
+          "B"
+        ]
+      },
+      "valueYaml": "[A, B]",
+      "expected": {
+        "status": "valid"
+      }
+    },
+    {
+      "name": "multi-select-flagged-option",
+      "field": {
+        "name": "labels",
+        "type": "multi-select",
+        "options": [
+          "A",
+          "B"
+        ]
+      },
+      "valueYaml": "[A, C]",
+      "expected": {
+        "status": "flagged",
+        "reason": {
+          "code": "unknown-option",
+          "path": "/1"
+        }
+      }
+    },
+    {
+      "name": "multi-select-flagged-duplicate",
+      "field": {
+        "name": "labels",
+        "type": "multi-select",
+        "options": [
+          "A",
+          "B"
+        ]
+      },
+      "valueYaml": "[A, A]",
+      "expected": {
+        "status": "flagged",
+        "reason": {
+          "code": "duplicate-value",
+          "path": "/1"
+        }
+      }
+    },
+    {
+      "name": "person-valid",
+      "field": {
+        "name": "owner",
+        "type": "person"
+      },
+      "valueYaml": "user_123",
+      "expected": {
+        "status": "valid"
+      }
+    },
+    {
+      "name": "person-flagged",
+      "field": {
+        "name": "owner",
+        "type": "person"
+      },
+      "valueYaml": "\"   \"",
+      "expected": {
+        "status": "flagged",
+        "reason": {
+          "code": "empty-person-id",
+          "path": ""
+        }
+      }
+    },
+    {
+      "name": "relation-single-valid",
+      "field": {
+        "name": "project",
+        "type": "relation",
+        "collection": "planning/projects",
+        "many": false
+      },
+      "valueYaml": "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": {
+        "status": "valid"
+      }
+    },
+    {
+      "name": "relation-single-flagged",
+      "field": {
+        "name": "project",
+        "type": "relation",
+        "collection": "planning/projects",
+        "many": false
+      },
+      "valueYaml": "record_123",
+      "expected": {
+        "status": "flagged",
+        "reason": {
+          "code": "invalid-record-id",
+          "path": ""
+        }
+      }
+    },
+    {
+      "name": "relation-many-valid",
+      "field": {
+        "name": "projects",
+        "type": "relation",
+        "collection": "planning/projects",
+        "many": true
+      },
+      "valueYaml": "[rec_aaaaaaaaaaaaaaaaaaaaaaaaaa, rec_77777777777777777777777774]",
+      "expected": {
+        "status": "valid"
+      }
+    },
+    {
+      "name": "relation-many-flagged-entry",
+      "field": {
+        "name": "projects",
+        "type": "relation",
+        "collection": "planning/projects",
+        "many": true
+      },
+      "valueYaml": "[rec_aaaaaaaaaaaaaaaaaaaaaaaaaa, REC_77777777777777777777777774]",
+      "expected": {
+        "status": "flagged",
+        "reason": {
+          "code": "invalid-record-id",
+          "path": "/1"
+        }
+      }
+    },
+    {
+      "name": "relation-many-flagged-duplicate",
+      "field": {
+        "name": "projects",
+        "type": "relation",
+        "collection": "planning/projects",
+        "many": true
+      },
+      "valueYaml": "[rec_aaaaaaaaaaaaaaaaaaaaaaaaaa, rec_aaaaaaaaaaaaaaaaaaaaaaaaaa]",
+      "expected": {
+        "status": "flagged",
+        "reason": {
+          "code": "duplicate-value",
+          "path": "/1"
+        }
+      }
+    },
+    {
+      "name": "url-valid",
+      "field": {
+        "name": "website",
+        "type": "url"
+      },
+      "valueYaml": "https://dohc.dev/path",
+      "expected": {
+        "status": "valid"
+      }
+    },
+    {
+      "name": "url-flagged",
+      "field": {
+        "name": "website",
+        "type": "url"
+      },
+      "valueYaml": "dohc.dev/path",
+      "expected": {
+        "status": "flagged",
+        "reason": {
+          "code": "invalid-url",
+          "path": ""
+        }
+      }
+    },
+    {
+      "name": "null-valid-for-every-field",
+      "field": {
+        "name": "title",
+        "type": "text"
+      },
+      "valueYaml": "null",
+      "expected": {
+        "status": "valid"
+      }
+    }
+  ]
+}

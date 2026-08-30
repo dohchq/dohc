@@ -1,9 +1,11 @@
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import * as Y from "yjs";
+import pipelineFixture from "../../../../crates/dohc-engine-domain/tests/fixtures/collection-field-pipeline.json";
 import { defaultWorkspaceMode, type WatcherEvent } from "@dohc/workspace-core";
 import {
   EngineDaemonLifecycle,
@@ -27,6 +29,9 @@ import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import { createRealDaemonWorkspaceSessions } from "../testing/realDaemonWorkspaceSessions";
 import { createTestScratch } from "./testTemp";
 import { waitForPathMoments } from "./waitForPathMoments";
+import { encodeFixtureBigInts } from "../../../../packages/workspace-engine-client/src/workspace/collectionFieldPipeline.testSupport";
+import { decodeCollectionValue } from "../../../../packages/workspace-engine-client/src/workspace/workspaceWireContract";
+import type { JsonValue } from "../../../../packages/workspace-engine-client/src/ydoc/generated/serde_json/JsonValue";
 
 function createWorkspaceEngineCapture(
   options: Omit<WorkspaceEngineCaptureOptions, "attachmentId">,
@@ -35,6 +40,24 @@ function createWorkspaceEngineCapture(
     ...options,
     attachmentId: Symbol(`test-workspace-attachment:${options.workspaceId}`),
   });
+}
+
+function decodePipelineFixtureValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(decodePipelineFixtureValue);
+  if (value !== null && typeof value === "object") {
+    const entries = Object.entries(value);
+    if (
+      entries.length === 1 &&
+      entries[0]?.[0] === "$dohcInt64" &&
+      typeof entries[0][1] === "string"
+    ) {
+      return BigInt(entries[0][1]);
+    }
+    return Object.fromEntries(
+      entries.map(([key, child]) => [key, decodePipelineFixtureValue(child)]),
+    );
+  }
+  return value;
 }
 
 // This suite looked only under the repo root, so it SKIPPED everywhere from the
@@ -75,6 +98,223 @@ async function listDaemonPathMoments(
   );
   return page.moments.filter((moment) => moment.path === path);
 }
+
+it.skipIf(engine.missing)(
+  "adopts rich collection Markdown through the shared Y.Doc importer without flattening it",
+  async () => {
+    const root = await createTestScratch("dohc-capture-rich-adoption-");
+    const lifecycle = new EngineDaemonLifecycle({
+      command: engine.require(),
+      maxRestarts: 0,
+    });
+    await mkdir(join(root, "tasks"), { recursive: true });
+    await writeFile(
+      join(root, "tasks", "collection.yaml"),
+      "name: Tasks\nfields:\n  status:\n    type: text\n",
+      "utf8",
+    );
+    const body = [
+      "| Metric | Value |",
+      "| ------ | ----- |",
+      "| apples | 10    |",
+      "",
+      "- parent",
+      "  - nested with **bold** and [details](https://example.com)",
+    ].join("\n");
+    const original = `---\nstatus: open\n---\n\n${body}`;
+    await writeFile(join(root, "tasks", "rich.md"), original, "utf8");
+    await lifecycle.start();
+    const sessions = createRealDaemonWorkspaceSessions(lifecycle);
+    const workspace = {
+      workspaceId: "capture-rich-adoption",
+      rootPath: root,
+      attachmentId: Symbol("test-workspace-attachment:capture-rich-adoption"),
+    };
+    const capture = createAttachedWorkspaceEngineCapture({
+      ...workspace,
+      rustEngineSessions: sessions,
+      daemonOwnsCapture: true,
+    });
+    try {
+      // `capture.flush()` drains changes the OS watcher has already observed;
+      // it deliberately cannot promise that the watcher's startup debounce
+      // has seen these pre-existing files. Wait on the record's durable
+      // capture moment, then flush the pending rich-document adoption.
+      await waitForPathMoments(capture, "tasks/collection.yaml", 1);
+      await waitForPathMoments(capture, "tasks/rich.md", 1);
+      await capture.flush();
+      const query = await sessions.run(
+        workspace,
+        async ({ client, workspace: handle }) =>
+          await new VersionedLiveAdapter(client, handle, {
+            workspaceId: workspace.workspaceId,
+          }).queryCollectionRecords({ collectionPath: "tasks" }),
+      );
+      expect(query.records).toHaveLength(1);
+      expect(query.records[0]?.path).toBe("tasks/rich.md");
+      const recordId = query.records[0]?.id;
+      expect(recordId).toBeTruthy();
+      const settled = await readFile(join(root, "tasks", "rich.md"), "utf8");
+      const prefix = `---\nid: ${recordId}\nstatus: open\n---\n\n`;
+      expect(settled).toBe(`${prefix}${body}`);
+      expect(settled.slice(prefix.length)).toBe(body);
+    } finally {
+      await capture.stop().catch(() => undefined);
+      await sessions.closeAll().catch(() => undefined);
+      await lifecycle.stop().catch(() => undefined);
+    }
+  },
+  60_000,
+);
+
+it.skipIf(engine.missing)(
+  "round-trips every v1 collection field type through the real daemon",
+  async () => {
+    const root = await createTestScratch("dohc-capture-field-pipeline-");
+    const lifecycle = new EngineDaemonLifecycle({
+      command: engine.require(),
+      maxRestarts: 0,
+    });
+    await mkdir(join(root, "pipeline"), { recursive: true });
+    await mkdir(join(root, "pipeline-targets"), { recursive: true });
+    await writeFile(
+      join(root, "pipeline", "collection.yaml"),
+      pipelineFixture.schemaYaml,
+      "utf8",
+    );
+    for (const support of pipelineFixture.supportFiles) {
+      await writeFile(join(root, support.path), support.text, "utf8");
+    }
+    expect(
+      createHash("sha256")
+        .update(pipelineFixture.recordMarkdown, "utf8")
+        .digest("hex"),
+    ).toBe(pipelineFixture.recordMarkdownSha256);
+    await writeFile(
+      join(root, "pipeline", "imported.md"),
+      pipelineFixture.recordMarkdown,
+      "utf8",
+    );
+    await writeFile(
+      join(root, "pipeline", "edited.md"),
+      "---\n---\n\nUI-edited record",
+      "utf8",
+    );
+
+    await lifecycle.start();
+    const sessions = createRealDaemonWorkspaceSessions(lifecycle);
+    const workspace = {
+      workspaceId: "capture-field-pipeline",
+      rootPath: root,
+      attachmentId: Symbol("test-workspace-attachment:capture-field-pipeline"),
+    };
+    const capture = createAttachedWorkspaceEngineCapture({
+      ...workspace,
+      rustEngineSessions: sessions,
+      daemonOwnsCapture: true,
+    });
+    const queryRecords = async () =>
+      await sessions.run(
+        workspace,
+        async ({ client, workspace: handle }) =>
+          await new VersionedLiveAdapter(client, handle, {
+            workspaceId: workspace.workspaceId,
+          }).queryCollectionRecords({ collectionPath: "pipeline" }),
+      );
+
+    try {
+      for (const path of [
+        "pipeline/collection.yaml",
+        "pipeline/imported.md",
+        "pipeline/edited.md",
+        ...pipelineFixture.supportFiles.map((support) => support.path),
+      ]) {
+        await waitForPathMoments(capture, path, 1);
+      }
+      await capture.flush();
+
+      const importedQuery = await queryRecords();
+      const imported = importedQuery.records.find(
+        (record) => record.path === "pipeline/imported.md",
+      );
+      const editedBefore = importedQuery.records.find(
+        (record) => record.path === "pipeline/edited.md",
+      );
+      expect(imported).toBeDefined();
+      expect(editedBefore).toBeDefined();
+      expect(imported?.values).toHaveLength(pipelineFixture.vectors.length);
+      expect(editedBefore?.values).toEqual([]);
+
+      const session = await capture.openYDocSession({
+        path: "pipeline/edited.md",
+        contentKind: "richdoc",
+        onRemoteUpdate: () => undefined,
+      });
+      const editor = new Y.Doc();
+      Y.applyUpdate(editor, session.initialUpdate);
+      const before = Y.encodeStateVector(editor);
+      const frontmatter = editor.getMap<unknown>("frontmatter");
+      for (const vector of pipelineFixture.vectors) {
+        frontmatter.set(
+          vector.fieldName,
+          decodePipelineFixtureValue(vector.expectedSemantic),
+        );
+      }
+      const update = Y.encodeStateAsUpdate(editor, before);
+      expect(update.byteLength).toBeGreaterThan(0);
+      await session.applyLocalUpdate(update);
+      await session.settleNow();
+      await session.close();
+
+      const finalQuery = await queryRecords();
+      const finalImported = finalQuery.records.find(
+        (record) => record.path === "pipeline/imported.md",
+      );
+      const finalEdited = finalQuery.records.find(
+        (record) => record.path === "pipeline/edited.md",
+      );
+      expect(finalImported).toBeDefined();
+      expect(finalEdited).toBeDefined();
+      const importedValues = new Map(
+        finalImported?.values.map((value) => [value.field, value]),
+      );
+      const editedValues = new Map(
+        finalEdited?.values.map((value) => [value.field, value]),
+      );
+      for (const vector of pipelineFixture.vectors) {
+        const importedValue = importedValues.get(vector.fieldName);
+        const editedValue = editedValues.get(vector.fieldName);
+        const expected = decodePipelineFixtureValue(vector.expectedSemantic);
+        expect(importedValue?.value, `${vector.name} imported`).toEqual(expected);
+        expect(editedValue?.value, `${vector.name} edited`).toEqual(expected);
+        expect(importedValue?.validation, `${vector.name} imported`).toEqual(
+          vector.expectedValidation,
+        );
+        expect(editedValue?.validation, `${vector.name} edited`).toEqual(
+          vector.expectedValidation,
+        );
+        // The daemon escapes marker-spelled keys on the wire and the client
+        // decode unescapes them, so the round-tripped value must match the
+        // DECODED expected wire form, not the wire bytes themselves.
+        expect(
+          JSON.stringify(encodeFixtureBigInts(importedValue?.value)),
+          `${vector.name} round-trip JSON`,
+        ).toBe(
+          JSON.stringify(
+            encodeFixtureBigInts(
+              decodeCollectionValue(vector.expectedWireValue as JsonValue),
+            ),
+          ),
+        );
+      }
+    } finally {
+      await capture.stop().catch(() => undefined);
+      await sessions.closeAll().catch(() => undefined);
+      await lifecycle.stop().catch(() => undefined);
+    }
+  },
+  60_000,
+);
 
 it.skipIf(engine.missing)(
   "drives watcher-batch capture, readback, and version-switch materialization through the real daemon",

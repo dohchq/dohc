@@ -250,6 +250,7 @@ export interface OpenYdocAdapterSessionInput {
   workspace: WorkspaceHandle;
   versionId: string;
   path: string;
+  expectedObjectId?: string;
   contentKind?: YdocContentKind;
   // An object with no durable CRDT lineage is normally seeded from its
   // artifact content. Set false when the caller already holds the canonical
@@ -1305,6 +1306,9 @@ export class YdocLiveAdapter {
     const params: YdocOpenParams = {
       versionId: input.versionId,
       path: input.path,
+      ...(input.expectedObjectId
+        ? { expectedObjectId: input.expectedObjectId }
+        : {}),
       ...(input.contentKind ? { contentKind: input.contentKind } : {}),
       ...(input.contentKind === "scene"
         ? { seedFromArtifact: input.seedAbsentLineage !== false }

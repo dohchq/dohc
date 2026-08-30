@@ -15,7 +15,8 @@
 use dohc_engine_collab::{ContentKind, DocKey, LeaseRegistry, Regime, Ydoc};
 use dohc_engine_domain::{
     CreateNamedVersion, DeleteTextFile, MergeTextFileFromVersion, MergeTextFileResult,
-    RollbackTextFileMutation, VersionedTextStore, WriteText,
+    RollbackTextFileMutation, VersionedTextStore, WriteText, get_collection_record,
+    reconcile_collections_in_tx,
 };
 use dohc_engine_runtime::{
     CancellationToken, CaptureIngest, CaptureRetire, NoFaults, RuntimeError, SelfWriteRecorder,
@@ -305,6 +306,57 @@ fn blob_bytes(db: &Path, sha: &str) -> Vec<u8> {
         .expect("the journaled blob exists locally")
 }
 
+fn seed_collection_replica(db: &Path, workspace_id: &str, object_id: &str, path: &str, text: &str) {
+    let mut store = EngineStore::open(db, 9_110).expect("open collection replica");
+    let mut versions = VersionedTextStore::new(&mut store);
+    versions
+        .ensure_main_version(workspace_id, "main", 1, &NoFaults)
+        .expect("collection main version");
+    versions
+        .write_text(
+            &WriteText {
+                workspace_id: workspace_id.to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "collection-schema-object".to_owned(),
+                path: "tasks/collection.yaml".to_owned(),
+                text: "fields:\n  status:\n    type: text\n".to_owned(),
+                moment_id: "collection-schema-moment".to_owned(),
+                metadata_origin: "test".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .expect("seed collection schema");
+    versions
+        .write_text(
+            &WriteText {
+                workspace_id: workspace_id.to_owned(),
+                version_id: "main".to_owned(),
+                object_id: object_id.to_owned(),
+                path: path.to_owned(),
+                text: text.to_owned(),
+                moment_id: "collection-record-moment".to_owned(),
+                metadata_origin: "test".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 3,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .expect("seed collection record");
+    store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, workspace_id, "main")
+        })
+        .expect("bind collection record");
+}
+
 /// Replay `ops` into a CLEAN peer and return the text it materialized for
 /// `path`. The blobs travel first, exactly as `push_workspace` uploads them
 /// before the log ops that reference them.
@@ -390,6 +442,122 @@ async fn capture_seed(
         .expect("capture")
         .snapshot
         .object_id
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn capture_authored_edit_keeps_actor_in_receiving_store_history() {
+    const WS: &str = "ws-capture-actor-replication";
+    const PATH: &str = "tasks/alpha.md";
+    const OBJECT: &str = "capture-actor-record-object";
+    const RECORD: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const AGENT: &str = "agent-capture-replication";
+    let initial = format!("---\nid: {RECORD}\nstatus: open\n---\n\nAlpha");
+    let edited = format!("---\nid: {RECORD}\nstatus: done\n---\n\nAlpha");
+    let source_scratch = ScratchDir::new().expect("source scratch");
+    let source_db = source_scratch.engine_db_path().expect("source db");
+    let peer_scratch = ScratchDir::new().expect("peer scratch");
+    let peer_db = peer_scratch.engine_db_path().expect("peer db");
+    seed_collection_replica(&source_db, WS, OBJECT, PATH, &initial);
+    seed_collection_replica(&peer_db, WS, OBJECT, PATH, &initial);
+    enable_sync(&source_db, WS);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor
+        .open(&source_db, 10)
+        .expect("open source actor")
+        .actor;
+    let key = DocKey::new(WS, "main", OBJECT).expect("collection document key");
+    let seed = Ydoc::wire();
+    seed.rewrite_content_to_markdown(ContentKind::Richdoc, &initial)
+        .expect("seed collection rich document");
+    handle
+        .ydoc_record_update(
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Richdoc,
+            Regime::LocalOnly,
+            seed.encode_full_state(),
+            None,
+            None,
+            true,
+            None,
+            None,
+            100,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("originate collection base");
+    handle
+        .capture_ingest(
+            CaptureIngest {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                path: PATH.to_owned(),
+                text: edited,
+                metadata_origin: "capture".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: Some(
+                    serde_json::json!({
+                        "kind": "agent",
+                        "agentId": AGENT,
+                        "onBehalfOf": "local",
+                        "agentRunId": "run-capture-replication",
+                    })
+                    .to_string(),
+                ),
+                now_ms: 200,
+                request_id: Some("capture-agent-edit".to_owned()),
+                claim_foreign_head: true,
+            },
+            LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("capture agent edit");
+    supervisor.close(&source_db).expect("close source actor");
+
+    let ops = local_ydoc_ops(&source_db);
+    assert_eq!(ops.len(), 2, "capture produces one base and one edit");
+    assert_eq!(
+        ops[1].payload["actorOriginId"],
+        serde_json::json!(AGENT),
+        "the replicated edit must carry the capture actor"
+    );
+    let first_origin_seq = ops[0].origin_seq;
+    let mut peer = EngineStore::open(&peer_db, 300).expect("open peer store");
+    for op in &ops {
+        let bytes = blob_bytes(&source_db, &op.blob_sha());
+        peer.put_binary_blob(&bytes).expect("copy Y.Doc blob");
+        let envelope = ReplicationEnvelope {
+            workspace_id: WS.to_owned(),
+            origin_id: op.origin_id.clone(),
+            origin_seq: op.origin_seq - first_origin_seq,
+            relay_seq: Some(op.origin_seq - first_origin_seq),
+            op_kind: op.op_kind.clone(),
+            payload: op.payload.clone(),
+            recorded_at_ms: op.recorded_at_ms,
+        };
+        apply_ydoc_envelope(&mut peer, &envelope, &NoFaults, &NoLiveLeases)
+            .expect("peer applies replicated collection edit");
+    }
+
+    let details = peer
+        .read_with(|conn| get_collection_record(conn, WS, "tasks", RECORD, 20, None))
+        .expect("read receiving collection history")
+        .expect("receiving collection record");
+    let edit = details
+        .history
+        .iter()
+        .find(|entry| {
+            entry.field == "status"
+                && entry.next.present
+                && entry.next.value == Some(serde_json::json!("done"))
+        })
+        .expect("receiving history contains captured status edit");
+    assert_eq!(edit.author_origin_id.as_deref(), Some(AGENT));
 }
 
 struct OversizedLineage {

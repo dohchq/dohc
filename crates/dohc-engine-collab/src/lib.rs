@@ -40,9 +40,9 @@ pub use durable::{
     claim_base_in_tx, close_session, encode_origination_base_in_tx, ensure_marker,
     load_doc_from_connection, load_doc_in_tx, load_persisted, mark_base_coordinate_absent_in_tx,
     maybe_compact, read_last_settled_sha, read_marker, read_marker_from_connection,
-    read_marker_in_tx, read_seed_only_lineage_source, record_base_coordinate,
-    record_base_coordinate_in_tx, record_local_update, record_local_update_creating_marker,
-    record_local_update_creating_marker_guarded,
+    read_marker_in_tx, read_pristine_seed_lineage_source, read_seed_only_lineage_source,
+    record_base_coordinate, record_base_coordinate_in_tx, record_local_update,
+    record_local_update_creating_marker, record_local_update_creating_marker_guarded,
     record_local_update_creating_marker_guarded_for_lineage, record_local_update_with_origin,
     record_update_for_lineage_in_tx, record_update_in_tx, replace_lineage_with_successor,
     replace_lineage_with_successor_in_tx, rewrite_bare_marker_content_kind, settle,
@@ -132,4 +132,11 @@ fn check_identifier(value: &str, reason: &'static str) -> Result<(), CollabError
         });
     }
     Ok(())
+}
+
+pub(crate) fn validate_actor_origin_id(value: &str) -> Result<(), CollabError> {
+    check_identifier(
+        value,
+        "actor_origin_id must be non-empty, bounded, and contain no control bytes",
+    )
 }

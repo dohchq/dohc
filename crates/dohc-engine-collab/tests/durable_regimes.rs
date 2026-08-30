@@ -5,6 +5,8 @@
 
 mod common;
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use common::*;
 use dohc_engine_collab::ContentKind;
 #[cfg(feature = "fault-injection")]
@@ -13,11 +15,11 @@ use dohc_engine_collab::{
     apply_remote_update, claim_base, claim_base_at_relay, close_session, ensure_marker,
     fresh_successor_base, load_persisted, maybe_compact, read_marker, record_base_coordinate,
     record_local_update, record_local_update_creating_marker_guarded,
-    record_local_update_creating_marker_guarded_for_lineage, replace_lineage_with_successor,
-    settle, BaseCoordinateRecord, BaseRelayCoordinate, ClaimOutcome, CloseOutcome, CollabError,
-    CompactOutcome, DocKey, LeaseRegistry, LineageClaimStatus, Regime, RemoteUpdate,
-    ReplicationApplyOutcome, SettleOutcome, SuccessorIdentity, SuccessorIdentityInput,
-    SuccessorInstallOutcome, SuccessorReplacement, Ydoc,
+    record_local_update_creating_marker_guarded_for_lineage, record_local_update_with_origin,
+    replace_lineage_with_successor, settle, BaseCoordinateRecord, BaseRelayCoordinate,
+    ClaimOutcome, CloseOutcome, CollabError, CompactOutcome, DocKey, LeaseRegistry,
+    LineageClaimStatus, Regime, RemoteUpdate, ReplicationApplyOutcome, SettleOutcome,
+    SuccessorIdentity, SuccessorIdentityInput, SuccessorInstallOutcome, SuccessorReplacement, Ydoc,
 };
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
 use rusqlite::OptionalExtension;
@@ -1449,6 +1451,424 @@ fn forced_close_on_a_compacted_lineage_skips_without_reminting() {
 
 // ---- base-once --------------------------------------------------------------
 
+const INDEX_RECORD_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+fn seed_collection_index_context(store: &mut EngineStore, key: &DocKey) {
+    const SCHEMA: &str =
+        "name: Tasks\nfields:\n  title:\n    type: text\n  status:\n    type: text\n";
+    committed(
+        store
+            .write_with(&NoFaults, |tx| {
+                let schema_sha = dohc_engine_storage::hex_sha256(SCHEMA.as_bytes());
+                tx.execute(
+                    "INSERT OR IGNORE INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                    rusqlite::params![schema_sha, SCHEMA.len() as i64, SCHEMA],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO versions \
+                     (workspace_id,version_id,kind,name,created_at_ms) \
+                     VALUES (?1,?2,'main','main',1)",
+                    rusqlite::params![key.workspace_id, key.version_id],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO file_objects \
+                     (workspace_id,object_id,created_at_ms) VALUES (?1,'schema-object',1)",
+                    [&key.workspace_id],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                tx.execute(
+                    "INSERT OR REPLACE INTO snapshots \
+                     (workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms, \
+                      latest_moment_id,metadata_origin) \
+                     VALUES (?1,?2,'schema-object','tasks/collection.yaml',?3,1, \
+                             'schema-moment','capture')",
+                    rusqlite::params![key.workspace_id, key.version_id, schema_sha],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                tx.execute(
+                    "INSERT INTO collections \
+                     (workspace_id,version_id,collection_path,schema_path,schema_status, \
+                      degradation_reasons_json) \
+                     VALUES (?1,?2,'tasks','tasks/collection.yaml','valid','[]')",
+                    rusqlite::params![key.workspace_id, key.version_id],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                tx.execute(
+                    "INSERT INTO collection_records \
+                     (workspace_id,version_id,record_id,collection_path,file_path,object_id, \
+                      adoption_state,index_initialized) \
+                     VALUES (?1,?2,?3,'tasks','tasks/record.md',?4,'adopted',0)",
+                    rusqlite::params![
+                        key.workspace_id,
+                        key.version_id,
+                        INDEX_RECORD_ID,
+                        key.object_id
+                    ],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                Ok::<_, dohc_engine_storage::StorageError>(())
+            })
+            .expect("seed collection index context"),
+    );
+}
+
+fn indexed_fields(store: &EngineStore, key: &DocKey) -> BTreeMap<String, String> {
+    store
+        .read_with(|conn| -> Result<_, CollabError> {
+            let mut statement = conn
+                .prepare(
+                    "SELECT field_name,value_json FROM collection_record_fields \
+                     WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3 \
+                     ORDER BY field_name",
+                )
+                .map_err(|error| CollabError::Corrupt {
+                    reason: error.to_string(),
+                })?;
+            let fields = statement
+                .query_map(
+                    rusqlite::params![key.workspace_id, key.version_id, INDEX_RECORD_ID],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|error| CollabError::Corrupt {
+                    reason: error.to_string(),
+                })?
+                .collect::<Result<BTreeMap<_, _>, _>>()
+                .map_err(|error| CollabError::Corrupt {
+                    reason: error.to_string(),
+                })?;
+            Ok(fields)
+        })
+        .expect("indexed fields")
+}
+
+fn field_history(store: &EngineStore, key: &DocKey, field: &str) -> Vec<(String, Option<String>)> {
+    store
+        .read_with(|conn| -> Result<_, CollabError> {
+            let mut statement = conn
+                .prepare(
+                    "SELECT author_origin_id,next_value_json FROM collection_field_history \
+                     WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3 \
+                       AND field_name=?4 ORDER BY history_id",
+                )
+                .map_err(|error| CollabError::Corrupt {
+                    reason: error.to_string(),
+                })?;
+            let history = statement
+                .query_map(
+                    rusqlite::params![key.workspace_id, key.version_id, INDEX_RECORD_ID, field],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|error| CollabError::Corrupt {
+                    reason: error.to_string(),
+                })?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| CollabError::Corrupt {
+                    reason: error.to_string(),
+                })?;
+            Ok(history)
+        })
+        .expect("field history")
+}
+
+fn collection_base() -> Vec<u8> {
+    let doc = Ydoc::wire();
+    doc.frontmatter_set("id", INDEX_RECORD_ID);
+    doc.frontmatter_set("title", "Original");
+    doc.frontmatter_set("status", "open");
+    doc.encode_full_state()
+}
+
+fn two_collection_stores(tag_a: &str, tag_b: &str) -> (TempStore, TempStore, DocKey, Vec<u8>) {
+    let mut a = fresh_store(tag_a);
+    let mut b = fresh_store(tag_b);
+    let key = test_key();
+    let base = collection_base();
+    for store in [&mut a.store, &mut b.store] {
+        seed_parents(store, &key, 1_000);
+        seed_collection_index_context(store, &key);
+        committed(
+            claim_base(store, &key, ContentKind::Richdoc, &base, &NoFaults, 1_000)
+                .expect("claim collection base"),
+        );
+    }
+    (a, b, key, base)
+}
+
+#[test]
+fn local_and_remote_different_field_edits_converge_in_both_collection_indexes() {
+    let (mut a, mut b, key, base) = two_collection_stores(
+        "collection-index-different-a",
+        "collection-index-different-b",
+    );
+    let peer_a = Ydoc::wire();
+    peer_a.apply(&base).expect("peer A base");
+    let peer_b = Ydoc::wire();
+    peer_b.apply(&base).expect("peer B base");
+    let alice = peer_a.frontmatter_set("title", "Alice title");
+    let bob = peer_b.frontmatter_set("status", "done");
+
+    committed(
+        record_local_update_with_origin(
+            &mut a.store,
+            &mut a.cache,
+            &key,
+            &alice,
+            Some("alice"),
+            &NoFaults,
+            1_100,
+        )
+        .expect("Alice local edit"),
+    );
+    committed(
+        record_local_update_with_origin(
+            &mut b.store,
+            &mut b.cache,
+            &key,
+            &bob,
+            Some("bob"),
+            &NoFaults,
+            1_100,
+        )
+        .expect("Bob local edit"),
+    );
+    committed(
+        apply_remote_update(
+            &mut a.store,
+            &key,
+            &RemoteUpdate {
+                origin_id: "bob".to_owned(),
+                origin_seq: 1,
+                bytes: bob.clone(),
+            },
+            None,
+            &NoFaults,
+            1_200,
+        )
+        .expect("Bob remote edit"),
+    );
+    committed(
+        apply_remote_update(
+            &mut b.store,
+            &key,
+            &RemoteUpdate {
+                origin_id: "alice".to_owned(),
+                origin_seq: 1,
+                bytes: alice.clone(),
+            },
+            None,
+            &NoFaults,
+            1_200,
+        )
+        .expect("Alice remote edit"),
+    );
+
+    let expected = BTreeMap::from([
+        ("status".to_owned(), "\"done\"".to_owned()),
+        ("title".to_owned(), "\"Alice title\"".to_owned()),
+    ]);
+    assert_eq!(indexed_fields(&a.store, &key), expected);
+    assert_eq!(indexed_fields(&b.store, &key), expected);
+    assert_eq!(
+        field_history(&a.store, &key, "title")
+            .into_iter()
+            .map(|row| row.0)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["alice".to_owned()])
+    );
+    assert_eq!(
+        field_history(&a.store, &key, "status")
+            .into_iter()
+            .map(|row| row.0)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["bob".to_owned()])
+    );
+}
+
+#[test]
+fn same_field_concurrent_edits_converge_and_keep_both_authored_writes() {
+    let (mut a, mut b, key, base) =
+        two_collection_stores("collection-index-same-a", "collection-index-same-b");
+    let peer_a = Ydoc::wire();
+    peer_a.apply(&base).expect("peer A base");
+    let peer_b = Ydoc::wire();
+    peer_b.apply(&base).expect("peer B base");
+    let alice = peer_a.frontmatter_set("title", "Alice title");
+    let bob = peer_b.frontmatter_set("title", "Bob title");
+
+    committed(
+        record_local_update_with_origin(
+            &mut a.store,
+            &mut a.cache,
+            &key,
+            &alice,
+            Some("alice"),
+            &NoFaults,
+            1_100,
+        )
+        .expect("Alice local edit"),
+    );
+    committed(
+        record_local_update_with_origin(
+            &mut b.store,
+            &mut b.cache,
+            &key,
+            &bob,
+            Some("bob"),
+            &NoFaults,
+            1_100,
+        )
+        .expect("Bob local edit"),
+    );
+    committed(
+        apply_remote_update(
+            &mut a.store,
+            &key,
+            &RemoteUpdate {
+                origin_id: "bob".to_owned(),
+                origin_seq: 1,
+                bytes: bob.clone(),
+            },
+            None,
+            &NoFaults,
+            1_200,
+        )
+        .expect("Bob remote edit"),
+    );
+    committed(
+        apply_remote_update(
+            &mut b.store,
+            &key,
+            &RemoteUpdate {
+                origin_id: "alice".to_owned(),
+                origin_seq: 1,
+                bytes: alice.clone(),
+            },
+            None,
+            &NoFaults,
+            1_200,
+        )
+        .expect("Alice remote edit"),
+    );
+
+    let fields_a = indexed_fields(&a.store, &key);
+    let fields_b = indexed_fields(&b.store, &key);
+    assert_eq!(fields_a, fields_b, "Yjs winner is indexed on both stores");
+    let applied_title = load_persisted(&a.store, &key)
+        .expect("load A")
+        .expect("A doc")
+        .doc
+        .frontmatter_json()["title"]
+        .clone();
+    assert_eq!(
+        fields_a.get("title"),
+        Some(&serde_json::to_string(&applied_title).expect("title JSON"))
+    );
+    for store in [&a.store, &b.store] {
+        let history = field_history(store, &key, "title");
+        assert_eq!(history.len(), 2, "both concurrent writes have history");
+        assert_eq!(
+            history
+                .iter()
+                .map(|(author, _)| author.clone())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["alice".to_owned(), "bob".to_owned()])
+        );
+        assert_eq!(
+            history
+                .into_iter()
+                .filter_map(|(_, next)| next)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["\"Alice title\"".to_owned(), "\"Bob title\"".to_owned()])
+        );
+    }
+}
+
+#[test]
+fn later_same_field_edit_wins_on_both_devices_and_keeps_earlier_history() {
+    let (mut a, mut b, key, base) =
+        two_collection_stores("collection-index-later-a", "collection-index-later-b");
+    let peer_a = Ydoc::wire();
+    peer_a.apply(&base).expect("peer A base");
+    let alice = peer_a.frontmatter_set("title", "Alice title");
+
+    committed(
+        record_local_update_with_origin(
+            &mut a.store,
+            &mut a.cache,
+            &key,
+            &alice,
+            Some("alice"),
+            &NoFaults,
+            1_100,
+        )
+        .expect("Alice local edit"),
+    );
+    committed(
+        apply_remote_update(
+            &mut b.store,
+            &key,
+            &RemoteUpdate {
+                origin_id: "alice".to_owned(),
+                origin_seq: 1,
+                bytes: alice.clone(),
+            },
+            None,
+            &NoFaults,
+            1_200,
+        )
+        .expect("Alice edit reaches device B"),
+    );
+
+    let peer_b = Ydoc::wire();
+    peer_b.apply(&base).expect("peer B base");
+    peer_b.apply(&alice).expect("peer B receives Alice edit");
+    let bob = peer_b.frontmatter_set("title", "Bob title");
+    committed(
+        record_local_update_with_origin(
+            &mut b.store,
+            &mut b.cache,
+            &key,
+            &bob,
+            Some("bob"),
+            &NoFaults,
+            1_300,
+        )
+        .expect("Bob later local edit"),
+    );
+    committed(
+        apply_remote_update(
+            &mut a.store,
+            &key,
+            &RemoteUpdate {
+                origin_id: "bob".to_owned(),
+                origin_seq: 1,
+                bytes: bob,
+            },
+            None,
+            &NoFaults,
+            1_400,
+        )
+        .expect("Bob edit reaches device A"),
+    );
+
+    let expected = BTreeMap::from([
+        ("status".to_owned(), "\"open\"".to_owned()),
+        ("title".to_owned(), "\"Bob title\"".to_owned()),
+    ]);
+    for store in [&a.store, &b.store] {
+        assert_eq!(indexed_fields(store, &key), expected);
+        assert_eq!(
+            field_history(store, &key, "title"),
+            vec![
+                ("alice".to_owned(), Some("\"Alice title\"".to_owned())),
+                ("bob".to_owned(), Some("\"Bob title\"".to_owned())),
+            ]
+        );
+    }
+}
+
 #[test]
 fn base_is_claimed_exactly_once() {
     let mut ts = fresh_store("base-once");
@@ -1510,6 +1930,7 @@ fn base_is_claimed_exactly_once() {
                 origin_seq: 1,
                 bytes: delta,
             },
+            None,
             &NoFaults,
             1_450,
         )
@@ -1748,6 +2169,7 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
                 origin_seq: 1,
                 bytes: delta,
             },
+            None,
             &NoFaults,
             1_100,
         )
@@ -1915,6 +2337,7 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
                 origin_seq: 2,
                 bytes: successor_delta,
             },
+            None,
             &NoFaults,
             1_225,
         )
@@ -2284,7 +2707,7 @@ fn remote_update_is_idempotent_and_echo_suppressed() {
     };
     // First apply: journaled, echo-suppressed (never re-emitted).
     let first = committed(
-        apply_remote_update(&mut ts.store, &key, &remote, &NoFaults, 1_100).expect("apply"),
+        apply_remote_update(&mut ts.store, &key, &remote, None, &NoFaults, 1_100).expect("apply"),
     );
     let seq = match first {
         ReplicationApplyOutcome::Applied { seq, emit_outbound } => {
@@ -2295,7 +2718,7 @@ fn remote_update_is_idempotent_and_echo_suppressed() {
     };
     // Redelivery of the same bytes is an idempotent no-op (content-addressed).
     let again = committed(
-        apply_remote_update(&mut ts.store, &key, &remote, &NoFaults, 1_200).expect("apply2"),
+        apply_remote_update(&mut ts.store, &key, &remote, None, &NoFaults, 1_200).expect("apply2"),
     );
     assert_eq!(
         again,
@@ -2586,6 +3009,7 @@ fn yrs_abort_witness_is_rejected_fail_closed_on_both_ingestion_paths() {
         &mut remote.store,
         &remote_key,
         &remote_update,
+        None,
         &NoFaults,
         1_000,
     );

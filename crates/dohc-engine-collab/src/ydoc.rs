@@ -29,7 +29,7 @@
 //!    the whole update before applying (a truncated update is rejected on decode,
 //!    state-unchanged), and the caller only persists bytes an apply accepted.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -53,6 +53,11 @@ pub const ROOT_FRONTMATTER: &str = "frontmatter";
 pub const ROOT_META: &str = "meta";
 /// Reserved engine metadata that identifies one immutable lineage epoch.
 pub const LINEAGE_EPOCH_META_KEY: &str = "dohcLineageEpoch";
+/// Reserved engine metadata that preserves a CRLF Markdown artifact's line endings.
+const MARKDOWN_CRLF_META_KEY: &str = "dohcMarkdownCrlf";
+const MARKDOWN_SOURCE_META_KEY: &str = "dohcMarkdownSource";
+const MARKDOWN_SOURCE_SHA_META_KEY: &str = "dohcMarkdownSourceSha256";
+const MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY: &str = "dohcMarkdownSourceProjectionSha256";
 /// The rich-document body: a ProseMirror `XmlFragment`.
 pub const ROOT_BODY: &str = "body";
 /// The plaintext-document body: a single `Y.Text`.
@@ -285,6 +290,15 @@ pub struct Projection {
     pub destructive: bool,
 }
 
+/// Digests for exact Markdown source held in the Y.Doc's reserved engine
+/// metadata. The source is canonical artifact state, not a pointer into local
+/// history; the projection digest invalidates it when the semantic roots move.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkdownSourceReference {
+    pub source_sha256: String,
+    pub projection_sha256: String,
+}
+
 /// A wire-facing durable Y.Doc.
 pub struct Ydoc {
     doc: Doc,
@@ -425,6 +439,64 @@ impl Ydoc {
             Some(Out::Any(Any::String(value))) => Some(value.to_string()),
             _ => None,
         }
+    }
+
+    /// Read a well-formed exact-source reference from the replicated metadata.
+    pub fn markdown_source_reference(&self) -> Option<MarkdownSourceReference> {
+        let meta = self.doc.get_or_insert_map(ROOT_META);
+        let txn = self.doc.transact();
+        let source_sha256 = match meta.get(&txn, MARKDOWN_SOURCE_SHA_META_KEY) {
+            Some(Out::Any(Any::String(value))) if valid_sha256(&value) => value.to_string(),
+            _ => return None,
+        };
+        let projection_sha256 = match meta.get(&txn, MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY) {
+            Some(Out::Any(Any::String(value))) if valid_sha256(&value) => value.to_string(),
+            _ => return None,
+        };
+        Some(MarkdownSourceReference {
+            source_sha256,
+            projection_sha256,
+        })
+    }
+
+    /// Resolve exact Markdown only after its lightweight projection witness
+    /// matches. This avoids cloning and hashing stale source after a document
+    /// edit, and never returns bytes the versioned text store cannot hold.
+    pub fn markdown_source(&self, reference: &MarkdownSourceReference) -> Option<String> {
+        let meta = self.doc.get_or_insert_map(ROOT_META);
+        let txn = self.doc.transact();
+        let source = match meta.get(&txn, MARKDOWN_SOURCE_META_KEY) {
+            Some(Out::Any(Any::String(value)))
+                if value.len() <= dohc_engine_domain::MAX_TEXT_BYTES =>
+            {
+                value.to_string()
+            }
+            _ => return None,
+        };
+        (crate::hex_sha256(source.as_bytes()) == reference.source_sha256).then_some(source)
+    }
+
+    /// Resolve exact Markdown source ONLY when it is equivalent to
+    /// `canonical_projection`: the projection witness must be fresh, the
+    /// source digest must match, and parsing the source must reproject to
+    /// exactly the canonical projection. The digests alone prove freshness
+    /// and self-consistency, never equivalence — the metadata rides the
+    /// replicated doc, so a crafted update can pair the current projection's
+    /// digest with foreign source bytes, and settlement would write bytes the
+    /// canonical Y.Doc never represented. Reprojection admits only lexical
+    /// variants of the canonical state — the authority every collaborator
+    /// already has by editing the document.
+    pub fn preserved_markdown_source(&self, canonical_projection: &str) -> Option<String> {
+        let reference = self.markdown_source_reference()?;
+        if reference.projection_sha256 != crate::hex_sha256(canonical_projection.as_bytes()) {
+            return None;
+        }
+        let source = self.markdown_source(&reference)?;
+        let staged = Ydoc::wire();
+        staged
+            .rewrite_content_to_markdown(ContentKind::Richdoc, &source)
+            .ok()?;
+        (staged.project_richdoc().ok()? == canonical_projection).then_some(source)
     }
 
     pub(crate) fn has_missing_updates(&self) -> bool {
@@ -676,8 +748,13 @@ impl Ydoc {
         // takes the store lock, so calling one while a transaction is live
         // deadlocks (spike harness note).
         let frontmatter = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
+        let meta = self.doc.get_or_insert_map(ROOT_META);
         let body = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
         let txn = self.doc.transact();
+        let uses_crlf = matches!(
+            meta.get(&txn, MARKDOWN_CRLF_META_KEY),
+            Some(Out::Any(Any::Bool(true)))
+        );
         let mut has_frontmatter = false;
         let mut remaining_nodes = projection_node_budget;
         let mut source_text_bytes = 0usize;
@@ -688,7 +765,13 @@ impl Ydoc {
                 source_text_bytes = checked_projection_len(source_text_bytes, k.len())?;
                 entries.insert(
                     k.to_string(),
-                    projection_out_json(&txn, v, 0, &mut remaining_nodes, &mut source_text_bytes)?,
+                    projection_frontmatter_value(
+                        &txn,
+                        v,
+                        0,
+                        &mut remaining_nodes,
+                        &mut source_text_bytes,
+                    )?,
                 );
             }
             out.push_str("---\n")?;
@@ -712,7 +795,12 @@ impl Ydoc {
             })?;
         }
         out.push_str(&body_markdown)?;
-        Ok(out.into_string())
+        let projected = out.into_string();
+        if uses_crlf {
+            ensure_projection_string(projected.replace('\n', "\r\n"))
+        } else {
+            Ok(projected)
+        }
     }
 
     // ---- Rust-side edit helpers (used to build lineages in unit tests without
@@ -782,26 +870,23 @@ impl Ydoc {
             ContentKind::Richdoc => {
                 let frag = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
                 let map = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
+                let meta = self.doc.get_or_insert_map(ROOT_META);
                 let (frontmatter, body) = split_markdown_frontmatter(markdown);
-                let blocks = parse_markdown_blocks(body);
+                let uses_crlf = markdown.contains("\r\n");
+                let normalized_body = uses_crlf.then(|| body.replace("\r\n", "\n"));
+                let blocks = parse_markdown_blocks(normalized_body.as_deref().unwrap_or(body));
                 self.with_delta(|txn| {
+                    if uses_crlf {
+                        meta.insert(txn, MARKDOWN_CRLF_META_KEY, true);
+                    } else {
+                        meta.remove(txn, MARKDOWN_CRLF_META_KEY);
+                    }
                     let keys: Vec<String> = map.iter(txn).map(|(key, _)| key.to_string()).collect();
                     for key in keys {
                         map.remove(txn, &key);
                     }
                     for (key, value) in &frontmatter {
-                        match value {
-                            MdFrontmatter::Scalar(value) => {
-                                map.insert(txn, key.as_str(), value.as_str());
-                            }
-                            MdFrontmatter::Map(children) => {
-                                let nested: std::collections::HashMap<String, Any> = children
-                                    .iter()
-                                    .map(|(k, v)| (k.clone(), Any::from(v.as_str())))
-                                    .collect();
-                                map.insert(txn, key.as_str(), Any::from(nested));
-                            }
-                        }
+                        map.insert(txn, key.as_str(), json_to_any(value));
                     }
                     let len = frag.len(txn);
                     if len > 0 {
@@ -829,6 +914,36 @@ impl Ydoc {
         })
     }
 
+    /// Set one frontmatter scalar and bind the resulting semantic projection
+    /// to exact source bytes already destined for the versioned text store.
+    pub fn frontmatter_set_preserving_markdown_source(
+        &self,
+        key: &str,
+        value: &str,
+        markdown: &str,
+    ) -> Result<Vec<u8>, CollabError> {
+        self.stage_source_preserving_edit(markdown, |staged| {
+            let _ = staged.frontmatter_set(key, value);
+            Ok(())
+        })
+    }
+
+    /// Rewrite a source-preserving rich document and advance its exact-source
+    /// reference in the same CRDT delta.
+    pub fn rewrite_content_to_markdown_preserving_source(
+        &self,
+        content_kind: ContentKind,
+        markdown: &str,
+    ) -> Result<Vec<u8>, CollabError> {
+        if content_kind != ContentKind::Richdoc {
+            return self.rewrite_content_to_markdown(content_kind, markdown);
+        }
+        self.stage_source_preserving_edit(markdown, |staged| {
+            let _ = staged.rewrite_content_to_markdown(content_kind, markdown)?;
+            Ok(())
+        })
+    }
+
     /// Set a top-level [`ROOT_FRONTMATTER`] nested map and return the encoded
     /// delta. Used to exercise constraint 2 (nested key-order nondeterminism).
     pub fn frontmatter_set_nested(&self, key: &str, entries: &[(&str, &str)]) -> Vec<u8> {
@@ -842,6 +957,101 @@ impl Ydoc {
         })
     }
 
+    /// Remove one target from a relation field. A single relation removes the
+    /// key; a many relation keeps the sequence and removes matching entries.
+    /// Returns `None` when the applied frontmatter has no such link.
+    pub fn frontmatter_drop_relation_target(
+        &self,
+        key: &str,
+        target_record_id: &str,
+        many: bool,
+    ) -> Option<Vec<u8>> {
+        let current = self.frontmatter_json();
+        let value = current.as_object()?.get(key)?;
+        let map = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
+        if many {
+            let values = value.as_array()?;
+            if !values
+                .iter()
+                .any(|value| value.as_str() == Some(target_record_id))
+            {
+                return None;
+            }
+            let retained = Value::Array(
+                values
+                    .iter()
+                    .filter(|value| value.as_str() != Some(target_record_id))
+                    .cloned()
+                    .collect(),
+            );
+            Some(self.with_delta(|txn| {
+                map.insert(txn, key, json_to_any(&retained));
+            }))
+        } else if value.as_str() == Some(target_record_id) {
+            Some(self.with_delta(|txn| {
+                map.remove(txn, key);
+            }))
+        } else {
+            None
+        }
+    }
+
+    /// Remove one relation target while keeping the current exact Markdown
+    /// body source when its projection witness is still valid.
+    pub fn frontmatter_drop_relation_target_preserving_markdown_source(
+        &self,
+        key: &str,
+        target_record_id: &str,
+        many: bool,
+    ) -> Result<Option<Vec<u8>>, CollabError> {
+        let Some(reference) = self.markdown_source_reference() else {
+            return Ok(self.frontmatter_drop_relation_target(key, target_record_id, many));
+        };
+        let projection = self.project_richdoc()?;
+        if reference.projection_sha256 != crate::hex_sha256(projection.as_bytes()) {
+            return Ok(self.frontmatter_drop_relation_target(key, target_record_id, many));
+        }
+        let Some(source) = self.markdown_source(&reference) else {
+            return Ok(self.frontmatter_drop_relation_target(key, target_record_id, many));
+        };
+        let Some((_, source_body)) =
+            dohc_engine_domain::collections::markdown_frontmatter_json_with_body(&source)
+        else {
+            return Ok(self.frontmatter_drop_relation_target(key, target_record_id, many));
+        };
+
+        let staged = Ydoc::wire();
+        staged.apply(&self.encode_full_state())?;
+        if staged
+            .frontmatter_drop_relation_target(key, target_record_id, many)
+            .is_none()
+        {
+            return Ok(None);
+        }
+        let projected = staged.project_richdoc()?;
+        let Some((_, projected_body)) =
+            dohc_engine_domain::collections::markdown_frontmatter_json_with_body(&projected)
+        else {
+            return Err(CollabError::Corrupt {
+                reason: "relation cleanup projection lost record frontmatter".to_owned(),
+            });
+        };
+        let frontmatter_end = projected.len() - projected_body.len();
+        let mut preserved = String::with_capacity(frontmatter_end + source_body.len());
+        preserved.push_str(&projected[..frontmatter_end]);
+        preserved.push_str(source_body);
+
+        self.stage_source_preserving_edit(&preserved, |staged| {
+            staged
+                .frontmatter_drop_relation_target(key, target_record_id, many)
+                .ok_or_else(|| CollabError::Corrupt {
+                    reason: "relation cleanup target disappeared while staging".to_owned(),
+                })?;
+            Ok(())
+        })
+        .map(Some)
+    }
+
     fn with_delta(&self, edit: impl FnOnce(&mut yrs::TransactionMut)) -> Vec<u8> {
         let before = self.doc.transact().state_vector();
         {
@@ -850,6 +1060,72 @@ impl Ydoc {
         }
         self.doc.transact().encode_state_as_update_v1(&before)
     }
+
+    fn stage_source_preserving_edit(
+        &self,
+        markdown: &str,
+        edit: impl FnOnce(&Ydoc) -> Result<(), CollabError>,
+    ) -> Result<Vec<u8>, CollabError> {
+        if markdown.len() > dohc_engine_domain::MAX_TEXT_BYTES {
+            return Err(CollabError::ProjectionTooLarge {
+                actual: markdown.len(),
+                max: dohc_engine_domain::MAX_TEXT_BYTES,
+            });
+        }
+
+        let before = self.doc.transact().state_vector();
+        let staged = Ydoc::wire();
+        staged.apply(&self.encode_full_state())?;
+        edit(&staged)?;
+        staged.record_validated_markdown_source_reference(markdown)?;
+        let update = staged.doc.transact().encode_state_as_update_v1(&before);
+        if update.len() > crate::limits::MAX_YDOC_UPDATE_BYTES {
+            return Err(CollabError::UpdateTooLarge {
+                actual: update.len(),
+                max: crate::limits::MAX_YDOC_UPDATE_BYTES,
+            });
+        }
+        let full_state_len = staged.encode_full_state().len();
+        if full_state_len > crate::limits::MAX_YDOC_UPDATE_BYTES {
+            return Err(CollabError::UpdateTooLarge {
+                actual: full_state_len,
+                max: crate::limits::MAX_YDOC_UPDATE_BYTES,
+            });
+        }
+        Ydoc::validate_update(&update)?;
+
+        self.apply(&update)?;
+        Ok(update)
+    }
+
+    fn record_validated_markdown_source_reference(
+        &self,
+        markdown: &str,
+    ) -> Result<(), CollabError> {
+        let projection_sha256 = crate::hex_sha256(self.project_richdoc()?.as_bytes());
+        let source_sha256 = crate::hex_sha256(markdown.as_bytes());
+        let meta = self.doc.get_or_insert_map(ROOT_META);
+        let mut txn = self.doc.transact_mut();
+        meta.insert(&mut txn, MARKDOWN_SOURCE_META_KEY, markdown);
+        meta.insert(
+            &mut txn,
+            MARKDOWN_SOURCE_SHA_META_KEY,
+            source_sha256.as_str(),
+        );
+        meta.insert(
+            &mut txn,
+            MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
+            projection_sha256.as_str(),
+        );
+        Ok(())
+    }
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn encode_state_vector_canonical(state_vector: &StateVector) -> Vec<u8> {
@@ -884,79 +1160,20 @@ enum MdBlock {
     Rule,
 }
 
-/// Split a leading `---` frontmatter block of flat `key: value` scalars off
-/// the chosen markdown. Only the exact shape the projector emits is claimed;
-/// anything else stays in the body and parses as blocks.
-/// A parsed frontmatter entry: the scalar and one-level-map shapes the
-/// projector itself emits (`scalar_line`). Anything else bails to the body
-/// parser rather than guessing at YAML.
-enum MdFrontmatter {
-    Scalar(String),
-    Map(Vec<(String, String)>),
-}
-
-fn split_markdown_frontmatter(markdown: &str) -> (Vec<(String, MdFrontmatter)>, &str) {
-    let Some(rest) = markdown.strip_prefix("---\n") else {
-        return (Vec::new(), markdown);
-    };
-    let Some(end) = rest.find("\n---") else {
-        return (Vec::new(), markdown);
-    };
-    let after = &rest[end + "\n---".len()..];
-    let body = after
-        .strip_prefix("\n\n")
-        .or_else(|| after.strip_prefix('\n'))
-        .unwrap_or(after);
-    if !after.is_empty() && !after.starts_with('\n') {
-        return (Vec::new(), markdown);
+/// Split a leading `---` YAML frontmatter block off the chosen markdown.
+/// Values use the collection indexer's YAML parser so a richdoc seed and its
+/// index agree on scalar, sequence, and mapping types.
+fn split_markdown_frontmatter(markdown: &str) -> (serde_json::Map<String, Value>, &str) {
+    match dohc_engine_domain::collections::markdown_frontmatter_json_with_body(markdown) {
+        Some((Value::Object(frontmatter), body)) => {
+            let body = body
+                .strip_prefix("\r\n")
+                .or_else(|| body.strip_prefix('\n'))
+                .unwrap_or(body);
+            (frontmatter, body)
+        }
+        _ => (serde_json::Map::new(), markdown),
     }
-    let lines: Vec<&str> = rest[..end].lines().collect();
-    let mut entries: Vec<(String, MdFrontmatter)> = Vec::new();
-    let mut index = 0usize;
-    while index < lines.len() {
-        let line = lines[index];
-        if line.starts_with(' ') || line.trim().is_empty() {
-            return (Vec::new(), markdown);
-        }
-        if let Some((key, value)) = line.split_once(": ") {
-            if key.trim().is_empty() {
-                return (Vec::new(), markdown);
-            }
-            entries.push((key.to_string(), MdFrontmatter::Scalar(value.to_string())));
-            index += 1;
-            continue;
-        }
-        // `key:` alone opens the projector's one-level nested map: two-space
-        // indented `child: value` scalars, sorted on projection.
-        let Some(key) = line.strip_suffix(':') else {
-            return (Vec::new(), markdown);
-        };
-        if key.trim().is_empty() || key.contains(':') {
-            return (Vec::new(), markdown);
-        }
-        index += 1;
-        let mut children = Vec::new();
-        while index < lines.len() {
-            let Some(child) = lines[index].strip_prefix("  ") else {
-                break;
-            };
-            // Deeper nesting than the projector emits: bail to the body
-            // parser rather than mangling metadata.
-            if child.starts_with(' ') {
-                return (Vec::new(), markdown);
-            }
-            let Some((child_key, child_value)) = child.split_once(": ") else {
-                return (Vec::new(), markdown);
-            };
-            if child_key.trim().is_empty() {
-                return (Vec::new(), markdown);
-            }
-            children.push((child_key.to_string(), child_value.to_string()));
-            index += 1;
-        }
-        entries.push((key.to_string(), MdFrontmatter::Map(children)));
-    }
-    (entries, body)
 }
 
 fn parse_markdown_blocks(body: &str) -> Vec<MdBlock> {
@@ -1731,6 +1948,28 @@ pub(crate) fn any_to_json(any: &Any) -> Value {
     }
 }
 
+fn json_to_any(value: &Value) -> Any {
+    match value {
+        Value::Null => Any::Null,
+        Value::Bool(value) => Any::Bool(*value),
+        Value::Number(value) => {
+            const MAX_SAFE_INTEGER: u64 = (1_u64 << 53) - 1;
+            match value.as_i64() {
+                Some(integer) if integer.unsigned_abs() > MAX_SAFE_INTEGER => Any::BigInt(integer),
+                _ => Any::Number(value.as_f64().unwrap_or(f64::NAN)),
+            }
+        }
+        Value::String(value) => Any::from(value.as_str()),
+        Value::Array(values) => Any::from(values.iter().map(json_to_any).collect::<Vec<_>>()),
+        Value::Object(values) => Any::from(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), json_to_any(value)))
+                .collect::<HashMap<String, Any>>(),
+        ),
+    }
+}
+
 /// Minimal standard-base64 for the rare `Any::Buffer` case in canonical content.
 /// (dohc content has no binary Any values today; kept for completeness/parity.)
 fn base64_encode(bytes: &[u8]) -> String {
@@ -1833,49 +2072,140 @@ impl ProjectionBuffer {
     }
 }
 
-fn project_frontmatter(key: &str, value: &Value) -> ProjectionResult<String> {
-    match value {
-        Value::Object(map) if map.get("type") == Some(&json!("any")) => {
-            scalar_line(key, map.get("value").unwrap_or(&Value::Null))
-        }
-        other => scalar_line(key, other),
+/// yjs cannot place a bigint directly in a `Y.Array`, so its shared-type
+/// frontmatter branch stores one as a singleton `Y.Map` under this key.
+/// Literal user keys spelled like the sentinel arrive prefix-escaped with one
+/// extra `$` (any escape depth), mirroring the `$dohcInt64` wire markers.
+const FRONTMATTER_SHARED_BIGINT_KEY: &str = "$dohcBigInt";
+
+fn is_frontmatter_shared_bigint_spelling(key: &str) -> bool {
+    key.strip_prefix('$')
+        .is_some_and(|rest| rest.trim_start_matches('$') == "dohcBigInt")
+}
+
+fn unescape_frontmatter_shared_bigint_key(key: &str) -> &str {
+    if key.starts_with("$$") && is_frontmatter_shared_bigint_spelling(key) {
+        &key[1..]
+    } else {
+        key
     }
 }
 
-fn scalar_line(key: &str, value: &Value) -> ProjectionResult<String> {
+/// One frontmatter value as the plain JSON both engines settle. Shared-type
+/// values (yjs writes them for maps with a `constructor` key and for bigints
+/// in arrays) must render exactly like their plain-`Any` twins: the bigint
+/// sentinel becomes its integer and escaped sentinel keys lose one `$`.
+fn projection_frontmatter_value<T: ReadTxn>(
+    txn: &T,
+    out: Out,
+    depth: usize,
+    remaining_nodes: &mut usize,
+    source_bytes: &mut usize,
+) -> ProjectionResult<Value> {
+    match out {
+        Out::YMap(map) => {
+            consume_projection_value_node(depth, remaining_nodes)?;
+            if map.len(txn) == 1 {
+                if let Some(Out::Any(Any::BigInt(integer))) =
+                    map.get(txn, FRONTMATTER_SHARED_BIGINT_KEY)
+                {
+                    return Ok(json!(integer));
+                }
+            }
+            let mut entries = BTreeMap::new();
+            for (key, value) in map.iter(txn) {
+                *source_bytes = checked_projection_len(*source_bytes, key.len())?;
+                entries.insert(
+                    unescape_frontmatter_shared_bigint_key(key).to_owned(),
+                    projection_frontmatter_value(
+                        txn,
+                        value,
+                        depth + 1,
+                        remaining_nodes,
+                        source_bytes,
+                    )?,
+                );
+            }
+            Ok(Value::Object(entries.into_iter().collect()))
+        }
+        Out::YArray(array) => {
+            consume_projection_value_node(depth, remaining_nodes)?;
+            let mut items = Vec::new();
+            for value in array.iter(txn) {
+                items.push(projection_frontmatter_value(
+                    txn,
+                    value,
+                    depth + 1,
+                    remaining_nodes,
+                    source_bytes,
+                )?);
+            }
+            Ok(Value::Array(items))
+        }
+        Out::Any(any) => projection_any_to_json(&any, depth, remaining_nodes, source_bytes),
+        other => projection_out_json(txn, other, depth, remaining_nodes, source_bytes),
+    }
+}
+
+fn project_frontmatter(key: &str, value: &Value) -> ProjectionResult<String> {
     let mut output = ProjectionBuffer::new();
+    write_yaml_mapping_entry(&mut output, key, value, 0)?;
+    Ok(output.into_string())
+}
+
+fn write_yaml_mapping_entry(
+    output: &mut ProjectionBuffer,
+    key: &str,
+    value: &Value,
+    indent: usize,
+) -> ProjectionResult<()> {
+    output.push_repeat(' ', indent)?;
+    let key = yaml_string_if_plain(key)?;
+    output.push_str(&key)?;
     match value {
         Value::String(value) => {
-            output.push_str(key)?;
             output.push_str(": ")?;
-            output.push_str(value)?;
+            let value = yaml_string_if_plain(value)?;
+            output.push_str(&value)?;
             output.push('\n')?;
         }
         Value::Object(map) => {
-            // Nested map: emit sorted `key:` block (constraint 2 — keys already
-            // sorted by `any_to_json`'s BTreeMap).
-            output.push_str(key)?;
-            output.push_str(":\n")?;
-            for (k, v) in map {
-                let child = scalar_line(k, v)?;
-                output.push_str("  ")?;
-                output.push_str(child.trim_end())?;
-                output.push('\n')?;
+            if map.is_empty() {
+                output.push_str(": {}\n")?;
+            } else {
+                output.push_str(":\n")?;
+                for (k, v) in map {
+                    write_yaml_mapping_entry(output, k, v, indent + 2)?;
+                }
             }
         }
         Value::Null => {
-            output.push_str(key)?;
             output.push_str(": null\n")?;
         }
         other => {
-            output.push_str(key)?;
             output.push_str(": ")?;
             let value = ensure_projection_string(serde_json::to_string(other).unwrap_or_default())?;
             output.push_str(&value)?;
             output.push('\n')?;
         }
     }
-    Ok(output.into_string())
+    Ok(())
+}
+
+fn yaml_string_if_plain(value: &str) -> ProjectionResult<String> {
+    let candidate = format!("---\nvalue: {value}\n---\n");
+    let remains_the_same_string =
+        match dohc_engine_domain::collections::markdown_frontmatter_json(&candidate) {
+            Some(Value::Object(frontmatter)) if frontmatter.len() == 1 => {
+                frontmatter.get("value").and_then(Value::as_str) == Some(value)
+            }
+            _ => false,
+        };
+    if remains_the_same_string {
+        ensure_projection_string(value.to_owned())
+    } else {
+        ensure_projection_string(serde_json::to_string(value).unwrap_or_default())
+    }
 }
 
 #[derive(Debug)]
@@ -2863,9 +3193,9 @@ fn render_table(children: &[MarkdownNode]) -> ProjectionResult<String> {
             Some(TableAlign::Left) | None => {}
         }
     }
-    output.push_str(" |\n")?;
+    output.push_str(" |")?;
     for row in &rows[1..] {
-        output.push_str("| ")?;
+        output.push_str("\n| ")?;
         for (index, width) in widths.iter().enumerate() {
             if index != 0 {
                 output.push_str(" | ")?;
@@ -2873,7 +3203,7 @@ fn render_table(children: &[MarkdownNode]) -> ProjectionResult<String> {
             let value = row.get(index).map(|cell| cell.text.as_str()).unwrap_or("");
             pad_utf16_into(&mut output, value, *width)?;
         }
-        output.push_str(" |\n")?;
+        output.push_str(" |")?;
     }
     Ok(output.into_string())
 }
@@ -3887,6 +4217,42 @@ mod projection_tests {
         assert_eq!(error.code(), "markdown-rewrite-unsupported");
     }
 
+    #[test]
+    fn oversized_source_preserving_edits_leave_ydoc_byte_identical() {
+        let oversized = " ".repeat(dohc_engine_domain::MAX_TEXT_BYTES + 1);
+
+        let frontmatter_doc = Ydoc::wire();
+        frontmatter_doc
+            .rewrite_content_to_markdown(ContentKind::Richdoc, "body")
+            .expect("seed document");
+        let before = frontmatter_doc.encode_full_state();
+
+        assert!(matches!(
+            frontmatter_doc.frontmatter_set_preserving_markdown_source("id", "record", &oversized),
+            Err(CollabError::ProjectionTooLarge { actual, max })
+                if actual == dohc_engine_domain::MAX_TEXT_BYTES + 1
+                    && max == dohc_engine_domain::MAX_TEXT_BYTES
+        ));
+        assert_eq!(frontmatter_doc.encode_full_state(), before);
+
+        let rewrite_doc = Ydoc::wire();
+        rewrite_doc
+            .rewrite_content_to_markdown(ContentKind::Richdoc, "original")
+            .expect("seed document");
+        let before = rewrite_doc.encode_full_state();
+
+        assert!(matches!(
+            rewrite_doc.rewrite_content_to_markdown_preserving_source(
+                ContentKind::Richdoc,
+                &oversized,
+            ),
+            Err(CollabError::ProjectionTooLarge { actual, max })
+                if actual == dohc_engine_domain::MAX_TEXT_BYTES + 1
+                    && max == dohc_engine_domain::MAX_TEXT_BYTES
+        ));
+        assert_eq!(rewrite_doc.encode_full_state(), before);
+    }
+
     fn xml_text(value: impl Into<String>) -> XmlIn {
         XmlTextPrelim::new(value).into()
     }
@@ -4328,6 +4694,57 @@ mod projection_tests {
         assert_eq!(
             markdown,
             "\n| H               |\n| --------------- |\n| first<br>second |"
+        );
+    }
+
+    #[test]
+    fn table_followed_by_nested_list_has_one_markdown_block_separator() {
+        let doc = remote_doc_with_body([
+            xml_element(
+                "table",
+                &[],
+                [
+                    xml_element(
+                        "tableRow",
+                        &[],
+                        [
+                            xml_element("tableHeader", &[], [paragraph("Metric")]),
+                            xml_element("tableHeader", &[], [paragraph("Value")]),
+                        ],
+                    ),
+                    xml_element(
+                        "tableRow",
+                        &[],
+                        [
+                            xml_element("tableCell", &[], [paragraph("apples")]),
+                            xml_element("tableCell", &[], [paragraph("10")]),
+                        ],
+                    ),
+                ],
+            ),
+            xml_element(
+                "bulletList",
+                &[],
+                [xml_element(
+                    "listItem",
+                    &[],
+                    [
+                        paragraph("parent"),
+                        xml_element(
+                            "bulletList",
+                            &[],
+                            [xml_element("listItem", &[], [paragraph("nested")])],
+                        ),
+                    ],
+                )],
+            ),
+        ]);
+
+        assert_eq!(
+            doc.project(ContentKind::Richdoc)
+                .expect("small projection")
+                .content,
+            "\n| Metric | Value |\n| ------ | ----- |\n| apples | 10    |\n\n- parent\n  - nested"
         );
     }
 
@@ -4820,6 +5237,309 @@ fn main() {}
             frontmatter.contains("owner") && frontmatter.contains("ice"),
             "the nested map is real metadata, not body text: {frontmatter}"
         );
+    }
+
+    #[test]
+    fn empty_frontmatter_mappings_settle_and_roundtrip_as_mappings() {
+        let chosen = "---\ntop: {}\nnested:\n  child: {}\n---\n\nbody text";
+        let canonical = "---\nnested:\n  child: {}\ntop: {}\n---\n\nbody text";
+        let expected_frontmatter = json!({
+            "top": {},
+            "nested": { "child": {} },
+        });
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
+            .expect("seed empty frontmatter mappings");
+
+        assert_eq!(doc.frontmatter_json(), expected_frontmatter);
+        let settled = doc
+            .project(ContentKind::Richdoc)
+            .expect("settle empty frontmatter mappings")
+            .content;
+        assert_eq!(settled, canonical);
+
+        let roundtripped = Ydoc::wire();
+        roundtripped
+            .rewrite_content_to_markdown(ContentKind::Richdoc, &settled)
+            .expect("roundtrip settled frontmatter");
+        assert_eq!(roundtripped.frontmatter_json(), expected_frontmatter);
+        assert_eq!(
+            roundtripped
+                .project(ContentKind::Richdoc)
+                .expect("settle roundtripped frontmatter")
+                .content,
+            settled
+        );
+    }
+
+    #[test]
+    fn floating_point_frontmatter_key_survives_settlement_roundtrip() {
+        let chosen = "---\n1.5: value\n---\n\nbody text";
+        let canonical = "---\n\"1.5\": value\n---\n\nbody text";
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
+            .expect("seed floating-point frontmatter key");
+
+        assert_eq!(doc.frontmatter_json(), json!({ "1.5": "value" }));
+        let settled = doc
+            .project(ContentKind::Richdoc)
+            .expect("settle floating-point frontmatter key")
+            .content;
+        assert_eq!(settled, canonical);
+
+        let roundtripped = Ydoc::wire();
+        roundtripped
+            .rewrite_content_to_markdown(ContentKind::Richdoc, &settled)
+            .expect("roundtrip settled floating-point frontmatter key");
+        assert_eq!(roundtripped.frontmatter_json(), json!({ "1.5": "value" }));
+        assert_eq!(
+            roundtripped
+                .project(ContentKind::Richdoc)
+                .expect("settle roundtripped floating-point frontmatter key")
+                .content,
+            settled
+        );
+    }
+
+    #[test]
+    fn fresh_successor_preserves_frontmatter_integers_outside_the_javascript_safe_range() {
+        let key = crate::DocKey::new("ws", "main", "large-integer").expect("valid key");
+        let artifact = "---\ndebt: -9007199254740993\nestimate: 9007199254740993\n---\n\nbody text";
+        let result_sha256 = crate::hex_sha256(artifact.as_bytes());
+        let identity = SuccessorIdentity::derive(SuccessorIdentityInput {
+            key: &key,
+            predecessor_claim_id: &"a".repeat(64),
+            predecessor_state_vector_sha256: &"b".repeat(64),
+            artifact_op_kind: "conflict.resolve",
+            artifact_id: "large-integer-choice",
+            artifact_preimage_sha256: &"c".repeat(64),
+            content_kind: ContentKind::Richdoc,
+            result_sha256: &result_sha256,
+        });
+
+        let successor = fresh_successor_base(&identity, artifact)
+            .expect("large frontmatter integers remain representable");
+        let loaded = Ydoc::wire();
+        loaded.apply(&successor.update).expect("load successor");
+
+        assert_eq!(
+            loaded
+                .project(ContentKind::Richdoc)
+                .expect("project successor")
+                .content,
+            artifact
+        );
+        assert_eq!(
+            loaded.frontmatter_json()["estimate"],
+            json!(9_007_199_254_740_993_i64)
+        );
+        assert_eq!(
+            loaded.frontmatter_json()["debt"],
+            json!(-9_007_199_254_740_993_i64)
+        );
+    }
+
+    fn decode_fixture_int64_markers(value: &mut Value) {
+        match value {
+            Value::Array(values) => values.iter_mut().for_each(decode_fixture_int64_markers),
+            Value::Object(values) => {
+                let decoded = if values.len() == 1 {
+                    values
+                        .get("$dohcInt64")
+                        .and_then(Value::as_str)
+                        .map(|decimal| decimal.parse::<i64>().expect("fixture int64 is valid"))
+                } else {
+                    None
+                };
+                if let Some(integer) = decoded {
+                    *value = json!(integer);
+                } else {
+                    values.values_mut().for_each(decode_fixture_int64_markers);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn frontmatter_fixture_expectation(name: &str) -> Value {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../dohc-engine-domain/tests/fixtures/collection-frontmatter.json"
+        ))
+        .expect("frontmatter fixture parses");
+        let mut expected = fixture["vectors"]
+            .as_array()
+            .expect("frontmatter vectors")
+            .iter()
+            .find(|vector| vector["name"] == name)
+            .unwrap_or_else(|| panic!("fixture vector {name} exists"))["expected"]
+            .clone();
+        decode_fixture_int64_markers(&mut expected);
+        expected
+    }
+
+    /// The yjs shared-type frontmatter branch for the fixture markdown
+    /// `sequence: [{constructor: hostile-constructor}, <second item>]`: a
+    /// `Y.Array` holding real `Y.Map`s, with the second map carrying one
+    /// bigint under the chosen key.
+    fn shared_branch_sequence_doc(second_item_key: &str) -> Ydoc {
+        let doc = Ydoc::wire();
+        let frontmatter = doc.doc.get_or_insert_map(ROOT_FRONTMATTER);
+        let mut txn = doc.doc.transact_mut();
+        frontmatter.insert(
+            &mut txn,
+            "sequence",
+            yrs::ArrayPrelim::from([
+                yrs::In::from(yrs::MapPrelim::from_iter([(
+                    "constructor",
+                    Any::from("hostile-constructor"),
+                )])),
+                yrs::In::from(yrs::MapPrelim::from_iter([(
+                    second_item_key,
+                    Any::BigInt(9_007_199_254_740_993),
+                )])),
+            ]),
+        );
+        drop(txn);
+        doc
+    }
+
+    #[test]
+    fn shared_branch_bigint_sentinel_projects_as_the_plain_branch_scalar() {
+        let plain = Ydoc::wire();
+        let frontmatter = plain.doc.get_or_insert_map(ROOT_FRONTMATTER);
+        {
+            let mut txn = plain.doc.transact_mut();
+            frontmatter.insert(
+                &mut txn,
+                "sequence",
+                Any::from(vec![
+                    Any::from(HashMap::from([(
+                        "constructor".to_string(),
+                        Any::from("hostile-constructor"),
+                    )])),
+                    Any::BigInt(9_007_199_254_740_993),
+                ]),
+            );
+        }
+        let expected = plain
+            .project(ContentKind::Richdoc)
+            .expect("plain-branch projection")
+            .content;
+
+        let shared = shared_branch_sequence_doc(FRONTMATTER_SHARED_BIGINT_KEY);
+        let projected = shared
+            .project(ContentKind::Richdoc)
+            .expect("shared-branch projection")
+            .content;
+
+        assert!(
+            projected.contains("9007199254740993"),
+            "the sentinel decodes to its integer: {projected}"
+        );
+        assert_eq!(
+            projected, expected,
+            "both frontmatter branches settle identically"
+        );
+        assert_eq!(
+            dohc_engine_domain::collections::markdown_frontmatter_json(&projected),
+            Some(frontmatter_fixture_expectation(
+                "constructor-map-and-unsafe-integer-share-array"
+            )),
+            "the settled artifact parses to the shared vector expectation"
+        );
+    }
+
+    #[test]
+    fn escaped_shared_bigint_key_unescapes_and_projects_as_a_map() {
+        let plain = Ydoc::wire();
+        let frontmatter = plain.doc.get_or_insert_map(ROOT_FRONTMATTER);
+        {
+            let mut txn = plain.doc.transact_mut();
+            frontmatter.insert(
+                &mut txn,
+                "sequence",
+                Any::from(vec![
+                    Any::from(HashMap::from([(
+                        "constructor".to_string(),
+                        Any::from("hostile-constructor"),
+                    )])),
+                    Any::from(HashMap::from([(
+                        FRONTMATTER_SHARED_BIGINT_KEY.to_string(),
+                        Any::BigInt(9_007_199_254_740_993),
+                    )])),
+                ]),
+            );
+        }
+        let expected = plain
+            .project(ContentKind::Richdoc)
+            .expect("plain-branch projection")
+            .content;
+
+        let shared = shared_branch_sequence_doc("$$dohcBigInt");
+        let projected = shared
+            .project(ContentKind::Richdoc)
+            .expect("shared-branch projection")
+            .content;
+
+        assert!(
+            projected.contains("\"$dohcBigInt\""),
+            "the escaped key loses exactly one `$`: {projected}"
+        );
+        assert!(
+            !projected.contains("$$dohcBigInt"),
+            "no escape depth survives projection: {projected}"
+        );
+        assert_eq!(
+            projected, expected,
+            "the literal collision map survives both branches as a map"
+        );
+        assert_eq!(
+            dohc_engine_domain::collections::markdown_frontmatter_json(&projected),
+            Some(frontmatter_fixture_expectation(
+                "literal-shared-bigint-key-map-survives-the-shared-branch"
+            )),
+            "the settled artifact parses to the shared vector expectation"
+        );
+    }
+
+    #[test]
+    fn richdoc_rewrite_adopts_crlf_frontmatter_as_typed_fields() {
+        let doc = Ydoc::wire();
+        let chosen = "---\r\ndone: false\r\npriority: 3\r\nstatus: open\r\n---\r\n\r\nbody text";
+
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
+            .expect("richdoc rewrite");
+
+        assert_eq!(doc.frontmatter_json()["status"], json!("open"));
+        assert_eq!(doc.frontmatter_json()["priority"], json!(3));
+        assert_eq!(doc.frontmatter_json()["done"], json!(false));
+        let body =
+            serde_json::to_string(&doc.canonical_content()["body"]).expect("canonical body json");
+        assert_eq!(body.matches("body text").count(), 1);
+        assert!(
+            !body.contains("status"),
+            "frontmatter must not become body: {body}"
+        );
+        assert_eq!(
+            doc.project(ContentKind::Richdoc)
+                .expect("richdoc projection")
+                .content,
+            chosen,
+            "the fold must retain the source's CRLF byte shape"
+        );
+    }
+
+    #[test]
+    fn richdoc_projection_quotes_strings_that_yaml_would_retype_or_reject() {
+        let doc = Ydoc::wire();
+        let chosen = "---\ndone: \"true\"\nsummary: \"TODO: call Bob\"\n---\n\nbody text";
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
+            .expect("richdoc rewrite");
+
+        let projected = doc.project(ContentKind::Richdoc).expect("projection");
+        assert_eq!(projected.content, chosen);
+        assert_eq!(doc.frontmatter_json()["done"], json!("true"));
+        assert_eq!(doc.frontmatter_json()["summary"], json!("TODO: call Bob"));
     }
 
     #[test]

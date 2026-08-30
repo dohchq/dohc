@@ -46,6 +46,8 @@ struct YdocUpdatePayload {
     update_blob_sha256: String,
     lineage_claim_id: String,
     #[serde(default)]
+    actor_origin_id: Option<String>,
+    #[serde(default)]
     is_base_state: bool,
 }
 
@@ -54,6 +56,15 @@ fn valid_lineage_claim_id(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn valid_actor_origin_id(value: Option<&str>) -> bool {
+    match value {
+        Some(value) => {
+            !value.is_empty() && value.len() <= dohc_engine_storage::MAX_IDENTIFIER_BYTES
+        }
+        None => true,
+    }
 }
 
 /// Admit a valid base only for authenticated, exact-coordinate repair.
@@ -72,6 +83,7 @@ pub(crate) fn is_exact_repairable_ydoc_base_claim(
         && payload.update_blob_sha256 == lineage_claim_id
         && payload.lineage_claim_id == lineage_claim_id
         && valid_lineage_claim_id(lineage_claim_id)
+        && valid_actor_origin_id(payload.actor_origin_id.as_deref())
         && ContentKind::parse(&payload.content_kind).is_ok()
         && classification == PathClassification::Tracked
         && normalized.as_deref() == Some(payload.path.as_str())
@@ -595,6 +607,7 @@ fn drain_deferred_ydoc(
                     .map_err(|_| local_corruption("parked ydoc.update payload is malformed"))?;
                 if lineage_claim_id != payload.lineage_claim_id
                     || !valid_lineage_claim_id(&lineage_claim_id)
+                    || !valid_actor_origin_id(payload.actor_origin_id.as_deref())
                 {
                     return Err(local_corruption(
                         "parked ydoc.update lineage identity does not match its payload",
@@ -712,11 +725,19 @@ fn drain_deferred_ydoc(
                 cache,
                 key,
                 &remote,
+                payload.actor_origin_id.as_deref(),
                 faults,
                 recorded_at_ms,
             )
         } else {
-            apply_remote_update(store, key, &remote, faults, recorded_at_ms)
+            apply_remote_update(
+                store,
+                key,
+                &remote,
+                payload.actor_origin_id.as_deref(),
+                faults,
+                recorded_at_ms,
+            )
         };
         let outcome = match apply_result {
             Ok(outcome) => outcome,
@@ -949,7 +970,13 @@ fn write_final_drained_projection(
             search_policy,
         )?;
         // Origination intentionally remains a full cold reconstruction.
-        crate::originate_ydoc_base_in_tx(tx, key, &payload.path, payload_recorded_at)
+        crate::originate_ydoc_base_in_tx(
+            tx,
+            key,
+            &payload.path,
+            payload.actor_origin_id.as_deref(),
+            payload_recorded_at,
+        )
     })
 }
 
@@ -1257,7 +1284,7 @@ pub(crate) fn reconcile_conflict_parent_resulting_head_in_tx(
     let complete = ensure_ydoc_lineage_complete_in_tx(tx, key)?;
     match resulting {
         ResultingHead::Text { path, text } => {
-            fold_complete_ydoc_lineage_in_tx(tx, &complete, path, text, now_ms, false)
+            fold_complete_ydoc_lineage_in_tx(tx, &complete, path, text, None, now_ms, false)
         }
         ResultingHead::BinaryOrAbsent => retire_complete_ydoc_lineage_in_tx(tx, &complete),
     }
@@ -1272,6 +1299,7 @@ pub fn reconcile_local_resulting_head_in_tx(
     version_id: &str,
     object_id: &str,
     resulting: ResultingHead<'_>,
+    actor_origin_id: Option<&str>,
     now_ms: i64,
 ) -> Result<(), SyncError> {
     let key =
@@ -1280,9 +1308,15 @@ pub fn reconcile_local_resulting_head_in_tx(
         })?;
     let complete = ensure_ydoc_lineage_complete_in_tx(tx, &key)?;
     match resulting {
-        ResultingHead::Text { path, text } => {
-            fold_complete_ydoc_lineage_in_tx(tx, &complete, path, text, now_ms, true)
-        }
+        ResultingHead::Text { path, text } => fold_complete_ydoc_lineage_in_tx(
+            tx,
+            &complete,
+            path,
+            text,
+            actor_origin_id,
+            now_ms,
+            true,
+        ),
         ResultingHead::BinaryOrAbsent => retire_complete_ydoc_lineage_in_tx(tx, &complete),
     }
 }
@@ -1397,7 +1431,7 @@ pub fn fold_resolution_into_ydoc_in_tx(
         key,
         state: complete,
     };
-    fold_complete_ydoc_lineage_in_tx(tx, &complete, path, chosen_text, now_ms, true)
+    fold_complete_ydoc_lineage_in_tx(tx, &complete, path, chosen_text, None, now_ms, true)
 }
 
 pub(crate) fn fold_complete_ydoc_lineage_in_tx(
@@ -1405,6 +1439,7 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
     complete: &CompleteYdocLineage,
     path: &str,
     chosen_text: &str,
+    actor_origin_id: Option<&str>,
     now_ms: i64,
     journal: bool,
 ) -> Result<(), SyncError> {
@@ -1442,11 +1477,24 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
             // exactly like a first open.
             return retire_complete_ydoc_lineage_in_tx(tx, complete);
         }
-        let update = doc
-            .rewrite_content_to_markdown(marker.content_kind, chosen_text)
-            .map_err(|_| SyncError::InvalidInput {
-                reason: "the content kind does not support Markdown conflict resolution",
-            })?;
+        let canonical_projection = doc
+            .project(marker.content_kind)
+            .map_err(|error| map_projection_error(error, "ydoc projection is invalid"))?;
+        let source_preserved = marker.content_kind == ContentKind::Richdoc
+            && projection.content != canonical_projection.content
+            && doc.markdown_source_reference().is_some_and(|reference| {
+                reference.source_sha256 == hex_sha256(projection.content.as_bytes())
+                    && reference.projection_sha256
+                        == hex_sha256(canonical_projection.content.as_bytes())
+            });
+        let update = if source_preserved {
+            doc.rewrite_content_to_markdown_preserving_source(marker.content_kind, chosen_text)
+        } else {
+            doc.rewrite_content_to_markdown(marker.content_kind, chosen_text)
+        }
+        .map_err(|_| SyncError::InvalidInput {
+            reason: "the content kind does not support Markdown conflict resolution",
+        })?;
         // VERIFY THE FOLD'S OWN OUTPUT. The markdown parser behind the
         // rewrite is asserted to be the projector's inverse, and nothing
         // makes that true: a construct it does not model round-trips through
@@ -1476,9 +1524,13 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
             });
         }
         let outcome =
-            dohc_engine_collab::record_update_in_tx(tx, key, &update, now_ms).map_err(|error| {
-                map_collab_payload_error(error, "conflict resolution fold could not be appended")
-            })?;
+            dohc_engine_collab::record_update_in_tx(tx, key, &update, actor_origin_id, now_ms)
+                .map_err(|error| {
+                    map_collab_payload_error(
+                        error,
+                        "conflict resolution fold could not be appended",
+                    )
+                })?;
         // Journal only when this workspace actually replicates: a receiver
         // that never enrolled has no sync identity, and its choice needs no
         // peer. `emit_outbound` alone cannot gate this — a claimed lineage
@@ -1502,6 +1554,7 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
                     marker.content_kind,
                     &dohc_engine_storage::hex_sha256(&update),
                     lineage_claim_id,
+                    actor_origin_id,
                     false,
                 ),
                 now_ms,
@@ -1645,9 +1698,15 @@ pub fn project_ydoc_with_store(
     content_kind: dohc_engine_collab::ContentKind,
 ) -> Result<dohc_engine_collab::Projection, SyncError> {
     if content_kind != dohc_engine_collab::ContentKind::Scene {
-        return doc
+        let mut projection = doc
             .project(content_kind)
-            .map_err(|error| map_projection_error(error, "ydoc projection is invalid"));
+            .map_err(|error| map_projection_error(error, "ydoc projection is invalid"))?;
+        if content_kind == dohc_engine_collab::ContentKind::Richdoc
+            && let Some(source) = doc.preserved_markdown_source(&projection.content)
+        {
+            projection.content = source;
+        }
+        return Ok(projection);
     }
     let folded = doc.fold_scene();
     // The unhydrated portable form bounds the scene-owned JSON before any
@@ -1779,6 +1838,16 @@ pub fn project_and_write_in_tx(
     search_policy: Option<&SearchPolicySnapshot>,
 ) -> Result<(), SyncError> {
     let current = validate_ydoc_identity(tx, key, path)?;
+    if content_kind == dohc_engine_collab::ContentKind::Richdoc {
+        dohc_engine_domain::synchronize_collection_frontmatter_index_in_tx(
+            tx,
+            &key.workspace_id,
+            &key.version_id,
+            &key.object_id,
+            &doc.frontmatter_json(),
+        )
+        .map_err(map_domain_hard_error)?;
+    }
     let projection = project_ydoc_with_store(tx, key, doc, content_kind)?;
     // While a sync conflict is open on this object, the visible head belongs
     // to the user's review: writing through it would clobber the exact state
@@ -1958,6 +2027,14 @@ fn apply_ydoc_envelope_inner(
             "ydoc.update lineage claim is invalid",
         );
     }
+    if !valid_actor_origin_id(payload.actor_origin_id.as_deref()) {
+        return refuse_ydoc(
+            store,
+            envelope,
+            faults,
+            "ydoc.update actor origin is invalid",
+        );
+    }
     let search_policy = search_policy_for_store(store);
     // Gate on the SAME floor the projection sink applies
     // (`validate_plaintext_storable_path`) rather than R10's narrow
@@ -2066,7 +2143,9 @@ fn apply_ydoc_envelope_inner(
             for (queued_claim_id, payload_json) in rows {
                 let queued_payload = serde_json::from_str::<YdocUpdatePayload>(&payload_json)
                     .map_err(|_| local_corruption("parked ydoc.update payload is malformed"))?;
-                if queued_claim_id != queued_payload.lineage_claim_id {
+                if queued_claim_id != queued_payload.lineage_claim_id
+                    || !valid_actor_origin_id(queued_payload.actor_origin_id.as_deref())
+                {
                     return Err(local_corruption(
                         "parked ydoc.update lineage identity does not match its payload",
                     ));
@@ -2747,6 +2826,7 @@ fn apply_ydoc_envelope_inner(
                     &mut cache_probe,
                     &key,
                     &remote,
+                    payload.actor_origin_id.as_deref(),
                     op.recorded_at_ms,
                 )
             } else {
@@ -2754,6 +2834,7 @@ fn apply_ydoc_envelope_inner(
                     tx,
                     &key,
                     &remote,
+                    payload.actor_origin_id.as_deref(),
                     op.recorded_at_ms,
                 )
             }
@@ -2786,6 +2867,7 @@ fn apply_ydoc_envelope_inner(
                                 tx,
                                 &key,
                                 &update_path,
+                                payload.actor_origin_id.as_deref(),
                                 op.recorded_at_ms,
                             )?
                         {
@@ -3104,6 +3186,148 @@ fn map_domain_hard_error(error: DomainError) -> SyncError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preserved_markdown_source_crosses_the_ydoc_update_without_a_local_blob() {
+        const ORIGINAL: &str =
+            "\n\n| Key | Value |\n| --- | --- |\n| generated |  |\n\n**bold** _italic_ `code`";
+        const RECORD_ID: &str = "01j00000000000000000000000";
+
+        let sender = dohc_engine_collab::Ydoc::wire();
+        let seed = sender
+            .rewrite_content_to_markdown(ContentKind::Richdoc, ORIGINAL)
+            .expect("seed sender");
+        let adopted = format!("---\nid: {RECORD_ID}\n---\n\n{ORIGINAL}");
+        let adoption = sender
+            .frontmatter_set_preserving_markdown_source("id", RECORD_ID, &adopted)
+            .expect("adopt sender");
+        assert_ne!(
+            sender
+                .project(ContentKind::Richdoc)
+                .expect("canonical sender projection")
+                .content,
+            adopted,
+            "the regression requires lexical bytes the canonical projector changes"
+        );
+
+        let receiver = dohc_engine_collab::Ydoc::wire();
+        receiver.apply(&seed).expect("apply seed on receiver");
+        receiver
+            .apply(&adoption)
+            .expect("apply adoption on receiver");
+        let connection = Connection::open_in_memory().expect("open empty receiver database");
+        let key = DocKey::new("workspace", "main", "record").expect("receiver key");
+        let projection =
+            project_ydoc_with_store(&connection, &key, &receiver, ContentKind::Richdoc)
+                .expect("project receiver without source blob");
+
+        assert_eq!(projection.content, adopted);
+    }
+
+    #[test]
+    fn stale_preserved_markdown_source_settles_from_the_current_projection() {
+        const ORIGINAL: &str =
+            "\n\n| Key | Value |\n| --- | --- |\n| generated |  |\n\n**bold** _italic_ `code`";
+        const RECORD_ID: &str = "01j00000000000000000000000";
+
+        let remote = dohc_engine_collab::Ydoc::wire();
+        remote
+            .rewrite_content_to_markdown(ContentKind::Richdoc, ORIGINAL)
+            .expect("seed remote");
+        let injected_source = format!("---\nid: {RECORD_ID}\n---\n\n{ORIGINAL}");
+        remote
+            .frontmatter_set_preserving_markdown_source("id", RECORD_ID, &injected_source)
+            .expect("plant source metadata");
+        remote.frontmatter_set("status", "current canonical value");
+
+        let receiver = dohc_engine_collab::Ydoc::wire();
+        receiver
+            .apply(&remote.encode_full_state())
+            .expect("apply remote state with stale source metadata");
+        let canonical = receiver
+            .project(ContentKind::Richdoc)
+            .expect("current canonical projection");
+        let reference = receiver
+            .markdown_source_reference()
+            .expect("remote source reference");
+        assert_ne!(
+            reference.projection_sha256,
+            hex_sha256(canonical.content.as_bytes()),
+            "the regression requires a projection witness stale against the document it rides in"
+        );
+
+        let connection = Connection::open_in_memory().expect("open empty receiver database");
+        let key = DocKey::new("workspace", "main", "record").expect("receiver key");
+        let settled = project_ydoc_with_store(&connection, &key, &receiver, ContentKind::Richdoc)
+            .expect("settle receiver");
+
+        assert_eq!(settled.content, canonical.content);
+        assert_ne!(settled.content, injected_source);
+    }
+
+    #[test]
+    fn planted_markdown_source_with_a_fresh_witness_settles_from_the_projection() {
+        const ORIGINAL: &str =
+            "\n\n| Key | Value |\n| --- | --- |\n| generated |  |\n\n**bold** _italic_ `code`";
+        const RECORD_ID: &str = "01j00000000000000000000000";
+        const PLANTED: &str = "# bytes the canonical document never represented\n";
+
+        let remote = dohc_engine_collab::Ydoc::wire();
+        remote
+            .rewrite_content_to_markdown(ContentKind::Richdoc, ORIGINAL)
+            .expect("seed remote");
+        // The reserved metadata rides the replicated doc, so a client-authored
+        // update can write it directly: planted source bytes, their matching
+        // digest, and the CURRENT canonical projection's digest. Both digest
+        // checks pass; only equivalence is missing.
+        remote
+            .frontmatter_set_preserving_markdown_source("id", RECORD_ID, PLANTED)
+            .expect("plant source metadata");
+
+        let receiver = dohc_engine_collab::Ydoc::wire();
+        receiver
+            .apply(&remote.encode_full_state())
+            .expect("apply remote state with planted source metadata");
+        let canonical = receiver
+            .project(ContentKind::Richdoc)
+            .expect("current canonical projection");
+        let reference = receiver
+            .markdown_source_reference()
+            .expect("planted source reference");
+        assert_eq!(
+            reference.projection_sha256,
+            hex_sha256(canonical.content.as_bytes()),
+            "the attack requires a projection witness fresh against the current canonical state"
+        );
+        assert_eq!(
+            reference.source_sha256,
+            hex_sha256(PLANTED.as_bytes()),
+            "the attack requires a source digest matching the planted bytes"
+        );
+
+        let connection = Connection::open_in_memory().expect("open empty receiver database");
+        let key = DocKey::new("workspace", "main", "record").expect("receiver key");
+        let settled = project_ydoc_with_store(&connection, &key, &receiver, ContentKind::Richdoc)
+            .expect("settle receiver");
+
+        assert_eq!(settled.content, canonical.content);
+        assert_ne!(settled.content, PLANTED);
+    }
+
+    #[test]
+    fn preserved_markdown_source_cannot_exceed_the_text_store_cap() {
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, "body")
+            .expect("seed document");
+        let oversized = " ".repeat(dohc_engine_domain::MAX_TEXT_BYTES + 1);
+
+        assert!(matches!(
+            doc.frontmatter_set_preserving_markdown_source("id", "record", &oversized),
+            Err(CollabError::ProjectionTooLarge { actual, max })
+                if actual == dohc_engine_domain::MAX_TEXT_BYTES + 1
+                    && max == dohc_engine_domain::MAX_TEXT_BYTES
+        ));
+    }
 
     #[test]
     fn projection_limit_reason_names_each_content_kind() {

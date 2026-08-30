@@ -241,6 +241,33 @@ const conflict: ConflictRecord = {
   incoming: conflictState,
 };
 
+const collectionSummary = {
+  path: "projects",
+  status: "degraded",
+  reasons: [{ code: "unknown-field-reference", path: "/views/0/groupBy" }],
+};
+const collectionRecord = {
+  id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+  path: "projects/roadmap.md",
+  conflicted: true,
+  values: [
+    {
+      field: "status",
+      value: "active",
+      validation: { status: "valid" },
+      resolvedRelations: [],
+    },
+    {
+      field: "legacy",
+      value: { nested: [1, true, null] },
+      validation: { status: "untyped" },
+      resolvedRelations: [
+        { recordId: "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb", label: "Linked" },
+      ],
+    },
+  ],
+};
+
 const WORKSPACE_DECODER_CASES: Array<{
   method: WorkspaceMethod;
   valid: Parameters<typeof decodeWorkspaceResult>[1];
@@ -255,6 +282,80 @@ const WORKSPACE_DECODER_CASES: Array<{
   {
     method: WORKSPACE_METHOD.conflictsResolve,
     valid: { conflict, write: null, delete: null },
+  },
+  {
+    method: WORKSPACE_METHOD.collectionsList,
+    valid: { collections: [collectionSummary] },
+  },
+  {
+    method: WORKSPACE_METHOD.collectionsListPendingAdoptions,
+    valid: {
+      adoptions: [
+        {
+          versionId: "main",
+          recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+          collectionPath: "projects",
+          filePath: "projects/roadmap.md",
+          objectId: "object",
+        },
+      ],
+      nextCursor: {
+        filePath: "projects/roadmap.md",
+        recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      },
+    },
+  },
+  {
+    method: WORKSPACE_METHOD.collectionsGet,
+    valid: {
+      ...collectionSummary,
+      schema: {
+        name: "Projects",
+        description: null,
+        fields: [{ name: "status", type: "text" }],
+        views: [
+          {
+            name: "All",
+            kind: "table",
+            groupBy: null,
+            sort: [{ field: "status", direction: "asc" }],
+            visibleFields: null,
+            dateField: null,
+          },
+        ],
+      },
+      recordCount: 1,
+    },
+  },
+  {
+    method: WORKSPACE_METHOD.collectionsQuery,
+    valid: {
+      collection: collectionSummary,
+      records: [collectionRecord],
+      groups: [{ value: "active", records: [collectionRecord] }],
+      nextCursor: {
+        sortValues: [{ present: true, value: "active" }],
+        recordPath: collectionRecord.path,
+        recordId: collectionRecord.id,
+      },
+    },
+  },
+  {
+    method: WORKSPACE_METHOD.collectionsGetRecord,
+    valid: {
+      collection: collectionSummary,
+      record: collectionRecord,
+      history: [
+        {
+          historyId: 1,
+          field: "status",
+          previous: { present: false, value: null },
+          next: { present: true, value: "active" },
+          authorOriginId: null,
+          recordedAtMs: 1,
+        },
+      ],
+    },
   },
   { method: WORKSPACE_METHOD.searchQuery, valid: [] },
   {
@@ -1310,7 +1411,7 @@ describe("VersionedLiveAdapter", () => {
     }
   });
 
-  it("encodes workspace.open and all eight bound workspace-family methods", async () => {
+  it("encodes workspace.open and representative bound workspace-family methods", async () => {
     const openRequests: Request[] = [];
     const captureAuthor = {
       kind: "agent" as const,
@@ -1351,6 +1452,225 @@ describe("VersionedLiveAdapter", () => {
         params: entry.params,
       });
     }
+  });
+
+  it("encodes the collection reads with their exact methods and params", async () => {
+    const requests: Request[] = [];
+    const adapter = new VersionedLiveAdapter(
+      captureClient(requests),
+      WORKSPACE,
+      { workspaceId: WORKSPACE },
+    );
+    const query = {
+      collectionPath: "projects",
+      filter: {
+        field: "metadata",
+        operator: "contains" as const,
+        value: { nested: ["active", 1, true, null] },
+      },
+      sort: [
+        { field: "due", direction: "asc" as const },
+        { field: "title", direction: "desc" as const },
+      ],
+      groupBy: "status",
+      resolveRelations: true,
+      limit: 25,
+      cursor: {
+        sortValues: [
+          { present: true, value: "2026-09-01" },
+          { present: false, value: null },
+        ],
+        recordPath: "projects/roadmap.md",
+        recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      },
+    };
+
+    await expect(adapter.listCollections()).rejects.toBe(SENTINEL);
+    await expect(
+      adapter.getCollection({ collectionPath: "projects" }),
+    ).rejects.toBe(SENTINEL);
+    await expect(
+      adapter.listPendingCollectionAdoptions({
+        limit: 25,
+        cursor: {
+          filePath: "projects/old.md",
+          recordId: "rec_zzzzzzzzzzzzzzzzzzzzzzzzzz",
+        },
+      }),
+    ).rejects.toBe(SENTINEL);
+    await expect(adapter.queryCollectionRecords(query)).rejects.toBe(SENTINEL);
+    await expect(
+      adapter.getCollectionRecord({
+        collectionPath: "projects",
+        recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+        historyLimit: 25,
+        beforeHistoryId: 17,
+      }),
+    ).rejects.toBe(SENTINEL);
+
+    expect(
+      requests.map(
+        ({ method, workspace, params, idempotencyKey, deadlineMs }) => ({
+          method,
+          workspace,
+          params,
+          idempotencyKey,
+          deadlineMs,
+        }),
+      ),
+    ).toEqual([
+      {
+        method: "collections.list",
+        workspace: WORKSPACE,
+        params: {},
+        idempotencyKey: undefined,
+        deadlineMs: undefined,
+      },
+      {
+        method: "collections.get",
+        workspace: WORKSPACE,
+        params: { collectionPath: "projects" },
+        idempotencyKey: undefined,
+        deadlineMs: undefined,
+      },
+      {
+        method: "collections.listPendingAdoptions",
+        workspace: WORKSPACE,
+        params: {
+          limit: 25,
+          cursor: {
+            filePath: "projects/old.md",
+            recordId: "rec_zzzzzzzzzzzzzzzzzzzzzzzzzz",
+          },
+        },
+        idempotencyKey: undefined,
+        deadlineMs: undefined,
+      },
+      {
+        method: "collections.query",
+        workspace: WORKSPACE,
+        params: query,
+        idempotencyKey: undefined,
+        deadlineMs: undefined,
+      },
+      {
+        method: "collections.getRecord",
+        workspace: WORKSPACE,
+        params: {
+          collectionPath: "projects",
+          recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+          historyLimit: 25,
+          beforeHistoryId: 17,
+        },
+        idempotencyKey: undefined,
+        deadlineMs: undefined,
+      },
+    ]);
+  });
+
+  it("hydrates near-limit collection results from correlated blob egress", async () => {
+    const notes = "x".repeat(10 * 1024 * 1024 - 1024);
+    const markedInteger = { $dohcInt64: "9007199254740993" };
+    const record = {
+      id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      path: "projects/roadmap.md",
+      conflicted: false,
+      values: [
+        {
+          field: "notes",
+          value: notes,
+          validation: { status: "valid" },
+          resolvedRelations: [],
+        },
+        {
+          field: "estimate",
+          value: markedInteger,
+          validation: { status: "valid" },
+          resolvedRelations: [],
+        },
+      ],
+    };
+    const results = {
+      [WORKSPACE_METHOD.collectionsGet]: {
+        path: "projects",
+        status: "valid",
+        reasons: [],
+        schema: {
+          name: "Projects",
+          description: notes,
+          fields: [],
+          views: [],
+        },
+        recordCount: 1,
+      },
+      [WORKSPACE_METHOD.collectionsQuery]: {
+        collection: { path: "projects", status: "valid", reasons: [] },
+        records: [record],
+        groups: null,
+        nextCursor: null,
+      },
+      [WORKSPACE_METHOD.collectionsGetRecord]: {
+        collection: { path: "projects", status: "valid", reasons: [] },
+        record,
+        history: [],
+      },
+    } as const;
+    const blobHandlers = new Set<
+      Parameters<NonNullable<MinimalDaemonClient["onBlob"]>>[0]
+    >();
+    const client: MinimalDaemonClient = {
+      close: () => undefined,
+      helloAck: { capabilities: ["blobs"] },
+      onBlob(handler) {
+        blobHandlers.add(handler);
+        return () => blobHandlers.delete(handler);
+      },
+      async sendRequest(request): Promise<Response> {
+        const method = request.method as keyof typeof results;
+        const bytes = new TextEncoder().encode(JSON.stringify(results[method]));
+        const sha256 = createHash("sha256").update(bytes).digest("hex");
+        for (const handler of blobHandlers) {
+          handler({
+            requestId: request.id,
+            streamId: request.id,
+            totalBytes: bytes.byteLength,
+            sha256,
+            bytes,
+          });
+        }
+        return {
+          id: request.id,
+          result: {
+            collectionJson: null,
+            blobSha256: sha256,
+            byteLength: bytes.byteLength,
+            inbandLimitBytes: 8 * 1024 * 1024,
+          },
+        };
+      },
+    };
+    const adapter = new VersionedLiveAdapter(client, WORKSPACE, {
+      workspaceId: WORKSPACE,
+    });
+
+    const collection = await adapter.getCollection({
+      collectionPath: "projects",
+    });
+    const queried = await adapter.queryCollectionRecords({
+      collectionPath: "projects",
+      limit: 1,
+    });
+    const fetched = await adapter.getCollectionRecord({
+      collectionPath: "projects",
+      recordId: record.id,
+      historyLimit: 1,
+    });
+
+    expect(collection.schema.description).toBe(notes);
+    expect(queried.records[0]?.values[0]?.value).toBe(notes);
+    expect(queried.records[0]?.values[1]?.value).toBe(9007199254740993n);
+    expect(fetched.record.values[0]?.value).toBe(notes);
+    expect(fetched.record.values[1]?.value).toBe(9007199254740993n);
   });
 
   it.each(WORKSPACE_DECODER_CASES)(

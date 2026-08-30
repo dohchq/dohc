@@ -42,6 +42,7 @@ pub fn originate_ydoc_base_in_tx(
     tx: &Transaction<'_>,
     key: &DocKey,
     path: &str,
+    actor_origin_id: Option<&str>,
     now_ms: i64,
 ) -> Result<BaseOrigination, SyncError> {
     let Some(marker) =
@@ -96,6 +97,7 @@ pub fn originate_ydoc_base_in_tx(
                     marker.content_kind,
                     &base_snapshot_sha,
                     &base_snapshot_sha,
+                    actor_origin_id,
                     true,
                 ),
                 now_ms,
@@ -151,9 +153,10 @@ pub fn ydoc_update_payload(
     content_kind: ContentKind,
     update_blob_sha256: &str,
     lineage_claim_id: &str,
+    actor_origin_id: Option<&str>,
     is_base_state: bool,
 ) -> serde_json::Value {
-    serde_json::json!({
+    let mut payload = serde_json::json!({
         "versionId": key.version_id,
         "objectId": key.object_id,
         "path": path,
@@ -161,5 +164,9 @@ pub fn ydoc_update_payload(
         "updateBlobSha256": update_blob_sha256,
         "lineageClaimId": lineage_claim_id,
         "isBaseState": is_base_state,
-    })
+    });
+    if let Some(actor_origin_id) = actor_origin_id {
+        payload["actorOriginId"] = serde_json::Value::String(actor_origin_id.to_owned());
+    }
+    payload
 }

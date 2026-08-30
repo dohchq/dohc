@@ -3,6 +3,18 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as SchemaGetter from "effect/SchemaGetter";
 import * as Struct from "effect/Struct";
+import {
+  COLLECTION_SCHEMA_REASON_CODES,
+  FIELD_VALUE_REASON_CODES,
+  type CollectionGetParams as CollectionGetContractParams,
+  type CollectionGetRecordParams as CollectionGetRecordContractParams,
+  type CollectionGetRecordResult as CollectionGetRecordContractResult,
+  type CollectionGetResult as CollectionGetContractResult,
+  type CollectionListResult as CollectionListContractResult,
+  type CollectionQueryParams as CollectionQueryContractParams,
+  type CollectionQueryResult as CollectionQueryContractResult,
+  type CollectionValue,
+} from "@dohc/workspace-contracts/collection";
 import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
 
 export const WORKSPACE_METHOD = {
@@ -11,6 +23,11 @@ export const WORKSPACE_METHOD = {
   conflictsList: "conflicts.list",
   conflictsOpen: "conflicts.open",
   conflictsResolve: "conflicts.resolve",
+  collectionsList: "collections.list",
+  collectionsListPendingAdoptions: "collections.listPendingAdoptions",
+  collectionsGet: "collections.get",
+  collectionsQuery: "collections.query",
+  collectionsGetRecord: "collections.getRecord",
   searchQuery: "search.query",
   searchQueryPage: "search.queryPage",
   searchQueryChatMessagesGranular: "search.queryChatMessagesGranular",
@@ -41,6 +58,11 @@ export type WorkspaceOpenParams = WorkspaceJsonObject & {
   recoverRunningDispatches?: boolean;
 };
 export type WorkspaceEmptyParams = WorkspaceJsonObject;
+export type CollectionGetParams =
+  WorkspaceJsonObject & CollectionGetContractParams;
+export type CollectionQueryParams = CollectionQueryContractParams;
+export type CollectionGetRecordParams =
+  WorkspaceJsonObject & CollectionGetRecordContractParams;
 export type ConflictListParams = WorkspaceJsonObject & {
   status?: "open" | "resolved";
   afterConflictId?: string;
@@ -175,6 +197,30 @@ export type ConflictResolveResult =
     })
   | ReplicatedConflictResult;
 
+export type CollectionListResult = CollectionListContractResult;
+export type CollectionPendingAdoption = WorkspaceJsonObject & {
+  versionId: string;
+  recordId: string;
+  collectionPath: string;
+  filePath: string;
+  objectId: string;
+};
+export type CollectionPendingAdoptionCursor = WorkspaceJsonObject & {
+  filePath: string;
+  recordId: string;
+};
+export type CollectionPendingAdoptionsParams = WorkspaceJsonObject & {
+  limit?: number;
+  cursor?: CollectionPendingAdoptionCursor;
+};
+export type CollectionPendingAdoptionsPage = WorkspaceJsonObject & {
+  adoptions: CollectionPendingAdoption[];
+  nextCursor: CollectionPendingAdoptionCursor | null;
+};
+export type CollectionGetResult = CollectionGetContractResult;
+export type CollectionQueryResult = CollectionQueryContractResult;
+export type CollectionGetRecordResult = CollectionGetRecordContractResult;
+
 export type SearchResult = WorkspaceJsonObject & {
   surface: "file" | "chat";
   path: string;
@@ -232,6 +278,11 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.conflictsList]: ConflictListParams;
   [WORKSPACE_METHOD.conflictsOpen]: ConflictOpenParams;
   [WORKSPACE_METHOD.conflictsResolve]: ConflictResolveParams;
+  [WORKSPACE_METHOD.collectionsList]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.collectionsListPendingAdoptions]: CollectionPendingAdoptionsParams;
+  [WORKSPACE_METHOD.collectionsGet]: CollectionGetParams;
+  [WORKSPACE_METHOD.collectionsQuery]: CollectionQueryParams;
+  [WORKSPACE_METHOD.collectionsGetRecord]: CollectionGetRecordParams;
   [WORKSPACE_METHOD.searchQuery]: SearchQueryParams;
   [WORKSPACE_METHOD.searchQueryPage]: SearchQueryPageParams;
   [WORKSPACE_METHOD.searchQueryChatMessagesGranular]: SearchQueryChatMessagesGranularParams;
@@ -247,6 +298,11 @@ export type WorkspaceMethodResultMap = {
   [WORKSPACE_METHOD.conflictsList]: ConflictListPage;
   [WORKSPACE_METHOD.conflictsOpen]: ConflictOpenResult;
   [WORKSPACE_METHOD.conflictsResolve]: ConflictResolveResult;
+  [WORKSPACE_METHOD.collectionsList]: CollectionListResult;
+  [WORKSPACE_METHOD.collectionsListPendingAdoptions]: CollectionPendingAdoptionsPage;
+  [WORKSPACE_METHOD.collectionsGet]: CollectionGetResult;
+  [WORKSPACE_METHOD.collectionsQuery]: CollectionQueryResult;
+  [WORKSPACE_METHOD.collectionsGetRecord]: CollectionGetRecordResult;
   [WORKSPACE_METHOD.searchQuery]: SearchResult[];
   [WORKSPACE_METHOD.searchQueryPage]: SearchQueryPageResult;
   [WORKSPACE_METHOD.searchQueryChatMessagesGranular]: GranularChatMessageSearchResponse;
@@ -261,6 +317,197 @@ export class WorkspaceProtocolShapeError extends Error {
     super(message);
     this.name = "WorkspaceProtocolShapeError";
   }
+}
+
+const COLLECTION_INTEGER_MARKER = "$dohcInt64";
+const COLLECTION_FLOAT_MARKER = "$dohcFloat64";
+const MAX_SAFE_COLLECTION_INTEGER = BigInt(Number.MAX_SAFE_INTEGER);
+const MIN_COLLECTION_INTEGER = -(1n << 63n);
+const MAX_COLLECTION_INTEGER = (1n << 64n) - 1n;
+
+function isCollectionMarkerSpelling(key: string): boolean {
+  return /^\$+dohc(?:Int64|Float64)$/.test(key);
+}
+
+function unescapeCollectionMarkerKey(key: string): string | null {
+  return key.startsWith("$$") && isCollectionMarkerSpelling(key)
+    ? key.slice(1)
+    : null;
+}
+
+function collectionWireObject(
+  value: JsonValue | undefined,
+): WorkspaceJsonObject | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value
+    : null;
+}
+
+function singleCollectionWireEntry(
+  value: JsonValue,
+): [string, JsonValue | undefined] | null {
+  const object = collectionWireObject(value);
+  if (object === null) return null;
+  const entries = Object.entries(object);
+  return entries.length === 1 ? entries[0]! : null;
+}
+
+function collectionIntegerMarker(value: JsonValue): bigint | null {
+  const entry = singleCollectionWireEntry(value);
+  if (entry?.[0] !== COLLECTION_INTEGER_MARKER) {
+    return null;
+  }
+  const decimal = entry[1];
+  if (typeof decimal !== "string" || !/^-?(?:0|[1-9]\d*)$/.test(decimal)) {
+    throw new WorkspaceProtocolShapeError(
+      "A collection integer marker must contain a canonical decimal string.",
+    );
+  }
+  const integer = BigInt(decimal);
+  if (integer < MIN_COLLECTION_INTEGER || integer > MAX_COLLECTION_INTEGER) {
+    throw new WorkspaceProtocolShapeError(
+      "A collection integer marker must fit in the engine's 64-bit integer range.",
+    );
+  }
+  if (
+    (integer >= -MAX_SAFE_COLLECTION_INTEGER &&
+      integer <= MAX_SAFE_COLLECTION_INTEGER)
+  ) {
+    throw new WorkspaceProtocolShapeError(
+      "A collection integer marker must contain an out-of-safe-range engine integer.",
+    );
+  }
+  return integer;
+}
+
+function collectionFloatMarker(value: JsonValue): number | null {
+  const entry = singleCollectionWireEntry(value);
+  if (entry?.[0] !== COLLECTION_FLOAT_MARKER) {
+    return null;
+  }
+  const decimal = entry[1];
+  if (typeof decimal !== "string" || !/^-?(?:0|[1-9]\d*)$/.test(decimal)) {
+    throw new WorkspaceProtocolShapeError(
+      "A collection float marker must contain a canonical decimal string.",
+    );
+  }
+  const number = Number(decimal);
+  if (
+    !Number.isFinite(number) ||
+    !Number.isInteger(number) ||
+    Number.isSafeInteger(number) ||
+    BigInt(number).toString() !== decimal
+  ) {
+    throw new WorkspaceProtocolShapeError(
+      "A collection float marker must contain an out-of-safe-range integral float.",
+    );
+  }
+  return number;
+}
+
+export function decodeCollectionValue(value: JsonValue): CollectionValue {
+  const entry = singleCollectionWireEntry(value);
+  const unescapedKey = entry === null ? null : unescapeCollectionMarkerKey(entry[0]);
+  if (entry !== null && unescapedKey !== null) {
+    return { [unescapedKey]: decodeCollectionValue(entry[1]!) };
+  }
+  const integer = collectionIntegerMarker(value);
+  if (integer !== null) return integer;
+  const float = collectionFloatMarker(value);
+  if (float !== null) return float;
+  if (Array.isArray(value)) return value.map(decodeCollectionValue);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, child]) => [
+        key,
+        decodeCollectionValue(child!),
+      ]),
+    );
+  }
+  return value;
+}
+
+export function encodeCollectionValue(value: CollectionValue): JsonValue {
+  if (
+    typeof value === "number" &&
+    Number.isFinite(value) &&
+    Number.isInteger(value) &&
+    !Number.isSafeInteger(value)
+  ) {
+    return { [COLLECTION_FLOAT_MARKER]: BigInt(value).toString() };
+  }
+  if (typeof value === "bigint") {
+    if (value < MIN_COLLECTION_INTEGER || value > MAX_COLLECTION_INTEGER) {
+      throw new WorkspaceProtocolShapeError(
+        "A collection integer must fit in the engine's 64-bit integer range.",
+      );
+    }
+    if (
+      value >= -MAX_SAFE_COLLECTION_INTEGER &&
+      value <= MAX_SAFE_COLLECTION_INTEGER
+    ) {
+      return Number(value);
+    }
+    return { [COLLECTION_INTEGER_MARKER]: value.toString() };
+  }
+  if (Array.isArray(value)) return value.map(encodeCollectionValue);
+  if (value !== null && typeof value === "object") {
+    const encoded = Object.fromEntries(
+      Object.entries(value).map(([key, child]) => [
+        key,
+        encodeCollectionValue(child),
+      ]),
+    );
+    const entry = Object.entries(encoded);
+    const key = entry.length === 1 ? entry[0]?.[0] : undefined;
+    return key !== undefined && isCollectionMarkerSpelling(key)
+      ? { [`$${key}`]: entry[0]![1] }
+      : encoded;
+  }
+  return value;
+}
+
+export function encodeCollectionQueryParams(
+  input: CollectionQueryParams,
+): JsonValue {
+  return {
+    ...input,
+    ...(input.filter !== undefined
+      ? {
+          filter: {
+            ...input.filter,
+            value: encodeCollectionValue(input.filter.value),
+          },
+        }
+      : {}),
+    ...(input.cursor !== undefined
+      ? {
+          cursor: {
+            ...input.cursor,
+            sortValues: input.cursor.sortValues.map((value) => ({
+              ...value,
+              value: encodeCollectionValue(value.value),
+            })),
+          },
+        }
+      : {}),
+  } as unknown as JsonValue;
+}
+
+export type CollectionBlobResult = WorkspaceJsonObject & {
+  collectionJson: null;
+  blobSha256: string;
+  byteLength: number;
+  inbandLimitBytes: number;
+};
+
+export function collectionResultExpectsBlob(value: JsonValue): boolean {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    value.collectionJson === null
+  );
 }
 
 function mutableStruct<const Fields extends Schema.Struct.Fields>(fields: Fields) {
@@ -364,6 +611,197 @@ type _ReplicatedConflictResultSchemaMatchesPublicType = Assert<
     : false
 >;
 
+const CollectionSchemaReasonSchema = mutableStruct({
+  code: Schema.Literals(COLLECTION_SCHEMA_REASON_CODES),
+  path: Schema.String,
+});
+
+const CollectionFieldDefinitionSchema = Schema.Union([
+  mutableStruct({
+    name: Schema.String,
+    type: Schema.Literals([
+      "text",
+      "number",
+      "checkbox",
+      "date",
+      "person",
+      "url",
+    ]),
+  }),
+  mutableStruct({
+    name: Schema.String,
+    type: Schema.Literals(["select", "multi-select"]),
+    options: Schema.mutable(Schema.Array(Schema.String)),
+  }),
+  mutableStruct({
+    name: Schema.String,
+    type: Schema.Literal("relation"),
+    collection: Schema.String,
+    many: Schema.Boolean,
+  }),
+]);
+
+const CollectionSchemaSchema = mutableStruct({
+  name: NullableString,
+  description: NullableString,
+  fields: Schema.mutable(Schema.Array(CollectionFieldDefinitionSchema)),
+  views: Schema.mutable(
+    Schema.Array(
+      mutableStruct({
+        name: Schema.String,
+        kind: Schema.Literals(["table", "board", "calendar"]),
+        groupBy: NullableString,
+        sort: Schema.mutable(
+          Schema.Array(
+            mutableStruct({
+              field: Schema.String,
+              direction: Schema.Literals(["asc", "desc"]),
+            }),
+          ),
+        ),
+        visibleFields: Schema.NullOr(
+          Schema.mutable(Schema.Array(Schema.String)),
+        ),
+        dateField: NullableString,
+      }),
+    ),
+  ),
+});
+
+const CollectionSummarySchema = mutableStruct({
+  path: Schema.String,
+  status: Schema.Literals(["valid", "degraded"]),
+  reasons: Schema.mutable(Schema.Array(CollectionSchemaReasonSchema)),
+});
+
+const CollectionDetailsSchema = mutableStruct({
+  path: Schema.String,
+  status: Schema.Literals(["valid", "degraded"]),
+  reasons: Schema.mutable(Schema.Array(CollectionSchemaReasonSchema)),
+  schema: CollectionSchemaSchema,
+  recordCount: Schema.Int,
+});
+
+const CollectionFieldValueReasonSchema = mutableStruct({
+  code: Schema.Literals(FIELD_VALUE_REASON_CODES),
+  path: Schema.String,
+});
+
+const CollectionIndexedValueValidationSchema = Schema.Union([
+  mutableStruct({ status: Schema.Literal("valid") }),
+  mutableStruct({
+    status: Schema.Literal("flagged"),
+    reason: CollectionFieldValueReasonSchema,
+  }),
+  mutableStruct({ status: Schema.Literal("untyped") }),
+]);
+
+const CollectionRecordSchema = mutableStruct({
+  id: Schema.String,
+  path: Schema.String,
+  conflicted: Schema.Boolean,
+  values: Schema.mutable(
+    Schema.Array(
+      mutableStruct({
+        field: Schema.String,
+        value: Schema.MutableJson,
+        validation: CollectionIndexedValueValidationSchema,
+        resolvedRelations: Schema.mutable(
+          Schema.Array(
+            mutableStruct({
+              recordId: Schema.String,
+              label: Schema.String,
+            }),
+          ),
+        ),
+      }),
+    ),
+  ),
+});
+
+const CollectionListResultSchema = mutableStruct({
+  collections: Schema.mutable(Schema.Array(CollectionSummarySchema)),
+});
+
+const CollectionQueryCursorSchema = mutableStruct({
+  sortValues: Schema.mutable(
+    Schema.Array(
+      mutableStruct({
+        present: Schema.Boolean,
+        value: Schema.MutableJson,
+      }),
+    ),
+  ),
+  recordPath: Schema.String,
+  recordId: Schema.String,
+});
+
+const CollectionPendingAdoptionCursorSchema = mutableStruct({
+  filePath: Schema.String,
+  recordId: Schema.String,
+});
+
+const CollectionPendingAdoptionsPageSchema = mutableStruct({
+  adoptions: Schema.mutable(
+    Schema.Array(
+      mutableStruct({
+        versionId: Schema.String,
+        recordId: Schema.String,
+        collectionPath: Schema.String,
+        filePath: Schema.String,
+        objectId: Schema.String,
+      }),
+    ),
+  ),
+  nextCursor: Schema.NullOr(CollectionPendingAdoptionCursorSchema),
+});
+
+const CollectionBlobResultSchema = mutableStruct({
+  collectionJson: Schema.Null,
+  blobSha256: Schema.String,
+  byteLength: Schema.Int,
+  inbandLimitBytes: Schema.Int,
+});
+
+const CollectionQueryResultSchema = mutableStruct({
+  collection: CollectionSummarySchema,
+  records: Schema.mutable(Schema.Array(CollectionRecordSchema)),
+  groups: Schema.NullOr(
+    Schema.mutable(
+      Schema.Array(
+        mutableStruct({
+          value: Schema.MutableJson,
+          records: Schema.mutable(Schema.Array(CollectionRecordSchema)),
+        }),
+      ),
+    ),
+  ),
+  nextCursor: Schema.NullOr(CollectionQueryCursorSchema),
+});
+
+const CollectionGetRecordResultSchema = mutableStruct({
+  collection: CollectionSummarySchema,
+  record: CollectionRecordSchema,
+  history: Schema.mutable(
+    Schema.Array(
+      mutableStruct({
+        historyId: Schema.Int,
+        field: Schema.String,
+        previous: mutableStruct({
+          present: Schema.Boolean,
+          value: Schema.MutableJson,
+        }),
+        next: mutableStruct({
+          present: Schema.Boolean,
+          value: Schema.MutableJson,
+        }),
+        authorOriginId: NullableString,
+        recordedAtMs: Schema.Int,
+      }),
+    ),
+  ),
+});
+
 const SearchResultSchema = mutableStruct({
   surface: Schema.Literals(["file", "chat"]),
   path: Schema.String,
@@ -421,6 +859,12 @@ const WorkspaceResultSchemas = {
     }),
     ReplicatedConflictResultSchema,
   ]),
+  [WORKSPACE_METHOD.collectionsList]: CollectionListResultSchema,
+  [WORKSPACE_METHOD.collectionsListPendingAdoptions]:
+    CollectionPendingAdoptionsPageSchema,
+  [WORKSPACE_METHOD.collectionsGet]: CollectionDetailsSchema,
+  [WORKSPACE_METHOD.collectionsQuery]: CollectionQueryResultSchema,
+  [WORKSPACE_METHOD.collectionsGetRecord]: CollectionGetRecordResultSchema,
   [WORKSPACE_METHOD.searchQuery]: Schema.mutable(Schema.Array(SearchResultSchema)),
   [WORKSPACE_METHOD.searchQueryPage]: SearchQueryPageResultSchema,
   [WORKSPACE_METHOD.searchQueryChatMessagesGranular]:
@@ -491,6 +935,75 @@ export function decodeGranularChatMessageSearchResponse(
   ) as GranularChatMessageSearchResponse;
 }
 
+export function decodeCollectionBlobResult(
+  value: JsonValue,
+): CollectionBlobResult {
+  return decodeWorkspaceSchema(
+    CollectionBlobResultSchema,
+    value,
+    "blob-backed collection result",
+  ) as CollectionBlobResult;
+}
+
+function decodeCollectionRecordValues(
+  record: CollectionQueryResult["records"][number],
+): CollectionQueryResult["records"][number] {
+  return {
+    ...record,
+    values: record.values.map((field) => ({
+      ...field,
+      value: decodeCollectionValue(field.value as JsonValue),
+    })),
+  };
+}
+
+function decodeCollectionQueryResultValues(
+  result: CollectionQueryResult,
+): CollectionQueryResult {
+  return {
+    ...result,
+    records: result.records.map(decodeCollectionRecordValues),
+    groups:
+      result.groups === null
+        ? null
+        : result.groups.map((group) => ({
+            ...group,
+            value: decodeCollectionValue(group.value as JsonValue),
+            records: group.records.map(decodeCollectionRecordValues),
+          })),
+    nextCursor:
+      result.nextCursor === null
+        ? null
+        : {
+            ...result.nextCursor,
+            sortValues: result.nextCursor.sortValues.map((value) => ({
+              ...value,
+              value: decodeCollectionValue(value.value as JsonValue),
+            })),
+          },
+  };
+}
+
+function decodeCollectionGetRecordResultValues(
+  result: CollectionGetRecordResult,
+): CollectionGetRecordResult {
+  return {
+    ...result,
+    record: decodeCollectionRecordValues(result.record),
+    history: result.history.map((entry) => ({
+      ...entry,
+      previous: {
+        ...entry.previous,
+        value: decodeCollectionValue(entry.previous.value as JsonValue),
+      },
+      next: {
+        ...entry.next,
+        value: decodeCollectionValue(entry.next.value as JsonValue),
+      },
+    })),
+  };
+}
+
 export function decodeWorkspaceResult<M extends WorkspaceMethod>(
   method: M,
   value: JsonValue,
@@ -501,10 +1014,21 @@ export function decodeWorkspaceResult<M extends WorkspaceMethod>(
       `Unsupported workspace method: ${method}`,
     );
   }
-  return decodeWorkspaceSchema(
+  const decoded = decodeWorkspaceSchema(
     schema,
     value,
     `${method} result`,
     method !== WORKSPACE_METHOD.searchQuery,
   ) as WorkspaceMethodResultMap[M];
+  if (method === WORKSPACE_METHOD.collectionsQuery) {
+    return decodeCollectionQueryResultValues(
+      decoded as CollectionQueryResult,
+    ) as WorkspaceMethodResultMap[M];
+  }
+  if (method === WORKSPACE_METHOD.collectionsGetRecord) {
+    return decodeCollectionGetRecordResultValues(
+      decoded as CollectionGetRecordResult,
+    ) as WorkspaceMethodResultMap[M];
+  }
+  return decoded;
 }

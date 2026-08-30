@@ -43,6 +43,8 @@ import {
   YdocReleasedWithSettleFailureError,
   YdocAdapterError,
   type EngineStoreRefusal,
+  type CollectionPendingAdoptionCursor,
+  type CollectionPendingAdoptionsPage,
   type EngineYdocProviderSession,
   type EngineYdocProviderSessionOptions,
   type EngineTransport,
@@ -76,6 +78,7 @@ import {
   TRANSPORT_REBIND_MAX_BACKOFF_MS,
   WORKSPACE_OPEN_DEADLINE_MS,
   type AttachedEngineWorkspace,
+  type EngineWorkspaceBinding,
   type EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import {
@@ -1487,6 +1490,14 @@ export function createWorkspaceEngineCapture(
   // (#874). Set when a pass failed because the engine REFUSED this
   // workspace's database, cleared by the next pass that reached the store.
   let storeRefused: EngineStoreRefusal | null = null;
+  const pendingCollectionAdoptionProviders = new Map<
+    string,
+    {
+      binding: EngineWorkspaceBinding;
+      provider: EngineYdocProviderSession;
+    }
+  >();
+  let pendingCollectionAdoptionDrain: Promise<void> | null = null;
 
   const publishCaptureOutcome = (): void => {
     const failure =
@@ -3334,12 +3345,139 @@ export function createWorkspaceEngineCapture(
     }
   }
 
+  function drainPendingCollectionAdoptions(
+    engine: CaptureVersionedTextStore,
+  ): Promise<void> {
+    if (pendingCollectionAdoptionDrain !== null) {
+      return pendingCollectionAdoptionDrain;
+    }
+    const pending = drainPendingCollectionAdoptionsOnce(engine).finally(() => {
+      if (pendingCollectionAdoptionDrain === pending) {
+        pendingCollectionAdoptionDrain = null;
+      }
+    });
+    pendingCollectionAdoptionDrain = pending;
+    return pending;
+  }
+
+  async function drainPendingCollectionAdoptionsOnce(
+    engine: CaptureVersionedTextStore,
+  ): Promise<void> {
+    const workspace = { workspaceId, rootPath, attachmentId };
+    let cursor: CollectionPendingAdoptionCursor | null = null;
+    let found = false;
+    const pendingAdoptionKeys = new Set<string>();
+    do {
+      const pending: CollectionPendingAdoptionsPage | undefined =
+        await engine.listPendingCollectionAdoptions?.({
+          ...(cursor !== null ? { cursor } : {}),
+        });
+      if (!pending) return;
+      found ||= pending.adoptions.length > 0;
+      for (const adoption of pending.adoptions) {
+        const adoptionKey =
+          `${adoption.versionId}\0${adoption.recordId}\0` +
+          `${adoption.objectId}\0${adoption.filePath}`;
+        pendingAdoptionKeys.add(adoptionKey);
+        let retained = pendingCollectionAdoptionProviders.get(adoptionKey);
+        try {
+          await options.rustEngineSessions.run(
+            workspace,
+            async (binding) => {
+              if (
+                retained !== undefined &&
+                retained.binding.workspace !== binding.workspace
+              ) {
+                const evicted = retained;
+                retained = undefined;
+                try {
+                  await evicted.provider.evict();
+                } catch (error) {
+                  onError(
+                    `collection adoption provider eviction of ${adoption.filePath}`,
+                    error,
+                  );
+                }
+              }
+              let provider = retained?.provider;
+              if (provider === undefined) {
+                const openProvider =
+                  options.openRustYDocProviderSession ??
+                  openEngineYdocProviderSession;
+                provider = await openProvider({
+                  transport: binding.client as EngineTransport,
+                  workspace: binding.workspace,
+                  versionId: adoption.versionId,
+                  path: adoption.filePath,
+                  expectedObjectId: adoption.objectId,
+                  contentKind: "richdoc",
+                  seedAbsentLineage: true,
+                  onRemoteUpdate: () => undefined,
+                });
+                retained = { binding, provider };
+              }
+              // Keep the imported lineage durable until reconciliation applies the
+              // record id. A seed-only settling close can prove the artifact already
+              // covers the document and prune the lineage before adoption uses it.
+              await provider.evict();
+            },
+            { retryTransportErrors: true },
+          );
+          pendingCollectionAdoptionProviders.delete(adoptionKey);
+        } catch (error) {
+          // Every unconfirmed eviction — busy, cancelled while queued, or any
+          // other failure — leaves the daemon session live and its lease
+          // held. Deleting the only handle here would leak that lease:
+          // reconciliation then fails with collection-reconciliation-lease-
+          // held, and later drains can only open another provider into the
+          // same lease. Retain until eviction is confirmed; a daemon restart
+          // is the one case the handle goes stale, and the binding check
+          // above replaces it then. The not-pending sweep below releases it
+          // once the adoption clears.
+          if (retained !== undefined) {
+            pendingCollectionAdoptionProviders.set(adoptionKey, retained);
+          } else {
+            pendingCollectionAdoptionProviders.delete(adoptionKey);
+          }
+          if (isEngineStoreBusyRefusal(error)) continue;
+          onError(`collection adoption of ${adoption.filePath}`, error);
+        }
+      }
+      cursor = pending.nextCursor;
+    } while (cursor !== null);
+    await releaseRetainedCollectionAdoptionProviders(pendingAdoptionKeys);
+    if (!found || pendingCollectionAdoptionProviders.size > 0) return;
+    await engine.reconcileCapture?.();
+  }
+
+  async function releaseRetainedCollectionAdoptionProviders(
+    pendingAdoptionKeys: ReadonlySet<string>,
+  ): Promise<void> {
+    for (const [adoptionKey, retained] of pendingCollectionAdoptionProviders) {
+      if (pendingAdoptionKeys.has(adoptionKey)) continue;
+      try {
+        await retained.provider.evict();
+        if (pendingCollectionAdoptionProviders.get(adoptionKey) === retained) {
+          pendingCollectionAdoptionProviders.delete(adoptionKey);
+        }
+      } catch (error) {
+        onError(
+          `collection adoption provider eviction of ${retained.provider.path}`,
+          error,
+        );
+      }
+    }
+  }
+
   function pollDaemonCaptureHealth(): void {
     if (stopped || daemonCaptureHealthTimer !== null) return;
     enqueue("daemon capture health", () =>
       reportCaptureOutcome(async () => {
         const engine = await engineStore();
         const status = await engine.watcherStatus?.();
+        if (status === undefined || (status.running && !status.terminal)) {
+          await drainPendingCollectionAdoptions(engine);
+        }
         return status === undefined
           ? true
           : status.running && !status.degraded && !status.terminal;
@@ -6451,7 +6589,9 @@ export function createWorkspaceEngineCapture(
     async flush() {
       await chain;
       if (options.daemonOwnsCapture) {
-        await (await engineStore()).flushCapture?.();
+        const engine = await engineStore();
+        await engine.flushCapture?.();
+        await drainPendingCollectionAdoptions(engine);
       }
     },
 
@@ -6467,8 +6607,10 @@ export function createWorkspaceEngineCapture(
       try {
         if (options.daemonOwnsCapture && store) {
           await store.flushCapture?.();
+          await drainPendingCollectionAdoptions(store);
         }
       } finally {
+        await releaseRetainedCollectionAdoptionProviders(new Set());
         // App quit may abandon a dead generation's retained release obligation:
         // the daemon process exits immediately afterward and releases every
         // workspace/session lease. Interactive lifecycle operations never use

@@ -1,10 +1,19 @@
 import { describe, expect, it } from "vitest";
+import { validateFieldValue } from "@dohc/workspace-contracts/collection-values";
+import type { CollectionValue } from "@dohc/workspace-contracts/collection";
+import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
+import pipelineFixture from "../../../../crates/dohc-engine-domain/tests/fixtures/collection-field-pipeline.json";
+import reasonCodes from "../../../../crates/dohc-engine-domain/tests/fixtures/collection-reason-codes.json";
 import {
   WORKSPACE_METHOD,
   WorkspaceProtocolShapeError,
+  decodeCollectionValue,
   decodeConflictRecord,
   decodeWorkspaceResult,
+  encodeCollectionValue,
+  encodeCollectionQueryParams,
 } from "./workspaceWireContract";
+import { encodeFixtureBigInts } from "./collectionFieldPipeline.testSupport";
 
 const snapshot = {
   workspaceId: "workspace",
@@ -51,6 +60,38 @@ const conflict = {
   current: state,
   incoming: state,
 };
+
+const reservedCollectionMarkerObjects: Array<{
+  value: CollectionValue;
+  encoded: JsonValue;
+}> = [
+  {
+    value: { $dohcInt64: "9007199254740993" },
+    encoded: { $$dohcInt64: "9007199254740993" },
+  },
+  {
+    value: { $dohcFloat64: "100000000000000000000" },
+    encoded: { $$dohcFloat64: "100000000000000000000" },
+  },
+  {
+    value: { $$dohcInt64: "literal" },
+    encoded: { $$$dohcInt64: "literal" },
+  },
+  {
+    value: { $dohcEscaped: { $dohcFloat64: "100000000000000000000" } },
+    encoded: { $dohcEscaped: { $$dohcFloat64: "100000000000000000000" } },
+  },
+];
+
+function collectionValueDepth(value: CollectionValue): number {
+  if (Array.isArray(value)) {
+    return 1 + Math.max(0, ...value.map(collectionValueDepth));
+  }
+  if (value !== null && typeof value === "object") {
+    return 1 + Math.max(0, ...Object.values(value).map(collectionValueDepth));
+  }
+  return 1;
+}
 
 describe("workspace wire schemas", () => {
   it("preserves the public object-shape error", () => {
@@ -112,6 +153,353 @@ describe("workspace wire schemas", () => {
       write: { nested: { values: [1, true, null] } },
       delete: { path: "old.md", reason: "replaced" },
     });
+  });
+
+  it("rejects excess fields nested in collection results", () => {
+    expect(() =>
+      decodeWorkspaceResult(WORKSPACE_METHOD.collectionsQuery, {
+        collection: { path: "projects", status: "valid", reasons: [] },
+        records: [
+          {
+            id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+            path: "projects/roadmap.md",
+            values: [
+              {
+                field: "status",
+                value: "active",
+                validation: { status: "valid", unexpected: true },
+                resolvedRelations: [],
+              },
+            ],
+          },
+        ],
+        groups: null,
+      }),
+    ).toThrow(WorkspaceProtocolShapeError);
+  });
+
+  it("accepts the shared full collection reason-code set", () => {
+    for (const code of reasonCodes.schemaReasonCodes) {
+      expect(() =>
+        decodeWorkspaceResult(WORKSPACE_METHOD.collectionsList, {
+          collections: [
+            {
+              path: "projects",
+              status: "degraded",
+              reasons: [{ code, path: "/fields" }],
+            },
+          ],
+        }),
+      ).not.toThrow();
+    }
+
+    for (const code of reasonCodes.fieldValueReasonCodes) {
+      const result = decodeWorkspaceResult(WORKSPACE_METHOD.collectionsQuery, {
+        collection: { path: "projects", status: "valid", reasons: [] },
+        records: [
+          {
+            id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+            path: "projects/roadmap.md",
+            conflicted: false,
+            values: [
+              {
+                field: "status",
+                value: "active",
+                validation: {
+                  status: "flagged",
+                  reason: { code, path: "" },
+                },
+                resolvedRelations: [],
+              },
+            ],
+          },
+        ],
+        groups: null,
+        nextCursor: null,
+      });
+
+      expect(result.records[0]?.values[0]?.validation).toEqual({
+        status: "flagged",
+        reason: { code, path: "" },
+      });
+    }
+  });
+
+  it("decodes the shared collection field pipeline wire vector", () => {
+    const rawValues = pipelineFixture.vectors.map((vector) => {
+      expect(JSON.stringify(vector.expectedWireValue), vector.name).toBe(
+        vector.expectedWireJson,
+      );
+      return {
+        field: vector.fieldName,
+        value: vector.expectedWireValue,
+        validation: vector.expectedValidation,
+        resolvedRelations: [],
+      };
+    });
+    const decoded = decodeWorkspaceResult(WORKSPACE_METHOD.collectionsQuery, {
+      collection: { path: "pipeline", status: "valid", reasons: [] },
+      records: [
+        {
+          id: "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb",
+          path: "pipeline/imported.md",
+          conflicted: false,
+          values: rawValues,
+        },
+      ],
+      groups: null,
+      nextCursor: null,
+    });
+
+    expect(decoded.records[0]?.values).toHaveLength(pipelineFixture.vectors.length);
+    for (const [index, vector] of pipelineFixture.vectors.entries()) {
+      const value = decoded.records[0]?.values[index];
+      expect(value?.field, vector.name).toBe(vector.fieldName);
+      expect(encodeFixtureBigInts(value?.value), vector.name).toEqual(
+        vector.expectedSemantic,
+      );
+      expect(value?.validation, vector.name).toEqual(
+        vector.expectedValidation,
+      );
+    }
+  });
+
+  it.each([
+    {
+      name: "out-of-safe-range integer",
+      marker: { $dohcInt64: "9007199254740993" },
+      decoded: 9007199254740993n,
+    },
+    {
+      name: "out-of-safe-range integral float",
+      marker: { $dohcFloat64: "100000000000000000000" },
+      decoded: 1e20,
+    },
+  ])(
+    "round-trips $name through every collection request and response surface",
+    ({ marker, decoded }) => {
+    const record = {
+      id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      path: "projects/roadmap.md",
+      conflicted: false,
+      values: [
+        {
+          field: "estimate",
+          value: marker,
+          validation: { status: "valid" },
+          resolvedRelations: [],
+        },
+      ],
+    };
+
+    const queried = decodeWorkspaceResult(WORKSPACE_METHOD.collectionsQuery, {
+      collection: { path: "projects", status: "valid", reasons: [] },
+      records: [record],
+      groups: [{ value: marker, records: [record] }],
+      nextCursor: {
+        sortValues: [{ present: true, value: marker }],
+        recordPath: record.path,
+        recordId: record.id,
+      },
+    });
+    expect(queried.records[0]?.values[0]?.value).toBe(decoded);
+    expect(queried.groups?.[0]?.value).toBe(decoded);
+    expect(queried.groups?.[0]?.records[0]?.values[0]?.value).toBe(decoded);
+    expect(queried.nextCursor?.sortValues[0]?.value).toBe(decoded);
+
+    const fetched = decodeWorkspaceResult(
+      WORKSPACE_METHOD.collectionsGetRecord,
+      {
+        collection: { path: "projects", status: "valid", reasons: [] },
+        record,
+        history: [
+          {
+            historyId: 1,
+            field: "estimate",
+            previous: { present: true, value: marker },
+            next: { present: true, value: marker },
+            authorOriginId: null,
+            recordedAtMs: 1,
+          },
+        ],
+      },
+    );
+    expect(fetched.record.values[0]?.value).toBe(decoded);
+    expect(fetched.history[0]?.previous.value).toBe(decoded);
+    expect(fetched.history[0]?.next.value).toBe(decoded);
+
+    expect(
+      encodeCollectionQueryParams({
+        collectionPath: "projects",
+        filter: {
+          field: "estimate",
+          operator: "equals",
+          value: decoded,
+        },
+        cursor: {
+          sortValues: [{ present: true, value: decoded }],
+          recordPath: record.path,
+          recordId: record.id,
+        },
+      }),
+    ).toMatchObject({
+      filter: { value: marker },
+      cursor: { sortValues: [{ value: marker }] },
+    });
+
+    expect(
+      validateFieldValue({ name: "estimate", type: "number" }, decoded),
+    ).toEqual({ status: "valid" });
+
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.collectionsList, {
+        collections: [
+          { path: "projects", status: "valid", reasons: [] },
+        ],
+      }).collections,
+    ).toHaveLength(1);
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.collectionsGet, {
+        path: "projects",
+        status: "valid",
+        reasons: [],
+        schema: {
+          name: null,
+          description: null,
+          fields: [],
+          views: [],
+        },
+        recordCount: 1,
+      }).recordCount,
+    ).toBe(1);
+    expect(
+      decodeWorkspaceResult(
+        WORKSPACE_METHOD.collectionsListPendingAdoptions,
+        {
+          adoptions: [
+            {
+              versionId: "main",
+              recordId: record.id,
+              collectionPath: "projects",
+              filePath: record.path,
+              objectId: "object",
+            },
+          ],
+          nextCursor: null,
+        },
+      ).adoptions,
+    ).toHaveLength(1);
+    },
+  );
+
+  it.each(reservedCollectionMarkerObjects)(
+    "round-trips reserved marker-shaped user object $value unchanged",
+    ({ value, encoded }) => {
+      expect(encodeCollectionValue(value)).toEqual(encoded);
+      expect(decodeCollectionValue(encoded)).toEqual(value);
+    },
+  );
+
+  it("keeps reserved marker escaping depth-neutral at the collection depth boundary", () => {
+    let value: CollectionValue = "leaf";
+    for (let depth = 1; depth < 24; depth += 1) {
+      value = { $dohcInt64: value };
+    }
+
+    const encoded = encodeCollectionValue(value);
+
+    expect(collectionValueDepth(value)).toBe(24);
+    expect(collectionValueDepth(encoded as CollectionValue)).toBe(24);
+    expect(decodeCollectionValue(encoded)).toEqual(value);
+  });
+
+  it.each([
+    [-(1n << 63n), "-9223372036854775808"],
+    [(1n << 64n) - 1n, "18446744073709551615"],
+  ])(
+    "round-trips the collection integer marker domain edge %s into a follow-up filter",
+    (integer, decimal) => {
+      const marker = { $dohcInt64: decimal };
+      const decoded = decodeCollectionValue(marker);
+
+      expect(decoded).toBe(integer);
+      expect(
+        validateFieldValue({ name: "estimate", type: "number" }, decoded),
+      ).toEqual({ status: "valid" });
+      expect(encodeCollectionValue(decoded)).toEqual(marker);
+      expect(
+        encodeCollectionQueryParams({
+          collectionPath: "projects",
+          filter: {
+            field: "estimate",
+            operator: "equals",
+            value: decoded,
+          },
+        }),
+      ).toMatchObject({ filter: { value: marker } });
+    },
+  );
+
+  it.each([
+    [-(1n << 63n) - 1n, "-9223372036854775809"],
+    [1n << 64n, "18446744073709551616"],
+  ])(
+    "rejects the collection integer marker immediately outside domain edge %s in both directions",
+    (integer, decimal) => {
+      expect(() =>
+        decodeCollectionValue({ $dohcInt64: decimal }),
+      ).toThrow(WorkspaceProtocolShapeError);
+      expect(() => encodeCollectionValue(integer)).toThrow(
+        WorkspaceProtocolShapeError,
+      );
+    },
+  );
+
+  it("enforces safe-range collection integer marker rules", () => {
+    expect(() =>
+      decodeCollectionValue({ $dohcInt64: "9007199254740991" }),
+    ).toThrow(WorkspaceProtocolShapeError);
+    expect(encodeCollectionValue(9007199254740991n)).toBe(
+      Number.MAX_SAFE_INTEGER,
+    );
+    expect(encodeCollectionValue(-9007199254740991n)).toBe(
+      -Number.MAX_SAFE_INTEGER,
+    );
+  });
+
+  it("rejects malformed collection integer markers", () => {
+    expect(() =>
+      decodeWorkspaceResult(WORKSPACE_METHOD.collectionsQuery, {
+        collection: { path: "projects", status: "valid", reasons: [] },
+        records: [
+          {
+            id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+            path: "projects/roadmap.md",
+            conflicted: false,
+            values: [
+              {
+                field: "estimate",
+                value: { $dohcInt64: "01" },
+                validation: { status: "valid" },
+                resolvedRelations: [],
+              },
+            ],
+          },
+        ],
+        groups: null,
+        nextCursor: null,
+      }),
+    ).toThrow(WorkspaceProtocolShapeError);
+  });
+
+  it.each([
+    "01",
+    "9007199254740991",
+    "100000000000000000001",
+  ])("rejects malformed collection float marker %s", (decimal) => {
+    expect(() =>
+      decodeCollectionValue({ $dohcFloat64: decimal }),
+    ).toThrow(WorkspaceProtocolShapeError);
   });
 
   it.each([

@@ -29,6 +29,7 @@
 #![forbid(unsafe_code)]
 
 pub mod chats;
+pub mod collections;
 pub mod conflicts;
 pub mod error;
 pub mod merge;
@@ -61,6 +62,29 @@ pub use chats::{
     render_chat_thread_projection, replay_pending_chat_coordinates_for_change,
     replay_ready_pending_chat_coordinates, resolve_feed_coordinate, resolve_follow_target,
     resolve_thread_message, thread_has_message, validate_follow_target,
+};
+pub use collections::{
+    COLLECTION_SCHEMA_FILENAME, CollectionAdoptionCandidate, CollectionDetails,
+    CollectionFieldHistoryEntry, CollectionFieldType, CollectionFieldValue, CollectionFilter,
+    CollectionFilterOperator, CollectionHistoryValue, CollectionIndexedValue,
+    CollectionIndexedValueValidation, CollectionPendingAdoption, CollectionPendingAdoptionCursor,
+    CollectionPendingAdoptionPage, CollectionQuery, CollectionQueryCursor,
+    CollectionQueryCursorValue, CollectionQueryResult, CollectionReconcileResult, CollectionRecord,
+    CollectionRecordDetails, CollectionRecordGroup, CollectionRelationCleanupCandidate,
+    CollectionResolvedRelation, CollectionSchema, CollectionSchemaParseResult,
+    CollectionSchemaReason, CollectionSchemaReasonCode, CollectionSchemaStatus, CollectionSort,
+    CollectionSummary, DEFAULT_COLLECTION_QUERY_LIMIT, FieldDefinition, FieldValueReason,
+    FieldValueReasonCode, FieldValueValidation, MAX_COLLECTION_FIELD_VALUE_DEPTH,
+    MAX_COLLECTION_HISTORY_LIMIT, MAX_COLLECTION_QUERY_LIMIT, MAX_COLLECTION_QUERY_SORTS,
+    RECORD_ID_FRONTMATTER_KEY, RECORD_ID_PREFIX, RECORD_ID_RANDOM_BASE32_LENGTH, ViewDefinition,
+    ViewKind, ViewSort, ViewSortDirection, collection_record_id_mismatch_in_tx,
+    collection_record_markdown_with_id, collection_value_exceeds_depth,
+    decline_oversized_collection_adoption_in_tx, delete_collection_adoption_binding_in_tx,
+    get_collection, get_collection_record, index_collection_frontmatter_apply_in_tx,
+    is_collection_record_bound_in_tx, is_record_id, list_collections,
+    list_pending_collection_adoptions, mint_record_id, parse_collection_schema,
+    query_collection_records, reconcile_collections_in_tx, set_collection_adoption_state_in_tx,
+    synchronize_collection_frontmatter_index_in_tx, validate_field_value,
 };
 pub use conflicts::{
     BINARY_COMBINED_TEXT_REFUSAL, BinaryResolveWrite, CONFLICT_METADATA_BUDGET_BYTES,

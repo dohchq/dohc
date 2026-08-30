@@ -2895,6 +2895,162 @@ CREATE TABLE chat_conversation_revisions (
 
 pub(crate) const CHAT_CONVERSATION_REVISIONS_MIGRATION_ID: &str = "v1-chat-conversation-revisions";
 
+/// Ordinal 41. Local collection detection and record bindings. Collection
+/// state is derived from active-version file heads, but persists so record ids
+/// survive renames and copied-file collisions have an existing owner.
+const V1_COLLECTION_ADOPTION_DDL: &str = "\
+CREATE TABLE collections (
+    workspace_id             TEXT NOT NULL,
+    version_id               TEXT NOT NULL,
+    collection_path          TEXT NOT NULL,
+    schema_path              TEXT NOT NULL,
+    schema_status            TEXT NOT NULL
+      CHECK (schema_status IN ('valid', 'degraded')),
+    degradation_reasons_json TEXT NOT NULL CHECK (json_valid(degradation_reasons_json)),
+    PRIMARY KEY (workspace_id, version_id, collection_path),
+    FOREIGN KEY (workspace_id, version_id)
+      REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE collection_records (
+    workspace_id    TEXT NOT NULL,
+    version_id      TEXT NOT NULL,
+    record_id       TEXT,
+    collection_path TEXT NOT NULL,
+    file_path       TEXT NOT NULL,
+    object_id       TEXT NOT NULL,
+    adoption_state  TEXT NOT NULL
+      CHECK (adoption_state IN (
+        'pending', 'pending-lossless', 'deferred-conflict', 'deferred-conflict-lossless', 'adopted'
+      )),
+    PRIMARY KEY (workspace_id, version_id, file_path),
+    UNIQUE (workspace_id, version_id, record_id),
+    FOREIGN KEY (workspace_id, version_id, collection_path)
+      REFERENCES collections(workspace_id, version_id, collection_path) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id, object_id)
+      REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX collection_records_by_collection
+    ON collection_records(workspace_id, version_id, collection_path, file_path);
+";
+
+pub(crate) const COLLECTION_ADOPTION_MIGRATION_ID: &str = "v1-collection-adoption";
+
+/// Ordinal 42. The local collection projection derived from applied record
+/// frontmatter: current values with validation, per-field history, and
+/// relation edges used for referential cleanup.
+const V1_COLLECTION_INDEX_DDL: &str = "\
+ALTER TABLE collection_records ADD COLUMN index_initialized INTEGER NOT NULL DEFAULT 0
+  CHECK (index_initialized IN (0, 1));
+
+CREATE TABLE collection_record_fields (
+    workspace_id          TEXT NOT NULL,
+    version_id            TEXT NOT NULL,
+    record_id             TEXT NOT NULL,
+    field_name            TEXT NOT NULL,
+    value_json            TEXT NOT NULL CHECK (json_valid(value_json)),
+    validation_status     TEXT NOT NULL
+      CHECK (validation_status IN ('valid', 'flagged', 'untyped')),
+    validation_reason_json TEXT CHECK (
+      validation_reason_json IS NULL OR json_valid(validation_reason_json)
+    ),
+    PRIMARY KEY (workspace_id, version_id, record_id, field_name),
+    FOREIGN KEY (workspace_id, version_id)
+      REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE collection_field_history (
+    history_id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id           TEXT NOT NULL,
+    version_id             TEXT NOT NULL,
+    record_id              TEXT NOT NULL,
+    field_name             TEXT NOT NULL,
+    previous_value_json    TEXT CHECK (
+      previous_value_json IS NULL OR json_valid(previous_value_json)
+    ),
+    next_value_json        TEXT CHECK (
+      next_value_json IS NULL OR json_valid(next_value_json)
+    ),
+    author_origin_id       TEXT,
+    source_origin_id       TEXT,
+    source_origin_seq      INTEGER CHECK (
+      source_origin_seq IS NULL OR source_origin_seq >= 0
+    ),
+    recorded_at_ms         INTEGER NOT NULL,
+    CHECK (
+      (source_origin_id IS NULL AND source_origin_seq IS NULL) OR
+      (source_origin_id IS NOT NULL AND source_origin_seq IS NOT NULL)
+    ),
+    FOREIGN KEY (workspace_id, version_id)
+      REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX collection_field_history_by_record
+    ON collection_field_history(
+      workspace_id, version_id, record_id, recorded_at_ms DESC, history_id DESC
+    );
+CREATE UNIQUE INDEX collection_field_history_by_source
+    ON collection_field_history(
+      workspace_id, version_id, record_id, field_name,
+      source_origin_id, source_origin_seq
+    ) WHERE source_origin_id IS NOT NULL;
+
+CREATE TABLE collection_relation_edges (
+    workspace_id          TEXT NOT NULL,
+    version_id            TEXT NOT NULL,
+    source_record_id      TEXT NOT NULL,
+    field_name            TEXT NOT NULL,
+    target_record_id      TEXT NOT NULL,
+    target_collection_path TEXT NOT NULL,
+    many                  INTEGER NOT NULL CHECK (many IN (0, 1)),
+    PRIMARY KEY (
+      workspace_id, version_id, source_record_id, field_name, target_record_id
+    ),
+    FOREIGN KEY (workspace_id, version_id)
+      REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE
+) STRICT;
+";
+
+pub(crate) const COLLECTION_INDEX_MIGRATION_ID: &str = "v1-collection-index";
+
+/// Ordinal 43. Cache record-id ownership observed in text moments. Reconciliation
+/// backfills each version once, then every new text moment appends to this table
+/// inside the moment transaction.
+const V1_COLLECTION_HISTORICAL_OWNERS_DDL: &str = "\
+CREATE TABLE collection_historical_record_owners (
+    workspace_id          TEXT NOT NULL,
+    version_id            TEXT NOT NULL,
+    object_id             TEXT NOT NULL,
+    moment_order          INTEGER NOT NULL CHECK (moment_order >= 0),
+    record_id             TEXT NOT NULL,
+    collection_path       TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, moment_order),
+    FOREIGN KEY (workspace_id, moment_order)
+      REFERENCES moments(workspace_id, moment_order) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id, version_id)
+      REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX collection_historical_record_owners_by_record
+    ON collection_historical_record_owners(
+      workspace_id, version_id, record_id, object_id
+    );
+CREATE INDEX collection_historical_record_owners_by_object
+    ON collection_historical_record_owners(
+      workspace_id, version_id, object_id, moment_order DESC
+    );
+
+CREATE TABLE collection_historical_record_owner_backfills (
+    workspace_id          TEXT NOT NULL,
+    version_id            TEXT NOT NULL,
+    index_version         INTEGER NOT NULL CHECK (index_version = 1),
+    PRIMARY KEY (workspace_id, version_id),
+    FOREIGN KEY (workspace_id, version_id)
+      REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE
+) STRICT;
+";
+
+pub(crate) const COLLECTION_HISTORICAL_OWNERS_MIGRATION_ID: &str =
+    "v1-collection-historical-owners";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -3187,6 +3343,27 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: CHAT_CONVERSATION_REVISIONS_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_CHAT_CONVERSATION_REVISIONS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 41,
+        id: COLLECTION_ADOPTION_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_COLLECTION_ADOPTION_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 42,
+        id: COLLECTION_INDEX_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_COLLECTION_INDEX_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 43,
+        id: COLLECTION_HISTORICAL_OWNERS_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_COLLECTION_HISTORICAL_OWNERS_DDL,
         sets_user_version: None,
     },
 ];
@@ -3568,6 +3745,181 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM engine_ownership", [], |r| r.get(0))
             .expect("own");
         assert_eq!(owns, 1);
+    }
+
+    #[test]
+    fn deleting_a_version_cascades_collection_index_rows() {
+        let dir = tempdir();
+        let path = dir.join("collection-index-version-cascade.db");
+        let ctx = MigrationContext::current(1_100);
+        let mut conn = open_bare(&path);
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("enable foreign keys");
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+            .expect("apply collection index migration");
+
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
+                 VALUES ('ws', 'main');
+             INSERT INTO versions (workspace_id, version_id, name, kind, created_at_ms)
+                 VALUES ('ws', 'main', 'Main', 'main', 1),
+                        ('ws', 'feature', 'Feature', 'named', 2);
+             INSERT INTO collection_record_fields (
+                 workspace_id, version_id, record_id, field_name,
+                 value_json, validation_status
+             ) VALUES ('ws', 'main', 'main-record', 'title', 'null', 'valid'),
+                      ('ws', 'feature', 'feature-record', 'title', 'null', 'valid');
+             INSERT INTO collection_field_history (
+                 workspace_id, version_id, record_id, field_name,
+                 next_value_json, recorded_at_ms
+             ) VALUES ('ws', 'main', 'main-record', 'title', '\"Main\"', 3),
+                      ('ws', 'feature', 'feature-record', 'title', '\"Feature\"', 4);
+             INSERT INTO collection_relation_edges (
+                 workspace_id, version_id, source_record_id, field_name,
+                 target_record_id, target_collection_path, many
+             ) VALUES ('ws', 'main', 'main-record', 'related',
+                       'main-target', 'people.collection.yaml', 0),
+                      ('ws', 'feature', 'feature-record', 'related',
+                       'feature-target', 'people.collection.yaml', 0);",
+        )
+        .expect("seed version-scoped collection index rows");
+
+        conn.execute(
+            "DELETE FROM versions WHERE workspace_id='ws' AND version_id='feature'",
+            [],
+        )
+        .expect("delete feature version");
+
+        let remaining: (i64, i64, i64) = conn
+            .query_row(
+                "SELECT
+                     (SELECT COUNT(*) FROM collection_record_fields),
+                     (SELECT COUNT(*) FROM collection_field_history),
+                     (SELECT COUNT(*) FROM collection_relation_edges)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("count surviving collection index rows");
+        assert_eq!(remaining, (1, 1, 1));
+        for table in [
+            "collection_record_fields",
+            "collection_field_history",
+            "collection_relation_edges",
+        ] {
+            let deleted_version_rows: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE version_id='feature'"),
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count deleted version rows");
+            assert_eq!(
+                deleted_version_rows, 0,
+                "{table} must cascade with its version"
+            );
+        }
+    }
+
+    #[test]
+    fn historical_record_owner_migration_upgrades_and_cascades_with_versions() {
+        let dir = tempdir();
+        let path = dir.join("collection-historical-owner-upgrade.db");
+        let ctx = MigrationContext::current(1_101);
+        let mut conn = open_bare(&path);
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("enable foreign keys");
+        let migration_index = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == COLLECTION_HISTORICAL_OWNERS_MIGRATION_ID)
+            .expect("historical owner migration is registered");
+        run_migrations(
+            &mut conn,
+            &BASELINE_MIGRATIONS[..migration_index],
+            &ctx,
+            &NoFaults,
+        )
+        .expect("apply migrations before the historical owner index");
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
+                 VALUES ('ws', 'main');
+             INSERT INTO versions (workspace_id, version_id, name, kind, created_at_ms)
+                 VALUES ('ws', 'main', 'Main', 'main', 1),
+                        ('ws', 'feature', 'Feature', 'named', 2);",
+        )
+        .expect("seed an existing store");
+
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+            .expect("apply the historical owner migration");
+        conn.execute_batch(
+            "INSERT INTO file_objects (workspace_id, object_id, created_at_ms)
+                 VALUES ('ws', 'object', 3);
+             INSERT INTO blobs (sha256, byte_length, text)
+                 VALUES ('sha', 49, '---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\n');
+             INSERT INTO moments (
+                 workspace_id, moment_order, moment_id, version_id, object_id, path,
+                 recorded_at_ms, operation, after_blob_sha256, before_present, metadata_origin
+             ) VALUES ('ws', 7, 'moment', 'feature', 'object', 'tasks/item.md',
+                       4, 'write', 'sha', 1, 'test');
+             INSERT INTO collection_historical_record_owners (
+                 workspace_id, version_id, object_id, moment_order, record_id, collection_path
+             ) VALUES ('ws', 'feature', 'object', 7,
+                       'rec_aaaaaaaaaaaaaaaaaaaaaaaaaa', 'tasks');
+             INSERT INTO collection_historical_record_owner_backfills (
+                 workspace_id, version_id, index_version
+             ) VALUES ('ws', 'feature', 1);
+             DELETE FROM versions WHERE workspace_id='ws' AND version_id='feature';",
+        )
+        .expect("seed and delete version-scoped historical ownership");
+
+        for table in [
+            "collection_historical_record_owners",
+            "collection_historical_record_owner_backfills",
+        ] {
+            let rows: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("count historical owner rows");
+            assert_eq!(rows, 0, "{table} must cascade with its version");
+        }
+    }
+
+    #[test]
+    fn collection_history_index_serves_newest_first_record_reads() {
+        let dir = tempdir();
+        let path = dir.join("collection-history-index.db");
+        let ctx = MigrationContext::current(1_100);
+        let mut conn = open_bare(&path);
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+            .expect("apply collection index migration");
+
+        let plan: Vec<String> = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN
+                 SELECT field_name, previous_value_json, next_value_json,
+                        author_origin_id, recorded_at_ms
+                   FROM collection_field_history
+                  WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3
+                  ORDER BY recorded_at_ms DESC, history_id DESC LIMIT ?4",
+            )
+            .expect("prepare newest-first history plan")
+            .query_map(rusqlite::params!["ws", "main", "record", 100], |row| {
+                row.get(3)
+            })
+            .expect("query newest-first history plan")
+            .collect::<rusqlite::Result<_>>()
+            .expect("collect newest-first history plan");
+
+        assert!(
+            plan.iter()
+                .any(|detail| detail.contains("collection_field_history_by_record")),
+            "record history must use its record index: {plan:?}"
+        );
+        assert!(
+            plan.iter()
+                .all(|detail| !detail.contains("TEMP B-TREE FOR ORDER BY")),
+            "record history index must serve newest-first ordering: {plan:?}"
+        );
     }
 
     #[test]

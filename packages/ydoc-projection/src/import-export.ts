@@ -16,6 +16,15 @@ import {
 import { TaskList } from '@tiptap/extension-list'
 import * as yaml from 'js-yaml'
 import {
+  CORE_SCHEMA,
+  defineMappingTag,
+  defineScalarTag,
+  defineSequenceTag,
+  floatCoreTag,
+  intCoreTag,
+  NOT_RESOLVED,
+} from 'js-yaml'
+import {
   prosemirrorJSONToYXmlFragment,
   yXmlFragmentToProseMirrorRootNode,
 } from 'y-prosemirror'
@@ -34,12 +43,90 @@ const FRONTMATTER_FIELD = 'frontmatter'
 const META_FIELD = 'meta'
 const FRONTMATTER_PRIORITY_KEYS = ['id', 'title', 'icon'] as const
 const DOHC_SCHEMA_VERSION = 1
+const MARKDOWN_CRLF_META_KEY = 'dohcMarkdownCrlf'
+const TAGGED_FRONTMATTER_PREFIX_META_KEY = 'dohcTaggedFrontmatterPrefix'
+const TAGGED_FRONTMATTER_BASELINE_META_KEY = 'dohcTaggedFrontmatterBaseline'
 const FM_RE = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n)?([\s\S]*)$/
 const PLAIN_TEXT_CONTENT_KIND = 'plain-text'
 // GFM forbids block nodes inside table cells but permits inline raw HTML, so a
 // multi-block ProseMirror cell uses a visible hard break instead of U+001F.
 const GFM_TABLE_CELL_BLOCK_SEPARATOR = '<br>'
 const PARSE_SENTINEL_RE = /\uE000DOHC_PARSE_\d+\uE001/gu
+const MAX_SAFE_INTEGER = BigInt(Number.MAX_SAFE_INTEGER)
+const MIN_YDOC_INTEGER = -(1n << 63n)
+const MAX_YDOC_INTEGER = (1n << 63n) - 1n
+
+function hasValidIntegerSeparators(source: string): boolean {
+  for (
+    let index = source.indexOf('_');
+    index !== -1;
+    index = source.indexOf('_', index + 1)
+  ) {
+    const previous = source[index - 1]
+    const next = source[index + 1]
+    if (
+      previous === undefined
+      || next === undefined
+      || !/[\dA-Fa-f]/u.test(previous)
+      || !/[\dA-Fa-f]/u.test(next)
+    ) {
+      return false
+    }
+  }
+  return true
+}
+
+const losslessIntegerTag = defineScalarTag('tag:yaml.org,2002:int', {
+  implicit: true,
+  implicitFirstChars: ['-', '+', ...'0123456789'],
+  resolve: (source, isExplicit, tagName) => {
+    if (!hasValidIntegerSeparators(source)) return NOT_RESOLVED
+    const normalizedSource = source.replaceAll('_', '')
+    if (
+      intCoreTag.resolve(normalizedSource, isExplicit, tagName) === NOT_RESOLVED
+    ) {
+      return NOT_RESOLVED
+    }
+    let magnitude = normalizedSource
+    let sign = 1n
+    if (magnitude[0] === '-' || magnitude[0] === '+') {
+      if (magnitude[0] === '-') sign = -1n
+      magnitude = magnitude.slice(1)
+    }
+    const integer = sign * BigInt(magnitude)
+    if (integer < MIN_YDOC_INTEGER || integer > MAX_YDOC_INTEGER) {
+      throw new Error('frontmatter integer exceeds the Y.Doc int64 domain')
+    }
+    if (integer >= -MAX_SAFE_INTEGER && integer <= MAX_SAFE_INTEGER) {
+      return integer === 0n && sign < 0n ? -0 : Number(integer)
+    }
+    return integer
+  },
+  identify: value =>
+    typeof value === 'bigint'
+    || (typeof value === 'number'
+      && Number.isSafeInteger(value)
+      && !Object.is(value, -0)),
+  represent: value => value.toString(),
+})
+const losslessFloatTag = defineScalarTag('tag:yaml.org,2002:float', {
+  implicit: true,
+  implicitFirstChars: floatCoreTag.implicitFirstChars,
+  resolve: floatCoreTag.resolve,
+  identify: value =>
+    typeof value === 'number'
+    && (!Number.isSafeInteger(value) || Object.is(value, -0)),
+  represent: value => {
+    const represented = floatCoreTag.represent(value)
+    return Number.isInteger(value) && !represented.includes('.')
+      ? `${represented}.0`
+      : represented
+  },
+})
+const losslessFrontmatterSchema = CORE_SCHEMA.withTags(
+  losslessIntegerTag,
+  losslessFloatTag,
+)
 
 function prepareRenderedTableCell(markdown: string): string {
   // Raw inline HTML is the canonical representation of cell block boundaries.
@@ -69,11 +156,14 @@ const MarkdownTable = Table.extend({
       renderChildren: (nodes, separator) =>
         prepareRenderedTableCell(helpers.renderChildren(nodes, separator)),
     }
+    // Tiptap's table renderer includes its own trailing newline, while the
+    // document renderer also joins sibling blocks with `\n\n`. Returning both
+    // would put two blank lines between a table and its next sibling.
     return renderTableToMarkdown(
       node,
       tableHelpers,
       { cellLineSeparator: GFM_TABLE_CELL_BLOCK_SEPARATOR },
-    )
+    ).replace(/\n$/u, '')
   },
 })
 
@@ -96,14 +186,31 @@ const schema = getSchema(extensions)
 type DohcMeta = { schemaVersion: number; contentKind?: 'plain-text' }
 
 export function markdownToYDoc(markdown: string): Y.Doc {
-  const { meta, body } = parseFrontmatter(markdown)
+  const {
+    meta,
+    body,
+    taggedFrontmatterPrefix,
+    taggedFrontmatterBaseline,
+  } = parseFrontmatter(markdown)
   const doc = new Y.Doc()
+  const usesCrlf = markdown.includes('\r\n')
 
   writeMap(doc.getMap(FRONTMATTER_FIELD), meta)
-  writeMap(doc.getMap(META_FIELD), { schemaVersion: DOHC_SCHEMA_VERSION })
+  writeMap(doc.getMap(META_FIELD), {
+    schemaVersion: DOHC_SCHEMA_VERSION,
+    ...(usesCrlf ? { [MARKDOWN_CRLF_META_KEY]: true } : {}),
+    ...(taggedFrontmatterPrefix === undefined
+      ? {}
+      : {
+          [TAGGED_FRONTMATTER_PREFIX_META_KEY]: taggedFrontmatterPrefix,
+          [TAGGED_FRONTMATTER_BASELINE_META_KEY]: taggedFrontmatterBaseline,
+        }),
+  })
 
   const bodyFragment = doc.getXmlFragment(BODY_FIELD)
-  const tiptapJson = parseRichdocMarkdown(body)
+  const tiptapJson = parseRichdocMarkdown(
+    usesCrlf ? body.replaceAll('\r\n', '\n') : body,
+  )
   prosemirrorJSONToYXmlFragment(schema, tiptapJson, bodyFragment)
 
   return doc
@@ -292,13 +399,24 @@ function restoreParseSentinels(
 }
 
 export function plainTextToYDoc(markdown: string): Y.Doc {
-  const { meta, body } = parseFrontmatter(markdown)
+  const {
+    meta,
+    body,
+    taggedFrontmatterPrefix,
+    taggedFrontmatterBaseline,
+  } = parseFrontmatter(markdown)
   const doc = new Y.Doc()
 
   writeMap(doc.getMap(FRONTMATTER_FIELD), meta)
   writeMap(doc.getMap(META_FIELD), {
     schemaVersion: DOHC_SCHEMA_VERSION,
     contentKind: PLAIN_TEXT_CONTENT_KIND,
+    ...(taggedFrontmatterPrefix === undefined
+      ? {}
+      : {
+          [TAGGED_FRONTMATTER_PREFIX_META_KEY]: taggedFrontmatterPrefix,
+          [TAGGED_FRONTMATTER_BASELINE_META_KEY]: taggedFrontmatterBaseline,
+        }),
   })
   doc.getText(PLAIN_TEXT_FIELD).insert(0, body)
 
@@ -308,15 +426,30 @@ export function plainTextToYDoc(markdown: string): Y.Doc {
 export function yDocToMarkdown(doc: Y.Doc): string {
   const body = yDocBodyToMarkdown(doc).trimEnd()
   const frontmatter = orderFrontmatter(getDohcYDocFrontmatter(doc))
+  const internalMeta = doc.getMap(META_FIELD)
+  const usesCrlf = internalMeta.get(MARKDOWN_CRLF_META_KEY) === true
+    && internalMeta.get('contentKind') !== PLAIN_TEXT_CONTENT_KIND
+  const restoreLineEndings = (markdown: string): string => (
+    usesCrlf ? markdown.replaceAll('\n', '\r\n') : markdown
+  )
 
-  if (Object.keys(frontmatter).length === 0) return body
+  const taggedPrefix = internalMeta.get(TAGGED_FRONTMATTER_PREFIX_META_KEY)
+  const taggedBaseline = internalMeta.get(TAGGED_FRONTMATTER_BASELINE_META_KEY)
+  if (
+    typeof taggedPrefix === 'string'
+    && typeof taggedBaseline === 'string'
+    && frontmatterYaml(frontmatter) === taggedBaseline
+  ) {
+    return `${taggedPrefix}${restoreLineEndings(body)}`
+  }
 
-  const yamlFrontmatter = yaml.dump(frontmatter, {
-    lineWidth: -1,
-    sortKeys: false,
-  })
+  if (Object.keys(frontmatter).length === 0) return restoreLineEndings(body)
 
-  return `---\n${yamlFrontmatter}---${body.startsWith('\n') ? '\n' : '\n\n'}${body}`
+  const yamlFrontmatter = frontmatterYaml(frontmatter)
+
+  return restoreLineEndings(
+    `---\n${yamlFrontmatter}---${body.startsWith('\n') ? '\n' : '\n\n'}${body}`,
+  )
 }
 
 export function getDohcYDocFrontmatter(doc: Y.Doc): Record<string, unknown> {
@@ -988,6 +1121,8 @@ function escapeRegExp(value: string): string {
 function parseFrontmatter(src: string): {
   meta: Record<string, unknown>
   body: string
+  taggedFrontmatterPrefix?: string
+  taggedFrontmatterBaseline?: string
 } {
   const match = FM_RE.exec(src)
   if (!match) return { meta: {}, body: src }
@@ -996,14 +1131,95 @@ function parseFrontmatter(src: string): {
   let meta: Record<string, unknown> = {}
   if (isEmptyFrontmatter(raw ?? '')) return { meta, body: rest ?? '' }
   try {
-    const parsed = yaml.load(raw ?? '')
+    const {
+      value: parsed,
+      hasUnsupportedTag,
+    } = loadFrontmatterWithUnsupportedTags(raw ?? '')
     if (parsed == null) return { meta: {}, body: src }
     if (!isFrontmatterMap(parsed)) return { meta: {}, body: src }
     meta = parsed
+    if (hasUnsupportedTag) {
+      const body = rest ?? ''
+      const leadingSeparator = /^(?:\r?\n)*/u.exec(body)?.[0] ?? ''
+      return {
+        meta,
+        body: body.slice(leadingSeparator.length),
+        taggedFrontmatterPrefix: `${
+          src.slice(0, src.length - body.length)
+        }${leadingSeparator}`,
+        taggedFrontmatterBaseline: frontmatterYaml(meta),
+      }
+    }
   } catch {
     return { meta: {}, body: src }
   }
   return { meta, body: rest ?? '' }
+}
+
+function loadFrontmatterWithUnsupportedTags(raw: string): {
+  value: unknown
+  hasUnsupportedTag: boolean
+} {
+  let hasUnsupportedTag = false
+  const markUnsupported = (): void => {
+    hasUnsupportedTag = true
+  }
+  const unsupportedScalarTag = defineScalarTag('', {
+    matchByTagPrefix: true,
+    resolve: source => {
+      markUnsupported()
+      return source
+    },
+  })
+  const unsupportedSequenceTag = defineSequenceTag('', {
+    matchByTagPrefix: true,
+    create: () => {
+      markUnsupported()
+      return [] as unknown[]
+    },
+    addItem: (values, value) => {
+      values.push(value)
+    },
+  })
+  const unsupportedMappingTag = defineMappingTag('', {
+    matchByTagPrefix: true,
+    create: () => {
+      markUnsupported()
+      return nullPrototypeRecord()
+    },
+    addPair: (mapping, key, value) => {
+      const normalizedKey = String(key)
+      mapping[normalizedKey] = value
+      return ''
+    },
+    has: (mapping, key) => Object.hasOwn(mapping, String(key)),
+    keys: mapping => Object.keys(mapping),
+    get: (mapping, key) => mapping[String(key)],
+  })
+  const schema = losslessFrontmatterSchema.withTags(
+    unsupportedScalarTag,
+    unsupportedSequenceTag,
+    unsupportedMappingTag,
+  )
+  return {
+    value: normalizeFrontmatterValue(yaml.load(raw, { schema })),
+    hasUnsupportedTag,
+  }
+}
+
+function nullPrototypeRecord(): Record<string, unknown> {
+  return Object.create(null) as Record<string, unknown>
+}
+
+function normalizeFrontmatterValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(normalizeFrontmatterValue)
+  if (!isFrontmatterMap(value)) return value
+
+  const normalized = nullPrototypeRecord()
+  for (const [key, child] of Object.entries(value)) {
+    normalized[key] = normalizeFrontmatterValue(child)
+  }
+  return normalized
 }
 
 function isFrontmatterMap(value: unknown): value is Record<string, unknown> {
@@ -1021,20 +1237,110 @@ function isEmptyFrontmatter(raw: string): boolean {
   })
 }
 
-function writeMap(map: Y.Map<unknown>, values: Record<string, unknown>): void {
+function writeMap(
+  map: Y.Map<unknown>,
+  values: Record<string, unknown>,
+  escapeSharedBigIntKeys = false,
+): void {
   for (const [key, value] of Object.entries(values)) {
-    map.set(key, value)
+    map.set(
+      escapeSharedBigIntKeys ? escapeSharedBigIntKey(key) : key,
+      frontmatterValueNeedsSharedType(value)
+        ? frontmatterValueToY(value)
+        : frontmatterValueToAny(value),
+    )
   }
 }
 
-function mapToObject(map: Y.Map<unknown>): Record<string, unknown> {
-  return Object.fromEntries(map.entries())
+function frontmatterValueNeedsSharedType(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(frontmatterValueNeedsSharedType)
+  if (!isFrontmatterMap(value)) return false
+  // Yjs dispatches plain values through `value.constructor`, so that data key
+  // must keep the older shared-type encoding.
+  return Object.hasOwn(value, 'constructor')
+    || Object.values(value).some(frontmatterValueNeedsSharedType)
+}
+
+function frontmatterValueToAny(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(frontmatterValueToAny)
+  if (!isFrontmatterMap(value)) return value
+  return Object.fromEntries(
+    Object.entries(value).map(([key, child]) => [key, frontmatterValueToAny(child)]),
+  )
+}
+
+const FRONTMATTER_SHARED_BIGINT_KEY = '$dohcBigInt'
+// The sentinel spelling and every extra-`$` escape depth of it. Literal keys
+// spelled this way gain one `$` when a shared map is built and lose one when
+// it is read, so only a real sentinel ever carries the unescaped key.
+const SHARED_BIGINT_KEY_SPELLING = /^\$+dohcBigInt$/
+
+function escapeSharedBigIntKey(key: string): string {
+  return SHARED_BIGINT_KEY_SPELLING.test(key) ? `$${key}` : key
+}
+
+function unescapeSharedBigIntKey(key: string): string {
+  return key.startsWith('$$') && SHARED_BIGINT_KEY_SPELLING.test(key)
+    ? key.slice(1)
+    : key
+}
+
+function frontmatterValueToY(value: unknown): unknown {
+  if (typeof value === 'bigint') {
+    // Y.Map stores bigint through ContentAny, while Y.Array rejects bigint as
+    // a direct item in Yjs 13. Keep the exact value in Any instead of changing
+    // its scalar kind to a collaborative text node.
+    const integer = new Y.Map<unknown>()
+    integer.set(FRONTMATTER_SHARED_BIGINT_KEY, value)
+    return integer
+  }
+  if (Array.isArray(value)) {
+    const array = new Y.Array<unknown>()
+    array.insert(0, value.map(frontmatterValueToY))
+    return array
+  }
+  if (isFrontmatterMap(value)) {
+    const map = new Y.Map<unknown>()
+    writeMap(map, value, true)
+    return map
+  }
+  return value
+}
+
+function yFrontmatterValueToPlain(value: unknown): unknown {
+  if (
+    value instanceof Y.Map
+    && value.size === 1
+    && typeof value.get(FRONTMATTER_SHARED_BIGINT_KEY) === 'bigint'
+  ) {
+    return value.get(FRONTMATTER_SHARED_BIGINT_KEY)
+  }
+  if (value instanceof Y.Map) return mapToObject(value, true)
+  if (value instanceof Y.Array) {
+    return value.toArray().map(yFrontmatterValueToPlain)
+  }
+  // No writer puts Y.Text in frontmatter (bigints ride the shared singleton
+  // map); a foreign one degrades to its visible string instead of throwing.
+  if (value instanceof Y.Text) return value.toString()
+  return normalizeFrontmatterValue(value)
+}
+
+function mapToObject(
+  map: Y.Map<unknown>,
+  unescapeSharedBigIntKeys = false,
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Array.from(map.entries(), ([key, child]) => [
+      unescapeSharedBigIntKeys ? unescapeSharedBigIntKey(key) : key,
+      yFrontmatterValueToPlain(child),
+    ]),
+  )
 }
 
 function orderFrontmatter(
   frontmatter: Record<string, unknown>,
 ): Record<string, unknown> {
-  const ordered: Record<string, unknown> = {}
+  const ordered = nullPrototypeRecord()
 
   for (const key of FRONTMATTER_PRIORITY_KEYS) {
     if (Object.hasOwn(frontmatter, key)) ordered[key] = frontmatter[key]
@@ -1045,4 +1351,12 @@ function orderFrontmatter(
   }
 
   return ordered
+}
+
+function frontmatterYaml(frontmatter: Record<string, unknown>): string {
+  return yaml.dump(orderFrontmatter(frontmatter), {
+    schema: losslessFrontmatterSchema,
+    lineWidth: -1,
+    sortKeys: false,
+  })
 }

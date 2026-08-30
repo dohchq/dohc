@@ -78,6 +78,16 @@ const fixtureSets = [
     oracleFailurePrefix: "",
     knownOracleFailures: new Map(),
   },
+  {
+    dir: "crates/dohc-engine-domain/tests/fixtures",
+    oracle: "packages/workspace-contracts",
+    dependencyOverrideEnv: "DOHC_TSX_BASE",
+    // Collection schema, Field value, and Record id outcomes are deterministic.
+    // Every byte remains part of the TypeScript-to-Rust drift signal.
+    volatileFields: [],
+    oracleFailurePrefix: "",
+    knownOracleFailures: new Map(),
+  },
 ];
 
 function fixtureNames(directory) {

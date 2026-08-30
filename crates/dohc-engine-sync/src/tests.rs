@@ -7162,6 +7162,7 @@ fn lower_relay_base_recovers_the_loser_as_one_ordinary_sibling() {
                 origin_seq: 1,
                 bytes: loser_delta,
             },
+            None,
             &NoFaults,
             1_150,
         ),
@@ -9275,6 +9276,176 @@ fn parked_ydoc_envelope_drains_into_the_lineage_and_redrains_deduped() {
         "replaying the parked row is content-deduped"
     );
     assert!(redrained.refusals.is_empty());
+}
+
+#[test]
+fn compacted_deferred_update_redelivery_does_not_duplicate_collection_history() {
+    const RECORD_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const OBJECT_ID: &str = "history-redelivery-object";
+    const PATH: &str = "tasks/history.md";
+
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    seed_text_head(
+        &mut engine,
+        "history-redelivery-schema",
+        "tasks/collection.yaml",
+        "fields:\n  title:\n    type: text\n  padding:\n    type: text\n",
+    );
+    let markdown = format!("---\nid: {RECORD_ID}\ntitle: Original\n---\n\nBody\n");
+    seed_text_head(&mut engine, OBJECT_ID, PATH, &markdown);
+    engine
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_domain::reconcile_collections_in_tx(tx, "ws", "main")?;
+            dohc_engine_domain::set_collection_adoption_state_in_tx(
+                tx, "ws", "main", PATH, RECORD_ID, "adopted",
+            )
+        })
+        .expect("bind adopted collection record");
+
+    let key = dohc_engine_collab::DocKey::new("ws", "main", OBJECT_ID).expect("key");
+    let local = dohc_engine_collab::Ydoc::wire();
+    local
+        .rewrite_content_to_markdown(dohc_engine_collab::ContentKind::Richdoc, &markdown)
+        .expect("seed rich document");
+    let base = local.encode_full_state();
+    let claim_id = match dohc_engine_collab::claim_base(
+        &mut engine,
+        &key,
+        dohc_engine_collab::ContentKind::Richdoc,
+        &base,
+        &NoFaults,
+        1_500,
+    )
+    .expect("claim replicated base")
+    {
+        TxnOutcome::Committed(dohc_engine_collab::ClaimOutcome::Claimed { base_snapshot_sha }) => {
+            base_snapshot_sha
+        }
+        other => panic!("unexpected base claim: {other:?}"),
+    };
+
+    let remote = dohc_engine_collab::Ydoc::wire();
+    remote.apply(&base).expect("remote sees base");
+    let remote_update = remote.frontmatter_set("title", "Remote");
+
+    let mut cache = dohc_engine_collab::WriterDocCache::new();
+    for index in 0..(dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD - 1) {
+        let filler = local.frontmatter_set("padding", &format!("{index}"));
+        let outcome = dohc_engine_collab::record_local_update(
+            &mut engine,
+            &mut cache,
+            &key,
+            &filler,
+            &NoFaults,
+            1_600 + index as i64,
+        )
+        .expect("append filler update");
+        assert!(matches!(outcome, TxnOutcome::Committed(_)));
+    }
+
+    let update_sha = engine
+        .put_binary_blob(&remote_update)
+        .expect("store remote update");
+    let operation = envelope(
+        "history-redelivery-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": OBJECT_ID,
+            "path": PATH,
+            "contentKind": "richdoc",
+            "updateBlobSha256": update_sha,
+            "lineageClaimId": claim_id,
+            "isBaseState": false,
+            "actorOriginId": "remote-author"
+        }),
+    );
+    assert!(matches!(
+        apply_ydoc_envelope(&mut engine, &operation, &NoFaults, &AlwaysLive),
+        Ok(ApplyOutcome::Applied(YdocApplyResult {
+            deferred: true,
+            ..
+        }))
+    ));
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(
+                "CREATE TRIGGER inject_deferred_projection_failure \
+                 BEFORE INSERT ON moments \
+                 BEGIN SELECT RAISE(ABORT, 'injected drain projection failure'); END",
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("install projection failure");
+
+    assert!(matches!(
+        drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults),
+        Err(SyncError::Storage(_))
+    ));
+    let after_failure: (i64, i64, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM collection_field_history \
+                     WHERE workspace_id='ws' AND version_id='main' \
+                       AND record_id=?1 AND field_name='title'",
+                    [RECORD_ID],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_updates \
+                     WHERE workspace_id='ws' AND version_id='main' AND object_id=?1",
+                    [OBJECT_ID],
+                    |row| row.get(0),
+                )?,
+                conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| {
+                    row.get(0)
+                })?,
+            ))
+        })
+        .expect("state after failed projection");
+    assert_eq!(
+        after_failure,
+        (1, 0, 1),
+        "the update and its history commit before projection, then compact"
+    );
+
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch("DROP TRIGGER inject_deferred_projection_failure")
+                .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("clear projection failure");
+    let redrained =
+        drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults).expect("redrain update");
+    assert_eq!(redrained.drained, 1);
+    let (history_rows, deferred_rows): (i64, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM collection_field_history \
+                     WHERE workspace_id='ws' AND version_id='main' \
+                       AND record_id=?1 AND field_name='title'",
+                    [RECORD_ID],
+                    |row| row.get(0),
+                )?,
+                conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| {
+                    row.get(0)
+                })?,
+            ))
+        })
+        .expect("state after redelivery");
+    assert_eq!(
+        history_rows, 1,
+        "redelivery must reuse the journal identity"
+    );
+    assert_eq!(deferred_rows, 0, "successful projection clears the marker");
 }
 
 #[test]
@@ -12238,6 +12409,7 @@ fn external_text_write_to_a_closed_scene_retires_the_lineage_for_reseed() {
                     path,
                     text: &changed,
                 },
+                None,
                 4_000,
             )
         })
@@ -17983,6 +18155,7 @@ fn recover_origin_rebases_ydoc_suffix_coordinates_before_repair_and_arbitration(
         dohc_engine_collab::ContentKind::Plaintext,
         &restored_claim,
         &restored_claim,
+        None,
         true,
     );
     let base_seq = journal_local_replication_op(
@@ -18008,6 +18181,7 @@ fn recover_origin_rebases_ydoc_suffix_coordinates_before_repair_and_arbitration(
         dohc_engine_collab::ContentKind::Plaintext,
         &delta_sha,
         &restored_claim,
+        None,
         false,
     );
     let delta_seq = journal_local_replication_op(
@@ -18166,6 +18340,7 @@ fn recover_origin_rebases_ydoc_suffix_coordinates_before_repair_and_arbitration(
             dohc_engine_collab::ContentKind::Plaintext,
             &winner_claim,
             &winner_claim,
+            None,
             true,
         ),
     );

@@ -25,10 +25,11 @@
 use crate::capture_sink::{CaptureProvenance, SelfWriteSuppression, StoreCaptureSink};
 use crate::{CAPTURE_MOMENT_RECORDED_EVENT, EngineEvents};
 use dohc_engine_collab::LeaseRegistry;
+use dohc_engine_domain::COLLECTION_SCHEMA_FILENAME;
 use dohc_engine_files::{
-    CancellationToken, CaptureApplyResult, FilesActor, FilesError, FilesHandle, ManifestEntry,
-    NativeWatcher, ReconcilePlan, ReconcileRun, ScanBounds, ScanGeneration, ScanManifest,
-    apply_reconcile_plan,
+    CancellationToken, CaptureApplyResult, CaptureOp, FilesActor, FilesError, FilesHandle,
+    IngestReason, ManifestEntry, NativeWatcher, ReconcilePlan, ReconcileRun, ScanBounds,
+    ScanGeneration, ScanManifest, apply_reconcile_plan,
 };
 use dohc_engine_runtime::{ActorHandle, NoFaults, RuntimeError};
 use std::path::{Path, PathBuf};
@@ -443,6 +444,11 @@ const STATUS_TERMINAL: u8 = 1 << 2;
 /// loop's unknown-fingerprint tracking so the policy-recovery rebuild fires
 /// even when the blip was visible only inside the apply window.
 const STATUS_POLICY_HOLD: u8 = 1 << 3;
+/// Collection state may need reconciliation without a membership op in the
+/// current file plan (startup, conflict, or version transition). The driver
+/// consumes this bit before attempting reconciliation and re-arms it on
+/// failure, so a transition racing the attempt remains pending.
+const STATUS_COLLECTION_RECONCILE_PENDING: u8 = 1 << 4;
 
 /// A consistent point-in-time view of the driver, decoded from ONE atomic
 /// load. Any consumer that needs MORE THAN ONE flag must go through this —
@@ -499,7 +505,7 @@ impl DriverStatus {
             }
         });
     }
-    fn mark_degraded(&self) {
+    pub(crate) fn mark_degraded(&self) {
         self.update(|bits| bits | STATUS_DEGRADED);
     }
     /// A failure: not running, degraded, terminal iff the streak says so —
@@ -528,6 +534,21 @@ impl DriverStatus {
     /// Consume the hold (test-and-clear in one atomic op).
     fn take_policy_hold(&self) -> bool {
         self.bits.fetch_and(!STATUS_POLICY_HOLD, Ordering::AcqRel) & STATUS_POLICY_HOLD != 0
+    }
+    pub(crate) fn request_collection_reconcile(&self) {
+        self.update(|bits| bits | STATUS_COLLECTION_RECONCILE_PENDING);
+    }
+    #[cfg(test)]
+    fn collection_reconcile_pending(&self) -> bool {
+        self.bits.load(Ordering::Acquire) & STATUS_COLLECTION_RECONCILE_PENDING != 0
+    }
+    /// Take the current request before starting the actor call. A concurrent
+    /// transition then sets a fresh bit that this attempt cannot erase.
+    fn take_collection_reconcile_request(&self) -> bool {
+        self.bits
+            .fetch_and(!STATUS_COLLECTION_RECONCILE_PENDING, Ordering::AcqRel)
+            & STATUS_COLLECTION_RECONCILE_PENDING
+            != 0
     }
 }
 
@@ -1874,6 +1895,61 @@ fn policy_excludes(
         .tracked
 }
 
+fn is_collection_record_path(root: &Path, path: &str) -> bool {
+    let Some((parent, name)) = path.rsplit_once('/') else {
+        // v1 does not admit the workspace root as a collection.
+        return false;
+    };
+    if parent.is_empty() || !dohc_engine_domain::collections::is_collection_markdown_path(name) {
+        return false;
+    }
+    match std::fs::symlink_metadata(root.join(parent).join(COLLECTION_SCHEMA_FILENAME)) {
+        Ok(metadata) => metadata.file_type().is_file(),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            false
+        }
+        // Permission/lock/other uncertainty fails toward reconciliation.
+        Err(_) => true,
+    }
+}
+
+/// Whether a settled file plan can change collection detection or membership.
+fn collection_reconcile_required(root: &Path, plan: &ReconcilePlan) -> bool {
+    plan.ops.iter().any(|op| {
+        let path = op.path();
+        path.rsplit('/').next() == Some(COLLECTION_SCHEMA_FILENAME)
+            || matches!(
+                op,
+                CaptureOp::Ingest {
+                    reason: IngestReason::Added,
+                    ..
+                } | CaptureOp::Retire { .. }
+            ) && is_collection_record_path(root, path)
+    })
+}
+
+/// Changed collection records whose canonical id needs comparison with the
+/// durable binding after capture. Body and ordinary field edits do not by
+/// themselves schedule the more expensive collection reconciliation.
+fn changed_collection_record_paths(root: &Path, plan: &ReconcilePlan) -> Vec<String> {
+    plan.ops
+        .iter()
+        .filter_map(|op| match op {
+            CaptureOp::Ingest {
+                path,
+                reason: IngestReason::Changed,
+                ..
+            } if is_collection_record_path(root, path) => Some(path.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn wall_now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2393,7 +2469,10 @@ impl DriverEnv for RealEnv {
         // The startup baseline is the offline-reconcile pass (TS parity):
         // ONE correlation id and the "Reconciled offline edits" summary tie
         // its per-file moments together, retries included — they finish the
-        // same pass.
+        // same pass. A new layer also performs one collection reconciliation:
+        // its in-memory retry bit cannot preserve a failed request across a
+        // daemon restart, and a rehydrated manifest may make this plan empty.
+        self.status.request_collection_reconcile();
         let provenance = reconcile_provenance();
         let mut settled =
             apply_run(self.apply_context_with(provenance.clone()), &fresh, initial).await;
@@ -2689,6 +2768,13 @@ struct ApplyRunContext<'a> {
     events: EngineEvents,
 }
 
+struct CaptureThreadOutcome {
+    plan: ReconcilePlan,
+    result: CaptureApplyResult,
+    policy_held: bool,
+    collections: Option<Result<Vec<String>, RuntimeError>>,
+}
+
 /// TS parity (`reconcile-${createId()}` + "Reconciled offline edits"): one
 /// actor-neutral correlation id ties a reconcile pass's per-file moments
 /// together as a group without inventing an author.
@@ -2762,9 +2848,45 @@ async fn apply_run_with_handle(
         events,
     } = context;
     let now_ms = wall_now_ms();
-    let plan = match run {
-        ReconcileRun::Completed(plan) => plan,
+    let (plan, collection_reconcile_requested) = match run {
+        ReconcileRun::Completed(plan) => {
+            let requested = status.take_collection_reconcile_request()
+                || collection_reconcile_required(root, &plan);
+            (plan, requested)
+        }
         ReconcileRun::Converged => {
+            let adopted_paths = if status.take_collection_reconcile_request() {
+                let result = match actor.active_version_id(workspace_id.to_owned()).await {
+                    Ok(version_id) => {
+                        actor
+                            .reconcile_collections(
+                                workspace_id.to_owned(),
+                                version_id,
+                                root.to_path_buf(),
+                                leases.clone(),
+                                Arc::new(self_writes.clone()),
+                                now_ms,
+                                Arc::new(NoFaults),
+                                CancellationToken::new(),
+                            )
+                            .await
+                    }
+                    Err(RuntimeError::Domain(
+                        dohc_engine_domain::DomainError::WorkspaceNotFound,
+                    )) => Ok(Vec::new()),
+                    Err(error) => Err(error),
+                };
+                match result {
+                    Ok(paths) => paths,
+                    Err(_) => {
+                        status.request_collection_reconcile();
+                        status.mark_degraded();
+                        return false;
+                    }
+                }
+            } else {
+                Vec::new()
+            };
             return match repair_and_materialize_ydoc_recoveries(
                 root,
                 actor,
@@ -2774,7 +2896,8 @@ async fn apply_run_with_handle(
             )
             .await
             {
-                Ok(recovered_paths) => {
+                Ok(mut recovered_paths) => {
+                    recovered_paths.extend(adopted_paths);
                     if !recovered_paths.is_empty() {
                         events.emit(
                             CAPTURE_MOMENT_RECORDED_EVENT,
@@ -2802,6 +2925,9 @@ async fn apply_run_with_handle(
             dohc_engine_domain::DomainError::WorkspaceNotFound,
         )) => "main".to_owned(),
         Err(_) => {
+            if collection_reconcile_requested {
+                status.request_collection_reconcile();
+            }
             status.mark_degraded();
             ack_all_failed(files, plan, status).await;
             return false;
@@ -2813,6 +2939,7 @@ async fn apply_run_with_handle(
     let apply_leases = leases.clone();
     let apply_self_writes = self_writes.clone();
     let version_for_retire = version_id.clone();
+    let changed_collection_paths = changed_collection_record_paths(root, &plan);
     // A DEDICATED plain thread, not spawn_blocking: the sink's blocking actor
     // calls assert they run OUTSIDE any tokio runtime context, and
     // spawn_blocking threads carry the runtime handle. Awaiting the oneshot
@@ -2844,9 +2971,31 @@ async fn apply_run_with_handle(
                 apply_provenance,
             );
             let result = apply_reconcile_plan(&apply_plan, &mut sink, &NoFaults);
-            let _ = done_tx.send((apply_plan, result, sink.policy_held()));
+            let collections =
+                if result.failed_applies.is_empty() && !result.degraded && result.completed() {
+                    let reconcile = if collection_reconcile_requested {
+                        Ok(true)
+                    } else if changed_collection_paths.is_empty() {
+                        Ok(false)
+                    } else {
+                        sink.collection_record_id_mismatch(changed_collection_paths)
+                    };
+                    match reconcile {
+                        Ok(true) => Some(sink.reconcile_collections()),
+                        Ok(false) => None,
+                        Err(error) => Some(Err(error)),
+                    }
+                } else {
+                    None
+                };
+            let _ = done_tx.send(CaptureThreadOutcome {
+                plan: apply_plan,
+                result,
+                policy_held: sink.policy_held(),
+                collections,
+            });
         });
-    let applied: Option<(ReconcilePlan, CaptureApplyResult, bool)> = match apply_thread {
+    let applied: Option<CaptureThreadOutcome> = match apply_thread {
         Ok(joiner) => {
             let outcome = done_rx.await.ok();
             let _ = tokio::task::spawn_blocking(move || joiner.join()).await;
@@ -2854,11 +3003,37 @@ async fn apply_run_with_handle(
         }
         Err(_) => None,
     };
-    let Some((plan, mut result, sink_policy_held)) = applied else {
+    let Some(CaptureThreadOutcome {
+        plan,
+        mut result,
+        policy_held: sink_policy_held,
+        collections: collection_result,
+    }) = applied
+    else {
         // Spawn failure or apply-thread panic: the plan must still resolve.
+        if collection_reconcile_requested {
+            status.request_collection_reconcile();
+        }
         status.mark_degraded();
         ack_all_failed(files, plan, status).await;
         return false;
+    };
+    let collection_paths = match collection_result {
+        Some(Ok(paths)) => paths,
+        Some(Err(_)) => {
+            status.request_collection_reconcile();
+            result.degraded = true;
+            status.mark_degraded();
+            Vec::new()
+        }
+        None => {
+            if collection_reconcile_requested {
+                // The file apply did not settle, so the relevant transition
+                // has not reached collection reconciliation yet.
+                status.request_collection_reconcile();
+            }
+            Vec::new()
+        }
     };
     // OVER-CAP + NARROWED: a path in the scanner's retained-over-cap set
     // never appears in the diff (CAL-3 keeps it last-known-good, never
@@ -2986,10 +3161,15 @@ async fn apply_run_with_handle(
     // retained loop above (which reports its retires via not_owned_paths).
     // Gating on applied_paths alone left the renderer permanently stale for
     // exactly those moments.
-    if !result.applied_paths.is_empty() || !result.not_owned_paths.is_empty() {
+    if !result.applied_paths.is_empty()
+        || !result.not_owned_paths.is_empty()
+        || !collection_paths.is_empty()
+    {
+        let mut recorded_paths = result.applied_paths.clone();
+        recorded_paths.extend(collection_paths);
         events.emit(
             CAPTURE_MOMENT_RECORDED_EVENT,
-            moment_recorded_payload(workspace_id, &result.applied_paths, &result.not_owned_paths),
+            moment_recorded_payload(workspace_id, &recorded_paths, &result.not_owned_paths),
         );
     }
     if result.completed() && files.acknowledge_capture(plan, result).await.is_err() {
@@ -3061,6 +3241,944 @@ async fn ack_all_failed(files: &FilesHandle, plan: ReconcilePlan, status: &Arc<D
     };
     if files.acknowledge_capture(plan, receipt).await.is_err() {
         status.mark_degraded();
+    }
+}
+
+#[cfg(test)]
+mod collection_reconcile_scheduling_tests {
+    use super::*;
+    use dohc_engine_collab::{ContentKind, DocKey, Ydoc};
+    use dohc_engine_files::{CaptureApplyResult, CaptureSink, CapturedIngest};
+    use dohc_engine_runtime::WorkspaceSupervisor;
+    use dohc_engine_testkit::ScratchDir;
+
+    const WORKSPACE_ID: &str = "ws-idle-collection-reconcile";
+
+    fn plan_with(op: CaptureOp) -> ReconcilePlan {
+        ReconcilePlan {
+            from_generation: ScanGeneration(0),
+            to_generation: ScanGeneration(1),
+            ops: vec![op],
+            retained_over_cap: Vec::new(),
+            unconfirmed_removed: Vec::new(),
+            degraded: false,
+            degraded_paths: Vec::new(),
+            prepared_from_dirty: true,
+            dirty_epoch: 1,
+        }
+    }
+
+    fn ingest(path: &str, reason: IngestReason) -> CaptureOp {
+        CaptureOp::Ingest {
+            path: path.to_owned(),
+            size: 1,
+            sha256: "advisory-sha".to_owned(),
+            mtime_ms: 0,
+            media_type: "text/markdown",
+            reason,
+        }
+    }
+
+    async fn wait_for_watcher_dirty(files: &FilesHandle) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if files.stats().await.expect("watcher stats").dirty {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "native watcher did not mark the collection edit dirty"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        }
+    }
+
+    async fn seed_plain_richdoc_lineage(actor: &ActorHandle, path: &str, markdown: &str) {
+        let state = actor
+            .ydoc_open_state(
+                WORKSPACE_ID.to_owned(),
+                wall_now_ms(),
+                false,
+                None,
+                "main".to_owned(),
+                path.to_owned(),
+                Some(ContentKind::Richdoc),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("open absent rich-document lineage");
+        assert!(
+            !state.lineage_existing,
+            "test fixture starts without lineage"
+        );
+
+        // These scheduling tests use a plain paragraph fixture. Production
+        // adoption seeds through the desktop's shared Markdown importer.
+        let doc = Ydoc::wire();
+        doc.apply(&state.initial_update)
+            .expect("apply initial rich-document state");
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, markdown)
+            .expect("seed plain rich-document fixture");
+        actor
+            .ydoc_record_update(
+                state.key,
+                path.to_owned(),
+                ContentKind::Richdoc,
+                state.regime,
+                doc.encode_full_state(),
+                None,
+                state.lineage_claim_id,
+                true,
+                state.head_blob_sha256,
+                None,
+                wall_now_ms(),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("record rich-document seed");
+    }
+
+    fn seed_collection_capture(actor: &ActorHandle, root: &Path, paths: &[&str]) {
+        let seed_actor = actor.clone();
+        let seed_root = root.to_path_buf();
+        let paths = paths
+            .iter()
+            .map(|path| (*path).to_owned())
+            .collect::<Vec<_>>();
+        std::thread::spawn(move || {
+            let mut sink =
+                StoreCaptureSink::new(seed_actor, WORKSPACE_ID, "main", seed_root, 2, None);
+            for path in paths {
+                sink.ingest(
+                    &path,
+                    0,
+                    "advisory-sha",
+                    "text/markdown",
+                    IngestReason::Added,
+                )
+                .unwrap_or_else(|_| panic!("capture {path}"));
+            }
+        })
+        .join()
+        .expect("collection seed thread");
+    }
+
+    fn collection_apply_context<'a>(
+        root: &'a Path,
+        actor: &'a ActorHandle,
+        leases: &'a LeaseRegistry,
+        status: &'a Arc<DriverStatus>,
+        self_writes: &'a SelfWriteSuppression,
+    ) -> ApplyRunContext<'a> {
+        ApplyRunContext {
+            root,
+            actor,
+            workspace_id: WORKSPACE_ID,
+            leases,
+            status,
+            self_writes,
+            author_json: None,
+            provenance: CaptureProvenance::default(),
+            events: EngineEvents::default(),
+        }
+    }
+
+    #[test]
+    fn collection_reconcile_predicate_tracks_only_detection_and_membership_changes() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let collection_dir = scratch.path().join("tasks");
+        std::fs::create_dir_all(&collection_dir).expect("collection directory");
+        std::fs::write(collection_dir.join("collection.yaml"), b"name: Tasks\n")
+            .expect("collection schema");
+
+        assert!(collection_reconcile_required(
+            scratch.path(),
+            &plan_with(ingest("collection.yaml", IngestReason::Changed)),
+        ));
+        assert!(collection_reconcile_required(
+            scratch.path(),
+            &plan_with(ingest("tasks/collection.yaml", IngestReason::Changed)),
+        ));
+        assert!(collection_reconcile_required(
+            scratch.path(),
+            &plan_with(ingest("tasks/alpha.md", IngestReason::Added)),
+        ));
+        assert!(collection_reconcile_required(
+            scratch.path(),
+            &plan_with(CaptureOp::Retire {
+                path: "tasks/alpha.md".to_owned(),
+            }),
+        ));
+        assert!(!collection_reconcile_required(
+            scratch.path(),
+            &plan_with(ingest("tasks/alpha.md", IngestReason::Changed)),
+        ));
+        assert!(!collection_reconcile_required(
+            scratch.path(),
+            &plan_with(ingest("notes/alpha.md", IngestReason::Added)),
+        ));
+        assert!(!collection_reconcile_required(
+            scratch.path(),
+            &plan_with(ingest("root.md", IngestReason::Added)),
+        ));
+    }
+
+    #[test]
+    fn collection_reconcile_predicate_matches_the_markdown_extension_case_insensitively() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let collection_dir = scratch.path().join("tasks");
+        std::fs::create_dir_all(&collection_dir).expect("collection directory");
+        std::fs::write(collection_dir.join("collection.yaml"), b"name: Tasks\n")
+            .expect("collection schema");
+
+        // The watcher path: adding NOTE.MD to a live collection must schedule
+        // the reconciliation that adopts it, exactly like note.md.
+        assert!(collection_reconcile_required(
+            scratch.path(),
+            &plan_with(ingest("tasks/NOTE.MD", IngestReason::Added)),
+        ));
+        assert!(collection_reconcile_required(
+            scratch.path(),
+            &plan_with(CaptureOp::Retire {
+                path: "tasks/NOTE.MD".to_owned(),
+            }),
+        ));
+        assert!(!collection_reconcile_required(
+            scratch.path(),
+            &plan_with(ingest("notes/NOTE.MD", IngestReason::Added)),
+        ));
+    }
+
+    #[test]
+    fn collection_reconcile_request_take_preserves_a_concurrent_request() {
+        let status = DriverStatus::default();
+        assert!(!status.collection_reconcile_pending());
+        status.request_collection_reconcile();
+        assert!(status.collection_reconcile_pending());
+        assert!(status.take_collection_reconcile_request());
+        assert!(!status.collection_reconcile_pending());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lease_blocked_collection_adoption_retries_after_release_without_a_file_change() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let collection_dir = scratch.path().join("tasks");
+        std::fs::create_dir_all(&collection_dir).expect("collection directory");
+        std::fs::write(collection_dir.join("collection.yaml"), b"name: Tasks\n")
+            .expect("collection schema");
+        std::fs::write(collection_dir.join("alpha.md"), b"Alpha task\n")
+            .expect("collection record");
+
+        let db = scratch.engine_db_path().expect("engine database path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        seed_collection_capture(
+            &actor,
+            scratch.path(),
+            &["tasks/collection.yaml", "tasks/alpha.md"],
+        );
+
+        let object_id = rusqlite::Connection::open(&db)
+            .expect("open database observer")
+            .query_row(
+                "SELECT object_id FROM path_aliases \
+                 WHERE workspace_id = ?1 AND version_id = 'main' \
+                   AND path = 'tasks/alpha.md'",
+                [WORKSPACE_ID],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("captured record object id");
+        seed_plain_richdoc_lineage(&actor, "tasks/alpha.md", "Alpha task\n").await;
+        let leases = LeaseRegistry::new();
+        let key = DocKey::new(WORKSPACE_ID, "main", &object_id).expect("record key");
+        let lease = leases.acquire(&key).expect("hold record lease");
+
+        let files = FilesActor::spawn_async(scratch.path().to_path_buf(), ScanBounds::default())
+            .await
+            .expect("files actor");
+        let files = FilesActorCloseGuard::new(files);
+        let status = Arc::new(DriverStatus::default());
+        let self_writes = SelfWriteSuppression::default();
+        status.request_collection_reconcile();
+        let first_clean = apply_run_with_handle(
+            collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes),
+            &files.handle(),
+            ReconcileRun::Converged,
+        )
+        .await;
+        assert!(!first_clean, "the held lease makes this pass retryable");
+        assert!(
+            status.collection_reconcile_pending(),
+            "a held lease must leave another collection pass scheduled"
+        );
+        assert_eq!(
+            std::fs::read_to_string(collection_dir.join("alpha.md"))
+                .expect("read lease-blocked record"),
+            "Alpha task\n"
+        );
+
+        drop(lease);
+        let second_clean = apply_run_with_handle(
+            collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes),
+            &files.handle(),
+            ReconcileRun::Converged,
+        )
+        .await;
+        assert!(second_clean, "the scheduled retry adopts after release");
+        assert!(!status.collection_reconcile_pending());
+        assert!(
+            std::fs::read_to_string(collection_dir.join("alpha.md"))
+                .expect("read adopted record")
+                .contains("id: rec_")
+        );
+        let adoption_state = rusqlite::Connection::open(&db)
+            .expect("open adopted-state observer")
+            .query_row(
+                "SELECT adoption_state FROM collection_records \
+                 WHERE workspace_id = ?1 AND version_id = 'main' \
+                   AND file_path = 'tasks/alpha.md'",
+                [WORKSPACE_ID],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("adopted collection record");
+        assert_eq!(adoption_state, "adopted");
+
+        files.close().await;
+        supervisor.close(&db).expect("close actor");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lease_blocked_collection_candidate_does_not_starve_other_adoptions() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let collection_dir = scratch.path().join("tasks");
+        std::fs::create_dir_all(&collection_dir).expect("collection directory");
+        std::fs::write(collection_dir.join("collection.yaml"), b"name: Tasks\n")
+            .expect("collection schema");
+        std::fs::write(collection_dir.join("alpha.md"), b"Alpha task\n")
+            .expect("first collection record");
+        std::fs::write(collection_dir.join("beta.md"), b"Beta task\n")
+            .expect("second collection record");
+
+        let db = scratch.engine_db_path().expect("engine database path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        seed_collection_capture(
+            &actor,
+            scratch.path(),
+            &["tasks/collection.yaml", "tasks/alpha.md", "tasks/beta.md"],
+        );
+
+        let object_id = rusqlite::Connection::open(&db)
+            .expect("open database observer")
+            .query_row(
+                "SELECT object_id FROM path_aliases \
+                 WHERE workspace_id = ?1 AND version_id = 'main' \
+                   AND path = 'tasks/alpha.md'",
+                [WORKSPACE_ID],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("first captured record object id");
+        seed_plain_richdoc_lineage(&actor, "tasks/alpha.md", "Alpha task\n").await;
+        seed_plain_richdoc_lineage(&actor, "tasks/beta.md", "Beta task\n").await;
+        let leases = LeaseRegistry::new();
+        let key = DocKey::new(WORKSPACE_ID, "main", &object_id).expect("first record key");
+        let lease = leases.acquire(&key).expect("hold first record lease");
+
+        let files = FilesActor::spawn_async(scratch.path().to_path_buf(), ScanBounds::default())
+            .await
+            .expect("files actor");
+        let files = FilesActorCloseGuard::new(files);
+        let status = Arc::new(DriverStatus::default());
+        let self_writes = SelfWriteSuppression::default();
+        status.request_collection_reconcile();
+        let first_clean = apply_run_with_handle(
+            collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes),
+            &files.handle(),
+            ReconcileRun::Converged,
+        )
+        .await;
+        assert!(!first_clean, "the held lease keeps its retry scheduled");
+        assert!(status.collection_reconcile_pending());
+        assert_eq!(
+            std::fs::read_to_string(collection_dir.join("alpha.md"))
+                .expect("read lease-blocked record"),
+            "Alpha task\n"
+        );
+        let beta_after_first =
+            std::fs::read_to_string(collection_dir.join("beta.md")).expect("read second record");
+        assert!(
+            beta_after_first.contains("id: rec_"),
+            "an unrelated candidate must adopt in the same pass"
+        );
+        let (alpha_state, beta_state) = rusqlite::Connection::open(&db)
+            .expect("open first-pass state observer")
+            .query_row(
+                "SELECT \
+                    MAX(CASE WHEN file_path = 'tasks/alpha.md' THEN adoption_state END), \
+                    MAX(CASE WHEN file_path = 'tasks/beta.md' THEN adoption_state END) \
+                 FROM collection_records \
+                 WHERE workspace_id = ?1 AND version_id = 'main'",
+                [WORKSPACE_ID],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .expect("first-pass adoption states");
+        assert_eq!(alpha_state, "pending-lossless");
+        assert_eq!(beta_state, "adopted");
+
+        drop(lease);
+        let second_clean = apply_run_with_handle(
+            collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes),
+            &files.handle(),
+            ReconcileRun::Converged,
+        )
+        .await;
+        assert!(second_clean, "the scheduled retry adopts after release");
+        assert!(!status.collection_reconcile_pending());
+        assert!(
+            std::fs::read_to_string(collection_dir.join("alpha.md"))
+                .expect("read adopted first record")
+                .contains("id: rec_")
+        );
+        assert_eq!(
+            std::fs::read_to_string(collection_dir.join("beta.md"))
+                .expect("read adopted second record"),
+            beta_after_first,
+            "the retry must not rewrite the already-adopted candidate"
+        );
+
+        files.close().await;
+        supervisor.close(&db).expect("close actor");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn watcher_edit_stripping_adopted_record_id_reasserts_the_binding() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let collection_dir = scratch.path().join("tasks");
+        let record_path = collection_dir.join("alpha.md");
+        std::fs::create_dir_all(&collection_dir).expect("collection directory");
+
+        let db = scratch.engine_db_path().expect("engine database path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        let leases = LeaseRegistry::new();
+        let self_writes = SelfWriteSuppression::default();
+        std::fs::write(collection_dir.join("collection.yaml"), b"name: Tasks\n")
+            .expect("collection schema");
+        std::fs::write(&record_path, b"Alpha task").expect("collection record");
+        let seed_actor = actor.clone();
+        let seed_root = scratch.path().to_path_buf();
+        let seed_leases = leases.clone();
+        let seed_self_writes = self_writes.clone();
+        std::thread::spawn(move || {
+            let mut sink = StoreCaptureSink::new_with_self_writes(
+                seed_actor,
+                WORKSPACE_ID,
+                "main",
+                seed_root,
+                2,
+                None,
+                seed_leases,
+                seed_self_writes,
+                CaptureProvenance::default(),
+            );
+            for path in ["tasks/collection.yaml", "tasks/alpha.md"] {
+                sink.ingest(
+                    path,
+                    0,
+                    "advisory-sha",
+                    "text/markdown",
+                    IngestReason::Added,
+                )
+                .unwrap_or_else(|_| panic!("capture {path}"));
+            }
+            assert!(
+                sink.reconcile_collections()
+                    .expect("bind pending collection record")
+                    .is_empty()
+            );
+        })
+        .join()
+        .expect("collection capture setup thread");
+        seed_plain_richdoc_lineage(&actor, "tasks/alpha.md", "Alpha task").await;
+        let adopt_actor = actor.clone();
+        let adopt_root = scratch.path().to_path_buf();
+        let adopt_leases = leases.clone();
+        let adopt_self_writes = self_writes.clone();
+        std::thread::spawn(move || {
+            assert_eq!(
+                StoreCaptureSink::new_with_self_writes(
+                    adopt_actor,
+                    WORKSPACE_ID,
+                    "main",
+                    adopt_root,
+                    3,
+                    None,
+                    adopt_leases,
+                    adopt_self_writes,
+                    CaptureProvenance::default(),
+                )
+                .reconcile_collections()
+                .expect("adopt shared-imported record"),
+                ["tasks/alpha.md"]
+            );
+        })
+        .join()
+        .expect("collection adoption setup thread");
+        let record_id = rusqlite::Connection::open(&db)
+            .expect("open binding observer")
+            .query_row(
+                "SELECT record_id FROM collection_records \
+                 WHERE workspace_id = ?1 AND version_id = 'main' \
+                   AND file_path = 'tasks/alpha.md'",
+                [WORKSPACE_ID],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("adopted record binding");
+        let adopted = std::fs::read_to_string(&record_path).expect("read adopted record");
+        assert!(adopted.contains(&format!("id: {record_id}")));
+
+        let files = FilesActor::spawn_async(scratch.path().to_path_buf(), ScanBounds::default())
+            .await
+            .expect("files actor");
+        let files = FilesActorCloseGuard::new(files);
+        let handle = files.handle();
+        let ready = NativeWatcher::start(
+            scratch.path().to_path_buf(),
+            handle.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("watcher start");
+        let mut watcher = ready.watcher;
+        let status = Arc::new(DriverStatus::default());
+
+        let ReconcileRun::Completed(baseline_plan) = ready.initial_reconcile else {
+            panic!("the watcher must prepare its adopted-file baseline");
+        };
+        assert!(!baseline_plan.degraded);
+        let captured = baseline_plan
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                CaptureOp::Ingest {
+                    path, size, sha256, ..
+                } => Some(CapturedIngest {
+                    path: path.clone(),
+                    size: *size,
+                    sha256: sha256.clone(),
+                }),
+                CaptureOp::Retire { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(captured.len(), baseline_plan.ops.len());
+        handle
+            .acknowledge_capture(
+                baseline_plan.clone(),
+                CaptureApplyResult {
+                    applied_paths: baseline_plan
+                        .ops
+                        .iter()
+                        .map(|op| op.path().to_owned())
+                        .collect(),
+                    captured,
+                    not_owned_paths: Vec::new(),
+                    failed_applies: Vec::new(),
+                    crashed_after_apply: None,
+                    degraded: false,
+                },
+            )
+            .await
+            .expect("acknowledge the already-captured adopted-file baseline");
+
+        std::fs::write(&record_path, b"Alpha task").expect("strip adopted record id");
+        wait_for_watcher_dirty(&handle).await;
+        let changed = handle
+            .reconcile_if_dirty(CancellationToken::new())
+            .await
+            .expect("reconcile stripped id");
+        let ReconcileRun::Completed(changed_plan) = changed else {
+            panic!("the watcher edit must produce a completed capture plan");
+        };
+        assert!(
+            changed_plan.ops.iter().any(|op| matches!(
+                op,
+                CaptureOp::Ingest {
+                    path,
+                    reason: IngestReason::Changed,
+                    ..
+                } if path == "tasks/alpha.md"
+            )),
+            "stripping the id must travel through the ordinary Changed path"
+        );
+        assert!(
+            apply_run_with_handle(
+                ApplyRunContext {
+                    root: scratch.path(),
+                    actor: &actor,
+                    workspace_id: WORKSPACE_ID,
+                    leases: &leases,
+                    status: &status,
+                    self_writes: &self_writes,
+                    author_json: None,
+                    provenance: CaptureProvenance::default(),
+                    events: EngineEvents::default(),
+                },
+                &handle,
+                ReconcileRun::Completed(changed_plan),
+            )
+            .await,
+            "the changed record capture settles cleanly"
+        );
+        let restored = std::fs::read_to_string(&record_path).expect("read restored record");
+
+        watcher.stop().expect("stop watcher");
+        files.close().await;
+        supervisor.close(&db).expect("close actor");
+
+        assert_eq!(
+            restored, adopted,
+            "the established binding must reassert its id after an ordinary edit strips it"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn watcher_repairing_malformed_collection_record_adopts_and_indexes_it() {
+        const RECORD_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const MALFORMED: &str = concat!(
+            "---\n",
+            "id: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+            "title: [\n",
+            "---\n",
+            "\n",
+            "Body\n",
+        );
+        const REPAIRED: &str = concat!(
+            "---\n",
+            "id: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+            "title: Repaired\n",
+            "---\n",
+            "\n",
+            "Body\n",
+        );
+
+        let scratch = ScratchDir::new().expect("scratch");
+        let collection_dir = scratch.path().join("tasks");
+        let record_path = collection_dir.join("alpha.md");
+        std::fs::create_dir_all(&collection_dir).expect("collection directory");
+        std::fs::write(
+            collection_dir.join("collection.yaml"),
+            b"fields:\n  title:\n    type: text\n",
+        )
+        .expect("collection schema");
+        std::fs::write(&record_path, MALFORMED).expect("malformed collection record");
+
+        let db = scratch.engine_db_path().expect("engine database path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        let leases = LeaseRegistry::new();
+        let self_writes = SelfWriteSuppression::default();
+        let seed_actor = actor.clone();
+        let seed_root = scratch.path().to_path_buf();
+        std::thread::spawn(move || {
+            let mut sink =
+                StoreCaptureSink::new(seed_actor, WORKSPACE_ID, "main", seed_root, 2, None);
+            for path in ["tasks/collection.yaml", "tasks/alpha.md"] {
+                sink.ingest(
+                    path,
+                    0,
+                    "advisory-sha",
+                    "text/markdown",
+                    IngestReason::Added,
+                )
+                .unwrap_or_else(|_| panic!("capture {path}"));
+            }
+            assert!(
+                sink.reconcile_collections()
+                    .expect("exclude malformed collection record")
+                    .is_empty()
+            );
+        })
+        .join()
+        .expect("malformed collection capture setup thread");
+        let binding_count = rusqlite::Connection::open(&db)
+            .expect("open binding observer")
+            .query_row(
+                "SELECT COUNT(*) FROM collection_records \
+                 WHERE workspace_id = ?1 AND version_id = 'main' \
+                   AND file_path = 'tasks/alpha.md'",
+                [WORKSPACE_ID],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count malformed record bindings");
+        assert_eq!(binding_count, 0, "malformed Markdown starts unbound");
+
+        let files = FilesActor::spawn_async(scratch.path().to_path_buf(), ScanBounds::default())
+            .await
+            .expect("files actor");
+        let files = FilesActorCloseGuard::new(files);
+        let handle = files.handle();
+        let ready = NativeWatcher::start(
+            scratch.path().to_path_buf(),
+            handle.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("watcher start");
+        let mut watcher = ready.watcher;
+        let status = Arc::new(DriverStatus::default());
+
+        let ReconcileRun::Completed(baseline_plan) = ready.initial_reconcile else {
+            panic!("the watcher must prepare its malformed-file baseline");
+        };
+        assert!(!baseline_plan.degraded);
+        let captured = baseline_plan
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                CaptureOp::Ingest {
+                    path, size, sha256, ..
+                } => Some(CapturedIngest {
+                    path: path.clone(),
+                    size: *size,
+                    sha256: sha256.clone(),
+                }),
+                CaptureOp::Retire { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(captured.len(), baseline_plan.ops.len());
+        handle
+            .acknowledge_capture(
+                baseline_plan.clone(),
+                CaptureApplyResult {
+                    applied_paths: baseline_plan
+                        .ops
+                        .iter()
+                        .map(|op| op.path().to_owned())
+                        .collect(),
+                    captured,
+                    not_owned_paths: Vec::new(),
+                    failed_applies: Vec::new(),
+                    crashed_after_apply: None,
+                    degraded: false,
+                },
+            )
+            .await
+            .expect("acknowledge the already-captured malformed-file baseline");
+
+        std::fs::write(&record_path, REPAIRED).expect("repair collection record frontmatter");
+        wait_for_watcher_dirty(&handle).await;
+        let changed = handle
+            .reconcile_if_dirty(CancellationToken::new())
+            .await
+            .expect("reconcile repaired frontmatter");
+        let ReconcileRun::Completed(changed_plan) = changed else {
+            panic!("the watcher repair must produce a completed capture plan");
+        };
+        assert!(
+            changed_plan.ops.iter().any(|op| matches!(
+                op,
+                CaptureOp::Ingest {
+                    path,
+                    reason: IngestReason::Changed,
+                    ..
+                } if path == "tasks/alpha.md"
+            )),
+            "repairing malformed frontmatter must travel through the Changed path"
+        );
+        assert!(
+            apply_run_with_handle(
+                ApplyRunContext {
+                    root: scratch.path(),
+                    actor: &actor,
+                    workspace_id: WORKSPACE_ID,
+                    leases: &leases,
+                    status: &status,
+                    self_writes: &self_writes,
+                    author_json: None,
+                    provenance: CaptureProvenance::default(),
+                    events: EngineEvents::default(),
+                },
+                &handle,
+                ReconcileRun::Completed(changed_plan),
+            )
+            .await,
+            "the repaired collection record capture settles cleanly"
+        );
+        let pending = rusqlite::Connection::open(&db)
+            .expect("open pending record observer")
+            .query_row(
+                "SELECT record_id,adoption_state,index_initialized FROM collection_records \
+                 WHERE workspace_id=?1 AND version_id='main' \
+                   AND file_path='tasks/alpha.md'",
+                [WORKSPACE_ID],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, bool>(2)?,
+                    ))
+                },
+            )
+            .expect("load repaired pending record");
+        assert_eq!(
+            pending,
+            (RECORD_ID.to_owned(), "pending".to_owned(), true),
+            "the Changed watcher pass must bind and index the repaired record"
+        );
+
+        // The desktop imports pending collection records into canonical
+        // rich-document lineage, then asks capture to reconcile again.
+        seed_plain_richdoc_lineage(&actor, "tasks/alpha.md", REPAIRED).await;
+        status.request_collection_reconcile();
+        assert!(
+            apply_run_with_handle(
+                ApplyRunContext {
+                    root: scratch.path(),
+                    actor: &actor,
+                    workspace_id: WORKSPACE_ID,
+                    leases: &leases,
+                    status: &status,
+                    self_writes: &self_writes,
+                    author_json: None,
+                    provenance: CaptureProvenance::default(),
+                    events: EngineEvents::default(),
+                },
+                &handle,
+                ReconcileRun::Converged,
+            )
+            .await,
+            "the imported repaired record adopts cleanly"
+        );
+        let indexed = rusqlite::Connection::open(&db)
+            .expect("open indexed record observer")
+            .query_row(
+                "SELECT r.record_id,r.adoption_state,r.index_initialized,f.value_json \
+                 FROM collection_records r \
+                 JOIN collection_record_fields f ON f.workspace_id=r.workspace_id \
+                   AND f.version_id=r.version_id AND f.record_id=r.record_id \
+                 WHERE r.workspace_id=?1 AND r.version_id='main' \
+                   AND r.file_path='tasks/alpha.md' AND f.field_name='title'",
+                [WORKSPACE_ID],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, bool>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .expect("load adopted indexed record");
+
+        watcher.stop().expect("stop watcher");
+        files.close().await;
+        supervisor.close(&db).expect("close actor");
+
+        assert_eq!(
+            indexed,
+            (
+                RECORD_ID.to_owned(),
+                "adopted".to_owned(),
+                true,
+                "\"Repaired\"".to_owned(),
+            )
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_converged_watcher_scan_does_not_rewrite_collection_state() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let collection_dir = scratch.path().join("tasks");
+        std::fs::create_dir_all(&collection_dir).expect("collection directory");
+        std::fs::write(collection_dir.join("collection.yaml"), b"name: Tasks\n")
+            .expect("collection schema");
+        std::fs::write(collection_dir.join("alpha.md"), b"Alpha task\n")
+            .expect("collection record");
+
+        let db = scratch.engine_db_path().expect("engine database path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        let seed_actor = actor.clone();
+        let seed_root = scratch.path().to_path_buf();
+        std::thread::spawn(move || {
+            let mut sink =
+                StoreCaptureSink::new(seed_actor, WORKSPACE_ID, "main", seed_root, 2, None);
+            for path in ["tasks/collection.yaml", "tasks/alpha.md"] {
+                sink.ingest(
+                    path,
+                    0,
+                    "advisory-sha",
+                    "text/markdown",
+                    IngestReason::Added,
+                )
+                .unwrap_or_else(|_| panic!("capture {path}"));
+            }
+            sink.reconcile_collections().expect("bind pending record");
+        })
+        .join()
+        .expect("collection seed thread");
+        seed_plain_richdoc_lineage(&actor, "tasks/alpha.md", "Alpha task\n").await;
+        let adopt_actor = actor.clone();
+        let adopt_root = scratch.path().to_path_buf();
+        std::thread::spawn(move || {
+            StoreCaptureSink::new(adopt_actor, WORKSPACE_ID, "main", adopt_root, 3, None)
+                .reconcile_collections()
+                .expect("adopt seeded record");
+        })
+        .join()
+        .expect("collection adoption thread");
+
+        let observer = rusqlite::Connection::open(&db).expect("open database observer");
+        let adoption_state = observer
+            .query_row(
+                "SELECT adoption_state FROM collection_records \
+                 WHERE workspace_id = ?1 AND version_id = 'main' \
+                   AND file_path = 'tasks/alpha.md'",
+                [WORKSPACE_ID],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("collection adoption state");
+        assert_eq!(adoption_state, "adopted");
+        let data_version = |connection: &rusqlite::Connection| {
+            connection
+                .query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))
+                .expect("database version")
+        };
+        let before = data_version(&observer);
+
+        let files = FilesActor::spawn_async(scratch.path().to_path_buf(), ScanBounds::default())
+            .await
+            .expect("files actor");
+        let files = FilesActorCloseGuard::new(files);
+        let status = Arc::new(DriverStatus::default());
+        let self_writes = SelfWriteSuppression::default();
+        let leases = LeaseRegistry::new();
+        let clean = apply_run_with_handle(
+            ApplyRunContext {
+                root: scratch.path(),
+                actor: &actor,
+                workspace_id: WORKSPACE_ID,
+                leases: &leases,
+                status: &status,
+                self_writes: &self_writes,
+                author_json: None,
+                provenance: CaptureProvenance::default(),
+                events: EngineEvents::default(),
+            },
+            &files.handle(),
+            ReconcileRun::Converged,
+        )
+        .await;
+        assert!(clean, "an idle converged pass stays healthy");
+        assert_eq!(
+            data_version(&observer),
+            before,
+            "an idle converged pass must not schedule collection writes"
+        );
+
+        files.close().await;
+        supervisor.close(&db).expect("close actor");
     }
 }
 

@@ -4,6 +4,28 @@ A local-first file sync and collaboration workspace for humans and agents. This 
 
 ## Language
 
+### Collections
+
+**Collection**:
+A folder whose schema file types its records. Shares, permissions, and sync address it by its path.
+_Avoid_: database (that is the SQLite file feature), table
+
+**Record**:
+One markdown file in a collection: typed properties plus a document body. A stable id identifies it; the filename is a label anyone can change.
+_Avoid_: row, page, item
+
+**Field**:
+One typed property the collection's schema defines. A value the schema cannot validate stays in the record and is flagged; validation never drops data.
+_Avoid_: column, attribute, metadata
+
+**Relation**:
+A field that references records by id, so renames and moves cannot break it. A prose link in a body is a link, not a relation.
+_Avoid_: link (that is a body link), backlink
+
+**View**:
+A named, shared way to render a collection: table, board, or calendar. Which view a person has open is their own local state.
+_Avoid_: dashboard (see App), layout
+
 ### Sharing
 
 **Share**:

@@ -130,3 +130,101 @@ async fn malformed_seed_is_rejected_without_stranding_the_parent_row() {
     assert!(!appended.outcome.deduped, "the seed is a fresh append");
     supervisor.close(&db).expect("close actor");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn direct_record_update_refuses_invalid_actor_origins_before_journaling() {
+    const WS: &str = "ws-invalid-actor-origin";
+    const PATH: &str = "notes/invalid-actor-origin.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("actor").actor;
+    actor
+        .ensure_main_version(
+            WS.to_owned(),
+            1,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("main");
+    let open = actor
+        .ydoc_open_state(
+            WS.to_owned(),
+            2,
+            true,
+            None,
+            "main".to_owned(),
+            PATH.to_owned(),
+            Some(ContentKind::Plaintext),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("open ydoc");
+
+    for (label, actor_origin_id) in [
+        ("empty", String::new()),
+        ("control", "actor\u{1}origin".to_owned()),
+        (
+            "overlong",
+            "x".repeat(dohc_engine_storage::MAX_IDENTIFIER_BYTES + 1),
+        ),
+    ] {
+        let result = actor
+            .ydoc_record_update(
+                open.key.clone(),
+                PATH.to_owned(),
+                ContentKind::Plaintext,
+                Regime::LocalOnly,
+                Ydoc::wire().plaintext_insert(0, "must not be journaled"),
+                Some(actor_origin_id),
+                None,
+                true,
+                None,
+                None,
+                3,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await;
+        match result {
+            Err(RuntimeError::Collab(CollabError::InvalidIdentifier { .. })) => {}
+            Err(error) => panic!("{label} actor origin returned the wrong refusal: {error:?}"),
+            Ok(outcome) => panic!("{label} actor origin was journaled: {outcome:?}"),
+        }
+    }
+    supervisor.close(&db).expect("close actor");
+
+    let store = EngineStore::open(&db, 100).expect("open store");
+    let (markers, updates, outbound_ops): (i64, i64, i64) = store
+        .read_with(|conn| -> Result<_, rusqlite::Error> {
+            Ok((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_docs WHERE workspace_id=?1 AND object_id=?2",
+                    rusqlite::params![WS, open.key.object_id],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_updates WHERE workspace_id=?1 AND object_id=?2",
+                    rusqlite::params![WS, open.key.object_id],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_log WHERE workspace_id=?1 AND op_kind='ydoc.update'",
+                    [WS],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("count journal rows");
+    assert_eq!(markers, 0, "refusal must roll back marker creation");
+    assert_eq!(
+        updates, 0,
+        "invalid provenance must never enter the Y.Doc log"
+    );
+    assert_eq!(
+        outbound_ops, 0,
+        "invalid provenance must never enter the sync log"
+    );
+}

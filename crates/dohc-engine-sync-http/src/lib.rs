@@ -28,6 +28,10 @@ const MAX_JSON_RESPONSE_BYTES: u64 = (MAX_PULL_OPS
     + MAX_LOG_PAGE_RESPONSE_OVERHEAD_BYTES) as u64;
 const MAX_ERROR_RESPONSE_BYTES: u64 = 64 * 1024;
 const MAX_KEY_ENVELOPE_ACK_BYTES: u64 = 64 * 1024;
+const CANCELLABLE_BODY_READ_POLL_INTERVAL: Duration = Duration::from_millis(25);
+/// A canceled synchronous ureq read may live until its transport timeout;
+/// match the runtime's download concurrency so those readers stay bounded.
+const MAX_CANCELLABLE_BODY_READ_WORKERS: usize = 4;
 /// The largest blob body a response may carry: the loosest ingest ceiling plus
 /// the one byte that lets ingest observe an overage and refuse it by name.
 const MAX_BLOB_BODY_BYTES: usize = MAX_INGEST_BLOB_BYTES + 1;
@@ -44,6 +48,62 @@ fn blob_body_overflow() -> RelayError {
         limit_bytes: MAX_INGEST_BLOB_BYTES,
         observed: ObservedBytes::AtLeast(BLOB_BODY_READ_LIMIT_BYTES),
     }
+}
+
+fn cancelled_relay_request() -> RelayError {
+    RelayError::Local("relay-io-cancelled".to_owned())
+}
+
+fn map_body_read_error(error: std::io::Error, overflow: &RelayError) -> RelayError {
+    // `ureq` wraps body-reader errors in `io::Error`; converting back recovers
+    // the typed limit variant used by the caller.
+    match ureq::Error::from(error) {
+        ureq::Error::BodyExceedsLimit(_) => overflow.clone(),
+        _ => RelayError::InvalidResponse,
+    }
+}
+
+static CANCELLABLE_BODY_READ_WORKERS: std::sync::LazyLock<(
+    std::sync::Mutex<usize>,
+    std::sync::Condvar,
+)> = std::sync::LazyLock::new(|| (std::sync::Mutex::new(0), std::sync::Condvar::new()));
+
+struct BodyReadWorkerPermit;
+
+impl Drop for BodyReadWorkerPermit {
+    fn drop(&mut self) {
+        let (active, available) = &*CANCELLABLE_BODY_READ_WORKERS;
+        let mut active = active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *active = active.saturating_sub(1);
+        available.notify_one();
+    }
+}
+
+fn acquire_body_read_worker<C>(cancelled: &C) -> Result<BodyReadWorkerPermit, RelayError>
+where
+    C: Fn() -> bool + ?Sized,
+{
+    let (active, available) = &*CANCELLABLE_BODY_READ_WORKERS;
+    let mut active = active.lock().map_err(|_| RelayError::InvalidResponse)?;
+    loop {
+        if cancelled() {
+            return Err(cancelled_relay_request());
+        }
+        if *active < MAX_CANCELLABLE_BODY_READ_WORKERS {
+            *active += 1;
+            return Ok(BodyReadWorkerPermit);
+        }
+        (active, _) = available
+            .wait_timeout(active, CANCELLABLE_BODY_READ_POLL_INTERVAL)
+            .map_err(|_| RelayError::InvalidResponse)?;
+    }
+}
+
+enum BodyReadWorkerMessage {
+    Progress,
+    Finished(Result<Vec<u8>, RelayError>),
 }
 
 pub struct HttpRelayTransport {
@@ -104,6 +164,101 @@ impl HttpRelayTransport {
             token,
             agent: configured_agent(timeout, allow_insecure_loopback, None),
         })
+    }
+
+    /// Download blobs while cooperatively observing request cancellation.
+    pub fn download_blobs_cancellable<C>(
+        &self,
+        req: BlobDownloadBatchRequest,
+        cancelled: C,
+    ) -> Result<BlobDownloadBatchResponse, RelayError>
+    where
+        C: Fn() -> bool,
+    {
+        if req.blobs.is_empty() || req.blobs.len() > MAX_BLOB_DOWNLOAD_BATCH {
+            return Err(RelayError::InvalidResponse);
+        }
+        if cancelled() {
+            return Err(cancelled_relay_request());
+        }
+
+        let mut results = Vec::with_capacity(req.blobs.len());
+        for blob in req.blobs {
+            if cancelled() {
+                return Err(cancelled_relay_request());
+            }
+            let result = (|| {
+                if blob.limit_bytes > MAX_INGEST_BLOB_BYTES {
+                    return Err(RelayError::InvalidResponse);
+                }
+                let read_limit_bytes = blob
+                    .limit_bytes
+                    .checked_add(1)
+                    .ok_or(RelayError::InvalidResponse)?;
+                let url = self.workspace_url(
+                    &req.workspace_id,
+                    &format!("/blobs/{}", encode_segment(&blob.sha256)),
+                    &req.replication_epoch,
+                    &req.stream_identity,
+                    &[],
+                );
+                if cancelled() {
+                    return Err(cancelled_relay_request());
+                }
+                let request = self
+                    .agent
+                    .get(&url)
+                    .header("authorization", &self.authorization());
+                // A cancelled synchronous ureq read can remain blocked until
+                // its transport timeout, so header and body reads share the
+                // same bounded worker budget.
+                let permit = acquire_body_read_worker(&cancelled)?;
+                let (response_tx, response_rx) = std::sync::mpsc::channel();
+                let worker = std::thread::Builder::new()
+                    .name("dohc-relay-header-read".to_owned())
+                    .spawn(move || {
+                        let _permit = permit;
+                        let _ = response_tx.send(request.call());
+                    })
+                    .map_err(|_| RelayError::InvalidResponse)?;
+                let response = loop {
+                    match response_rx.recv_timeout(CANCELLABLE_BODY_READ_POLL_INTERVAL) {
+                        Ok(response) => {
+                            worker.join().map_err(|_| RelayError::InvalidResponse)?;
+                            break response;
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            worker.join().map_err(|_| RelayError::InvalidResponse)?;
+                            return Err(RelayError::InvalidResponse);
+                        }
+                    }
+                    if cancelled() {
+                        return Err(cancelled_relay_request());
+                    }
+                };
+                if cancelled() {
+                    return Err(cancelled_relay_request());
+                }
+                let (bytes, _) = self.bytes_cancellable(
+                    response,
+                    RequestContext::Blob,
+                    read_limit_bytes,
+                    RelayError::BlobTooLarge {
+                        constraint: "MAX_INGEST_BLOB_BYTES",
+                        limit_bytes: blob.limit_bytes,
+                        observed: ObservedBytes::AtLeast(read_limit_bytes),
+                    },
+                    &cancelled,
+                )?;
+                Ok(BlobDownloadResponse { bytes })
+            })();
+            if cancelled() {
+                return Err(cancelled_relay_request());
+            }
+            results.push(result);
+        }
+        Ok(BlobDownloadBatchResponse { results })
     }
 
     fn authorization(&self) -> String {
@@ -189,28 +344,124 @@ impl HttpRelayTransport {
         read_limit_bytes: usize,
         overflow: RelayError,
     ) -> Result<(Vec<u8>, Option<String>), RelayError> {
+        self.bytes_with_cancellation(response, context, read_limit_bytes, overflow, None)
+    }
+
+    fn bytes_cancellable<C>(
+        &self,
+        response: Result<Response<Body>, ureq::Error>,
+        context: RequestContext,
+        read_limit_bytes: usize,
+        overflow: RelayError,
+        cancelled: &C,
+    ) -> Result<(Vec<u8>, Option<String>), RelayError>
+    where
+        C: Fn() -> bool,
+    {
+        self.bytes_with_cancellation(
+            response,
+            context,
+            read_limit_bytes,
+            overflow,
+            Some(cancelled),
+        )
+    }
+
+    fn bytes_with_cancellation(
+        &self,
+        response: Result<Response<Body>, ureq::Error>,
+        context: RequestContext,
+        read_limit_bytes: usize,
+        overflow: RelayError,
+        cancelled: Option<&dyn Fn() -> bool>,
+    ) -> Result<(Vec<u8>, Option<String>), RelayError> {
         let mut response = response.map_err(map_transport_error)?;
+        if cancelled.is_some_and(|cancelled| cancelled()) {
+            return Err(cancelled_relay_request());
+        }
         if !response.status().is_success() {
-            return Err(map_http_error(&mut response, context));
+            let error = map_http_error(&mut response, context);
+            return if cancelled.is_some_and(|cancelled| cancelled()) {
+                Err(cancelled_relay_request())
+            } else {
+                Err(error)
+            };
         }
         let etag = response
             .headers()
             .get("etag")
             .and_then(|value| value.to_str().ok())
             .and_then(parse_etag);
-        let bytes = response
-            .body_mut()
-            .with_config()
+        let mut reader = response
+            .into_body()
+            .into_with_config()
             .limit(read_limit_bytes as u64)
-            .read_to_vec()
-            .map_err(|error| match error {
-                // `ureq` boxes this variant into the `io::Error` its reader
-                // returns and unwraps it again, so the overflow stays a typed
-                // condition rather than an unreadable-response guess.
-                ureq::Error::BodyExceedsLimit(_) => overflow,
-                _ => RelayError::InvalidResponse,
-            })?;
-        Ok((bytes, etag))
+            .reader();
+        let Some(cancelled) = cancelled else {
+            let mut bytes = Vec::new();
+            let mut chunk = [0_u8; 64 * 1024];
+            loop {
+                let read = std::io::Read::read(&mut reader, &mut chunk)
+                    .map_err(|error| map_body_read_error(error, &overflow))?;
+                if read == 0 {
+                    return Ok((bytes, etag));
+                }
+                bytes.extend_from_slice(&chunk[..read]);
+            }
+        };
+
+        let permit = acquire_body_read_worker(cancelled)?;
+        let (message_tx, message_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::Builder::new()
+            .name("dohc-relay-body-read".to_owned())
+            .spawn(move || {
+                let _permit = permit;
+                let mut bytes = Vec::new();
+                let mut chunk = [0_u8; 64 * 1024];
+                loop {
+                    let read = std::io::Read::read(&mut reader, &mut chunk)
+                        .map_err(|error| map_body_read_error(error, &overflow));
+                    match read {
+                        Ok(0) => {
+                            let _ = message_tx.send(BodyReadWorkerMessage::Finished(Ok(bytes)));
+                            return;
+                        }
+                        Ok(read) => {
+                            bytes.extend_from_slice(&chunk[..read]);
+                            if message_tx.send(BodyReadWorkerMessage::Progress).is_err() {
+                                return;
+                            }
+                        }
+                        Err(error) => {
+                            let _ = message_tx.send(BodyReadWorkerMessage::Finished(Err(error)));
+                            return;
+                        }
+                    }
+                }
+            })
+            .map_err(|_| RelayError::InvalidResponse)?;
+
+        loop {
+            match message_rx.recv_timeout(CANCELLABLE_BODY_READ_POLL_INTERVAL) {
+                Ok(BodyReadWorkerMessage::Progress) => {}
+                Ok(BodyReadWorkerMessage::Finished(result)) => {
+                    worker.join().map_err(|_| RelayError::InvalidResponse)?;
+                    return if cancelled() {
+                        Err(cancelled_relay_request())
+                    } else {
+                        result.map(|bytes| (bytes, etag))
+                    };
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    worker.join().map_err(|_| RelayError::InvalidResponse)?;
+                    return Err(RelayError::InvalidResponse);
+                }
+            }
+            if cancelled() {
+                return Err(cancelled_relay_request());
+            }
+        }
     }
 }
 
@@ -452,45 +703,7 @@ impl RelayTransport for HttpRelayTransport {
         &self,
         req: BlobDownloadBatchRequest,
     ) -> Result<BlobDownloadBatchResponse, RelayError> {
-        if req.blobs.is_empty() || req.blobs.len() > MAX_BLOB_DOWNLOAD_BATCH {
-            return Err(RelayError::InvalidResponse);
-        }
-
-        let mut results = Vec::with_capacity(req.blobs.len());
-        for blob in req.blobs {
-            let result = (|| {
-                if blob.limit_bytes > MAX_INGEST_BLOB_BYTES {
-                    return Err(RelayError::InvalidResponse);
-                }
-                let read_limit_bytes = blob
-                    .limit_bytes
-                    .checked_add(1)
-                    .ok_or(RelayError::InvalidResponse)?;
-                let url = self.workspace_url(
-                    &req.workspace_id,
-                    &format!("/blobs/{}", encode_segment(&blob.sha256)),
-                    &req.replication_epoch,
-                    &req.stream_identity,
-                    &[],
-                );
-                let (bytes, _) = self.bytes(
-                    self.agent
-                        .get(&url)
-                        .header("authorization", &self.authorization())
-                        .call(),
-                    RequestContext::Blob,
-                    read_limit_bytes,
-                    RelayError::BlobTooLarge {
-                        constraint: "MAX_INGEST_BLOB_BYTES",
-                        limit_bytes: blob.limit_bytes,
-                        observed: ObservedBytes::AtLeast(read_limit_bytes),
-                    },
-                )?;
-                Ok(BlobDownloadResponse { bytes })
-            })();
-            results.push(result);
-        }
-        Ok(BlobDownloadBatchResponse { results })
+        self.download_blobs_cancellable(req, || false)
     }
 
     fn upload_key_envelope(
@@ -1316,6 +1529,186 @@ mod tests {
             "MUTATION: restoring redirects follows the HTTPS-to-HTTP downgrade"
         );
         thread.join().expect("TLS server thread");
+    }
+
+    #[test]
+    fn cancelling_a_stalled_tls_blob_header_wait_settles_before_header_release() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let cert = base64::engine::general_purpose::STANDARD
+            .decode(TEST_CERT_DER_BASE64)
+            .expect("test certificate");
+        let key = base64::engine::general_purpose::STANDARD
+            .decode(TEST_KEY_DER_BASE64)
+            .expect("test key");
+        let server = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![CertificateDer::from(cert)],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key)),
+            )
+            .expect("TLS server config");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("TLS listener");
+        let port = listener.local_addr().expect("TLS address").port();
+        let server = Arc::new(server);
+        let (request_received_tx, request_received_rx) = mpsc::channel();
+        let (release_headers_tx, release_headers_rx) = mpsc::channel();
+        let server_thread = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("TLS accept");
+            let connection = ServerConnection::new(server).expect("TLS connection");
+            let mut stream = StreamOwned::new(connection, stream);
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).expect("TLS request");
+            request_received_tx
+                .send(())
+                .expect("request received signal");
+            release_headers_rx.recv().expect("release stalled headers");
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-length: 8\r\nconnection: close\r\n\r\npartdone",
+            );
+            let _ = stream.flush();
+        });
+        let tls_config = ureq::tls::TlsConfig::builder()
+            .provider(ureq::tls::TlsProvider::Rustls)
+            .disable_verification(true)
+            .build();
+        let transport = HttpRelayTransport {
+            base_url: format!("https://localhost:{port}"),
+            token: "token".to_owned(),
+            agent: configured_agent(Duration::from_secs(5), false, Some(tls_config)),
+        };
+        let (outcome_tx, outcome_rx) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let request_cancelled = Arc::clone(&cancelled);
+        let request_thread = thread::spawn(move || {
+            let outcome = transport.download_blobs_cancellable(
+                BlobDownloadBatchRequest {
+                    workspace_id: "workspace".to_owned(),
+                    replication_epoch: "epoch".to_owned(),
+                    stream_identity: "stream".to_owned(),
+                    blobs: vec![dohc_engine_sync::BlobDownloadSpec {
+                        sha256: "blob".to_owned(),
+                        limit_bytes: 8,
+                    }],
+                },
+                || request_cancelled.load(Ordering::SeqCst),
+            );
+            outcome_tx.send(outcome).expect("blob request outcome");
+        });
+
+        request_received_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("TLS server receives blob request before cancellation");
+        cancelled.store(true, Ordering::SeqCst);
+        let outcome_before_release = outcome_rx.recv_timeout(Duration::from_secs(1));
+
+        release_headers_tx.send(()).expect("release TLS server");
+        request_thread.join().expect("blob request thread");
+        server_thread.join().expect("TLS server thread");
+
+        let outcome = outcome_before_release
+            .expect("cancellation must settle while response headers are still stalled");
+        assert!(
+            matches!(&outcome, Err(RelayError::Local(reason)) if reason == "relay-io-cancelled"),
+            "a cancelled header wait must not produce a relay response: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn cancelling_a_stalled_tls_blob_body_settles_before_body_release() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let cert = base64::engine::general_purpose::STANDARD
+            .decode(TEST_CERT_DER_BASE64)
+            .expect("test certificate");
+        let key = base64::engine::general_purpose::STANDARD
+            .decode(TEST_KEY_DER_BASE64)
+            .expect("test key");
+        let server = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![CertificateDer::from(cert)],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key)),
+            )
+            .expect("TLS server config");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("TLS listener");
+        let port = listener.local_addr().expect("TLS address").port();
+        let server = Arc::new(server);
+        let (release_body_tx, release_body_rx) = mpsc::channel();
+        let server_thread = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("TLS accept");
+            let connection = ServerConnection::new(server).expect("TLS connection");
+            let mut stream = StreamOwned::new(connection, stream);
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).expect("TLS request");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 8\r\nconnection: close\r\n\r\npart")
+                .expect("partial TLS blob response");
+            stream.flush().expect("partial TLS blob flush");
+            release_body_rx.recv().expect("release stalled body");
+            let _ = stream.write_all(b"done");
+            let _ = stream.flush();
+        });
+        let tls_config = ureq::tls::TlsConfig::builder()
+            .provider(ureq::tls::TlsProvider::Rustls)
+            .disable_verification(true)
+            .build();
+        let transport = HttpRelayTransport {
+            base_url: format!("https://localhost:{port}"),
+            token: "token".to_owned(),
+            agent: configured_agent(Duration::from_secs(5), false, Some(tls_config)),
+        };
+        let (mid_body_tx, mid_body_rx) = mpsc::channel();
+        let (outcome_tx, outcome_rx) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let request_cancelled = Arc::clone(&cancelled);
+        let checks = Arc::new(AtomicUsize::new(0));
+        let request_checks = Arc::clone(&checks);
+        const MID_BODY_CHECK_THRESHOLD: usize = 7;
+        let request_thread = thread::spawn(move || {
+            let outcome = transport.download_blobs_cancellable(
+                BlobDownloadBatchRequest {
+                    workspace_id: "workspace".to_owned(),
+                    replication_epoch: "epoch".to_owned(),
+                    stream_identity: "stream".to_owned(),
+                    blobs: vec![dohc_engine_sync::BlobDownloadSpec {
+                        sha256: "blob".to_owned(),
+                        limit_bytes: 8,
+                    }],
+                },
+                || {
+                    let cancelled = request_cancelled.load(Ordering::SeqCst);
+                    let check_count = request_checks.fetch_add(1, Ordering::SeqCst) + 1;
+                    if check_count >= MID_BODY_CHECK_THRESHOLD {
+                        mid_body_tx.send(()).expect("mid-body signal");
+                    }
+                    cancelled
+                },
+            );
+            outcome_tx.send(outcome).expect("blob request outcome");
+        });
+
+        mid_body_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("client checks cancellation after reading partial body");
+        cancelled.store(true, Ordering::SeqCst);
+        let outcome_before_release = outcome_rx.recv_timeout(Duration::from_secs(1));
+
+        release_body_tx.send(()).expect("release TLS server");
+        request_thread.join().expect("blob request thread");
+        server_thread.join().expect("TLS server thread");
+
+        let outcome = outcome_before_release
+            .expect("cancellation must settle while the next body chunk is still stalled");
+        assert!(
+            matches!(&outcome, Err(RelayError::Local(reason)) if reason == "relay-io-cancelled"),
+            "a cancelled body must not expose the bytes read before cancellation: {outcome:?}"
+        );
+        assert!(checks.load(Ordering::SeqCst) >= 7);
     }
 
     #[test]

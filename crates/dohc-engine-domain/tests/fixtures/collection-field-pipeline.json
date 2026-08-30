@@ -1,0 +1,714 @@
+{
+  "version": 1,
+  "collectionPath": "pipeline",
+  "schemaYaml": "name: Field pipeline\nfields:\n  text_typical:\n    type: text\n  text_edge:\n    type: text\n  text_flagged:\n    type: text\n  number_typical:\n    type: number\n  number_edge:\n    type: number\n  number_flagged:\n    type: number\n  checkbox_typical:\n    type: checkbox\n  checkbox_edge:\n    type: checkbox\n  checkbox_flagged:\n    type: checkbox\n  date_typical:\n    type: date\n  date_edge:\n    type: date\n  date_flagged:\n    type: date\n  select_typical:\n    type: select\n    options: [\"Planned\",\"Active\",\"true\"]\n  select_edge:\n    type: select\n    options: [\"Planned\",\"Active\",\"true\"]\n  select_flagged:\n    type: select\n    options: [\"Planned\",\"Active\",\"true\"]\n  multi_select_typical:\n    type: multi-select\n    options: [\"A\",\"B\"]\n  multi_select_edge:\n    type: multi-select\n    options: [\"A\",\"B\"]\n  multi_select_flagged:\n    type: multi-select\n    options: [\"A\",\"B\"]\n  person_typical:\n    type: person\n  person_edge:\n    type: person\n  person_flagged:\n    type: person\n  relation_typical:\n    type: relation\n    collection: pipeline-targets\n    many: false\n  relation_edge:\n    type: relation\n    collection: pipeline-targets\n    many: true\n  relation_flagged:\n    type: relation\n    collection: pipeline-targets\n    many: false\n  url_typical:\n    type: url\n  url_edge:\n    type: url\n  url_flagged:\n    type: url\n  text_marker_depth_boundary:\n    type: text\n",
+  "recordMarkdown": "---\ntext_typical: \"café 🙂\"\ntext_edge: \"\"\ntext_flagged: 42\nnumber_typical: 42.5\nnumber_edge: 9007199254740993\nnumber_flagged: \"42\"\ncheckbox_typical: true\ncheckbox_edge: false\ncheckbox_flagged: \"true\"\ndate_typical: \"2026-08-30\"\ndate_edge: \"2000-02-29\"\ndate_flagged: \"2023-02-29\"\nselect_typical: Active\nselect_edge: \"true\"\nselect_flagged: Done\nmulti_select_typical: [A, B]\nmulti_select_edge: []\nmulti_select_flagged: [A, A]\nperson_typical: user_123\nperson_edge: \"  user_123  \"\nperson_flagged: \"   \"\nrelation_typical: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nrelation_edge: [rec_aaaaaaaaaaaaaaaaaaaaaaaaaa, rec_77777777777777777777777774]\nrelation_flagged: record_123\nurl_typical: \"https://dohc.dev/path?x=1#frag\"\nurl_edge: \"mailto:user@example.com\"\nurl_flagged: \"dohc.dev/path\"\ntext_marker_depth_boundary: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: true } } } } } } } } } } } } } } } } } } } } } } }\n---\n\nPipeline record",
+  "recordMarkdownSha256": "b45b3afd2312a5b5e3810ab76875f4f312e76fb7d2ba43ae93ac3dadb7b35343",
+  "supportFiles": [
+    {
+      "path": "pipeline-targets/collection.yaml",
+      "text": "fields:\n  label:\n    type: text\n"
+    },
+    {
+      "path": "pipeline-targets/a.md",
+      "text": "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nlabel: Alpha\n---\n"
+    },
+    {
+      "path": "pipeline-targets/z.md",
+      "text": "---\nid: rec_77777777777777777777777774\nlabel: Omega\n---\n"
+    }
+  ],
+  "vectors": [
+    {
+      "name": "text-typical",
+      "class": "typical",
+      "fieldName": "text_typical",
+      "field": {
+        "name": "text_typical",
+        "type": "text"
+      },
+      "valueYaml": "\"café 🙂\"",
+      "valueYamlUtf8Hex": "22636166c3a920f09f998222",
+      "expectedSemantic": "café 🙂",
+      "expectedIndexJson": "\"café 🙂\"",
+      "expectedValidation": {
+        "status": "valid"
+      },
+      "expectedWireValue": "café 🙂",
+      "expectedWireJson": "\"café 🙂\""
+    },
+    {
+      "name": "text-edge",
+      "class": "edge",
+      "fieldName": "text_edge",
+      "field": {
+        "name": "text_edge",
+        "type": "text"
+      },
+      "valueYaml": "\"\"",
+      "valueYamlUtf8Hex": "2222",
+      "expectedSemantic": "",
+      "expectedIndexJson": "\"\"",
+      "expectedValidation": {
+        "status": "valid"
+      },
+      "expectedWireValue": "",
+      "expectedWireJson": "\"\""
+    },
+    {
+      "name": "text-flagged",
+      "class": "flagged",
+      "fieldName": "text_flagged",
+      "field": {
+        "name": "text_flagged",
+        "type": "text"
+      },
+      "valueYaml": "42",
+      "valueYamlUtf8Hex": "3432",
+      "expectedSemantic": 42,
+      "expectedIndexJson": "42",
+      "expectedValidation": {
+        "status": "flagged",
+        "reason": {
+          "code": "expected-text",
+          "path": ""
+        }
+      },
+      "expectedWireValue": 42,
+      "expectedWireJson": "42"
+    },
+    {
+      "name": "number-typical",
+      "class": "typical",
+      "fieldName": "number_typical",
+      "field": {
+        "name": "number_typical",
+        "type": "number"
+      },
+      "valueYaml": "42.5",
+      "valueYamlUtf8Hex": "34322e35",
+      "expectedSemantic": 42.5,
+      "expectedIndexJson": "42.5",
+      "expectedValidation": {
+        "status": "valid"
+      },
+      "expectedWireValue": 42.5,
+      "expectedWireJson": "42.5"
+    },
+    {
+      "name": "number-edge",
+      "class": "edge",
+      "fieldName": "number_edge",
+      "field": {
+        "name": "number_edge",
+        "type": "number"
+      },
+      "valueYaml": "9007199254740993",
+      "valueYamlUtf8Hex": "39303037313939323534373430393933",
+      "expectedSemantic": {
+        "$dohcInt64": "9007199254740993"
+      },
+      "expectedIndexJson": "9007199254740993",
+      "expectedValidation": {
+        "status": "valid"
+      },
+      "expectedWireValue": {
+        "$dohcInt64": "9007199254740993"
+      },
+      "expectedWireJson": "{\"$dohcInt64\":\"9007199254740993\"}"
+    },
+    {
+      "name": "number-flagged",
+      "class": "flagged",
+      "fieldName": "number_flagged",
+      "field": {
+        "name": "number_flagged",
+        "type": "number"
+      },
+      "valueYaml": "\"42\"",
+      "valueYamlUtf8Hex": "22343222",
+      "expectedSemantic": "42",
+      "expectedIndexJson": "\"42\"",
+      "expectedValidation": {
+        "status": "flagged",
+        "reason": {
+          "code": "expected-number",
+          "path": ""
+        }
+      },
+      "expectedWireValue": "42",
+      "expectedWireJson": "\"42\""
+    },
+    {
+      "name": "checkbox-typical",
+      "class": "typical",
+      "fieldName": "checkbox_typical",
+      "field": {
+        "name": "checkbox_typical",
+        "type": "checkbox"
+      },
+      "valueYaml": "true",
+      "valueYamlUtf8Hex": "74727565",
+      "expectedSemantic": true,
+      "expectedIndexJson": "true",
+      "expectedValidation": {
+        "status": "valid"
+      },
+      "expectedWireValue": true,
+      "expectedWireJson": "true"
+    },
+    {
+      "name": "checkbox-edge",
+      "class": "edge",
+      "fieldName": "checkbox_edge",
+      "field": {
+        "name": "checkbox_edge",
+        "type": "checkbox"
+      },
+      "valueYaml": "false",
+      "valueYamlUtf8Hex": "66616c7365",
+      "expectedSemantic": false,
+      "expectedIndexJson": "false",
+      "expectedValidation": {
+        "status": "valid"
+      },
+      "expectedWireValue": false,
+      "expectedWireJson": "false"
+    },
+    {
+      "name": "checkbox-flagged",
+      "class": "flagged",
+      "fieldName": "checkbox_flagged",
+      "field": {
+        "name": "checkbox_flagged",
+        "type": "checkbox"
+      },
+      "valueYaml": "\"true\"",
+      "valueYamlUtf8Hex": "227472756522",
+      "expectedSemantic": "true",
+      "expectedIndexJson": "\"true\"",
+      "expectedValidation": {
+        "status": "flagged",
+        "reason": {
+          "code": "expected-boolean",
+          "path": ""
+        }
+      },
+      "expectedWireValue": "true",
+      "expectedWireJson": "\"true\""
+    },
+    {
+      "name": "date-typical",
+      "class": "typical",
+      "fieldName": "date_typical",
+      "field": {
+        "name": "date_typical",
+        "type": "date"
+      },
+      "valueYaml": "\"2026-08-30\"",
+      "valueYamlUtf8Hex": "22323032362d30382d333022",
+      "expectedSemantic": "2026-08-30",
+      "expectedIndexJson": "\"2026-08-30\"",
+      "expectedValidation": {
+        "status": "valid"
+      },
+      "expectedWireValue": "2026-08-30",
+      "expectedWireJson": "\"2026-08-30\""
+    },
+    {
+      "name": "date-edge",
+      "class": "edge",
+      "fieldName": "date_edge",
+      "field": {
+        "name": "date_edge",
+        "type": "date"
+      },
+      "valueYaml": "\"2000-02-29\"",
+      "valueYamlUtf8Hex": "22323030302d30322d323922",
+      "expectedSemantic": "2000-02-29",
+      "expectedIndexJson": "\"2000-02-29\"",
+      "expectedValidation": {
+        "status": "valid"
+      },
+      "expectedWireValue": "2000-02-29",
+      "expectedWireJson": "\"2000-02-29\""
+    },
+    {
+      "name": "date-flagged",
+      "class": "flagged",
+      "fieldName": "date_flagged",
+      "field": {
+        "name": "date_flagged",
+        "type": "date"
+      },
+      "valueYaml": "\"2023-02-29\"",
+      "valueYamlUtf8Hex": "22323032332d30322d323922",
+      "expectedSemantic": "2023-02-29",
+      "expectedIndexJson": "\"2023-02-29\"",
+      "expectedValidation": {
+        "status": "flagged",
+        "reason": {
+          "code": "invalid-date",
+          "path": ""
+        }
+      },
+      "expectedWireValue": "2023-02-29",
+      "expectedWireJson": "\"2023-02-29\""
+    },
+    {
+      "name": "select-typical",
+      "class": "typical",
+      "fieldName": "select_typical",
+      "field": {
+        "name": "select_typical",
+        "type": "select",
+        "options": [
+          "Planned",
+          "Active",
+          "true"
+        ]
+      },
+      "valueYaml": "Active",
+      "valueYamlUtf8Hex": "416374697665",
+      "expectedSemantic": "Active",
+      "expectedIndexJson": "\"Active\"",
+      "expectedValidation": {
+        "status": "valid"
+      },
+      "expectedWireValue": "Active",
+      "expectedWireJson": "\"Active\""
+    },
+    {
+      "name": "select-edge",
+      "class": "edge",
+      "fieldName": "select_edge",
+      "field": {
+        "name": "select_edge",
+        "type": "select",
+        "options": [
+          "Planned",
+          "Active",
+          "true"
+        ]
+      },
+      "valueYaml": "\"true\"",
+      "valueYamlUtf8Hex": "227472756522",
+      "expectedSemantic": "true",
+      "expectedIndexJson": "\"true\"",
+      "expectedValidation": {
+        "status": "valid"
+      },
+      "expectedWireValue": "true",
+      "expectedWireJson": "\"true\""
+    },
+    {
+      "name": "select-flagged",
+      "class": "flagged",
+      "fieldName": "select_flagged",
+      "field": {
+        "name": "select_flagged",
+        "type": "select",
+        "options": [
+          "Planned",
+          "Active",
+          "true"
+        ]
+      },
+      "valueYaml": "Done",
+      "valueYamlUtf8Hex": "446f6e65",
+      "expectedSemantic": "Done",
+      "expectedIndexJson": "\"Done\"",
+      "expectedValidation": {
+        "status": "flagged",
+        "reason": {
+          "code": "unknown-option",
+          "path": ""
+        }
+      },
+      "expectedWireValue": "Done",
+      "expectedWireJson": "\"Done\""
+    },
+    {
+      "name": "multi-select-typical",
+      "class": "typical",
+      "fieldName": "multi_select_typical",
+      "field": {
+        "name": "multi_select_typical",
+        "type": "multi-select",
+        "options": [
+          "A",
+          "B"
+        ]
+      },
+      "valueYaml": "[A, B]",
+      "valueYamlUtf8Hex": "5b412c20425d",
+      "expectedSemantic": [
+        "A",
+        "B"
+      ],
+      "expectedIndexJson": "[\"A\",\"B\"]",
+      "expectedValidation": {
+        "status": "valid"
+      },
+      "expectedWireValue": [
+        "A",
+        "B"
+      ],
+      "expectedWireJson": "[\"A\",\"B\"]"
+    },
+    {
+      "name": "multi-select-edge",
+      "class": "edge",
+      "fieldName": "multi_select_edge",
+      "field": {
+        "name": "multi_select_edge",
+        "type": "multi-select",
+        "options": [
+          "A",
+          "B"
+        ]
+      },
+      "valueYaml": "[]",
+      "valueYamlUtf8Hex": "5b5d",
+      "expectedSemantic": [],
+      "expectedIndexJson": "[]",
+      "expectedValidation": {
+        "status": "valid"
+      },
+      "expectedWireValue": [],
+      "expectedWireJson": "[]"
+    },
+    {
+      "name": "multi-select-flagged",
+      "class": "flagged",
+      "fieldName": "multi_select_flagged",
+      "field": {
+        "name": "multi_select_flagged",
+        "type": "multi-select",
+        "options": [
+          "A",
+          "B"
+        ]
+      },
+      "valueYaml": "[A, A]",
+      "valueYamlUtf8Hex": "5b412c20415d",
+      "expectedSemantic": [
+        "A",
+        "A"
+      ],
+      "expectedIndexJson": "[\"A\",\"A\"]",
+      "expectedValidation": {
+        "status": "flagged",
+        "reason": {
+          "code": "duplicate-value",
+          "path": "/1"
+        }
+      },
+      "expectedWireValue": [
+        "A",
+        "A"
+      ],
+      "expectedWireJson": "[\"A\",\"A\"]"
+    },
+    {
+      "name": "person-typical",
+      "class": "typical",
+      "fieldName": "person_typical",
+      "field": {
+        "name": "person_typical",
+        "type": "person"
+      },
+      "valueYaml": "user_123",
+      "valueYamlUtf8Hex": "757365725f313233",
+      "expectedSemantic": "user_123",
+      "expectedIndexJson": "\"user_123\"",
+      "expectedValidation": {
+        "status": "valid"
+      },
+      "expectedWireValue": "user_123",
+      "expectedWireJson": "\"user_123\""
+    },
+    {
+      "name": "person-edge",
+      "class": "edge",
+      "fieldName": "person_edge",
+      "field": {
+        "name": "person_edge",
+        "type": "person"
+      },
+      "valueYaml": "\"  user_123  \"",
+      "valueYamlUtf8Hex": "222020757365725f313233202022",
+      "expectedSemantic": "  user_123  ",
+      "expectedIndexJson": "\"  user_123  \"",
+      "expectedValidation": {
+        "status": "valid"
+      },
+      "expectedWireValue": "  user_123  ",
+      "expectedWireJson": "\"  user_123  \""
+    },
+    {
+      "name": "person-flagged",
+      "class": "flagged",
+      "fieldName": "person_flagged",
+      "field": {
+        "name": "person_flagged",
+        "type": "person"
+      },
+      "valueYaml": "\"   \"",
+      "valueYamlUtf8Hex": "2220202022",
+      "expectedSemantic": "   ",
+      "expectedIndexJson": "\"   \"",
+      "expectedValidation": {
+        "status": "flagged",
+        "reason": {
+          "code": "empty-person-id",
+          "path": ""
+        }
+      },
+      "expectedWireValue": "   ",
+      "expectedWireJson": "\"   \""
+    },
+    {
+      "name": "relation-typical",
+      "class": "typical",
+      "fieldName": "relation_typical",
+      "field": {
+        "name": "relation_typical",
+        "type": "relation",
+        "collection": "pipeline-targets",
+        "many": false
+      },
+      "valueYaml": "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "valueYamlUtf8Hex": "7265635f6161616161616161616161616161616161616161616161616161",
+      "expectedSemantic": "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expectedIndexJson": "\"rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+      "expectedValidation": {
+        "status": "valid"
+      },
+      "expectedWireValue": "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expectedWireJson": "\"rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\""
+    },
+    {
+      "name": "relation-edge",
+      "class": "edge",
+      "fieldName": "relation_edge",
+      "field": {
+        "name": "relation_edge",
+        "type": "relation",
+        "collection": "pipeline-targets",
+        "many": true
+      },
+      "valueYaml": "[rec_aaaaaaaaaaaaaaaaaaaaaaaaaa, rec_77777777777777777777777774]",
+      "valueYamlUtf8Hex": "5b7265635f61616161616161616161616161616161616161616161616161612c207265635f37373737373737373737373737373737373737373737373737345d",
+      "expectedSemantic": [
+        "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "rec_77777777777777777777777774"
+      ],
+      "expectedIndexJson": "[\"rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\",\"rec_77777777777777777777777774\"]",
+      "expectedValidation": {
+        "status": "valid"
+      },
+      "expectedWireValue": [
+        "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "rec_77777777777777777777777774"
+      ],
+      "expectedWireJson": "[\"rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\",\"rec_77777777777777777777777774\"]"
+    },
+    {
+      "name": "relation-flagged",
+      "class": "flagged",
+      "fieldName": "relation_flagged",
+      "field": {
+        "name": "relation_flagged",
+        "type": "relation",
+        "collection": "pipeline-targets",
+        "many": false
+      },
+      "valueYaml": "record_123",
+      "valueYamlUtf8Hex": "7265636f72645f313233",
+      "expectedSemantic": "record_123",
+      "expectedIndexJson": "\"record_123\"",
+      "expectedValidation": {
+        "status": "flagged",
+        "reason": {
+          "code": "invalid-record-id",
+          "path": ""
+        }
+      },
+      "expectedWireValue": "record_123",
+      "expectedWireJson": "\"record_123\""
+    },
+    {
+      "name": "url-typical",
+      "class": "typical",
+      "fieldName": "url_typical",
+      "field": {
+        "name": "url_typical",
+        "type": "url"
+      },
+      "valueYaml": "\"https://dohc.dev/path?x=1#frag\"",
+      "valueYamlUtf8Hex": "2268747470733a2f2f646f68632e6465762f706174683f783d31236672616722",
+      "expectedSemantic": "https://dohc.dev/path?x=1#frag",
+      "expectedIndexJson": "\"https://dohc.dev/path?x=1#frag\"",
+      "expectedValidation": {
+        "status": "valid"
+      },
+      "expectedWireValue": "https://dohc.dev/path?x=1#frag",
+      "expectedWireJson": "\"https://dohc.dev/path?x=1#frag\""
+    },
+    {
+      "name": "url-edge",
+      "class": "edge",
+      "fieldName": "url_edge",
+      "field": {
+        "name": "url_edge",
+        "type": "url"
+      },
+      "valueYaml": "\"mailto:user@example.com\"",
+      "valueYamlUtf8Hex": "226d61696c746f3a75736572406578616d706c652e636f6d22",
+      "expectedSemantic": "mailto:user@example.com",
+      "expectedIndexJson": "\"mailto:user@example.com\"",
+      "expectedValidation": {
+        "status": "valid"
+      },
+      "expectedWireValue": "mailto:user@example.com",
+      "expectedWireJson": "\"mailto:user@example.com\""
+    },
+    {
+      "name": "url-flagged",
+      "class": "flagged",
+      "fieldName": "url_flagged",
+      "field": {
+        "name": "url_flagged",
+        "type": "url"
+      },
+      "valueYaml": "\"dohc.dev/path\"",
+      "valueYamlUtf8Hex": "22646f68632e6465762f7061746822",
+      "expectedSemantic": "dohc.dev/path",
+      "expectedIndexJson": "\"dohc.dev/path\"",
+      "expectedValidation": {
+        "status": "flagged",
+        "reason": {
+          "code": "invalid-url",
+          "path": ""
+        }
+      },
+      "expectedWireValue": "dohc.dev/path",
+      "expectedWireJson": "\"dohc.dev/path\""
+    },
+    {
+      "name": "text-marker-depth-boundary",
+      "class": "edge",
+      "fieldName": "text_marker_depth_boundary",
+      "field": {
+        "name": "text_marker_depth_boundary",
+        "type": "text"
+      },
+      "valueYaml": "{ $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: { $dohcInt64: true } } } } } } } } } } } } } } } } } } } } } } }",
+      "valueYamlUtf8Hex": "7b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a207b2024646f6863496e7436343a2074727565207d207d207d207d207d207d207d207d207d207d207d207d207d207d207d207d207d207d207d207d207d207d207d",
+      "expectedSemantic": {
+        "$dohcInt64": {
+          "$dohcInt64": {
+            "$dohcInt64": {
+              "$dohcInt64": {
+                "$dohcInt64": {
+                  "$dohcInt64": {
+                    "$dohcInt64": {
+                      "$dohcInt64": {
+                        "$dohcInt64": {
+                          "$dohcInt64": {
+                            "$dohcInt64": {
+                              "$dohcInt64": {
+                                "$dohcInt64": {
+                                  "$dohcInt64": {
+                                    "$dohcInt64": {
+                                      "$dohcInt64": {
+                                        "$dohcInt64": {
+                                          "$dohcInt64": {
+                                            "$dohcInt64": {
+                                              "$dohcInt64": {
+                                                "$dohcInt64": {
+                                                  "$dohcInt64": {
+                                                    "$dohcInt64": true
+                                                  }
+                                                }
+                                              }
+                                            }
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "expectedIndexJson": "{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":{\"$dohcInt64\":true}}}}}}}}}}}}}}}}}}}}}}}",
+      "expectedValidation": {
+        "status": "flagged",
+        "reason": {
+          "code": "expected-text",
+          "path": ""
+        }
+      },
+      "expectedWireValue": {
+        "$$dohcInt64": {
+          "$$dohcInt64": {
+            "$$dohcInt64": {
+              "$$dohcInt64": {
+                "$$dohcInt64": {
+                  "$$dohcInt64": {
+                    "$$dohcInt64": {
+                      "$$dohcInt64": {
+                        "$$dohcInt64": {
+                          "$$dohcInt64": {
+                            "$$dohcInt64": {
+                              "$$dohcInt64": {
+                                "$$dohcInt64": {
+                                  "$$dohcInt64": {
+                                    "$$dohcInt64": {
+                                      "$$dohcInt64": {
+                                        "$$dohcInt64": {
+                                          "$$dohcInt64": {
+                                            "$$dohcInt64": {
+                                              "$$dohcInt64": {
+                                                "$$dohcInt64": {
+                                                  "$$dohcInt64": {
+                                                    "$$dohcInt64": true
+                                                  }
+                                                }
+                                              }
+                                            }
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "expectedWireJson": "{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":{\"$$dohcInt64\":true}}}}}}}}}}}}}}}}}}}}}}}"
+    }
+  ]
+}

@@ -7,6 +7,8 @@
     "./chat-identity": "./src/chatIdentity.ts",
     "./chat-identity-values": "./src/chatIdentityValues.ts",
     "./chat-mentions": "./src/chatMentions.ts",
+    "./collection": "./src/collection.ts",
+    "./collection-values": "./src/collectionValues.ts",
     "./domain": "./src/domain.ts",
     "./domain-values": "./src/domainValues.ts",
     "./engine": "./src/engine.ts",
@@ -22,7 +24,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "effect": "4.0.0-beta.107"
+    "effect": "4.0.0-beta.107",
+    "js-yaml": "^5.2.3"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",

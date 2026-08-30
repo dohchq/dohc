@@ -49,11 +49,14 @@ use dohc_engine_domain::{
     ChatChannelKind, ChatChannelSummary, ChatDecision, ChatFeedPage, ChatFeedReadState,
     ChatFileMention, ChatFollow, ChatMention, ChatMessage, ChatMessagePage,
     ChatProjectionFileAccess, ChatReaction, ChatThread, ChatThreadProjection, ChatThreadReadState,
-    CompareTextFileVersions, CreateFileThread, CreateNamedVersion, DeleteResult, DeleteTextFile,
-    DispatchClaim, DispatchRecovery, DomainError, InbandBinary, InbandSecret, InbandText,
-    LinkedChatStore, ListMomentsQuery, MentionCursor, MergeTextFileFromVersion,
-    MergeTextFileResult, MomentPage, MomentRecord, PendingBookmarkRow, ProjectedWriteText,
-    RenameResult, RenameTextFile, ResolveDecision, ResolveTextConflict, ResolveTextConflictResult,
+    CollectionAdoptionCandidate, CollectionDetails, CollectionPendingAdoptionCursor,
+    CollectionPendingAdoptionPage, CollectionQuery, CollectionQueryResult, CollectionRecordDetails,
+    CollectionRelationCleanupCandidate, CollectionSummary, CompareTextFileVersions,
+    CreateFileThread, CreateNamedVersion, DeleteResult, DeleteTextFile, DispatchClaim,
+    DispatchRecovery, DomainError, InbandBinary, InbandSecret, InbandText, LinkedChatStore,
+    ListMomentsQuery, MentionCursor, MergeTextFileFromVersion, MergeTextFileResult, MomentPage,
+    MomentRecord, PendingBookmarkRow, ProjectedWriteText, RECORD_ID_FRONTMATTER_KEY, RenameResult,
+    RenameTextFile, ResolveDecision, ResolveTextConflict, ResolveTextConflictResult,
     RollbackTextFileMutation, RunRecordLink, SaveBookmark, SecretComparePage, SecretDelete,
     SecretFileStat, SecretFileStore, SecretMomentPage, SecretMomentRecord, SecretOp,
     SecretRestoreResult, SecretWrite, SecretWriteResult, SendMessage, SetFollow, SetReaction,
@@ -64,15 +67,21 @@ use dohc_engine_domain::{
     binary_rename_write_job_id, binary_rollback_job_identity,
     capture_ingest_binary_with_admission_in_tx, capture_ingest_with_admission_in_tx,
     capture_manifest_seed, capture_retire_in_tx, capture_secret_retire_with,
-    compare_secret_files_page_keyless, decode_binary_rollback_job_identity,
+    collection_record_id_mismatch_in_tx, collection_record_markdown_with_id,
+    compare_secret_files_page_keyless, decline_oversized_collection_adoption_in_tx,
+    decode_binary_rollback_job_identity, delete_collection_adoption_binding_in_tx,
     delete_secret_file_keyless_with, derive_capture_object_id, enqueue_binary_delete,
-    enqueue_binary_rename, enqueue_write, fork_version_keyless_with, get_secret_moment_keyless,
-    has_secret_state, insert_text_conflict_if_absent, list_secret_files_keyless,
-    list_secret_files_keyless_page, list_secret_moments_in_time_window_keyless,
-    list_secret_moments_page_keyless, restore_secret_file_verbatim_with_metadata_and_after,
-    rollback_compensating_moment_id, secret_file_len_keyless, select_snapshot_by_path_in_tx,
-    validate_addressable_plaintext_path, validate_plaintext_storable_path, write_binary_in_tx,
-    write_projected_text_in_tx, write_text_in_tx,
+    enqueue_binary_rename, enqueue_write, fork_version_keyless_with, get_collection,
+    get_collection_record, get_secret_moment_keyless, has_secret_state,
+    insert_text_conflict_if_absent, is_collection_record_bound_in_tx, list_collections,
+    list_pending_collection_adoptions, list_secret_files_keyless, list_secret_files_keyless_page,
+    list_secret_moments_in_time_window_keyless, list_secret_moments_page_keyless,
+    query_collection_records, reconcile_collections_in_tx,
+    restore_secret_file_verbatim_with_metadata_and_after, rollback_compensating_moment_id,
+    secret_file_len_keyless, select_snapshot_by_path_in_tx, set_collection_adoption_state_in_tx,
+    synchronize_collection_frontmatter_index_in_tx, validate_addressable_plaintext_path,
+    validate_plaintext_storable_path, write_binary_in_tx, write_projected_text_in_tx,
+    write_text_in_tx,
 };
 use dohc_engine_files::{
     DurabilityPolicy, JobOutcome, MaterializeError, ProjectionTargetKind, ProjectionTargetState,
@@ -285,6 +294,9 @@ pub struct YdocSettlement {
     /// retry and the artifact on disk is still the old one. Callers must not
     /// report the document as saved on a `false`.
     pub materialized: bool,
+    /// The settled rich-document head changed an engine-owned collection
+    /// record id and must run through ordinary collection reconciliation.
+    pub collection_reconcile_required: bool,
     pub projection: Projection,
 }
 
@@ -945,6 +957,7 @@ mod deferred_relay_tests {
     enum BlobWorkerEvent {
         Started(usize),
         Completed(usize),
+        Cancelled(usize),
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -978,32 +991,36 @@ mod deferred_relay_tests {
                 })
                 .collect(),
         };
-        let task = tokio::spawn(execute_blob_download_batch(request, move |request| {
-            let index = request.blobs[0]
-                .sha256
-                .parse::<usize>()
-                .expect("test blob index");
-            events
-                .send(BlobWorkerEvent::Started(index))
-                .expect("started event");
-            let (released, condition) = &worker_gates[index];
-            let mut released = released
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            while !*released {
-                released = condition
-                    .wait(released)
+        let task = tokio::spawn(execute_blob_download_batch(
+            request,
+            CancellationToken::new(),
+            move |request, _worker_token| {
+                let index = request.blobs[0]
+                    .sha256
+                    .parse::<usize>()
+                    .expect("test blob index");
+                events
+                    .send(BlobWorkerEvent::Started(index))
+                    .expect("started event");
+                let (released, condition) = &worker_gates[index];
+                let mut released = released
+                    .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-            }
-            events
-                .send(BlobWorkerEvent::Completed(index))
-                .expect("completed event");
-            Ok(BlobDownloadBatchResponse {
-                results: vec![Ok(BlobDownloadResponse {
-                    bytes: vec![u8::try_from(index).expect("test byte")],
-                })],
-            })
-        }));
+                while !*released {
+                    released = condition
+                        .wait(released)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+                events
+                    .send(BlobWorkerEvent::Completed(index))
+                    .expect("completed event");
+                Ok(BlobDownloadBatchResponse {
+                    results: vec![Ok(BlobDownloadResponse {
+                        bytes: vec![u8::try_from(index).expect("test byte")],
+                    })],
+                })
+            },
+        ));
 
         let mut started = std::collections::BTreeSet::new();
         for _ in 0..MAX_CONCURRENT_BLOB_DOWNLOADS {
@@ -1050,6 +1067,108 @@ mod deferred_relay_tests {
             .map(|result| result.expect("blob result").bytes)
             .collect::<Vec<_>>();
         assert_eq!(bytes, vec![vec![0], vec![1], vec![2], vec![3], vec![4]]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_blob_batch_stops_scheduling_and_releases_in_flight_downloads() {
+        use std::sync::{Condvar, mpsc};
+        use std::time::Duration;
+
+        let gates = Arc::new(
+            (0..5)
+                .map(|_| (Mutex::new(false), Condvar::new()))
+                .collect::<Vec<_>>(),
+        );
+        let (events, event_rx) = mpsc::channel();
+        let worker_gates = Arc::clone(&gates);
+        let cancellation = CancellationToken::new();
+        let task_cancellation = cancellation.clone();
+        let request = BlobDownloadBatchRequest {
+            workspace_id: "workspace".to_owned(),
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            blobs: (0..5)
+                .map(|index| dohc_engine_sync::BlobDownloadSpec {
+                    sha256: index.to_string(),
+                    limit_bytes: 1,
+                })
+                .collect(),
+        };
+        let task = tokio::spawn(execute_blob_download_batch(
+            request,
+            task_cancellation,
+            move |request, worker_cancellation| {
+                let index = request.blobs[0]
+                    .sha256
+                    .parse::<usize>()
+                    .expect("test blob index");
+                events
+                    .send(BlobWorkerEvent::Started(index))
+                    .expect("started event");
+                let (released, condition) = &worker_gates[index];
+                let mut released = released
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                while !*released && !worker_cancellation.is_cancelled() {
+                    released = condition
+                        .wait(released)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+                assert!(worker_cancellation.is_cancelled());
+                events
+                    .send(BlobWorkerEvent::Cancelled(index))
+                    .expect("cancelled event");
+                Err(RelayError::Local("cancelled test download".to_owned()))
+            },
+        ));
+
+        let mut started = std::collections::BTreeSet::new();
+        for _ in 0..MAX_CONCURRENT_BLOB_DOWNLOADS {
+            match event_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("four workers start")
+            {
+                BlobWorkerEvent::Started(index) => {
+                    started.insert(index);
+                }
+                event => panic!("unexpected worker event: {event:?}"),
+            }
+        }
+        assert_eq!(started, [0, 1, 2, 3].into_iter().collect());
+
+        cancellation.cancel();
+        for (released, condition) in gates.iter() {
+            *released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+            condition.notify_all();
+        }
+
+        let mut cancelled = std::collections::BTreeSet::new();
+        for _ in 0..MAX_CONCURRENT_BLOB_DOWNLOADS {
+            match event_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("in-flight workers observe cancellation")
+            {
+                BlobWorkerEvent::Cancelled(index) => {
+                    cancelled.insert(index);
+                }
+                event => panic!("unexpected worker event after cancellation: {event:?}"),
+            }
+        }
+        assert_eq!(cancelled, [0, 1, 2, 3].into_iter().collect());
+        let outcome = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("cancelled batch resolves promptly")
+            .expect("batch task");
+        assert!(
+            outcome.is_err(),
+            "a cancelled batch must not produce a response"
+        );
+        assert!(
+            event_rx.try_recv().is_err(),
+            "cancellation must prevent the fifth download from starting"
+        );
     }
 }
 
@@ -1206,6 +1325,52 @@ enum Command {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<CaptureIngestBinaryResult, RuntimeError>>,
+    },
+    CollectionRecordIdMismatch {
+        workspace_id: String,
+        version_id: String,
+        paths: Vec<String>,
+        reply: oneshot::Sender<Result<bool, RuntimeError>>,
+    },
+    ReconcileCollections {
+        workspace_id: String,
+        version_id: String,
+        root_dir: PathBuf,
+        leases: LeaseRegistry,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<Vec<String>, RuntimeError>>,
+    },
+    CollectionsList {
+        workspace_id: String,
+        reply: oneshot::Sender<Result<Vec<CollectionSummary>, RuntimeError>>,
+    },
+    CollectionsListPendingAdoptions {
+        workspace_id: String,
+        limit: usize,
+        cursor: Option<CollectionPendingAdoptionCursor>,
+        reply: oneshot::Sender<Result<CollectionPendingAdoptionPage, RuntimeError>>,
+    },
+    CollectionsGet {
+        workspace_id: String,
+        collection_path: String,
+        reply: oneshot::Sender<Result<Option<CollectionDetails>, RuntimeError>>,
+    },
+    CollectionsQueryRecords {
+        workspace_id: String,
+        collection_path: String,
+        query: CollectionQuery,
+        reply: oneshot::Sender<Result<Option<CollectionQueryResult>, RuntimeError>>,
+    },
+    CollectionsGetRecord {
+        workspace_id: String,
+        collection_path: String,
+        record_id: String,
+        history_limit: usize,
+        before_history_id: Option<i64>,
+        reply: oneshot::Sender<Result<Option<CollectionRecordDetails>, RuntimeError>>,
     },
     CaptureSecret {
         // Boxed: the plaintext + key payload should not size every command
@@ -2401,6 +2566,60 @@ impl ActorHandle {
             .map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    /// Check changed collection records against their durable id bindings,
+    /// blocking the calling capture worker thread.
+    pub fn collection_record_id_mismatch_blocking(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        paths: Vec<String>,
+    ) -> Result<bool, RuntimeError> {
+        debug_assert_sync_context();
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::CollectionRecordIdMismatch {
+                workspace_id,
+                version_id,
+                paths,
+                reply,
+            })
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx
+            .blocking_recv()
+            .map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn reconcile_collections_blocking(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        root_dir: PathBuf,
+        leases: LeaseRegistry,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+    ) -> Result<Vec<String>, RuntimeError> {
+        debug_assert_sync_context();
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::ReconcileCollections {
+                workspace_id,
+                version_id,
+                root_dir,
+                leases,
+                self_writes,
+                now_ms,
+                faults,
+                token: CancellationToken::new(),
+                reply,
+            })
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx
+            .blocking_recv()
+            .map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
     /// Capture a secret file on the actor's writer, blocking the caller. The
     /// workspace data key travels with the request (the actor holds no key
     /// state; custody stays at the composition layer).
@@ -2846,6 +3065,129 @@ impl ActorHandle {
                 leases,
                 faults,
                 token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn reconcile_collections(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        root_dir: PathBuf,
+        leases: LeaseRegistry,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<Vec<String>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ReconcileCollections {
+                workspace_id,
+                version_id,
+                root_dir,
+                leases,
+                self_writes,
+                now_ms,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn collections_list(
+        &self,
+        workspace_id: String,
+    ) -> Result<Vec<CollectionSummary>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::CollectionsList {
+                workspace_id,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn collections_list_pending_adoptions(
+        &self,
+        workspace_id: String,
+        limit: usize,
+        cursor: Option<CollectionPendingAdoptionCursor>,
+    ) -> Result<CollectionPendingAdoptionPage, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::CollectionsListPendingAdoptions {
+                workspace_id,
+                limit,
+                cursor,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn collections_get(
+        &self,
+        workspace_id: String,
+        collection_path: String,
+    ) -> Result<Option<CollectionDetails>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::CollectionsGet {
+                workspace_id,
+                collection_path,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn collections_query_records(
+        &self,
+        workspace_id: String,
+        collection_path: String,
+        query: CollectionQuery,
+    ) -> Result<Option<CollectionQueryResult>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::CollectionsQueryRecords {
+                workspace_id,
+                collection_path,
+                query,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn collections_get_record(
+        &self,
+        workspace_id: String,
+        collection_path: String,
+        record_id: String,
+        history_limit: usize,
+        before_history_id: Option<i64>,
+    ) -> Result<Option<CollectionRecordDetails>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::CollectionsGetRecord {
+                workspace_id,
+                collection_path,
+                record_id,
+                history_limit,
+                before_history_id,
                 reply,
             })
             .await
@@ -5593,8 +5935,13 @@ impl ActorHandle {
                     let http_transport = Arc::clone(&http_transport);
                     let io_request = request.clone();
                     let result = tokio::select! {
-                        result = execute_http_request(http_transport, io_request) => result,
+                        biased;
                         () = token.cancelled() => return Err(RuntimeError::Cancelled),
+                        result = execute_http_request(
+                            http_transport,
+                            io_request,
+                            token.clone(),
+                        ) => result,
                     };
                     transport.complete(request, result);
                 }
@@ -6875,15 +7222,21 @@ fn build_http_transport(
 }
 
 const MAX_CONCURRENT_BLOB_DOWNLOADS: usize = 4;
+const RELAY_IO_CANCELLED: &str = "relay-io-cancelled";
+
+fn relay_io_cancelled() -> RelayError {
+    RelayError::Local(RELAY_IO_CANCELLED.to_owned())
+}
 
 async fn execute_http_request(
     transport: Arc<HttpRelayTransport>,
     request: RelayIoRequest,
+    token: CancellationToken,
 ) -> Result<RelayIoResponse, RelayError> {
     if let RelayIoRequest::DownloadBlobs(request) = request {
         let download_transport = Arc::clone(&transport);
-        return execute_blob_download_batch(request, move |request| {
-            download_transport.download_blobs(request)
+        return execute_blob_download_batch(request, token, move |request, worker_token| {
+            download_transport.download_blobs_cancellable(request, || worker_token.is_cancelled())
         })
         .await
         .map(RelayIoResponse::DownloadBlobs);
@@ -6899,14 +7252,21 @@ async fn execute_http_request(
 /// bound blob bytes held here to 240 MiB, plus allocator and request overhead.
 async fn execute_blob_download_batch<F>(
     request: BlobDownloadBatchRequest,
+    token: CancellationToken,
     download: F,
 ) -> Result<BlobDownloadBatchResponse, RelayError>
 where
-    F: Fn(BlobDownloadBatchRequest) -> Result<BlobDownloadBatchResponse, RelayError>
+    F: Fn(
+            BlobDownloadBatchRequest,
+            CancellationToken,
+        ) -> Result<BlobDownloadBatchResponse, RelayError>
         + Clone
         + Send
         + 'static,
 {
+    if token.is_cancelled() {
+        return Err(relay_io_cancelled());
+    }
     if request.blobs.is_empty() || request.blobs.len() > MAX_BLOB_DOWNLOAD_BATCH {
         return Err(RelayError::InvalidResponse);
     }
@@ -6918,6 +7278,10 @@ where
 
     while next < result_count || !tasks.is_empty() {
         while next < result_count && tasks.len() < MAX_CONCURRENT_BLOB_DOWNLOADS {
+            if token.is_cancelled() {
+                tasks.abort_all();
+                return Err(relay_io_cancelled());
+            }
             let index = next;
             let single = BlobDownloadBatchRequest {
                 workspace_id: request.workspace_id.clone(),
@@ -6926,8 +7290,9 @@ where
                 blobs: vec![request.blobs[index].clone()],
             };
             let download = download.clone();
+            let worker_token = token.clone();
             tasks.spawn_blocking(move || {
-                let result = match download(single) {
+                let result = match download(single, worker_token) {
                     Ok(response) => {
                         let mut results = response.results.into_iter();
                         match (results.next(), results.next()) {
@@ -6942,12 +7307,21 @@ where
             next += 1;
         }
 
-        let (index, result) = tasks
-            .join_next()
-            .await
+        let joined = tokio::select! {
+            biased;
+            () = token.cancelled() => {
+                tasks.abort_all();
+                return Err(relay_io_cancelled());
+            }
+            joined = tasks.join_next() => joined,
+        };
+        let (index, result) = joined
             .ok_or(RelayError::InvalidResponse)?
             .map_err(|_| RelayError::Partitioned)?;
         results[index] = Some(result);
+    }
+    if token.is_cancelled() {
+        return Err(relay_io_cancelled());
     }
 
     let results = results
@@ -7519,6 +7893,121 @@ fn worker_main(
                         &token,
                     )
                 });
+                let _ = reply.send(outcome);
+            }
+            Command::CollectionRecordIdMismatch {
+                workspace_id,
+                version_id,
+                paths,
+                reply,
+            } => {
+                let outcome = store
+                    .read_with(|conn| {
+                        collection_record_id_mismatch_in_tx(
+                            conn,
+                            &workspace_id,
+                            &version_id,
+                            &paths,
+                        )
+                    })
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ReconcileCollections {
+                workspace_id,
+                version_id,
+                root_dir,
+                leases,
+                self_writes,
+                now_ms,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = reconcile_collections_on_store(
+                    &mut store,
+                    &mut doc_cache,
+                    &workspace_id,
+                    &version_id,
+                    &root_dir,
+                    &leases,
+                    self_writes.as_ref(),
+                    now_ms,
+                    faults.as_ref(),
+                    &token,
+                );
+                let _ = reply.send(outcome);
+            }
+            Command::CollectionsList {
+                workspace_id,
+                reply,
+            } => {
+                let outcome = store
+                    .read_with(|conn| list_collections(conn, &workspace_id))
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::CollectionsListPendingAdoptions {
+                workspace_id,
+                limit,
+                cursor,
+                reply,
+            } => {
+                let outcome = store
+                    .read_with(|conn| {
+                        list_pending_collection_adoptions(
+                            conn,
+                            &workspace_id,
+                            limit,
+                            cursor.as_ref(),
+                        )
+                    })
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::CollectionsGet {
+                workspace_id,
+                collection_path,
+                reply,
+            } => {
+                let outcome = store
+                    .read_with(|conn| get_collection(conn, &workspace_id, &collection_path))
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::CollectionsQueryRecords {
+                workspace_id,
+                collection_path,
+                query,
+                reply,
+            } => {
+                let outcome = store
+                    .read_with(|conn| {
+                        query_collection_records(conn, &workspace_id, &collection_path, &query)
+                    })
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::CollectionsGetRecord {
+                workspace_id,
+                collection_path,
+                record_id,
+                history_limit,
+                before_history_id,
+                reply,
+            } => {
+                let outcome = store
+                    .read_with(|conn| {
+                        get_collection_record(
+                            conn,
+                            &workspace_id,
+                            &collection_path,
+                            &record_id,
+                            history_limit,
+                            before_history_id,
+                        )
+                    })
+                    .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
             Command::CaptureSecret {
@@ -8303,6 +8792,7 @@ fn worker_main(
                     content_kind,
                     expected_lineage_claim_id.as_deref(),
                     expected_head_sha,
+                    None,
                     &session_id,
                     self_writes.as_ref(),
                     now_ms,
@@ -8368,9 +8858,12 @@ fn worker_main(
                     )
                     .map_err(RuntimeError::from)
                 };
-                // Recovery repair rewrites lineage state (probe-covered; reset
-                // hooks stay unconditional).
-                doc_cache.clear();
+                // A proven-empty scan performed no lineage transaction, so it
+                // must not invalidate an unrelated active writer session. Any
+                // materialization or error can have changed lineage state.
+                if !matches!(&outcome, Ok(recoveries) if recoveries.is_empty()) {
+                    doc_cache.clear();
+                }
                 let _ = reply.send(outcome);
             }
             Command::MaterializeReplayPending {
@@ -9814,7 +10307,11 @@ fn ydoc_version_unsettled_content_kind_on_store(
             .map_err(StorageError::corrupt_public)
             .map(Option::flatten)
         })?;
-        if materialized_sha.as_deref() != Some(projected_sha.as_str()) {
+        let seed_source = dohc_engine_collab::read_seed_only_lineage_source(store, &key)?;
+        let covered_by_seed = seed_source
+            .as_deref()
+            .is_some_and(|source| materialized_sha.as_deref() == Some(source));
+        if materialized_sha.as_deref() != Some(projected_sha.as_str()) && !covered_by_seed {
             return Ok(Some(content_kind));
         }
     }
@@ -10544,6 +11041,7 @@ fn ydoc_record_update_on_store(
                 tx,
                 &journal_key,
                 &journal_path,
+                actor_origin_id.as_deref(),
                 now_ms,
             )
             .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
@@ -10572,6 +11070,7 @@ fn ydoc_record_update_on_store(
                         journal_kind,
                         update_sha,
                         &lineage_claim_id,
+                        actor_origin_id.as_deref(),
                         false,
                     ),
                     now_ms,
@@ -10650,6 +11149,31 @@ fn ydoc_settle_disk_preimage(
     }
 }
 
+fn settled_collection_record_id_mismatch(
+    store: &EngineStore,
+    key: &DocKey,
+    path: &str,
+) -> Result<bool, RuntimeError> {
+    store
+        .read_with(|conn| {
+            if !is_collection_record_bound_in_tx(
+                conn,
+                &key.workspace_id,
+                &key.version_id,
+                &key.object_id,
+            )? {
+                return Ok(false);
+            }
+            collection_record_id_mismatch_in_tx(
+                conn,
+                &key.workspace_id,
+                &key.version_id,
+                &[path.to_owned()],
+            )
+        })
+        .map_err(RuntimeError::from)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn ydoc_settle_on_store(
     store: &mut EngineStore,
@@ -10660,6 +11184,7 @@ fn ydoc_settle_on_store(
     content_kind: ContentKind,
     expected_lineage_claim_id: Option<&str>,
     expected_head_sha: Option<String>,
+    settled_content_override: Option<String>,
     session_id: &str,
     self_writes: &dyn SelfWriteRecorder,
     now_ms: i64,
@@ -10894,7 +11419,12 @@ fn ydoc_settle_on_store(
             }
         }
     }
-    let projected_sha = dohc_engine_storage::hex_sha256(projection.content.as_bytes());
+    let projected_sha = dohc_engine_storage::hex_sha256(
+        settled_content_override
+            .as_deref()
+            .unwrap_or(&projection.content)
+            .as_bytes(),
+    );
     // Classify the exact disk preimage through the same contained projection
     // probe that materialization uses. This must precede the settle transaction:
     // compensating only the marker after a rival is found would leave the new
@@ -10919,6 +11449,7 @@ fn ydoc_settle_on_store(
             // Any pending job for this head was replayed above, and a Blocked
             // replay returns Err rather than reaching here.
             materialized: true,
+            collection_reconcile_required: settled_collection_record_id_mismatch(store, key, path)?,
             projection,
         });
     }
@@ -10947,15 +11478,17 @@ fn ydoc_settle_on_store(
             content: inband_settled_content(current.text),
             sha256: current.blob_sha256,
             materialized: true,
+            collection_reconcile_required: settled_collection_record_id_mismatch(store, key, path)?,
             projection,
         });
     }
     let Projection {
-        content: projected_text,
+        content: ydoc_projected_text,
         content_kind: projected_content_kind,
         source_state_vector_sha256,
         destructive: projection_destructive,
     } = projection;
+    let projected_text = settled_content_override.unwrap_or(ydoc_projected_text);
     let outcome = store.write_with(faults, |tx| {
         let current = select_snapshot_by_path_in_tx(tx, &key.workspace_id, &key.version_id, path)?;
         if current.binary_sha256.is_some() {
@@ -11193,6 +11726,7 @@ fn ydoc_settle_on_store(
         content,
         sha256: write.snapshot.blob_sha256,
         materialized,
+        collection_reconcile_required: settled_collection_record_id_mismatch(store, key, path)?,
         projection,
     })
 }
@@ -11486,6 +12020,7 @@ fn versioned_text_write_on_store(
                     path: &result.snapshot.path,
                     text: &result.snapshot.text,
                 },
+                None,
                 input.now_ms,
             )?;
         }
@@ -11545,6 +12080,7 @@ fn versioned_binary_write_on_store(
                 &input.version_id,
                 &result.object_id,
                 dohc_engine_sync::ResultingHead::BinaryOrAbsent,
+                None,
                 input.now_ms,
             )?;
             delete_file_search_index(
@@ -11840,6 +12376,7 @@ fn versioned_text_rename_on_store(
                     &input.version_id,
                     &result.object.object_id,
                     resulting,
+                    None,
                     input.now_ms,
                 )
                 .map_err(map_fold_error)?;
@@ -12340,6 +12877,7 @@ fn versioned_text_rollback_on_store(
                 &input.version_id,
                 object_id,
                 resulting,
+                None,
                 recorded_at_ms,
             )
             .map_err(map_fold_error)?;
@@ -12969,6 +13507,7 @@ fn versioned_text_merge_on_store(
                                 path: &write.snapshot.path,
                                 text: &write.snapshot.text,
                             },
+                            None,
                             input.now_ms,
                         )
                         .map_err(map_fold_error)?;
@@ -12999,6 +13538,7 @@ fn versioned_text_merge_on_store(
                             &input.target_version_id,
                             &delete.object.object_id,
                             dohc_engine_sync::ResultingHead::BinaryOrAbsent,
+                            None,
                             input.now_ms,
                         )
                         .map_err(map_fold_error)?;
@@ -13016,6 +13556,7 @@ fn versioned_text_merge_on_store(
                             &input.target_version_id,
                             &write.object.object_id,
                             dohc_engine_sync::ResultingHead::BinaryOrAbsent,
+                            None,
                             input.now_ms,
                         )
                         .map_err(map_fold_error)?;
@@ -13123,6 +13664,618 @@ fn merge_moment_outbound_identity(result: &MergeTextFileResult) -> Option<(&str,
     }
 }
 
+fn persist_collection_adoption_state(
+    store: &mut EngineStore,
+    candidate: &CollectionAdoptionCandidate,
+    workspace_id: &str,
+    version_id: &str,
+    state: &str,
+    faults: &dyn FaultInjector,
+) -> Result<(), RuntimeError> {
+    match store.write_with(faults, |tx| {
+        set_collection_adoption_state_in_tx(
+            tx,
+            workspace_id,
+            version_id,
+            &candidate.file_path,
+            &candidate.record_id,
+            state,
+        )
+        .map_err(RuntimeError::from)
+    })? {
+        TxnOutcome::Committed(()) => Ok(()),
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
+}
+
+fn decline_oversized_collection_adoption(
+    store: &mut EngineStore,
+    candidate: &CollectionAdoptionCandidate,
+    workspace_id: &str,
+    version_id: &str,
+    faults: &dyn FaultInjector,
+) -> Result<(), RuntimeError> {
+    match store.write_with(faults, |tx| {
+        decline_oversized_collection_adoption_in_tx(
+            tx,
+            workspace_id,
+            version_id,
+            &candidate.collection_path,
+            &candidate.file_path,
+            &candidate.record_id,
+        )
+        .map_err(RuntimeError::from)
+    })? {
+        TxnOutcome::Committed(()) => Ok(()),
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
+}
+
+fn delete_collection_adoption_binding(
+    store: &mut EngineStore,
+    candidate: &CollectionAdoptionCandidate,
+    workspace_id: &str,
+    version_id: &str,
+    faults: &dyn FaultInjector,
+) -> Result<(), RuntimeError> {
+    match store.write_with(faults, |tx| {
+        delete_collection_adoption_binding_in_tx(
+            tx,
+            workspace_id,
+            version_id,
+            &candidate.file_path,
+            &candidate.record_id,
+        )
+        .map_err(RuntimeError::from)
+    })? {
+        TxnOutcome::Committed(()) => Ok(()),
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
+}
+
+fn adoption_conflict(error: &RuntimeError) -> bool {
+    matches!(
+        error,
+        RuntimeError::Domain(DomainError::InvalidInput {
+            reason: "ydoc-conflict-open"
+        })
+    )
+}
+
+enum CollectionAdoptionExecution {
+    Applied { changed_path: Option<String> },
+    Declined,
+    DeclinedOversized,
+    NeedsRichdocSeed,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ensure_collection_record_id_on_store(
+    store: &mut EngineStore,
+    doc_cache: &mut WriterDocCache,
+    doc: &Ydoc,
+    key: &DocKey,
+    file_path: &str,
+    regime: Regime,
+    record_id: &str,
+    preserved_markdown: Option<&str>,
+    lineage_claim_id: Option<String>,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<Option<(Option<String>, bool)>, RuntimeError> {
+    if doc
+        .frontmatter_json()
+        .get(RECORD_ID_FRONTMATTER_KEY)
+        .and_then(serde_json::Value::as_str)
+        == Some(record_id)
+        && preserved_markdown.is_none()
+    {
+        return Ok(Some((lineage_claim_id, false)));
+    }
+
+    let update = match preserved_markdown {
+        Some(markdown) => match doc.frontmatter_set_preserving_markdown_source(
+            RECORD_ID_FRONTMATTER_KEY,
+            record_id,
+            markdown,
+        ) {
+            Ok(update) => update,
+            Err(CollabError::ProjectionTooLarge { .. } | CollabError::UpdateTooLarge { .. }) => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error.into()),
+        },
+        None => doc.frontmatter_set(RECORD_ID_FRONTMATTER_KEY, record_id),
+    };
+    let lineage_claim_id = ydoc_record_update_on_store(
+        store,
+        doc_cache,
+        key,
+        file_path,
+        ContentKind::Richdoc,
+        regime,
+        &update,
+        Some("engine".to_owned()),
+        lineage_claim_id,
+        false,
+        None,
+        None,
+        now_ms,
+        faults,
+        token,
+    )?
+    .lineage_claim_id;
+    Ok(Some((lineage_claim_id, true)))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn adopt_collection_record_on_store(
+    store: &mut EngineStore,
+    doc_cache: &mut WriterDocCache,
+    candidate: &CollectionAdoptionCandidate,
+    workspace_id: &str,
+    version_id: &str,
+    root_dir: &std::path::Path,
+    leases: &LeaseRegistry,
+    self_writes: &dyn SelfWriteRecorder,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<Option<CollectionAdoptionExecution>, RuntimeError> {
+    let probe = ydoc_open_state_on_store(
+        store,
+        doc_cache,
+        workspace_id,
+        now_ms,
+        false,
+        None,
+        version_id,
+        &candidate.file_path,
+        Some(ContentKind::Richdoc),
+        false,
+        token,
+    )?;
+    if probe.key.object_id != candidate.object_id {
+        return Err(DomainError::StateCorrupt {
+            reason: "collection record changed identity during adoption",
+        }
+        .into());
+    }
+    if !probe.lineage_existing {
+        return Ok(Some(CollectionAdoptionExecution::NeedsRichdocSeed));
+    }
+    let _lease = match leases.acquire(&probe.key) {
+        Ok(lease) => lease,
+        Err(CollabError::LeaseHeld) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let state = ydoc_open_state_on_store(
+        store,
+        doc_cache,
+        workspace_id,
+        now_ms,
+        true,
+        Some(&probe.key),
+        version_id,
+        &candidate.file_path,
+        Some(ContentKind::Richdoc),
+        false,
+        token,
+    )?;
+    if state.key != probe.key || state.content_kind != ContentKind::Richdoc {
+        return Err(DomainError::InvalidInput {
+            reason: "collection record does not have a rich-document lineage",
+        }
+        .into());
+    }
+
+    if !state.lineage_existing {
+        return Err(DomainError::StateCorrupt {
+            reason: "collection record lineage disappeared during adoption",
+        }
+        .into());
+    }
+    let doc = Ydoc::wire();
+    doc.apply(&state.initial_update)?;
+    let lineage_claim_id = state.lineage_claim_id;
+    let settled_content_override = if candidate.lossless_insertion_required {
+        let preserved =
+            match dohc_engine_collab::read_pristine_seed_lineage_source(store, &state.key)? {
+                Some(seed_source_sha)
+                    if Some(&seed_source_sha) == state.head_blob_sha256.as_ref() =>
+                {
+                    VersionedTextStore::new(store)
+                        .read_text(workspace_id, version_id, &candidate.file_path)?
+                        .filter(|snapshot| {
+                            snapshot.object_id == candidate.object_id
+                                && snapshot.blob_sha256 == seed_source_sha
+                        })
+                        .and_then(|snapshot| {
+                            collection_record_markdown_with_id(&snapshot.text, &candidate.record_id)
+                        })
+                }
+                _ => None,
+            };
+        match preserved {
+            Some(preserved) => Some(preserved),
+            None if doc.markdown_source_reference().is_some_and(|reference| {
+                doc.project(ContentKind::Richdoc).is_ok_and(|projection| {
+                    reference.projection_sha256 == hex_sha256(projection.content.as_bytes())
+                        && doc.markdown_source(&reference).is_some()
+                })
+            }) =>
+            {
+                None
+            }
+            None => return Ok(Some(CollectionAdoptionExecution::Declined)),
+        }
+    } else {
+        None
+    };
+    let Some((lineage_claim_id, _id_added)) = ensure_collection_record_id_on_store(
+        store,
+        doc_cache,
+        &doc,
+        &state.key,
+        &candidate.file_path,
+        state.regime,
+        &candidate.record_id,
+        settled_content_override.as_deref(),
+        lineage_claim_id,
+        now_ms,
+        faults,
+        token,
+    )?
+    else {
+        return Ok(Some(CollectionAdoptionExecution::DeclinedOversized));
+    };
+    let changed_path = Some(
+        ydoc_settle_on_store(
+            store,
+            doc_cache,
+            root_dir,
+            &state.key,
+            &candidate.file_path,
+            ContentKind::Richdoc,
+            lineage_claim_id.as_deref(),
+            state.head_blob_sha256,
+            settled_content_override,
+            &format!("collection-adoption:{}", candidate.record_id),
+            self_writes,
+            now_ms,
+            faults,
+            token,
+        )?
+        .path,
+    );
+    Ok(Some(CollectionAdoptionExecution::Applied { changed_path }))
+}
+
+enum CollectionRelationCleanupExecution {
+    Applied(String),
+    NoChange,
+    LeaseHeld,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cleanup_collection_relation_on_store(
+    store: &mut EngineStore,
+    doc_cache: &mut WriterDocCache,
+    candidate: &CollectionRelationCleanupCandidate,
+    workspace_id: &str,
+    version_id: &str,
+    root_dir: &std::path::Path,
+    leases: &LeaseRegistry,
+    self_writes: &dyn SelfWriteRecorder,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<CollectionRelationCleanupExecution, RuntimeError> {
+    let probe = ydoc_open_state_on_store(
+        store,
+        doc_cache,
+        workspace_id,
+        now_ms,
+        false,
+        None,
+        version_id,
+        &candidate.source_file_path,
+        Some(ContentKind::Richdoc),
+        false,
+        token,
+    )?;
+    if probe.key.object_id != candidate.source_object_id {
+        return Err(DomainError::StateCorrupt {
+            reason: "collection relation referrer changed identity during cleanup",
+        }
+        .into());
+    }
+    let _lease = match leases.acquire(&probe.key) {
+        Ok(lease) => lease,
+        Err(CollabError::LeaseHeld) => {
+            return Ok(CollectionRelationCleanupExecution::LeaseHeld);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let state = ydoc_open_state_on_store(
+        store,
+        doc_cache,
+        workspace_id,
+        now_ms,
+        true,
+        Some(&probe.key),
+        version_id,
+        &candidate.source_file_path,
+        Some(ContentKind::Richdoc),
+        false,
+        token,
+    )?;
+    if state.key != probe.key || state.content_kind != ContentKind::Richdoc {
+        return Err(DomainError::InvalidInput {
+            reason: "collection relation referrer does not have a rich-document lineage",
+        }
+        .into());
+    }
+
+    let doc = Ydoc::wire();
+    doc.apply(&state.initial_update)?;
+    let mut lineage_claim_id = state.lineage_claim_id.clone();
+    if !state.lineage_existing {
+        let seed = state
+            .seed_content
+            .as_deref()
+            .ok_or(DomainError::StateCorrupt {
+                reason: "collection relation cleanup has no Markdown artifact seed",
+            })?;
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, seed)?;
+        let seed_update = doc.encode_full_state();
+        lineage_claim_id = ydoc_record_update_on_store(
+            store,
+            doc_cache,
+            &state.key,
+            &candidate.source_file_path,
+            ContentKind::Richdoc,
+            state.regime,
+            &seed_update,
+            None,
+            lineage_claim_id,
+            true,
+            state.head_blob_sha256.clone(),
+            None,
+            now_ms,
+            faults,
+            token,
+        )?
+        .lineage_claim_id;
+    }
+    let Some(update) = doc.frontmatter_drop_relation_target_preserving_markdown_source(
+        &candidate.field_name,
+        &candidate.target_record_id,
+        candidate.many,
+    )?
+    else {
+        match store.write_with(faults, |tx| {
+            synchronize_collection_frontmatter_index_in_tx(
+                tx,
+                workspace_id,
+                version_id,
+                &candidate.source_object_id,
+                &doc.frontmatter_json(),
+            )
+            .map_err(RuntimeError::from)
+        })? {
+            TxnOutcome::Committed(()) => {
+                return Ok(CollectionRelationCleanupExecution::NoChange);
+            }
+            TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+        }
+    };
+    let append = ydoc_record_update_on_store(
+        store,
+        doc_cache,
+        &state.key,
+        &candidate.source_file_path,
+        ContentKind::Richdoc,
+        state.regime,
+        &update,
+        Some("engine".to_owned()),
+        lineage_claim_id,
+        false,
+        None,
+        None,
+        now_ms,
+        faults,
+        token,
+    )?;
+    let settlement = ydoc_settle_on_store(
+        store,
+        doc_cache,
+        root_dir,
+        &state.key,
+        &candidate.source_file_path,
+        ContentKind::Richdoc,
+        append.lineage_claim_id.as_deref(),
+        state.head_blob_sha256,
+        None,
+        &format!(
+            "collection-relation-cleanup:{}:{}:{}",
+            candidate.source_record_id, candidate.field_name, candidate.target_record_id
+        ),
+        self_writes,
+        now_ms,
+        faults,
+        token,
+    )?;
+    Ok(CollectionRelationCleanupExecution::Applied(settlement.path))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reconcile_collections_on_store(
+    store: &mut EngineStore,
+    doc_cache: &mut WriterDocCache,
+    workspace_id: &str,
+    version_id: &str,
+    root_dir: &std::path::Path,
+    leases: &LeaseRegistry,
+    self_writes: &dyn SelfWriteRecorder,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<Vec<String>, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    let reconciliation = match store.write_with(faults, |tx| {
+        reconcile_collections_in_tx(tx, workspace_id, version_id).map_err(RuntimeError::from)
+    })? {
+        TxnOutcome::Committed(reconciliation) => reconciliation,
+        TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+    };
+
+    let mut changed_paths = Vec::new();
+    let mut pending_seed_objects = HashSet::new();
+    let mut lease_held = false;
+    for candidate in reconciliation.adoptions {
+        if token.is_cancelled() {
+            return Err(RuntimeError::Cancelled);
+        }
+        match adopt_collection_record_on_store(
+            store,
+            doc_cache,
+            &candidate,
+            workspace_id,
+            version_id,
+            root_dir,
+            leases,
+            self_writes,
+            now_ms,
+            faults,
+            token,
+        ) {
+            Ok(Some(CollectionAdoptionExecution::Applied { changed_path })) => {
+                persist_collection_adoption_state(
+                    store,
+                    &candidate,
+                    workspace_id,
+                    version_id,
+                    "adopted",
+                    faults,
+                )?;
+                if let Some(path) = changed_path
+                    && !changed_paths.contains(&path)
+                {
+                    changed_paths.push(path);
+                }
+            }
+            Ok(Some(CollectionAdoptionExecution::Declined)) => {
+                delete_collection_adoption_binding(
+                    store,
+                    &candidate,
+                    workspace_id,
+                    version_id,
+                    faults,
+                )?;
+            }
+            Ok(Some(CollectionAdoptionExecution::DeclinedOversized)) => {
+                decline_oversized_collection_adoption(
+                    store,
+                    &candidate,
+                    workspace_id,
+                    version_id,
+                    faults,
+                )?;
+            }
+            Ok(Some(CollectionAdoptionExecution::NeedsRichdocSeed)) => {
+                pending_seed_objects.insert(candidate.object_id.clone());
+            }
+            Ok(None) => {
+                lease_held = true;
+            }
+            Err(error) if adoption_conflict(&error) => {
+                let state = if candidate.lossless_insertion_required {
+                    "deferred-conflict-lossless"
+                } else {
+                    "deferred-conflict"
+                };
+                persist_collection_adoption_state(
+                    store,
+                    &candidate,
+                    workspace_id,
+                    version_id,
+                    state,
+                    faults,
+                )?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    for candidate in reconciliation.relation_cleanups {
+        if token.is_cancelled() {
+            return Err(RuntimeError::Cancelled);
+        }
+        if pending_seed_objects.contains(&candidate.source_object_id) {
+            continue;
+        }
+        match cleanup_collection_relation_on_store(
+            store,
+            doc_cache,
+            &candidate,
+            workspace_id,
+            version_id,
+            root_dir,
+            leases,
+            self_writes,
+            now_ms,
+            faults,
+            token,
+        ) {
+            Ok(CollectionRelationCleanupExecution::Applied(path)) => {
+                if !changed_paths.contains(&path) {
+                    changed_paths.push(path);
+                }
+            }
+            Ok(CollectionRelationCleanupExecution::NoChange) => {}
+            Ok(CollectionRelationCleanupExecution::LeaseHeld) => {
+                lease_held = true;
+            }
+            Err(error) if adoption_conflict(&error) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    if lease_held {
+        return Err(RuntimeError::Sync(
+            dohc_engine_sync::SyncError::RetryableState {
+                reason: "collection-reconciliation-lease-held",
+            },
+        ));
+    }
+    Ok(changed_paths)
+}
+
+fn capture_agent_origin_id(author_json: Option<&str>) -> Option<String> {
+    let author = serde_json::from_str::<serde_json::Value>(author_json?).ok()?;
+    let object = author.as_object()?;
+    if object.get("kind").and_then(serde_json::Value::as_str) != Some("agent") {
+        return None;
+    }
+    let agent_id = object
+        .get("agentId")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())?;
+    object
+        .get("onBehalfOf")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())?;
+    if object
+        .get("agentRunId")
+        .is_some_and(|value| value.as_str().is_none_or(str::is_empty))
+    {
+        return None;
+    }
+    Some(agent_id.to_owned())
+}
+
 fn capture_ingest_on_store(
     store: &mut EngineStore,
     input: &CaptureIngest,
@@ -13144,6 +14297,7 @@ fn capture_ingest_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
+    let actor_origin_id = capture_agent_origin_id(input.author_json.as_deref());
     let outcome = store.write_with(faults, |tx| {
         let mut admitted = false;
         let result = capture_ingest_with_admission_in_tx(
@@ -13165,6 +14319,7 @@ fn capture_ingest_on_store(
                     path: &result.snapshot.path,
                     text: &result.snapshot.text,
                 },
+                actor_origin_id.as_deref(),
                 input.now_ms,
             )?;
         }
@@ -13235,6 +14390,7 @@ fn capture_ingest_binary_on_store(
                 &input.version_id,
                 &result.object_id,
                 dohc_engine_sync::ResultingHead::BinaryOrAbsent,
+                None,
                 input.now_ms,
             )?;
         }
@@ -13592,6 +14748,190 @@ fn snapshot(store: &EngineStore) -> Result<StoreSnapshot, StorageError> {
         request_ledger: store.request_ledger_len()?,
         migration_ledger: store.migration_ledger_len()?,
     })
+}
+
+#[cfg(test)]
+mod collection_relation_cleanup_tests {
+    use super::*;
+    use dohc_engine_testkit::ScratchDir;
+
+    const WORKSPACE_ID: &str = "workspace";
+    const VERSION_ID: &str = "main";
+    const SOURCE_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const TARGET_ID: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const SOURCE_OBJECT_ID: &str = "relation-source-object";
+    const SOURCE_PATH: &str = "tasks/source.md";
+
+    struct NoSelfWrites;
+
+    impl SelfWriteRecorder for NoSelfWrites {
+        fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
+
+        fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
+    }
+
+    fn write_text(
+        store: &mut EngineStore,
+        object_id: &str,
+        path: &str,
+        text: &str,
+        moment_id: &str,
+        now_ms: i64,
+    ) {
+        VersionedTextStore::new(store)
+            .write_text(
+                &WriteText {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    version_id: VERSION_ID.to_owned(),
+                    object_id: object_id.to_owned(),
+                    path: path.to_owned(),
+                    text: text.to_owned(),
+                    moment_id: moment_id.to_owned(),
+                    metadata_origin: "test".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("write collection fixture");
+    }
+
+    #[test]
+    fn absent_relation_target_cleanup_refreshes_only_the_index() {
+        let scratch = ScratchDir::new().expect("scratch directory");
+        let mut store = EngineStore::open(&scratch.engine_db_path().expect("engine database"), 1)
+            .expect("open engine store");
+        ensure_mutation_version_on_store(&mut store, WORKSPACE_ID, VERSION_ID, 1, &NoFaults)
+            .expect("ensure main version");
+        write_text(
+            &mut store,
+            "relation-schema-object",
+            "tasks/collection.yaml",
+            "fields:\n  related:\n    type: relation\n    collection: tasks\n    many: false\n",
+            "relation-schema-moment",
+            2,
+        );
+        let markdown = format!("---\nid: {SOURCE_ID}\n---\n\nSource\n");
+        write_text(
+            &mut store,
+            SOURCE_OBJECT_ID,
+            SOURCE_PATH,
+            &markdown,
+            "relation-source-moment",
+            3,
+        );
+        store
+            .write_with(&NoFaults, |tx| {
+                reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)?;
+                set_collection_adoption_state_in_tx(
+                    tx,
+                    WORKSPACE_ID,
+                    VERSION_ID,
+                    SOURCE_PATH,
+                    SOURCE_ID,
+                    "adopted",
+                )
+            })
+            .expect("adopt source record");
+
+        let key = DocKey::new(WORKSPACE_ID, VERSION_ID, SOURCE_OBJECT_ID).expect("document key");
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, &markdown)
+            .expect("seed rich document");
+        let mut cache = WriterDocCache::new();
+        let appended = dohc_engine_collab::record_local_update_creating_marker(
+            &mut store,
+            &mut cache,
+            &key,
+            Some(SOURCE_PATH),
+            ContentKind::Richdoc,
+            Regime::LocalOnly,
+            &doc.encode_full_state(),
+            None,
+            &NoFaults,
+            4,
+        )
+        .expect("seed source lineage");
+        assert!(matches!(appended, TxnOutcome::Committed(_)));
+        store
+            .write_with(&NoFaults, |tx| {
+                synchronize_collection_frontmatter_index_in_tx(
+                    tx,
+                    WORKSPACE_ID,
+                    VERSION_ID,
+                    SOURCE_OBJECT_ID,
+                    &serde_json::json!({ "id": SOURCE_ID, "related": TARGET_ID }),
+                )
+                .map_err(RuntimeError::from)
+            })
+            .expect("seed stale relation index");
+
+        let before: (i64, i64, i64) = store
+            .read_with(|conn| {
+                Ok::<_, rusqlite::Error>((
+                    conn.query_row("SELECT COUNT(*) FROM ydoc_updates", [], |row| row.get(0))?,
+                    conn.query_row("SELECT COUNT(*) FROM moments", [], |row| row.get(0))?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM collection_relation_edges",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                ))
+            })
+            .expect("state before cleanup");
+        assert_eq!(before.2, 1, "the stale index must contain the target edge");
+
+        let outcome = cleanup_collection_relation_on_store(
+            &mut store,
+            &mut cache,
+            &CollectionRelationCleanupCandidate {
+                source_record_id: SOURCE_ID.to_owned(),
+                source_file_path: SOURCE_PATH.to_owned(),
+                source_object_id: SOURCE_OBJECT_ID.to_owned(),
+                field_name: "related".to_owned(),
+                target_record_id: TARGET_ID.to_owned(),
+                many: false,
+            },
+            WORKSPACE_ID,
+            VERSION_ID,
+            scratch.path(),
+            &LeaseRegistry::default(),
+            &NoSelfWrites,
+            5,
+            &NoFaults,
+            &CancellationToken::new(),
+        )
+        .expect("clean absent relation target");
+        assert!(matches!(
+            outcome,
+            CollectionRelationCleanupExecution::NoChange
+        ));
+
+        let after: (i64, i64, i64, i64) = store
+            .read_with(|conn| {
+                Ok::<_, rusqlite::Error>((
+                    conn.query_row("SELECT COUNT(*) FROM ydoc_updates", [], |row| row.get(0))?,
+                    conn.query_row("SELECT COUNT(*) FROM moments", [], |row| row.get(0))?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM collection_relation_edges",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM collection_record_fields \
+                         WHERE record_id=?1 AND field_name='related'",
+                        [SOURCE_ID],
+                        |row| row.get(0),
+                    )?,
+                ))
+            })
+            .expect("state after cleanup");
+        assert_eq!((after.0, after.1), (before.0, before.1));
+        assert_eq!((after.2, after.3), (0, 0));
+    }
 }
 
 #[cfg(test)]

@@ -482,6 +482,7 @@ pub fn record_local_update_with_origin(
             &marker,
             update,
             &sha,
+            true,
             actor_origin_id,
             now_ms,
             cache,
@@ -811,12 +812,19 @@ where
             }
         };
         {
+            // Collection reconciliation already indexed the captured artifact.
+            // Its declared first seed establishes the lineage without inventing
+            // an absent-to-value field edit; later appends use the normal hook.
+            let index_frontmatter = seed_source_sha256.is_none()
+                || marker.head_update_seq > 0
+                || marker.head_snapshot_seq > 0;
             let outcome = append_local_update_cached(
                 tx,
                 key,
                 &marker,
                 update,
                 &update_sha,
+                index_frontmatter,
                 actor_origin_id,
                 now_ms,
                 cache,
@@ -884,6 +892,100 @@ where
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn append_and_index_update(
+    conn: &Connection,
+    key: &DocKey,
+    content_kind: ContentKind,
+    base: &Ydoc,
+    update: &[u8],
+    sha: &str,
+    index_frontmatter: bool,
+    actor_origin_id: Option<&str>,
+    history_source: Option<(&str, i64)>,
+    now_ms: i64,
+) -> Result<(Ydoc, i64), CollabError> {
+    let projection = crate::validate_replay_parity_with_scratch(base, update)?;
+    let seq = append_validated_and_index_update(
+        conn,
+        key,
+        content_kind,
+        base,
+        Some(&projection),
+        update,
+        sha,
+        index_frontmatter,
+        actor_origin_id,
+        history_source,
+        now_ms,
+    )?;
+    Ok((projection, seq))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn append_validated_and_index_update(
+    conn: &Connection,
+    key: &DocKey,
+    content_kind: ContentKind,
+    base: &Ydoc,
+    projection: Option<&Ydoc>,
+    update: &[u8],
+    sha: &str,
+    index_frontmatter: bool,
+    actor_origin_id: Option<&str>,
+    history_source: Option<(&str, i64)>,
+    now_ms: i64,
+) -> Result<i64, CollabError> {
+    put_binary_blob_with_sha(conn, update, sha)?;
+    let seq = append_row(conn, key, sha, actor_origin_id, now_ms)?;
+    let is_bound_collection_record = index_frontmatter
+        && content_kind == ContentKind::Richdoc
+        && dohc_engine_domain::is_collection_record_bound_in_tx(
+            conn,
+            &key.workspace_id,
+            &key.version_id,
+            &key.object_id,
+        )
+        .map_err(|error| CollabError::Corrupt {
+            reason: format!("collection record binding check failed: {error}"),
+        })?;
+    if is_bound_collection_record {
+        let owned_projection;
+        let projection = match projection {
+            Some(projection) => projection,
+            None => {
+                owned_projection = project_applied_update(base, update)?;
+                &owned_projection
+            }
+        };
+        index_applied_frontmatter(
+            conn,
+            key,
+            content_kind,
+            base,
+            projection,
+            update,
+            actor_origin_id,
+            history_source,
+            now_ms,
+        )?;
+    }
+    Ok(seq)
+}
+
+/// Build a content-readable post-update fork after the parity gate accepts.
+/// The writer cache's persistent scratch is check-4-only and cannot serve
+/// collection indexing.
+fn project_applied_update(base: &Ydoc, update: &[u8]) -> Result<Ydoc, CollabError> {
+    let projection = Ydoc::wire();
+    projection.apply(&base.encode_full_state())?;
+    if let Some(pending) = base.pending_update_v1() {
+        projection.apply(&pending)?;
+    }
+    projection.apply(update)?;
+    Ok(projection)
+}
+
 fn append_local_update(
     conn: &Connection,
     key: &DocKey,
@@ -893,6 +995,9 @@ fn append_local_update(
     actor_origin_id: Option<&str>,
     now_ms: i64,
 ) -> Result<AppendOutcome, CollabError> {
+    if let Some(actor_origin_id) = actor_origin_id {
+        crate::validate_actor_origin_id(actor_origin_id)?;
+    }
     // Dedup BEFORE the gate — `blob_seq_in_log`'s doc explains the order.
     if let Some(existing) = blob_seq_in_log(conn, key, sha, update)? {
         return Ok(AppendOutcome {
@@ -902,9 +1007,18 @@ fn append_local_update(
         });
     }
     let base = load_for_replay_gate(conn, key)?;
-    crate::validate_replay_parity(&base, update)?;
-    put_binary_blob_with_sha(conn, update, sha)?;
-    let seq = append_row(conn, key, sha, actor_origin_id, now_ms)?;
+    let (_, seq) = append_and_index_update(
+        conn,
+        key,
+        marker.content_kind,
+        &base,
+        update,
+        sha,
+        true,
+        actor_origin_id,
+        None,
+        now_ms,
+    )?;
     Ok(AppendOutcome {
         seq,
         deduped: false,
@@ -927,11 +1041,15 @@ fn append_local_update_cached(
     marker: &Marker,
     update: &[u8],
     sha: &str,
+    index_frontmatter: bool,
     actor_origin_id: Option<&str>,
     now_ms: i64,
     cache: &WriterDocCache,
     probe: &mut GateBaseProbe,
 ) -> Result<AppendOutcome, CollabError> {
+    if let Some(actor_origin_id) = actor_origin_id {
+        crate::validate_actor_origin_id(actor_origin_id)?;
+    }
     // Dedup BEFORE the gate — `blob_seq_in_log`'s doc explains the order. A
     // dedupe changes no durable state, so it never touches the cache.
     if let Some(existing) = blob_seq_in_log(conn, key, sha, update)? {
@@ -941,7 +1059,7 @@ fn append_local_update_cached(
             emit_outbound: false,
         });
     }
-    match cache.base_frontier_and_scratch_for_gate(conn, key, marker)? {
+    let seq = match cache.base_frontier_and_scratch_for_gate(conn, key, marker)? {
         Some((base, frontier, scratch)) => {
             let validation = crate::replay_parity::validate_replay_parity_for_cached_gate(
                 base,
@@ -950,12 +1068,26 @@ fn append_local_update_cached(
                 &mut probe.scratch_mutated,
                 update,
             )?;
+            let seq = append_validated_and_index_update(
+                conn,
+                key,
+                marker.content_kind,
+                base,
+                None,
+                update,
+                sha,
+                index_frontmatter,
+                actor_origin_id,
+                None,
+                now_ms,
+            )?;
             probe.candidate = Some(validation.candidate);
             probe.rebuilt_scratch = validation.rebuilt_scratch;
             probe.served = Some(ServedGateBase {
                 source: GateBaseSource::Hit,
                 observed: marker.clone(),
             });
+            seq
         }
         None => {
             let base = load_for_replay_gate(conn, key)?;
@@ -965,6 +1097,19 @@ fn append_local_update_cached(
                 None,
                 &mut probe.scratch_mutated,
                 update,
+            )?;
+            let seq = append_validated_and_index_update(
+                conn,
+                key,
+                marker.content_kind,
+                &base,
+                None,
+                update,
+                sha,
+                index_frontmatter,
+                actor_origin_id,
+                None,
+                now_ms,
             )?;
             probe.candidate = Some(validation.candidate);
             probe.rebuilt_scratch = validation.rebuilt_scratch;
@@ -977,10 +1122,9 @@ fn append_local_update_cached(
                 },
                 observed: marker.clone(),
             });
+            seq
         }
-    }
-    put_binary_blob_with_sha(conn, update, sha)?;
-    let seq = append_row(conn, key, sha, actor_origin_id, now_ms)?;
+    };
     Ok(AppendOutcome {
         seq,
         deduped: false,
@@ -1015,6 +1159,64 @@ fn finalize_local_append(
         now_ms,
     )?;
     Ok(outcome)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn index_applied_frontmatter(
+    conn: &Connection,
+    key: &DocKey,
+    content_kind: ContentKind,
+    before_doc: &Ydoc,
+    after_doc: &Ydoc,
+    update: &[u8],
+    author_origin_id: Option<&str>,
+    history_source: Option<(&str, i64)>,
+    recorded_at_ms: i64,
+) -> Result<(), CollabError> {
+    if content_kind != ContentKind::Richdoc {
+        return Ok(());
+    }
+    let before = before_doc.frontmatter_json();
+    let after = after_doc.frontmatter_json();
+    let authored_doc = lineage_base_doc(conn, key)?;
+    let authored_before = authored_doc.frontmatter_json();
+    authored_doc.apply(update)?;
+    let authored_after = authored_doc.frontmatter_json();
+    dohc_engine_domain::index_collection_frontmatter_apply_in_tx(
+        conn,
+        &key.workspace_id,
+        &key.version_id,
+        &key.object_id,
+        &before,
+        &after,
+        &authored_before,
+        &authored_after,
+        author_origin_id,
+        history_source,
+        recorded_at_ms,
+    )
+    .map_err(|error| CollabError::Corrupt {
+        reason: format!("collection frontmatter index apply failed: {error}"),
+    })
+}
+
+fn lineage_base_doc(conn: &Connection, key: &DocKey) -> Result<Ydoc, CollabError> {
+    let bytes = conn
+        .query_row(
+            "SELECT b.bytes FROM ydoc_snapshots s \
+             JOIN binary_blobs b ON b.sha256=s.snapshot_blob_sha256 \
+             WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 \
+               AND s.up_to_seq=0",
+            rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .map_err(map_sql)?;
+    let doc = Ydoc::wire();
+    if let Some(bytes) = bytes {
+        doc.apply(&bytes)?;
+    }
+    Ok(doc)
 }
 
 /// After a genuinely-new append, fold the log if it has grown past the default
@@ -2034,12 +2236,13 @@ pub fn record_update_in_tx(
     tx: &Transaction<'_>,
     key: &DocKey,
     update: &[u8],
+    actor_origin_id: Option<&str>,
     now_ms: i64,
 ) -> Result<AppendOutcome, CollabError> {
     validate_update_bytes(update)?;
     let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
     let sha = crate::hex_sha256(update);
-    append_local_update(tx, key, &marker, update, &sha, None, now_ms)
+    append_local_update(tx, key, &marker, update, &sha, actor_origin_id, now_ms)
 }
 
 /// Append only if the active claim matches the lineage an open session bound
@@ -2608,10 +2811,58 @@ pub(crate) fn seed_only_lineage_source(
 
 /// Store-level [`seed_only_lineage_source`].
 pub fn read_seed_only_lineage_source(
-    store: &mut EngineStore,
+    store: &EngineStore,
     key: &DocKey,
 ) -> Result<Option<String>, CollabError> {
     store.read_with(|conn| seed_only_lineage_source(conn, key))
+}
+
+/// The captured head sha for a pristine seed lineage that collection adoption
+/// may amend without replacing any intervening document edit.
+///
+/// Unlike [`read_seed_only_lineage_source`], this also recognizes the exact
+/// shape produced when sync promotion claims that seed as the replicated base:
+/// the original seed update remains at sequence 1 and the claimed full-state
+/// base is the sole sequence-0 snapshot. Any later update, compaction, settle,
+/// replacement, or incomplete claim makes the witness unavailable.
+pub fn read_pristine_seed_lineage_source(
+    store: &EngineStore,
+    key: &DocKey,
+) -> Result<Option<String>, CollabError> {
+    store.read_with(|conn| {
+        conn.query_row(
+            "SELECT d.seed_source_sha256 FROM ydoc_docs d \
+                 WHERE d.workspace_id = ?1 AND d.version_id = ?2 AND d.object_id = ?3 \
+                   AND d.head_update_seq = 1 AND d.head_snapshot_seq = 0 \
+                   AND d.last_settled_sha IS NULL \
+                   AND d.seed_source_sha256 IS NOT NULL \
+                   AND (SELECT COUNT(*) FROM ydoc_updates u \
+                         WHERE u.workspace_id = ?1 AND u.version_id = ?2 \
+                           AND u.object_id = ?3) = 1 \
+                   AND ( \
+                     (d.regime = 'local-only' \
+                       AND d.lineage_claim_status = 'unclaimed' \
+                       AND NOT EXISTS (SELECT 1 FROM ydoc_snapshots s \
+                         WHERE s.workspace_id = ?1 AND s.version_id = ?2 \
+                           AND s.object_id = ?3)) \
+                     OR \
+                     (d.regime = 'replicated' \
+                       AND d.lineage_claim_status = 'exact' \
+                       AND d.lineage_claim_id IS NOT NULL \
+                       AND (SELECT COUNT(*) FROM ydoc_snapshots s \
+                         WHERE s.workspace_id = ?1 AND s.version_id = ?2 \
+                           AND s.object_id = ?3) = 1 \
+                       AND EXISTS (SELECT 1 FROM ydoc_snapshots s \
+                         WHERE s.workspace_id = ?1 AND s.version_id = ?2 \
+                           AND s.object_id = ?3 AND s.up_to_seq = 0)) \
+                   )",
+            rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(map_sql)
+        .map(Option::flatten)
+    })
 }
 
 fn last_settled_sha(conn: &Connection, key: &DocKey) -> Result<Option<String>, CollabError> {

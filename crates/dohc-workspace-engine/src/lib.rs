@@ -21,16 +21,20 @@ use dohc_engine_domain::{
     ChatAgentReadState, ChatAttachment, ChatBookmark, ChatChannel, ChatChannelKind,
     ChatChannelSummary, ChatDecision, ChatDecisionState, ChatFeedReadState, ChatFileMention,
     ChatFollow, ChatMention, ChatMessage, ChatProjectionFileAccess, ChatReaction,
-    ChatReactionState, ChatThread, ChatThreadReadState, CompareTextFileVersions, ComparisonStatus,
-    ConflictChoice, ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution,
-    ConflictStatus, CreateFileThread, CreateNamedVersion, DeleteTextFile, DispatchClaim,
+    ChatReactionState, ChatThread, ChatThreadReadState, CollectionFilter,
+    CollectionPendingAdoptionCursor, CollectionQuery, CollectionQueryCursor, CollectionQueryResult,
+    CollectionSort, CompareTextFileVersions, ComparisonStatus, ConflictChoice, ConflictContentKind,
+    ConflictFileState, ConflictMetadata, ConflictResolution, ConflictStatus, CreateFileThread,
+    CreateNamedVersion, DEFAULT_COLLECTION_QUERY_LIMIT, DeleteTextFile, DispatchClaim,
     DispatchRecord, DomainError, FeedCursorValue, FollowState, FollowTargetKind,
-    LocalAttachmentInput, MentionCursor, MergeTextFileFromVersion, MergeTextFileResult,
-    MergeUnchangedReason, MomentOp, MomentPage, RenameTextFile, ResolveConflictKind,
-    ResolveDecision, ResolveTextConflict, RollbackTextFileMutation, SaveBookmark, SecretDelete,
-    SecretDiskIntent, SecretMomentRecord, SecretWrite, SendMessage, SetFollow, SetReaction,
-    StartChannelThread, TextConflict, TextSnapshot, ThreadDispatchPause, VersionFileChangeStatus,
-    VersionRecord, WriteBinary, WriteText, validate_addressable_plaintext_path,
+    LocalAttachmentInput, MAX_COLLECTION_FIELD_VALUE_DEPTH, MAX_COLLECTION_HISTORY_LIMIT,
+    MAX_COLLECTION_QUERY_LIMIT, MAX_COLLECTION_QUERY_SORTS, MentionCursor,
+    MergeTextFileFromVersion, MergeTextFileResult, MergeUnchangedReason, MomentOp, MomentPage,
+    RenameTextFile, ResolveConflictKind, ResolveDecision, ResolveTextConflict,
+    RollbackTextFileMutation, SaveBookmark, SecretDelete, SecretDiskIntent, SecretMomentRecord,
+    SecretWrite, SendMessage, SetFollow, SetReaction, StartChannelThread, TextConflict,
+    TextSnapshot, ThreadDispatchPause, VersionFileChangeStatus, VersionRecord, WriteBinary,
+    WriteText, collection_value_exceeds_depth, validate_addressable_plaintext_path,
 };
 use dohc_engine_protocol::{
     error::{ErrorCode, WireError},
@@ -135,6 +139,246 @@ impl EngineEvents {
 const MAX_INBAND_CONTENT_BYTES: usize = dohc_engine_domain::INBAND_CONTENT_CAP_BYTES;
 const MAX_DESKTOP_CAPTURE_TEXT_BYTES: usize = 128 * 1024;
 const MAX_METADATA_FIELD_BYTES: usize = dohc_engine_domain::MAX_METADATA_FIELD_BYTES;
+const COLLECTION_RESPONSE_HARD_CAP_BYTES: usize =
+    dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize - 64 * 1024;
+const COLLECTION_INTEGER_MARKER: &str = "$dohcInt64";
+const COLLECTION_FLOAT_MARKER: &str = "$dohcFloat64";
+
+fn is_collection_marker_spelling(marker: &str) -> bool {
+    let Some(marker) = marker.strip_prefix('$') else {
+        return false;
+    };
+    matches!(marker.trim_start_matches('$'), "dohcInt64" | "dohcFloat64")
+}
+
+fn unescape_collection_marker_key(marker: &str) -> Option<&str> {
+    (marker.starts_with("$$") && is_collection_marker_spelling(marker)).then(|| &marker[1..])
+}
+
+fn canonical_collection_decimal(decimal: &str) -> bool {
+    decimal == "0"
+        || decimal.strip_prefix('-').is_some_and(|digits| {
+            !digits.is_empty()
+                && !digits.starts_with('0')
+                && digits.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        || (!decimal.starts_with('0') && decimal.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+fn encode_collection_wire_numbers(value: &mut Value) {
+    match value {
+        Value::Number(number) => {
+            let marker = if number.is_f64() {
+                number.as_f64().and_then(|number| {
+                    (number.is_finite()
+                        && number.fract() == 0.0
+                        && number.abs() > dohc_engine_protocol::MAX_WIRE_INTEGER as f64)
+                        .then(|| (COLLECTION_FLOAT_MARKER, format!("{number:.0}")))
+                })
+            } else {
+                number
+                    .as_i64()
+                    .filter(|number| number.unsigned_abs() > dohc_engine_protocol::MAX_WIRE_INTEGER)
+                    .map(|number| (COLLECTION_INTEGER_MARKER, number.to_string()))
+                    .or_else(|| {
+                        number
+                            .as_u64()
+                            .filter(|number| *number > dohc_engine_protocol::MAX_WIRE_INTEGER)
+                            .map(|number| (COLLECTION_INTEGER_MARKER, number.to_string()))
+                    })
+            };
+            if let Some((marker, decimal)) = marker {
+                *value = json!({ (marker): decimal });
+            }
+        }
+        Value::Array(values) => values.iter_mut().for_each(encode_collection_wire_numbers),
+        Value::Object(object) => {
+            object.values_mut().for_each(encode_collection_wire_numbers);
+            let marker = (object.len() == 1)
+                .then(|| object.keys().next())
+                .flatten()
+                .filter(|key| is_collection_marker_spelling(key))
+                .cloned();
+            if let Some(marker) = marker {
+                let child = object.remove(&marker).expect("singleton marker child");
+                object.insert(format!("${marker}"), child);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::String(_) => {}
+    }
+}
+
+fn decode_collection_wire_numbers(value: &mut Value) -> Result<(), WireError> {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                decode_collection_wire_numbers(value)?;
+            }
+        }
+        Value::Object(object) => {
+            let escaped_marker = (object.len() == 1)
+                .then(|| object.keys().next())
+                .flatten()
+                .and_then(|key| {
+                    unescape_collection_marker_key(key)
+                        .map(|unescaped| (key.clone(), unescaped.to_owned()))
+                });
+            if let Some((marker, unescaped)) = escaped_marker {
+                let mut child = object
+                    .remove(&marker)
+                    .expect("singleton escaped marker child");
+                decode_collection_wire_numbers(&mut child)?;
+                object.insert(unescaped, child);
+            } else if object.len() == 1 && object.contains_key(COLLECTION_INTEGER_MARKER) {
+                let decimal = object
+                    .get(COLLECTION_INTEGER_MARKER)
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        wire(
+                            ErrorCode::InvalidParams,
+                            "collection-integer-marker-invalid",
+                        )
+                    })?;
+                let canonical = canonical_collection_decimal(decimal);
+                let number = if canonical && decimal.starts_with('-') {
+                    decimal
+                        .parse::<i64>()
+                        .ok()
+                        .filter(|number| {
+                            number.unsigned_abs() > dohc_engine_protocol::MAX_WIRE_INTEGER
+                        })
+                        .map(Value::from)
+                } else if canonical {
+                    decimal
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|number| *number > dohc_engine_protocol::MAX_WIRE_INTEGER)
+                        .map(Value::from)
+                } else {
+                    None
+                }
+                .ok_or_else(|| {
+                    wire(
+                        ErrorCode::InvalidParams,
+                        "collection-integer-marker-invalid",
+                    )
+                })?;
+                *value = number;
+            } else if object.len() == 1 && object.contains_key(COLLECTION_FLOAT_MARKER) {
+                let decimal = object
+                    .get(COLLECTION_FLOAT_MARKER)
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        wire(ErrorCode::InvalidParams, "collection-float-marker-invalid")
+                    })?;
+                let number = canonical_collection_decimal(decimal)
+                    .then(|| decimal.parse::<f64>().ok())
+                    .flatten()
+                    .filter(|number| {
+                        number.is_finite()
+                            && number.fract() == 0.0
+                            && number.abs() > dohc_engine_protocol::MAX_WIRE_INTEGER as f64
+                            && format!("{number:.0}") == decimal
+                    })
+                    .and_then(serde_json::Number::from_f64)
+                    .map(Value::Number)
+                    .ok_or_else(|| {
+                        wire(ErrorCode::InvalidParams, "collection-float-marker-invalid")
+                    })?;
+                *value = number;
+            } else {
+                for value in object.values_mut() {
+                    decode_collection_wire_numbers(value)?;
+                }
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+    Ok(())
+}
+
+fn decode_collection_query_wire_numbers(
+    params: &mut CollectionsQueryParams,
+) -> Result<(), WireError> {
+    if let Some(filter) = params.filter.as_mut() {
+        decode_collection_wire_numbers(&mut filter.value)?;
+    }
+    if let Some(cursor) = params.cursor.as_mut() {
+        for value in &mut cursor.sort_values {
+            decode_collection_wire_numbers(&mut value.value)?;
+        }
+    }
+    Ok(())
+}
+
+fn elide_overdepth_collection_values(value: &mut Value) {
+    match value {
+        Value::Array(values) => values
+            .iter_mut()
+            .for_each(elide_overdepth_collection_values),
+        Value::Object(object) => {
+            let value_envelope = object.contains_key("value")
+                && (object.contains_key("field")
+                    || object.contains_key("records")
+                    || object.contains_key("present"));
+            for (key, child) in object {
+                if value_envelope && key == "value" {
+                    if collection_value_exceeds_depth(child, MAX_COLLECTION_FIELD_VALUE_DEPTH) {
+                        *child = Value::Null;
+                    }
+                } else {
+                    elide_overdepth_collection_values(child);
+                }
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+fn collection_response_value(response: impl Serialize) -> Result<Value, WireError> {
+    let mut response =
+        serde_json::to_value(response).map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?;
+    elide_overdepth_collection_values(&mut response);
+    encode_collection_wire_numbers(&mut response);
+    Ok(response)
+}
+
+fn collection_query_response_value(
+    mut response: CollectionQueryResult,
+) -> Result<Value, WireError> {
+    if let Some(cursor) = response.next_cursor.as_mut() {
+        for sort_value in &mut cursor.sort_values {
+            if sort_value.present
+                && collection_value_exceeds_depth(
+                    &sort_value.value,
+                    MAX_COLLECTION_FIELD_VALUE_DEPTH,
+                )
+            {
+                sort_value.present = false;
+                sort_value.value = Value::Null;
+            }
+        }
+    }
+    let mut response =
+        serde_json::to_value(response).map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?;
+    elide_overdepth_collection_values(&mut response);
+    encode_collection_wire_numbers(&mut response);
+    Ok(response)
+}
+
+fn collection_response_json(response: impl Serialize) -> Result<Value, WireError> {
+    let response = collection_response_value(response)?;
+    let encoded_len = serde_json::to_vec(&response)
+        .map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?
+        .len();
+    if encoded_len > COLLECTION_RESPONSE_HARD_CAP_BYTES {
+        return Err(wire(
+            ErrorCode::LimitExceeded,
+            "collection-response-exceeds-wire-limit",
+        ));
+    }
+    Ok(response)
+}
 
 /// Aggregate hydrated blob bytes allowed to wait for or flow through framed
 /// egress. A single stored blob may be this large, so exact-byte reservations
@@ -620,6 +864,12 @@ struct YdocSessionView {
 }
 
 impl OpenWorkspace {
+    fn request_collection_reconcile(&self) {
+        if let Some(driver) = lock(&self.capture).as_ref() {
+            driver.status().request_collection_reconcile();
+        }
+    }
+
     /// Take the driver and cancel it SYNCHRONOUSLY (no await point, so an
     /// aborted RPC future can never leave a driver un-cancelled), returning
     /// the join handle for callers that must await the full drain.
@@ -798,6 +1048,50 @@ impl Default for EngineService {
 }
 
 impl EngineService {
+    async fn collection_response_with_blob(
+        &self,
+        ctx: &RequestContext,
+        cancellation: &OperationCancellation,
+        request_id: u64,
+        operation: &str,
+        response: Value,
+    ) -> Result<(Value, Option<BlobEgress>), WireError> {
+        let bytes = serde_json::to_vec(&response)
+            .map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?;
+        if bytes.len() <= COLLECTION_RESPONSE_HARD_CAP_BYTES {
+            return Ok((response, None));
+        }
+        if !ctx.has_capability("blobs") {
+            return Err(wire(
+                ErrorCode::LimitExceeded,
+                "collection-response-exceeds-wire-limit",
+            ));
+        }
+        let byte_length =
+            i64::try_from(bytes.len()).map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?;
+        let byte_permit = self
+            .blob_egress_budget
+            .reserve(byte_length, cancellation, operation)
+            .await?;
+        let sha256 = dohc_engine_storage::hex_sha256(&bytes);
+        Ok((
+            json!({
+                "collectionJson": Value::Null,
+                "blobSha256": sha256,
+                "byteLength": byte_length,
+                "inbandLimitBytes": COLLECTION_RESPONSE_HARD_CAP_BYTES,
+            }),
+            Some(BlobEgress {
+                stream_id: request_id,
+                sha256,
+                bytes,
+                cancel: ctx.cancel.clone(),
+                deadline: ctx.deadline,
+                byte_permit: Some(byte_permit),
+            }),
+        ))
+    }
+
     pub fn new() -> Self {
         Self::with_supervisor(WorkspaceSupervisor::global())
     }
@@ -908,6 +1202,33 @@ impl EngineService {
             return Ok(ServiceResponse {
                 response: Response { id, result },
                 blob_egress: Some(blob_egress),
+            });
+        }
+        if request.method == "collections.get" {
+            let (result, blob_egress) = self
+                .collections_get(&ctx, request.workspace, request.params, id)
+                .await?;
+            return Ok(ServiceResponse {
+                response: Response { id, result },
+                blob_egress,
+            });
+        }
+        if request.method == "collections.query" {
+            let (result, blob_egress) = self
+                .collections_query(&ctx, request.workspace, request.params, id)
+                .await?;
+            return Ok(ServiceResponse {
+                response: Response { id, result },
+                blob_egress,
+            });
+        }
+        if request.method == "collections.getRecord" {
+            let (result, blob_egress) = self
+                .collections_get_record(&ctx, request.workspace, request.params, id)
+                .await?;
+            return Ok(ServiceResponse {
+                response: Response { id, result },
+                blob_egress,
             });
         }
         let result = match request.method.as_str() {
@@ -1064,6 +1385,14 @@ impl EngineService {
             }
             "search.ensureIndex" => {
                 self.search_ensure_index(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "collections.list" => {
+                self.collections_list(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "collections.listPendingAdoptions" => {
+                self.collections_list_pending_adoptions(&ctx, request.workspace, request.params)
                     .await?
             }
             "watcher.status" => self.watcher_status(request.workspace)?,
@@ -2153,6 +2482,20 @@ impl EngineService {
                 "sync.pull",
             )
             .await?;
+        // Reconcile only after the terminal pull page. A relation target may
+        // be on a later page, and dangling-link cleanup must not observe the
+        // pull's partial state. The bounded outcome does not expose whether an
+        // earlier page applied a collection change, so the terminal page
+        // queues one reconciliation even when that page itself was empty.
+        if matches!(
+            &outcome,
+            RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
+                has_more: false,
+                ..
+            })
+        ) {
+            open.request_collection_reconcile();
+        }
         let pending = match &outcome {
             RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
                 pending_cursor: Some(cursor),
@@ -3523,31 +3866,56 @@ impl EngineService {
             }
 
             let version = match intent {
-                VersionFenceIntent::Fork { input } => {
-                    open.actor
-                        .create_named_version(input, Arc::new(NoFaults), token)
-                        .await
-                }
+                VersionFenceIntent::Fork { input } => open
+                    .actor
+                    .create_named_version(input, Arc::new(NoFaults), token)
+                    .await
+                    .map_err(map_runtime)?,
                 VersionFenceIntent::Switch {
                     target_version_id,
-                    now_ms,
+                    now_ms: switch_now_ms,
                 } => {
-                    open.actor
+                    let version = open
+                        .actor
                         .set_active_version(
                             dohc_engine_runtime::ActiveVersionSwitch {
                                 workspace_id: open.workspace_id.clone(),
                                 version_id: target_version_id,
                                 root_dir: open.root.clone(),
                                 self_writes: Arc::new(self_writes.scoped(&open.root)),
-                                now_ms,
+                                now_ms: switch_now_ms,
                             },
+                            Arc::new(NoFaults),
+                            token.clone(),
+                        )
+                        .await
+                        .map_err(map_runtime)?;
+                    if let Err(error) = open
+                        .actor
+                        .reconcile_collections(
+                            open.workspace_id.clone(),
+                            version.version_id.clone(),
+                            open.root.clone(),
+                            capture_leases.clone(),
+                            Arc::new(self_writes.scoped(&open.root)),
+                            now_ms()?,
                             Arc::new(NoFaults),
                             token,
                         )
                         .await
+                    {
+                        // The switch is durable. The capture driver already retries
+                        // collection reconciliation on its next pass.
+                        capture_status.request_collection_reconcile();
+                        capture_status.mark_degraded();
+                        eprintln!(
+                            "engine: version switch committed but collection reconciliation \
+                             failed; capture will retry: {error}"
+                        );
+                    }
+                    version
                 }
-            }
-            .map_err(map_runtime)?;
+            };
             Ok(VersionFenceOutcome::Committed(version))
         });
         tokio::select! {
@@ -3670,10 +4038,173 @@ impl EngineService {
         })
     }
 
-    /// The capture driver's observable health: whether the files layer is
-    /// up (`running`), whether anything since the last fully clean tick went
-    /// wrong (`degraded`), and whether the restart streak has escalated past
-    /// recovery-on-its-own-timescale (`terminal`).
+    /// Returns every collection in the workspace's active version, ordered by path.
+    async fn collections_list(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let _: CollectionsListParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let collections = Self::read_under_ctx(
+            &cancellation,
+            "collections.list",
+            open.actor.collections_list(open.workspace_id),
+        )
+        .await?;
+        collection_response_json(json!({ "collections": collections }))
+    }
+
+    /// Returns active-version collection bindings waiting for the shared
+    /// rich-document importer to establish canonical Y.Doc lineage.
+    async fn collections_list_pending_adoptions(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: CollectionsListPendingAdoptionsParams = parse(params)?;
+        if params.limit == 0 || params.limit > MAX_COLLECTION_QUERY_LIMIT {
+            return Err(wire(
+                ErrorCode::InvalidParams,
+                "collection-pending-adoptions-limit-out-of-range",
+            ));
+        }
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let page = Self::read_under_ctx(
+            &cancellation,
+            "collections.listPendingAdoptions",
+            open.actor.collections_list_pending_adoptions(
+                open.workspace_id,
+                params.limit,
+                params.cursor,
+            ),
+        )
+        .await?;
+        collection_response_json(page)
+    }
+
+    async fn collections_get(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+        request_id: u64,
+    ) -> Result<(Value, Option<BlobEgress>), WireError> {
+        let params: CollectionsGetParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let collection = Self::read_under_ctx(
+            &cancellation,
+            "collections.get",
+            open.actor
+                .collections_get(open.workspace_id, params.collection_path),
+        )
+        .await?
+        .ok_or_else(|| wire(ErrorCode::InvalidParams, "collection-not-found"))?;
+        self.collection_response_with_blob(
+            ctx,
+            &cancellation,
+            request_id,
+            "collections.get",
+            collection_response_value(collection)?,
+        )
+        .await
+    }
+
+    async fn collections_query(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+        request_id: u64,
+    ) -> Result<(Value, Option<BlobEgress>), WireError> {
+        let mut params: CollectionsQueryParams = parse(params)?;
+        if params.limit == 0 || params.limit > MAX_COLLECTION_QUERY_LIMIT {
+            return Err(wire(
+                ErrorCode::InvalidParams,
+                "collection-query-limit-out-of-range",
+            ));
+        }
+        if params.sort.len() > MAX_COLLECTION_QUERY_SORTS {
+            return Err(wire(
+                ErrorCode::InvalidParams,
+                "collection-query-sort-limit-exceeded",
+            ));
+        }
+        decode_collection_query_wire_numbers(&mut params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let result = Self::read_under_ctx(
+            &cancellation,
+            "collections.query",
+            open.actor.collections_query_records(
+                open.workspace_id,
+                params.collection_path,
+                CollectionQuery {
+                    filter: params.filter,
+                    sort: params.sort,
+                    group_by: params.group_by,
+                    resolve_relations: params.resolve_relations,
+                    limit: params.limit,
+                    cursor: params.cursor,
+                },
+            ),
+        )
+        .await?
+        .ok_or_else(|| wire(ErrorCode::InvalidParams, "collection-not-found"))?;
+        self.collection_response_with_blob(
+            ctx,
+            &cancellation,
+            request_id,
+            "collections.query",
+            collection_query_response_value(result)?,
+        )
+        .await
+    }
+
+    async fn collections_get_record(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+        request_id: u64,
+    ) -> Result<(Value, Option<BlobEgress>), WireError> {
+        let params: CollectionsGetRecordParams = parse(params)?;
+        if params.history_limit == 0 || params.history_limit > MAX_COLLECTION_HISTORY_LIMIT {
+            return Err(wire(
+                ErrorCode::InvalidParams,
+                "collection-history-limit-out-of-range",
+            ));
+        }
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let result = Self::read_under_ctx(
+            &cancellation,
+            "collections.getRecord",
+            open.actor.collections_get_record(
+                open.workspace_id,
+                params.collection_path,
+                params.record_id,
+                params.history_limit,
+                params.before_history_id,
+            ),
+        )
+        .await?
+        .ok_or_else(|| wire(ErrorCode::InvalidParams, "collection-record-not-found"))?;
+        self.collection_response_with_blob(
+            ctx,
+            &cancellation,
+            request_id,
+            "collections.getRecord",
+            collection_response_value(result)?,
+        )
+        .await
+    }
+
     fn watcher_status(&self, handle: Option<WorkspaceHandle>) -> Result<Value, WireError> {
         let open = self.open(handle.as_ref())?;
         let guard = lock(&open.capture);
@@ -7433,6 +7964,13 @@ impl EngineService {
             )
             .await
             .map_err(map_ydoc_open_runtime)?;
+        if params
+            .expected_object_id
+            .as_deref()
+            .is_some_and(|expected| expected != probe.key.object_id.as_str())
+        {
+            return Err(wire(ErrorCode::InvalidParams, "ydoc-object-changed"));
+        }
         let lease =
             self.leases
                 .scoped(&open.root)
@@ -7763,6 +8301,9 @@ impl EngineService {
                     map_runtime(error)
                 }
             })?;
+        if settled.collection_reconcile_required {
+            open.request_collection_reconcile();
+        }
         if let Some(session) = lock(&self.sessions).get_mut(session_id) {
             session.last_settled_sha = Some(settled.sha256.clone());
         }
@@ -8210,6 +8751,9 @@ impl EngineService {
                 )
                 .await
                 .map_err(map_runtime)?;
+            if matches!(&result, ApplyOutcome::Applied(_)) {
+                open.request_collection_reconcile();
+            }
             return Ok(replicated_conflict_json(result));
         }
         let conflict = params
@@ -8222,6 +8766,9 @@ impl EngineService {
             .conflict_open(Box::new(conflict), Arc::new(NoFaults), cancellation.token())
             .await
             .map_err(map_runtime)?;
+        if inserted {
+            open.request_collection_reconcile();
+        }
         Ok(json!({ "inserted": inserted }))
     }
 
@@ -8256,6 +8803,9 @@ impl EngineService {
                 )
                 .await
                 .map_err(map_runtime)?;
+            if matches!(&result, ApplyOutcome::Applied(_)) {
+                open.request_collection_reconcile();
+            }
             return Ok(replicated_conflict_json(result));
         }
         let local = params.local.ok_or_else(|| {
@@ -8339,7 +8889,7 @@ impl EngineService {
             .actor
             .conflict_resolve_indexed(
                 ResolveTextConflict {
-                    workspace_id: open.workspace_id,
+                    workspace_id: open.workspace_id.clone(),
                     conflict_id: local.conflict_id,
                     resolution,
                     object_id: local.object_id,
@@ -8354,12 +8904,13 @@ impl EngineService {
                     conflict_answer_budget_bytes,
                 },
                 scoped_leases,
-                open.root,
+                open.root.clone(),
                 Arc::new(NoFaults),
                 cancellation.token(),
             )
             .await
             .map_err(map_runtime)?;
+        open.request_collection_reconcile();
         let mut answer = json!({
             "conflict": settled_conflict_json(&result.conflict),
             "write": result.write.as_ref().map(|write| json!({
@@ -8869,6 +9420,9 @@ async fn settle_ydoc_session_for_version_fence(
                 map_runtime(error)
             }
         })?;
+    if settled.collection_reconcile_required {
+        open.request_collection_reconcile();
+    }
     if let Some(session) = lock(sessions).get_mut(session_id) {
         session.last_settled_sha = Some(settled.sha256);
     }
@@ -9629,6 +10183,8 @@ struct YdocOpenParams {
     version_id: String,
     path: String,
     #[serde(default)]
+    expected_object_id: Option<String>,
+    #[serde(default)]
     content_kind: Option<String>,
     #[serde(default)]
     seed_from_artifact: bool,
@@ -9858,6 +10414,56 @@ struct SearchChatMessagesGranularParams {
 struct SearchEnsureIndexParams {
     workspace_id: String,
     version_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CollectionsListParams {}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CollectionsListPendingAdoptionsParams {
+    #[serde(default = "default_collection_query_limit")]
+    limit: usize,
+    #[serde(default)]
+    cursor: Option<CollectionPendingAdoptionCursor>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CollectionsGetParams {
+    collection_path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CollectionsQueryParams {
+    collection_path: String,
+    #[serde(default)]
+    filter: Option<CollectionFilter>,
+    #[serde(default)]
+    sort: Vec<CollectionSort>,
+    #[serde(default)]
+    group_by: Option<String>,
+    #[serde(default)]
+    resolve_relations: bool,
+    #[serde(default = "default_collection_query_limit")]
+    limit: usize,
+    #[serde(default)]
+    cursor: Option<CollectionQueryCursor>,
+}
+
+fn default_collection_query_limit() -> usize {
+    DEFAULT_COLLECTION_QUERY_LIMIT
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CollectionsGetRecordParams {
+    collection_path: String,
+    record_id: String,
+    history_limit: usize,
+    before_history_id: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -12359,6 +12965,253 @@ mod tests {
 
     const SHADOW_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+    #[test]
+    fn collection_number_marker_shaped_user_objects_use_depth_neutral_key_escaping() {
+        for (literal, expected) in [
+            (
+                json!({ "$dohcInt64": "9007199254740993" }),
+                json!({ "$$dohcInt64": "9007199254740993" }),
+            ),
+            (
+                json!({ "$dohcFloat64": "100000000000000000000" }),
+                json!({ "$$dohcFloat64": "100000000000000000000" }),
+            ),
+            (
+                json!({ "$$dohcInt64": "literal" }),
+                json!({ "$$$dohcInt64": "literal" }),
+            ),
+        ] {
+            let mut encoded = literal.clone();
+            encode_collection_wire_numbers(&mut encoded);
+            assert_eq!(encoded, expected);
+
+            decode_collection_wire_numbers(&mut encoded).expect("decode escaped collection object");
+            assert_eq!(encoded, literal);
+        }
+
+        let nested_literal = json!({
+            "$dohcInt64": { "$dohcFloat64": "literal" }
+        });
+        let mut nested_integer = nested_literal.clone();
+        encode_collection_wire_numbers(&mut nested_integer);
+        assert_eq!(
+            nested_integer,
+            json!({
+                "$$dohcInt64": { "$$dohcFloat64": "literal" }
+            })
+        );
+        decode_collection_wire_numbers(&mut nested_integer)
+            .expect("decode nested marker-shaped literals");
+        assert_eq!(nested_integer, nested_literal);
+
+        let mut former_escape_marker = json!({
+            "$dohcEscaped": { "integer": 9_007_199_254_740_993_i64 }
+        });
+        encode_collection_wire_numbers(&mut former_escape_marker);
+        assert_eq!(
+            former_escape_marker,
+            json!({ "$dohcEscaped": { "integer": { "$dohcInt64": "9007199254740993" } } })
+        );
+    }
+
+    #[test]
+    fn collection_big_number_markers_preserve_integer_and_float_kinds() {
+        for integer in [json!(i64::MIN), json!(u64::MAX)] {
+            let mut encoded = integer.clone();
+            encode_collection_wire_numbers(&mut encoded);
+            let decimal = integer.as_number().expect("integer").to_string();
+            assert_eq!(encoded, json!({ "$dohcInt64": decimal }));
+
+            decode_collection_wire_numbers(&mut encoded).expect("decode domain edge");
+            assert_eq!(encoded, integer);
+        }
+
+        for decimal in ["-9223372036854775809", "18446744073709551616"] {
+            let mut marker = json!({ "$dohcInt64": decimal });
+            let error = decode_collection_wire_numbers(&mut marker)
+                .expect_err("reject integer immediately outside the marker domain");
+            assert_eq!(error.code, ErrorCode::InvalidParams);
+            assert_eq!(error.message, "collection-integer-marker-invalid");
+        }
+
+        let mut out_of_domain_float = json!(100_000_000_000_000_000_000_f64);
+        encode_collection_wire_numbers(&mut out_of_domain_float);
+        assert_eq!(
+            out_of_domain_float,
+            json!({ "$dohcFloat64": "100000000000000000000" })
+        );
+        decode_collection_wire_numbers(&mut out_of_domain_float)
+            .expect("decode integral f64 outside the integer domain");
+        assert_eq!(out_of_domain_float, json!(100_000_000_000_000_000_000_f64));
+
+        for decimal in ["01", "9007199254740991", "100000000000000000001"] {
+            let mut marker = json!({ "$dohcFloat64": decimal });
+            let error = decode_collection_wire_numbers(&mut marker)
+                .expect_err("reject malformed, safe, or noncanonical float marker");
+            assert_eq!(error.code, ErrorCode::InvalidParams);
+            assert_eq!(error.message, "collection-float-marker-invalid");
+        }
+    }
+
+    #[test]
+    fn collection_cap_matrix_elides_display_and_overdepth_cursor_values() {
+        fn nested_value(containers: usize) -> Value {
+            let mut value = json!("leaf");
+            for _ in 0..containers {
+                value = json!([value]);
+            }
+            value
+        }
+
+        let at_limit = nested_value(23);
+        let over_limit = nested_value(24);
+        let record = |value: Value| {
+            json!({
+                "id": "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "path": "tasks/record.md",
+                "conflicted": false,
+                "values": [{
+                    "field": "deep",
+                    "value": value,
+                    "validation": {
+                        "status": "flagged",
+                        "reason": { "code": "value-depth-exceeded", "path": "" }
+                    },
+                    "resolvedRelations": []
+                }]
+            })
+        };
+        let collection = json!({
+            "path": "tasks",
+            "status": "degraded",
+            "reasons": [{ "code": "invalid-yaml", "path": "" }]
+        });
+        let cases = [
+            (
+                "collections.get",
+                json!({
+                    "path": "tasks",
+                    "status": "valid",
+                    "reasons": [],
+                    "schema": {
+                        "name": null,
+                        "description": null,
+                        "fields": [],
+                        "views": []
+                    },
+                    "recordCount": 1
+                }),
+                Vec::<&str>::new(),
+            ),
+            (
+                "collections.query",
+                json!({
+                    "collection": collection,
+                    "records": [record(over_limit.clone()), record(at_limit.clone())],
+                    "groups": [{
+                        "value": over_limit.clone(),
+                        "records": [record(over_limit.clone())]
+                    }],
+                    "nextCursor": {
+                        "sortValues": [{ "present": true, "value": over_limit.clone() }],
+                        "recordPath": "tasks/record.md",
+                        "recordId": "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    }
+                }),
+                vec![
+                    "/records/0/values/0/value",
+                    "/groups/0/value",
+                    "/groups/0/records/0/values/0/value",
+                ],
+            ),
+            (
+                "collections.getRecord",
+                json!({
+                    "collection": collection,
+                    "record": record(over_limit.clone()),
+                    "history": [{
+                        "historyId": 1,
+                        "field": "deep",
+                        "previous": { "present": true, "value": over_limit.clone() },
+                        "next": { "present": true, "value": over_limit.clone() },
+                        "authorOriginId": null,
+                        "recordedAtMs": 1
+                    }]
+                }),
+                vec![
+                    "/record/values/0/value",
+                    "/history/0/previous/value",
+                    "/history/0/next/value",
+                ],
+            ),
+            (
+                "collections.list",
+                json!({ "collections": [collection] }),
+                Vec::<&str>::new(),
+            ),
+            (
+                "collections.listPendingAdoptions",
+                json!({
+                    "adoptions": [{
+                        "versionId": "main",
+                        "recordId": "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "collectionPath": "tasks",
+                        "filePath": "tasks/record.md",
+                        "objectId": "object"
+                    }],
+                    "nextCursor": null
+                }),
+                Vec::<&str>::new(),
+            ),
+        ];
+
+        for (surface, input, elided_paths) in cases {
+            let response = if surface == "collections.query" {
+                collection_query_response_value(
+                    serde_json::from_value(input.clone()).expect("typed collection query result"),
+                )
+            } else {
+                collection_response_value(input.clone())
+            }
+            .unwrap_or_else(|error| panic!("{surface} projection failed: {error:?}"));
+            for path in elided_paths {
+                assert_eq!(
+                    response.pointer(path),
+                    Some(&Value::Null),
+                    "{surface} {path}"
+                );
+            }
+            if surface == "collections.query" {
+                assert_eq!(
+                    response.pointer("/records/1/values/0/value"),
+                    Some(&at_limit),
+                    "the boundary value must remain intact"
+                );
+                assert_eq!(
+                    response.pointer("/nextCursor/sortValues/0/value"),
+                    Some(&Value::Null),
+                    "an over-depth sort coordinate must not enter the control frame"
+                );
+                assert_eq!(
+                    response.pointer("/nextCursor/sortValues/0/present"),
+                    Some(&Value::Bool(false)),
+                    "the record tiebreaker is the only usable cursor coordinate"
+                );
+                assert_eq!(
+                    response.pointer("/nextCursor/recordPath"),
+                    Some(&json!("tasks/record.md"))
+                );
+                assert_eq!(
+                    response.pointer("/nextCursor/recordId"),
+                    Some(&json!("rec_aaaaaaaaaaaaaaaaaaaaaaaaaa"))
+                );
+            }
+            if !input.to_string().contains("value-depth-exceeded") {
+                assert_eq!(response, input, "{surface} has no dynamic value to elide");
+            }
+        }
+    }
+
     /// #595 round 8: the artifact lock and a busy engine database are two
     /// different contentions, and only the first may be reported as
     /// `file-locked` — the desktop turns that message into "another program
@@ -13335,6 +14188,7 @@ mod tests {
                 RelayError::UnknownChatOperation,
                 ErrorCode::UnknownChatOperation,
             ),
+            (RelayError::LinkReadRateLimited, ErrorCode::Overloaded),
             (RelayError::PresenceCapacity, ErrorCode::PresenceCapacity),
             (RelayError::SelfShare, ErrorCode::SelfShare),
             (RelayError::AmbiguousSelector, ErrorCode::AmbiguousSelector),
