@@ -44,7 +44,8 @@ use dohc_engine_collab::{
 use dohc_engine_crypto::{SecretDataKey, SecretPlaintext, load_key_file};
 use dohc_engine_domain::{
     AgentRunRecord, AgentUnreadThreadRow, BinaryHead, BinaryHeadMeta, BinaryWriteResult,
-    CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult, CaptureManifestSeedEntry,
+    CaptureIngest, CaptureIngestBatchContext, CaptureIngestBinary, CaptureIngestBinaryResult,
+    CaptureManifestSeedEntry,
     CaptureRetire, CaptureRetireResult, CaptureSecret, CaptureSecretRetire, ChannelThreadSummary,
     ChatAgentReadState, ChatAttachment, ChatBookmark, ChatBookmarkTransition, ChatChannel,
     ChatChannelKind, ChatChannelSummary, ChatDecision, ChatFeedPage, ChatFeedReadState,
@@ -66,8 +67,9 @@ use dohc_engine_domain::{
     VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult, WriteText,
     apply_secret_file_from_version_with, binary_delete_job_id, binary_rename_delete_job_id,
     binary_rename_write_job_id, binary_rollback_job_identity,
-    capture_ingest_binary_with_admission_in_tx, capture_ingest_with_admission_in_tx,
-    capture_manifest_seed, capture_retire_in_tx, capture_secret_retire_with,
+    capture_ingest_binary_with_admission_in_tx, capture_ingest_in_batch_with_admission_in_tx,
+    capture_ingest_with_admission_in_tx, capture_manifest_seed, capture_retire_in_tx,
+    capture_secret_retire_with,
     collection_record_id_mismatch_in_tx, collection_record_markdown_with_id,
     compare_secret_files_page_keyless, decline_oversized_collection_adoption_in_tx,
     decode_binary_rollback_job_identity, delete_collection_adoption_binding_in_tx,
@@ -12358,10 +12360,34 @@ fn journal_moment_outbound_in_tx(
     moment_id: &str,
     deduped: bool,
 ) -> Result<(), DomainError> {
-    if deduped
-        || !dohc_engine_sync::workspace_journals_file_moments_in_tx(tx, workspace_id)
-            .map_err(outbound_domain)?
-    {
+    journal_moment_outbound_with_batch_in_tx(tx, workspace_id, moment_id, deduped, None)
+}
+
+fn journal_moment_outbound_with_batch_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    moment_id: &str,
+    deduped: bool,
+    batch_eligibility: Option<&mut Option<bool>>,
+) -> Result<(), DomainError> {
+    if deduped {
+        return Ok(());
+    }
+    let journals_file_moments = match batch_eligibility {
+        Some(cached) => match *cached {
+            Some(eligible) => eligible,
+            None => {
+                let eligible =
+                    dohc_engine_sync::workspace_journals_file_moments_in_tx(tx, workspace_id)
+                        .map_err(outbound_domain)?;
+                *cached = Some(eligible);
+                eligible
+            }
+        },
+        None => dohc_engine_sync::workspace_journals_file_moments_in_tx(tx, workspace_id)
+            .map_err(outbound_domain)?,
+    };
+    if !journals_file_moments {
         return Ok(());
     }
     dohc_engine_sync::journal_moment_append_in_tx(tx, workspace_id, moment_id)
@@ -14400,7 +14426,7 @@ fn capture_ingest_on_store(
         return Err(RuntimeError::Cancelled);
     }
     let outcome = store.write_with(faults, |tx| {
-        capture_ingest_in_tx(tx, input, indexing, leases)
+        capture_ingest_in_tx(tx, input, indexing, leases, None)
     })?;
     match outcome {
         TxnOutcome::Committed(result) => Ok(result),
@@ -14408,33 +14434,72 @@ fn capture_ingest_on_store(
     }
 }
 
+struct CaptureBatchSharedContext {
+    capture: CaptureIngestBatchContext,
+    has_ydoc_state: Option<bool>,
+    journals_file_moments: Option<bool>,
+}
+
 fn capture_ingest_in_tx(
     tx: &Transaction<'_>,
     input: &CaptureIngest,
     indexing: &CaptureIndexing,
     leases: &LeaseRegistry,
+    mut batch: Option<&mut CaptureBatchSharedContext>,
 ) -> Result<WriteResult, RuntimeError> {
     let actor_origin_id = capture_agent_origin_id(input.author_json.as_deref());
     let mut admitted = false;
-    let result =
-        capture_ingest_with_admission_in_tx(tx, input, |workspace_id, version_id, object_id| {
-            ensure_capture_target_not_leased(leases, workspace_id, version_id, object_id)?;
-            admitted = true;
-            Ok::<_, RuntimeError>(())
-        })?;
-    if admitted {
-        dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+    let result = match batch.as_deref_mut() {
+        Some(batch) => capture_ingest_in_batch_with_admission_in_tx(
             tx,
-            &input.workspace_id,
-            &input.version_id,
-            &result.snapshot.object_id,
-            dohc_engine_sync::ResultingHead::Text {
-                path: &result.snapshot.path,
-                text: &result.snapshot.text,
+            input,
+            &mut batch.capture,
+            |workspace_id, version_id, object_id| {
+                ensure_capture_target_not_leased(leases, workspace_id, version_id, object_id)?;
+                admitted = true;
+                Ok::<_, RuntimeError>(())
             },
-            actor_origin_id.as_deref(),
-            input.now_ms,
-        )?;
+        )?,
+        None => capture_ingest_with_admission_in_tx(
+            tx,
+            input,
+            |workspace_id, version_id, object_id| {
+                ensure_capture_target_not_leased(leases, workspace_id, version_id, object_id)?;
+                admitted = true;
+                Ok::<_, RuntimeError>(())
+            },
+        )?,
+    };
+    if admitted {
+        let has_ydoc_state = match batch.as_deref_mut() {
+            Some(batch) => match batch.has_ydoc_state {
+                Some(has_ydoc_state) => has_ydoc_state,
+                None => {
+                    let has_ydoc_state = dohc_engine_sync::workspace_has_ydoc_state_in_tx(
+                        tx,
+                        &input.workspace_id,
+                        &input.version_id,
+                    )?;
+                    batch.has_ydoc_state = Some(has_ydoc_state);
+                    has_ydoc_state
+                }
+            },
+            None => true,
+        };
+        if has_ydoc_state {
+            dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+                tx,
+                &input.workspace_id,
+                &input.version_id,
+                &result.snapshot.object_id,
+                 dohc_engine_sync::ResultingHead::Text {
+                     path: &result.snapshot.path,
+                     text: &result.snapshot.text,
+                 },
+                 actor_origin_id.as_deref(),
+                 input.now_ms,
+             )?;
+         }
     }
     if !result.deduped {
         match indexing {
@@ -14462,12 +14527,21 @@ fn capture_ingest_in_tx(
             .map_err(RuntimeError::from)?,
         }
     }
-    journal_moment_outbound_in_tx(
-        tx,
-        &input.workspace_id,
-        &result.moment.moment_id,
-        result.deduped,
-    )
+    match batch.as_deref_mut() {
+        Some(batch) => journal_moment_outbound_with_batch_in_tx(
+            tx,
+            &input.workspace_id,
+            &result.moment.moment_id,
+            result.deduped,
+            Some(&mut batch.journals_file_moments),
+        ),
+        None => journal_moment_outbound_in_tx(
+            tx,
+            &input.workspace_id,
+            &result.moment.moment_id,
+            result.deduped,
+        ),
+    }
     .map_err(RuntimeError::from)?;
     Ok(result)
 }
@@ -14520,13 +14594,19 @@ fn capture_ingest_batch_on_store(
     let outcome = store.write_with(faults, |tx| {
         let mut results = Vec::with_capacity(inputs.len());
         let indexing = CaptureIndexing::UseSnapshot(Arc::clone(search_policy));
+        let mut batch = CaptureBatchSharedContext {
+            capture: CaptureIngestBatchContext::new(&first.workspace_id, &first.version_id),
+            has_ydoc_state: None,
+            journals_file_moments: None,
+        };
         for input in inputs {
             tx.execute_batch("SAVEPOINT dohc_capture_batch_item")
                 .map_err(StorageError::persist_public)?;
-            match capture_ingest_in_tx(tx, input, &indexing, leases) {
+            match capture_ingest_in_tx(tx, input, &indexing, leases, Some(&mut batch)) {
                 Ok(result) => {
                     tx.execute_batch("RELEASE dohc_capture_batch_item")
                         .map_err(StorageError::persist_public)?;
+                    batch.capture.commit_result(&result)?;
                     results.push(Ok(result));
                 }
                 Err(error) => {

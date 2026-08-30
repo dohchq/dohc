@@ -253,6 +253,23 @@ fn bounded_capture_batch_contains_a_leased_path_and_replays_without_duplicates()
             .as_ref()
             .is_ok_and(|write| !write.deduped && !write.moment.before_present)
     );
+    assert_eq!(
+        first[0]
+            .as_ref()
+            .expect("first capture")
+            .moment
+            .moment_order,
+        1
+    );
+    assert_eq!(
+        first[2]
+            .as_ref()
+            .expect("third capture")
+            .moment
+            .moment_order,
+        2,
+        "the failed middle savepoint must not consume the batch order cursor"
+    );
     supervisor.close(&db).expect("close after partial batch");
 
     let state = |expected_paths: &[&str]| {
@@ -297,6 +314,15 @@ fn bounded_capture_batch_contains_a_leased_path_and_replays_without_duplicates()
     assert!(replay[0].as_ref().is_ok_and(|write| write.deduped));
     assert!(replay[1].as_ref().is_ok_and(|write| !write.deduped));
     assert!(replay[2].as_ref().is_ok_and(|write| write.deduped));
+    assert_eq!(
+        replay[1]
+            .as_ref()
+            .expect("retried middle capture")
+            .moment
+            .moment_order,
+        3,
+        "the leading dedupe must not consume the batch order cursor"
+    );
     supervisor.close(&db).expect("close after replay");
     state(&["notes/a.md", "notes/b.md", "notes/c.md"]);
 }

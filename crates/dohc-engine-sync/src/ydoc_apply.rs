@@ -1198,6 +1198,29 @@ enum YdocLineageCompleteness {
     PendingDependencies,
 }
 
+/// Whether any object in this workspace version needs Y.Doc reconciliation.
+///
+/// `ydoc_updates` and `ydoc_snapshots` are foreign-key children of
+/// `ydoc_docs`, while a pre-base deferred update may exist without a marker.
+/// Those are exactly the two roots read by `ydoc_lineage_completeness_in_tx`.
+/// A capture-only transaction creates neither, so a false result remains false
+/// for every item in that transaction.
+pub fn workspace_has_ydoc_state_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+) -> Result<bool, SyncError> {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ydoc_docs \
+         WHERE workspace_id=?1 AND version_id=?2) \
+         OR EXISTS(SELECT 1 FROM ydoc_deferred_updates \
+         WHERE workspace_id=?1 AND version_id=?2)",
+        params![workspace_id, version_id],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
+}
+
 fn ydoc_lineage_completeness_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &DocKey,
@@ -3327,6 +3350,50 @@ mod tests {
                 if actual == dohc_engine_domain::MAX_TEXT_BYTES + 1
                     && max == dohc_engine_domain::MAX_TEXT_BYTES
         ));
+    }
+
+    #[test]
+    fn workspace_ydoc_state_probe_covers_marker_and_prebase_deferred_roots() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open in-memory database");
+        conn.execute_batch(
+            "CREATE TABLE ydoc_docs (workspace_id TEXT NOT NULL, version_id TEXT NOT NULL); \
+             CREATE TABLE ydoc_deferred_updates (workspace_id TEXT NOT NULL, version_id TEXT NOT NULL);",
+        )
+        .expect("create Y.Doc root tables");
+        let tx = conn.transaction().expect("begin probe transaction");
+
+        assert!(
+            !workspace_has_ydoc_state_in_tx(&tx, "ws", "main").expect("empty probe"),
+            "a fresh workspace version has no reconciliation work"
+        );
+        tx.execute(
+            "INSERT INTO ydoc_docs (workspace_id, version_id) VALUES ('other', 'main')",
+            [],
+        )
+        .expect("seed unrelated marker");
+        assert!(!workspace_has_ydoc_state_in_tx(&tx, "ws", "main").expect("scoped probe"));
+
+        tx.execute(
+            "INSERT INTO ydoc_docs (workspace_id, version_id) VALUES ('ws', 'main')",
+            [],
+        )
+        .expect("seed marker");
+        assert!(workspace_has_ydoc_state_in_tx(&tx, "ws", "main").expect("marker probe"));
+        tx.execute(
+            "DELETE FROM ydoc_docs WHERE workspace_id='ws' AND version_id='main'",
+            [],
+        )
+        .expect("remove marker");
+
+        tx.execute(
+            "INSERT INTO ydoc_deferred_updates (workspace_id, version_id) VALUES ('ws', 'main')",
+            [],
+        )
+        .expect("seed pre-base deferred update");
+        assert!(
+            workspace_has_ydoc_state_in_tx(&tx, "ws", "main").expect("deferred probe"),
+            "a deferred update is reconciliation work even without a marker"
+        );
     }
 
     #[test]

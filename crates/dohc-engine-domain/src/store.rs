@@ -2121,6 +2121,100 @@ struct ResolvedCaptureObject {
     known_object: Option<FileObjectRecord>,
 }
 
+/// Transaction-local facts shared by one actor-owned capture batch.
+///
+/// The runtime advances `next_moment_order` only after an item's savepoint has
+/// been released. Keeping the proposed order immutable while an item runs
+/// makes a failed or deduped item consume nothing, while still giving object
+/// disambiguation and moment derivation the exact same candidate.
+#[doc(hidden)]
+pub struct CaptureIngestBatchContext {
+    workspace_id: String,
+    version_id: String,
+    producer_id: Option<String>,
+    moment_order_cursor: CaptureMomentOrderCursor,
+}
+
+#[derive(Clone, Copy)]
+enum CaptureMomentOrderCursor {
+    Uninitialized,
+    Ready(i64),
+    Exhausted,
+}
+
+impl CaptureIngestBatchContext {
+    /// Establish the shared coordinate. Producer and order stay lazy so an
+    /// all-dedupe replay keeps the legacy short-circuit and does not gain
+    /// unrelated failure modes.
+    pub fn new(workspace_id: &str, version_id: &str) -> Self {
+        Self {
+            workspace_id: workspace_id.to_owned(),
+            version_id: version_id.to_owned(),
+            producer_id: None,
+            moment_order_cursor: CaptureMomentOrderCursor::Uninitialized,
+        }
+    }
+
+    /// Advance after the item's savepoint has committed all of its side
+    /// effects. A dedupe points at an existing moment and consumes no order.
+    pub fn commit_result(&mut self, result: &WriteResult) -> Result<(), DomainError> {
+        if result.deduped {
+            return Ok(());
+        }
+        let next_moment_order = match self.moment_order_cursor {
+            CaptureMomentOrderCursor::Ready(next_moment_order) => next_moment_order,
+            CaptureMomentOrderCursor::Uninitialized => {
+                return Err(DomainError::StateCorrupt {
+                    reason: "capture batch committed a moment without reserving an order",
+                });
+            }
+            CaptureMomentOrderCursor::Exhausted => {
+                return Err(DomainError::StateCorrupt {
+                    reason: "capture batch committed a moment after order exhaustion",
+                });
+            }
+        };
+        if result.moment.moment_order != next_moment_order {
+            return Err(DomainError::StateCorrupt {
+                reason: "capture batch moment order diverged from its cursor",
+            });
+        }
+        self.moment_order_cursor = match next_moment_order.checked_add(1) {
+            Some(next_moment_order) => CaptureMomentOrderCursor::Ready(next_moment_order),
+            None => CaptureMomentOrderCursor::Exhausted,
+        };
+        Ok(())
+    }
+
+    fn validates(&self, input: &CaptureIngest) -> bool {
+        input.workspace_id == self.workspace_id && input.version_id == self.version_id
+    }
+
+    fn proposed_moment_order(&mut self, tx: &Transaction<'_>) -> Result<i64, DomainError> {
+        match self.moment_order_cursor {
+            CaptureMomentOrderCursor::Ready(next_moment_order) => Ok(next_moment_order),
+            CaptureMomentOrderCursor::Uninitialized => {
+                let next_moment_order = next_moment_order(tx)?;
+                self.moment_order_cursor = CaptureMomentOrderCursor::Ready(next_moment_order);
+                Ok(next_moment_order)
+            }
+            CaptureMomentOrderCursor::Exhausted => Err(DomainError::StateCorrupt {
+                reason: "capture batch moment order overflowed",
+            }),
+        }
+    }
+
+    fn producer_id(&mut self, tx: &Transaction<'_>) -> Result<&str, DomainError> {
+        if self.producer_id.is_none() {
+            self.producer_id = Some(capture_producer_id(tx, &self.workspace_id)?);
+        }
+        Ok(self
+            .producer_id
+            .as_deref()
+            .expect("capture producer was initialized"))
+    }
+}
+
 impl<'a> From<&'a WriteText> for ProjectedWriteText<'a> {
     fn from(input: &'a WriteText) -> Self {
         Self {
@@ -2294,8 +2388,43 @@ pub fn capture_ingest_with_admission_in_tx<E>(
 where
     E: From<DomainError>,
 {
+    capture_ingest_with_context_and_admission_in_tx(tx, input, None, admit)
+}
+
+/// Capture one item using facts reserved by its actor-owned batch.
+#[doc(hidden)]
+pub fn capture_ingest_in_batch_with_admission_in_tx<E>(
+    tx: &Transaction<'_>,
+    input: &CaptureIngest,
+    batch: &mut CaptureIngestBatchContext,
+    admit: impl FnOnce(&str, &str, &str) -> Result<(), E>,
+) -> Result<WriteResult, E>
+where
+    E: From<DomainError>,
+{
+    capture_ingest_with_context_and_admission_in_tx(tx, input, Some(batch), admit)
+}
+
+fn capture_ingest_with_context_and_admission_in_tx<E>(
+    tx: &Transaction<'_>,
+    input: &CaptureIngest,
+    mut batch: Option<&mut CaptureIngestBatchContext>,
+    admit: impl FnOnce(&str, &str, &str) -> Result<(), E>,
+) -> Result<WriteResult, E>
+where
+    E: From<DomainError>,
+{
     let input = normalized_capture_ingest(input)?;
-    if !version_exists(tx, &input.workspace_id, &input.version_id)? {
+    if batch
+        .as_deref()
+        .is_some_and(|batch| !batch.validates(&input))
+    {
+        return Err(DomainError::InvalidInput {
+            reason: "capture batch coordinates do not match",
+        }
+        .into());
+    }
+    if batch.is_none() && !version_exists(tx, &input.workspace_id, &input.version_id)? {
         return Err(DomainError::VersionNotFound.into());
     }
     let (author_kind, author_json) = match input.author_json.as_deref() {
@@ -2353,6 +2482,7 @@ where
         &input.version_id,
         &input.path,
         input.now_ms,
+        batch.as_deref_mut(),
     )?;
     let before = get_snapshot(
         tx,
@@ -2433,17 +2563,29 @@ where
     ]);
     let next_order = match resolved.reserved_moment_order {
         Some(next_order) => next_order,
-        None => next_moment_order(tx)?,
+        None => match batch.as_deref_mut() {
+            Some(batch) => batch.proposed_moment_order(tx)?,
+            None => next_moment_order(tx)?,
+        },
     };
-    let producer_id = capture_producer_id(tx, &input.workspace_id)?;
-    let moment_id = derive_capture_moment_id(
-        &producer_id,
-        &input.workspace_id,
-        &resolved.object_id,
-        next_order,
-        "write",
-        &mutation_identity,
-    );
+    let moment_id = match batch.as_deref_mut() {
+        Some(batch) => derive_capture_moment_id(
+            batch.producer_id(tx)?,
+            &input.workspace_id,
+            &resolved.object_id,
+            next_order,
+            "write",
+            &mutation_identity,
+        ),
+        None => derive_capture_moment_id(
+            &capture_producer_id(tx, &input.workspace_id)?,
+            &input.workspace_id,
+            &resolved.object_id,
+            next_order,
+            "write",
+            &mutation_identity,
+        ),
+    };
     let write = normalized_write_input(ProjectedWriteText {
         workspace_id: &input.workspace_id,
         version_id: &input.version_id,
@@ -2765,6 +2907,7 @@ where
         &input.version_id,
         &path,
         input.now_ms,
+        None,
     )?;
     let before = get_snapshot(tx, &input.workspace_id, &input.version_id, &object_id)?;
     if let Some(existing) = &before
@@ -3787,6 +3930,7 @@ fn resolve_capture_object(
     version_id: &str,
     path: &str,
     now_ms: i64,
+    mut batch: Option<&mut CaptureIngestBatchContext>,
 ) -> Result<ResolvedCaptureObject, DomainError> {
     let mut reserved_moment_order = None;
     let mut known_object = None;
@@ -3810,7 +3954,10 @@ fn resolve_capture_object(
             } else if !object_has_live_alias(tx, workspace_id, &derived_object_id)? {
                 derived_object_id
             } else {
-                let next_order = next_moment_order(tx)?;
+                let next_order = match batch.as_deref_mut() {
+                    Some(batch) => batch.proposed_moment_order(tx)?,
+                    None => next_moment_order(tx)?,
+                };
                 let disambiguated_object_id = derive_disambiguated_capture_object_id(
                     workspace_id,
                     version_id,
@@ -6170,8 +6317,10 @@ mod tests {
     use std::borrow::Cow;
 
     use super::{
-        MOMENT_TEXT_HYDRATION_CAP_BYTES, NEXT_MOMENT_ORDER_SQL, ProjectedWriteText,
-        VersionedTextStore, capture_prepared_write_counts, derive_capture_object_id,
+        CaptureIngestBatchContext, MOMENT_TEXT_HYDRATION_CAP_BYTES, NEXT_MOMENT_ORDER_SQL,
+        ProjectedWriteText, VersionedTextStore, capture_ingest_in_batch_with_admission_in_tx,
+        capture_prepared_write_counts, derive_capture_moment_id, derive_capture_object_id,
+        derive_disambiguated_capture_object_id, hash_fields, hash_optional_text_fields,
         next_moment_order, object_has_references, reset_capture_prepared_write_counts,
         reset_write_text_ownership_counts, text_blob_sha256, write_projected_text_in_tx,
         write_text_in_tx, write_text_ownership_counts,
@@ -6179,7 +6328,9 @@ mod tests {
     use crate::{
         CaptureIngest, CaptureRetire, DomainError, RenameTextFile, WriteResult, WriteText,
     };
-    use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
+    use dohc_engine_storage::{
+        EngineStore, MaterializationJobSpec, NoFaults, Preimage, TxnOutcome, record_completed_job,
+    };
     use dohc_engine_testkit::ScratchDir;
     use rusqlite::{Connection, params};
 
@@ -6310,6 +6461,209 @@ mod tests {
             }),
             "the high-water query must not scan either growing table: {details:?}"
         );
+    }
+
+    #[test]
+    fn capture_batch_preserves_producer_and_global_high_water_parity() {
+        fn initialized_store(db: &std::path::Path) -> EngineStore {
+            let mut store = EngineStore::open(db, 1).expect("open store");
+            VersionedTextStore::new(&mut store)
+                .ensure_main_version("ws", "main", 1, &NoFaults)
+                .expect("ensure main version");
+            let outcome = store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "INSERT INTO sync_identity \
+                         (workspace_id, origin_id, replication_epoch, stream_identity, created_at_ms) \
+                         VALUES ('ws', 'origin-capture-parity', 'epoch', 'stream', 1)",
+                        [],
+                    )
+                    .map_err(DomainError::sql_persist)?;
+                    record_completed_job(
+                        tx,
+                        &MaterializationJobSpec {
+                            job_id: "mutation-mat_capture-high-water".to_owned(),
+                            workspace_id: "ws".to_owned(),
+                            target_path: "notes/high-water.md".to_owned(),
+                            content_sha256: "0".repeat(64),
+                            preimage: Preimage::Absent,
+                            target_generation: 40,
+                            now_ms: 1,
+                        },
+                    )
+                    .map_err(DomainError::from)?;
+                    Ok::<_, DomainError>(())
+                })
+                .expect("seed producer and high water");
+            super::committed(outcome).expect("commit producer and high water");
+            store
+        }
+
+        let sequential_scratch = ScratchDir::new().expect("sequential scratch");
+        let batch_scratch = ScratchDir::new().expect("batch scratch");
+        let mut sequential =
+            initialized_store(&sequential_scratch.engine_db_path().expect("sequential db"));
+        let mut batched = initialized_store(&batch_scratch.engine_db_path().expect("batch db"));
+        let inputs = vec![
+            capture_input("notes/a.md", "alpha".to_owned(), 10),
+            capture_input("notes/b.md", "bravo".to_owned(), 11),
+            capture_input("notes/c.md", "charlie".to_owned(), 12),
+        ];
+
+        let expected = inputs
+            .iter()
+            .map(|input| {
+                VersionedTextStore::new(&mut sequential)
+                    .capture_ingest(input, &NoFaults)
+                    .expect("sequential capture")
+            })
+            .collect::<Vec<_>>();
+
+        let outcome = batched
+            .write_with(&NoFaults, |tx| {
+                let mut context = CaptureIngestBatchContext::new("ws", "main");
+                let mut results = Vec::with_capacity(inputs.len());
+                for input in &inputs {
+                    tx.execute_batch("SAVEPOINT capture_batch_parity")
+                        .map_err(DomainError::sql_persist)?;
+                    let result = capture_ingest_in_batch_with_admission_in_tx(
+                        tx,
+                        input,
+                        &mut context,
+                        |_, _, _| Ok::<_, DomainError>(()),
+                    )?;
+                    tx.execute_batch("RELEASE capture_batch_parity")
+                        .map_err(DomainError::sql_persist)?;
+                    context.commit_result(&result)?;
+                    results.push(result);
+                }
+                Ok::<_, DomainError>(results)
+            })
+            .expect("capture batch");
+        let actual = super::committed(outcome).expect("commit capture batch");
+
+        assert_eq!(actual, expected);
+        assert_eq!(
+            actual
+                .iter()
+                .map(|result| result.moment.moment_order)
+                .collect::<Vec<_>>(),
+            vec![41, 42, 43],
+            "the materialization-job high-water must seed the shared cursor"
+        );
+    }
+
+    #[test]
+    fn capture_batch_reuses_candidate_after_item_savepoint_rollback() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let mut store =
+            EngineStore::open(&scratch.engine_db_path().expect("db"), 1).expect("open store");
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .expect("ensure main version");
+
+        let outcome = store
+            .write_with(&NoFaults, |tx| {
+                let mut context = CaptureIngestBatchContext::new("ws", "main");
+                tx.execute_batch("SAVEPOINT capture_batch_failed_item")
+                    .map_err(DomainError::sql_persist)?;
+                let rolled_back = capture_ingest_in_batch_with_admission_in_tx(
+                    tx,
+                    &capture_input("notes/rolled-back.md", "first".to_owned(), 10),
+                    &mut context,
+                    |_, _, _| Ok::<_, DomainError>(()),
+                )?;
+                let candidate = rolled_back.moment.moment_order;
+                tx.execute_batch(
+                    "ROLLBACK TO capture_batch_failed_item; \
+                     RELEASE capture_batch_failed_item",
+                )
+                .map_err(DomainError::sql_persist)?;
+
+                tx.execute_batch("SAVEPOINT capture_batch_retry_candidate")
+                    .map_err(DomainError::sql_persist)?;
+                let captured = capture_ingest_in_batch_with_admission_in_tx(
+                    tx,
+                    &capture_input("notes/committed.md", "second".to_owned(), 11),
+                    &mut context,
+                    |_, _, _| Ok::<_, DomainError>(()),
+                )?;
+                tx.execute_batch("RELEASE capture_batch_retry_candidate")
+                    .map_err(DomainError::sql_persist)?;
+                context.commit_result(&captured)?;
+                Ok::<_, DomainError>((candidate, captured))
+            })
+            .expect("capture around rolled-back item");
+        let (candidate, captured) =
+            super::committed(outcome).expect("commit surviving capture item");
+
+        assert_eq!(captured.moment.moment_order, candidate);
+        assert_eq!(captured.snapshot.path, "notes/committed.md");
+        assert!(
+            VersionedTextStore::new(&mut store)
+                .read_text("ws", "main", "notes/rolled-back.md")
+                .expect("read rolled-back path")
+                .is_none(),
+            "the failed item's savepoint must leave no state behind"
+        );
+    }
+
+    #[test]
+    fn capture_batch_accepts_a_final_maximum_moment_order() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let mut store =
+            EngineStore::open(&scratch.engine_db_path().expect("db"), 1).expect("open store");
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .expect("ensure main version");
+        let outcome = store
+            .write_with(&NoFaults, |tx| {
+                record_completed_job(
+                    tx,
+                    &MaterializationJobSpec {
+                        job_id: "mutation-mat_before-order-exhaustion".to_owned(),
+                        workspace_id: "ws".to_owned(),
+                        target_path: "notes/before-order-exhaustion.md".to_owned(),
+                        content_sha256: "0".repeat(64),
+                        preimage: Preimage::Absent,
+                        target_generation: i64::MAX - 1,
+                        now_ms: 1,
+                    },
+                )
+                .map_err(DomainError::from)?;
+                Ok::<_, DomainError>(())
+            })
+            .expect("seed maximum high-water");
+        super::committed(outcome).expect("commit maximum high-water");
+
+        let outcome = store
+            .write_with(&NoFaults, |tx| {
+                let mut context = CaptureIngestBatchContext::new("ws", "main");
+                tx.execute_batch("SAVEPOINT capture_maximum_order")
+                    .map_err(DomainError::sql_persist)?;
+                let captured = capture_ingest_in_batch_with_admission_in_tx(
+                    tx,
+                    &capture_input("notes/final.md", "final".to_owned(), 2),
+                    &mut context,
+                    |_, _, _| Ok::<_, DomainError>(()),
+                )?;
+                tx.execute_batch("RELEASE capture_maximum_order")
+                    .map_err(DomainError::sql_persist)?;
+                context.commit_result(&captured)?;
+                assert!(
+                    matches!(
+                        context.proposed_moment_order(tx),
+                        Err(DomainError::StateCorrupt {
+                            reason: "capture batch moment order overflowed"
+                        })
+                    ),
+                    "only a later mutation should observe cursor exhaustion"
+                );
+                Ok::<_, DomainError>(captured)
+            })
+            .expect("capture final maximum-order item");
+        let captured = super::committed(outcome).expect("commit final maximum-order item");
+        assert_eq!(captured.moment.moment_order, i64::MAX);
     }
 
     #[test]
@@ -6585,9 +6939,70 @@ mod tests {
             .expect("rename captured file");
 
         reset_capture_prepared_write_counts();
-        let captured = capture_text(&mut store, original_path, "replacement body".to_owned(), 4);
+        let replacement = capture_input(original_path, "replacement body".to_owned(), 4);
+        let outcome = store
+            .write_with(&NoFaults, |tx| {
+                let proposed_order = next_moment_order(tx)?;
+                let mut context = CaptureIngestBatchContext::new("ws", "main");
+                tx.execute_batch("SAVEPOINT capture_disambiguation")
+                    .map_err(DomainError::sql_persist)?;
+                let captured = capture_ingest_in_batch_with_admission_in_tx(
+                    tx,
+                    &replacement,
+                    &mut context,
+                    |_, _, _| Ok::<_, DomainError>(()),
+                )?;
+                tx.execute_batch("RELEASE capture_disambiguation")
+                    .map_err(DomainError::sql_persist)?;
+                context.commit_result(&captured)?;
+                Ok::<_, DomainError>((proposed_order, captured))
+            })
+            .expect("capture disambiguated path");
+        let (proposed_order, captured) =
+            super::committed(outcome).expect("commit disambiguated capture");
 
         assert_ne!(captured.object.object_id, first.object.object_id);
+        assert_eq!(captured.moment.moment_order, proposed_order);
+        assert_eq!(
+            captured.object.object_id,
+            derive_disambiguated_capture_object_id("ws", "main", original_path, proposed_order),
+            "object disambiguation and the persisted moment must share one order candidate"
+        );
+        let producer_id = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT engine_uuid FROM engine_ownership WHERE rowid_guard=1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+            })
+            .expect("read capture producer");
+        let (summary_kind, summary) = hash_optional_text_fields(Some("Captured test file"));
+        let (correlation_kind, correlation) = hash_optional_text_fields(Some("capture-pass-1"));
+        let mutation_identity = hash_fields(&[
+            original_path.as_bytes(),
+            text_blob_sha256("replacement body").as_bytes(),
+            b"capture",
+            summary_kind,
+            summary,
+            correlation_kind,
+            correlation,
+            b"some",
+            br#"{"kind":"capture-test"}"#,
+            b"4",
+        ]);
+        assert_eq!(
+            captured.moment.moment_id,
+            derive_capture_moment_id(
+                &producer_id,
+                "ws",
+                &captured.object.object_id,
+                proposed_order,
+                "write",
+                &mutation_identity,
+            ),
+            "moment derivation must use the same order candidate as object disambiguation"
+        );
         assert_eq!(
             capture_prepared_write_counts(),
             (1, 0),

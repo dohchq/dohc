@@ -131,16 +131,17 @@ pub use secrets::{
     restore_secret_file_verbatim_with_metadata_and_after, secret_file_len_keyless,
 };
 pub use store::{
-    CaptureManifestSeedEntry, INBAND_CONTENT_CAP_BYTES, MAX_AUTHOR_FIELD_BYTES,
-    MAX_AUTHOR_JSON_BYTES, MAX_CAPTURE_BINARY_FILE_BYTES, MAX_METADATA_FIELD_BYTES, MAX_TEXT_BYTES,
-    ProjectedWriteText, SECRET_SEED_SENTINEL_SHA, VersionedTextStore, binary_rollback_job_identity,
-    capture_ingest_binary_in_tx, capture_ingest_binary_with_admission_in_tx, capture_ingest_in_tx,
-    capture_ingest_with_admission_in_tx, capture_manifest_seed, capture_retire_in_tx,
-    decode_binary_rollback_job_identity, delete_text_in_tx, derive_capture_moment_id,
-    derive_capture_object_id, derive_capture_retire_moment_id, object_has_live_alias,
-    rollback_compensating_moment_id, validate_addressable_plaintext_path, validate_delete_input,
-    validate_plaintext_storable_path, validate_write_input, write_binary_in_tx,
-    write_projected_text_in_tx, write_text_in_tx,
+    CaptureIngestBatchContext, CaptureManifestSeedEntry, INBAND_CONTENT_CAP_BYTES,
+    MAX_AUTHOR_FIELD_BYTES, MAX_AUTHOR_JSON_BYTES, MAX_CAPTURE_BINARY_FILE_BYTES,
+    MAX_METADATA_FIELD_BYTES, MAX_TEXT_BYTES, ProjectedWriteText, SECRET_SEED_SENTINEL_SHA,
+    VersionedTextStore, binary_rollback_job_identity, capture_ingest_binary_in_tx,
+    capture_ingest_binary_with_admission_in_tx, capture_ingest_in_batch_with_admission_in_tx,
+    capture_ingest_in_tx, capture_ingest_with_admission_in_tx, capture_manifest_seed,
+    capture_retire_in_tx, decode_binary_rollback_job_identity, delete_text_in_tx,
+    derive_capture_moment_id, derive_capture_object_id, derive_capture_retire_moment_id,
+    object_has_live_alias, rollback_compensating_moment_id, validate_addressable_plaintext_path,
+    validate_delete_input, validate_plaintext_storable_path, validate_write_input,
+    write_binary_in_tx, write_projected_text_in_tx, write_text_in_tx,
 };
 
 // Re-export the storage surface a domain caller needs on the common path.
