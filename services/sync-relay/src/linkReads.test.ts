@@ -2502,39 +2502,24 @@ describe("relay capability reads", () => {
         ),
     ],
     [
-      "retuning",
+      "widening",
       async (
         h: SyncRelayHandler,
         shareId: string,
         grantId: string,
-        storage: SyncRelayStorage,
-      ) => {
-        expect(
-          storage.retuneShareGrant({
-            shareId,
-            grantId,
-            access: "comment",
-            changedAtMs: 2_001,
-            expectedDependentGrantIds: [],
-            guard: () => undefined,
-            mintCredential: () => ({
-              credentialId: "storage-seeded-comment-stream-credential",
-              secretHash: "storage-seeded-comment-stream-hash",
-            }),
-          }),
-        ).toMatchObject({ ok: true, grant: { access: "comment" } });
-        return await h(
+        _storage: SyncRelayStorage,
+      ) =>
+        await h(
           request(
             OWNER,
             `/sync/shares/${shareId}/links/${grantId}/retune`,
             jsonBody({
               workspaceId: WORKSPACE,
-              access: "view",
+              access: "comment",
               expectedDependentGrantIds: [],
             }),
           ),
-        );
-      },
+        ),
     ],
   ] as const)(
     "terminates an open link blob stream after %s without affecting another grant",
@@ -2595,6 +2580,88 @@ describe("relay capability reads", () => {
       expect(new TextDecoder().decode(untouchedBytes)).toBe(content);
     },
   );
+
+  it("preserves an open Comment link blob stream through View narrowing", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const content = `${"a".repeat(64 * 1024)}${"b".repeat(64 * 1024)}${"c".repeat(64 * 1024)}`;
+    expect(
+      (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
+    ).toBe(200);
+    const blobSha = await putBlob(h, content);
+    await appendMoments(h, [moment(0, "docs/large.bin", content, 1_100)]);
+    const target = await createLink(h, { paths: ["docs"], access: "comment" });
+    const untouched = await createLink(h, { paths: ["docs"], access: "view" });
+
+    const targetResponse = await h(
+      linkRequest(target.capability, `/sync/link/blobs/${blobSha}`),
+    );
+    const untouchedResponse = await h(
+      linkRequest(untouched.capability, `/sync/link/blobs/${blobSha}`),
+    );
+    expect(targetResponse.status).toBe(200);
+    expect(untouchedResponse.status).toBe(200);
+    const targetReader = targetResponse.body!.getReader();
+    const untouchedReader = untouchedResponse.body!.getReader();
+    const targetFirst = await targetReader.read();
+    const untouchedFirst = await untouchedReader.read();
+    expect(targetFirst.done).toBe(false);
+    expect(untouchedFirst.done).toBe(false);
+    if (targetFirst.done || untouchedFirst.done) return;
+    expect(targetFirst.value.byteLength).toBe(64 * 1024);
+    expect(untouchedFirst.value.byteLength).toBe(64 * 1024);
+
+    const capabilityHash = hashLinkBearer(target.capability, LINK_KEY);
+    const grantBefore = storage.getShareGrant(target.grantId)!;
+    const credentialBefore = storage.getCurrentLinkCredential(target.grantId);
+    const sessionBefore = storage.findLinkSessionByCapabilityHash(capabilityHash);
+    const narrowed = await h(
+      request(
+        OWNER,
+        `/sync/shares/${target.shareId}/links/${target.grantId}/retune`,
+        jsonBody({
+          workspaceId: WORKSPACE,
+          access: "view",
+          expectedDependentGrantIds: [],
+        }),
+      ),
+    );
+    expect(narrowed.status).toBe(200);
+    expect(storage.getShareGrant(target.grantId)).toMatchObject({
+      access: "view",
+      generation: grantBefore.generation,
+    });
+    expect(storage.getCurrentLinkCredential(target.grantId)).toEqual(credentialBefore);
+    expect(storage.findLinkSessionByCapabilityHash(capabilityHash)).toEqual(sessionBefore);
+
+    const targetOutcome = await readRemainingBytes(targetReader, targetFirst.value).then(
+      (bytes) => ({
+        kind: "delivered" as const,
+        byteLength: bytes.byteLength,
+        sha256: sha256(new TextDecoder().decode(bytes)),
+      }),
+      (error: unknown) => ({
+        kind: "terminated" as const,
+        message: error instanceof Error ? error.message : String(error),
+      }),
+    );
+    const untouchedBytes = await readRemainingBytes(
+      untouchedReader,
+      untouchedFirst.value,
+    );
+    expect(new TextDecoder().decode(untouchedBytes)).toBe(content);
+    expect(targetOutcome).toEqual({
+      kind: "delivered",
+      byteLength: Buffer.byteLength(content),
+      sha256: sha256(content),
+    });
+
+    const freshRead = await h(
+      linkRequest(target.capability, `/sync/link/blobs/${blobSha}`),
+    );
+    expect(freshRead.status).toBe(200);
+    expect(new TextDecoder().decode(await freshRead.arrayBuffer())).toBe(content);
+  });
 
   it.each(["rotate", "retune"] as const)(
     "refuses %s when owner standing changes before commit without writes or terminated reads",

@@ -2702,7 +2702,7 @@ export function createSyncRelayHandler({
           }
           throw notFound();
         }
-        terminateLinkStreamsForGrant(result.grant.grantId);
+        if (widening) terminateLinkStreamsForGrant(result.grant.grantId);
         discussionActivity.wake(share.shareId);
         return jsonResponse({
           ok: true,
