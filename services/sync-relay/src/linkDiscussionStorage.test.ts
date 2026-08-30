@@ -1400,6 +1400,96 @@ describe("durable link discussion storage", () => {
     expectStoredUsageReadInsideTransaction(asserted);
   });
 
+  it("does not rebuild the durable workspace total on an ordinary reopen", async () => {
+    const { storage, dbPath } = await openStorage();
+    const seeded = seedShare(storage, { suffix: "usage-reopen" });
+    expect(
+      append(storage, seeded, {
+        profile: "usage-reopen-profile",
+        body: "survives an ordinary reopen",
+        idempotencyKey: "usage-reopen",
+      }),
+    ).toMatchObject({ ok: true });
+    expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
+    storage.close();
+    storages.splice(storages.indexOf(storage), 1);
+
+    const audit = new InspectionDatabaseSync(dbPath);
+    try {
+      audit.exec(`
+        CREATE TABLE sync_relay_workspace_usage_delete_audit (
+          workspace_id TEXT NOT NULL
+        ) STRICT;
+        CREATE TRIGGER audit_sync_relay_workspace_usage_delete
+        AFTER DELETE ON sync_relay_workspace_usage
+        BEGIN
+          INSERT INTO sync_relay_workspace_usage_delete_audit (workspace_id)
+          VALUES (OLD.workspace_id);
+        END;
+      `);
+    } finally {
+      audit.close();
+    }
+
+    const reopened = openSyncRelayStorage(dbPath);
+    storages.push(reopened);
+    const inspection = new InspectionDatabaseSync(dbPath, { readOnly: true });
+    try {
+      expect(
+        inspection
+          .prepare("SELECT COUNT(*) AS count FROM sync_relay_workspace_usage_delete_audit")
+          .get()?.count,
+      ).toBe(0);
+    } finally {
+      inspection.close();
+    }
+    expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
+  });
+
+  it("backfills the durable workspace total when its migration marker is absent", async () => {
+    const { storage, dbPath } = await openStorage();
+    const seeded = seedShare(storage, { suffix: "usage-backfill" });
+    expect(
+      append(storage, seeded, {
+        profile: "usage-backfill-profile",
+        body: "restored by the one-time backfill",
+        idempotencyKey: "usage-backfill",
+      }),
+    ).toMatchObject({ ok: true });
+    const expectedUsage = expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
+    expect(expectedUsage).toBeGreaterThan(0);
+    storage.close();
+    storages.splice(storages.indexOf(storage), 1);
+
+    const stale = new InspectionDatabaseSync(dbPath);
+    try {
+      stale
+        .prepare("UPDATE sync_relay_workspace_usage SET usage_bytes = 0 WHERE workspace_id = ?")
+        .run(seeded.workspaceId);
+      stale
+        .prepare("DELETE FROM sync_relay_migrations WHERE migration_id = ?")
+        .run("workspace-usage-backfill-v1");
+    } finally {
+      stale.close();
+    }
+
+    const reopened = openSyncRelayStorage(dbPath);
+    storages.push(reopened);
+    expect(expectExactWorkspaceUsage(dbPath, seeded.workspaceId)).toBe(expectedUsage);
+    const inspection = new InspectionDatabaseSync(dbPath, { readOnly: true });
+    try {
+      expect(
+        inspection
+          .prepare(
+            "SELECT COUNT(*) AS count FROM sync_relay_migrations WHERE migration_id = ?",
+          )
+          .get("workspace-usage-backfill-v1")?.count,
+      ).toBe(1);
+    } finally {
+      inspection.close();
+    }
+  });
+
   it("keeps the durable workspace total exact across every counted write lifecycle", async () => {
     const { storage, dbPath } = await openStorage({ blobGraceMs: 0 });
     const seeded = seedShare(storage, { suffix: "usage-lifecycle" });

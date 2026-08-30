@@ -1403,6 +1403,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       .get();
     const principalSchemaSql = String(principalSchema?.sql ?? "");
     const discussionSchemaSql = String(discussionSchema?.sql ?? "");
+    let normalizedShareSchemaReplaced = false;
     if (
       shareColumns.includes("recipient_user_id") ||
       !String(grantSchema?.sql ?? "").includes("'link'") ||
@@ -1431,6 +1432,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
         `length(CAST(body AS BLOB)) <= ${LINK_DISCUSSION_BODY_INPUT_BYTE_LIMIT}`,
       )
     ) {
+      normalizedShareSchemaReplaced = true;
       // Pre-launch replacement. Discussion authority is one normalized model:
       // the share pause, grant, protected principal, session binding, and
       // message provenance must never exist in mixed schema generations.
@@ -1625,39 +1627,55 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
         );
       END;
     `);
-    db.exec(`
-      DELETE FROM sync_relay_workspace_usage;
-      WITH usage_rows(workspace_id, bytes) AS (
-        SELECT workspace_id, byte_length FROM sync_relay_blobs
-        UNION ALL
-        SELECT workspace_id, length(CAST(payload_json AS BLOB)) FROM sync_relay_log
-        UNION ALL
-        SELECT workspace_id, length(CAST(envelope_json AS BLOB))
-        FROM sync_relay_key_envelopes
-        UNION ALL
-        SELECT workspace_id, length(CAST(envelope_json AS BLOB))
-        FROM sync_relay_key_envelope_history
-        UNION ALL
-        SELECT workspace_id,
-               length(CAST(replication_epoch AS BLOB)) +
-               length(CAST(stream_identity AS BLOB))
-        FROM sync_relay_epoch_supersessions
-        UNION ALL
-        SELECT share.workspace_id, message.storage_bytes
-        FROM sync_relay_share_discussion_messages AS message
-        JOIN sync_relay_shares AS share ON share.share_id = message.share_id
-        UNION ALL
-        SELECT share.workspace_id, principal.storage_bytes
-        FROM sync_relay_link_principals AS principal
-        JOIN sync_relay_share_grants AS grant ON grant.grant_id = principal.grant_id
-        JOIN sync_relay_shares AS share ON share.share_id = grant.share_id
+    const workspaceUsageMigrationId = "workspace-usage-backfill-v1";
+    const workspaceUsageBackfilled = db
+      .prepare(
+        "SELECT EXISTS(SELECT 1 FROM sync_relay_migrations WHERE migration_id=?) AS complete",
       )
-      INSERT INTO sync_relay_workspace_usage (workspace_id, usage_bytes)
-      SELECT workspace.workspace_id, COALESCE(SUM(usage_rows.bytes), 0)
-      FROM sync_relay_workspaces AS workspace
-      LEFT JOIN usage_rows ON usage_rows.workspace_id = workspace.workspace_id
-      GROUP BY workspace.workspace_id;
-    `);
+      .get(workspaceUsageMigrationId);
+    if (
+      normalizedShareSchemaReplaced ||
+      Number(workspaceUsageBackfilled?.complete ?? 0) === 0
+    ) {
+      db.exec(`
+        DELETE FROM sync_relay_workspace_usage;
+        WITH usage_rows(workspace_id, bytes) AS (
+          SELECT workspace_id, byte_length FROM sync_relay_blobs
+          UNION ALL
+          SELECT workspace_id, length(CAST(payload_json AS BLOB)) FROM sync_relay_log
+          UNION ALL
+          SELECT workspace_id, length(CAST(envelope_json AS BLOB))
+          FROM sync_relay_key_envelopes
+          UNION ALL
+          SELECT workspace_id, length(CAST(envelope_json AS BLOB))
+          FROM sync_relay_key_envelope_history
+          UNION ALL
+          SELECT workspace_id,
+                 length(CAST(replication_epoch AS BLOB)) +
+                 length(CAST(stream_identity AS BLOB))
+          FROM sync_relay_epoch_supersessions
+          UNION ALL
+          SELECT share.workspace_id, message.storage_bytes
+          FROM sync_relay_share_discussion_messages AS message
+          JOIN sync_relay_shares AS share ON share.share_id = message.share_id
+          UNION ALL
+          SELECT share.workspace_id, principal.storage_bytes
+          FROM sync_relay_link_principals AS principal
+          JOIN sync_relay_share_grants AS grant ON grant.grant_id = principal.grant_id
+          JOIN sync_relay_shares AS share ON share.share_id = grant.share_id
+        )
+        INSERT INTO sync_relay_workspace_usage (workspace_id, usage_bytes)
+        SELECT workspace.workspace_id, COALESCE(SUM(usage_rows.bytes), 0)
+        FROM sync_relay_workspaces AS workspace
+        LEFT JOIN usage_rows ON usage_rows.workspace_id = workspace.workspace_id
+        GROUP BY workspace.workspace_id;
+      `);
+      db.prepare(
+        `INSERT INTO sync_relay_migrations (migration_id, completed_at_ms)
+         VALUES (?, ?)
+         ON CONFLICT(migration_id) DO NOTHING`,
+      ).run(workspaceUsageMigrationId, Date.now());
+    }
     // Lazy additive migration (0P sync-hardening item 4): dbs created before the
     // blob retention window gain created_at_ms on open. Existing rows default to
     // 0, so a legacy unreferenced blob is immediately past any grace window and
