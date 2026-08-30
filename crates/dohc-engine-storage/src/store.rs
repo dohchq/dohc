@@ -14,13 +14,6 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-/// Keep the writable connection's measured capture working set resident.
-/// Capture interleaves domain, sync, and search statements; rusqlite's
-/// 16-entry default evicts hot statements during a large initial import.
-/// Sixty-four remains a small, fixed per-writer bound and leaves read-only
-/// connections on rusqlite's default because they do not run this workload.
-const WRITER_PREPARED_STATEMENT_CACHE_CAPACITY: usize = 64;
-
 /// Whether a string is a safe bare SQL identifier (ASCII alnum + underscore,
 /// non-empty). Used to guard the one place a table name is interpolated rather
 /// than bound (`table_row_count`), so a caller cannot inject SQL through it.
@@ -183,9 +176,6 @@ impl EngineStore {
     /// `dohc-engine-runtime`'s supervisor, which is the intended entry point.
     pub fn open(path: &Path, now_ms: i64) -> Result<Self, StorageError> {
         let opened = open_engine_db(path, now_ms)?;
-        opened
-            .conn
-            .set_prepared_statement_cache_capacity(WRITER_PREPARED_STATEMENT_CACHE_CAPACITY);
         Ok(EngineStore {
             conn: opened.conn,
             freshly_created: opened.freshly_created,
