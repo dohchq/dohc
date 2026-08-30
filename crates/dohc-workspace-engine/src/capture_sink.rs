@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// The encrypted store validates origins against the TS `WRITE_ORIGINS` set,
 /// which has no "capture" entry; the TS capture path writes secrets with
@@ -213,6 +213,12 @@ pub struct StoreCaptureSink {
     workspace_id: String,
     version_id: String,
     shadow_root: PathBuf,
+    /// The root is stable for one reconcile generation. Resolving it lazily
+    /// avoids two filesystem resolutions per captured path while still
+    /// allowing tests and callers to construct the sink before the root
+    /// exists. Only successful resolutions are cached, so a transiently
+    /// absent root can recover without rebuilding the sink.
+    canonical_shadow_root: OnceLock<PathBuf>,
     now_ms: i64,
     author_json: Option<String>,
     search_policy: Arc<SearchPolicySnapshot>,
@@ -303,6 +309,7 @@ impl StoreCaptureSink {
             workspace_id: workspace_id.into(),
             version_id: version_id.into(),
             shadow_root,
+            canonical_shadow_root: OnceLock::new(),
             now_ms,
             author_json,
             search_policy: snapshot,
@@ -312,6 +319,44 @@ impl StoreCaptureSink {
             self_writes,
             provenance,
         }
+    }
+
+    fn canonical_shadow_root(&self) -> Result<&Path, CaptureError> {
+        if let Some(root) = self.canonical_shadow_root.get() {
+            return Ok(root.as_path());
+        }
+        let root = self.shadow_root.canonicalize().map_err(|_| ESCAPES_ROOT)?;
+        // StoreCaptureSink is actor-owned. OnceLock also prevents any later
+        // read from changing this generation's chosen root location.
+        let _ = self.canonical_shadow_root.set(root);
+        self.canonical_shadow_root
+            .get()
+            .map(PathBuf::as_path)
+            .ok_or(ESCAPES_ROOT)
+    }
+
+    fn path_containment(&self, rel_path: &str) -> Containment {
+        let absolute = self.shadow_root.join(rel_path);
+        let Some(parent) = absolute.parent() else {
+            return Containment::Escaped;
+        };
+        // Resolve the parent first to preserve the established distinction:
+        // an absent path settles as absent, while any other resolution error
+        // fails closed. Root resolution is attempted only once a parent is
+        // present, then reused for the rest of this sink's generation.
+        let canonical_parent = match parent.canonicalize() {
+            Ok(real) => real,
+            Err(err) if absent_error(&err) => return Containment::Absent,
+            Err(_) => return Containment::Escaped,
+        };
+        let Ok(canonical_root) = self.canonical_shadow_root() else {
+            return Containment::Escaped;
+        };
+        // A root moved behind a symlink now resolves somewhere other than
+        // this cached location and is refused. Replacing a directory in place
+        // at the same canonical pathname remains indistinguishable by path,
+        // the same identity limitation as the previous per-read resolution.
+        contained_parent(canonical_root, rel_path, &canonical_parent)
     }
 
     fn ensure_secret_key(&mut self) -> Result<&SecretDataKey, CaptureError> {
@@ -408,11 +453,12 @@ impl StoreCaptureSink {
     /// candidate hardening for the composition driver.
     fn read_current(&self, path: &str, media_type: &str) -> Result<CurrentContent, CaptureError> {
         let absolute = self.shadow_root.join(path);
-        match contained_parent(&self.shadow_root, path) {
+        match self.path_containment(path) {
             Containment::Contained => {}
             Containment::Absent => return Ok(CurrentContent::Absent),
             Containment::Escaped => return Err(ESCAPES_ROOT),
         }
+        let canonical_root = self.canonical_shadow_root()?;
         // Advisory lstat mirror of the TS refusal (symlink leaf and non-file
         // entries are not engine-ownable); the no-follow open below is what
         // actually closes the check-then-open race.
@@ -430,7 +476,7 @@ impl StoreCaptureSink {
             NoFollowOpen::Absent => return Ok(CurrentContent::Absent),
             NoFollowOpen::Failed => return Err(READ_FAILED),
         };
-        verify_opened_containment(&self.shadow_root, path, &file)?;
+        verify_opened_containment(&self.shadow_root, canonical_root, path, &file)?;
         let metadata = file.metadata().map_err(|_| READ_FAILED)?;
         if !metadata.file_type().is_file() {
             return Ok(CurrentContent::NonOwnable);
@@ -635,11 +681,12 @@ impl StoreCaptureSink {
     /// the text read, text-cap bound, UTF-8-or-untracked (no binary route).
     fn read_current_secret(&self, path: &str) -> Result<SecretContent, CaptureError> {
         let absolute = self.shadow_root.join(path);
-        match contained_parent(&self.shadow_root, path) {
+        match self.path_containment(path) {
             Containment::Contained => {}
             Containment::Absent => return Ok(SecretContent::Untracked),
             Containment::Escaped => return Err(ESCAPES_ROOT),
         }
+        let canonical_root = self.canonical_shadow_root()?;
         match std::fs::symlink_metadata(&absolute) {
             Ok(metadata) if !metadata.file_type().is_file() => {
                 return Ok(SecretContent::Untracked);
@@ -653,7 +700,7 @@ impl StoreCaptureSink {
             NoFollowOpen::Refused | NoFollowOpen::Absent => return Ok(SecretContent::Untracked),
             NoFollowOpen::Failed => return Err(READ_FAILED),
         };
-        verify_opened_containment(&self.shadow_root, path, &file)?;
+        verify_opened_containment(&self.shadow_root, canonical_root, path, &file)?;
         let metadata = file.metadata().map_err(|_| READ_FAILED)?;
         if !metadata.file_type().is_file() {
             return Ok(SecretContent::Untracked);
@@ -1080,7 +1127,7 @@ impl CaptureSink for StoreCaptureSink {
                 // retire (a delete never decrypts). Mirrors the text arm's
                 // reappearance refusal.
                 let absolute = self.shadow_root.join(path);
-                match contained_parent(&self.shadow_root, path) {
+                match self.path_containment(path) {
                     Containment::Contained => {}
                     Containment::Absent => return self.retire_secret(path),
                     Containment::Escaped => return Err(ESCAPES_ROOT),
@@ -1104,7 +1151,7 @@ impl CaptureSink for StoreCaptureSink {
                 // verdict must never be based on an off-root file reached
                 // through a symlinked ancestor. A missing parent confirms the
                 // tracked file gone; an escape retains last-known-good.
-                match contained_parent(&self.shadow_root, path) {
+                match self.path_containment(path) {
                     Containment::Contained => {}
                     Containment::Absent => {
                         return self.retire_head(path, false, self.provenance.summary.clone());
@@ -1189,21 +1236,9 @@ fn expected_absolute(real_root: &Path, rel_path: &str) -> PathBuf {
 /// under the root. Strict equality rejects a symlinked ancestor regardless of
 /// where it points (off-root exfiltration AND in-root aliasing).
 /// Unresolvable-for-any-other-reason fails CLOSED as a refusal.
-fn contained_parent(root: &Path, rel_path: &str) -> Containment {
-    let absolute = root.join(rel_path);
-    let Some(parent) = absolute.parent() else {
-        return Containment::Escaped;
-    };
-    let real_parent = match parent.canonicalize() {
-        Ok(real) => real,
-        Err(err) if absent_error(&err) => return Containment::Absent,
-        Err(_) => return Containment::Escaped,
-    };
-    let Ok(real_root) = root.canonicalize() else {
-        return Containment::Escaped;
-    };
+fn contained_parent(canonical_root: &Path, rel_path: &str, canonical_parent: &Path) -> Containment {
     let parent_rel = rel_path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
-    if real_parent == expected_absolute(&real_root, parent_rel) {
+    if canonical_parent == expected_absolute(canonical_root, parent_rel) {
         Containment::Contained
     } else {
         Containment::Escaped
@@ -1216,11 +1251,15 @@ fn contained_parent(root: &Path, rel_path: &str) -> Containment {
 /// the pre-open check and the open. On Unix the opened descriptor's
 /// (dev, ino) must also match the re-resolved path, so a swap-back cannot
 /// hide a foreign descriptor.
-fn verify_opened_containment(root: &Path, rel_path: &str, file: &File) -> Result<(), CaptureError> {
+fn verify_opened_containment(
+    root: &Path,
+    canonical_root: &Path,
+    rel_path: &str,
+    file: &File,
+) -> Result<(), CaptureError> {
     let absolute = root.join(rel_path);
     let real = absolute.canonicalize().map_err(|_| ESCAPES_ROOT)?;
-    let real_root = root.canonicalize().map_err(|_| ESCAPES_ROOT)?;
-    if real != expected_absolute(&real_root, rel_path) {
+    if real != expected_absolute(canonical_root, rel_path) {
         return Err(ESCAPES_ROOT);
     }
     #[cfg(unix)]
@@ -3572,6 +3611,13 @@ mod tests {
         }
     }
 
+    fn remove_dir_symlink(link: &Path) {
+        #[cfg(unix)]
+        std::fs::remove_file(link).expect("remove directory symlink");
+        #[cfg(windows)]
+        std::fs::remove_dir(link).expect("remove directory symlink");
+    }
+
     #[test]
     fn text_ingest_rereads_updates_and_dedupes_equal_content() {
         let scratch = ScratchDir::new().expect("scratch");
@@ -3973,6 +4019,47 @@ mod tests {
         drop(sink);
         supervisor.close(&db).expect("close actor");
         assert_eq!(moment_count(&db, "alias/x.md"), 0);
+    }
+
+    #[test]
+    fn cached_canonical_root_refuses_a_root_symlink_swap() {
+        // The engine database lives elsewhere so Windows can rename the
+        // capture root while its actor remains open.
+        let store_scratch = ScratchDir::new().expect("store scratch");
+        let capture_scratch = ScratchDir::new().expect("capture scratch");
+        let root = capture_scratch.path().to_path_buf();
+        let moved_root = root.with_file_name(format!(
+            "{}-moved",
+            root.file_name().expect("root name").to_string_lossy()
+        ));
+        let db = store_scratch.engine_db_path().expect("engine db path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        write_file(&root, "first.md", b"first");
+        write_file(&root, "second.md", b"second");
+        let mut sink = StoreCaptureSink::new(actor, WORKSPACE_ID, VERSION_ID, &root, 10, None);
+
+        // The first read fixes this reconcile generation's canonical root.
+        ingest(&mut sink, "first.md").expect("seed canonical root");
+        std::fs::rename(&root, &moved_root).expect("move capture root");
+        if !try_symlink_dir(&root, &moved_root) {
+            std::fs::rename(&moved_root, &root).expect("restore capture root");
+            eprintln!("note: dir symlink unavailable on this host; root swap not exercised");
+            drop(sink);
+            supervisor.close(&db).expect("close actor");
+            return;
+        }
+
+        // Re-canonicalizing the root per file would accept the symlink's new
+        // target. Comparing the current parent with the cached location must
+        // instead fail closed without reading or capturing the target.
+        assert_eq!(ingest(&mut sink, "second.md"), Err(ESCAPES_ROOT));
+
+        remove_dir_symlink(&root);
+        std::fs::rename(&moved_root, &root).expect("restore capture root");
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        assert_eq!(moment_count(&db, "second.md"), 0);
     }
 
     #[test]
