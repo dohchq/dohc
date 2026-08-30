@@ -22,8 +22,8 @@ use dohc_engine_domain::{
     ChatChannelSummary, ChatDecision, ChatDecisionState, ChatFeedReadState, ChatFileMention,
     ChatFollow, ChatMention, ChatMessage, ChatProjectionFileAccess, ChatReaction,
     ChatReactionState, ChatThread, ChatThreadReadState, CollectionFilter,
-    CollectionPendingAdoptionCursor, CollectionQuery, CollectionQueryCursor, CollectionSort,
-    CompareTextFileVersions, ComparisonStatus, ConflictChoice, ConflictContentKind,
+    CollectionPendingAdoptionCursor, CollectionQuery, CollectionQueryCursor, CollectionQueryResult,
+    CollectionSort, CompareTextFileVersions, ComparisonStatus, ConflictChoice, ConflictContentKind,
     ConflictFileState, ConflictMetadata, ConflictResolution, ConflictStatus, CreateFileThread,
     CreateNamedVersion, DEFAULT_COLLECTION_QUERY_LIMIT, DeleteTextFile, DispatchClaim,
     DispatchRecord, DomainError, FeedCursorValue, FollowState, FollowTargetKind,
@@ -346,6 +346,23 @@ fn collection_response_value(response: impl Serialize) -> Result<Value, WireErro
     let mut response =
         serde_json::to_value(response).map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?;
     elide_overdepth_collection_values(&mut response);
+    encode_collection_wire_numbers(&mut response);
+    Ok(response)
+}
+
+fn collection_query_response_value(response: CollectionQueryResult) -> Result<Value, WireError> {
+    let mut response =
+        serde_json::to_value(response).map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?;
+    let cursor_sort_values = response
+        .pointer_mut("/nextCursor/sortValues")
+        .map(std::mem::take);
+    elide_overdepth_collection_values(&mut response);
+    if let Some(sort_values) = cursor_sort_values {
+        let cursor_sort_values = response
+            .pointer_mut("/nextCursor/sortValues")
+            .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+        *cursor_sort_values = sort_values;
+    }
     encode_collection_wire_numbers(&mut response);
     Ok(response)
 }
@@ -1038,9 +1055,8 @@ impl EngineService {
         cancellation: &OperationCancellation,
         request_id: u64,
         operation: &str,
-        response: impl Serialize,
+        response: Value,
     ) -> Result<(Value, Option<BlobEgress>), WireError> {
-        let response = collection_response_value(response)?;
         let bytes = serde_json::to_vec(&response)
             .map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?;
         if bytes.len() <= COLLECTION_RESPONSE_HARD_CAP_BYTES {
@@ -4095,7 +4111,7 @@ impl EngineService {
             &cancellation,
             request_id,
             "collections.get",
-            collection,
+            collection_response_value(collection)?,
         )
         .await
     }
@@ -4146,7 +4162,7 @@ impl EngineService {
             &cancellation,
             request_id,
             "collections.query",
-            result,
+            collection_query_response_value(result)?,
         )
         .await
     }
@@ -4185,7 +4201,7 @@ impl EngineService {
             &cancellation,
             request_id,
             "collections.getRecord",
-            result,
+            collection_response_value(result)?,
         )
         .await
     }
@@ -13024,7 +13040,7 @@ mod tests {
     }
 
     #[test]
-    fn collection_cap_matrix_elides_overdepth_values_on_every_response_surface() {
+    fn collection_cap_matrix_elides_display_values_but_preserves_query_cursors() {
         fn nested_value(containers: usize) -> Value {
             let mut value = json!("leaf");
             for _ in 0..containers {
@@ -13092,7 +13108,6 @@ mod tests {
                     "/records/0/values/0/value",
                     "/groups/0/value",
                     "/groups/0/records/0/values/0/value",
-                    "/nextCursor/sortValues/0/value",
                 ],
             ),
             (
@@ -13137,8 +13152,14 @@ mod tests {
         ];
 
         for (surface, input, elided_paths) in cases {
-            let response = collection_response_value(input.clone())
-                .unwrap_or_else(|error| panic!("{surface} projection failed: {error:?}"));
+            let response = if surface == "collections.query" {
+                collection_query_response_value(
+                    serde_json::from_value(input.clone()).expect("typed collection query result"),
+                )
+            } else {
+                collection_response_value(input.clone())
+            }
+            .unwrap_or_else(|error| panic!("{surface} projection failed: {error:?}"));
             for path in elided_paths {
                 assert_eq!(
                     response.pointer(path),
@@ -13151,6 +13172,11 @@ mod tests {
                     response.pointer("/records/1/values/0/value"),
                     Some(&at_limit),
                     "the boundary value must remain intact"
+                );
+                assert_eq!(
+                    response.pointer("/nextCursor/sortValues/0/value"),
+                    Some(&over_limit),
+                    "the raw cursor value must remain an opaque continuation token"
                 );
             }
             if !input.to_string().contains("value-depth-exceeded") {

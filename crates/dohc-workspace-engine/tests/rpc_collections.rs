@@ -872,6 +872,114 @@ async fn collection_larger_than_frame_cap_pages_completely_in_sorted_order() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn overdepth_sort_values_page_without_gaps_or_duplicates() {
+    const RECORDS: [(&str, &str, &str); 3] = [
+        ("zeta.md", "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa", "charlie"),
+        ("alpha.md", "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb", "alpha"),
+        ("beta.md", "rec_cccccccccccccccccccccccccc", "bravo"),
+    ];
+
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let db = scratch.engine_db_path().expect("engine db path");
+    let mut store = EngineStore::open(&db, 1).expect("open store");
+    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
+        .expect("main version");
+    let schema = "name: Deep values\n";
+    seed_text(&mut store, "depth/collection.yaml", schema, 2);
+    let collection_dir = scratch.path().join("depth");
+    std::fs::create_dir_all(&collection_dir).expect("depth collection directory");
+    std::fs::write(collection_dir.join("collection.yaml"), schema).expect("schema file");
+    for (index, (filename, record_id, leaf)) in RECORDS.iter().enumerate() {
+        let overdepth = format!("{}\"{leaf}\"{}", "[".repeat(24), "]".repeat(24));
+        let record = format!("---\nid: {record_id}\ndeep: {overdepth}\n---\n");
+        seed_text(
+            &mut store,
+            &format!("depth/{filename}"),
+            &record,
+            3 + index as i64,
+        );
+        std::fs::write(collection_dir.join(filename), record).expect("depth record file");
+    }
+    let reconciled = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, "main")
+        })
+        .expect("reconcile depth collection");
+    assert!(matches!(reconciled, TxnOutcome::Committed(_)));
+    drop(store);
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+
+    let mut cursor = Value::Null;
+    let mut record_paths = Vec::new();
+    for request_id in 100..100 + RECORDS.len() as u64 {
+        let mut params = json!({
+            "collectionPath": "depth",
+            "sort": [{ "field": "deep", "direction": "asc" }],
+            "limit": 1,
+        });
+        if !cursor.is_null() {
+            params["cursor"] = cursor.clone();
+        }
+        let page = call(&transport, &handle, request_id, "collections.query", params).await;
+        let records = page["records"].as_array().expect("record page");
+        assert_eq!(records.len(), 1, "each page must contain one record");
+        let record = &records[0];
+        let deep = record["values"]
+            .as_array()
+            .expect("record values")
+            .iter()
+            .find(|value| value["field"] == "deep")
+            .expect("deep indexed value");
+        assert_eq!(
+            deep["validation"],
+            json!({
+                "status": "flagged",
+                "reason": { "code": "value-depth-exceeded", "path": "" }
+            }),
+            "the sort fixture must exercise an over-depth flagged value"
+        );
+        record_paths.push(record["path"].as_str().expect("record path").to_owned());
+        cursor = page["nextCursor"].clone();
+    }
+
+    assert_eq!(
+        record_paths
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        RECORDS.len(),
+        "exclusive page boundaries must not duplicate records"
+    );
+    assert_eq!(
+        record_paths,
+        vec!["depth/alpha.md", "depth/beta.md", "depth/zeta.md"],
+        "sorted pagination must not leave gaps"
+    );
+    assert!(cursor.is_null(), "the final page must terminate the cursor");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn big_collection_numbers_cross_every_request_and_response_surface() {
     struct NumberCase {
         name: &'static str,

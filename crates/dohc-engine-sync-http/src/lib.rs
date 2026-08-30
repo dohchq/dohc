@@ -205,11 +205,38 @@ impl HttpRelayTransport {
                 if cancelled() {
                     return Err(cancelled_relay_request());
                 }
-                let response = self
+                let request = self
                     .agent
                     .get(&url)
-                    .header("authorization", &self.authorization())
-                    .call();
+                    .header("authorization", &self.authorization());
+                // A cancelled synchronous ureq read can remain blocked until
+                // its transport timeout, so header and body reads share the
+                // same bounded worker budget.
+                let permit = acquire_body_read_worker(&cancelled)?;
+                let (response_tx, response_rx) = std::sync::mpsc::channel();
+                let worker = std::thread::Builder::new()
+                    .name("dohc-relay-header-read".to_owned())
+                    .spawn(move || {
+                        let _permit = permit;
+                        let _ = response_tx.send(request.call());
+                    })
+                    .map_err(|_| RelayError::InvalidResponse)?;
+                let response = loop {
+                    match response_rx.recv_timeout(CANCELLABLE_BODY_READ_POLL_INTERVAL) {
+                        Ok(response) => {
+                            worker.join().map_err(|_| RelayError::InvalidResponse)?;
+                            break response;
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            worker.join().map_err(|_| RelayError::InvalidResponse)?;
+                            return Err(RelayError::InvalidResponse);
+                        }
+                    }
+                    if cancelled() {
+                        return Err(cancelled_relay_request());
+                    }
+                };
                 if cancelled() {
                     return Err(cancelled_relay_request());
                 }
@@ -1502,6 +1529,91 @@ mod tests {
             "MUTATION: restoring redirects follows the HTTPS-to-HTTP downgrade"
         );
         thread.join().expect("TLS server thread");
+    }
+
+    #[test]
+    fn cancelling_a_stalled_tls_blob_header_wait_settles_before_header_release() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let cert = base64::engine::general_purpose::STANDARD
+            .decode(TEST_CERT_DER_BASE64)
+            .expect("test certificate");
+        let key = base64::engine::general_purpose::STANDARD
+            .decode(TEST_KEY_DER_BASE64)
+            .expect("test key");
+        let server = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![CertificateDer::from(cert)],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key)),
+            )
+            .expect("TLS server config");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("TLS listener");
+        let port = listener.local_addr().expect("TLS address").port();
+        let server = Arc::new(server);
+        let (request_received_tx, request_received_rx) = mpsc::channel();
+        let (release_headers_tx, release_headers_rx) = mpsc::channel();
+        let server_thread = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("TLS accept");
+            let connection = ServerConnection::new(server).expect("TLS connection");
+            let mut stream = StreamOwned::new(connection, stream);
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).expect("TLS request");
+            request_received_tx
+                .send(())
+                .expect("request received signal");
+            release_headers_rx.recv().expect("release stalled headers");
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-length: 8\r\nconnection: close\r\n\r\npartdone",
+            );
+            let _ = stream.flush();
+        });
+        let tls_config = ureq::tls::TlsConfig::builder()
+            .provider(ureq::tls::TlsProvider::Rustls)
+            .disable_verification(true)
+            .build();
+        let transport = HttpRelayTransport {
+            base_url: format!("https://localhost:{port}"),
+            token: "token".to_owned(),
+            agent: configured_agent(Duration::from_secs(5), false, Some(tls_config)),
+        };
+        let (outcome_tx, outcome_rx) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let request_cancelled = Arc::clone(&cancelled);
+        let request_thread = thread::spawn(move || {
+            let outcome = transport.download_blobs_cancellable(
+                BlobDownloadBatchRequest {
+                    workspace_id: "workspace".to_owned(),
+                    replication_epoch: "epoch".to_owned(),
+                    stream_identity: "stream".to_owned(),
+                    blobs: vec![dohc_engine_sync::BlobDownloadSpec {
+                        sha256: "blob".to_owned(),
+                        limit_bytes: 8,
+                    }],
+                },
+                || request_cancelled.load(Ordering::SeqCst),
+            );
+            outcome_tx.send(outcome).expect("blob request outcome");
+        });
+
+        request_received_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("TLS server receives blob request before cancellation");
+        cancelled.store(true, Ordering::SeqCst);
+        let outcome_before_release = outcome_rx.recv_timeout(Duration::from_secs(1));
+
+        release_headers_tx.send(()).expect("release TLS server");
+        request_thread.join().expect("blob request thread");
+        server_thread.join().expect("TLS server thread");
+
+        let outcome = outcome_before_release
+            .expect("cancellation must settle while response headers are still stalled");
+        assert!(
+            matches!(&outcome, Err(RelayError::Local(reason)) if reason == "relay-io-cancelled"),
+            "a cancelled header wait must not produce a relay response: {outcome:?}"
+        );
     }
 
     #[test]
