@@ -8,25 +8,29 @@ The run does not decide whether dohc has every planned feature. It decides wheth
 
 ## Current verdict
 
-**Not launch-ready.** Five of the seven P1 defects found after the first pass
-were not owned by the Notion-parity session. Four are now fixed with durable or
-performance evidence: History retries its expected capture contention, live
-Markdown is flushed before a rename, a 250 KiB Markdown document retains the
-complete input burst, and a 3 MiB Markdown document stays in a bounded source
-viewer. The 5,000-file Explorer path also meets the measured interaction
-boundary.
+**Launch-ready for the tested desktop scope.** No reproducible P0 or P1 defect
+remains in the 20 findings from this run. The first-use, Sites, Cloud, chat,
+History, graph, large-document, Explorer, and large-workspace paths now have
+durable or real-app evidence. One search observation was not reproducible after
+the test waited for a durable save.
 
-Three P1s remain. Cold large-workspace adoption is still an engine performance
-blocker owned by this run. It now has a covered loading state and a production
-deadline instead of exposing a raw error, but fresh 15,000-file capture still
-takes minutes. Transparent Sites previews and the Cloud localhost default
-remain behind the active share-links ownership fence.
+A first import is still visible work at large scale. In the packaged release
+build, a fresh 15,000-file workspace opens in a named `Importing` phase after
+14.746 seconds and reaches full History readiness after 77.226 seconds. The
+same workspace reopens `Ready` in 815 ms. Baseline-dependent operations fail
+fast with an updating response during import; file content, close, and reopen
+remain available and preserve the first and last fixture files. This is an
+explicit background-import boundary, not an unexplained wait or raw deadline.
+Fresh plans below 1,000 files keep the simpler strict barrier and do not expose
+a partial-ready state for ordinary workspaces.
 
 The verdict is based on the production Electron build, fresh-profile and
 power-user computer-control tours, targeted durable-result E2Es, a 21-surface
-light/dark visual audit, full JavaScript checks, the canonical Rust gate, and
-default-engine performance profiles. Passing checks do not override the
-remaining cold-adoption and share-surface failures.
+light/dark visual audit, full JavaScript checks, canonical Rust gates, and
+default-engine performance profiles. A release that offers managed dohc Cloud
+must still provide both production origins through `DOHC_CLOUD_URL` and
+`DOHC_CLOUD_RELAY_URL`; an unconfigured build now says so and offers the
+self-hosted path instead of guessing localhost.
 
 ## Starting point
 
@@ -38,11 +42,11 @@ remaining cold-adoption and share-surface failures.
 
 ## Conflict fence
 
-The share-links session owns its active Sites and Cloud surfaces. This run can
-test those workflows and record failures, but must not edit their source or
-tests. The first ownership map also fenced several editor and History findings
-as Notion-parity work. A second exact-file audit found no active collision for
-those P1s, so this run fixed them in isolation.
+The first ownership map fenced Sites, Cloud, chat, History, graph, and editor
+findings at the surface level. An exact file-and-hunk audit found that the
+required edits were disjoint from the active share-links and Notion-parity
+sessions. Each unit was implemented in an isolated worktree, verified there,
+then inspected and integrated here. No active share-link hunk was changed.
 
 Before each fix, check its files against active worktrees and the recent diff from the baseline. If ownership is unclear, leave the finding open instead of creating a parallel contract.
 
@@ -99,7 +103,9 @@ The harness and manual tour must cover these workflow groups in light and dark t
 11. Engine loss, stale async responses, missing files, unsupported files, and relaunch recovery.
 12. Workspace switching and large-workspace paths covered by existing profiling fixtures.
 
-Share-link workflows remain test-only for this branch.
+Share-link creation and handoff workflows remain outside this branch. The
+adjacent Sites and Cloud launch surfaces were changed only where the exact hunk
+audit proved they did not overlap that work.
 
 ## Workflow
 
@@ -146,7 +152,8 @@ For each unit:
 
 - Inspect each worker's diff and artifact before integration.
 - Run a separate judge over delegated work.
-- Use one Fable review for the final integrated, taste-sensitive UI judgment.
+- Use the single Fable budget for taste-sensitive UI judgment, then run a
+  read-only independent simplification review on the final integrated code.
 - Verify every review finding against the final source and real app.
 
 ### 7. Close the run
@@ -168,16 +175,21 @@ Raw evidence stays out of Git. The manifest, checks, findings, and decisions sta
 
 ## Closeout status
 
-- Launch-readiness-owned P1s: five fixed or disproved with durable-result
-  evidence; cold workspace adoption remains open.
-- Share-links-owned P1s: reproduced, assigned, and retained with traces or
-  screenshots; none were edited in this branch.
-- Post-fix product tour: New file, file creation, settings, focus, and light/dark
-  surfaces rechecked in the production Electron build.
+- Findings: 19 fixed and one not reproduced after a durable-save control; no
+  reproducible P0 or P1 remains in the tested scope.
+- Ownership: every formerly deferred Sites, Cloud, chat, History, and graph
+  fix passed an exact hunk audit before isolated implementation.
+- Post-fix product tour: first file, Sites, preview, chat, settings, focus, and
+  light/dark surfaces were rechecked in the production Electron build.
 - Explorer performance: fixed from 5,004 mounted rows and 2,407 ms expansion to
   37 mounted rows and 80 ms to first child on the final production bundle.
 - Large Markdown performance: 30 of 30 characters persisted in the 250 KiB
   edit journey; the bounded 3 MiB read settled in 198 ms with 460 whole-page
   DOM nodes and one 64 ms long task.
-- Remaining release decision: blocked until LR-005, LR-010, and LR-014 are
-  fixed and their real-app journeys pass.
+- Graph performance: bounded to 240 interactive nodes and rows; three release
+  runs reached ready in 1.494-1.673 seconds with a 66-78 ms longest task.
+- Fresh capture: 5,000 files open at 6.864 seconds and reach `Ready` at 16.153
+  seconds; 15,000 files open at 14.746 seconds and reach `Ready` at 77.226
+  seconds. Reopens are 256 ms and 815 ms, with content integrity checks passed.
+- Release configuration: set both managed Cloud origins for a managed-service
+  build. Missing or invalid configuration is now an honest, recoverable state.
