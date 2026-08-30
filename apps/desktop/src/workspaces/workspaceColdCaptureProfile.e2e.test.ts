@@ -5,12 +5,13 @@ import { performance } from "node:perf_hooks";
 import { expect, it } from "vitest";
 import {
   createEngineClient,
-  EngineWorkspaceSessions,
   type EngineClient,
   type EngineWorkspace,
+  type EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
+import { createRealDaemonWorkspaceSessions } from "../testing/realDaemonWorkspaceSessions";
 import { createTestScratch } from "./testTemp";
 
 const FILE_COUNT_ENV = "DOHC_COLD_CAPTURE_PROFILE_FILES";
@@ -120,7 +121,7 @@ it.skipIf(fileCount === 0 || engine.missing)(
     };
     const binary = engine.require();
     let client = await startClient(binary);
-    let sessions = new EngineWorkspaceSessions(
+    let sessions = createRealDaemonWorkspaceSessions(
       { currentClient: () => client },
       { workspaceOpenDeadlineMs: PROFILE_OPEN_DEADLINE_MS },
     );
@@ -137,7 +138,7 @@ it.skipIf(fileCount === 0 || engine.missing)(
       await stopClient(client);
 
       client = await startClient(binary);
-      sessions = new EngineWorkspaceSessions(
+      sessions = createRealDaemonWorkspaceSessions(
         { currentClient: () => client },
         { workspaceOpenDeadlineMs: PROFILE_OPEN_DEADLINE_MS },
       );

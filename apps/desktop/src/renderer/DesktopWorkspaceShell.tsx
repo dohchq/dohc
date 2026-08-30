@@ -4775,10 +4775,11 @@ export function DesktopWorkspaceShell(props: {
         const status = await bridge().openWorkspace({ workspaceId });
         if (cancelled) return;
         markCurrentSwitchPhase("session-admitted");
-        // Main awaits the capture build before it answers, so this is the
-        // moment the decision exists — and the status committed beside it is
-        // the first one that describes a decided workspace (#626). The two
-        // commit together, so "decided" never runs ahead of what it decided.
+        // Main answers after the safe startup boundary: either a complete
+        // baseline or a proven large fresh import. This is the moment the
+        // decision exists, and the status committed beside it is the first one
+        // that describes that decided workspace (#626). The two commit
+        // together, so "decided" never runs ahead of what it decided.
         // The lane may refuse this status, and the decision still stands: what
         // outranks it is a NEWER status, which describes a workspace at least
         // as decided as this one.

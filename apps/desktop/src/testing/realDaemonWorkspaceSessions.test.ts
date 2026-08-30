@@ -45,6 +45,42 @@ describe("real daemon workspace sessions", () => {
     }
   });
 
+  it("keeps a profile's explicit open budget on the shared factory", async () => {
+    const rootPath = await createTestScratch("dohc-profile-daemon-sessions-");
+    const requests: Request[] = [];
+    const client: EngineDaemonClient = {
+      close() {},
+      async sendRequest(request) {
+        requests.push(request);
+        if (request.method === "workspace.open") {
+          return { id: request.id, result: { workspace: "handle-1" } };
+        }
+        if (request.method === "workspace.close") {
+          return { id: request.id, result: { closed: true } };
+        }
+        throw new Error(`Unexpected request: ${request.method}`);
+      },
+    };
+    const sessions = createRealDaemonWorkspaceSessions(
+      { currentClient: () => client },
+      { workspaceOpenDeadlineMs: 300_000 },
+    );
+
+    try {
+      await sessions.run(
+        { workspaceId: "profile-daemon-test", rootPath },
+        async () => undefined,
+      );
+      expect(requests[0]).toMatchObject({
+        method: "workspace.open",
+        deadlineMs: 300_000,
+      });
+    } finally {
+      await sessions.closeAll();
+      await rm(rootPath, { recursive: true, force: true });
+    }
+  });
+
   it("keeps real-daemon suites on the shared session factory", () => {
     const desktopRoot = fileURLToPath(new URL("../..", import.meta.url));
     const lifecycleConstructor = ["new", "EngineDaemonLifecycle("].join(" ");
