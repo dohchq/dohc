@@ -131,6 +131,94 @@ afterEach(() => {
 });
 
 describe("GraphView", () => {
+  it("bounds the panel DOM while keeping the active document reachable", async () => {
+    const nodes = Array.from({ length: 2_000 }, (_, index) => ({
+      path: `note-${index.toString().padStart(4, "0")}.md`,
+      title: `Note ${index}`,
+      incoming: index % 17,
+      outgoing: index % 11,
+    }));
+    const activePath = nodes.at(-1)!.path;
+    vi.stubGlobal("dohcDesktop", {
+      readWorkspaceGraph: vi.fn(async () => ({
+        nodes,
+        edges: [],
+        unresolvedLinks: 0,
+        scannedFileCount: nodes.length,
+        omittedFileCount: 7_000,
+        truncatedFileCount: 0,
+      })),
+    });
+
+    render(
+      <GraphView
+        workspaceId="ws-large-graph"
+        activePath={activePath}
+        refreshKey="0"
+        onOpenPath={vi.fn()}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId("graph-view").dataset.state).toBe("ready"),
+    );
+    await waitFor(
+      () => expect(screen.queryAllByTestId("graph-node")).toHaveLength(240),
+      { timeout: 5_000 },
+    );
+    expect(screen.getAllByTestId("graph-file-row")).toHaveLength(240);
+    expect(
+      screen.getAllByTestId("graph-node").some((node) => node.dataset.path === activePath),
+    ).toBe(true);
+    expect(screen.getByTestId("graph-unresolved-count").textContent).toContain(
+      "240 of 2000 shown",
+    );
+    expect(screen.getByTestId("graph-unresolved-count").textContent).toContain(
+      "7000 omitted",
+    );
+  });
+
+  it("uses the larger bounded slice in the full-page graph", async () => {
+    const nodes = Array.from({ length: 900 }, (_, index) => ({
+      path: `page-${index}.md`,
+      title: `Page ${index}`,
+      incoming: index % 5,
+      outgoing: 0,
+    }));
+    vi.stubGlobal("dohcDesktop", {
+      readWorkspaceGraph: vi.fn(async () => ({
+        nodes,
+        edges: [],
+        unresolvedLinks: 0,
+        scannedFileCount: nodes.length,
+        omittedFileCount: 0,
+        truncatedFileCount: 0,
+      })),
+    });
+
+    render(
+      <GraphView
+        workspaceId="ws-page-graph"
+        activePath={null}
+        refreshKey="0"
+        variant="page"
+        onOpenPath={vi.fn()}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId("graph-view").dataset.state).toBe("ready"),
+    );
+    await waitFor(
+      () => expect(screen.queryAllByTestId("graph-node")).toHaveLength(500),
+      { timeout: 5_000 },
+    );
+    expect(screen.queryAllByTestId("graph-file-row")).toHaveLength(0);
+    expect(screen.getByTestId("graph-unresolved-count").textContent).toContain(
+      "500 of 900 shown",
+    );
+  });
+
   it("does not commit React renders during force-simulation frames", async () => {
     const frames = stubAnimationFrames();
     vi.stubGlobal("dohcDesktop", {

@@ -6,12 +6,14 @@ import {
   isGraphTabPath,
   isHistoryDiffTabPath,
   isHistoryTabPath,
+  isMomentDiffTabPath,
   isPluginDetailsTabPath,
   isPluginPanelTabPath,
   isPluginWebAppTabPath,
   isSingletonEditorTabPath,
   isVersionCompareTabPath,
   parseHistoryDiffTabPath,
+  parseMomentDiffTabFilePath,
   parsePluginDetailsTabPath,
   parsePluginPanelTabPath,
   parsePluginWebAppTabPath,
@@ -44,6 +46,11 @@ function fileName(path: string, label?: string): string {
     const name = parsed?.filePath.split("/").pop() ?? "Diff";
     return `Diff: ${name}`;
   }
+  if (isMomentDiffTabPath(path)) {
+    const filePath = parseMomentDiffTabFilePath(path);
+    const name = filePath?.split("/").pop();
+    return name ? `Diff: ${name}` : "History change";
+  }
   if (isVersionCompareTabPath(path)) return "Compare with Main";
   return path.split("/").pop() ?? path;
 }
@@ -70,6 +77,10 @@ function tabTitle(path: string, label?: string): string {
   if (isHistoryDiffTabPath(path)) {
     const parsed = parseHistoryDiffTabPath(path);
     return parsed ? `History diff: ${parsed.filePath}` : "History diff";
+  }
+  if (isMomentDiffTabPath(path)) {
+    const filePath = parseMomentDiffTabFilePath(path);
+    return filePath ? `History diff: ${filePath}` : "History change";
   }
   if (isVersionCompareTabPath(path)) return "Compare this Version with Main";
   return path;

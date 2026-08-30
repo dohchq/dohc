@@ -88,8 +88,9 @@ export const VERSION_COMPARE_TAB_PREFIX = "dohc://versions/compare/";
 // MOMENT id, not legacy change-set id.
 export const MOMENT_DIFF_TAB_PREFIX = "dohc://moment-diff/";
 
-export function momentDiffTabPath(momentId: string): string {
-  return `${MOMENT_DIFF_TAB_PREFIX}${encodeURIComponent(momentId)}`;
+export function momentDiffTabPath(momentId: string, filePath?: string): string {
+  const path = `${MOMENT_DIFF_TAB_PREFIX}${encodeURIComponent(momentId)}`;
+  return filePath ? `${path}?file=${encodeURIComponent(filePath)}` : path;
 }
 
 export function isMomentDiffTabPath(path: string | null): boolean {
@@ -99,8 +100,21 @@ export function isMomentDiffTabPath(path: string | null): boolean {
 export function parseMomentDiffTabPath(path: string | null): string | null {
   if (typeof path !== "string" || !isMomentDiffTabPath(path)) return null;
   try {
-    const momentId = decodeURIComponent(path.slice(MOMENT_DIFF_TAB_PREFIX.length));
+    const encoded = path.slice(MOMENT_DIFF_TAB_PREFIX.length).split("?", 1)[0] ?? "";
+    const momentId = decodeURIComponent(encoded);
     return momentId.length > 0 ? momentId : null;
+  } catch {
+    return null;
+  }
+}
+
+export function parseMomentDiffTabFilePath(path: string | null): string | null {
+  if (typeof path !== "string" || !isMomentDiffTabPath(path)) return null;
+  const queryIndex = path.indexOf("?");
+  if (queryIndex < 0) return null;
+  try {
+    const filePath = new URLSearchParams(path.slice(queryIndex + 1)).get("file");
+    return filePath && filePath.length > 0 ? filePath : null;
   } catch {
     return null;
   }

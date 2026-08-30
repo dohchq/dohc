@@ -10092,7 +10092,7 @@ describe("history page", () => {
       await save.promise;
     });
 
-    const momentPath = momentDiffTabPath("m-1");
+    const momentPath = momentDiffTabPath("m-1", "notes/plan.md");
     await waitFor(() =>
       expect(within(left).getByTestId(`tab-${momentPath}`).dataset.active).toBe(
         "true",
@@ -10145,7 +10145,9 @@ describe("history page", () => {
       expect(within(group).getByTestId("tab-b.md").dataset.active).toBe("true"),
     );
     expect(
-      within(group).queryByTestId(`tab-${momentDiffTabPath("m-1")}`),
+      within(group).queryByTestId(
+        `tab-${momentDiffTabPath("m-1", "notes/plan.md")}`,
+      ),
     ).toBeNull();
   });
 

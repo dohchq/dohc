@@ -3836,7 +3836,7 @@ export function DesktopWorkspaceShell(props: {
   );
   // Engine history diff (flagged workspaces): one tab per moment.
   const openMomentDiffTab = useCallback(
-    (momentId: string) => {
+    (momentId: string, filePath: string) => {
       const targetGroupId = wbRef.current.activeEditorGroup;
       const requestSequence = invalidateDeferredFileOpen(targetGroupId);
       const isCurrentRequest = () =>
@@ -3851,7 +3851,7 @@ export function DesktopWorkspaceShell(props: {
             return;
           }
           mutateWb((state) =>
-            openTab(state, momentDiffTabPath(momentId), targetGroupId),
+            openTab(state, momentDiffTabPath(momentId, filePath), targetGroupId),
           );
         })
         .catch((error) => {

@@ -25,6 +25,7 @@ import {
   isMomentDiffTabPath,
   momentDiffTabPath,
   parseMomentDiffTabPath,
+  parseMomentDiffTabFilePath,
   isVersionCompareTabPath,
   parseVersionCompareTabPath,
   versionCompareTabPath,
@@ -574,11 +575,18 @@ describe("tabs", () => {
     expect(parseHistoryDiffTabPath("notes/today.md")).toBeNull();
   });
 
-  it("recognizes engine moment diffs as virtual tabs with encoded moment ids", () => {
-    const path = momentDiffTabPath("moment id/with strange chars");
+  it("recognizes engine moment diffs with durable file labels", () => {
+    const path = momentDiffTabPath(
+      "moment id/with strange chars",
+      "notes/today plan.md",
+    );
     expect(isMomentDiffTabPath(path)).toBe(true);
     expect(isVirtualTabPath(path)).toBe(true);
     expect(parseMomentDiffTabPath(path)).toBe("moment id/with strange chars");
+    expect(parseMomentDiffTabFilePath(path)).toBe("notes/today plan.md");
+    expect(
+      parseMomentDiffTabFilePath(momentDiffTabPath("legacy-moment")),
+    ).toBeNull();
     expect(parseMomentDiffTabPath("dohc://moment-diff/")).toBeNull();
     expect(parseMomentDiffTabPath("dohc://moment-diff/%ZZ")).toBeNull();
     expect(parseMomentDiffTabPath("notes/today.md")).toBeNull();

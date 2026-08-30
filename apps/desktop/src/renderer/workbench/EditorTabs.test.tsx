@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EditorTabs } from "./EditorTabs";
 import {
   CHATS_TAB_PATH,
+  momentDiffTabPath,
   pluginDetailsTabPath,
   pluginPanelTabPath,
   siteTabPath,
@@ -45,6 +46,52 @@ function renderTabs(activeTab: string) {
 }
 
 describe("EditorTabs strip scrolling", () => {
+  it("names current history changes after their file, never the internal moment id", () => {
+    const path = momentDiffTabPath("moment-ydoc-internal-hash", "notes/plan.md");
+    render(
+      <EditorTabs
+        groupId="left"
+        groupNumber={1}
+        tabs={[{ path }]}
+        activeTab={path}
+        activeTabDirty={false}
+        recoveryPaths={new Set<string>()}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={noop}
+      />,
+    );
+
+    const tab = screen.getByRole("tab", { name: "Diff: plan.md" });
+    expect(tab.title).toBe("History diff: notes/plan.md");
+    expect(tab.textContent).not.toContain("moment-ydoc");
+  });
+
+  it("gives restored legacy moment tabs a neutral label instead of a raw id", () => {
+    const path = momentDiffTabPath("moment-ydoc-internal-hash");
+    render(
+      <EditorTabs
+        groupId="left"
+        groupNumber={1}
+        tabs={[{ path }]}
+        activeTab={path}
+        activeTabDirty={false}
+        recoveryPaths={new Set<string>()}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={noop}
+      />,
+    );
+
+    expect(screen.getByRole("tab", { name: "History change" })).toBeTruthy();
+  });
+
   it("uses readable labels for plugin panel tabs", () => {
     const path = pluginPanelTabPath("hello/plugin", "main panel");
     render(
