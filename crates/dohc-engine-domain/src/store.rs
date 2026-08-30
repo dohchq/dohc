@@ -2118,6 +2118,16 @@ struct ResolvedCaptureObject {
     object_id: String,
     reserved_moment_order: Option<i64>,
     known_object: Option<FileObjectRecord>,
+    snapshot_known_absent: bool,
+}
+
+/// The result of capture's admission-aware mutation seam. Runtime callers use
+/// `object_was_created` to avoid inspecting Y.Doc state that cannot exist yet:
+/// every durable lineage row has the file object as its foreign-key parent.
+#[doc(hidden)]
+pub struct CaptureIngestOutcome {
+    pub result: WriteResult,
+    pub object_was_created: bool,
 }
 
 impl<'a> From<&'a WriteText> for ProjectedWriteText<'a> {
@@ -2145,6 +2155,8 @@ thread_local! {
         const { std::cell::Cell::new((0, 0)) };
     static CAPTURE_PREPARED_WRITE_COUNTS: std::cell::Cell<(usize, usize)> =
         const { std::cell::Cell::new((0, 0)) };
+    static CAPTURE_QUERY_COUNTS: std::cell::Cell<(usize, usize, usize)> =
+        const { std::cell::Cell::new((0, 0, 0)) };
 }
 
 #[cfg(test)]
@@ -2185,6 +2197,40 @@ fn note_capture_prepared_write(read_back: bool) {
 #[cfg(test)]
 fn capture_prepared_write_counts() -> (usize, usize) {
     CAPTURE_PREPARED_WRITE_COUNTS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn reset_capture_query_counts() {
+    CAPTURE_QUERY_COUNTS.with(|counts| counts.set((0, 0, 0)));
+}
+
+#[cfg(test)]
+fn note_version_exists_query() {
+    CAPTURE_QUERY_COUNTS.with(|counts| {
+        let (version, alias, snapshot) = counts.get();
+        counts.set((version + 1, alias, snapshot));
+    });
+}
+
+#[cfg(test)]
+fn note_alias_query() {
+    CAPTURE_QUERY_COUNTS.with(|counts| {
+        let (version, alias, snapshot) = counts.get();
+        counts.set((version, alias + 1, snapshot));
+    });
+}
+
+#[cfg(test)]
+fn note_snapshot_query() {
+    CAPTURE_QUERY_COUNTS.with(|counts| {
+        let (version, alias, snapshot) = counts.get();
+        counts.set((version, alias, snapshot + 1));
+    });
+}
+
+#[cfg(test)]
+fn capture_query_counts() -> (usize, usize, usize) {
+    CAPTURE_QUERY_COUNTS.with(std::cell::Cell::get)
 }
 
 /// Validate a write and normalize only its path through the R07
@@ -2281,7 +2327,7 @@ pub fn capture_ingest_in_tx(
     tx: &Transaction<'_>,
     input: &CaptureIngest,
 ) -> Result<WriteResult, DomainError> {
-    capture_ingest_with_admission_in_tx(tx, input, |_, _, _| Ok::<(), DomainError>(()))
+    Ok(capture_ingest_with_admission_in_tx(tx, input, |_, _, _| Ok::<(), DomainError>(()))?.result)
 }
 
 #[doc(hidden)]
@@ -2289,7 +2335,7 @@ pub fn capture_ingest_with_admission_in_tx<E>(
     tx: &Transaction<'_>,
     input: &CaptureIngest,
     admit: impl FnOnce(&str, &str, &str) -> Result<(), E>,
-) -> Result<WriteResult, E>
+) -> Result<CaptureIngestOutcome, E>
 where
     E: From<DomainError>,
 {
@@ -2333,14 +2379,18 @@ where
         if recorded.payload_hash != payload_hash {
             return Err(DomainError::IdempotencyKeyReuseMismatch.into());
         }
-        return reconstruct_capture_write(tx, &input.workspace_id, recorded.result_seq)
-            .map_err(E::from);
+        return Ok(CaptureIngestOutcome {
+            result: reconstruct_capture_write(tx, &input.workspace_id, recorded.result_seq)
+                .map_err(E::from)?,
+            object_was_created: false,
+        });
     }
 
-    let target_object_id =
-        alias_object_id(tx, &input.workspace_id, &input.version_id, &input.path)?.unwrap_or_else(
-            || derive_capture_object_id(&input.workspace_id, &input.version_id, &input.path),
-        );
+    let existing_object_id =
+        alias_object_id(tx, &input.workspace_id, &input.version_id, &input.path)?;
+    let target_object_id = existing_object_id.clone().unwrap_or_else(|| {
+        derive_capture_object_id(&input.workspace_id, &input.version_id, &input.path)
+    });
     admit(&input.workspace_id, &input.version_id, &target_object_id)?;
 
     let resolved = resolve_capture_object(
@@ -2348,14 +2398,20 @@ where
         &input.workspace_id,
         &input.version_id,
         &input.path,
+        existing_object_id,
         input.now_ms,
     )?;
-    let before = get_snapshot(
-        tx,
-        &input.workspace_id,
-        &input.version_id,
-        &resolved.object_id,
-    )?;
+    let before = if resolved.snapshot_known_absent {
+        None
+    } else {
+        get_snapshot(
+            tx,
+            &input.workspace_id,
+            &input.version_id,
+            &resolved.object_id,
+        )?
+    };
+    let object_was_created = resolved.known_object.is_some();
     // OWNERSHIP: capture only overwrites heads written with ITS OWN origin.
     // A head that arrived by another route (RPC, replication) may have no
     // disk counterpart at all, so letting disk bytes overwrite it would
@@ -2397,7 +2453,10 @@ where
             result.moment.moment_order,
             input.now_ms,
         )?;
-        return Ok(result);
+        return Ok(CaptureIngestOutcome {
+            result,
+            object_was_created,
+        });
     }
 
     // TS `writeIfChanged` parity: an explicit pass summary (a reconcile)
@@ -2483,7 +2542,10 @@ where
         result.moment.moment_order,
         input.now_ms,
     )?;
-    Ok(result)
+    Ok(CaptureIngestOutcome {
+        result,
+        object_was_created,
+    })
 }
 
 #[doc(hidden)]
@@ -2746,22 +2808,30 @@ where
             .map_err(E::from);
     }
 
-    let target_object_id = alias_object_id(tx, &input.workspace_id, &input.version_id, &path)?
+    let existing_object_id = alias_object_id(tx, &input.workspace_id, &input.version_id, &path)?;
+    let target_object_id = existing_object_id
+        .clone()
         .unwrap_or_else(|| derive_capture_object_id(&input.workspace_id, &input.version_id, &path));
     admit(&input.workspace_id, &input.version_id, &target_object_id)?;
 
     let ResolvedCaptureObject {
         object_id,
         reserved_moment_order,
+        snapshot_known_absent,
         ..
     } = resolve_capture_object(
         tx,
         &input.workspace_id,
         &input.version_id,
         &path,
+        existing_object_id,
         input.now_ms,
     )?;
-    let before = get_snapshot(tx, &input.workspace_id, &input.version_id, &object_id)?;
+    let before = if snapshot_known_absent {
+        None
+    } else {
+        get_snapshot(tx, &input.workspace_id, &input.version_id, &object_id)?
+    };
     if let Some(existing) = &before
         && existing.metadata_origin != input.metadata_origin
         && !input.claim_foreign_head
@@ -3354,11 +3424,12 @@ fn write_normalized_text_in_tx_with_journal(
         )
         .map_err(DomainError::sql_persist)?;
     }
-    let blob_inserted = tx.execute(
-        "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
-        params![blob, input.text.len() as i64, input.text.as_ref()],
-    )
-    .map_err(DomainError::sql_persist)?
+    let blob_inserted = tx
+        .execute(
+            "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
+            params![blob, input.text.len() as i64, input.text.as_ref()],
+        )
+        .map_err(DomainError::sql_persist)?
         != 0;
     if bind_alias {
         tx.execute(
@@ -3772,11 +3843,13 @@ fn resolve_capture_object(
     workspace_id: &str,
     version_id: &str,
     path: &str,
+    existing_object_id: Option<String>,
     now_ms: i64,
 ) -> Result<ResolvedCaptureObject, DomainError> {
     let mut reserved_moment_order = None;
     let mut known_object = None;
-    let object_id = match alias_object_id(tx, workspace_id, version_id, path)? {
+    let mut snapshot_known_absent = false;
+    let object_id = match existing_object_id {
         Some(object_id) => object_id,
         None => {
             let derived_object_id = derive_capture_object_id(workspace_id, version_id, path);
@@ -3792,6 +3865,7 @@ fn resolve_capture_object(
                     object_id: derived_object_id.clone(),
                     created_at_ms: now_ms,
                 });
+                snapshot_known_absent = true;
                 derived_object_id
             } else if !object_has_live_alias(tx, workspace_id, &derived_object_id)? {
                 derived_object_id
@@ -3814,6 +3888,7 @@ fn resolve_capture_object(
                     object_id: disambiguated_object_id.clone(),
                     created_at_ms: now_ms,
                 });
+                snapshot_known_absent = true;
                 reserved_moment_order = Some(next_order);
                 disambiguated_object_id
             };
@@ -3830,6 +3905,7 @@ fn resolve_capture_object(
         object_id,
         reserved_moment_order,
         known_object,
+        snapshot_known_absent,
     })
 }
 
@@ -4493,6 +4569,8 @@ fn version_exists(
     workspace_id: &str,
     version_id: &str,
 ) -> Result<bool, DomainError> {
+    #[cfg(test)]
+    note_version_exists_query();
     let found: Option<i64> = conn
         .query_row(
             "SELECT 1 FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
@@ -4624,6 +4702,8 @@ fn alias_object_id(
     version_id: &str,
     path: &str,
 ) -> Result<Option<String>, DomainError> {
+    #[cfg(test)]
+    note_alias_query();
     conn.query_row(
         "SELECT object_id FROM path_aliases WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
         params![workspace_id, version_id, path],
@@ -4752,6 +4832,8 @@ fn get_snapshot(
     version_id: &str,
     object_id: &str,
 ) -> Result<Option<SnapshotRecord>, DomainError> {
+    #[cfg(test)]
+    note_snapshot_query();
     let row = conn
         .query_row(
             "SELECT s.object_id, s.path, b.text, s.blob_sha256, s.updated_at_ms, \
@@ -6152,11 +6234,12 @@ mod tests {
     use std::borrow::Cow;
 
     use super::{
-        MOMENT_TEXT_HYDRATION_CAP_BYTES, NEXT_MOMENT_ORDER_SQL, ProjectedWriteText,
-        VersionedTextStore, capture_prepared_write_counts, derive_capture_object_id,
+        CaptureIngestOutcome, MOMENT_TEXT_HYDRATION_CAP_BYTES, NEXT_MOMENT_ORDER_SQL,
+        ProjectedWriteText, VersionedTextStore, capture_ingest_with_admission_in_tx,
+        capture_prepared_write_counts, capture_query_counts, derive_capture_object_id,
         next_moment_order, object_has_references, reset_capture_prepared_write_counts,
-        reset_write_text_ownership_counts, text_blob_sha256, write_projected_text_in_tx,
-        write_text_in_tx, write_text_ownership_counts,
+        reset_capture_query_counts, reset_write_text_ownership_counts, text_blob_sha256,
+        write_projected_text_in_tx, write_text_in_tx, write_text_ownership_counts,
     };
     use crate::{
         CaptureIngest, CaptureRetire, DomainError, RenameTextFile, WriteResult, WriteText,
@@ -6198,6 +6281,18 @@ mod tests {
         VersionedTextStore::new(store)
             .capture_ingest(&capture_input(path, text, now_ms), &NoFaults)
             .expect("capture text")
+    }
+
+    fn capture_outcome(store: &mut EngineStore, input: &CaptureIngest) -> CaptureIngestOutcome {
+        let outcome = store
+            .write_with(&NoFaults, |tx| {
+                capture_ingest_with_admission_in_tx(tx, input, |_, _, _| Ok::<_, DomainError>(()))
+            })
+            .expect("capture text");
+        match outcome {
+            TxnOutcome::Committed(outcome) => outcome,
+            TxnOutcome::Crashed { .. } => panic!("capture crashed"),
+        }
     }
 
     fn assert_capture_matches_hydrated(store: &mut EngineStore, captured: &WriteResult) {
@@ -6373,29 +6468,21 @@ mod tests {
             .expect("ensure main version");
 
         reset_capture_prepared_write_counts();
-        let captured = VersionedTextStore::new(&mut store)
-            .capture_ingest(
-                &CaptureIngest {
-                    workspace_id: "ws".to_owned(),
-                    version_id: "main".to_owned(),
-                    path: "notes/fresh.md".to_owned(),
-                    text: "prepared capture body".to_owned(),
-                    metadata_origin: "capture".to_owned(),
-                    metadata_summary: Some("Captured fresh file".to_owned()),
-                    metadata_correlation_id: Some("capture-pass-1".to_owned()),
-                    author_json: Some(r#"{"kind":"capture-test"}"#.to_owned()),
-                    now_ms: 2,
-                    request_id: None,
-                    claim_foreign_head: false,
-                },
-                &NoFaults,
-            )
-            .expect("capture fresh text");
+        reset_capture_query_counts();
+        let input = capture_input("notes/fresh.md", "prepared capture body".to_owned(), 2);
+        let captured = capture_outcome(&mut store, &input);
+        assert!(captured.object_was_created);
+        let captured = captured.result;
 
         assert_eq!(
             capture_prepared_write_counts(),
             (1, 0),
             "fresh capture must persist its resolved state without rereading the wide result"
+        );
+        assert_eq!(
+            capture_query_counts(),
+            (1, 1, 0),
+            "fresh capture must check version and alias once without querying an impossible preimage"
         );
         let versioned = VersionedTextStore::new(&mut store);
         let hydrated_moment = versioned
@@ -6601,15 +6688,17 @@ mod tests {
             .expect("retire captured file");
 
         reset_capture_prepared_write_counts();
-        let captured = capture_text(&mut store, path, "recreated body".to_owned(), 4);
+        let input = capture_input(path, "recreated body".to_owned(), 4);
+        let captured = capture_outcome(&mut store, &input);
 
-        assert_eq!(captured.object.object_id, first.object.object_id);
+        assert!(!captured.object_was_created);
+        assert_eq!(captured.result.object.object_id, first.object.object_id);
         assert_eq!(
             capture_prepared_write_counts(),
             (1, 1),
             "capture must hydrate a pre-existing object that it did not insert"
         );
-        assert_capture_matches_hydrated(&mut store, &captured);
+        assert_capture_matches_hydrated(&mut store, &captured.result);
     }
 
     #[test]

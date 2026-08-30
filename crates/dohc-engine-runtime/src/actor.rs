@@ -12358,10 +12358,22 @@ fn journal_moment_outbound_in_tx(
     moment_id: &str,
     deduped: bool,
 ) -> Result<(), DomainError> {
-    if deduped
-        || !dohc_engine_sync::workspace_journals_file_moments_in_tx(tx, workspace_id)
-            .map_err(outbound_domain)?
-    {
+    if deduped {
+        return Ok(());
+    }
+    let enabled = dohc_engine_sync::workspace_journals_file_moments_in_tx(tx, workspace_id)
+        .map_err(outbound_domain)?;
+    journal_moment_outbound_when_enabled_in_tx(tx, workspace_id, moment_id, false, enabled)
+}
+
+fn journal_moment_outbound_when_enabled_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    moment_id: &str,
+    deduped: bool,
+    enabled: bool,
+) -> Result<(), DomainError> {
+    if deduped || !enabled {
         return Ok(());
     }
     dohc_engine_sync::journal_moment_append_in_tx(tx, workspace_id, moment_id)
@@ -14400,7 +14412,7 @@ fn capture_ingest_on_store(
         return Err(RuntimeError::Cancelled);
     }
     let outcome = store.write_with(faults, |tx| {
-        capture_ingest_in_tx(tx, input, indexing, leases)
+        capture_ingest_in_tx(tx, input, indexing, leases, None)
     })?;
     match outcome {
         TxnOutcome::Committed(result) => Ok(result),
@@ -14413,16 +14425,19 @@ fn capture_ingest_in_tx(
     input: &CaptureIngest,
     indexing: &CaptureIndexing,
     leases: &LeaseRegistry,
+    journals_file_moments: Option<bool>,
 ) -> Result<WriteResult, RuntimeError> {
     let actor_origin_id = capture_agent_origin_id(input.author_json.as_deref());
     let mut admitted = false;
-    let result =
-        capture_ingest_with_admission_in_tx(tx, input, |workspace_id, version_id, object_id| {
-            ensure_capture_target_not_leased(leases, workspace_id, version_id, object_id)?;
-            admitted = true;
-            Ok::<_, RuntimeError>(())
-        })?;
-    if admitted {
+    let dohc_engine_domain::CaptureIngestOutcome {
+        result,
+        object_was_created,
+    } = capture_ingest_with_admission_in_tx(tx, input, |workspace_id, version_id, object_id| {
+        ensure_capture_target_not_leased(leases, workspace_id, version_id, object_id)?;
+        admitted = true;
+        Ok::<_, RuntimeError>(())
+    })?;
+    if admitted && !object_was_created {
         dohc_engine_sync::reconcile_local_resulting_head_in_tx(
             tx,
             &input.workspace_id,
@@ -14462,12 +14477,21 @@ fn capture_ingest_in_tx(
             .map_err(RuntimeError::from)?,
         }
     }
-    journal_moment_outbound_in_tx(
-        tx,
-        &input.workspace_id,
-        &result.moment.moment_id,
-        result.deduped,
-    )
+    match journals_file_moments {
+        Some(enabled) => journal_moment_outbound_when_enabled_in_tx(
+            tx,
+            &input.workspace_id,
+            &result.moment.moment_id,
+            result.deduped,
+            enabled,
+        ),
+        None => journal_moment_outbound_in_tx(
+            tx,
+            &input.workspace_id,
+            &result.moment.moment_id,
+            result.deduped,
+        ),
+    }
     .map_err(RuntimeError::from)?;
     Ok(result)
 }
@@ -14520,10 +14544,16 @@ fn capture_ingest_batch_on_store(
     let outcome = store.write_with(faults, |tx| {
         let mut results = Vec::with_capacity(inputs.len());
         let indexing = CaptureIndexing::UseSnapshot(Arc::clone(search_policy));
+        // Capture mutates file state and outbound rows, never the owner/share
+        // lane tables that determine eligibility, so one read covers the
+        // whole compound transaction.
+        let journals_file_moments =
+            dohc_engine_sync::workspace_journals_file_moments_in_tx(tx, &first.workspace_id)
+                .map_err(outbound_domain)?;
         for input in inputs {
             tx.execute_batch("SAVEPOINT dohc_capture_batch_item")
                 .map_err(StorageError::persist_public)?;
-            match capture_ingest_in_tx(tx, input, &indexing, leases) {
+            match capture_ingest_in_tx(tx, input, &indexing, leases, Some(journals_file_moments)) {
                 Ok(result) => {
                     tx.execute_batch("RELEASE dohc_capture_batch_item")
                         .map_err(StorageError::persist_public)?;
