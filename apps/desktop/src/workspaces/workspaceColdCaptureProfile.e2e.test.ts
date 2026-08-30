@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
+import { setTimeout as delay } from "node:timers/promises";
 import { expect, it } from "vitest";
 import {
   createEngineClient,
@@ -9,13 +10,17 @@ import {
   type EngineWorkspace,
   type EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
-import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import {
+  DaemonRefusalError,
+  VersionedLiveAdapter,
+} from "@dohc/workspace-engine-client";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import { createRealDaemonWorkspaceSessions } from "../testing/realDaemonWorkspaceSessions";
 import { createTestScratch } from "./testTemp";
 
 const FILE_COUNT_ENV = "DOHC_COLD_CAPTURE_PROFILE_FILES";
 const MAX_OPEN_MS_ENV = "DOHC_COLD_CAPTURE_PROFILE_MAX_MS";
+const MAX_READY_MS_ENV = "DOHC_COLD_CAPTURE_PROFILE_MAX_READY_MS";
 const OUTPUT_ENV = "DOHC_COLD_CAPTURE_PROFILE_OUTPUT";
 const SEARCH_MODE_ENV = "DOHC_COLD_CAPTURE_PROFILE_SEARCH";
 const PROFILE_OPEN_DEADLINE_MS = 5 * 60_000;
@@ -68,6 +73,7 @@ async function stopClient(client: EngineClient): Promise<void> {
 async function countDurableMoments(
   sessions: EngineWorkspaceSessions,
   workspace: EngineWorkspace,
+  onFirstPage?: () => void,
 ): Promise<{ moments: number; paths: number; latestMomentOrder: number }> {
   return await sessions.run(workspace, async ({ client, workspace: handle }) => {
     const adapter = new VersionedLiveAdapter(client, handle, {
@@ -83,6 +89,7 @@ async function countDurableMoments(
         limit: 500,
         ...(beforeMomentOrder !== undefined ? { beforeMomentOrder } : {}),
       });
+      if (beforeMomentOrder === undefined) onFirstPage?.();
       latestMomentOrder = Math.max(latestMomentOrder, page.latestMomentOrder);
       moments += page.moments.length;
       for (const moment of page.moments) paths.add(moment.path);
@@ -92,12 +99,36 @@ async function countDurableMoments(
   });
 }
 
+async function waitForDurableMoments(
+  sessions: EngineWorkspaceSessions,
+  workspace: EngineWorkspace,
+  onFirstPage: () => void,
+): Promise<{ moments: number; paths: number; latestMomentOrder: number }> {
+  const deadline = performance.now() + PROFILE_OPEN_DEADLINE_MS;
+  while (true) {
+    try {
+      return await countDurableMoments(sessions, workspace, onFirstPage);
+    } catch (error) {
+      if (
+        !(error instanceof DaemonRefusalError) ||
+        error.wireCode !== "OVERLOADED" ||
+        error.message !== "Workspace is still updating. Try again." ||
+        performance.now() >= deadline
+      ) {
+        throw error;
+      }
+      await delay(250);
+    }
+  }
+}
+
 const fileCount = positiveInteger(FILE_COUNT_ENV, 0);
 
 it.skipIf(fileCount === 0 || engine.missing)(
   "profiles fresh default-capture workspace adoption and proves history survives restart",
   async () => {
     const maxOpenMs = positiveInteger(MAX_OPEN_MS_ENV, Number.MAX_SAFE_INTEGER);
+    const maxReadyMs = positiveInteger(MAX_READY_MS_ENV, Number.MAX_SAFE_INTEGER);
     const root = await createTestScratch("dohc-cold-capture-profile-");
     const searchMode = process.env[SEARCH_MODE_ENV]?.trim() || "default";
     if (searchMode === "excluded") {
@@ -126,13 +157,18 @@ it.skipIf(fileCount === 0 || engine.missing)(
       { workspaceOpenDeadlineMs: PROFILE_OPEN_DEADLINE_MS },
     );
     let openMs = 0;
+    let historyAcceptedMs = 0;
+    let readyMs = 0;
     let captured = { moments: 0, paths: 0, latestMomentOrder: 0 };
     let restarted = { moments: 0, paths: 0, latestMomentOrder: 0 };
     try {
       const openedAt = performance.now();
       await sessions.run(workspace, async () => undefined);
       openMs = performance.now() - openedAt;
-      captured = await countDurableMoments(sessions, workspace);
+      captured = await waitForDurableMoments(sessions, workspace, () => {
+        historyAcceptedMs = performance.now() - openedAt;
+      });
+      readyMs = performance.now() - openedAt;
 
       await sessions.closeAll();
       await stopClient(client);
@@ -155,9 +191,12 @@ it.skipIf(fileCount === 0 || engine.missing)(
     const result = {
       fileCount,
       openMs,
+      historyAcceptedMs,
+      readyMs,
       captured,
       restarted,
       maxOpenMs,
+      maxReadyMs,
       searchMode,
     };
     console.log(`COLD_CAPTURE_PROFILE ${JSON.stringify(result)}`);
@@ -171,6 +210,7 @@ it.skipIf(fileCount === 0 || engine.missing)(
     expect(captured.paths).toBe(fileCount);
     expect(restarted).toEqual(captured);
     expect(openMs).toBeLessThan(maxOpenMs);
+    expect(readyMs).toBeLessThan(maxReadyMs);
   },
   PROFILE_OPEN_DEADLINE_MS + 60_000,
 );
