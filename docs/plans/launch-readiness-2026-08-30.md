@@ -193,3 +193,9 @@ Raw evidence stays out of Git. The manifest, checks, findings, and decisions sta
   seconds. Reopens are 256 ms and 815 ms, with content integrity checks passed.
 - Release configuration: set both managed Cloud origins for a managed-service
   build. Missing or invalid configuration is now an honest, recoverable state.
+- Final gates: the canonical Rust gate passed 2,090 workspace tests and the
+  183-test crash tier; the desktop gate passed 7,662 tests across 389 files;
+  all 21 typecheck projects and the production desktop build passed.
+- Final Windows tour: the packaged Cloud dialog clearly separated an
+  unconfigured managed build from self-hosting, used neutral HTTPS examples,
+  and focused the first field after a specific blank-submit error.
