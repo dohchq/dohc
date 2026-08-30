@@ -8,20 +8,25 @@ The run does not decide whether dohc has every planned feature. It decides wheth
 
 ## Current verdict
 
-**Not launch-ready.** The launch-readiness-owned fixes are complete and the
-5,000-file Explorer path now meets the measured interaction boundary. Seven
-reproducible P1 defects remain behind active ownership fences: transient
-History startup exposes an internal error; cold large-workspace adoption
-misses the engine deadline; renaming an open Markdown file can fail to save;
-192–250 KiB Markdown editing loses input and exits edit mode; oversized
-Markdown reading creates multi-second main-thread work; transparent sites can
-be unreadable in dark mode; and the Cloud surface defaults to localhost.
+**Not launch-ready.** Five of the seven P1 defects found after the first pass
+were not owned by the Notion-parity session. Four are now fixed with durable or
+performance evidence: History retries its expected capture contention, live
+Markdown is flushed before a rename, a 250 KiB Markdown document retains the
+complete input burst, and a 3 MiB Markdown document stays in a bounded source
+viewer. The 5,000-file Explorer path also meets the measured interaction
+boundary.
+
+Three P1s remain. Cold large-workspace adoption is still an engine performance
+blocker owned by this run. It now has a covered loading state and a production
+deadline instead of exposing a raw error, but fresh 15,000-file capture still
+takes minutes. Transparent Sites previews and the Cloud localhost default
+remain behind the active share-links ownership fence.
 
 The verdict is based on the production Electron build, fresh-profile and
 power-user computer-control tours, targeted durable-result E2Es, a 21-surface
 light/dark visual audit, full JavaScript checks, the canonical Rust gate, and
 default-engine performance profiles. Passing checks do not override the
-reproduced data-loss and critical-workflow failures.
+remaining cold-adoption and share-surface failures.
 
 ## Starting point
 
@@ -33,7 +38,11 @@ reproduced data-loss and critical-workflow failures.
 
 ## Conflict fence
 
-Other sessions own share links and Notion-parity editor work. This run can test those workflows and record failures. It must not edit their source or tests.
+The share-links session owns its active Sites and Cloud surfaces. This run can
+test those workflows and record failures, but must not edit their source or
+tests. The first ownership map also fenced several editor and History findings
+as Notion-parity work. A second exact-file audit found no active collision for
+those P1s, so this run fixed them in isolation.
 
 Before each fix, check its files against active worktrees and the recent diff from the baseline. If ownership is unclear, leave the finding open instead of creating a parallel contract.
 
@@ -81,7 +90,7 @@ The harness and manual tour must cover these workflow groups in light and dark t
 2. Create, rename, move, duplicate, and delete files and folders, including recovery copy.
 3. Open, edit, save, close, reopen, and switch files across editor groups.
 4. Quick open, command palette, workspace search, and no-result recovery.
-5. Markdown input, keyboard selection, links, images, tables, and source view. Record findings only inside the Notion-parity fence.
+5. Markdown input, keyboard selection, links, images, tables, and source view.
 6. Backlinks, graph, properties, file details, and history.
 7. Chat creation, linked chat, message states, agent attribution, and interruption.
 8. Settings navigation, theme changes, update state, and invalid configuration feedback.
@@ -159,12 +168,16 @@ Raw evidence stays out of Git. The manifest, checks, findings, and decisions sta
 
 ## Closeout status
 
-- Launch-readiness-owned P1s: fixed or disproved with durable-result evidence.
-- Conflict-fenced P1s: reproduced, assigned, and retained with traces or
+- Launch-readiness-owned P1s: five fixed or disproved with durable-result
+  evidence; cold workspace adoption remains open.
+- Share-links-owned P1s: reproduced, assigned, and retained with traces or
   screenshots; none were edited in this branch.
 - Post-fix product tour: New file, file creation, settings, focus, and light/dark
   surfaces rechecked in the production Electron build.
 - Explorer performance: fixed from 5,004 mounted rows and 2,407 ms expansion to
   37 mounted rows and 80 ms to first child on the final production bundle.
-- Remaining release decision: blocked until LR-002, LR-005, LR-010, LR-012,
-  LR-014, LR-018, and LR-019 are fixed and their real-app journeys pass.
+- Large Markdown performance: 30 of 30 characters persisted in the 250 KiB
+  edit journey; the bounded 3 MiB read settled in 198 ms with 460 whole-page
+  DOM nodes and one 64 ms long task.
+- Remaining release decision: blocked until LR-005, LR-010, and LR-014 are
+  fixed and their real-app journeys pass.

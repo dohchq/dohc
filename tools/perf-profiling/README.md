@@ -24,7 +24,7 @@ The runner performs these actions:
 1. Seeds deterministic workspaces under `<output>/fixtures`.
 2. Stages the worktree-root engine through the existing E2E preflight.
 3. Runs each profiling spec in a separate Electron profile.
-4. Runs the five scenarios serially.
+4. Runs the six scenarios serially.
 5. Writes an attributable `run.json` before launching the scenarios.
 6. Writes each raw artifact and `summary.json` under the output directory.
 
@@ -79,7 +79,8 @@ Each scenario JSON keeps raw marks, CDP metrics, long tasks, and CPU profiles wh
 - long-task support, counts, total duration, and longest task;
 - Explorer expansion-to-first-child and expansion-to-complete-tree timings;
 - React commit counts when available;
-- scenario-specific Explorer, Quick Open, Graph, Excalidraw, and big-document metrics.
+- scenario-specific Explorer, Quick Open, Graph, Excalidraw, editable
+  big-document, and bounded oversized-read metrics.
 
 A missing scenario is `null`, never a pass. `complete` is true only when every
 scenario produced an artifact.
