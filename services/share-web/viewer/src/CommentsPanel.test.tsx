@@ -771,6 +771,7 @@ describe("CommentsPanel", () => {
       if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
         return jsonResponse({
           ok: true,
+          access: "view",
           latestRevision: 8,
           cursorRevision: 8,
           hasMore: false,
