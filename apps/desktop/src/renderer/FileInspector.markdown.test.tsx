@@ -15,6 +15,7 @@ import {
   it,
   vi,
 } from "vitest";
+import type { GetBacklinksResult } from "../ipc/bridgeContract";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import { FileInspector } from "./FileInspector";
 
@@ -93,7 +94,7 @@ describe("FileInspector renders markdown through the shared component map", () =
     })),
     writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
     openFileExternally: vi.fn(async () => undefined),
-    getBacklinks: vi.fn(async () => ({ sources: [] })),
+    getBacklinks: vi.fn(async (): Promise<GetBacklinksResult> => ({ sources: [] })),
     listWorkspaceFiles: vi.fn(async () => ({
       files: [{ path: "a.md", kind: "file" }],
       folders: [],
