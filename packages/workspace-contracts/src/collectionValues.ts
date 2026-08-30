@@ -19,6 +19,7 @@ const URL_PATTERN = /^[A-Za-z][A-Za-z0-9+.-]*:\S+$/;
 const MAX_COLLECTION_FIELD_VALUE_DEPTH = 24;
 const MAX_SCHEMA_COLLECTION_ITEMS = 16_384;
 const COLLECTION_SCHEMA = CORE_SCHEMA.withTags(realMapTag);
+const YAML_MAPPING_KEYS = new WeakMap<Record<string, unknown>, readonly (string | null)[]>();
 
 const FIELD_TYPES = new Set<CollectionFieldType>([
   "text",
@@ -40,6 +41,13 @@ function emptyCollectionSchema(): CollectionSchema {
     fields: [],
     views: [],
   };
+}
+
+function isEmptyYamlDocument(value: string): boolean {
+  return value.split(/\r?\n/u).every((line) => {
+    const trimmed = line.trim();
+    return trimmed.length === 0 || trimmed.startsWith("#");
+  });
 }
 
 function pointerSegment(value: string): string {
@@ -69,10 +77,13 @@ function yamlKeyText(value: unknown): string | null {
 function yamlToPlain(value: unknown): unknown {
   if (value instanceof Map) {
     const result = Object.create(null) as Record<string, unknown>;
+    const keys: (string | null)[] = [];
     for (const [key, entry] of value) {
       const text = yamlKeyText(key);
+      keys.push(text);
       if (text !== null) result[text] = yamlToPlain(entry);
     }
+    YAML_MAPPING_KEYS.set(result, keys);
     return result;
   }
   if (Array.isArray(value)) return value.map(yamlToPlain);
@@ -105,8 +116,13 @@ function reportUnknownProperties(
   path: string,
   reasons: CollectionSchemaReason[],
 ): void {
-  for (const key of Object.keys(value)) {
-    if (!allowed.has(key)) {
+  const keys = YAML_MAPPING_KEYS.get(value) ?? Object.keys(value);
+  const reported = new Set<string>();
+  for (const key of keys) {
+    if (key === null) {
+      reason(reasons, "unknown-property", propertyPath(path, "<non-text-key>"));
+    } else if (!allowed.has(key) && !reported.has(key)) {
+      reported.add(key);
       reason(reasons, "unknown-property", propertyPath(path, key));
     }
   }
@@ -448,7 +464,7 @@ function parseViews(
 }
 
 export function parseCollectionSchema(yamlText: string): CollectionSchemaParseResult {
-  if (yamlText.trim().length === 0) {
+  if (isEmptyYamlDocument(yamlText)) {
     return { status: "valid", schema: emptyCollectionSchema(), reasons: [] };
   }
 

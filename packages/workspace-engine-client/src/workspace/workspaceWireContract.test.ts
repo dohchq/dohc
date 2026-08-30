@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { validateFieldValue } from "@dohc/workspace-contracts/collection-values";
 import type { CollectionValue } from "@dohc/workspace-contracts/collection";
+import pipelineFixture from "../../../../crates/dohc-engine-domain/tests/fixtures/collection-field-pipeline.json";
 import reasonCodes from "../../../../crates/dohc-engine-domain/tests/fixtures/collection-reason-codes.json";
 import {
   WORKSPACE_METHOD,
@@ -63,6 +64,19 @@ const reservedCollectionMarkerObjects: CollectionValue[] = [
   { $dohcFloat64: "100000000000000000000" },
   { $dohcEscaped: { $dohcFloat64: "100000000000000000000" } },
 ];
+
+function fixtureValue(value: unknown): unknown {
+  if (typeof value === "bigint") {
+    return { $dohcInt64: value.toString() };
+  }
+  if (Array.isArray(value)) return value.map(fixtureValue);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, child]) => [key, fixtureValue(child)]),
+    );
+  }
+  return value;
+}
 
 describe("workspace wire schemas", () => {
   it("preserves the public object-shape error", () => {
@@ -193,6 +207,45 @@ describe("workspace wire schemas", () => {
         status: "flagged",
         reason: { code, path: "" },
       });
+    }
+  });
+
+  it("decodes the shared collection field pipeline wire vector", () => {
+    const rawValues = pipelineFixture.vectors.map((vector) => {
+      expect(JSON.stringify(vector.expectedWireValue), vector.name).toBe(
+        vector.expectedWireJson,
+      );
+      return {
+        field: vector.fieldName,
+        value: vector.expectedWireValue,
+        validation: vector.expectedValidation,
+        resolvedRelations: [],
+      };
+    });
+    const decoded = decodeWorkspaceResult(WORKSPACE_METHOD.collectionsQuery, {
+      collection: { path: "pipeline", status: "valid", reasons: [] },
+      records: [
+        {
+          id: "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb",
+          path: "pipeline/imported.md",
+          conflicted: false,
+          values: rawValues,
+        },
+      ],
+      groups: null,
+      nextCursor: null,
+    });
+
+    expect(decoded.records[0]?.values).toHaveLength(pipelineFixture.vectors.length);
+    for (const [index, vector] of pipelineFixture.vectors.entries()) {
+      const value = decoded.records[0]?.values[index];
+      expect(value?.field, vector.name).toBe(vector.fieldName);
+      expect(fixtureValue(value?.value), vector.name).toEqual(
+        vector.expectedSemantic,
+      );
+      expect(value?.validation, vector.name).toEqual(
+        vector.expectedValidation,
+      );
     }
   });
 

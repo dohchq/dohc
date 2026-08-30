@@ -1,7 +1,9 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use dohc_engine_domain::{
     CollectionFilter, CollectionFilterOperator, CollectionIndexedValueValidation,
     CollectionPendingAdoptionCursor, CollectionQuery, CollectionSchemaReasonCode,
-    CollectionSchemaStatus, CollectionSort, DeleteTextFile, DomainError,
+    CollectionSchemaStatus, CollectionSort, DeleteTextFile, DomainError, FieldDefinition,
     MAX_COLLECTION_HISTORY_LIMIT, MAX_COLLECTION_QUERY_SORTS, NoFaults, RenameTextFile, TxnOutcome,
     VersionedTextStore, ViewSortDirection, WriteText, collection_record_markdown_with_id,
     get_collection, get_collection_record, index_collection_frontmatter_apply_in_tx,
@@ -12,6 +14,7 @@ use dohc_engine_domain::{
 use dohc_engine_storage::{EngineStore, StorageError};
 use dohc_engine_testkit::ScratchDir;
 use rusqlite::params;
+use serde::Deserialize;
 use serde_json::json;
 
 const WORKSPACE_ID: &str = "collection-query-workspace";
@@ -21,6 +24,37 @@ const SECOND_PERSON_ID: &str = "rec_eeeeeeeeeeeeeeeeeeeeeeeeee";
 const FIRST_TASK_ID: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
 const SECOND_TASK_ID: &str = "rec_cccccccccccccccccccccccccc";
 const DEGRADED_RECORD_ID: &str = "rec_dddddddddddddddddddddddddd";
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FieldPipelineFixture {
+    version: u8,
+    collection_path: String,
+    schema_yaml: String,
+    record_markdown: String,
+    support_files: Vec<FieldPipelineSupportFile>,
+    vectors: Vec<FieldPipelineVector>,
+}
+
+#[derive(Deserialize)]
+struct FieldPipelineSupportFile {
+    path: String,
+    text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FieldPipelineVector {
+    name: String,
+    class: String,
+    field_name: String,
+    field: FieldDefinition,
+    value_yaml: String,
+    value_yaml_utf8_hex: String,
+    expected_index_json: String,
+    expected_validation: serde_json::Value,
+    expected_wire_json: String,
+}
 
 fn write_text(
     store: &mut EngineStore,
@@ -142,7 +176,7 @@ fn seeded_store() -> (ScratchDir, EngineStore) {
     .expect("person record");
     write_text(
         &mut store,
-        "people/bob.md",
+        "people/bob.MD",
         &format!("---\nid: {SECOND_PERSON_ID}\nNotes: Not a title\n---\n"),
         4,
     )
@@ -244,6 +278,176 @@ fn duplicate_frontmatter_key_vectors_are_rejected_like_the_ydoc_projection() {
         })
         .expect("count duplicate-key bindings");
     assert_eq!(binding_count, 0);
+}
+
+#[test]
+fn shared_collection_field_pipeline_vectors_index_and_query_exactly() {
+    let fixture: FieldPipelineFixture =
+        serde_json::from_str(include_str!("fixtures/collection-field-pipeline.json"))
+            .expect("field pipeline fixture parses");
+    assert_eq!(fixture.version, 1);
+    assert_eq!(fixture.collection_path, "pipeline");
+
+    let mut types_by_class = BTreeMap::<String, BTreeSet<String>>::new();
+    for vector in &fixture.vectors {
+        let field_json = serde_json::to_value(&vector.field).expect("serialize field definition");
+        let field_type = field_json["type"].as_str().expect("field type");
+        types_by_class
+            .entry(field_type.to_owned())
+            .or_default()
+            .insert(vector.class.clone());
+        assert_eq!(vector.field.name(), vector.field_name, "{}", vector.name);
+        assert_eq!(
+            vector
+                .value_yaml
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
+            vector.value_yaml_utf8_hex,
+            "{} source bytes",
+            vector.name
+        );
+        serde_json::from_str::<serde_json::Value>(&vector.expected_wire_json)
+            .unwrap_or_else(|error| panic!("{} wire JSON: {error}", vector.name));
+    }
+    assert_eq!(
+        types_by_class
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        [
+            "checkbox",
+            "date",
+            "multi-select",
+            "number",
+            "person",
+            "relation",
+            "select",
+            "text",
+            "url",
+        ]
+    );
+    for (field_type, classes) in &types_by_class {
+        assert_eq!(
+            classes,
+            &BTreeSet::from([
+                "edge".to_owned(),
+                "flagged".to_owned(),
+                "typical".to_owned()
+            ]),
+            "{field_type} coverage"
+        );
+    }
+
+    let (_scratch, mut store) = fresh_store();
+    write_text(
+        &mut store,
+        "pipeline/collection.yaml",
+        &fixture.schema_yaml,
+        2,
+    )
+    .expect("pipeline schema");
+    let mut sequence = 3;
+    for support in &fixture.support_files {
+        write_text(&mut store, &support.path, &support.text, sequence)
+            .expect("pipeline support file");
+        sequence += 1;
+    }
+    let record =
+        fixture
+            .record_markdown
+            .replacen("---\n", &format!("---\nid: {FIRST_TASK_ID}\n"), 1);
+    write_text(&mut store, "pipeline/imported.md", &record, sequence).expect("pipeline record");
+    store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile field pipeline");
+
+    let indexed = store
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT field_name,value_json,validation_status,validation_reason_json \
+                 FROM collection_record_fields \
+                 WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3",
+            )?;
+            let rows =
+                statement.query_map(params![WORKSPACE_ID, VERSION_ID, FIRST_TASK_ID], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        (
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                        ),
+                    ))
+                })?;
+            rows.collect::<Result<BTreeMap<_, _>, _>>()
+        })
+        .expect("read exact indexed pipeline bytes");
+    assert_eq!(indexed.len(), fixture.vectors.len());
+    for vector in &fixture.vectors {
+        let (value_json, status, reason_json) = indexed
+            .get(&vector.field_name)
+            .unwrap_or_else(|| panic!("missing indexed vector {}", vector.name));
+        assert_eq!(value_json, &vector.expected_index_json, "{}", vector.name);
+        assert_eq!(
+            status,
+            vector.expected_validation["status"]
+                .as_str()
+                .expect("validation status"),
+            "{}",
+            vector.name
+        );
+        let expected_reason = vector
+            .expected_validation
+            .get("reason")
+            .map(serde_json::Value::to_string);
+        assert_eq!(reason_json, &expected_reason, "{}", vector.name);
+    }
+
+    let result = store
+        .read_with(|conn| {
+            query_collection_records(conn, WORKSPACE_ID, "pipeline", &CollectionQuery::default())
+        })
+        .expect("query field pipeline")
+        .expect("pipeline collection");
+    let record = result.records.first().expect("pipeline record");
+    let queried = record
+        .values
+        .iter()
+        .map(|field| (field.field.clone(), field))
+        .collect::<BTreeMap<_, _>>();
+    for vector in &fixture.vectors {
+        let field = queried
+            .get(&vector.field_name)
+            .unwrap_or_else(|| panic!("missing queried vector {}", vector.name));
+        assert_eq!(
+            field.value,
+            serde_json::from_str::<serde_json::Value>(&vector.expected_index_json)
+                .expect("expected indexed JSON"),
+            "{}",
+            vector.name
+        );
+        assert_eq!(
+            serde_json::to_value(&field.validation).expect("serialize query validation"),
+            vector.expected_validation,
+            "{}",
+            vector.name
+        );
+    }
+    let relation_edges = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM collection_relation_edges \
+                 WHERE workspace_id=?1 AND version_id=?2 AND source_record_id=?3",
+                params![WORKSPACE_ID, VERSION_ID, FIRST_TASK_ID],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .expect("count pipeline relation edges");
+    assert_eq!(relation_edges, 3);
 }
 
 #[test]

@@ -1095,6 +1095,13 @@ pub fn parse_collection_schema(yaml_text: &str) -> CollectionSchemaParseResult {
     let Ok(documents) = YamlOwned::load_from_str(yaml_text) else {
         return degraded_document(CollectionSchemaReasonCode::InvalidYaml);
     };
+    if documents.is_empty() {
+        return CollectionSchemaParseResult {
+            status: CollectionSchemaStatus::Valid,
+            schema: CollectionSchema::empty(),
+            reasons: Vec::new(),
+        };
+    }
     if documents.len() != 1 {
         return degraded_document(CollectionSchemaReasonCode::InvalidYaml);
     }
@@ -3629,9 +3636,11 @@ fn load_collection_records(
 }
 
 fn filename_label(path: &str) -> String {
-    path_basename(path)
-        .strip_suffix(".md")
-        .unwrap_or_else(|| path_basename(path))
+    let basename = path_basename(path);
+    basename
+        .get(..basename.len().saturating_sub(3))
+        .filter(|_| is_collection_markdown_path(basename))
+        .unwrap_or(basename)
         .to_owned()
 }
 

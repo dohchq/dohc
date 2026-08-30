@@ -1923,7 +1923,13 @@ fn json_to_any(value: &Value) -> Any {
     match value {
         Value::Null => Any::Null,
         Value::Bool(value) => Any::Bool(*value),
-        Value::Number(value) => Any::Number(value.as_f64().unwrap_or(f64::NAN)),
+        Value::Number(value) => {
+            const MAX_SAFE_INTEGER: u64 = (1_u64 << 53) - 1;
+            match value.as_i64() {
+                Some(integer) if integer.unsigned_abs() > MAX_SAFE_INTEGER => Any::BigInt(integer),
+                _ => Any::Number(value.as_f64().unwrap_or(f64::NAN)),
+            }
+        }
         Value::String(value) => Any::from(value.as_str()),
         Value::Array(values) => Any::from(values.iter().map(json_to_any).collect::<Vec<_>>()),
         Value::Object(values) => Any::from(
@@ -5168,6 +5174,44 @@ fn main() {}
                 .expect("settle roundtripped frontmatter")
                 .content,
             settled
+        );
+    }
+
+    #[test]
+    fn fresh_successor_preserves_frontmatter_integers_outside_the_javascript_safe_range() {
+        let key = crate::DocKey::new("ws", "main", "large-integer").expect("valid key");
+        let artifact = "---\ndebt: -9007199254740993\nestimate: 9007199254740993\n---\n\nbody text";
+        let result_sha256 = crate::hex_sha256(artifact.as_bytes());
+        let identity = SuccessorIdentity::derive(SuccessorIdentityInput {
+            key: &key,
+            predecessor_claim_id: &"a".repeat(64),
+            predecessor_state_vector_sha256: &"b".repeat(64),
+            artifact_op_kind: "conflict.resolve",
+            artifact_id: "large-integer-choice",
+            artifact_preimage_sha256: &"c".repeat(64),
+            content_kind: ContentKind::Richdoc,
+            result_sha256: &result_sha256,
+        });
+
+        let successor = fresh_successor_base(&identity, artifact)
+            .expect("large frontmatter integers remain representable");
+        let loaded = Ydoc::wire();
+        loaded.apply(&successor.update).expect("load successor");
+
+        assert_eq!(
+            loaded
+                .project(ContentKind::Richdoc)
+                .expect("project successor")
+                .content,
+            artifact
+        );
+        assert_eq!(
+            loaded.frontmatter_json()["estimate"],
+            json!(9_007_199_254_740_993_i64)
+        );
+        assert_eq!(
+            loaded.frontmatter_json()["debt"],
+            json!(-9_007_199_254_740_993_i64)
         );
     }
 

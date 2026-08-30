@@ -2,6 +2,7 @@
 //   node crates/dohc-engine-domain/tests/fixtures/gen-fixtures.mjs
 //   DOHC_FIXTURE_OUT=<directory> node crates/dohc-engine-domain/tests/fixtures/gen-fixtures.mjs
 import { createRequire } from "node:module";
+import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -50,6 +51,14 @@ const { getDohcYDocFrontmatter, markdownToYDoc } = await import(
     join(repoRoot, "packages/ydoc-projection/src/import-export.ts"),
   ).href
 );
+const { encodeCollectionValue } = await import(
+  pathToFileURL(
+    join(
+      repoRoot,
+      "packages/workspace-engine-client/src/workspace/workspaceWireContract.ts",
+    ),
+  ).href
+);
 await unregisterTsx();
 
 const workspaceContractsRequire = createRequire(
@@ -58,6 +67,38 @@ const workspaceContractsRequire = createRequire(
 const { CORE_SCHEMA, load } = workspaceContractsRequire("js-yaml");
 
 const schemas = [
+  {
+    name: "valid-comment-only-schema",
+    yaml: "# collection schema to be filled in later\n",
+    expected: {
+      status: "valid",
+      schema: { name: null, description: null, fields: [], views: [] },
+      reasons: [],
+    },
+  },
+  {
+    name: "non-text-root-key-is-unknown-property",
+    yaml: "? [unexpected, key]\n: ignored\n",
+    expected: {
+      status: "degraded",
+      schema: { name: null, description: null, fields: [], views: [] },
+      reasons: [{ code: "unknown-property", path: "/<non-text-key>" }],
+    },
+  },
+  {
+    name: "non-text-field-property-is-unknown-property",
+    yaml: "fields:\n  title:\n    type: text\n    ? [unexpected, key]\n    : ignored\n",
+    expected: {
+      status: "degraded",
+      schema: {
+        name: null,
+        description: null,
+        fields: [{ name: "title", type: "text" }],
+        views: [],
+      },
+      reasons: [{ code: "unknown-property", path: "/fields/title/<non-text-key>" }],
+    },
+  },
   {
     name: "normalized-field-name-collision-flags-and-keeps-both",
     yaml: 'fields:\n  true:\n    type: text\n  "true":\n    type: number\n',
@@ -325,9 +366,169 @@ const fieldValues = [
   ["url-flagged", { name: "website", type: "url" }, "dohc.dev/path"],
   ["null-valid-for-every-field", { name: "title", type: "text" }, "null"],
 ].map(([name, field, valueYaml]) => {
-  const value = load(valueYaml, { schema: CORE_SCHEMA, json: true });
+  const loadedValue = load(valueYaml, { schema: CORE_SCHEMA, json: true });
+  const value =
+    /^-?\d+$/.test(valueYaml) &&
+    typeof loadedValue === "number" &&
+    !Number.isSafeInteger(loadedValue)
+      ? BigInt(valueYaml)
+      : loadedValue;
   return { name, field, valueYaml, expected: validateFieldValue(field, value) };
 });
+
+const pipelineTargetA = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+const pipelineTargetB = "rec_77777777777777777777777774";
+const pipelineValues = [
+  ["text-typical", "typical", { type: "text" }, '"café 🙂"'],
+  ["text-edge", "edge", { type: "text" }, '""'],
+  ["text-flagged", "flagged", { type: "text" }, "42"],
+  ["number-typical", "typical", { type: "number" }, "42.5"],
+  ["number-edge", "edge", { type: "number" }, "9007199254740993"],
+  ["number-flagged", "flagged", { type: "number" }, '"42"'],
+  ["checkbox-typical", "typical", { type: "checkbox" }, "true"],
+  ["checkbox-edge", "edge", { type: "checkbox" }, "false"],
+  ["checkbox-flagged", "flagged", { type: "checkbox" }, '"true"'],
+  ["date-typical", "typical", { type: "date" }, '"2026-08-30"'],
+  ["date-edge", "edge", { type: "date" }, '"2000-02-29"'],
+  ["date-flagged", "flagged", { type: "date" }, '"2023-02-29"'],
+  [
+    "select-typical",
+    "typical",
+    { type: "select", options: ["Planned", "Active", "true"] },
+    "Active",
+  ],
+  [
+    "select-edge",
+    "edge",
+    { type: "select", options: ["Planned", "Active", "true"] },
+    '"true"',
+  ],
+  [
+    "select-flagged",
+    "flagged",
+    { type: "select", options: ["Planned", "Active", "true"] },
+    "Done",
+  ],
+  [
+    "multi-select-typical",
+    "typical",
+    { type: "multi-select", options: ["A", "B"] },
+    "[A, B]",
+  ],
+  [
+    "multi-select-edge",
+    "edge",
+    { type: "multi-select", options: ["A", "B"] },
+    "[]",
+  ],
+  [
+    "multi-select-flagged",
+    "flagged",
+    { type: "multi-select", options: ["A", "B"] },
+    "[A, A]",
+  ],
+  ["person-typical", "typical", { type: "person" }, "user_123"],
+  ["person-edge", "edge", { type: "person" }, '"  user_123  "'],
+  ["person-flagged", "flagged", { type: "person" }, '"   "'],
+  [
+    "relation-typical",
+    "typical",
+    { type: "relation", collection: "pipeline-targets", many: false },
+    pipelineTargetA,
+  ],
+  [
+    "relation-edge",
+    "edge",
+    { type: "relation", collection: "pipeline-targets", many: true },
+    `[${pipelineTargetA}, ${pipelineTargetB}]`,
+  ],
+  [
+    "relation-flagged",
+    "flagged",
+    { type: "relation", collection: "pipeline-targets", many: false },
+    "record_123",
+  ],
+  [
+    "url-typical",
+    "typical",
+    { type: "url" },
+    '"https://dohc.dev/path?x=1#frag"',
+  ],
+  ["url-edge", "edge", { type: "url" }, '"mailto:user@example.com"'],
+  ["url-flagged", "flagged", { type: "url" }, '"dohc.dev/path"'],
+].map(([name, valueClass, definition, valueYaml]) => {
+  const fieldName = name.replaceAll("-", "_");
+  const field = { name: fieldName, ...definition };
+  const loadedValue = load(valueYaml, { schema: CORE_SCHEMA, json: true });
+  const value =
+    /^-?\d+$/.test(valueYaml) &&
+    typeof loadedValue === "number" &&
+    !Number.isSafeInteger(loadedValue)
+      ? BigInt(valueYaml)
+      : loadedValue;
+  const wireValue = encodeCollectionValue(value);
+  return {
+    name,
+    class: valueClass,
+    fieldName,
+    field,
+    valueYaml,
+    valueYamlUtf8Hex: Buffer.from(valueYaml, "utf8").toString("hex"),
+    expectedSemantic: value,
+    expectedIndexJson: indexJson(value),
+    expectedValidation: validateFieldValue(field, value),
+    expectedWireValue: wireValue,
+    expectedWireJson: JSON.stringify(wireValue),
+  };
+});
+
+function indexJson(value) {
+  if (typeof value === "bigint") return value.toString();
+  if (Array.isArray(value)) return `[${value.map(indexJson).join(",")}]`;
+  return JSON.stringify(value);
+}
+
+function pipelineSchemaYaml(vectors) {
+  const lines = ["name: Field pipeline", "fields:"];
+  for (const vector of vectors) {
+    const { field } = vector;
+    lines.push(`  ${field.name}:`, `    type: ${field.type}`);
+    if ("options" in field) {
+      lines.push(`    options: ${JSON.stringify(field.options)}`);
+    }
+    if (field.type === "relation") {
+      lines.push(
+        `    collection: ${field.collection}`,
+        `    many: ${field.many}`,
+      );
+    }
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function pipelineRecordMarkdown(vectors) {
+  const lines = ["---"];
+  for (const vector of vectors) {
+    lines.push(`${vector.fieldName}: ${vector.valueYaml}`);
+  }
+  lines.push("---", "", "Pipeline record");
+  return lines.join("\n");
+}
+
+const pipelineRecord = pipelineRecordMarkdown(pipelineValues);
+const pipelineFrontmatter = getDohcYDocFrontmatter(
+  markdownToYDoc(pipelineRecord),
+);
+for (const vector of pipelineValues) {
+  if (
+    !isDeepStrictEqual(
+      pipelineFrontmatter[vector.fieldName],
+      vector.expectedSemantic,
+    )
+  ) {
+    throw new Error(`pipeline fixture ${vector.name} disagrees with markdownToYDoc`);
+  }
+}
 
 const recordIds = [
   "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -519,6 +720,30 @@ writeFixture("collection-schema-limits.json", {
   ],
 });
 writeFixture("collection-field-values.json", { vectors: fieldValues });
+writeFixture("collection-field-pipeline.json", {
+  version: 1,
+  collectionPath: "pipeline",
+  schemaYaml: pipelineSchemaYaml(pipelineValues),
+  recordMarkdown: pipelineRecord,
+  recordMarkdownSha256: createHash("sha256")
+    .update(pipelineRecord, "utf8")
+    .digest("hex"),
+  supportFiles: [
+    {
+      path: "pipeline-targets/collection.yaml",
+      text: "fields:\n  label:\n    type: text\n",
+    },
+    {
+      path: "pipeline-targets/a.md",
+      text: `---\nid: ${pipelineTargetA}\nlabel: Alpha\n---\n`,
+    },
+    {
+      path: "pipeline-targets/z.md",
+      text: `---\nid: ${pipelineTargetB}\nlabel: Omega\n---\n`,
+    },
+  ],
+  vectors: pipelineValues,
+});
 writeFixture("collection-record-ids.json", { vectors: recordIds });
 writeFixture("collection-frontmatter.json", { vectors: frontmatter });
 writeFixture("collection-reason-codes.json", {

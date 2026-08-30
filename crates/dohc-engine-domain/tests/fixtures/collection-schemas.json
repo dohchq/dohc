@@ -1,6 +1,63 @@
 {
   "vectors": [
     {
+      "name": "valid-comment-only-schema",
+      "yaml": "# collection schema to be filled in later\n",
+      "expected": {
+        "status": "valid",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [],
+          "views": []
+        },
+        "reasons": []
+      }
+    },
+    {
+      "name": "non-text-root-key-is-unknown-property",
+      "yaml": "? [unexpected, key]\n: ignored\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [],
+          "views": []
+        },
+        "reasons": [
+          {
+            "code": "unknown-property",
+            "path": "/<non-text-key>"
+          }
+        ]
+      }
+    },
+    {
+      "name": "non-text-field-property-is-unknown-property",
+      "yaml": "fields:\n  title:\n    type: text\n    ? [unexpected, key]\n    : ignored\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [
+            {
+              "name": "title",
+              "type": "text"
+            }
+          ],
+          "views": []
+        },
+        "reasons": [
+          {
+            "code": "unknown-property",
+            "path": "/fields/title/<non-text-key>"
+          }
+        ]
+      }
+    },
+    {
       "name": "normalized-field-name-collision-flags-and-keeps-both",
       "yaml": "fields:\n  true:\n    type: text\n  \"true\":\n    type: number\n",
       "expected": {

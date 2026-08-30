@@ -1239,8 +1239,30 @@ function isEmptyFrontmatter(raw: string): boolean {
 
 function writeMap(map: Y.Map<unknown>, values: Record<string, unknown>): void {
   for (const [key, value] of Object.entries(values)) {
-    map.set(key, frontmatterValueToY(value))
+    map.set(
+      key,
+      frontmatterValueNeedsSharedType(value)
+        ? frontmatterValueToY(value)
+        : frontmatterValueToAny(value),
+    )
   }
+}
+
+function frontmatterValueNeedsSharedType(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(frontmatterValueNeedsSharedType)
+  if (!isFrontmatterMap(value)) return false
+  // Yjs dispatches plain values through `value.constructor`, so that data key
+  // must keep the older shared-type encoding.
+  return Object.hasOwn(value, 'constructor')
+    || Object.values(value).some(frontmatterValueNeedsSharedType)
+}
+
+function frontmatterValueToAny(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(frontmatterValueToAny)
+  if (!isFrontmatterMap(value)) return value
+  return Object.fromEntries(
+    Object.entries(value).map(([key, child]) => [key, frontmatterValueToAny(child)]),
+  )
 }
 
 function frontmatterValueToY(value: unknown): unknown {

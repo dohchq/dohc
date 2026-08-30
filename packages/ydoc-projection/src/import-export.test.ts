@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { JSONContent } from '@tiptap/core'
+import pipelineFixtureJson from '../../../crates/dohc-engine-domain/tests/fixtures/collection-field-pipeline.json'
 import frontmatterFixtureJson from '../../../crates/dohc-engine-domain/tests/fixtures/collection-frontmatter.json'
 import {
   prosemirrorJSONToYXmlFragment,
@@ -25,6 +26,17 @@ interface FrontmatterVector {
   expected: Record<string, unknown> | null
 }
 
+interface PipelineVector {
+  name: string
+  class: 'typical' | 'edge' | 'flagged'
+  fieldName: string
+  field: { type: string }
+  valueYaml: string
+  valueYamlUtf8Hex: string
+  expectedSemantic: unknown
+  expectedIndexJson: string
+}
+
 function decodeFixtureIntegers(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(decodeFixtureIntegers)
   if (value !== null && typeof value === 'object') {
@@ -44,6 +56,19 @@ function decodeFixtureIntegers(value: unknown): unknown {
 }
 
 const frontmatterVectors = frontmatterFixtureJson.vectors as FrontmatterVector[]
+const pipelineVectors = pipelineFixtureJson.vectors as PipelineVector[]
+
+function indexJson(value: unknown): string {
+  if (typeof value === 'bigint') return value.toString()
+  if (Array.isArray(value)) return `[${value.map(indexJson).join(',')}]`
+  return JSON.stringify(value)
+}
+
+function utf8Hex(value: string): string {
+  return Array.from(new TextEncoder().encode(value), byte =>
+    byte.toString(16).padStart(2, '0'),
+  ).join('')
+}
 
 function yDocFromBody(content: JSONContent[]): Y.Doc {
   const doc = new Y.Doc()
@@ -92,7 +117,7 @@ describe('Y.Doc markdown import/export', () => {
     }
   })
 
-  it('encodes unsafe frontmatter integers recursively as Y.Text', () => {
+  it('encodes imported frontmatter as JSON-compatible Yjs Any values', () => {
     const vector = frontmatterVectors.find(
       candidate => candidate.name === 'unsafe-integer-nesting-is-exact',
     )
@@ -104,22 +129,73 @@ describe('Y.Doc markdown import/export', () => {
     const frontmatter = replica.getMap<unknown>('frontmatter')
     const nested = frontmatter.get('nested')
     const sequence = frontmatter.get('sequence')
-    expect(nested).toBeInstanceOf(Y.Map)
-    expect(sequence).toBeInstanceOf(Y.Array)
+    expect(nested).not.toBeInstanceOf(Y.Map)
+    expect(sequence).not.toBeInstanceOf(Y.Array)
+    expect(nested).toEqual({ exact: 9007199254740993n })
+    expect(sequence).toEqual([9007199254740993n])
     const integers = [
       frontmatter.get('exact'),
-      (nested as Y.Map<unknown>).get('exact'),
-      (sequence as Y.Array<unknown>).get(0),
+      (nested as Record<string, unknown>).exact,
+      (sequence as unknown[])[0],
     ]
     for (const integer of integers) {
-      expect(integer).toBeInstanceOf(Y.Text)
-      expect((integer as Y.Text).toString()).toBe('9007199254740993')
+      expect(typeof integer).toBe('bigint')
+      expect(integer).toBe(9007199254740993n)
     }
     expect(getDohcYDocFrontmatter(replica)).toEqual({
       exact: 9007199254740993n,
       nested: { exact: 9007199254740993n },
       sequence: [9007199254740993n],
     })
+  })
+
+  it('imports every v1 collection field pipeline vector with exact semantics', () => {
+    const imported = markdownToYDoc(pipelineFixtureJson.recordMarkdown)
+    const update = Y.encodeStateAsUpdate(imported)
+    const replica = new Y.Doc()
+    Y.applyUpdate(replica, update)
+    const frontmatter = getDohcYDocFrontmatter(replica)
+    const replicatedMap = replica.getMap<unknown>('frontmatter')
+
+    expect(update.byteLength).toBeGreaterThan(0)
+    expect(new Set(pipelineVectors.map(vector => vector.field.type))).toEqual(
+      new Set([
+        'text',
+        'number',
+        'checkbox',
+        'date',
+        'select',
+        'multi-select',
+        'person',
+        'relation',
+        'url',
+      ]),
+    )
+    for (const type of new Set(pipelineVectors.map(vector => vector.field.type))) {
+      expect(
+        new Set(
+          pipelineVectors
+            .filter(vector => vector.field.type === type)
+            .map(vector => vector.class),
+        ),
+        type,
+      ).toEqual(new Set(['typical', 'edge', 'flagged']))
+    }
+
+    for (const vector of pipelineVectors) {
+      const expected = decodeFixtureIntegers(vector.expectedSemantic)
+      const replicated = replicatedMap.get(vector.fieldName)
+      expect(frontmatter[vector.fieldName], vector.name).toEqual(expected)
+      expect(replicated, vector.name).toEqual(expected)
+      expect(replicated, vector.name).not.toBeInstanceOf(Y.Array)
+      expect(replicated, vector.name).not.toBeInstanceOf(Y.Map)
+      expect(indexJson(frontmatter[vector.fieldName]), vector.name).toBe(
+        vector.expectedIndexJson,
+      )
+      expect(utf8Hex(vector.valueYaml), vector.name).toBe(
+        vector.valueYamlUtf8Hex,
+      )
+    }
   })
 
   it('round-trips unsupported tagged frontmatter until its raw value changes', () => {
