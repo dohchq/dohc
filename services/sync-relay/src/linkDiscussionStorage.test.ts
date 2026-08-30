@@ -814,6 +814,78 @@ describe("durable link discussion storage", () => {
     expect(countRows(dbPath, "sync_relay_share_discussion_messages")).toBe(1);
   });
 
+  it("acknowledges a committed replay after a Comment link narrows to View", async () => {
+    const { storage, dbPath } = await openStorage();
+    const seeded = seedShare(storage);
+    const first = append(storage, seeded, {
+      claimedName: "Alice",
+      body: "Committed before narrowing",
+      idempotencyKey: "lost-before-narrowing",
+      createdAtMs: 2_000,
+    });
+    expect(first).toMatchObject({ ok: true, replayed: false });
+    if (!first.ok) throw new Error("discussion append did not commit");
+
+    const sessionBeforeNarrowing = storage.findLinkSessionByCapabilityHash(
+      seeded.capabilityHash,
+    );
+    expect(sessionBeforeNarrowing).toMatchObject({
+      grantId: seeded.grantId,
+      generation: 1,
+      principalId: first.principal.principalId,
+    });
+    expect(
+      storage.retuneShareGrant({
+        shareId: seeded.shareId,
+        grantId: seeded.grantId,
+        access: "view",
+        changedAtMs: 2_100,
+        expectedDependentGrantIds: [],
+        guard: () => {},
+      }),
+    ).toMatchObject({ ok: true, grant: { access: "view", generation: 1 } });
+    expect(
+      storage.findLinkSessionByCapabilityHash(seeded.capabilityHash),
+    ).toEqual(sessionBeforeNarrowing);
+
+    const snapshot = {
+      messages: countRows(dbPath, "sync_relay_share_discussion_messages"),
+      principals: countRows(dbPath, "sync_relay_link_principals"),
+      revision: storage.getShareDiscussionRevision(seeded.shareId),
+      usage: aggregateWorkspaceUsageBytes(dbPath, seeded.workspaceId),
+    };
+    expect(
+      append(storage, seeded, {
+        claimedName: "Alice",
+        body: "Committed before narrowing",
+        idempotencyKey: "lost-before-narrowing",
+        createdAtMs: 2_101,
+      }),
+    ).toEqual({ ...first, replayed: true });
+    expect(
+      append(storage, seeded, {
+        claimedName: "Alice",
+        body: "Conflicting retry",
+        idempotencyKey: "lost-before-narrowing",
+        createdAtMs: 2_102,
+      }),
+    ).toEqual({ ok: false, reason: "idempotency-conflict" });
+    expect(
+      append(storage, seeded, {
+        claimedName: "Alice",
+        body: "Genuinely new",
+        idempotencyKey: "new-after-narrowing",
+        createdAtMs: 2_103,
+      }),
+    ).toEqual({ ok: false, reason: "not-authorized" });
+    expect({
+      messages: countRows(dbPath, "sync_relay_share_discussion_messages"),
+      principals: countRows(dbPath, "sync_relay_link_principals"),
+      revision: storage.getShareDiscussionRevision(seeded.shareId),
+      usage: aggregateWorkspaceUsageBytes(dbPath, seeded.workspaceId),
+    }).toEqual(snapshot);
+  });
+
   it("acknowledges a committed replay through pause and block but keeps authority ahead of replay", async () => {
     const { storage, dbPath } = await openStorage();
     const seeded = seedShare(storage);

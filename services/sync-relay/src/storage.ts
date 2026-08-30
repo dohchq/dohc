@@ -3969,7 +3969,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         !authority ||
         authority.status !== "active" ||
         authority.revoked_at_ms !== null ||
-        authority.access !== "comment" ||
         Number(authority.session_generation) !== Number(authority.grant_generation) ||
         Number(authority.minted_at_ms) > createdAtMs ||
         Number(authority.expires_at_ms) <= createdAtMs ||
@@ -4026,6 +4025,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
             message: rowToShareDiscussionMessageRow(replayRow),
           };
         }
+      }
+      if (authority.access !== "comment") {
+        return { ok: false, reason: "not-authorized" };
       }
       if (principal && principal.blockedAtMs !== null) {
         return { ok: false, reason: "blocked" };
