@@ -2107,6 +2107,7 @@ struct PreparedTextWrite {
     object_id: String,
     before: Option<SnapshotRecord>,
     moment_order: i64,
+    content_sha256: String,
     bind_object: bool,
     bind_alias: bool,
     known_object: Option<FileObjectRecord>,
@@ -2308,25 +2309,28 @@ where
     let (summary_kind, summary) = hash_optional_text_fields(input.metadata_summary.as_deref());
     let (correlation_kind, correlation) =
         hash_optional_text_fields(input.metadata_correlation_id.as_deref());
-    let payload_hash = hash_fields(&[
-        b"capture-ingest",
-        input.workspace_id.as_bytes(),
-        input.version_id.as_bytes(),
-        input.path.as_bytes(),
-        input.text.as_bytes(),
-        input.metadata_origin.as_bytes(),
-        summary_kind,
-        summary,
-        correlation_kind,
-        correlation,
-        author_kind,
-        author_json,
-        if input.claim_foreign_head {
-            b"claim-foreign".as_slice()
-        } else {
-            b"own-only".as_slice()
-        },
-    ]);
+    let payload_hash = hash_request_fields(
+        input.request_id.as_deref(),
+        &[
+            b"capture-ingest",
+            input.workspace_id.as_bytes(),
+            input.version_id.as_bytes(),
+            input.path.as_bytes(),
+            input.text.as_bytes(),
+            input.metadata_origin.as_bytes(),
+            summary_kind,
+            summary,
+            correlation_kind,
+            correlation,
+            author_kind,
+            author_json,
+            if input.claim_foreign_head {
+                b"claim-foreign".as_slice()
+            } else {
+                b"own-only".as_slice()
+            },
+        ],
+    );
     if let Some(request_id) = &input.request_id
         && let Some(recorded) = lookup_request(tx, request_id)?
     {
@@ -2463,6 +2467,7 @@ where
             object_id: resolved.object_id.clone(),
             before,
             moment_order: next_order,
+            content_sha256,
             bind_object: false,
             bind_alias: false,
             known_object: resolved.known_object,
@@ -3240,25 +3245,31 @@ fn write_normalized_text_in_tx_with_journal(
         return Err(DomainError::VersionNotFound);
     }
 
-    let blob = text_blob_sha256(&input.text);
+    let blob = prepared
+        .as_ref()
+        .map(|prepared| prepared.content_sha256.clone())
+        .unwrap_or_else(|| text_blob_sha256(&input.text));
     let (author_kind, author_json) = hash_author_fields(input.author_json);
     let (summary_kind, summary) = hash_optional_text_fields(input.metadata_summary);
     let (correlation_kind, correlation_id) =
         hash_optional_text_fields(input.metadata_correlation_id);
-    let payload_hash = hash_fields(&[
-        input.version_id.as_bytes(),
-        input.path.as_bytes(),
-        input.text.as_bytes(),
-        input.moment_id.as_bytes(),
-        input.object_id.as_bytes(),
-        input.metadata_origin.as_bytes(),
-        summary_kind,
-        summary,
-        correlation_kind,
-        correlation_id,
-        author_kind,
-        author_json,
-    ]);
+    let payload_hash = hash_request_fields(
+        input.request_id,
+        &[
+            input.version_id.as_bytes(),
+            input.path.as_bytes(),
+            input.text.as_bytes(),
+            input.moment_id.as_bytes(),
+            input.object_id.as_bytes(),
+            input.metadata_origin.as_bytes(),
+            summary_kind,
+            summary,
+            correlation_kind,
+            correlation_id,
+            author_kind,
+            author_json,
+        ],
+    );
     if let Some(request_id) = input.request_id
         && let Some(recorded) = lookup_request(tx, request_id)?
     {
@@ -3320,6 +3331,7 @@ fn write_normalized_text_in_tx_with_journal(
                 object_id: existing_object.unwrap_or_else(|| input.object_id.to_owned()),
                 before,
                 moment_order: next_moment_order(tx)?,
+                content_sha256: blob.clone(),
                 bind_object: is_new_object,
                 bind_alias: true,
                 known_object: None,
@@ -3332,6 +3344,7 @@ fn write_normalized_text_in_tx_with_journal(
         object_id,
         before,
         moment_order,
+        content_sha256: _,
         bind_object,
         bind_alias,
         known_object,
@@ -3354,11 +3367,12 @@ fn write_normalized_text_in_tx_with_journal(
         )
         .map_err(DomainError::sql_persist)?;
     }
-    let blob_inserted = tx.execute(
-        "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
-        params![blob, input.text.len() as i64, input.text.as_ref()],
-    )
-    .map_err(DomainError::sql_persist)?
+    let blob_inserted = tx
+        .execute(
+            "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
+            params![blob, input.text.len() as i64, input.text.as_ref()],
+        )
+        .map_err(DomainError::sql_persist)?
         != 0;
     if bind_alias {
         tx.execute(
@@ -6118,6 +6132,10 @@ pub(crate) fn hash_fields(fields: &[&[u8]]) -> String {
     hex(&hasher.finalize())
 }
 
+fn hash_request_fields(request_id: Option<&str>, fields: &[&[u8]]) -> String {
+    request_id.map_or_else(String::new, |_| hash_fields(fields))
+}
+
 pub(crate) fn hash_author_fields(author_json: Option<&str>) -> (&'static [u8], &[u8]) {
     match author_json {
         Some(author_json) => (b"some", author_json.as_bytes()),
@@ -6373,13 +6391,14 @@ mod tests {
             .expect("ensure main version");
 
         reset_capture_prepared_write_counts();
+        let text = "prepared capture body";
         let captured = VersionedTextStore::new(&mut store)
             .capture_ingest(
                 &CaptureIngest {
                     workspace_id: "ws".to_owned(),
                     version_id: "main".to_owned(),
                     path: "notes/fresh.md".to_owned(),
-                    text: "prepared capture body".to_owned(),
+                    text: text.to_owned(),
                     metadata_origin: "capture".to_owned(),
                     metadata_summary: Some("Captured fresh file".to_owned()),
                     metadata_correlation_id: Some("capture-pass-1".to_owned()),
@@ -6396,6 +6415,12 @@ mod tests {
             capture_prepared_write_counts(),
             (1, 0),
             "fresh capture must persist its resolved state without rereading the wide result"
+        );
+        let expected_blob_sha256 = text_blob_sha256(text);
+        assert_eq!(captured.snapshot.blob_sha256, expected_blob_sha256);
+        assert_eq!(
+            captured.moment.after_blob_sha256.as_deref(),
+            Some(expected_blob_sha256.as_str())
         );
         let versioned = VersionedTextStore::new(&mut store);
         let hydrated_moment = versioned
