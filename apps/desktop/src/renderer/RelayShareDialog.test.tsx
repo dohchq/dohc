@@ -1612,6 +1612,168 @@ describe("RelayShareDialog", () => {
     }
   });
 
+  it("admits Add link only when the matching share still has an active grant", async () => {
+    const revokedAtMs = CREATED_MS + 1;
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [
+        readableLink("ended-link", {
+          shareId: "share-ended",
+          status: "revoked",
+          revokedAtMs,
+        }),
+        readableLink("named-link", {
+          shareId: "share-named",
+          status: "revoked",
+          revokedAtMs,
+        }),
+        readableLink("pending-link", {
+          shareId: "share-pending",
+          status: "revoked",
+          revokedAtMs,
+        }),
+        readableLink("other-share-link", {
+          shareId: "share-other-evidence",
+          status: "revoked",
+          revokedAtMs,
+        }),
+        readableLink("damaged-history", {
+          shareId: "share-damaged",
+          status: "revoked",
+          revokedAtMs,
+        }),
+        damagedLink("damaged-active", { shareId: "share-damaged" }),
+      ],
+    });
+    bridgeMock.listRelayShares.mockResolvedValue({
+      granted: [
+        independentGrant("named-root", { shareId: "share-named" }),
+        independentGrant("pending-root", {
+          shareId: "share-pending",
+          recipientUserId: null,
+          recipientEmail: "pending@example.test",
+        }),
+        independentGrant("other-root", { shareId: "share-unrelated" }),
+      ],
+      received: [],
+    });
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+
+    const ended = await screen.findByTestId("share-link-group-share-ended");
+    const named = screen.getByTestId("share-link-group-share-named");
+    const pending = screen.getByTestId("share-link-group-share-pending");
+    const otherEvidence = screen.getByTestId(
+      "share-link-group-share-other-evidence",
+    );
+    const damaged = screen.getByTestId("share-link-group-share-damaged");
+
+    for (const group of [ended, otherEvidence]) {
+      expect(within(group).queryByRole("button", { name: "Add link" })).toBeNull();
+      expect(
+        within(group).queryByRole("radiogroup", { name: "Access for another link" }),
+      ).toBeNull();
+      expect(within(group).queryByRole("button", { name: "Comments" })).toBeNull();
+    }
+    for (const group of [named, pending, damaged]) {
+      expect(within(group).getByRole("button", { name: "Add link" })).toBeTruthy();
+      expect(within(group).getByRole("button", { name: "Comments" })).toBeTruthy();
+    }
+
+    const create = screen.getByRole("button", { name: "Create link" });
+    expect(create.textContent).toBe("Create separate link");
+
+    await user.click(within(named).getByRole("button", { name: "Comments" }));
+    const namedGrant = await within(named).findByTestId(
+      "share-independent-named-root",
+    );
+    expect(
+      within(namedGrant).getByRole("button", { name: "End access" }),
+    ).toBeTruthy();
+    expect(within(pending).queryByTestId("share-independent-pending-root")).toBeNull();
+  });
+
+  it("does not use stale root-grant eligibility after its inventory refresh fails", async () => {
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [
+        readableLink("ended-link", {
+          shareId: "share-1",
+          status: "revoked",
+          revokedAtMs: CREATED_MS + 1,
+        }),
+      ],
+    });
+    bridgeMock.listRelayShares
+      .mockResolvedValueOnce({
+        granted: [independentGrant("named-root")],
+        received: [],
+      })
+      .mockRejectedValueOnce(new Error("independent inventory unavailable"))
+      .mockResolvedValueOnce({
+        granted: [independentGrant("named-root")],
+        received: [],
+      });
+    bridgeMock.revokeRelayShareGrant.mockRejectedValueOnce(
+      new Error("revoke unavailable"),
+    );
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+
+    const group = await screen.findByTestId("share-link-group-share-1");
+    await user.click(within(group).getByRole("button", { name: "Comments" }));
+    const namedGrant = await within(group).findByTestId(
+      "share-independent-named-root",
+    );
+    await user.click(within(namedGrant).getByRole("button", { name: "End access" }));
+    await user.click(
+      within(within(group).getByTestId("owner-comments-confirmation")).getByRole(
+        "button",
+        { name: "End access" },
+      ),
+    );
+
+    await vi.waitFor(() => {
+      expect(bridgeMock.listRelayShares).toHaveBeenCalledTimes(2);
+      expect(within(group).queryByRole("button", { name: "Add link" })).toBeNull();
+    });
+    expect(within(group).queryByRole("button", { name: "Comments" })).toBeNull();
+    expect(within(group).queryByTestId("share-independent-named-root")).toBeNull();
+
+    const inventoryError = screen.queryByTestId("share-independent-inventory-error");
+    expect(inventoryError).toBeTruthy();
+    if (inventoryError === null) throw new Error("Missing inventory recovery.");
+    expect(
+      within(inventoryError).getByText(
+        "Couldn't load people with independent access.",
+      ),
+    ).toBeTruthy();
+    await user.click(within(inventoryError).getByRole("button", { name: "Retry" }));
+
+    await vi.waitFor(() => {
+      expect(bridgeMock.listRelayShares).toHaveBeenCalledTimes(3);
+      expect(within(group).getByRole("button", { name: "Add link" })).toBeTruthy();
+      expect(within(group).getByRole("button", { name: "Comments" })).toBeTruthy();
+    });
+    expect(screen.queryByTestId("share-independent-inventory-error")).toBeNull();
+    await user.click(within(group).getByRole("button", { name: "Comments" }));
+    expect(
+      await within(group).findByTestId("share-independent-named-root"),
+    ).toBeTruthy();
+  });
+
   it("keeps equal selectors as separate shares and creates a separate Comment link", async () => {
     bridgeMock.listRelayShareLinks.mockResolvedValue({
       links: [
@@ -2905,7 +3067,7 @@ describe("RelayShareDialog", () => {
     );
     await showLinkPane(user);
     const group = await openOwnerComments(user, "share-1");
-    const error = await within(group).findByText(
+    const error = await screen.findByText(
       "Couldn't load people with independent access.",
     );
     expect(
@@ -2937,9 +3099,7 @@ describe("RelayShareDialog", () => {
       await within(group).findByTestId("share-independent-independent-1"),
     ).toBeTruthy();
     expect(
-      within(group).queryByText(
-        "Couldn't load people with independent access.",
-      ),
+      screen.queryByText("Couldn't load people with independent access."),
     ).toBeNull();
     expect(within(group).getByRole("button", { name: "End access" })).toBeTruthy();
   });
@@ -2991,7 +3151,7 @@ describe("RelayShareDialog", () => {
       ),
     );
 
-    const error = await within(group).findByText(
+    const error = await screen.findByText(
       "Couldn't load people with independent access.",
     );
     expect(within(group).queryByTestId("share-dependent-dependent-1")).toBeNull();
@@ -3049,9 +3209,7 @@ describe("RelayShareDialog", () => {
       stale.reject(new Error("stale inventory failure"));
     });
     expect(
-      within(group).queryByText(
-        "Couldn't load people with independent access.",
-      ),
+      screen.queryByText("Couldn't load people with independent access."),
     ).toBeNull();
   });
 
@@ -3099,9 +3257,7 @@ describe("RelayShareDialog", () => {
       stale.reject(new Error("replaced inventory failure"));
     });
     expect(
-      within(group).queryByText(
-        "Couldn't load people with independent access.",
-      ),
+      screen.queryByText("Couldn't load people with independent access."),
     ).toBeNull();
   });
 

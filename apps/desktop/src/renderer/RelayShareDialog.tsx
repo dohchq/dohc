@@ -428,14 +428,26 @@ export function RelayShareDialog(props: {
   const hasMatchingShare = visibleLinkGroups.some((group) =>
     group.rows.some((row) => rowMatchesTarget(row, props.target)),
   );
+  const activeRootGrantShareIds = useMemo(
+    () =>
+      independentGrantsError
+        ? new Set<string>()
+        : new Set(independentGrants.map((grant) => grant.shareId)),
+    [independentGrants, independentGrantsError],
+  );
   const eligibleShareIds = useMemo(
     () =>
-      visibleLinkGroups
-        .filter((group) =>
-          group.rows.some((row) => rowMatchesTarget(row, props.target)),
-        )
-        .map((group) => group.shareId),
-    [targetKey, visibleLinkGroups],
+      new Set(
+        visibleLinkGroups
+          .filter(
+            (group) =>
+              group.rows.some((row) => rowMatchesTarget(row, props.target)) &&
+              (group.rows.some((row) => row.status === "active") ||
+                activeRootGrantShareIds.has(group.shareId)),
+          )
+          .map((group) => group.shareId),
+      ),
+    [activeRootGrantShareIds, targetKey, visibleLinkGroups],
   );
   const eligibleShareIdsKey = JSON.stringify([...eligibleShareIds].sort());
 
@@ -824,7 +836,6 @@ export function RelayShareDialog(props: {
         result.granted.filter(
           (grant) =>
             grant.workspaceId === props.workspaceId &&
-            grant.recipientUserId !== null &&
             grant.revokedAtMs === null,
         ),
       );
@@ -1738,6 +1749,20 @@ export function RelayShareDialog(props: {
               </div>
             ) : null}
 
+            {independentGrantsError ? (
+              <div
+                data-testid="share-independent-inventory-error"
+                className="flex items-center justify-between gap-3 border-t border-line pt-3"
+              >
+                <p role="alert" className="m-0 text-xs text-danger">
+                  Couldn't load people with independent access.
+                </p>
+                <SecondaryButton onClick={() => void refreshIndependentGrants()}>
+                  Retry
+                </SecondaryButton>
+              </div>
+            ) : null}
+
             {lifecycleError ? (
               <p role="alert" className="m-0 text-xs leading-relaxed text-danger">
                 {lifecycleError}
@@ -1745,9 +1770,7 @@ export function RelayShareDialog(props: {
             ) : null}
 
             {visibleLinkGroups.map((group) => {
-              const canAdd = group.rows.some((row) =>
-                rowMatchesTarget(row, props.target),
-              );
+              const canAdd = eligibleShareIds.has(group.shareId);
               const addAccess = addAccessByShareId[group.shareId] ?? "view";
               const ownerDiscussion =
                 ownerDiscussionByShareId[group.shareId] ?? emptyOwnerDiscussion();
@@ -1767,6 +1790,7 @@ export function RelayShareDialog(props: {
               const shareIndependentGrants = independentGrants.filter(
                 (grant) =>
                   grant.shareId === group.shareId &&
+                  grant.recipientUserId !== null &&
                   !displayedDependentIds.has(grant.grantId),
               );
               return (
@@ -2102,22 +2126,6 @@ export function RelayShareDialog(props: {
                               </SecondaryButton>
                             </div>
                           </div>
-
-                          {independentGrantsError ? (
-                            <div
-                              data-testid="share-independent-inventory-error"
-                              className="flex items-center justify-between gap-3 border-t border-line pt-3"
-                            >
-                              <p role="alert" className="m-0 text-xs text-danger">
-                                Couldn't load people with independent access.
-                              </p>
-                              <SecondaryButton
-                                onClick={() => void refreshIndependentGrants()}
-                              >
-                                Retry
-                              </SecondaryButton>
-                            </div>
-                          ) : null}
 
                           {group.rows.some(
                             (row) =>
