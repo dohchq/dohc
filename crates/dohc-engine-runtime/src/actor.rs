@@ -14527,7 +14527,7 @@ fn capture_ingest_in_tx(
             .map_err(RuntimeError::from)?,
         }
     }
-    match batch.as_deref_mut() {
+    match batch {
         Some(batch) => journal_moment_outbound_with_batch_in_tx(
             tx,
             &input.workspace_id,
