@@ -19,6 +19,7 @@ const SCENARIOS = [
   { artifact: "quickopen-graph", spec: "quickopen-graph.spec.ts" },
   { artifact: "excalidraw-profile", spec: "excalidraw-profile.spec.ts" },
   { artifact: "bigdoc-profile", spec: "bigdoc-profile.spec.ts" },
+  { artifact: "bigdoc-read-profile", spec: "bigdoc-read-profile.spec.ts" },
 ];
 
 function usage() {
@@ -194,6 +195,7 @@ function summarizeArtifacts(artifacts) {
   const quickOpen = artifacts["quickopen-graph"]?.measurements;
   const excalidraw = artifacts["excalidraw-profile"]?.measurements;
   const bigDoc = artifacts["bigdoc-profile"]?.measurements;
+  const bigDocRead = artifacts["bigdoc-read-profile"]?.measurements;
   const phases = [
     "switch-start",
     "session-admitted",
@@ -268,6 +270,18 @@ function summarizeArtifacts(artifacts) {
             bigDoc.rendererMarks?.after?.measures?.["markdown-open"] ?? null,
           taskDurationSeconds: bigDoc.performance?.delta?.TaskDuration ?? null,
           scriptDurationSeconds: bigDoc.performance?.delta?.ScriptDuration ?? null,
+        }
+      : null,
+    bigDocRead: bigDocRead
+      ? {
+          ...commonSummary(bigDocRead),
+          bytes: artifacts["bigdoc-read-profile"].fixture.bytes,
+          elapsedMs: bigDocRead.elapsedMs,
+          sourceDescendants: bigDocRead.sourceDescendants,
+          renderedLines: bigDocRead.renderedLines,
+          pageNodes: bigDocRead.pageNodes,
+          taskDurationSeconds: bigDocRead.performance?.delta?.TaskDuration ?? null,
+          scriptDurationSeconds: bigDocRead.performance?.delta?.ScriptDuration ?? null,
         }
       : null,
   };

@@ -167,3 +167,11 @@ export function editableBigDoc(manifest: SeedManifest): { path: string; bytes: n
   if (!doc) throw new Error("The big-docs fixture has no doc-250kb.md.");
   return doc;
 }
+
+export function oversizedReadDoc(manifest: SeedManifest): { path: string; bytes: number } {
+  const doc = manifest.fixtures["big-docs"].files.find(({ path }) =>
+    path.endsWith("doc-3mb.md"),
+  );
+  if (!doc) throw new Error("The big-docs fixture has no doc-3mb.md.");
+  return doc;
+}
