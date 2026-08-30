@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import fieldValueFixtureJson from "../../../crates/dohc-engine-domain/tests/fixtures/collection-field-values.json";
 import recordIdFixtureJson from "../../../crates/dohc-engine-domain/tests/fixtures/collection-record-ids.json";
 import reasonCodeFixtureJson from "../../../crates/dohc-engine-domain/tests/fixtures/collection-reason-codes.json";
+import schemaLimitFixtureJson from "../../../crates/dohc-engine-domain/tests/fixtures/collection-schema-limits.json";
 import schemaFixtureJson from "../../../crates/dohc-engine-domain/tests/fixtures/collection-schemas.json";
 import type {
   CollectionSchemaParseResult,
@@ -37,9 +38,17 @@ interface RecordIdVector {
   valid: boolean;
 }
 
+interface SchemaLimitVector {
+  name: string;
+  itemCount: number;
+  expectedItemCount: number;
+  expectedReasons: CollectionSchemaParseResult["reasons"];
+}
+
 const schemaVectors = schemaFixtureJson.vectors as SchemaVector[];
 const fieldValueVectors = fieldValueFixtureJson.vectors as FieldValueVector[];
 const recordIdVectors = recordIdFixtureJson.vectors as RecordIdVector[];
+const schemaLimitVectors = schemaLimitFixtureJson.vectors as SchemaLimitVector[];
 
 describe("Collection reason-code contract", () => {
   it("matches the shared full reason-code set", () => {
@@ -74,6 +83,24 @@ describe("Collection schema contract vectors", () => {
     expect(second.schema.fields).toEqual([]);
     expect(second.schema.views).toEqual([]);
   });
+
+  it.each(schemaLimitVectors)("matches $name", ({ itemCount, expectedItemCount, expectedReasons }) => {
+    const fields = Array.from(
+      { length: itemCount },
+      (_, index) => `  field_${index}:\n    type: text`,
+    ).join("\n");
+    const views = Array.from(
+      { length: itemCount },
+      (_, index) => `  - name: View ${index}\n    kind: table`,
+    ).join("\n");
+
+    const parsed = parseCollectionSchema(`fields:\n${fields}\nviews:\n${views}\n`);
+
+    expect(parsed.status).toBe("degraded");
+    expect(parsed.schema.fields).toHaveLength(expectedItemCount);
+    expect(parsed.schema.views).toHaveLength(expectedItemCount);
+    expect(parsed.reasons).toEqual(expectedReasons);
+  });
 });
 
 describe("Field value contract vectors", () => {
@@ -84,6 +111,15 @@ describe("Field value contract vectors", () => {
     expect(validateFieldValue(field, value)).toEqual(expected);
     expect(JSON.stringify(field)).toBe(beforeField);
     expect(JSON.stringify(value)).toBe(beforeValue);
+  });
+
+  it("accepts a lossless integer as a number-field value", () => {
+    expect(
+      validateFieldValue(
+        { name: "estimate", type: "number" },
+        9_007_199_254_740_993n,
+      ),
+    ).toEqual({ status: "valid" });
   });
 });
 

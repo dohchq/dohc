@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { validateFieldValue } from "@dohc/workspace-contracts/collection-values";
 import reasonCodes from "../../../../crates/dohc-engine-domain/tests/fixtures/collection-reason-codes.json";
 import {
   WORKSPACE_METHOD,
@@ -278,6 +279,9 @@ describe("workspace wire schemas", () => {
       const decoded = decodeCollectionValue(marker);
 
       expect(decoded).toBe(integer);
+      expect(
+        validateFieldValue({ name: "estimate", type: "number" }, decoded),
+      ).toEqual({ status: "valid" });
       expect(encodeCollectionValue(decoded)).toEqual(marker);
       expect(
         encodeCollectionQueryParams({

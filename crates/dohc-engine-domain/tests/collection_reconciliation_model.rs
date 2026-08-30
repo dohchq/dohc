@@ -28,6 +28,7 @@ enum Event {
     WriteMalformedFrontmatter,
     Repair,
     Rename,
+    ReplaceAtPath,
     CopyWithSameId,
     Delete,
     ChangeId,
@@ -36,11 +37,12 @@ enum Event {
 }
 
 impl Event {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::WriteValidFrontmatter,
         Self::WriteMalformedFrontmatter,
         Self::Repair,
         Self::Rename,
+        Self::ReplaceAtPath,
         Self::CopyWithSameId,
         Self::Delete,
         Self::ChangeId,
@@ -100,6 +102,9 @@ impl ModelState {
             Event::WriteMalformedFrontmatter => self.target_present && self.target_valid,
             Event::Repair => self.target_present && !self.target_valid,
             Event::Rename => self.target_present && !self.target_renamed,
+            Event::ReplaceAtPath => {
+                self.target_present && !self.target_renamed && !self.copy_present
+            }
             Event::CopyWithSameId => self.target_present && !self.copy_present,
             Event::Delete => self.target_present,
             Event::ChangeId => self.target_present && self.target_valid && !self.target_id_changed,
@@ -218,7 +223,7 @@ fn replace_target_text(
     Ok(())
 }
 
-fn insert_copy(conn: &Connection, state: &ModelState) -> Result<(), DomainError> {
+fn insert_copy(conn: &Connection, state: &ModelState, path: &str) -> Result<(), DomainError> {
     let text = record_text(state.target_id(), "Target copy");
     let sha256 = put_blob(conn, &text)?;
     conn.execute(
@@ -229,10 +234,10 @@ fn insert_copy(conn: &Connection, state: &ModelState) -> Result<(), DomainError>
     conn.execute(
         "INSERT INTO path_aliases (workspace_id,version_id,path,object_id) \
          VALUES (?1,?2,?3,?4)",
-        params![WORKSPACE_ID, VERSION_ID, COPY_PATH, COPY_OBJECT],
+        params![WORKSPACE_ID, VERSION_ID, path, COPY_OBJECT],
     )
     .map_err(StorageError::persist_public)?;
-    let moment_id = append_model_moment(conn, COPY_OBJECT, COPY_PATH, &sha256)?;
+    let moment_id = append_model_moment(conn, COPY_OBJECT, path, &sha256)?;
     conn.execute(
         "INSERT INTO snapshots (workspace_id,version_id,object_id,path,blob_sha256, \
            updated_at_ms,latest_moment_id,metadata_origin,content_kind,binary_sha256) \
@@ -241,7 +246,7 @@ fn insert_copy(conn: &Connection, state: &ModelState) -> Result<(), DomainError>
             WORKSPACE_ID,
             VERSION_ID,
             COPY_OBJECT,
-            COPY_PATH,
+            path,
             sha256,
             moment_id
         ],
@@ -317,8 +322,49 @@ fn apply_event(
             .map_err(StorageError::persist_public)?;
             state.target_renamed = true;
         }
+        Event::ReplaceAtPath => {
+            let old_path = state.target_path();
+            let blob_sha256 = conn
+                .query_row(
+                    "SELECT blob_sha256 FROM snapshots \
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    params![WORKSPACE_ID, VERSION_ID, TARGET_OBJECT],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(StorageError::persist_public)?;
+            let moment_id =
+                append_model_moment(conn, TARGET_OBJECT, RENAMED_TARGET_PATH, &blob_sha256)?;
+            conn.execute(
+                "DELETE FROM path_aliases \
+                 WHERE workspace_id=?1 AND version_id=?2 AND path=?3 AND object_id=?4",
+                params![WORKSPACE_ID, VERSION_ID, old_path, TARGET_OBJECT],
+            )
+            .map_err(StorageError::persist_public)?;
+            conn.execute(
+                "INSERT INTO path_aliases (workspace_id,version_id,path,object_id) \
+                 VALUES (?1,?2,?3,?4)",
+                params![WORKSPACE_ID, VERSION_ID, RENAMED_TARGET_PATH, TARGET_OBJECT],
+            )
+            .map_err(StorageError::persist_public)?;
+            conn.execute(
+                "UPDATE snapshots SET path=?4,updated_at_ms=updated_at_ms+1, \
+                   latest_moment_id=?5 \
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                params![
+                    WORKSPACE_ID,
+                    VERSION_ID,
+                    TARGET_OBJECT,
+                    RENAMED_TARGET_PATH,
+                    moment_id
+                ],
+            )
+            .map_err(StorageError::persist_public)?;
+            state.target_renamed = true;
+            insert_copy(conn, state, old_path)?;
+            state.copy_present = true;
+        }
         Event::CopyWithSameId => {
-            insert_copy(conn, state)?;
+            insert_copy(conn, state, COPY_PATH)?;
             state.copy_present = true;
         }
         Event::Delete => {
@@ -401,6 +447,7 @@ fn apply_event(
 #[derive(Debug)]
 struct Binding {
     record_id: Option<String>,
+    file_path: String,
     object_id: String,
     adoption_state: String,
     index_initialized: bool,
@@ -409,7 +456,7 @@ struct Binding {
 fn load_bindings(conn: &Connection) -> Result<Vec<Binding>, DomainError> {
     let mut statement = conn
         .prepare(
-            "SELECT record_id,object_id,adoption_state,index_initialized \
+            "SELECT record_id,file_path,object_id,adoption_state,index_initialized \
              FROM collection_records WHERE workspace_id=?1 AND version_id=?2 \
              ORDER BY file_path",
         )
@@ -418,9 +465,10 @@ fn load_bindings(conn: &Connection) -> Result<Vec<Binding>, DomainError> {
         .query_map(params![WORKSPACE_ID, VERSION_ID], |row| {
             Ok(Binding {
                 record_id: row.get(0)?,
-                object_id: row.get(1)?,
-                adoption_state: row.get(2)?,
-                index_initialized: row.get(3)?,
+                file_path: row.get(1)?,
+                object_id: row.get(2)?,
+                adoption_state: row.get(3)?,
+                index_initialized: row.get(4)?,
             })
         })
         .map_err(StorageError::persist_public)?
@@ -627,4 +675,79 @@ fn bounded_reconciliation_event_sequences_preserve_collection_invariants() {
         panic!("reconciliation state model crashed");
     };
     assert!(visited >= Event::ALL.len());
+}
+
+#[test]
+fn replacing_an_adopted_path_keeps_the_departed_objects_id_and_remints_the_replacement() {
+    let (_scratch, mut store) = fresh_store();
+    write_text_for_object(
+        &mut store,
+        "records/collection.yaml",
+        "fields:\n  Name:\n    type: text\n",
+        "model-schema-object",
+        "model-schema-moment",
+        2,
+    );
+    write_text_for_object(
+        &mut store,
+        TARGET_PATH,
+        &record_text(TARGET_ID, "Target"),
+        TARGET_OBJECT,
+        "model-target-moment",
+        3,
+    );
+    store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)?;
+            set_collection_adoption_state_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                TARGET_PATH,
+                TARGET_ID,
+                "adopted",
+            )?;
+            Ok::<_, DomainError>(())
+        })
+        .expect("seed adopted target");
+
+    let reconciled = store
+        .write_with(&NoFaults, |tx| {
+            let mut state = ModelState::initial();
+            apply_event(tx, &mut state, Event::ReplaceAtPath, 0)?;
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("replace adopted path");
+    let result = match reconciled {
+        TxnOutcome::Committed(result) => result,
+        TxnOutcome::Crashed { .. } => panic!("replacement reconciliation crashed"),
+    };
+    let bindings = store
+        .read_with(load_bindings)
+        .expect("load replacement bindings");
+    let departed = bindings
+        .iter()
+        .find(|binding| binding.file_path == RENAMED_TARGET_PATH)
+        .expect("departed object binding");
+    let replacement = bindings
+        .iter()
+        .find(|binding| binding.file_path == TARGET_PATH)
+        .expect("replacement object binding");
+
+    assert_eq!(departed.object_id, TARGET_OBJECT);
+    assert_eq!(departed.record_id.as_deref(), Some(TARGET_ID));
+    assert_eq!(departed.adoption_state, "adopted");
+    assert_eq!(replacement.object_id, COPY_OBJECT);
+    assert_ne!(replacement.record_id.as_deref(), Some(TARGET_ID));
+    assert_eq!(replacement.adoption_state, "pending-lossless");
+    assert_eq!(
+        result.adoptions,
+        [dohc_engine_domain::CollectionAdoptionCandidate {
+            record_id: replacement.record_id.clone().expect("replacement id"),
+            collection_path: "records".to_owned(),
+            file_path: TARGET_PATH.to_owned(),
+            object_id: COPY_OBJECT.to_owned(),
+            lossless_insertion_required: true,
+        }]
+    );
 }

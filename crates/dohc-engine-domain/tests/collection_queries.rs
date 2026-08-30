@@ -214,6 +214,7 @@ fn body_only_collection_apply_does_not_rewrite_index_or_history() {
                 &frontmatter,
                 &frontmatter,
                 Some("editor"),
+                None,
                 10,
             )?;
             Ok::<_, DomainError>(tx.total_changes() - writes_before)
@@ -299,6 +300,7 @@ fn multi_field_history_order_matches_across_independent_stores() {
                     &before,
                     &after,
                     Some("editor"),
+                    None,
                     4,
                 )
             })
@@ -789,6 +791,7 @@ fn changing_an_adopted_record_id_preserves_full_authored_history_under_the_new_i
                 &draft,
                 &review,
                 Some("human-editor"),
+                None,
                 10,
             )?;
             index_collection_frontmatter_apply_in_tx(
@@ -801,6 +804,7 @@ fn changing_an_adopted_record_id_preserves_full_authored_history_under_the_new_i
                 &review,
                 &done,
                 Some("agent-editor"),
+                None,
                 20,
             )
         })
@@ -1018,6 +1022,7 @@ fn rename_and_same_id_copy_keep_identity_and_history_with_the_original_object() 
                 &before,
                 &after,
                 Some("editor"),
+                None,
                 4,
             )
         })

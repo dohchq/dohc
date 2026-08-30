@@ -55,10 +55,31 @@ const MAX_SAFE_INTEGER = BigInt(Number.MAX_SAFE_INTEGER)
 const MIN_YDOC_INTEGER = -(1n << 63n)
 const MAX_YDOC_INTEGER = (1n << 63n) - 1n
 
+function hasValidIntegerSeparators(source: string): boolean {
+  for (
+    let index = source.indexOf('_');
+    index !== -1;
+    index = source.indexOf('_', index + 1)
+  ) {
+    const previous = source[index - 1]
+    const next = source[index + 1]
+    if (
+      previous === undefined
+      || next === undefined
+      || !/[\dA-Fa-f]/u.test(previous)
+      || !/[\dA-Fa-f]/u.test(next)
+    ) {
+      return false
+    }
+  }
+  return true
+}
+
 const losslessIntegerTag = defineScalarTag('tag:yaml.org,2002:int', {
   implicit: true,
   implicitFirstChars: ['-', '+', ...'0123456789'],
   resolve: (source, isExplicit, tagName) => {
+    if (!hasValidIntegerSeparators(source)) return NOT_RESOLVED
     const normalizedSource = source.replaceAll('_', '')
     if (
       intCoreTag.resolve(normalizedSource, isExplicit, tagName) === NOT_RESOLVED

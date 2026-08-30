@@ -2972,7 +2972,15 @@ CREATE TABLE collection_field_history (
       next_value_json IS NULL OR json_valid(next_value_json)
     ),
     author_origin_id       TEXT,
+    source_origin_id       TEXT,
+    source_origin_seq      INTEGER CHECK (
+      source_origin_seq IS NULL OR source_origin_seq >= 0
+    ),
     recorded_at_ms         INTEGER NOT NULL,
+    CHECK (
+      (source_origin_id IS NULL AND source_origin_seq IS NULL) OR
+      (source_origin_id IS NOT NULL AND source_origin_seq IS NOT NULL)
+    ),
     FOREIGN KEY (workspace_id, version_id)
       REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE
 ) STRICT;
@@ -2980,6 +2988,11 @@ CREATE INDEX collection_field_history_by_record
     ON collection_field_history(
       workspace_id, version_id, record_id, recorded_at_ms DESC, history_id DESC
     );
+CREATE UNIQUE INDEX collection_field_history_by_source
+    ON collection_field_history(
+      workspace_id, version_id, record_id, field_name,
+      source_origin_id, source_origin_seq
+    ) WHERE source_origin_id IS NOT NULL;
 
 CREATE TABLE collection_relation_edges (
     workspace_id          TEXT NOT NULL,

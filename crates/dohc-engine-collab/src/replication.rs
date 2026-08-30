@@ -271,6 +271,7 @@ fn apply_remote_update_in_transaction_inner(
         &sha,
         true,
         origin.actor_id(),
+        Some((&remote.origin_id, remote.origin_seq)),
         now_ms,
     )?;
     Ok(ReplicationApplyOutcome::Applied {
@@ -325,6 +326,7 @@ pub fn apply_remote_update_in_transaction_with_projection(
         &sha,
         true,
         origin.actor_id(),
+        Some((&remote.origin_id, remote.origin_seq)),
         now_ms,
     )?;
     Ok(RemoteApplyProjection {
@@ -399,6 +401,7 @@ pub fn apply_remote_update_in_transaction_cached_with_projection(
                 &sha,
                 true,
                 origin.actor_id(),
+                Some((&remote.origin_id, remote.origin_seq)),
                 now_ms,
             )?;
             (projection, validation, GateBaseSource::Hit, seq)
@@ -427,6 +430,7 @@ pub fn apply_remote_update_in_transaction_cached_with_projection(
                 &sha,
                 true,
                 origin.actor_id(),
+                Some((&remote.origin_id, remote.origin_seq)),
                 now_ms,
             )?;
             (

@@ -1256,8 +1256,7 @@ fn yaml_to_json(value: &YamlOwned) -> Value {
         }
         YamlOwned::Value(ScalarOwned::String(value)) => Value::String(value.clone()),
         YamlOwned::Representation(value, ScalarStyle::Plain, None) if value.contains('_') => {
-            separated_decimal_integer(value)
-                .map_or_else(|| Value::String(value.clone()), Value::from)
+            separated_integer(value).map_or_else(|| Value::String(value.clone()), Value::from)
         }
         YamlOwned::Representation(value, _, _) => Value::String(value.clone()),
         YamlOwned::Sequence(values) => Value::Array(values.iter().map(yaml_to_json).collect()),
@@ -1275,19 +1274,35 @@ fn yaml_to_json(value: &YamlOwned) -> Value {
     }
 }
 
-fn separated_decimal_integer(value: &str) -> Option<i64> {
+fn separated_integer(value: &str) -> Option<i64> {
     if !value.contains('_') {
         return None;
     }
-    let normalized = value.replace('_', "");
-    let digits = normalized
-        .strip_prefix('+')
-        .or_else(|| normalized.strip_prefix('-'))
-        .unwrap_or(normalized.as_str());
-    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
+    for (index, byte) in value.bytes().enumerate() {
+        if byte != b'_' {
+            continue;
+        }
+        if index == 0
+            || index + 1 == value.len()
+            || !value.as_bytes()[index - 1].is_ascii_hexdigit()
+            || !value.as_bytes()[index + 1].is_ascii_hexdigit()
+        {
+            return None;
+        }
     }
-    normalized.parse::<i64>().ok()
+    let normalized = value.replace('_', "");
+    let (sign, magnitude) = normalized.strip_prefix('-').map_or_else(
+        || (1_i128, normalized.strip_prefix('+').unwrap_or(&normalized)),
+        |magnitude| (-1_i128, magnitude),
+    );
+    let (radix, digits) = magnitude
+        .strip_prefix("0b")
+        .map(|digits| (2, digits))
+        .or_else(|| magnitude.strip_prefix("0o").map(|digits| (8, digits)))
+        .or_else(|| magnitude.strip_prefix("0x").map(|digits| (16, digits)))
+        .unwrap_or((10, magnitude));
+    let magnitude = i128::from_str_radix(digits, radix).ok()?;
+    i64::try_from(sign * magnitude).ok()
 }
 
 fn marked_yaml_key_text(value: &MarkedYamlOwned) -> Option<String> {
@@ -1311,7 +1326,7 @@ fn normalize_separated_yaml_integers(value: &mut Value, marked: &MarkedYamlOwned
         let end = marked.span.end.index();
         if let Some(representation) = source.get(start..end)
             && representation == marked_value
-            && let Some(integer) = separated_decimal_integer(representation)
+            && let Some(integer) = separated_integer(representation)
         {
             *value = Value::from(integer);
         }
@@ -1966,13 +1981,20 @@ fn insert_field_history(
     previous: Option<&Value>,
     next: Option<&Value>,
     author_origin_id: Option<&str>,
+    source_update: Option<(&str, i64)>,
     recorded_at_ms: i64,
 ) -> Result<(), crate::DomainError> {
+    let (source_origin_id, source_origin_seq) = source_update
+        .map(|(origin_id, origin_seq)| (Some(origin_id), Some(origin_seq)))
+        .unwrap_or((None, None));
     conn.execute(
         "INSERT INTO collection_field_history \
          (workspace_id,version_id,record_id,field_name,previous_value_json, \
-          next_value_json,author_origin_id,recorded_at_ms) \
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+          next_value_json,author_origin_id,source_origin_id,source_origin_seq,recorded_at_ms) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) \
+         ON CONFLICT(workspace_id,version_id,record_id,field_name, \
+                     source_origin_id,source_origin_seq) \
+         WHERE source_origin_id IS NOT NULL DO NOTHING",
         params![
             workspace_id,
             version_id,
@@ -1981,6 +2003,8 @@ fn insert_field_history(
             history_value(previous)?,
             history_value(next)?,
             author_origin_id,
+            source_origin_id,
+            source_origin_seq,
             recorded_at_ms,
         ],
     )
@@ -2004,6 +2028,7 @@ pub fn index_collection_frontmatter_apply_in_tx(
     authored_before: &Value,
     authored_after: &Value,
     author_origin_id: Option<&str>,
+    source_update: Option<(&str, i64)>,
     recorded_at_ms: i64,
 ) -> Result<(), crate::DomainError> {
     let Some((record_id, collection_path)) =
@@ -2042,6 +2067,7 @@ pub fn index_collection_frontmatter_apply_in_tx(
                 previous,
                 next,
                 author_origin_id,
+                source_update,
                 recorded_at_ms,
             )?;
         }
@@ -2073,6 +2099,7 @@ pub fn index_collection_frontmatter_apply_in_tx(
                 authored_previous,
                 authored_next,
                 author_origin_id,
+                source_update,
                 recorded_at_ms,
             )?;
         }
@@ -2595,10 +2622,6 @@ pub fn reconcile_collections_in_tx(
         })
         .collect();
 
-    let existing_by_path: HashMap<&str, &ExistingRecordBinding> = existing
-        .iter()
-        .map(|binding| (binding.file_path.as_str(), binding))
-        .collect();
     let existing_by_record_id: HashMap<&str, &ExistingRecordBinding> = existing
         .iter()
         .filter_map(|binding| {
@@ -2643,8 +2666,9 @@ pub fn reconcile_collections_in_tx(
         let established_owner = existing_by_object_id
             .get(record.object_id.as_str())
             .is_some_and(|binding| {
-                binding.adoption_state == "adopted"
-                    || binding.adoption_state.starts_with("deferred-conflict")
+                binding.record_id.is_some()
+                    && (binding.adoption_state == "adopted"
+                        || binding.adoption_state.starts_with("deferred-conflict"))
             });
         if current_id_counts.get(record_id.as_str()) == Some(&1)
             || current_owners.contains_key(record_id)
@@ -2685,7 +2709,6 @@ pub fn reconcile_collections_in_tx(
         if parsed_id.is_none() && declined_adoption_paths.contains(record.path.as_str()) {
             continue;
         }
-        let existing_at_path = existing_by_path.get(record.path.as_str()).copied();
         let existing_same_object = existing_by_object_id
             .get(record.object_id.as_str())
             .copied();
@@ -2707,17 +2730,17 @@ pub fn reconcile_collections_in_tx(
         if conflicted {
             let record_id = existing_same_object
                 .and_then(|binding| binding.record_id.clone())
-                .or_else(|| existing_at_path.and_then(|binding| binding.record_id.clone()))
                 .or_else(|| {
                     parsed_id
                         .as_ref()
                         .filter(|record_id| {
-                            (current_owners
-                                .get(*record_id)
-                                .is_some_and(|owner| owner == &record.object_id)
-                                || absent_owners.contains(*record_id)
-                                || !existing_by_record_id.contains_key(record_id.as_str()))
-                                && !claimed_ids.contains_key(record_id.as_str())
+                            current_owners.get(*record_id).map_or_else(
+                                || {
+                                    absent_owners.contains(*record_id)
+                                        || !existing_by_record_id.contains_key(record_id.as_str())
+                                },
+                                |owner| owner == &record.object_id,
+                            ) && !claimed_ids.contains_key(record_id.as_str())
                         })
                         .cloned()
                 });
@@ -2725,7 +2748,6 @@ pub fn reconcile_collections_in_tx(
                 claimed_ids.insert(record_id.clone(), record.path.clone());
             }
             let index_initialized = existing_same_object
-                .or(existing_at_path)
                 .filter(|binding| binding.record_id.as_ref() == record_id.as_ref())
                 .is_some_and(|binding| binding.index_initialized);
             desired.push(DesiredRecordBinding {
@@ -2778,8 +2800,8 @@ pub fn reconcile_collections_in_tx(
                 used_ids.insert(record_id.clone());
                 claimed_ids.insert(record_id.clone(), record.path.clone());
                 let needs_adoption =
-                    existing_at_path.is_none_or(|binding| binding.adoption_state != "adopted");
-                let index_initialized = existing_at_path
+                    existing_same_object.is_none_or(|binding| binding.adoption_state != "adopted");
+                let index_initialized = existing_same_object
                     .filter(|binding| binding.record_id.as_deref() == Some(record_id.as_str()))
                     .or_else(|| existing_by_record_id.get(record_id.as_str()).copied())
                     .is_some_and(|binding| binding.index_initialized);

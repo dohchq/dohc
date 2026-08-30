@@ -17,6 +17,7 @@ const RECORD_ID_PATTERN = /^rec_[a-z2-7]{26}$/;
 const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
 const URL_PATTERN = /^[A-Za-z][A-Za-z0-9+.-]*:\S+$/;
 const MAX_COLLECTION_FIELD_VALUE_DEPTH = 24;
+const MAX_SCHEMA_COLLECTION_ITEMS = 16_384;
 const COLLECTION_SCHEMA = CORE_SCHEMA.withTags(realMapTag);
 
 const FIELD_TYPES = new Set<CollectionFieldType>([
@@ -478,11 +479,22 @@ export function parseCollectionSchema(yamlText: string): CollectionSchemaParseRe
     reasons,
   );
   const fields = parseFields(raw.fields, reasons, preservedFieldEntries);
+  const name = readOptionalText(raw, "name", "", reasons);
+  const description = readOptionalText(raw, "description", "", reasons);
+  const views = parseViews(raw.views, fields, reasons);
+  if (fields.length > MAX_SCHEMA_COLLECTION_ITEMS) {
+    fields.length = MAX_SCHEMA_COLLECTION_ITEMS;
+    reasons.push({ code: "schema-collection-limit-exceeded", path: "/fields" });
+  }
+  if (views.length > MAX_SCHEMA_COLLECTION_ITEMS) {
+    views.length = MAX_SCHEMA_COLLECTION_ITEMS;
+    reasons.push({ code: "schema-collection-limit-exceeded", path: "/views" });
+  }
   const schema: CollectionSchema = {
-    name: readOptionalText(raw, "name", "", reasons),
-    description: readOptionalText(raw, "description", "", reasons),
+    name,
+    description,
     fields,
-    views: parseViews(raw.views, fields, reasons),
+    views,
   };
   return {
     status: reasons.length === 0 ? "valid" : "degraded",
@@ -546,6 +558,7 @@ export function validateFieldValue(
     case "text":
       return typeof value === "string" ? { status: "valid" } : flag("expected-text");
     case "number":
+      if (typeof value === "bigint") return { status: "valid" };
       if (typeof value !== "number") return flag("expected-number");
       return Number.isFinite(value) ? { status: "valid" } : flag("number-not-finite");
     case "checkbox":

@@ -8,6 +8,7 @@ use saphyr::{LoadableYamlNode, ScalarOwned, YamlOwned};
 use serde::Deserialize;
 
 const SCHEMA_FIXTURE: &str = include_str!("fixtures/collection-schemas.json");
+const SCHEMA_LIMIT_FIXTURE: &str = include_str!("fixtures/collection-schema-limits.json");
 const FIELD_VALUE_FIXTURE: &str = include_str!("fixtures/collection-field-values.json");
 const RECORD_ID_FIXTURE: &str = include_str!("fixtures/collection-record-ids.json");
 const FRONTMATTER_FIXTURE: &str = include_str!("fixtures/collection-frontmatter.json");
@@ -25,6 +26,15 @@ struct SchemaVector {
     name: String,
     yaml: String,
     expected: CollectionSchemaParseResult,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SchemaLimitVector {
+    name: String,
+    item_count: usize,
+    expected_item_count: usize,
+    expected_reasons: Vec<dohc_engine_domain::CollectionSchemaReason>,
 }
 
 #[derive(Deserialize)]
@@ -144,6 +154,44 @@ fn collection_schema_caps_degradation_reasons_with_a_terminal_truncation_reason(
             "/reasons",
         ))
     );
+}
+
+#[test]
+fn collection_schema_item_caps_match_the_shared_boundary_vector() {
+    let fixture: Fixture<SchemaLimitVector> =
+        serde_json::from_str(SCHEMA_LIMIT_FIXTURE).expect("schema-limit fixture parses");
+    for vector in fixture.vectors {
+        let mut yaml = String::from("fields:\n");
+        for index in 0..vector.item_count {
+            yaml.push_str(&format!("  field_{index}:\n    type: text\n"));
+        }
+        yaml.push_str("views:\n");
+        for index in 0..vector.item_count {
+            yaml.push_str(&format!("  - name: View {index}\n    kind: table\n"));
+        }
+
+        let parsed = parse_collection_schema(&yaml);
+
+        assert_eq!(
+            parsed.status,
+            CollectionSchemaStatus::Degraded,
+            "{}",
+            vector.name
+        );
+        assert_eq!(
+            parsed.schema.fields.len(),
+            vector.expected_item_count,
+            "{}",
+            vector.name
+        );
+        assert_eq!(
+            parsed.schema.views.len(),
+            vector.expected_item_count,
+            "{}",
+            vector.name
+        );
+        assert_eq!(parsed.reasons, vector.expected_reasons, "{}", vector.name);
+    }
 }
 
 #[test]

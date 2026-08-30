@@ -64,6 +64,52 @@
       }
     },
     {
+      "name": "separated-hex-integer-is-exact",
+      "markdown": "---\nexact: 0x20_0000_0000_0001\n---",
+      "expected": {
+        "exact": {
+          "$dohcInt64": "9007199254740993"
+        }
+      }
+    },
+    {
+      "name": "separated-octal-integer-is-exact",
+      "markdown": "---\nexact: 0o400_0000_0000_0000_0001\n---",
+      "expected": {
+        "exact": {
+          "$dohcInt64": "72057594037927937"
+        }
+      }
+    },
+    {
+      "name": "trailing-integer-separator-stays-text",
+      "markdown": "---\nexact: 1_\n---",
+      "expected": {
+        "exact": "1_"
+      }
+    },
+    {
+      "name": "consecutive-integer-separators-stay-text",
+      "markdown": "---\nexact: 1__2\n---",
+      "expected": {
+        "exact": "1__2"
+      }
+    },
+    {
+      "name": "hex-prefix-integer-separator-stays-text",
+      "markdown": "---\nexact: 0x_FF\n---",
+      "expected": {
+        "exact": "0x_FF"
+      }
+    },
+    {
+      "name": "octal-trailing-integer-separator-stays-text",
+      "markdown": "---\nexact: 0o17_\n---",
+      "expected": {
+        "exact": "0o17_"
+      }
+    },
+    {
       "name": "quoted-separated-integer-stays-text",
       "markdown": "---\nexact: \"1_000_000_000_000_000_003\"\n---",
       "expected": {

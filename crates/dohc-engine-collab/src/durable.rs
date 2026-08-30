@@ -902,6 +902,7 @@ pub(crate) fn append_and_index_update(
     sha: &str,
     index_frontmatter: bool,
     actor_origin_id: Option<&str>,
+    history_source: Option<(&str, i64)>,
     now_ms: i64,
 ) -> Result<(Ydoc, i64), CollabError> {
     let projection = crate::validate_replay_parity_with_scratch(base, update)?;
@@ -915,6 +916,7 @@ pub(crate) fn append_and_index_update(
         sha,
         index_frontmatter,
         actor_origin_id,
+        history_source,
         now_ms,
     )?;
     Ok((projection, seq))
@@ -931,6 +933,7 @@ pub(crate) fn append_validated_and_index_update(
     sha: &str,
     index_frontmatter: bool,
     actor_origin_id: Option<&str>,
+    history_source: Option<(&str, i64)>,
     now_ms: i64,
 ) -> Result<i64, CollabError> {
     put_binary_blob_with_sha(conn, update, sha)?;
@@ -963,6 +966,7 @@ pub(crate) fn append_validated_and_index_update(
             projection,
             update,
             actor_origin_id,
+            history_source,
             now_ms,
         )?;
     }
@@ -1012,6 +1016,7 @@ fn append_local_update(
         sha,
         true,
         actor_origin_id,
+        None,
         now_ms,
     )?;
     Ok(AppendOutcome {
@@ -1073,6 +1078,7 @@ fn append_local_update_cached(
                 sha,
                 index_frontmatter,
                 actor_origin_id,
+                None,
                 now_ms,
             )?;
             probe.candidate = Some(validation.candidate);
@@ -1102,6 +1108,7 @@ fn append_local_update_cached(
                 sha,
                 index_frontmatter,
                 actor_origin_id,
+                None,
                 now_ms,
             )?;
             probe.candidate = Some(validation.candidate);
@@ -1163,6 +1170,7 @@ pub(crate) fn index_applied_frontmatter(
     after_doc: &Ydoc,
     update: &[u8],
     author_origin_id: Option<&str>,
+    history_source: Option<(&str, i64)>,
     recorded_at_ms: i64,
 ) -> Result<(), CollabError> {
     if content_kind != ContentKind::Richdoc {
@@ -1184,6 +1192,7 @@ pub(crate) fn index_applied_frontmatter(
         &authored_before,
         &authored_after,
         author_origin_id,
+        history_source,
         recorded_at_ms,
     )
     .map_err(|error| CollabError::Corrupt {

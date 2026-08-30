@@ -330,6 +330,34 @@ const frontmatter = [
     markdown: "---\nexact: 1_000_000_000_000_000_003\n---",
   },
   {
+    name: "separated-hex-integer-is-exact",
+    markdown: "---\nexact: 0x20_0000_0000_0001\n---",
+  },
+  {
+    name: "separated-octal-integer-is-exact",
+    markdown: "---\nexact: 0o400_0000_0000_0000_0001\n---",
+  },
+  {
+    name: "trailing-integer-separator-stays-text",
+    markdown: "---\nexact: 1_\n---",
+    expected: { exact: "1_" },
+  },
+  {
+    name: "consecutive-integer-separators-stay-text",
+    markdown: "---\nexact: 1__2\n---",
+    expected: { exact: "1__2" },
+  },
+  {
+    name: "hex-prefix-integer-separator-stays-text",
+    markdown: "---\nexact: 0x_FF\n---",
+    expected: { exact: "0x_FF" },
+  },
+  {
+    name: "octal-trailing-integer-separator-stays-text",
+    markdown: "---\nexact: 0o17_\n---",
+    expected: { exact: "0o17_" },
+  },
+  {
     name: "quoted-separated-integer-stays-text",
     markdown: '---\nexact: "1_000_000_000_000_000_003"\n---',
   },
@@ -337,11 +365,13 @@ const frontmatter = [
     name: "unsupported-explicit-tag-keeps-raw-value",
     markdown: "---\npriority: !custom high\n---\n\n# Body",
   },
-].map(({ name, markdown }) => ({
-  name,
-  markdown,
-  expected: getDohcYDocFrontmatter(markdownToYDoc(markdown)),
-}));
+].map(({ name, markdown, expected }) => {
+  const parsed = getDohcYDocFrontmatter(markdownToYDoc(markdown));
+  if (expected !== undefined && !isDeepStrictEqual(expected, parsed)) {
+    throw new Error(`frontmatter fixture ${name} disagrees with markdownToYDoc`);
+  }
+  return { name, markdown, expected: expected ?? parsed };
+});
 
 function writeFixture(name, value) {
   const json = JSON.stringify(
@@ -361,6 +391,19 @@ writeFixture("collection-schemas.json", {
     }
     return { name, yaml, expected: expected ?? parsed };
   }),
+});
+writeFixture("collection-schema-limits.json", {
+  vectors: [
+    {
+      name: "fields-and-views-one-over-collection-limit",
+      itemCount: 16_385,
+      expectedItemCount: 16_384,
+      expectedReasons: [
+        { code: "schema-collection-limit-exceeded", path: "/fields" },
+        { code: "schema-collection-limit-exceeded", path: "/views" },
+      ],
+    },
+  ],
 });
 writeFixture("collection-field-values.json", { vectors: fieldValues });
 writeFixture("collection-record-ids.json", { vectors: recordIds });

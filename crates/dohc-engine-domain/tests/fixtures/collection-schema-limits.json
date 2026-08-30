@@ -1,0 +1,19 @@
+{
+  "vectors": [
+    {
+      "name": "fields-and-views-one-over-collection-limit",
+      "itemCount": 16385,
+      "expectedItemCount": 16384,
+      "expectedReasons": [
+        {
+          "code": "schema-collection-limit-exceeded",
+          "path": "/fields"
+        },
+        {
+          "code": "schema-collection-limit-exceeded",
+          "path": "/views"
+        }
+      ]
+    }
+  ]
+}

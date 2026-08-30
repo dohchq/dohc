@@ -14720,6 +14720,190 @@ fn snapshot(store: &EngineStore) -> Result<StoreSnapshot, StorageError> {
 }
 
 #[cfg(test)]
+mod collection_relation_cleanup_tests {
+    use super::*;
+    use dohc_engine_testkit::ScratchDir;
+
+    const WORKSPACE_ID: &str = "workspace";
+    const VERSION_ID: &str = "main";
+    const SOURCE_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const TARGET_ID: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const SOURCE_OBJECT_ID: &str = "relation-source-object";
+    const SOURCE_PATH: &str = "tasks/source.md";
+
+    struct NoSelfWrites;
+
+    impl SelfWriteRecorder for NoSelfWrites {
+        fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
+
+        fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
+    }
+
+    fn write_text(
+        store: &mut EngineStore,
+        object_id: &str,
+        path: &str,
+        text: &str,
+        moment_id: &str,
+        now_ms: i64,
+    ) {
+        VersionedTextStore::new(store)
+            .write_text(
+                &WriteText {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    version_id: VERSION_ID.to_owned(),
+                    object_id: object_id.to_owned(),
+                    path: path.to_owned(),
+                    text: text.to_owned(),
+                    moment_id: moment_id.to_owned(),
+                    metadata_origin: "test".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("write collection fixture");
+    }
+
+    #[test]
+    fn absent_relation_target_cleanup_refreshes_only_the_index() {
+        let scratch = ScratchDir::new().expect("scratch directory");
+        let mut store = EngineStore::open(&scratch.engine_db_path().expect("engine database"), 1)
+            .expect("open engine store");
+        ensure_mutation_version_on_store(&mut store, WORKSPACE_ID, VERSION_ID, 1, &NoFaults)
+            .expect("ensure main version");
+        write_text(
+            &mut store,
+            "relation-schema-object",
+            "tasks/collection.yaml",
+            "fields:\n  related:\n    type: relation\n    collection: tasks\n    many: false\n",
+            "relation-schema-moment",
+            2,
+        );
+        let markdown = format!("---\nid: {SOURCE_ID}\n---\n\nSource\n");
+        write_text(
+            &mut store,
+            SOURCE_OBJECT_ID,
+            SOURCE_PATH,
+            &markdown,
+            "relation-source-moment",
+            3,
+        );
+        store
+            .write_with(&NoFaults, |tx| {
+                reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)?;
+                set_collection_adoption_state_in_tx(
+                    tx,
+                    WORKSPACE_ID,
+                    VERSION_ID,
+                    SOURCE_PATH,
+                    SOURCE_ID,
+                    "adopted",
+                )
+            })
+            .expect("adopt source record");
+
+        let key = DocKey::new(WORKSPACE_ID, VERSION_ID, SOURCE_OBJECT_ID).expect("document key");
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, &markdown)
+            .expect("seed rich document");
+        let mut cache = WriterDocCache::new();
+        let appended = dohc_engine_collab::record_local_update_creating_marker(
+            &mut store,
+            &mut cache,
+            &key,
+            Some(SOURCE_PATH),
+            ContentKind::Richdoc,
+            Regime::LocalOnly,
+            &doc.encode_full_state(),
+            None,
+            &NoFaults,
+            4,
+        )
+        .expect("seed source lineage");
+        assert!(matches!(appended, TxnOutcome::Committed(_)));
+        store
+            .write_with(&NoFaults, |tx| {
+                synchronize_collection_frontmatter_index_in_tx(
+                    tx,
+                    WORKSPACE_ID,
+                    VERSION_ID,
+                    SOURCE_OBJECT_ID,
+                    &serde_json::json!({ "id": SOURCE_ID, "related": TARGET_ID }),
+                )
+                .map_err(RuntimeError::from)
+            })
+            .expect("seed stale relation index");
+
+        let before: (i64, i64, i64) = store
+            .read_with(|conn| {
+                Ok::<_, rusqlite::Error>((
+                    conn.query_row("SELECT COUNT(*) FROM ydoc_updates", [], |row| row.get(0))?,
+                    conn.query_row("SELECT COUNT(*) FROM moments", [], |row| row.get(0))?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM collection_relation_edges",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                ))
+            })
+            .expect("state before cleanup");
+        assert_eq!(before.2, 1, "the stale index must contain the target edge");
+
+        let outcome = cleanup_collection_relation_on_store(
+            &mut store,
+            &mut cache,
+            &CollectionRelationCleanupCandidate {
+                source_record_id: SOURCE_ID.to_owned(),
+                source_file_path: SOURCE_PATH.to_owned(),
+                source_object_id: SOURCE_OBJECT_ID.to_owned(),
+                field_name: "related".to_owned(),
+                target_record_id: TARGET_ID.to_owned(),
+                many: false,
+            },
+            WORKSPACE_ID,
+            VERSION_ID,
+            scratch.path(),
+            &LeaseRegistry::default(),
+            &NoSelfWrites,
+            5,
+            &NoFaults,
+            &CancellationToken::new(),
+        )
+        .expect("clean absent relation target");
+        assert!(matches!(
+            outcome,
+            CollectionRelationCleanupExecution::NoChange
+        ));
+
+        let after: (i64, i64, i64, i64) = store
+            .read_with(|conn| {
+                Ok::<_, rusqlite::Error>((
+                    conn.query_row("SELECT COUNT(*) FROM ydoc_updates", [], |row| row.get(0))?,
+                    conn.query_row("SELECT COUNT(*) FROM moments", [], |row| row.get(0))?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM collection_relation_edges",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM collection_record_fields \
+                         WHERE record_id=?1 AND field_name='related'",
+                        [SOURCE_ID],
+                        |row| row.get(0),
+                    )?,
+                ))
+            })
+            .expect("state after cleanup");
+        assert_eq!((after.0, after.1), (before.0, before.1));
+        assert_eq!((after.2, after.3), (0, 0));
+    }
+}
+
+#[cfg(test)]
 mod doc_cache_reset_tests {
     use super::*;
     use dohc_engine_testkit::ScratchDir;
