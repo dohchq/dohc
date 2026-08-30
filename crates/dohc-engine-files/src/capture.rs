@@ -20,6 +20,7 @@
 //! `SecretFileStore`, and skip `Ignored` using [`crate::policy`], without
 //! introducing the forbidden files -> domain dependency cycle.
 
+use crate::CancellationToken;
 use crate::error::FilesError;
 use crate::reconcile::{CaptureOp, IngestReason, ReconcileController, ReconcilePlan};
 use dohc_engine_storage::FaultInjector;
@@ -148,10 +149,26 @@ pub fn apply_reconcile_plan(
     sink: &mut dyn CaptureSink,
     faults: &dyn FaultInjector,
 ) -> CaptureApplyResult {
+    apply_reconcile_plan_cancellable(plan, sink, faults, &CancellationToken::new())
+}
+
+/// Apply a prepared plan, stopping cooperatively between bounded sink calls.
+/// The unprocessed suffix is reported failed so acknowledgement leaves it
+/// dirty for the next startup instead of losing it during close.
+pub fn apply_reconcile_plan_cancellable(
+    plan: &ReconcilePlan,
+    sink: &mut dyn CaptureSink,
+    faults: &dyn FaultInjector,
+    cancel: &CancellationToken,
+) -> CaptureApplyResult {
     let mut receipt = Receipt::with_capacity(plan.ops.len());
     let mut cursor = 0;
     let mut try_batch = true;
     while cursor < plan.ops.len() {
+        if cancel.is_cancelled() {
+            receipt.fail_all(&plan.ops[cursor..]);
+            break;
+        }
         if try_batch {
             match sink.ingest_batch(&plan.ops[cursor..]) {
                 Some(BatchIngestResult::Committed(outcomes)) => {

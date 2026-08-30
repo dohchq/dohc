@@ -29,7 +29,7 @@ use dohc_engine_domain::COLLECTION_SCHEMA_FILENAME;
 use dohc_engine_files::{
     CancellationToken, CaptureApplyResult, CaptureOp, FilesActor, FilesError, FilesHandle,
     IngestReason, ManifestEntry, NativeWatcher, ReconcilePlan, ReconcileRun, ScanBounds,
-    ScanGeneration, ScanManifest, apply_reconcile_plan,
+    ScanGeneration, ScanManifest, apply_reconcile_plan_cancellable,
 };
 use dohc_engine_runtime::{ActorHandle, NoFaults, RuntimeError};
 use std::path::{Path, PathBuf};
@@ -196,6 +196,19 @@ impl CaptureApplyProbe {
                 .await
                 .expect("capture apply probe remains open")
                 .forget();
+        }
+    }
+
+    async fn pause_initial_if_armed(&self, cancel: &CancellationToken) {
+        if self.inner.armed.swap(false, Ordering::AcqRel) {
+            self.inner.entered.add_permits(1);
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => {}
+                permit = self.inner.release.acquire() => {
+                    permit.expect("capture apply probe remains open").forget();
+                }
+            }
         }
     }
 
@@ -449,6 +462,48 @@ const STATUS_POLICY_HOLD: u8 = 1 << 3;
 /// consumes this bit before attempting reconciliation and re-arms it on
 /// failure, so a transition racing the attempt remains pending.
 const STATUS_COLLECTION_RECONCILE_PENDING: u8 = 1 << 4;
+const STATUS_PHASE_SHIFT: u8 = 5;
+const STATUS_PHASE_MASK: u8 = 0b11 << STATUS_PHASE_SHIFT;
+
+/// Truth about the one-time startup capture barrier. Once `Ready`, ordinary
+/// later watcher passes never take the workspace back behind this barrier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CapturePhase {
+    Starting,
+    Importing,
+    Ready,
+    Degraded,
+}
+
+impl CapturePhase {
+    fn bits(self) -> u8 {
+        let value = match self {
+            Self::Starting => 0,
+            Self::Importing => 1,
+            Self::Ready => 2,
+            Self::Degraded => 3,
+        };
+        value << STATUS_PHASE_SHIFT
+    }
+
+    fn from_bits(bits: u8) -> Self {
+        match (bits & STATUS_PHASE_MASK) >> STATUS_PHASE_SHIFT {
+            1 => Self::Importing,
+            2 => Self::Ready,
+            3 => Self::Degraded,
+            _ => Self::Starting,
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Importing => "importing",
+            Self::Ready => "ready",
+            Self::Degraded => "degraded",
+        }
+    }
+}
 
 /// A consistent point-in-time view of the driver, decoded from ONE atomic
 /// load. Any consumer that needs MORE THAN ONE flag must go through this —
@@ -460,6 +515,7 @@ pub(crate) struct StatusSnapshot {
     pub(crate) running: bool,
     pub(crate) degraded: bool,
     pub(crate) terminal: bool,
+    pub(crate) phase: CapturePhase,
 }
 
 impl DriverStatus {
@@ -470,6 +526,7 @@ impl DriverStatus {
             running: bits & STATUS_RUNNING != 0,
             degraded: bits & STATUS_DEGRADED != 0,
             terminal: bits & STATUS_TERMINAL != 0,
+            phase: CapturePhase::from_bits(bits),
         }
     }
 
@@ -508,6 +565,20 @@ impl DriverStatus {
     pub(crate) fn mark_degraded(&self) {
         self.update(|bits| bits | STATUS_DEGRADED);
     }
+    fn set_initial_phase(&self, phase: CapturePhase) {
+        self.update(|bits| (bits & !STATUS_PHASE_MASK) | phase.bits());
+    }
+    fn mark_initial_ready(&self) {
+        self.set_initial_phase(CapturePhase::Ready);
+    }
+    fn mark_initial_degraded(&self) {
+        self.update(|bits| {
+            if CapturePhase::from_bits(bits) == CapturePhase::Ready {
+                return bits | STATUS_DEGRADED;
+            }
+            ((bits | STATUS_DEGRADED) & !STATUS_PHASE_MASK) | CapturePhase::Degraded.bits()
+        });
+    }
     /// A failure: not running, degraded, terminal iff the streak says so —
     /// ONE store, so no reader can see a half-applied transition.
     fn record_failure_transition(&self, terminal: bool) {
@@ -524,8 +595,14 @@ impl DriverStatus {
     /// ONE store.
     fn record_healthy_transition(&self, clean: bool) {
         self.update(|bits| {
-            let bits = (bits | STATUS_RUNNING) & !STATUS_TERMINAL;
-            if clean { bits & !STATUS_DEGRADED } else { bits }
+            let mut bits = (bits | STATUS_RUNNING) & !STATUS_TERMINAL;
+            if clean {
+                bits &= !STATUS_DEGRADED;
+                if CapturePhase::from_bits(bits) != CapturePhase::Ready {
+                    bits = (bits & !STATUS_PHASE_MASK) | CapturePhase::Ready.bits();
+                }
+            }
+            bits
         });
     }
     fn arm_policy_hold(&self) {
@@ -549,6 +626,69 @@ impl DriverStatus {
             .fetch_and(!STATUS_COLLECTION_RECONCILE_PENDING, Ordering::AcqRel)
             & STATUS_COLLECTION_RECONCILE_PENDING
             != 0
+    }
+}
+
+#[cfg(test)]
+mod startup_contract_tests {
+    use super::*;
+
+    fn plan(op: CaptureOp) -> ReconcileRun {
+        ReconcileRun::Completed(ReconcilePlan {
+            from_generation: ScanGeneration(0),
+            to_generation: ScanGeneration(1),
+            ops: vec![op],
+            retained_over_cap: Vec::new(),
+            unconfirmed_removed: Vec::new(),
+            degraded: false,
+            degraded_paths: Vec::new(),
+            prepared_from_dirty: true,
+            dirty_epoch: 1,
+        })
+    }
+
+    fn ingest(reason: IngestReason) -> CaptureOp {
+        CaptureOp::Ingest {
+            path: "note.md".to_owned(),
+            size: 4,
+            sha256: "a".repeat(64),
+            mtime_ms: 1,
+            media_type: "text/markdown",
+            reason,
+        }
+    }
+
+    #[test]
+    fn only_a_nonempty_all_added_clean_plan_can_import_early() {
+        assert!(is_safe_fresh_import_plan(&plan(ingest(
+            IngestReason::Added
+        ))));
+        assert!(!is_safe_fresh_import_plan(&plan(ingest(
+            IngestReason::Changed
+        ))));
+        assert!(!is_safe_fresh_import_plan(&plan(CaptureOp::Retire {
+            path: "note.md".to_owned(),
+        })));
+        assert!(!is_safe_fresh_import_plan(&ReconcileRun::Converged));
+
+        let ReconcileRun::Completed(mut degraded) = plan(ingest(IngestReason::Added)) else {
+            unreachable!();
+        };
+        degraded.degraded = true;
+        assert!(!is_safe_fresh_import_plan(&ReconcileRun::Completed(
+            degraded
+        )));
+    }
+
+    #[test]
+    fn ready_is_a_one_way_startup_barrier() {
+        let status = DriverStatus::default();
+        status.set_initial_phase(CapturePhase::Importing);
+        status.mark_initial_ready();
+        status.mark_initial_degraded();
+        let snapshot = status.snapshot();
+        assert_eq!(snapshot.phase, CapturePhase::Ready);
+        assert!(snapshot.degraded);
     }
 }
 
@@ -1541,11 +1681,11 @@ pub(crate) struct CaptureDriver {
     /// Bounded: a caller flood means capture is already busy doing exactly
     /// what flush asks for; excess callers wait for a slot.
     flush_tx: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<FlushOutcome>>,
-    /// Resolves once the STARTUP baseline reconcile has been applied (or the
-    /// initial layer start failed) — `workspace.open` awaits this so a
-    /// caller's first RPC write can never be overwritten by a later capture
-    /// of stale closed-period disk bytes.
-    baseline: tokio::sync::watch::Receiver<bool>,
+    /// Resolves at the first safe open point: before apply only for the strict
+    /// fresh all-Added import, otherwise after the startup baseline settles or
+    /// degrades. The phase remains the source of truth after this one-shot
+    /// readiness edge.
+    open_ready: tokio::sync::watch::Receiver<bool>,
     /// Invalidates the live files layer after an out-of-band forced reconcile.
     /// The epoch is sampled into each layer; a mismatch makes the old layer
     /// restart before it may apply again.
@@ -1575,6 +1715,7 @@ impl CaptureDriver {
         leases: LeaseRegistry,
         self_writes: SelfWriteSuppression,
         apply_gate: ApplyGate,
+        store_freshly_created: bool,
         initial_author_json: Option<String>,
         events: EngineEvents,
         #[cfg(feature = "harness")] apply_probe: Option<CaptureApplyProbe>,
@@ -1582,7 +1723,7 @@ impl CaptureDriver {
         let cancel = CancellationToken::new();
         let status = Arc::new(DriverStatus::default());
         let author_json = Arc::new(Mutex::new(initial_author_json));
-        let (baseline_tx, baseline) = tokio::sync::watch::channel(false);
+        let (open_ready_tx, open_ready) = tokio::sync::watch::channel(false);
         let (flush_tx, flush_rx) = tokio::sync::mpsc::channel(8);
         let refresh_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
         #[cfg(feature = "harness")]
@@ -1596,9 +1737,10 @@ impl CaptureDriver {
             cancel.clone(),
             Arc::clone(&status),
             Arc::clone(&author_json),
-            baseline_tx,
+            open_ready_tx,
             flush_rx,
             apply_gate,
+            store_freshly_created,
             Arc::clone(&refresh_epoch),
             events,
             #[cfg(feature = "harness")]
@@ -1610,7 +1752,7 @@ impl CaptureDriver {
             status,
             author_json,
             flush_tx,
-            baseline,
+            open_ready,
             refresh_epoch,
             #[cfg(feature = "harness")]
             apply_probe: driver_probe,
@@ -1640,12 +1782,13 @@ impl CaptureDriver {
             .clone()
     }
 
-    /// Wait until the startup baseline reconcile has been applied (or the
-    /// initial start failed — the workspace still opens, degraded).
-    pub(crate) async fn wait_for_baseline(&self) {
-        let mut baseline = self.baseline.clone();
-        while !*baseline.borrow() {
-            if baseline.changed().await.is_err() {
+    /// Wait for the first point at which handing out the workspace handle is
+    /// safe. This is normally the settled baseline; only a proven fresh import
+    /// can publish `Importing` before its bounded actor batches finish.
+    pub(crate) async fn wait_for_open_ready(&self) {
+        let mut open_ready = self.open_ready.clone();
+        while !*open_ready.borrow() {
+            if open_ready.changed().await.is_err() {
                 return;
             }
         }
@@ -1664,6 +1807,14 @@ impl CaptureDriver {
         if let Some(probe) = &self.apply_probe {
             probe.record_manifest_refresh();
         }
+    }
+
+    /// Request cooperative shutdown without taking ownership of the driver.
+    /// Close calls this before waiting on the apply gate, so a long fresh
+    /// import stops at the next bounded chunk instead of making close wait for
+    /// the whole manifest.
+    pub(crate) fn request_shutdown(&self) {
+        self.cancel.cancel();
     }
 
     /// Cancel the loop SYNCHRONOUSLY and hand back the join handle; the
@@ -1733,6 +1884,30 @@ impl FilesLayer {
     }
 }
 
+/// The only initial plan that can safely continue after `workspace.open`
+/// returns. Every path is new to a brand-new store, so capture never claims a
+/// foreign head; any retire, changed ingest, degraded observation, or retained
+/// path requires the traditional full startup barrier.
+fn is_safe_fresh_import_plan(run: &ReconcileRun) -> bool {
+    let ReconcileRun::Completed(plan) = run else {
+        return false;
+    };
+    !plan.ops.is_empty()
+        && !plan.degraded
+        && plan.degraded_paths.is_empty()
+        && plan.unconfirmed_removed.is_empty()
+        && plan.retained_over_cap.is_empty()
+        && plan.ops.iter().all(|op| {
+            matches!(
+                op,
+                CaptureOp::Ingest {
+                    reason: IngestReason::Added,
+                    ..
+                }
+            )
+        })
+}
+
 /// A cheap change-detector over the two policy files. Content-hash based so
 /// touch-without-change does not force a re-offer. ABSENCE is a real,
 /// hashable state (no files.toml is simply the default policy); any OTHER
@@ -1787,18 +1962,39 @@ fn policy_fingerprint(root: &Path) -> Option<u64> {
     Some(hasher.finish())
 }
 
+/// Why the files layer starts with an empty or populated manifest. Keeping
+/// `WorkspaceMissing` distinct from `Existing(None)` is part of the early-open
+/// proof: an existing empty workspace must never look fresh by accident.
+enum ManifestSeed {
+    WorkspaceMissing,
+    Existing(Option<(ScanManifest, ScanGeneration)>),
+}
+
+impl ManifestSeed {
+    fn into_scan_seed(self) -> Option<(ScanManifest, ScanGeneration)> {
+        match self {
+            Self::WorkspaceMissing => None,
+            Self::Existing(seed) => seed,
+        }
+    }
+
+    fn is_workspace_missing(&self) -> bool {
+        matches!(self, Self::WorkspaceMissing)
+    }
+}
+
 /// Build the rehydration seed from the domain's captured state for the
-/// version capture will target. `None` (uninitialized workspace or a read
-/// failure) starts from the empty baseline.
+/// version capture will target. A missing workspace is represented
+/// explicitly; read failures remain errors and can never authorize early open.
 async fn manifest_seed(
     root: &Path,
     actor: &ActorHandle,
     workspace_id: &str,
-) -> Result<Option<(ScanManifest, ScanGeneration)>, RuntimeError> {
+) -> Result<ManifestSeed, RuntimeError> {
     let version_id = match actor.active_version_id(workspace_id.to_owned()).await {
         Ok(version_id) => version_id,
         Err(RuntimeError::Domain(dohc_engine_domain::DomainError::WorkspaceNotFound)) => {
-            return Ok(None);
+            return Ok(ManifestSeed::WorkspaceMissing);
         }
         Err(error) => return Err(error),
     };
@@ -1806,7 +2002,7 @@ async fn manifest_seed(
         .capture_manifest_seed(workspace_id.to_owned(), version_id)
         .await?;
     if entries.is_empty() {
-        return Ok(None);
+        return Ok(ManifestSeed::Existing(None));
     }
     // EVERY capture-owned entry is seeded — including paths the CURRENT
     // policy narrows out, but with a SENTINEL hash. That single choice
@@ -1849,7 +2045,7 @@ async fn manifest_seed(
             },
         )
     }));
-    Ok(Some((manifest, ScanGeneration(1))))
+    Ok(ManifestSeed::Existing(Some((manifest, ScanGeneration(1)))))
 }
 
 /// Never a valid hex digest, so a seeded entry carrying it always re-offers.
@@ -2082,7 +2278,7 @@ async fn drive_loop<E: DriverEnv>(
     env: &mut E,
     cancel: CancellationToken,
     status: Arc<DriverStatus>,
-    baseline_tx: tokio::sync::watch::Sender<bool>,
+    open_ready_tx: tokio::sync::watch::Sender<bool>,
     mut flush_rx: tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<FlushOutcome>>,
 ) {
     let mut layer: Option<E::Layer> = None;
@@ -2180,12 +2376,13 @@ async fn drive_loop<E: DriverEnv>(
                     // MAX_RESTART_ATTEMPTS consecutive failures. The failure
                     // transition is one store; no manual pre-ordering needed.
                     restart.record_failure(&status);
+                    status.mark_initial_degraded();
                 }
             }
             // Whether the baseline applied or the start failed, the open
             // barrier releases: the workspace opens (possibly degraded), and
             // callers' first writes are ordered AFTER the startup capture.
-            let _ = baseline_tx.send(true);
+            let _ = open_ready_tx.send(true);
         }
 
         let Some(current) = layer.as_ref() else {
@@ -2377,6 +2574,8 @@ struct RealEnv {
     author_json: Arc<Mutex<Option<String>>>,
     self_writes: SelfWriteSuppression,
     apply_gate: ApplyGate,
+    store_freshly_created: bool,
+    open_ready_tx: tokio::sync::watch::Sender<bool>,
     refresh_epoch: Arc<std::sync::atomic::AtomicU64>,
     events: EngineEvents,
     #[cfg(feature = "harness")]
@@ -2451,20 +2650,57 @@ impl DriverEnv for RealEnv {
         // would swallow the edit (the seed reflects old policy while the
         // layer claims to be current).
         let fingerprint_before_seed = policy_fingerprint(&self.root);
-        let seed = manifest_seed(&self.root, &self.actor, &self.workspace_id)
-            .await
-            .ok()
-            .flatten();
+        let (seed, seed_loaded) =
+            match manifest_seed(&self.root, &self.actor, &self.workspace_id).await {
+                Ok(seed) => (seed, true),
+                Err(_) => {
+                    // Empty is the conservative capture fallback, but a failed
+                    // authoritative seed read can never prove a fresh import.
+                    self.status.mark_degraded();
+                    (ManifestSeed::Existing(None), false)
+                }
+            };
+        let workspace_missing = seed.is_workspace_missing();
         let refresh_epoch = self.refresh_epoch.load(Ordering::Acquire);
         let (fresh, initial) = FilesLayer::start_with_fingerprint(
             &self.root,
             cancel,
-            seed,
+            seed.into_scan_seed(),
             fingerprint_before_seed,
             refresh_epoch,
         )
         .await
         .map_err(|_| ())?;
+
+        // EARLY-OPEN PROOF. The watcher is attached before NativeWatcher
+        // returns this initial plan. Re-read every mutable prerequisite after
+        // the scan, then publish Importing in one atomic transition before the
+        // first actor batch can be enqueued. Anything uncertain falls back to
+        // the settled-baseline barrier below.
+        let fingerprint_after_scan = policy_fingerprint(&self.root);
+        let refresh_after_scan = self.refresh_epoch.load(Ordering::Acquire);
+        let early_import = self.store_freshly_created
+            && seed_loaded
+            && workspace_missing
+            && is_safe_fresh_import_plan(&initial)
+            && fingerprint_before_seed.is_some()
+            && fingerprint_after_scan == fingerprint_before_seed
+            && refresh_after_scan == refresh_epoch
+            && !fresh.watcher.is_unavailable()
+            && fresh.watcher.disruption_count() == 0
+            && !cancel.is_cancelled();
+        if early_import {
+            self.status.set_running(true);
+            self.status.set_initial_phase(CapturePhase::Importing);
+            let _ = self.open_ready_tx.send(true);
+        }
+
+        #[cfg(feature = "harness")]
+        if matches!(initial, ReconcileRun::Completed(_))
+            && let Some(probe) = &self.apply_probe
+        {
+            probe.pause_initial_if_armed(cancel).await;
+        }
 
         // The startup baseline is the offline-reconcile pass (TS parity):
         // ONE correlation id and the "Reconciled offline edits" summary tie
@@ -2474,8 +2710,13 @@ impl DriverEnv for RealEnv {
         // daemon restart, and a rehydrated manifest may make this plan empty.
         self.status.request_collection_reconcile();
         let provenance = reconcile_provenance();
-        let mut settled =
-            apply_run(self.apply_context_with(provenance.clone()), &fresh, initial).await;
+        let mut settled = apply_run(
+            self.apply_context_with(provenance.clone()),
+            &fresh,
+            initial,
+            cancel,
+        )
+        .await;
         // The open barrier must not release on a FAILED baseline: a caller
         // whose first write lands before the retry could have it overwritten
         // by the retry's capture of stale closed-period disk bytes. Retry a
@@ -2496,11 +2737,34 @@ impl DriverEnv for RealEnv {
                 .await
             {
                 Ok(run) => {
-                    apply_run(self.apply_context_with(provenance.clone()), &fresh, run).await
+                    apply_run(
+                        self.apply_context_with(provenance.clone()),
+                        &fresh,
+                        run,
+                        cancel,
+                    )
+                    .await
                 }
                 Err(_) => false,
             };
         }
+        let fingerprint_after_apply = policy_fingerprint(&self.root);
+        let initial_ready = settled
+            && seed_loaded
+            && !cancel.is_cancelled()
+            && fingerprint_before_seed.is_some()
+            && fingerprint_after_apply == fingerprint_before_seed
+            && self.refresh_epoch.load(Ordering::Acquire) == refresh_epoch
+            && !fresh.watcher.is_unavailable()
+            && fresh.watcher.disruption_count() == 0;
+        if initial_ready {
+            self.status.mark_initial_ready();
+        } else {
+            self.status.mark_initial_degraded();
+        }
+        // Unsafe starts release only here, after the bounded settle attempt.
+        // An early import already sent this edge; watch::Sender coalesces it.
+        let _ = self.open_ready_tx.send(true);
         #[cfg(feature = "harness")]
         if let Some(probe) = &self.apply_probe {
             probe.record_layer_start();
@@ -2544,7 +2808,7 @@ impl DriverEnv for RealEnv {
             // racing this tick, and it must not be mistaken for quiescence.
             Ok(ReconcileRun::Cancelled) => TickIo::Cancelled,
             Ok(ReconcileRun::Converged) => {
-                if !apply_run(self.apply_context(), layer, ReconcileRun::Converged).await {
+                if !apply_run(self.apply_context(), layer, ReconcileRun::Converged, cancel).await {
                     return TickIo::Applied { clean: false };
                 }
                 if self.status.degraded() {
@@ -2561,7 +2825,7 @@ impl DriverEnv for RealEnv {
                 }
             }
             Ok(run) => {
-                let clean = apply_run(self.apply_context(), layer, run).await;
+                let clean = apply_run(self.apply_context(), layer, run, cancel).await;
                 // A clean-looking tick with a NON-EMPTY quarantine is not
                 // health: the controller parks persistently failing paths on
                 // its own degraded-rescan backoff and stops self-forcing
@@ -2607,9 +2871,10 @@ async fn drive(
     cancel: CancellationToken,
     status: Arc<DriverStatus>,
     author_json: Arc<Mutex<Option<String>>>,
-    baseline_tx: tokio::sync::watch::Sender<bool>,
+    open_ready_tx: tokio::sync::watch::Sender<bool>,
     flush_rx: tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<FlushOutcome>>,
     apply_gate: ApplyGate,
+    store_freshly_created: bool,
     refresh_epoch: Arc<std::sync::atomic::AtomicU64>,
     events: EngineEvents,
     #[cfg(feature = "harness")] apply_probe: Option<CaptureApplyProbe>,
@@ -2623,12 +2888,14 @@ async fn drive(
         author_json,
         self_writes,
         apply_gate,
+        store_freshly_created,
+        open_ready_tx: open_ready_tx.clone(),
         refresh_epoch,
         events,
         #[cfg(feature = "harness")]
         apply_probe,
     };
-    drive_loop(&mut env, cancel, status, baseline_tx, flush_rx).await;
+    drive_loop(&mut env, cancel, status, open_ready_tx, flush_rx).await;
 }
 
 /// Force the oracle-equivalent pre-switch full scan while the caller owns the
@@ -2654,7 +2921,8 @@ pub(crate) async fn reconcile_full_for_switch(
     }
     let seed = manifest_seed(root, actor, workspace_id)
         .await
-        .map_err(|_| SwitchReconcileError::Unavailable)?;
+        .map_err(|_| SwitchReconcileError::Unavailable)?
+        .into_scan_seed();
     let files =
         FilesActor::spawn_async_with_manifest(root.to_path_buf(), ScanBounds::default(), seed)
             .await
@@ -2697,7 +2965,7 @@ pub(crate) async fn reconcile_full_for_switch(
                 provenance,
                 events,
             };
-            if apply_run_with_handle(context, &handle, run).await {
+            if apply_run_with_handle(context, &handle, run, &token).await {
                 Ok(manifest_changed)
             } else {
                 Err(SwitchReconcileError::ApplyFailed)
@@ -2827,14 +3095,20 @@ fn moment_recorded_payload(
 /// abnormal paths (version fetch failure, apply-thread spawn failure or
 /// panic) the plan is acked with an ALL-FAILED receipt: the latch clears,
 /// the paths stay dirty, and the next cycle retries.
-async fn apply_run(context: ApplyRunContext<'_>, layer: &FilesLayer, run: ReconcileRun) -> bool {
-    apply_run_with_handle(context, &layer.files.handle(), run).await
+async fn apply_run(
+    context: ApplyRunContext<'_>,
+    layer: &FilesLayer,
+    run: ReconcileRun,
+    cancel: &CancellationToken,
+) -> bool {
+    apply_run_with_handle(context, &layer.files.handle(), run, cancel).await
 }
 
 async fn apply_run_with_handle(
     context: ApplyRunContext<'_>,
     files: &FilesHandle,
     run: ReconcileRun,
+    cancel: &CancellationToken,
 ) -> bool {
     let ApplyRunContext {
         root,
@@ -2948,6 +3222,7 @@ async fn apply_run_with_handle(
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
     let apply_plan = plan.clone();
     let apply_author_json = author_json.clone();
+    let apply_cancel = cancel.clone();
     // The retained-over-cap loop below retires through its OWN sink; it must
     // carry the same pass provenance or its deletes split the reconcile/fence
     // history group with NULL correlation ids.
@@ -2970,7 +3245,12 @@ async fn apply_run_with_handle(
                 apply_self_writes,
                 apply_provenance,
             );
-            let result = apply_reconcile_plan(&apply_plan, &mut sink, &NoFaults);
+            let result = apply_reconcile_plan_cancellable(
+                &apply_plan,
+                &mut sink,
+                &NoFaults,
+                &apply_cancel,
+            );
             let collections =
                 if result.failed_applies.is_empty() && !result.degraded && result.completed() {
                     let reconcile = if collection_reconcile_requested {

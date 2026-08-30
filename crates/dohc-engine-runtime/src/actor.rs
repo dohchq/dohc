@@ -2272,6 +2272,10 @@ enum Command {
 pub struct WorkspaceActor {
     identity: EngineDbIdentity,
     generation: u64,
+    /// Authoritative open disposition reported by [`EngineStore`]. This is
+    /// true only when this actor created a brand-new schema; opening an
+    /// existing, migrated, or recovered database always reports false.
+    store_freshly_created: bool,
     tx: mpsc::Sender<Command>,
     /// A permit for the `Close` command, reserved at spawn from the dedicated
     /// extra channel slot. `close` consumes it to deliver `Close` in bounded
@@ -2322,7 +2326,7 @@ impl WorkspaceActor {
         let state = Arc::new(AtomicU8::new(LifecycleState::Opening.as_u8()));
         // Startup handshake uses a std channel: `spawn` runs in a synchronous
         // context, so the open result must not depend on a tokio runtime.
-        let (startup_tx, startup_rx) = std_sync_channel::<Result<(), StorageError>>(1);
+        let (startup_tx, startup_rx) = std_sync_channel::<Result<bool, StorageError>>(1);
 
         let worker_state = Arc::clone(&state);
         let worker = std::thread::Builder::new()
@@ -2331,9 +2335,10 @@ impl WorkspaceActor {
             .map_err(RuntimeError::ThreadSpawn)?;
 
         match startup_rx.recv() {
-            Ok(Ok(())) => Ok(WorkspaceActor {
+            Ok(Ok(store_freshly_created)) => Ok(WorkspaceActor {
                 identity,
                 generation,
+                store_freshly_created,
                 tx,
                 close_permit,
                 state,
@@ -2367,6 +2372,11 @@ impl WorkspaceActor {
     /// The session generation (incremented on restart).
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Whether this actor's store open created a brand-new database schema.
+    pub fn store_was_freshly_created(&self) -> bool {
+        self.store_freshly_created
     }
 
     /// The current lifecycle state.
@@ -7711,7 +7721,7 @@ fn worker_main(
     read_only: bool,
     mut rx: mpsc::Receiver<Command>,
     state: Arc<AtomicU8>,
-    startup_tx: std::sync::mpsc::SyncSender<Result<(), StorageError>>,
+    startup_tx: std::sync::mpsc::SyncSender<Result<bool, StorageError>>,
 ) {
     // Publish Closed on ANY exit — normal return OR a panic unwind (e.g. a
     // panicking fault injector). Declared before `store` so `store` (and its
@@ -7737,10 +7747,13 @@ fn worker_main(
             return;
         }
     };
+    let store_freshly_created = store.was_freshly_created();
     // Publish Ready *before* acking the open, so a caller that observes the
-    // successful open also observes Ready.
+    // successful open also observes Ready. The same handshake carries the
+    // store's authoritative freshness disposition; no caller infers it from
+    // file existence or actor-registry ownership.
     state.store(LifecycleState::Ready.as_u8(), Ordering::Release);
-    if startup_tx.send(Ok(())).is_err() {
+    if startup_tx.send(Ok(store_freshly_created)).is_err() {
         // The spawner unwound before the actor was built; nothing to serve.
         return;
     }

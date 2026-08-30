@@ -59,6 +59,8 @@ pub struct WorkspaceSupervisor {
 pub struct SupervisorOpen {
     pub actor: ActorHandle,
     pub created_actor: bool,
+    /// Authoritative database disposition from `EngineStore::open`.
+    pub store_freshly_created: bool,
 }
 
 /// An actor removed from the registry while its `Closing` marker remains held.
@@ -177,6 +179,7 @@ impl WorkspaceSupervisor {
                             return Ok(SupervisorOpen {
                                 actor: actor.handle(),
                                 created_actor: false,
+                                store_freshly_created: actor.store_was_freshly_created(),
                             });
                         }
                         continue; // slot changed under us; re-evaluate
@@ -210,10 +213,14 @@ impl WorkspaceSupervisor {
                 WorkspaceActor::spawn_read_only(db_path.to_path_buf(), identity.clone(), 1)
             }
         };
+        let store_freshly_created = spawned
+            .as_ref()
+            .is_ok_and(WorkspaceActor::store_was_freshly_created);
         self.finalize_reservation(identity, spawned)
             .map(|actor| SupervisorOpen {
                 actor,
                 created_actor: true,
+                store_freshly_created,
             })
     }
 

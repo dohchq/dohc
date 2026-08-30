@@ -193,6 +193,20 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
         serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
     let mut id: u64 = 10;
 
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        id += 1;
+        let status = call(&transport, &handle, id, "watcher.status", json!({})).await;
+        if status["phase"] == json!("ready") {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "startup capture never became ready: {status}"
+        );
+        tokio::task::yield_now().await;
+    }
+
     // versions.active resolves to main on a fresh workspace.
     let active = call(&transport, &handle, 2, "versions.active", json!({})).await;
     assert_eq!(active["id"], json!("main"));

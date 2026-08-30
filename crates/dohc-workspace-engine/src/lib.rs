@@ -870,6 +870,14 @@ impl OpenWorkspace {
         }
     }
 
+    /// Ask capture to stop before close waits on its apply gate. The driver
+    /// remains owned here until teardown takes and joins it.
+    fn request_capture_shutdown(&self) {
+        if let Some(driver) = lock(&self.capture).as_ref() {
+            driver.request_shutdown();
+        }
+    }
+
     /// Take the driver and cancel it SYNCHRONOUSLY (no await point, so an
     /// aborted RPC future can never leave a driver un-cancelled), returning
     /// the join handle for callers that must await the full drain.
@@ -1168,6 +1176,7 @@ impl EngineService {
     ) -> Result<ServiceResponse, WireError> {
         let id = request.id;
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
+        self.require_initial_capture_ready(request.workspace.as_ref(), &request.method)?;
         if request.method == "versionedBinary.readBlob" {
             let (result, blob_egress) = self
                 .versioned_binary_read_blob(&ctx, request.workspace, request.params, id)
@@ -1816,6 +1825,32 @@ impl EngineService {
         Ok(())
     }
 
+    /// Fence reads and barriers whose answer is defined over a complete
+    /// initial file baseline. The classifier is centralized so a new early
+    /// handle cannot accidentally expose a partial prefix through one handler
+    /// while another blocks behind the capture driver.
+    fn require_initial_capture_ready(
+        &self,
+        handle: Option<&WorkspaceHandle>,
+        method: &str,
+    ) -> Result<(), WireError> {
+        if !method_requires_initial_capture_ready(method) {
+            return Ok(());
+        }
+        let Some(handle) = handle else {
+            return Ok(());
+        };
+        let open = self.open(Some(handle))?;
+        let phase = lock(&open.capture)
+            .as_ref()
+            .map(|driver| driver.status().snapshot().phase)
+            .unwrap_or(capture_driver::CapturePhase::Ready);
+        if phase == capture_driver::CapturePhase::Ready {
+            return Ok(());
+        }
+        Err(initial_capture_updating())
+    }
+
     /// Tear down every open workspace's capture driver (watcher joined,
     /// files actor closed). Called at daemon shutdown AFTER the transport's
     /// workspace close hook: store actors are already gone by then, so any
@@ -2112,6 +2147,7 @@ impl EngineService {
                     self.leases.scoped(&root),
                     self.self_writes.scoped(&root),
                     Arc::clone(&capture_apply_gate),
+                    actor_open.store_freshly_created,
                     capture_author_json.flatten(),
                     self.events.clone(),
                     #[cfg(feature = "harness")]
@@ -2146,7 +2182,7 @@ impl EngineService {
                 .await?;
             }
             if let Some(capture) = &capture {
-                capture.wait_for_baseline().await;
+                capture.wait_for_open_ready().await;
             }
             capture
         };
@@ -2236,6 +2272,10 @@ impl EngineService {
             lock(&self.sessions).retain(|_, session| session.workspace != handle);
             return Ok(json!({ "closed": false, "attachmentClosed": removed }));
         }
+        // Cancellation must precede the capture-gate wait. During a large
+        // fresh import this stops the sink at the next bounded batch; waiting
+        // first would turn close into a wait for the whole import.
+        open.request_capture_shutdown();
         // The same capture→sessions order as `fence_version_snapshot`.
         // Holding the capture gate through driver cancellation/drain means no
         // apply can be queued behind a session-first close and form the
@@ -4218,11 +4258,17 @@ impl EngineService {
                     "running": snapshot.running,
                     "degraded": snapshot.degraded,
                     "terminal": snapshot.terminal,
+                    "phase": snapshot.phase.as_str(),
                 })
             }
             // The driver is only absent mid-teardown; report an honest
             // "down" rather than erroring a racing status poll.
-            None => json!({ "running": false, "degraded": true, "terminal": false }),
+            None => json!({
+                "running": false,
+                "degraded": true,
+                "terminal": false,
+                "phase": "degraded",
+            }),
         })
     }
 
@@ -4259,14 +4305,27 @@ impl EngineService {
         // Clone the sender OUT of the lock and await OUTSIDE it: a flush can
         // legitimately take many reconcile cycles, and the workspace table
         // must not be blocked for its duration.
-        let sender = lock(&open.capture)
+        let (sender, initial_phase, initial_snapshot) = lock(&open.capture)
             .as_ref()
-            .map(capture_driver::CaptureDriver::flush_sender);
+            .map(|driver| {
+                let snapshot = driver.status().snapshot();
+                (driver.flush_sender(), snapshot.phase, Some(snapshot))
+            })
+            .map(|(sender, phase, snapshot)| (Some(sender), Some(phase), snapshot))
+            .unwrap_or((None, None, None));
         let unavailable = capture_driver::FlushOutcome {
             settled: false,
             running: false,
             degraded: true,
         };
+        if initial_phase.is_some_and(|phase| phase != capture_driver::CapturePhase::Ready) {
+            let snapshot = initial_snapshot.expect("capture phase has one status snapshot");
+            return Ok(capture_driver::FlushOutcome {
+                settled: false,
+                running: snapshot.running,
+                degraded: snapshot.degraded,
+            });
+        }
         let Some(sender) = sender else {
             return Ok(unavailable);
         };
@@ -7970,6 +8029,25 @@ impl EngineService {
             .is_some_and(|expected| expected != probe.key.object_id.as_str())
         {
             return Err(wire(ErrorCode::InvalidParams, "ydoc-object-changed"));
+        }
+        let capture_phase = lock(&open.capture)
+            .as_ref()
+            .map(|driver| driver.status().snapshot().phase)
+            .unwrap_or(capture_driver::CapturePhase::Ready);
+        let artifact_is_proven_absent =
+            match std::fs::symlink_metadata(open.root.join(&params.path)) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+                Ok(_) | Err(_) => false,
+            };
+        if probe.head_blob_sha256.is_none()
+            && capture_phase != capture_driver::CapturePhase::Ready
+            && !artifact_is_proven_absent
+        {
+            // The initial scan has seen this artifact but has not installed
+            // its head yet. Refuse before lease acquisition; otherwise a new
+            // absent-lineage session can block capture and turn disk bytes
+            // into a misleading uncaptured-artifact failure.
+            return Err(initial_capture_updating());
         }
         let lease =
             self.leases
@@ -12898,6 +12976,40 @@ fn map_search_code(error: SearchError) -> ErrorCode {
 
 fn map_shadow_fence(_error: shadow_fence::ShadowFenceError) -> WireError {
     wire(ErrorCode::InvalidParams, "shadow workspace refused")
+}
+
+fn method_requires_initial_capture_ready(method: &str) -> bool {
+    method.starts_with("sync.")
+        || method.starts_with("share.")
+        || method.starts_with("search.")
+        || method.starts_with("versions.")
+        || method.starts_with("conflicts.")
+        || matches!(
+            method,
+            "capture.reconcile"
+                | "versionedText.list"
+                | "versionedText.read"
+                | "versionedText.readBlob"
+                | "versionedText.compare"
+                | "versionedText.rename"
+                | "versionedText.delete"
+                | "versionedText.rollback"
+                | "versionedText.merge"
+                | "versionedBinary.read"
+                | "versionedBinary.readBlob"
+                | "moments.list"
+                | "moments.get"
+                | "history.page"
+                | "secrets.list"
+                | "secrets.stateExists"
+        )
+}
+
+fn initial_capture_updating() -> WireError {
+    wire(
+        ErrorCode::Overloaded,
+        "Workspace is still updating. Try again.",
+    )
 }
 
 fn workspace_unavailable() -> WireError {
