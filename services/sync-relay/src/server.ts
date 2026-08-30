@@ -790,24 +790,13 @@ export function createSyncRelayHandler({
     const share = storage.getShare(shareId);
     if (!share) throw notFound();
     if (
-      requestedWorkspaceId !== undefined &&
-      share.workspaceId !== requestedWorkspaceId
-    ) {
-      throw notFound();
-    }
-    if (
       storage.workspaceIsOwnedBy(share.workspaceId, actorUserId)
     ) {
-      if (requestedWorkspaceId === undefined) throw notFound();
+      if (share.workspaceId !== requestedWorkspaceId) throw notFound();
       return { viewer: "owner" };
     }
+    if (requestedWorkspaceId !== undefined) throw notFound();
     const authorized = requireShareAction(shareId, actorUserId, "read");
-    if (
-      requestedWorkspaceId !== undefined &&
-      authorized.share.workspaceId !== requestedWorkspaceId
-    ) {
-      throw notFound();
-    }
     if (
       action === "append" &&
       authorized.grant.access !== "comment" &&
