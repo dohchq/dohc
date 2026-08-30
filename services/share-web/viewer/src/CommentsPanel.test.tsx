@@ -746,6 +746,52 @@ describe("CommentsPanel", () => {
     await settle(() => parkedSignal !== undefined);
   });
 
+  it("keeps same-millisecond activity before a complete initial history", async () => {
+    const initial = {
+      ...LINK_MESSAGE,
+      messageId: "message-b",
+      createdAtMs: 4_000,
+      body: "Initial body",
+    };
+    const concurrent = {
+      ...NAMED_MESSAGE,
+      messageId: "message-a",
+      createdAtMs: initial.createdAtMs,
+      body: "Concurrent body",
+    };
+    let parkedSignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/view/discussion?direction=newest-first") {
+        return discussionPageAt(7, [initial]);
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        return jsonResponse({
+          ok: true,
+          latestRevision: 8,
+          cursorRevision: 8,
+          hasMore: false,
+          messages: [concurrent],
+          composerState: "available",
+        });
+      }
+      if (path === "/api/view/discussion/activity?since=8&hold=30000&limit=100") {
+        parkedSignal = init?.signal ?? undefined;
+        return await new Promise<Response>(() => undefined);
+      }
+      throw new Error(`unexpected request: ${path}`);
+    }));
+
+    await render("view");
+    await settle(() => parkedSignal !== undefined);
+
+    expect([...container.querySelectorAll(".comment-row")].map((row) => row.textContent))
+      .toEqual([
+        "Named PersonConcurrent body",
+        "Link PersonUnverifiedInitial body",
+      ]);
+  });
+
   it("retries one failed earlier page only after another click", async () => {
     let earlierAttempts = 0;
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {

@@ -522,8 +522,16 @@ describe("public discussion projection", () => {
       messageId: "message-after-window",
       createdAtMs: link.createdAtMs + 1,
     };
+    const sameMillisecondBeforeWindow = {
+      ...named,
+      messageId: "message-before-window",
+      createdAtMs: link.createdAtMs,
+    };
 
-    expect(mergeDiscussionWindowMessages([link], [olderUnseen, newerUnseen]))
+    expect(mergeDiscussionWindowMessages(
+      [link],
+      [olderUnseen, sameMillisecondBeforeWindow, newerUnseen],
+    ))
       .toEqual([link, newerUnseen]);
     expect(mergeDiscussionWindowMessages([link], [{ ...link, body: "conflict" }]))
       .toBeNull();

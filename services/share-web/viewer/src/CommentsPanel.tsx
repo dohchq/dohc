@@ -248,6 +248,7 @@ export function CommentsPanel(props: { access: ShareAccess; session: string }) {
   const pageTokenRef = useRef<symbol | null>(null);
   const pageControllerRef = useRef<AbortController | null>(null);
   const earlierPendingRef = useRef(false);
+  const hasEarlierHistoryRef = useRef(false);
   const seenEarlierCursorsRef = useRef(new Set<string>());
   const submitTokenRef = useRef<symbol | null>(null);
   const submitControllerRef = useRef<AbortController | null>(null);
@@ -269,6 +270,7 @@ export function CommentsPanel(props: { access: ShareAccess; session: string }) {
     messagesRef.current = null;
     activityRevisionRef.current = 0;
     earlierPendingRef.current = false;
+    hasEarlierHistoryRef.current = false;
     seenEarlierCursorsRef.current = new Set();
     setMessages(null);
     setLoadState("loading");
@@ -289,6 +291,7 @@ export function CommentsPanel(props: { access: ShareAccess; session: string }) {
         if (!isCurrent()) return;
         messagesRef.current = loaded.messages;
         activityRevisionRef.current = loaded.activityRevision;
+        hasEarlierHistoryRef.current = loaded.nextCursor !== null;
         setMessages(loaded.messages);
         setEarlierCursor(loaded.nextCursor);
         if (loaded.nextCursor !== null) {
@@ -304,10 +307,12 @@ export function CommentsPanel(props: { access: ShareAccess; session: string }) {
           isCurrent,
           (activity) => {
             if (!messagesRef.current) return false;
-            const merged = mergeDiscussionWindowMessages(
-              messagesRef.current,
-              activity.messages,
-            );
+            const merged = hasEarlierHistoryRef.current
+              ? mergeDiscussionWindowMessages(
+                  messagesRef.current,
+                  activity.messages,
+                )
+              : mergeDiscussionMessages(messagesRef.current, activity.messages);
             if (!merged) return false;
             messagesRef.current = merged;
             activityRevisionRef.current = activity.cursorRevision;
@@ -375,6 +380,7 @@ export function CommentsPanel(props: { access: ShareAccess; session: string }) {
         seenEarlierCursorsRef.current.add(page.nextCursor);
       }
       messagesRef.current = merged;
+      hasEarlierHistoryRef.current = page.nextCursor !== null;
       setMessages(merged);
       setEarlierCursor(page.nextCursor);
     } catch {
