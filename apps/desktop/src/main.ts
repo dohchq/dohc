@@ -428,6 +428,7 @@ import {
   type ShareLogPage,
 } from "./workspaces/dmChats";
 import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
+import { resolveManagedCloudConfiguration } from "./workspaces/cloudConfiguration";
 import {
   clearDeclinedDm,
   declineDm,
@@ -1326,6 +1327,7 @@ function testImportPaths(): string[] | null {
 // handlers register inside whenReady. The session token lives encrypted in
 // the credential store and never crosses IPC.
 let cachedCloudLogin: CloudLogin | null = null;
+const managedCloudConfiguration = resolveManagedCloudConfiguration(process.env);
 function cloudLogin(): CloudLogin {
   if (!cachedCloudLogin) {
     cachedCloudLogin = createCloudLogin({
@@ -1338,7 +1340,12 @@ function cloudLogin(): CloudLogin {
             safeStorage.decryptString(Buffer.from(cipherText, "base64")),
         },
       }),
-      defaultServerUrl: process.env.DOHC_CLOUD_URL ?? "http://localhost:1786",
+      ...(managedCloudConfiguration.status === "ready"
+        ? {
+            defaultServerUrl: managedCloudConfiguration.serverUrl,
+            defaultRelayUrl: managedCloudConfiguration.relayUrl,
+          }
+        : {}),
     });
   }
   return cachedCloudLogin;
@@ -7304,6 +7311,7 @@ function registerIpcHandlers(
     }
     return CloudStatusResult.parse({
       ...status,
+      managedCloudStatus: managedCloudConfiguration.status,
       ...(input.workspaceId
         ? {
             workspaceSynced: !!workspace?.remote,

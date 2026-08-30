@@ -3390,6 +3390,7 @@ export type CloudStatusPayload = z.infer<typeof CloudStatusPayload>;
 
 export const CloudStatusResult = z.object({
   connected: z.boolean(),
+  managedCloudStatus: z.enum(["ready", "unconfigured", "invalid"]),
   email: z.string().optional(),
   serverUrl: z.string().optional(),
   relayUrl: z.string().optional(),

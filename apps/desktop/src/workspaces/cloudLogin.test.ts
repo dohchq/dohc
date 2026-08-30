@@ -71,6 +71,58 @@ const DEVICE = {
 };
 
 describe("cloud device-flow login", () => {
+  it("refuses to invent a server when neither the build nor the caller supplies one", async () => {
+    const { impl, calls } = fakeFetch({});
+    const login = createCloudLogin({
+      store: memoryStore(),
+      fetch: impl,
+    });
+
+    await expect(login.start()).rejects.toThrow(
+      "No dohc Cloud server is configured",
+    );
+    expect(calls).toEqual([]);
+  });
+
+  it("rejects a caller-supplied path before making a request", async () => {
+    const { impl, calls } = fakeFetch({});
+    const login = createCloudLogin({
+      store: memoryStore(),
+      fetch: impl,
+    });
+
+    await expect(
+      login.start("https://cloud.example.test/api", "https://relay.example.test"),
+    ).rejects.toThrow("cloud server URL must be an HTTP or HTTPS origin");
+    expect(calls).toEqual([]);
+  });
+
+  it("uses an explicitly configured relay for the managed flow", async () => {
+    const store = memoryStore();
+    const { impl } = fakeFetch({
+      "/api/auth/device/code": () => ({ body: DEVICE }),
+      "/api/auth/device/token": () => ({
+        body: { access_token: "session-token-xyz" },
+      }),
+      "/api/auth/get-session": () => ({
+        body: { user: { email: "ice@dohc.test", id: "usr_ice" } },
+      }),
+    });
+    const login = createCloudLogin({
+      store,
+      defaultServerUrl: "http://cloud.test",
+      defaultRelayUrl: "http://relay.test",
+      fetch: impl,
+    });
+
+    await login.start();
+    await expect(login.poll()).resolves.toMatchObject({ status: "complete" });
+    expect(store.saved).toMatchObject({
+      serverUrl: "http://cloud.test",
+      relayUrl: "http://relay.test",
+    });
+  });
+
   it("start() returns the user code and the complete verification URI", async () => {
     const { impl } = fakeFetch({ "/api/auth/device/code": () => ({ body: DEVICE }) });
     const login = createCloudLogin({

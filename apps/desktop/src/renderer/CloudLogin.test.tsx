@@ -29,7 +29,11 @@ function deferred<T>() {
 beforeEach(() => {
   vi.useRealTimers();
   vi.resetAllMocks();
-  bridgeMock.cloudStatus.mockResolvedValue({ connected: false, workspaceSynced: false });
+  bridgeMock.cloudStatus.mockResolvedValue({
+    connected: false,
+    managedCloudStatus: "unconfigured",
+    workspaceSynced: false,
+  });
   bridgeMock.cloudEnableSync.mockResolvedValue(undefined);
   bridgeMock.cloudLoginStart.mockResolvedValue({
     userCode: "ABCD",
@@ -45,6 +49,128 @@ afterEach(() => {
 });
 
 describe("CloudLogin", () => {
+  it("uses the configured managed Cloud flow without showing infrastructure fields", async () => {
+    bridgeMock.cloudStatus.mockResolvedValue({
+      connected: false,
+      managedCloudStatus: "ready",
+      workspaceSynced: false,
+    });
+
+    render(<CloudLogin workspaceId="ws-1" />);
+
+    const connect = await screen.findByTestId("cloud-connect-start");
+    expect(screen.queryByTestId("cloud-server-url")).toBeNull();
+    expect(screen.queryByTestId("cloud-relay-url")).toBeNull();
+    expect(screen.getByTestId("cloud-use-self-host")).toBeTruthy();
+
+    fireEvent.click(connect);
+    await waitFor(() => expect(bridgeMock.cloudLoginStart).toHaveBeenCalledWith({}));
+  });
+
+  it("shows an explicit self-host path when managed Cloud is not configured", async () => {
+    render(<CloudLogin workspaceId="ws-1" />);
+
+    expect((await screen.findByTestId("cloud-managed-unconfigured")).textContent).toContain(
+      "isn't configured in this build",
+    );
+    expect((screen.getByTestId("cloud-server-url") as HTMLInputElement).placeholder).toBe(
+      "https://cloud.example.com",
+    );
+    expect((screen.getByTestId("cloud-relay-url") as HTMLInputElement).placeholder).toBe(
+      "https://relay.example.com",
+    );
+
+    fireEvent.click(screen.getByTestId("cloud-connect-start"));
+    expect(screen.getByTestId("cloud-connection-error").textContent).toBe(
+      "Enter the cloud server URL and sync relay URL.",
+    );
+    expect(document.activeElement).toBe(screen.getByTestId("cloud-server-url"));
+    expect(bridgeMock.cloudLoginStart).not.toHaveBeenCalled();
+  });
+
+  it("reports an incomplete managed configuration without hiding self-hosting", async () => {
+    bridgeMock.cloudStatus.mockResolvedValue({
+      connected: false,
+      managedCloudStatus: "invalid",
+      workspaceSynced: false,
+    });
+
+    render(<CloudLogin workspaceId="ws-1" />);
+
+    expect((await screen.findByTestId("cloud-managed-invalid")).textContent).toContain(
+      "incomplete server settings",
+    );
+    expect(screen.getByTestId("cloud-server-url")).toBeTruthy();
+    expect(screen.getByTestId("cloud-relay-url")).toBeTruthy();
+    expect(screen.queryByTestId("cloud-use-managed")).toBeNull();
+  });
+
+  it("switches from managed Cloud to a validated self-hosted server", async () => {
+    bridgeMock.cloudStatus.mockResolvedValue({
+      connected: false,
+      managedCloudStatus: "ready",
+      workspaceSynced: false,
+    });
+
+    render(<CloudLogin workspaceId="ws-1" />);
+    fireEvent.click(await screen.findByTestId("cloud-use-self-host"));
+    expect(screen.getByTestId("cloud-use-managed")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("cloud-use-managed"));
+    expect(screen.queryByTestId("cloud-server-url")).toBeNull();
+    fireEvent.click(screen.getByTestId("cloud-use-self-host"));
+    fireEvent.change(screen.getByTestId("cloud-server-url"), {
+      target: { value: " HTTPS://Cloud.Example.Test:443/ " },
+    });
+    fireEvent.change(screen.getByTestId("cloud-relay-url"), {
+      target: { value: "https://Relay.Example.Test/" },
+    });
+    fireEvent.click(screen.getByTestId("cloud-connect-start"));
+
+    await waitFor(() =>
+      expect(bridgeMock.cloudLoginStart).toHaveBeenCalledWith({
+        serverUrl: "https://cloud.example.test",
+        relayUrl: "https://relay.example.test",
+      }),
+    );
+  });
+
+  it("rejects a self-hosted URL that is not an origin", async () => {
+    render(<CloudLogin workspaceId="ws-1" />);
+    await screen.findByTestId("cloud-server-url");
+    fireEvent.change(screen.getByTestId("cloud-server-url"), {
+      target: { value: "https://cloud.example.test/api" },
+    });
+    fireEvent.change(screen.getByTestId("cloud-relay-url"), {
+      target: { value: "https://relay.example.test" },
+    });
+    fireEvent.click(screen.getByTestId("cloud-connect-start"));
+
+    expect(screen.getByTestId("cloud-connection-error").textContent).toBe(
+      "Enter the cloud server URL as an HTTP or HTTPS origin.",
+    );
+    expect(document.activeElement).toBe(screen.getByTestId("cloud-server-url"));
+    expect(bridgeMock.cloudLoginStart).not.toHaveBeenCalled();
+  });
+
+  it("uses loopback only when the user enters it", async () => {
+    render(<CloudLogin workspaceId="ws-1" />);
+    await screen.findByTestId("cloud-server-url");
+    fireEvent.change(screen.getByTestId("cloud-server-url"), {
+      target: { value: "http://localhost:1786" },
+    });
+    fireEvent.change(screen.getByTestId("cloud-relay-url"), {
+      target: { value: "http://localhost:1788" },
+    });
+    fireEvent.click(screen.getByTestId("cloud-connect-start"));
+
+    await waitFor(() =>
+      expect(bridgeMock.cloudLoginStart).toHaveBeenCalledWith({
+        serverUrl: "http://localhost:1786",
+        relayUrl: "http://localhost:1788",
+      }),
+    );
+  });
+
   it("ignores stale status responses after switching workspaces", async () => {
     const oldStatus = deferred<{
       connected: boolean;
@@ -79,6 +205,11 @@ describe("CloudLogin", () => {
     vi.useFakeTimers();
     const poll = deferred<{ status: "complete"; email: string }>();
     bridgeMock.cloudLoginPoll.mockImplementationOnce(() => poll.promise);
+    bridgeMock.cloudStatus.mockResolvedValue({
+      connected: false,
+      managedCloudStatus: "ready",
+      workspaceSynced: false,
+    });
 
     const { rerender } = render(<CloudLogin workspaceId="old" />);
     await act(async () => {});
@@ -248,6 +379,7 @@ describe("CloudLogin", () => {
     bridgeMock.cloudStatus
       .mockResolvedValueOnce({
         connected: false,
+        managedCloudStatus: "ready",
         workspaceSynced: true,
       })
       .mockResolvedValueOnce({
