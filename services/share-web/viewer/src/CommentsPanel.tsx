@@ -468,15 +468,15 @@ export function CommentsPanel(props: {
       } else if (response.ok) {
         const result = await response.json();
         if (!isCurrent()) return;
-        const message = parseDiscussionAppendResult(result);
-        const merged = message && messagesRef.current
-          ? mergeDiscussionMessages(messagesRef.current, [message])
+        const acknowledgement = parseDiscussionAppendResult(result);
+        const merged = acknowledgement && messagesRef.current
+          ? mergeDiscussionMessages(messagesRef.current, [acknowledgement.message])
           : null;
-        if (message && merged) {
+        if (acknowledgement && merged) {
           messagesRef.current = merged;
           setMessages(merged);
-          if (intent.claimedName !== undefined && message.deleted === false) {
-            setClaimedName(message.author.displayName);
+          if (intent.claimedName !== undefined && acknowledgement.kind === "live") {
+            setClaimedName(acknowledgement.message.author.displayName);
             setNameLocked(true);
           }
           intentRef.current = null;

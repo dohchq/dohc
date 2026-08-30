@@ -678,6 +678,79 @@ describe("CommentsPanel", () => {
     expect(container.querySelectorAll(".comment-row.comment-deleted")).toHaveLength(1);
   });
 
+  it("clears an exact retry intent when the durable result is already deleted", async () => {
+    const submittedBody = "Committed before its response was lost";
+    const deleted = {
+      messageId: "message-lost-response",
+      createdAtMs: 4_000,
+      deleted: true as const,
+    };
+    const heldDeletion = heldJsonResponse(200);
+    const posted: Array<Record<string, unknown>> = [];
+    let finalParkSignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/view/discussion" && init?.method === "POST") {
+        posted.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+        return posted.length === 1
+          ? new Response(null, { status: 404 })
+          : jsonResponse({ ok: true, message: deleted });
+      }
+      if (path === "/api/view/discussion?direction=newest-first") {
+        return discussionPageAt(7);
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        return jsonResponse({
+          ok: true,
+          access: "comment",
+          latestRevision: 7,
+          cursorRevision: 7,
+          hasMore: false,
+          messages: [],
+          composerState: "available",
+        });
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
+        return heldDeletion.response;
+      }
+      if (path === "/api/view/discussion/activity?since=8&hold=30000&limit=100") {
+        finalParkSignal = init?.signal ?? undefined;
+        return await new Promise<Response>(() => undefined);
+      }
+      throw new Error(`unexpected request: ${path}`);
+    }));
+
+    await render("comment");
+    await settle(heldDeletion.bodyStarted);
+    setControlValue(bodyInput(), submittedBody);
+    submit();
+    await settle(() =>
+      container.textContent?.includes("The comment didn't post. Try again.") === true
+    );
+
+    heldDeletion.release({
+      ok: true,
+      access: "comment",
+      latestRevision: 8,
+      cursorRevision: 8,
+      hasMore: false,
+      messages: [deleted],
+      composerState: "available",
+    });
+    await settle(() =>
+      container.textContent?.includes("Comment deleted by the owner") === true &&
+      finalParkSignal !== undefined
+    );
+
+    submit();
+    await settle(() => posted.length === 2 && bodyInput().value === "");
+
+    expect(posted[1]?.idempotencyKey).toBe(posted[0]?.idempotencyKey);
+    expect(container.textContent).not.toContain(submittedBody);
+    expect(container.textContent).not.toContain("The comment didn't post. Try again.");
+    expect(container.querySelectorAll(".comment-row.comment-deleted")).toHaveLength(1);
+  });
+
   it.each([
     ["blocked", "The owner turned off comments for this browser."],
     ["paused", "The owner paused comments. You can still read everything."],

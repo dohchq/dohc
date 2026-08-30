@@ -277,7 +277,10 @@ describe("public discussion projection", () => {
       activityRevision: 7,
       profileName: null,
     });
-    expect(parseDiscussionAppendResult({ ok: true, message: link })).toEqual(link);
+    expect(parseDiscussionAppendResult({ ok: true, message: link })).toEqual({
+      kind: "live",
+      message: link,
+    });
   });
 
   it("validates newest-first pages and returns their loaded window chronologically", () => {
@@ -342,10 +345,29 @@ describe("public discussion projection", () => {
     }
   });
 
-  it("accepts only a live link-authored append result", () => {
-    expect(parseDiscussionAppendResult({ ok: true, message: link })).toEqual(link);
+  it("accepts only an exact link append or deleted replay acknowledgement", () => {
+    expect(parseDiscussionAppendResult({ ok: true, message: link })).toEqual({
+      kind: "live",
+      message: link,
+    });
     expect(parseDiscussionAppendResult({ ok: true, message: named })).toBeNull();
-    expect(parseDiscussionAppendResult({ ok: true, message: tombstone })).toBeNull();
+    expect(parseDiscussionAppendResult({ ok: true, message: tombstone })).toEqual({
+      kind: "deleted",
+      message: tombstone,
+    });
+    for (const malformed of [
+      { ...tombstone, body: "deleted body" },
+      { ...tombstone, author: link.author },
+      { messageId: tombstone.messageId, deleted: true },
+      { ...tombstone, createdAtMs: -1 },
+    ]) {
+      expect(parseDiscussionAppendResult({ ok: true, message: malformed })).toBeNull();
+    }
+    expect(parseDiscussionAppendResult({
+      ok: true,
+      message: tombstone,
+      principalId: "private",
+    })).toBeNull();
   });
 
   it.each([

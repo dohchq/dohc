@@ -53,6 +53,13 @@ export type PublicDiscussionMessage =
   | LiveDiscussionMessage
   | DeletedDiscussionMessage;
 
+export type DiscussionAppendResult =
+  | {
+      kind: "live";
+      message: LiveDiscussionMessage & { author: LinkDiscussionAuthor };
+    }
+  | { kind: "deleted"; message: DeletedDiscussionMessage };
+
 export interface PublicDiscussionPage {
   messages: PublicDiscussionMessage[];
   nextCursor: string | null;
@@ -254,15 +261,16 @@ export function parseDiscussionActivity(value: unknown): PublicDiscussionActivit
   };
 }
 
-export function parseDiscussionAppendResult(value: unknown): PublicDiscussionMessage | null {
+export function parseDiscussionAppendResult(value: unknown): DiscussionAppendResult | null {
   const result = record(value);
   if (!result || result.ok !== true || !hasExactKeys(result, ["ok", "message"])) {
     return null;
   }
   const message = discussionMessage(result.message);
-  return message && !message.deleted && message.author.kind === "link"
-    ? message
-    : null;
+  if (!message) return null;
+  if (message.deleted) return { kind: "deleted", message };
+  if (message.author.kind !== "link") return null;
+  return { kind: "live", message: { ...message, author: message.author } };
 }
 
 export function parseDiscussionWriteState(value: unknown): "blocked" | "paused" | null {
