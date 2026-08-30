@@ -1353,6 +1353,11 @@ export function RelayShareDialog(props: {
       grantId: row.grantId,
       expectedDependentGrantIds: dependentGrantIds(row),
     };
+    const retiresDisplayedCredential =
+      minted?.grantId === row.grantId &&
+      (action.kind === "reset" ||
+        action.kind === "end" ||
+        (action.kind === "retune" && action.access === "comment"));
     setMutationBusy({ kind: action.kind, grantId: row.grantId });
     setLifecycleError(null);
 
@@ -1425,6 +1430,11 @@ export function RelayShareDialog(props: {
         latestMutationRequest.current !== requestId
       ) {
         return;
+      }
+      if (retiresDisplayedCredential) {
+        latestCopyRequest.current += 1;
+        setMinted(null);
+        setLinkCopied(false);
       }
       setLifecycleError(errorMessage(cause));
       setConfirmation(null);

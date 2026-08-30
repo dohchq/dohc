@@ -2070,7 +2070,7 @@ describe("RelayShareDialog", () => {
     });
   });
 
-  it("refreshes the link and closes confirmation after a stale lifecycle failure", async () => {
+  it("retires the displayed URL before refreshing after a lost widening response", async () => {
     const retune = controllable<{ outcome: "widened"; url: string }>();
     const viewRow = readableLink("stale-retune", {
       shareId: "share-stale-retune",
@@ -2082,7 +2082,13 @@ describe("RelayShareDialog", () => {
     });
     bridgeMock.listRelayShareLinks
       .mockResolvedValueOnce({ links: [viewRow] })
+      .mockResolvedValueOnce({ links: [viewRow] })
       .mockResolvedValueOnce({ links: [commentRow] });
+    bridgeMock.createRelayShareLink.mockResolvedValueOnce({
+      shareId: viewRow.shareId,
+      grantId: viewRow.grantId,
+      url: LINK_URL_A,
+    });
     bridgeMock.retuneRelayShareLink.mockReturnValueOnce(retune.promise);
     const user = userEvent.setup();
     render(
@@ -2095,6 +2101,11 @@ describe("RelayShareDialog", () => {
     await showLinkPane(user);
 
     let row = await screen.findByTestId("share-link-row-stale-retune");
+    await user.click(screen.getByRole("button", { name: "Create link" }));
+    expect((await screen.findByTestId("share-link-url")).textContent).toBe(LINK_URL_A);
+    await vi.waitFor(() => {
+      expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
+    });
     await user.click(within(row).getByRole("button", { name: "Turn on comments" }));
     await user.click(
       within(screen.getByTestId("share-link-confirmation")).getByRole("button", {
@@ -2110,8 +2121,10 @@ describe("RelayShareDialog", () => {
     expect(
       await screen.findByText("The link changed on another device."),
     ).toBeTruthy();
+    expect(screen.queryByTestId("share-link-url")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Copy" })).toBeNull();
     await vi.waitFor(() => {
-      expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
+      expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(3);
     });
     expect(screen.queryByTestId("share-link-confirmation")).toBeNull();
     row = screen.getByTestId("share-link-row-stale-retune");
