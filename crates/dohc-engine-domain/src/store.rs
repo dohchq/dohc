@@ -4465,6 +4465,17 @@ fn alias_object_id(
     .map_err(DomainError::sql_corrupt)
 }
 
+const NEXT_MOMENT_ORDER_SQL: &str = "\
+SELECT MAX(
+    COALESCE((SELECT MAX(moment_order) FROM moments), 0),
+    COALESCE((
+        SELECT MAX(target_generation)
+        FROM materialization_jobs
+        WHERE job_id NOT GLOB 'version-switch-mat_*'
+          AND job_id NOT GLOB 'version-switch-secret-mat_*'
+    ), 0)
+)";
+
 pub(crate) fn next_moment_order(conn: &Connection) -> Result<i64, DomainError> {
     // Ordinary materialization rows are the durable high-water mark when
     // rollback history surgery removes a tip moment. Pending and terminal
@@ -4472,19 +4483,10 @@ pub(crate) fn next_moment_order(conn: &Connection) -> Result<i64, DomainError> {
     // newer than an already-issued compensating restore. Version-switch
     // projections use snapshot timestamps as generations, so they are a
     // separate ordering domain and must not advance the mutation sequence.
-    let max: Option<i64> = conn
-        .query_row(
-            "SELECT MAX(generation) FROM ( \
-                 SELECT moment_order AS generation FROM moments \
-                 UNION ALL \
-                 SELECT target_generation AS generation FROM materialization_jobs \
-                 WHERE job_id NOT GLOB 'version-switch-mat_*' \
-                   AND job_id NOT GLOB 'version-switch-secret-mat_*')",
-            [],
-            |row| row.get(0),
-        )
+    let max: i64 = conn
+        .query_row(NEXT_MOMENT_ORDER_SQL, [], |row| row.get(0))
         .map_err(DomainError::sql_corrupt)?;
-    Ok(max.unwrap_or(0) + 1)
+    Ok(max + 1)
 }
 
 fn latest_moment_order(
@@ -5982,14 +5984,101 @@ mod tests {
     use std::borrow::Cow;
 
     use super::{
-        ProjectedWriteText, VersionedTextStore, object_has_references,
-        reset_write_text_ownership_counts, write_projected_text_in_tx, write_text_in_tx,
-        write_text_ownership_counts,
+        NEXT_MOMENT_ORDER_SQL, ProjectedWriteText, VersionedTextStore, next_moment_order,
+        object_has_references, reset_write_text_ownership_counts, write_projected_text_in_tx,
+        write_text_in_tx, write_text_ownership_counts,
     };
     use crate::WriteText;
     use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
     use dohc_engine_testkit::ScratchDir;
     use rusqlite::Connection;
+
+    fn moment_order_connection() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        conn.execute_batch(
+            "CREATE TABLE moments (moment_order INTEGER NOT NULL); \
+             CREATE INDEX idx_moments_global_order \
+                 ON moments(moment_order DESC); \
+             CREATE TABLE materialization_jobs ( \
+                 job_id TEXT PRIMARY KEY, \
+                 target_generation INTEGER NOT NULL \
+             ); \
+             CREATE INDEX idx_materialization_jobs_mutation_generation \
+                 ON materialization_jobs(target_generation DESC) \
+                 WHERE job_id NOT GLOB 'version-switch-mat_*' \
+                   AND job_id NOT GLOB 'version-switch-secret-mat_*';",
+        )
+        .expect("create moment-order tables and indexes");
+        conn
+    }
+
+    #[test]
+    fn next_moment_order_preserves_global_and_job_high_water_semantics() {
+        let mut conn = moment_order_connection();
+        assert_eq!(next_moment_order(&conn).expect("empty order"), 1);
+
+        conn.execute_batch(
+            "INSERT INTO moments (moment_order) VALUES (7), (12); \
+             INSERT INTO materialization_jobs (job_id, target_generation) VALUES \
+                 ('mutation-mat_a', 40), \
+                 ('version-switch-mat_ignored', 100), \
+                 ('version-switch-secret-mat_ignored', 101);",
+        )
+        .expect("seed global order domains");
+        assert_eq!(next_moment_order(&conn).expect("job high water"), 41);
+
+        let transaction = conn.transaction().expect("begin rollback probe");
+        transaction
+            .execute(
+                "INSERT INTO materialization_jobs (job_id, target_generation) VALUES (?1, ?2)",
+                ("mutation-mat_rolled_back", 70),
+            )
+            .expect("reserve rolled-back generation");
+        assert_eq!(
+            next_moment_order(&transaction).expect("transaction high water"),
+            71
+        );
+        transaction.rollback().expect("roll back generation probe");
+
+        assert_eq!(
+            next_moment_order(&conn).expect("high water after rollback"),
+            41,
+            "a rolled-back transaction must not reserve a generation"
+        );
+    }
+
+    #[test]
+    fn next_moment_order_uses_generation_first_indexes() {
+        let conn = moment_order_connection();
+        let mut statement = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {NEXT_MOMENT_ORDER_SQL}"))
+            .expect("prepare query plan");
+        let details = statement
+            .query_map([], |row| row.get::<_, String>(3))
+            .expect("query plan")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect query plan");
+
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("idx_moments_global_order")),
+            "moment maximum must use its global generation index: {details:?}"
+        );
+        assert!(
+            details
+                .iter()
+                .any(|detail| { detail.contains("idx_materialization_jobs_mutation_generation") }),
+            "materialization maximum must use its filtered generation index: {details:?}"
+        );
+        assert!(
+            details.iter().all(|detail| {
+                !detail.starts_with("SCAN moments")
+                    && !detail.starts_with("SCAN materialization_jobs")
+            }),
+            "the high-water query must not scan either growing table: {details:?}"
+        );
+    }
 
     #[test]
     fn direct_write_borrows_text_and_projected_write_moves_owned_text() {
