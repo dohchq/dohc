@@ -6329,7 +6329,8 @@ mod tests {
         CaptureIngest, CaptureRetire, DomainError, RenameTextFile, WriteResult, WriteText,
     };
     use dohc_engine_storage::{
-        EngineStore, MaterializationJobSpec, NoFaults, Preimage, TxnOutcome, record_completed_job,
+        EngineStore, MaterializationJobSpec, NoFaults, Preimage, TxnOutcome, put_binary_blob,
+        record_completed_job,
     };
     use dohc_engine_testkit::ScratchDir;
     use rusqlite::{Connection, params};
@@ -6479,13 +6480,16 @@ mod tests {
                         [],
                     )
                     .map_err(DomainError::sql_persist)?;
+                    let content_sha256 =
+                        put_binary_blob(tx, b"capture high-water fixture")
+                            .map_err(DomainError::from)?;
                     record_completed_job(
                         tx,
                         &MaterializationJobSpec {
                             job_id: "mutation-mat_capture-high-water".to_owned(),
                             workspace_id: "ws".to_owned(),
                             target_path: "notes/high-water.md".to_owned(),
-                            content_sha256: "0".repeat(64),
+                            content_sha256,
                             preimage: Preimage::Absent,
                             target_generation: 40,
                             now_ms: 1,
@@ -6618,13 +6622,15 @@ mod tests {
             .expect("ensure main version");
         let outcome = store
             .write_with(&NoFaults, |tx| {
+                let content_sha256 = put_binary_blob(tx, b"moment-order exhaustion fixture")
+                    .map_err(DomainError::from)?;
                 record_completed_job(
                     tx,
                     &MaterializationJobSpec {
                         job_id: "mutation-mat_before-order-exhaustion".to_owned(),
                         workspace_id: "ws".to_owned(),
                         target_path: "notes/before-order-exhaustion.md".to_owned(),
-                        content_sha256: "0".repeat(64),
+                        content_sha256,
                         preimage: Preimage::Absent,
                         target_generation: i64::MAX - 1,
                         now_ms: 1,
