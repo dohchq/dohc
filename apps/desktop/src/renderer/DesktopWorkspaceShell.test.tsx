@@ -782,7 +782,7 @@ function renderShell(
   );
 }
 
-async function enterMarkdownWysiwyg(
+async function enterMarkdownSource(
   user: ReturnType<typeof userEvent.setup>,
   scope: HTMLElement = document.body,
 ): Promise<HTMLElement> {
@@ -790,21 +790,40 @@ async function enterMarkdownWysiwyg(
   await waitFor(() => expect(shell.dataset.ready).toBe("true"));
 
   const queries = within(scope);
-  const currentEditor = queries.queryByTestId("markdown-editor");
-  if (currentEditor) return currentEditor;
+  const currentSource = queries
+    .queryByTestId("markdown-editor")
+    ?.querySelector<HTMLElement>(".cm-content");
+  if (currentSource?.getAttribute("contenteditable") === "true") {
+    return currentSource;
+  }
 
   const toggle = (await queries.findByTestId(
     "markdown-edit-toggle",
   )) as HTMLButtonElement;
   await waitFor(() => expect(toggle.disabled).toBe(false));
 
-  if (toggle.textContent === "Source") {
-    return await queries.findByTestId("markdown-editor");
+  if (toggle.textContent === "Edit") {
+    await user.click(toggle);
+    await waitFor(() => expect(toggle.textContent).toBe("Source"));
   }
+  if (toggle.textContent === "Source") {
+    await user.click(toggle);
+  } else {
+    expect(toggle.textContent).toBe("WYSIWYG");
+  }
+  return await waitFor(() => {
+    const content = queries
+      .getByTestId("markdown-editor")
+      .querySelector<HTMLElement>(".cm-content");
+    expect(content?.getAttribute("contenteditable")).toBe("true");
+    return content!;
+  });
+}
 
-  expect(toggle.textContent).toMatch(/^(Edit|WYSIWYG)$/);
-  await user.click(toggle);
-  return await queries.findByTestId("markdown-editor");
+function sourceEditorText(editor: HTMLElement): string {
+  return Array.from(editor.querySelectorAll<HTMLElement>(".cm-line"), (line) =>
+    line.textContent ?? "",
+  ).join("\n");
 }
 
 function shellBootstrapProps(bridge: ReturnType<typeof makeBridge>) {
@@ -2067,7 +2086,7 @@ describe("editor groups", () => {
     );
     const left = screen.getByRole("region", { name: "Editor group 1" });
     const right = screen.getByRole("region", { name: "Editor group 2" });
-    await user.type(await enterMarkdownWysiwyg(user, left), "Draft");
+    await user.type(await enterMarkdownSource(user, left), "Draft");
     await waitFor(() =>
       expect(within(left).getByTestId("tab-dirty")).toBeTruthy(),
     );
@@ -2142,7 +2161,7 @@ describe("editor groups", () => {
     const left = await screen.findByTestId("editor-group-left");
     const right = await screen.findByTestId("editor-group-right");
     await user.type(
-      await enterMarkdownWysiwyg(user, left),
+      await enterMarkdownSource(user, left),
       " dirty",
     );
 
@@ -2222,7 +2241,7 @@ describe("editor groups", () => {
     const left = screen.getByTestId("editor-group-left");
     const middle = screen.getByTestId("editor-group-middle");
     const right = screen.getByTestId("editor-group-right");
-    await user.type(await enterMarkdownWysiwyg(user, left), " dirty");
+    await user.type(await enterMarkdownSource(user, left), " dirty");
     await waitFor(() => expect(within(left).getByTestId("tab-dirty")).toBeTruthy());
     Object.defineProperty(document, "elementFromPoint", {
       configurable: true,
@@ -2303,7 +2322,7 @@ describe("editor groups", () => {
     );
     const left = screen.getByTestId("editor-group-left");
     const right = screen.getByTestId("editor-group-right");
-    await user.type(await enterMarkdownWysiwyg(user, left), " dirty");
+    await user.type(await enterMarkdownSource(user, left), " dirty");
     await waitFor(() => expect(within(left).getByTestId("tab-dirty")).toBeTruthy());
 
     await user.click(within(left).getByTestId("create-editor-group-right"));
@@ -2581,7 +2600,7 @@ describe("editor groups", () => {
     );
     const left = screen.getByRole("region", { name: "Editor group 1" });
     const right = screen.getByRole("region", { name: "Editor group 2" });
-    await user.type(await enterMarkdownWysiwyg(user, right), "Draft");
+    await user.type(await enterMarkdownSource(user, right), "Draft");
     await waitFor(() => expect(within(right).getByTestId("tab-dirty")).toBeTruthy());
 
     await user.click(within(right).getByTestId("create-editor-group-right"));
@@ -2611,7 +2630,7 @@ describe("editor groups", () => {
     renderShell(bridge);
 
     await screen.findByTestId("view-markdown");
-    await user.type(await enterMarkdownWysiwyg(user), "Draft");
+    await user.type(await enterMarkdownSource(user), "Draft");
     await waitFor(() => expect(screen.getByTestId("tab-dirty")).toBeTruthy());
 
     fireEvent.contextMenu(screen.getByTestId("tab-a.md"));
@@ -2672,7 +2691,7 @@ describe("editor groups", () => {
     );
     const left = screen.getByRole("region", { name: "Editor group 1" });
     const right = screen.getByRole("region", { name: "Editor group 2" });
-    await user.type(await enterMarkdownWysiwyg(user, left), "Draft");
+    await user.type(await enterMarkdownSource(user, left), "Draft");
     await waitFor(() => expect(within(left).getByTestId("tab-dirty")).toBeTruthy());
     Object.defineProperty(document, "elementFromPoint", {
       configurable: true,
@@ -2755,8 +2774,8 @@ describe("editor groups", () => {
     const left = screen.getByRole("region", { name: "Editor group 1" });
     const middle = screen.getByRole("region", { name: "Editor group 2" });
     const right = screen.getByRole("region", { name: "Editor group 3" });
-    await user.type(await enterMarkdownWysiwyg(user, left), "Left draft");
-    await user.type(await enterMarkdownWysiwyg(user, middle), "Middle draft");
+    await user.type(await enterMarkdownSource(user, left), "Left draft");
+    await user.type(await enterMarkdownSource(user, middle), "Middle draft");
     await waitFor(() => {
       expect(within(left).getByTestId("tab-dirty")).toBeTruthy();
       expect(within(middle).getByTestId("tab-dirty")).toBeTruthy();
@@ -2926,8 +2945,8 @@ describe("editor groups", () => {
     const left = screen.getByRole("region", { name: "Editor group 1" });
     const middle = screen.getByRole("region", { name: "Editor group 2" });
     const right = screen.getByRole("region", { name: "Editor group 3" });
-    await user.type(await enterMarkdownWysiwyg(user, left), "Left draft");
-    await user.type(await enterMarkdownWysiwyg(user, middle), "Middle draft");
+    await user.type(await enterMarkdownSource(user, left), "Left draft");
+    await user.type(await enterMarkdownSource(user, middle), "Middle draft");
     await waitFor(() =>
       expect(
         screen
@@ -3022,7 +3041,7 @@ describe("editor groups", () => {
       );
       const left = screen.getByRole("region", { name: "Editor group 1" });
       const right = screen.getByRole("region", { name: "Editor group 2" });
-      await user.type(await enterMarkdownWysiwyg(user, left), "Draft");
+      await user.type(await enterMarkdownSource(user, left), "Draft");
       await waitFor(() =>
         expect(within(left).getByTestId("tab-dirty")).toBeTruthy(),
       );
@@ -3257,7 +3276,7 @@ describe("editor groups", () => {
       );
       const left = screen.getByRole("region", { name: "Editor group 1" });
       const right = screen.getByRole("region", { name: "Editor group 2" });
-      await user.type(await enterMarkdownWysiwyg(user, left), "Draft");
+      await user.type(await enterMarkdownSource(user, left), "Draft");
       await waitFor(() =>
         expect(within(left).getByTestId("tab-dirty")).toBeTruthy(),
       );
@@ -3462,7 +3481,7 @@ describe("editor groups", () => {
     const user = userEvent.setup();
     renderShell(bridge);
     await screen.findByTestId("view-markdown");
-    await user.type(await enterMarkdownWysiwyg(user), "Draft!");
+    await user.type(await enterMarkdownSource(user), "Draft!");
     await screen.findByTestId("tab-dirty");
 
     await user.click(screen.getByTestId("tab-b.md"));
@@ -5044,7 +5063,7 @@ describe("ui-state merge-on-load", () => {
 
     // Type into the restored tab's document without letting it settle.
     await screen.findByTestId("view-markdown");
-    await user.type(await enterMarkdownWysiwyg(user), "Draft!");
+    await user.type(await enterMarkdownSource(user), "Draft!");
     await screen.findByTestId("tab-dirty");
     expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
 
@@ -7104,7 +7123,7 @@ describe("file-open-start marking", () => {
     renderShell(bridge);
 
     await screen.findByTestId("view-markdown");
-    await user.type(await enterMarkdownWysiwyg(user), "Draft");
+    await user.type(await enterMarkdownSource(user), "Draft");
     await waitFor(() => expect(screen.getByTestId("tab-dirty")).toBeTruthy());
     const mark = vi.spyOn(rendererMarks, "mark");
 
@@ -7481,7 +7500,7 @@ async function openDirtyMarkdown(
   bridge: ReturnType<typeof makeBridge>,
 ): Promise<{
   user: ReturnType<typeof userEvent.setup>;
-  editor: HTMLTextAreaElement;
+  editor: HTMLElement;
 }> {
   const user = userEvent.setup();
   renderShell(bridge);
@@ -7490,12 +7509,12 @@ async function openDirtyMarkdown(
   )!;
   await user.click(row);
   await screen.findByTestId("view-markdown");
-  const editor = await enterMarkdownWysiwyg(user);
+  const editor = await enterMarkdownSource(user);
   await user.type(editor, "Draft!");
   await waitFor(() =>
     expect(screen.queryAllByTestId("tab-dirty").length).toBeGreaterThan(0),
   );
-  return { user, editor: editor as HTMLTextAreaElement };
+  return { user, editor };
 }
 
 describe("dirty tab close boundaries", () => {
@@ -7515,7 +7534,7 @@ describe("dirty tab close boundaries", () => {
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
     expect(screen.getByTestId("tab-a.md")).toBeTruthy();
     expect(editor.isConnected).toBe(true);
-    expect(editor.value).toContain("Draft!");
+    expect(editor.textContent).toContain("Draft!");
     expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
       "disk full",
     );
@@ -7574,7 +7593,7 @@ describe("dirty tab close boundaries", () => {
     // This is a later action, but b.md was already in the captured close set.
     // Its newly mounted editor therefore needs its own flush before it closes.
     await user.click(screen.getByTestId("tab-b.md"));
-    const bEditor = (await enterMarkdownWysiwyg(user)) as HTMLTextAreaElement;
+    const bEditor = await enterMarkdownSource(user);
     await user.type(bEditor, "Second draft!");
 
     await act(async () => {
@@ -7658,7 +7677,7 @@ describe("dirty tab close boundaries", () => {
     await screen.findByTestId("tab-c.md");
     await waitFor(() => expect(screen.getAllByTestId("view-markdown")).toHaveLength(2));
     const left = screen.getByRole("region", { name: "Editor group 1" });
-    await user.type(await enterMarkdownWysiwyg(user, left), "Draft!");
+    await user.type(await enterMarkdownSource(user, left), "Draft!");
     await within(screen.getByTestId("tab-a.md")).findByTestId("tab-dirty");
     await user.click(
       within(left).getByRole("button", { name: "Close editor group" }),
@@ -7715,8 +7734,8 @@ describe("dirty tab close boundaries", () => {
     await waitFor(() => expect(screen.getAllByTestId("view-markdown")).toHaveLength(2));
     const left = screen.getByRole("region", { name: "Editor group 1" });
     const right = screen.getByRole("region", { name: "Editor group 2" });
-    await user.type(await enterMarkdownWysiwyg(user, left), "Left draft");
-    await user.type(await enterMarkdownWysiwyg(user, right), "Right draft");
+    await user.type(await enterMarkdownSource(user, left), "Left draft");
+    await user.type(await enterMarkdownSource(user, right), "Right draft");
     await waitFor(() => expect(screen.getAllByTestId("tab-dirty")).toHaveLength(2));
 
     await user.click(screen.getByRole("button", { name: "Close all editors" }));
@@ -7724,8 +7743,8 @@ describe("dirty tab close boundaries", () => {
     await waitFor(() => expect(screen.getAllByTestId("tab-dirty")).toHaveLength(1));
 
     const firstEditor = firstPath === "a.md"
-      ? within(left).getByTestId("markdown-editor")
-      : within(right).getByTestId("markdown-editor");
+      ? within(left).getByTestId("markdown-editor").querySelector<HTMLElement>(".cm-content")!
+      : within(right).getByTestId("markdown-editor").querySelector<HTMLElement>(".cm-content")!;
     await user.type(firstEditor, " changed again");
     await waitFor(() => expect(screen.getAllByTestId("tab-dirty")).toHaveLength(2));
 
@@ -8945,7 +8964,7 @@ describe("explorer destructive change flush boundaries", () => {
       .getAllByTestId("tree-row")
       .find((candidate) => candidate.dataset.path === "docs/b.md")!;
     await user.click(bRow);
-    const bEditor = (await enterMarkdownWysiwyg(user)) as HTMLTextAreaElement;
+    const bEditor = await enterMarkdownSource(user);
     await user.type(bEditor, "Second draft!");
 
     await act(async () => {
@@ -9036,7 +9055,7 @@ describe("explorer destructive change flush boundaries", () => {
 
     await user.click(editor);
     await user.type(editor, " Late");
-    const lateDraft = editor.value;
+    const lateDraft = sourceEditorText(editor);
     await user.keyboard("{Control>}s{/Control}");
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
     expect(bridge.writeWorkspaceText.mock.calls[1]?.[0]).toEqual({
@@ -9099,7 +9118,7 @@ describe("explorer destructive change flush boundaries", () => {
 
     await user.click(editor);
     await user.type(editor, " Late");
-    const lateDraft = editor.value;
+    const lateDraft = sourceEditorText(editor);
     await user.keyboard("{Control>}s{/Control}");
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
     expect(bridge.writeWorkspaceText.mock.calls[1]?.[0]).toEqual(
@@ -9162,7 +9181,7 @@ describe("explorer destructive change flush boundaries", () => {
 
     await user.click(editor);
     await user.type(editor, " Late");
-    const lateDraft = editor.value;
+    const lateDraft = sourceEditorText(editor);
     await user.keyboard("{Control>}s{/Control}");
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
 
@@ -9242,14 +9261,14 @@ describe("explorer destructive change flush boundaries", () => {
 
     await user.click(editorA);
     await user.type(editorA, " Late A");
-    const lateADraft = editorA.value;
+    const lateADraft = sourceEditorText(editorA);
     await user.keyboard("{Control>}s{/Control}");
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
 
     await user.click(screen.getByTestId("tab-b.md"));
-    const editorB = (await enterMarkdownWysiwyg(user)) as HTMLTextAreaElement;
+    const editorB = await enterMarkdownSource(user);
     await user.type(editorB, "Late B");
-    const lateBDraft = editorB.value;
+    const lateBDraft = sourceEditorText(editorB);
     await user.keyboard("{Control>}s{/Control}");
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(3));
 
@@ -9317,14 +9336,14 @@ describe("explorer destructive change flush boundaries", () => {
 
     await user.click(editorA);
     await user.type(editorA, " Late A");
-    const lateADraft = editorA.value;
+    const lateADraft = sourceEditorText(editorA);
     await user.keyboard("{Control>}s{/Control}");
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
 
     await user.click(screen.getByTestId("tab-b.md"));
-    const editorB = (await enterMarkdownWysiwyg(user)) as HTMLTextAreaElement;
+    const editorB = await enterMarkdownSource(user);
     await user.type(editorB, "Late B");
-    const lateBDraft = editorB.value;
+    const lateBDraft = sourceEditorText(editorB);
     await user.keyboard("{Control>}s{/Control}");
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(3));
 
@@ -9388,7 +9407,7 @@ describe("explorer destructive change flush boundaries", () => {
 
     await user.click(editor);
     await user.type(editor, " Late");
-    const lateDraft = editor.value;
+    const lateDraft = sourceEditorText(editor);
     await user.keyboard("{Control>}s{/Control}");
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
 
@@ -15613,7 +15632,7 @@ describe("set-aside draft recovery", () => {
 
     await screen.findByTestId("view-markdown");
     await user.type(
-      await enterMarkdownWysiwyg(user),
+      await enterMarkdownSource(user),
       "Draft!",
     );
     await screen.findByTestId("tab-dirty");
@@ -15640,7 +15659,9 @@ describe("set-aside draft recovery", () => {
     );
     expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
     expect(
-      (screen.getByTestId("markdown-editor") as HTMLTextAreaElement).value,
+      screen
+        .getByTestId("markdown-editor")
+        .querySelector<HTMLElement>(".cm-content")?.textContent,
     ).toContain("Draft!");
   });
 });
