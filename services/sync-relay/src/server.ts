@@ -1713,7 +1713,12 @@ export function createSyncRelayHandler({
         "append",
         input.workspaceId,
       );
-      const lookedUpName = await lookupUserDisplayName?.(actor.userId);
+      let lookedUpName: string | null | undefined;
+      try {
+        lookedUpName = await lookupUserDisplayName?.(actor.userId);
+      } catch {
+        lookedUpName = null;
+      }
       const displayName = normalizeDiscussionDisplayName(lookedUpName) ?? "Unnamed";
       const result = storage.appendAuthenticatedDiscussionMessage({
         shareId,

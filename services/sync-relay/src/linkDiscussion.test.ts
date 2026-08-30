@@ -2602,6 +2602,73 @@ describe("share discussion HTTP boundary", () => {
     ]);
   });
 
+  it("falls back to Unnamed when an authenticated display-name lookup fails", async () => {
+    for (const [actor, authorKind, failureMode] of [
+      [OWNER, "owner", "async-rejection"],
+      [COMMENTER, "named", "async-rejection"],
+      [OWNER, "owner", "synchronous-throw"],
+      [COMMENTER, "named", "synchronous-throw"],
+    ] as const) {
+      const lookupUserDisplayName =
+        failureMode === "async-rejection"
+          ? vi.fn(async () => {
+              throw new Error("display-name lookup unavailable");
+            })
+          : vi.fn(() => {
+              throw new Error("display-name lookup unavailable");
+            });
+      const test = await fixture({ lookupUserDisplayName });
+      const caseLabel = `${actor}:${failureMode}`;
+      const beforeRows = count(
+        test.dbPath,
+        "sync_relay_share_discussion_messages",
+      );
+      const beforeRevision = test.storage.getShareDiscussionRevision(SHARE);
+      const messageBody = `fallback from ${caseLabel}`;
+
+      const response = await test.handler(
+        request(
+          actor,
+          `/sync/shares/${SHARE}/discussion`,
+          jsonRequest({
+            body: messageBody,
+            idempotencyKey: `display-name-fallback-${authorKind}-${failureMode}`,
+          }),
+        ),
+      );
+
+      expect(response.status, caseLabel).toBe(200);
+      expectPrivate(response);
+      expect(await body(response), caseLabel).toMatchObject({
+        message: {
+          body: messageBody,
+          author: { kind: "named", displayName: "Unnamed" },
+        },
+      });
+      expect(lookupUserDisplayName, caseLabel).toHaveBeenCalledOnce();
+      expect(lookupUserDisplayName, caseLabel).toHaveBeenCalledWith(actor);
+      expect(
+        count(test.dbPath, "sync_relay_share_discussion_messages"),
+        caseLabel,
+      ).toBe(beforeRows + 1);
+      expect(test.storage.getShareDiscussionRevision(SHARE), caseLabel).toBe(
+        (beforeRevision ?? 0) + 1,
+      );
+      expect(
+        test.storage.listShareDiscussionMessages({ shareId: SHARE, limit: 10 })
+          .messages,
+        caseLabel,
+      ).toMatchObject([
+        {
+          authorKind,
+          authorUserId: actor,
+          displayNameSnapshot: "Unnamed",
+          body: messageBody,
+        },
+      ]);
+    }
+  });
+
   it("projects durable owner rows exactly before and after deletion", async () => {
     const test = await fixture();
     const appendedResponse = await test.handler(
