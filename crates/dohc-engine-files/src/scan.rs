@@ -15,7 +15,7 @@ use crate::bounds::{OverCapPolicy, ScanBounds};
 use crate::diff::ScanManifest;
 use crate::error::FilesError;
 use crate::floor;
-use crate::hash::{HashInput, HashOutcome, HashPool, HashRun};
+use crate::hash::{HashInput, HashOutcome, HashPool, HashRun, PostHashExpectation, PostHashProbe};
 use crate::media::media_type_for_path;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -204,6 +204,7 @@ impl Scanner {
         // against the non-reused candidates below.
         let mut reused: Vec<Option<String>> = Vec::with_capacity(candidates.files.len());
         let mut inputs: Vec<HashInput> = Vec::new();
+        let mut post_hash: Vec<PostHashExpectation> = Vec::new();
         for candidate in &candidates.files {
             let hash = prior.get(&candidate.rel).and_then(|entry| {
                 (candidate.mtime_ms != 0
@@ -216,11 +217,26 @@ impl Scanner {
                     index: inputs.len(),
                     abs: candidate.abs.clone(),
                 });
+                post_hash.push(PostHashExpectation {
+                    probe_path: self.io_faults.as_ref().map(|_| candidate.rel.clone()),
+                    size: candidate.size,
+                    mtime_ms: candidate.mtime_ms,
+                });
             }
             reused.push(hash);
         }
 
-        let outcomes = match self.pool.hash_batched(&inputs, token)? {
+        let post_hash_probe = self.io_faults.as_ref().map(|faults| {
+            let faults = Arc::clone(faults);
+            Arc::new(move |path: &str| faults.error_kind(path, ScanIoOperation::Hash))
+                as PostHashProbe
+        });
+        let outcomes = match self.pool.hash_batched_with_post_stat(
+            &inputs,
+            &post_hash,
+            post_hash_probe,
+            token,
+        )? {
             HashRun::Cancelled => return Ok(ScanOutcome::Cancelled),
             HashRun::Completed { outcomes } => outcomes,
         };
@@ -250,15 +266,12 @@ impl Scanner {
                     reason: "hash pool dropped a result",
                 });
             };
-            if let Some(kind) = self.injected(&candidate.rel, ScanIoOperation::Hash) {
-                failed.push(FailedPath {
-                    path: candidate.rel,
-                    kind,
-                });
-                continue;
-            }
             match outcome {
-                HashOutcome::Hashed { sha256, bytes } => {
+                HashOutcome::Hashed {
+                    sha256,
+                    bytes,
+                    stable_mtime_ms,
+                } => {
                     // The candidate mtime comes from the enumerate-time stat,
                     // but the hashed bytes come from a later read. A same-size
                     // write inside that gap would pair the STALE mtime with the
@@ -269,18 +282,9 @@ impl Scanner {
                     // enumerate observation — the file provably sat still
                     // across the whole stat→read→stat window. Any drift, or a
                     // failed re-stat, records 0 (no pairing) and the next scan
-                    // re-hashes. One extra stat per hashed file; reused files
-                    // never reach this arm.
-                    let mtime_ms = match std::fs::metadata(&candidate.abs) {
-                        Ok(metadata)
-                            if metadata.is_file()
-                                && metadata.len() == candidate.size
-                                && mtime_ms(&metadata) == candidate.mtime_ms =>
-                        {
-                            candidate.mtime_ms
-                        }
-                        _ => 0,
-                    };
+                    // re-hashes. The hash worker performs that path stat
+                    // immediately after the byte stream, retaining the race
+                    // fence without a serial second pass here.
                     files.push(FileEntry {
                         media_type: media_type_for_path(&candidate.rel),
                         path: candidate.rel,
@@ -288,7 +292,7 @@ impl Scanner {
                         // the absence of a concurrent truncation; trust the streamed
                         // count (what was actually hashed).
                         size: bytes,
-                        mtime_ms,
+                        mtime_ms: stable_mtime_ms,
                         sha256,
                     })
                 }

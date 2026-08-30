@@ -362,6 +362,82 @@ impl ScanIoFaultInjector for DenyHash {
     }
 }
 
+#[derive(Default)]
+struct ProbeConcurrency {
+    active: usize,
+    peak: usize,
+    released: bool,
+}
+
+struct ConcurrentHashProbe {
+    expected: usize,
+    state: std::sync::Mutex<ProbeConcurrency>,
+    ready: std::sync::Condvar,
+}
+
+impl ConcurrentHashProbe {
+    fn peak(&self) -> usize {
+        self.state.lock().expect("probe state").peak
+    }
+}
+
+impl ScanIoFaultInjector for ConcurrentHashProbe {
+    fn error_kind(&self, _path: &str, operation: ScanIoOperation) -> Option<ErrorKind> {
+        if operation != ScanIoOperation::Hash {
+            return None;
+        }
+        let mut state = self.state.lock().expect("probe state");
+        state.active += 1;
+        state.peak = state.peak.max(state.active);
+        if state.peak >= self.expected {
+            state.released = true;
+            self.ready.notify_all();
+        } else if !state.released {
+            let (next, timeout) = self
+                .ready
+                .wait_timeout_while(state, std::time::Duration::from_secs(1), |state| {
+                    !state.released
+                })
+                .expect("probe wait");
+            state = next;
+            if timeout.timed_out() {
+                state.released = true;
+                self.ready.notify_all();
+            }
+        }
+        state.active -= 1;
+        None
+    }
+}
+
+#[test]
+fn post_hash_mtime_fences_run_inside_the_bounded_workers() {
+    let ws = Scratch::new();
+    let workers = 4;
+    for index in 0..workers {
+        ws.write(&format!("f{index}.md"), b"content");
+    }
+    let probe = Arc::new(ConcurrentHashProbe {
+        expected: workers,
+        state: std::sync::Mutex::new(ProbeConcurrency::default()),
+        ready: std::sync::Condvar::new(),
+    });
+    let scanner = Scanner::new_with_io_faults(
+        ScanBounds::builder()
+            .hash_workers(std::num::NonZeroUsize::new(workers).expect("workers"))
+            .build(),
+        probe.clone(),
+    )
+    .expect("scanner");
+
+    assert_eq!(scan(&scanner, ws.path()).files.len(), workers);
+    assert_eq!(
+        probe.peak(),
+        workers,
+        "the post-hash mtime fences must not regress to a serial caller pass"
+    );
+}
+
 /// A racing writer standing in for the stat→read gap: the injector's Hash
 /// probe runs after the pool's read and before the post-hash re-stat, so a
 /// side-effect write from it lands inside the exact window the pairing guard
