@@ -91,11 +91,10 @@ export interface EngineWorkspaceSessionsOptions {
   now?: () => number;
   /**
    * Deadline for a single daemon `workspace.open`. Defaults to
-   * WORKSPACE_OPEN_DEADLINE_MS, which is the product guarantee about
-   * workspace-open latency — production must not pass anything else. Test
-   * harnesses that run many daemons at once can raise it, because there the
-   * cause of a missed deadline is suite contention rather than the code under
-   * test.
+   * WORKSPACE_OPEN_DEADLINE_MS. An application may pass a larger finite bound
+   * when it has measured work that is deliberately part of `workspace.open`;
+   * test harnesses may also account for aggregate suite contention. This
+   * changes only the request deadline, never when a handle becomes usable.
    */
   workspaceOpenDeadlineMs?: number;
 }

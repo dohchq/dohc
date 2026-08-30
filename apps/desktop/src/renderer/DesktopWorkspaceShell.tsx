@@ -1910,6 +1910,13 @@ export function DesktopWorkspaceShell(props: {
   const workspaceIsReady =
     workspaceReadyFor?.workspaceId === workspaceId &&
     workspaceReadyFor.selectionGeneration === workspaceSelectionGeneration;
+  const [workspaceOpenFailedFor, setWorkspaceOpenFailedFor] = useState<{
+    workspaceId: string;
+    selectionGeneration: number;
+  } | null>(null);
+  const workspaceOpenFailed =
+    workspaceOpenFailedFor?.workspaceId === workspaceId &&
+    workspaceOpenFailedFor.selectionGeneration === workspaceSelectionGeneration;
   // Set-aside recovery markers (#567): every path holding a draft marks its
   // tab and Open Editors row — inactive tabs included, because the store is
   // knowable for all of them (#579 review, r4). Deliberately NOT part of
@@ -4748,7 +4755,13 @@ export function DesktopWorkspaceShell(props: {
           reportShellError("Could not refresh workspace files.", error),
         );
       } catch (error) {
-        if (!cancelled) reportShellError("Could not open this workspace.", error);
+        if (!cancelled) {
+          setWorkspaceOpenFailedFor({
+            workspaceId,
+            selectionGeneration: workspaceSelectionGeneration,
+          });
+          reportShellError("Could not open this workspace.", error);
+        }
       }
     })();
     return () => {
@@ -5691,8 +5704,8 @@ export function DesktopWorkspaceShell(props: {
       // that writes a file right after the shell appears would otherwise race
       // chokidar's ignoreInitial scan and have the write silently swallowed.
       // Waiting on this attribute is the deterministic "watcher is live" gate.
-      data-ready={syncStatus ? "true" : "false"}
-      className="app-chrome flex h-screen flex-col bg-bg text-ink"
+      data-ready={workspaceIsReady ? "true" : "false"}
+      className="app-chrome relative flex h-screen flex-col bg-bg text-ink"
     >
       <Titlebar
         workspace={props.workspace}
@@ -5956,7 +5969,11 @@ export function DesktopWorkspaceShell(props: {
           ) : null}
         </div>
       ) : null}
-      <div className="flex min-h-0 flex-1">
+      <div
+        data-testid="workspace-workbench"
+        inert={!workspaceIsReady && !workspaceOpenFailed ? true : undefined}
+        className="flex min-h-0 flex-1"
+      >
         <ActivityBar
           workspaceId={workspaceId}
           activeView={wb.activeView}
@@ -6644,6 +6661,20 @@ export function DesktopWorkspaceShell(props: {
           </ChatsPanel>
         ) : null}
       </div>
+      {!workspaceIsReady && !workspaceOpenFailed ? (
+        <div
+          data-testid="workspace-preparing"
+          role="status"
+          aria-live="polite"
+          className="absolute inset-x-0 bottom-0 top-10 z-10 flex flex-col items-center justify-center gap-2 bg-bg px-6 text-center"
+        >
+          <RefreshCw size={16} aria-hidden className="animate-spin text-subtle" />
+          <p className="text-sm font-medium text-ink">Preparing this workspace</p>
+          <p className="text-xs text-muted">
+            dohc is checking your existing files before editing starts.
+          </p>
+        </div>
+      ) : null}
 
       <StatusBar
         workspaceId={workspaceId}

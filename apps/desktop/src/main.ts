@@ -590,6 +590,7 @@ import {
   type AttachedEngineWorkspace,
   type EngineWorkspace,
 } from "@dohc/workspace-engine-client/daemon";
+import { createDesktopEngineWorkspaceSessions } from "./workspaces/desktopEngineWorkspaceSessions";
 import {
   createDesktopLinkedChatStore,
   type DesktopLinkedChatStore,
@@ -12547,7 +12548,8 @@ async function startRustEngineDaemon(): Promise<boolean> {
       rustEngineDaemon,
       relayTransportRoutes,
     );
-    rustEngineWorkspaceSessions = new EngineWorkspaceSessions(relaySource);
+    rustEngineWorkspaceSessions =
+      createDesktopEngineWorkspaceSessions(relaySource);
     rustEngineRelayClient = new EngineRelayClient({
       sessions: rustEngineWorkspaceSessions,
       routes: relayTransportRoutes,

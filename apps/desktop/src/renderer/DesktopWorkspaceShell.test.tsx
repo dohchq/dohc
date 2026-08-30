@@ -7004,6 +7004,38 @@ describe("engine store recovery", () => {
 });
 
 describe("workspace shell errors", () => {
+  it("keeps the workbench unavailable while existing files are prepared", async () => {
+    const decision = deferred<typeof SYNC_STATUS>();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace = vi.fn(() => decision.promise);
+
+    renderShell(bridge);
+
+    const preparing = await screen.findByTestId("workspace-preparing");
+    expect(preparing.getAttribute("role")).toBe("status");
+    expect(preparing.textContent).toContain("Preparing this workspace");
+    expect(preparing.textContent).toContain(
+      "dohc is checking your existing files before editing starts.",
+    );
+    expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
+    expect(
+      screen.getByTestId("workspace-workbench").hasAttribute("inert"),
+    ).toBe(true);
+
+    await act(async () => {
+      decision.resolve(SYNC_STATUS);
+      await decision.promise;
+    });
+
+    await waitFor(() =>
+      expect(screen.queryByTestId("workspace-preparing")).toBeNull(),
+    );
+    expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true");
+    expect(
+      screen.getByTestId("workspace-workbench").hasAttribute("inert"),
+    ).toBe(false);
+  });
+
   it("reports openWorkspace failures instead of leaving an unhandled rejection", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.openWorkspace.mockRejectedValueOnce(new Error("Watcher failed"));
