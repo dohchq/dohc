@@ -807,6 +807,7 @@ export function RelayShareDialog(props: {
 
   async function refreshIndependentGrants(
     scopeGeneration = linkScopeGeneration.current,
+    options: { preserveOwnerMutationError?: boolean } = {},
   ) {
     if (!isCurrentLinkScope(scopeGeneration)) return;
     const requestId = ++latestNamedInventoryRequest.current;
@@ -827,11 +828,13 @@ export function RelayShareDialog(props: {
         ),
       );
       setIndependentGrantsError(false);
-      setOwnerMutationError((current) =>
-        current !== null && isGrantMutationAction(current.actionKey)
-          ? null
-          : current,
-      );
+      if (!options.preserveOwnerMutationError) {
+        setOwnerMutationError((current) =>
+          current !== null && isGrantMutationAction(current.actionKey)
+            ? null
+            : current,
+        );
+      }
     } catch {
       if (
         !isCurrentLinkScope(scopeGeneration) ||
@@ -1091,6 +1094,12 @@ export function RelayShareDialog(props: {
       }
       setOwnerConfirmation(null);
       setOwnerMutationError({ shareId, actionKey });
+      if (refresh === "inventories") {
+        void refreshLinks(scopeGeneration);
+        void refreshIndependentGrants(scopeGeneration, {
+          preserveOwnerMutationError: true,
+        });
+      }
     } finally {
       if (
         isCurrentOwnerRequest(
