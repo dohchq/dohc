@@ -24,6 +24,7 @@ async function requireOk(response: Response, operation: string): Promise<Respons
 async function appendNamedComment(input: {
   relayUrl: string;
   shareId: string;
+  workspaceId: string;
   ownerUserId: string;
   body: string;
 }): Promise<string> {
@@ -32,6 +33,7 @@ async function appendNamedComment(input: {
       method: "POST",
       headers: ownerHeaders(input.ownerUserId, true),
       body: JSON.stringify({
+        workspaceId: input.workspaceId,
         body: input.body,
         idempotencyKey: `named-${randomBytes(8).toString("hex")}`,
       }),
@@ -289,6 +291,7 @@ test("keeps mixed View and Comment links isolated over one committed discussion"
   const namedMessageId = await appendNamedComment({
     relayUrl: stack.relayUrl,
     shareId: seeded.shareId,
+    workspaceId: seeded.workspaceId,
     ownerUserId: seeded.ownerUserId,
     body: namedBody,
   });
