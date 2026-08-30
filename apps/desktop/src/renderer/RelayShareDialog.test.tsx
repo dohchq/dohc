@@ -1542,6 +1542,45 @@ describe("RelayShareDialog", () => {
     expect(bridgeMock.writeClipboardText).not.toHaveBeenCalled();
   });
 
+  it("recovers a committed Create link after its response is lost", async () => {
+    const create = controllable<LinkResult>();
+    const committed = readableLink("committed-create", {
+      shareId: "share-created",
+      access: "comment",
+    });
+    bridgeMock.listRelayShareLinks
+      .mockResolvedValueOnce({ links: [] })
+      .mockResolvedValueOnce({ links: [committed] });
+    bridgeMock.createRelayShareLink.mockReturnValueOnce(create.promise);
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+
+    await user.click(screen.getByRole("radio", { name: "Comment" }));
+    await user.click(screen.getByRole("button", { name: "Create link" }));
+    await act(async () => {
+      create.reject(new Error("The Create link response was lost."));
+    });
+
+    expect(await screen.findByText("The Create link response was lost.")).toBeTruthy();
+    await vi.waitFor(() => {
+      expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
+    });
+    const committedRow = await screen.findByTestId("share-link-row-committed-create");
+    expect(within(committedRow).getByText("Comment")).toBeTruthy();
+    for (const name of ["Turn off comments", "Reset link", "End link"]) {
+      expect(within(committedRow).getByRole("button", { name })).toBeTruthy();
+    }
+    expect(screen.queryByTestId("share-link-url")).toBeNull();
+    expect(bridgeMock.createRelayShareLink).toHaveBeenCalledTimes(1);
+  });
+
   it("groups links by real share id and adds only to the chosen share", async () => {
     bridgeMock.listRelayShareLinks.mockResolvedValue({
       links: [
@@ -1610,6 +1649,47 @@ describe("RelayShareDialog", () => {
       expect(payload).not.toHaveProperty("versionId");
       expect(payload.access).not.toBe("edit");
     }
+  });
+
+  it("recovers a committed Add link after its response is lost", async () => {
+    const add = controllable<LinkResult>();
+    const existing = readableLink("existing-link", { shareId: "share-existing" });
+    const committed = readableLink("committed-link", {
+      shareId: "share-existing",
+      access: "comment",
+    });
+    bridgeMock.listRelayShareLinks
+      .mockResolvedValueOnce({ links: [existing] })
+      .mockResolvedValueOnce({ links: [existing, committed] });
+    bridgeMock.addRelayShareLink.mockReturnValueOnce(add.promise);
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+
+    const group = await screen.findByTestId("share-link-group-share-existing");
+    await user.click(within(group).getByRole("radio", { name: "Comment" }));
+    await user.click(within(group).getByRole("button", { name: "Add link" }));
+    await act(async () => {
+      add.reject(new Error("The Add link response was lost."));
+    });
+
+    expect(await screen.findByText("The Add link response was lost.")).toBeTruthy();
+    await vi.waitFor(() => {
+      expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
+    });
+    const committedRow = await screen.findByTestId("share-link-row-committed-link");
+    expect(within(committedRow).getByText("Comment")).toBeTruthy();
+    for (const name of ["Turn off comments", "Reset link", "End link"]) {
+      expect(within(committedRow).getByRole("button", { name })).toBeTruthy();
+    }
+    expect(screen.queryByTestId("share-link-url")).toBeNull();
+    expect(bridgeMock.addRelayShareLink).toHaveBeenCalledTimes(1);
   });
 
   it("admits Add link only when the matching share still has an active grant", async () => {
