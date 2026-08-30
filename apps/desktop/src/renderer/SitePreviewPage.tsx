@@ -689,7 +689,8 @@ export function SitePreviewPage(props: {
                 src={preview.url}
                 sandbox="allow-forms allow-same-origin allow-scripts"
                 referrerPolicy="no-referrer"
-                className="min-h-0 flex-1 border-0 bg-bg"
+                style={{ colorScheme: "light", backgroundColor: "Canvas" }}
+                className="min-h-0 flex-1 border-0"
               />
               {preview.mode === "dev" || previewLogs.length > 0 ? (
                 <LogsDetails

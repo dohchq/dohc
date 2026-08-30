@@ -226,6 +226,7 @@ import {
   recordRecentFile,
   remapWorkbenchPaths,
   serializeUiState,
+  siteTabPath,
   setChatsWidth,
   setFolderExpanded,
   setOpenEditorsHeight,
@@ -241,6 +242,7 @@ import {
   type WorkbenchTab,
 } from "./workbench/workbenchState";
 import { useCommitOnRelease } from "./workbench/useCommitOnRelease";
+import { createFirstSiteFiles } from "./workbench/createFirstSite";
 
 // Mounted-share paths (shared-with-me/…) are read-only projections of
 // someone else's files. This check is a renderer UX affordance only — main
@@ -3665,12 +3667,16 @@ export function DesktopWorkspaceShell(props: {
   // editor is what performs the reads — without this the panel keeps showing
   // counts the user already cleared until something remounts it.
   const [chatsReadRevision, setChatsReadRevision] = useState(0);
+  const [chatsThreadRevision, setChatsThreadRevision] = useState(0);
   const [chatsDmReadRevision, setChatsDmReadRevision] = useState(0);
   const onChatsThreadRead = useCallback(() => {
     setChatsReadRevision((current) => current + 1);
   }, []);
   const onChatsDmRead = useCallback(() => {
     setChatsDmReadRevision((current) => current + 1);
+  }, []);
+  const onChatsThreadStarted = useCallback(() => {
+    setChatsThreadRevision((current) => current + 1);
   }, []);
   // THE one write of the chat destination: the ref the panel reads, the state
   // the navigator highlights, and the cancellation that choosing a different
@@ -4421,6 +4427,36 @@ export function DesktopWorkspaceShell(props: {
       reportShellError("Could not create a drawing.", error);
     }
   }, [files, folders, openFile, refreshFiles, reportShellError, workspaceId]);
+  const createFirstSite = useCallback(async () => {
+    try {
+      const { root } = await createFirstSiteFiles({
+        workspaceId,
+        files,
+        folders,
+        mutations: bridge(),
+      });
+      try {
+        await refreshFiles();
+      } catch (error) {
+        reportShellError(
+          "The site was created, but the workspace could not refresh.",
+          error,
+        );
+        return;
+      }
+      openVirtualTab(siteTabPath(root));
+    } catch (error) {
+      reportShellError("Could not create the site.", error);
+      await refreshFiles().catch(() => undefined);
+    }
+  }, [
+    files,
+    folders,
+    openVirtualTab,
+    refreshFiles,
+    reportShellError,
+    workspaceId,
+  ]);
   // Stable identities for the memoized explorer and inspector (D2#2/#5).
   // Inline arrows here handed every shell render a fresh prop set, which
   // re-rendered every TreeRow and re-ran FileInspector for renders that
@@ -5648,6 +5684,7 @@ export function DesktopWorkspaceShell(props: {
     onNavCommand: onChatsNavCommand,
     onDraftsChange: onChatsDrafts,
     onThreadRead: onChatsThreadRead,
+    onThreadStarted: onChatsThreadStarted,
     onDmRead: onChatsDmRead,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
@@ -5674,6 +5711,7 @@ export function DesktopWorkspaceShell(props: {
     workspaces: dmWorkspaceOptions,
     selectedNav: selectedChatsNav ?? undefined,
     readRevision: chatsReadRevision,
+    threadRevision: chatsThreadRevision,
     dmReadRevision: chatsDmReadRevision,
     onOpenInTab: openChatsNavInTab,
     onOpenFileChat: openFileChatInPanel,
@@ -6062,6 +6100,7 @@ export function DesktopWorkspaceShell(props: {
                   workspaceId={workspaceId}
                   filesSettledRevision={listingsSettled}
                   onOpenPath={openPathWithHeading}
+                  onCreateFirstSite={createFirstSite}
                 />
               </Suspense>
             ) : wb.activeView === "history" ? (

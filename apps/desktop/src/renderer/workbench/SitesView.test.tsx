@@ -61,6 +61,7 @@ describe("SitesView", () => {
         workspaceId="ws-sites"
         filesSettledRevision={0}
         onOpenPath={onOpenPath}
+        onCreateFirstSite={vi.fn()}
       />,
     );
 
@@ -80,6 +81,7 @@ describe("SitesView", () => {
         workspaceId="ws-sites"
         filesSettledRevision={0}
         onOpenPath={vi.fn()}
+        onCreateFirstSite={vi.fn()}
       />,
     );
     await screen.findByText("Client Portal");
@@ -90,6 +92,7 @@ describe("SitesView", () => {
         workspaceId="ws-sites"
         filesSettledRevision={1}
         onOpenPath={vi.fn()}
+        onCreateFirstSite={vi.fn()}
       />,
     );
 
@@ -102,6 +105,7 @@ describe("SitesView", () => {
         workspaceId="ws-sites"
         filesSettledRevision={0}
         onOpenPath={vi.fn()}
+        onCreateFirstSite={vi.fn()}
       />,
     );
     await screen.findByText("Client Portal");
@@ -111,6 +115,7 @@ describe("SitesView", () => {
         workspaceId="ws-sites"
         filesSettledRevision={0}
         onOpenPath={vi.fn()}
+        onCreateFirstSite={vi.fn()}
       />,
     );
     await Promise.resolve();
@@ -131,6 +136,7 @@ describe("SitesView", () => {
         workspaceId="workspace-a"
         filesSettledRevision={0}
         onOpenPath={vi.fn()}
+        onCreateFirstSite={vi.fn()}
       />,
     );
 
@@ -139,6 +145,7 @@ describe("SitesView", () => {
         workspaceId="workspace-b"
         filesSettledRevision={0}
         onOpenPath={vi.fn()}
+        onCreateFirstSite={vi.fn()}
       />,
     );
     await act(async () => {
@@ -162,6 +169,7 @@ describe("SitesView", () => {
         workspaceId="ws-sites"
         filesSettledRevision={0}
         onOpenPath={vi.fn()}
+        onCreateFirstSite={vi.fn()}
       />,
     );
 
@@ -177,6 +185,7 @@ describe("SitesView", () => {
         workspaceId="ws-sites"
         filesSettledRevision={0}
         onOpenPath={vi.fn()}
+        onCreateFirstSite={vi.fn()}
       />,
     );
 
@@ -184,21 +193,28 @@ describe("SitesView", () => {
     expect(screen.getByTestId("sites-count").textContent).toContain("0 sites");
   });
 
-  it("renders an empty state when no sites are detected", async () => {
+  it("offers a keyboard-accessible first-site action when no sites are detected", async () => {
     bridgeMock.listSites.mockResolvedValueOnce({ sites: [] });
+    const onCreateFirstSite = vi.fn(async () => undefined);
+    const user = userEvent.setup();
     render(
       <SitesView
         workspaceId="ws-sites"
         filesSettledRevision={0}
         onOpenPath={vi.fn()}
+        onCreateFirstSite={onCreateFirstSite}
       />,
     );
 
     expect(await screen.findByText("No sites yet")).toBeTruthy();
     expect(
-      screen.getByText("Add a folder with an index.html file, and it shows up here."),
+      screen.getByText("Start with one editable HTML file in your workspace."),
     ).toBeTruthy();
     expect(screen.getByTestId("sites-count").textContent).toContain("0 sites");
+    const create = screen.getByRole("button", { name: "Create site" });
+    create.focus();
+    await user.keyboard("{Enter}");
+    expect(onCreateFirstSite).toHaveBeenCalledTimes(1);
   });
 
   it("labels sites opened from a mounted share", async () => {
@@ -216,6 +232,7 @@ describe("SitesView", () => {
         workspaceId="ws-sites"
         filesSettledRevision={0}
         onOpenPath={vi.fn()}
+        onCreateFirstSite={vi.fn()}
       />,
     );
 
@@ -244,6 +261,7 @@ describe("SitesView", () => {
         workspaceId="ws-sites"
         filesSettledRevision={0}
         onOpenPath={vi.fn()}
+        onCreateFirstSite={vi.fn()}
       />,
     );
 
@@ -263,6 +281,7 @@ describe("SitesView", () => {
         workspaceId="ws-sites"
         filesSettledRevision={0}
         onOpenPath={vi.fn()}
+        onCreateFirstSite={vi.fn()}
       />,
     );
 
