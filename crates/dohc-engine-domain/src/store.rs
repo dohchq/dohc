@@ -5993,28 +5993,22 @@ mod tests {
     use dohc_engine_testkit::ScratchDir;
     use rusqlite::Connection;
 
-    fn moment_order_connection() -> Connection {
+    fn moment_order_semantics_connection() -> Connection {
         let conn = Connection::open_in_memory().expect("open in-memory database");
         conn.execute_batch(
             "CREATE TABLE moments (moment_order INTEGER NOT NULL); \
-             CREATE INDEX idx_moments_global_order \
-                 ON moments(moment_order DESC); \
              CREATE TABLE materialization_jobs ( \
                  job_id TEXT PRIMARY KEY, \
                  target_generation INTEGER NOT NULL \
-             ); \
-             CREATE INDEX idx_materialization_jobs_mutation_generation \
-                 ON materialization_jobs(target_generation DESC) \
-                 WHERE job_id NOT GLOB 'version-switch-mat_*' \
-                   AND job_id NOT GLOB 'version-switch-secret-mat_*';",
+             );",
         )
-        .expect("create moment-order tables and indexes");
+        .expect("create moment-order tables");
         conn
     }
 
     #[test]
     fn next_moment_order_preserves_global_and_job_high_water_semantics() {
-        let mut conn = moment_order_connection();
+        let mut conn = moment_order_semantics_connection();
         assert_eq!(next_moment_order(&conn).expect("empty order"), 1);
 
         conn.execute_batch(
@@ -6045,19 +6039,30 @@ mod tests {
             41,
             "a rolled-back transaction must not reserve a generation"
         );
+
+        conn.execute("INSERT INTO moments (moment_order) VALUES (80)", [])
+            .expect("seed moment high water");
+        assert_eq!(
+            next_moment_order(&conn).expect("moment high water"),
+            81,
+            "the global moment maximum must win when it exceeds every job generation"
+        );
     }
 
     #[test]
     fn next_moment_order_uses_generation_first_indexes() {
-        let conn = moment_order_connection();
-        let mut statement = conn
-            .prepare(&format!("EXPLAIN QUERY PLAN {NEXT_MOMENT_ORDER_SQL}"))
-            .expect("prepare query plan");
-        let details = statement
-            .query_map([], |row| row.get::<_, String>(3))
-            .expect("query plan")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("collect query plan");
+        let scratch = ScratchDir::new().expect("scratch");
+        let store =
+            EngineStore::open(&scratch.engine_db_path().expect("db"), 1).expect("open store");
+        let details = store
+            .read_with(|conn| {
+                let mut statement =
+                    conn.prepare(&format!("EXPLAIN QUERY PLAN {NEXT_MOMENT_ORDER_SQL}"))?;
+                statement
+                    .query_map([], |row| row.get::<_, String>(3))?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .expect("query plan against migrated schema");
 
         assert!(
             details
