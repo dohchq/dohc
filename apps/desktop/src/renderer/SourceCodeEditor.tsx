@@ -119,9 +119,12 @@ export function SourceCodeEditor(props: {
   language: string;
   path: string;
   readOnly?: boolean;
+  autoFocus?: boolean;
   scrollLine?: number;
   pendingUndo?: SourceCodePendingUndo;
   onPendingUndoConsumed?: (token: number) => void;
+  onFocus?: () => void;
+  onScrollLineApplied?: () => void;
   onChange: (next: string) => void;
   onSave: () => void;
 }) {
@@ -131,6 +134,8 @@ export function SourceCodeEditor(props: {
   const languageCompartment = useRef(new Compartment()).current;
   const onChangeRef = useRef(props.onChange);
   const onSaveRef = useRef(props.onSave);
+  const onFocusRef = useRef(props.onFocus);
+  const onScrollLineAppliedRef = useRef(props.onScrollLineApplied);
   const valueRef = useRef(props.value);
   const applyingRemoteValue = useRef(false);
   const appliedUndoToken = useRef<number | null>(null);
@@ -140,6 +145,8 @@ export function SourceCodeEditor(props: {
   useEffect(() => {
     onChangeRef.current = props.onChange;
     onSaveRef.current = props.onSave;
+    onFocusRef.current = props.onFocus;
+    onScrollLineAppliedRef.current = props.onScrollLineApplied;
   });
 
   useEffect(() => {
@@ -169,6 +176,10 @@ export function SourceCodeEditor(props: {
           languageCompartment.of(codeMirrorLanguage(props.path, props.language)),
           keymap.of([indentWithTab, ...defaultKeymap, ...historyKeymap, ...foldKeymap]),
           EditorView.domEventHandlers({
+            focus() {
+              onFocusRef.current?.();
+              return false;
+            },
             keydown(event) {
               if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
                 event.preventDefault();
@@ -186,6 +197,7 @@ export function SourceCodeEditor(props: {
       }),
     });
     viewRef.current = view;
+    if (props.autoFocus) view.focus();
     return () => {
       view.destroy();
       viewRef.current = null;
@@ -275,6 +287,7 @@ export function SourceCodeEditor(props: {
       selection: { anchor: line.from, head: line.to },
       effects: EditorView.scrollIntoView(line.from, { y: "center" }),
     });
+    onScrollLineAppliedRef.current?.();
   }, [props.scrollLine]);
 
   return (

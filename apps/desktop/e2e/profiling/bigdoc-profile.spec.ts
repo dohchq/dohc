@@ -29,6 +29,10 @@ test("profiles opening, typing in, and viewing source for the 250 KiB document",
     await editToggle.click();
     const editor = page.getByTestId("markdown-editor");
     await expect(editor).toBeVisible({ timeout: 120_000 });
+    await expect(editor.locator(".cm-content")).toHaveAttribute(
+      "contenteditable",
+      "true",
+    );
     await editor.click();
     await page.keyboard.press("ControlOrMeta+End");
     const typedText = "profilex-0123456789-abcdefghij";
@@ -36,7 +40,7 @@ test("profiles opening, typing in, and viewing source for the 250 KiB document",
     const typingStartedAt = performance.now();
     await page.keyboard.type(typedText);
     const typingDurationMs = performance.now() - typingStartedAt;
-    await expect(editToggle).toHaveText("Source", { timeout: 10_000 });
+    await expect(editToggle).toHaveText("WYSIWYG", { timeout: 10_000 });
     await expect(page.getByTestId("markdown-save-state")).toHaveAttribute(
       "data-state",
       "saved",
@@ -51,9 +55,6 @@ test("profiles opening, typing in, and viewing source for the 250 KiB document",
         { timeout: 30_000 },
       )
       .toContain(typedText);
-    await editToggle.click();
-    await expect(editToggle).toHaveText("WYSIWYG", { timeout: 120_000 });
-    await expect(editor).toHaveJSProperty("tagName", "TEXTAREA");
     const captured = await capture.stop();
     const afterMarks = await readRendererMarks(page);
 
