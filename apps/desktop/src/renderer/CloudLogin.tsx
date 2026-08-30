@@ -340,7 +340,6 @@ export function CloudLogin(props: {
               </p>
               <PrimaryButton
                 data-testid="cloud-connect-start"
-                aria-label="Connect"
                 onClick={() => void connect()}
                 className="mt-3"
               >
