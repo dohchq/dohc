@@ -6,7 +6,11 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { hashLinkBearer } from "./linkSecurity";
 import { DiscussionActivityHub } from "./discussionActivity";
-import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
+import {
+  createSyncRelayHandler,
+  DISCUSSION_DISPLAY_NAME_LOOKUP_DEADLINE_MS,
+  type SyncRelayHandler,
+} from "./server";
 import {
   openSyncRelayStorage,
   type OpenSyncRelayStorageOptions,
@@ -2666,6 +2670,177 @@ describe("share discussion HTTP boundary", () => {
           body: messageBody,
         },
       ]);
+    }
+  });
+
+  it("clears the display-name deadline after a timely asynchronous lookup", async () => {
+    let signalLookupStarted: () => void = () => {};
+    const lookupStarted = new Promise<void>((resolve) => {
+      signalLookupStarted = resolve;
+    });
+    let releaseLookup: (name: string | null) => void = () => {};
+    const deferredName = new Promise<string | null>((resolve) => {
+      releaseLookup = resolve;
+    });
+    const lookupUserDisplayName = vi.fn(() => {
+      signalLookupStarted();
+      return deferredName;
+    });
+    const test = await fixture({ lookupUserDisplayName });
+    vi.useFakeTimers();
+
+    try {
+      const timerBaseline = vi.getTimerCount();
+      const pending = test.handler(
+        request(
+          OWNER,
+          `/sync/shares/${SHARE}/discussion`,
+          jsonRequest({
+            body: "timely display name",
+            idempotencyKey: "timely-display-name",
+          }),
+        ),
+      );
+      await lookupStarted;
+      expect(vi.getTimerCount()).toBe(timerBaseline + 1);
+
+      await vi.advanceTimersByTimeAsync(
+        DISCUSSION_DISPLAY_NAME_LOOKUP_DEADLINE_MS - 1,
+      );
+      releaseLookup("  Owner Name  ");
+      const response = await pending;
+
+      expect(response.status).toBe(200);
+      expectPrivate(response);
+      expect(await body(response)).toMatchObject({
+        message: {
+          author: { kind: "named", displayName: "Owner Name" },
+        },
+      });
+      expect(vi.getTimerCount()).toBe(timerBaseline);
+      expect(
+        test.storage.listShareDiscussionMessages({ shareId: SHARE, limit: 10 })
+          .messages,
+      ).toMatchObject([
+        {
+          authorKind: "owner",
+          authorUserId: OWNER,
+          displayNameSnapshot: "Owner Name",
+        },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds a stalled authenticated display-name lookup before persisting the fallback", async () => {
+    for (const [actor, authorKind] of [
+      [OWNER, "owner"],
+      [COMMENTER, "named"],
+    ] as const) {
+      let signalLookupStarted: () => void = () => {};
+      const lookupStarted = new Promise<void>((resolve) => {
+        signalLookupStarted = resolve;
+      });
+      let rejectLookup: (error: Error) => void = () => {};
+      const stalledLookup = new Promise<string | null>((_resolve, reject) => {
+        rejectLookup = reject;
+      });
+      const lookupUserDisplayName = vi.fn(() => {
+        signalLookupStarted();
+        return stalledLookup;
+      });
+      const test = await fixture({ lookupUserDisplayName });
+      const caseLabel = `${actor}:${authorKind}`;
+      const beforeRows = count(
+        test.dbPath,
+        "sync_relay_share_discussion_messages",
+      );
+      const beforeRevision = test.storage.getShareDiscussionRevision(SHARE);
+      const unhandledRejections: unknown[] = [];
+      const observeUnhandledRejection = (error: unknown) => {
+        unhandledRejections.push(error);
+      };
+      process.on("unhandledRejection", observeUnhandledRejection);
+      vi.useFakeTimers();
+
+      try {
+        const timerBaseline = vi.getTimerCount();
+        let settled = false;
+        const pending = test
+          .handler(
+            request(
+              actor,
+              `/sync/shares/${SHARE}/discussion`,
+              jsonRequest({
+                body: `stalled lookup from ${actor}`,
+                idempotencyKey: `stalled-display-name-${authorKind}`,
+              }),
+            ),
+          )
+          .then((response) => {
+            settled = true;
+            return response;
+          });
+        await lookupStarted;
+
+        expect(lookupUserDisplayName, caseLabel).toHaveBeenCalledOnce();
+        expect(lookupUserDisplayName, caseLabel).toHaveBeenCalledWith(actor);
+        expect(settled, caseLabel).toBe(false);
+        expect(vi.getTimerCount(), caseLabel).toBe(timerBaseline + 1);
+
+        await vi.advanceTimersByTimeAsync(
+          DISCUSSION_DISPLAY_NAME_LOOKUP_DEADLINE_MS - 1,
+        );
+        expect(settled, caseLabel).toBe(false);
+        expect(
+          count(test.dbPath, "sync_relay_share_discussion_messages"),
+          caseLabel,
+        ).toBe(beforeRows);
+        expect(test.storage.getShareDiscussionRevision(SHARE), caseLabel).toBe(
+          beforeRevision,
+        );
+
+        await vi.advanceTimersByTimeAsync(1);
+        const response = await pending;
+        expect(response.status, caseLabel).toBe(200);
+        expectPrivate(response);
+        expect(await body(response), caseLabel).toMatchObject({
+          message: {
+            body: `stalled lookup from ${actor}`,
+            author: { kind: "named", displayName: "Unnamed" },
+          },
+        });
+        expect(
+          count(test.dbPath, "sync_relay_share_discussion_messages"),
+          caseLabel,
+        ).toBe(beforeRows + 1);
+        expect(test.storage.getShareDiscussionRevision(SHARE), caseLabel).toBe(
+          (beforeRevision ?? 0) + 1,
+        );
+        expect(
+          test.storage.listShareDiscussionMessages({ shareId: SHARE, limit: 10 })
+            .messages,
+          caseLabel,
+        ).toMatchObject([
+          {
+            authorKind,
+            authorUserId: actor,
+            displayNameSnapshot: "Unnamed",
+            body: `stalled lookup from ${actor}`,
+          },
+        ]);
+        expect(vi.getTimerCount(), caseLabel).toBe(timerBaseline);
+
+        rejectLookup(new Error(`late lookup rejection for ${caseLabel}`));
+        await Promise.resolve();
+        vi.runAllTicks();
+        await Promise.resolve();
+        expect(unhandledRejections, caseLabel).toEqual([]);
+      } finally {
+        process.off("unhandledRejection", observeUnhandledRejection);
+        vi.useRealTimers();
+      }
     }
   });
 

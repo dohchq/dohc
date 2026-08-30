@@ -262,6 +262,7 @@ export const MAX_OPS_PER_REQUEST = 500;
 export const DEFAULT_LOG_PAGE_SIZE = 100;
 export const MAX_LOG_PAGE_SIZE = 500;
 const DEFAULT_DISCUSSION_PAGE_SIZE = 50;
+export const DISCUSSION_DISPLAY_NAME_LOOKUP_DEADLINE_MS = 1_000;
 export const DEFAULT_DISCUSSION_ACTIVITY_HOLD_MS = 25_000;
 export const MAX_DISCUSSION_ACTIVITY_HOLD_MS = 30_000;
 const DISCUSSION_CURSOR_MAX_CHARS = 1_024;
@@ -357,6 +358,39 @@ function settledMomentIdentity(row: SyncRelayLogRow): SettledMomentIdentity | nu
         ? record.payloadAfterPath
         : null;
   return { objectId, versionId, referencedPaths, settledPath, deleted };
+}
+
+async function discussionDisplayName(
+  lookupUserDisplayName:
+    | CreateSyncRelayHandlerOptions["lookupUserDisplayName"]
+    | undefined,
+  userId: string,
+): Promise<string> {
+  if (!lookupUserDisplayName) return "Unnamed";
+
+  let lookup: Promise<string | null>;
+  try {
+    lookup = Promise.resolve(lookupUserDisplayName(userId));
+  } catch {
+    return "Unnamed";
+  }
+
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const deadlineResult = new Promise<null>((resolve) => {
+      deadline = setTimeout(
+        () => resolve(null),
+        DISCUSSION_DISPLAY_NAME_LOOKUP_DEADLINE_MS,
+      );
+      deadline.unref();
+    });
+    const lookedUpName = await Promise.race([lookup, deadlineResult]);
+    return normalizeDiscussionDisplayName(lookedUpName) ?? "Unnamed";
+  } catch {
+    return "Unnamed";
+  } finally {
+    if (deadline) clearTimeout(deadline);
+  }
 }
 
 export function createSyncRelayHandler({
@@ -1713,13 +1747,10 @@ export function createSyncRelayHandler({
         "append",
         input.workspaceId,
       );
-      let lookedUpName: string | null | undefined;
-      try {
-        lookedUpName = await lookupUserDisplayName?.(actor.userId);
-      } catch {
-        lookedUpName = null;
-      }
-      const displayName = normalizeDiscussionDisplayName(lookedUpName) ?? "Unnamed";
+      const displayName = await discussionDisplayName(
+        lookupUserDisplayName,
+        actor.userId,
+      );
       const result = storage.appendAuthenticatedDiscussionMessage({
         shareId,
         authorUserId: actor.userId,
