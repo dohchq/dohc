@@ -785,15 +785,29 @@ export function createSyncRelayHandler({
     shareId: string,
     actorUserId: string,
     action: "read" | "append",
+    requestedWorkspaceId?: string,
   ): { viewer: "owner" | "named" } => {
     const share = storage.getShare(shareId);
+    if (!share) throw notFound();
     if (
-      share &&
+      requestedWorkspaceId !== undefined &&
+      share.workspaceId !== requestedWorkspaceId
+    ) {
+      throw notFound();
+    }
+    if (
       storage.workspaceIsOwnedBy(share.workspaceId, actorUserId)
     ) {
+      if (requestedWorkspaceId === undefined) throw notFound();
       return { viewer: "owner" };
     }
     const authorized = requireShareAction(shareId, actorUserId, "read");
+    if (
+      requestedWorkspaceId !== undefined &&
+      authorized.share.workspaceId !== requestedWorkspaceId
+    ) {
+      throw notFound();
+    }
     if (
       action === "append" &&
       authorized.grant.access !== "comment" &&
@@ -1646,7 +1660,13 @@ export function createSyncRelayHandler({
     shareId: string,
   ): Promise<Response> => {
     try {
-      const actor = await resolveActor(request, "");
+      const url = new URL(request.url);
+      const actor = await resolveActor(
+        request,
+        request.method === "GET"
+          ? (url.searchParams.get("workspaceId") ?? "")
+          : "",
+      );
       if (
         !actor.userId ||
         Buffer.byteLength(actor.userId, "utf8") >
@@ -1656,34 +1676,37 @@ export function createSyncRelayHandler({
       }
       await claimPendingShares(actor.userId);
       if (request.method === "GET") {
+        const query = parseDiscussionListQuery(url.searchParams);
         const initialAuthority = requireDiscussionAuthority(
           shareId,
           actor.userId,
           "read",
+          query.workspaceId,
         );
-        const url = new URL(request.url);
-        const cursor = decodeDiscussionCursor(url.searchParams.get("cursor"));
-        const limit = parseDiscussionLimit(url.searchParams.get("limit"));
-        const direction = parseDiscussionDirection(
-          url.searchParams.get("direction"),
-        );
-        if (direction === "newest-first" && initialAuthority.viewer !== "owner") {
+        if (
+          query.direction === "newest-first" &&
+          initialAuthority.viewer !== "owner"
+        ) {
           throw notFound();
         }
         const storedPage = storage.listShareDiscussionMessages({
           shareId,
-          ...(direction === "newest-first"
-            ? { before: cursor }
-            : { after: cursor }),
-          direction,
-          limit,
+          ...(query.direction === "newest-first"
+            ? { before: query.cursor }
+            : { after: query.cursor }),
+          direction: query.direction,
+          limit: query.limit,
         });
         const finalAuthority = requireDiscussionAuthority(
           shareId,
           actor.userId,
           "read",
+          query.workspaceId,
         );
-        if (direction === "newest-first" && finalAuthority.viewer !== "owner") {
+        if (
+          query.direction === "newest-first" &&
+          finalAuthority.viewer !== "owner"
+        ) {
           throw notFound();
         }
         return privateJsonResponse(
@@ -1694,8 +1717,13 @@ export function createSyncRelayHandler({
         return privateErrorResponse(methodNotAllowed());
       }
 
-      const authority = requireDiscussionAuthority(shareId, actor.userId, "append");
       const input = parseNamedDiscussionAppendBody(await readJsonObject(request));
+      const authority = requireDiscussionAuthority(
+        shareId,
+        actor.userId,
+        "append",
+        input.workspaceId,
+      );
       const lookedUpName = await lookupUserDisplayName?.(actor.userId);
       const displayName = normalizeDiscussionDisplayName(lookedUpName) ?? "Unnamed";
       const result = storage.appendAuthenticatedDiscussionMessage({
@@ -1706,7 +1734,12 @@ export function createSyncRelayHandler({
         idempotencyKey: input.idempotencyKey,
         createdAtMs: nowMs(),
         guard: () => {
-          const current = requireDiscussionAuthority(shareId, actor.userId, "append");
+          const current = requireDiscussionAuthority(
+            shareId,
+            actor.userId,
+            "append",
+            input.workspaceId,
+          );
           return current.viewer === "owner" ? "owner" : "recipient";
         },
       });
@@ -1758,7 +1791,11 @@ export function createSyncRelayHandler({
       return privateErrorResponse(methodNotAllowed());
     }
     try {
-      const actor = await resolveActor(request, "");
+      const url = new URL(request.url);
+      const actor = await resolveActor(
+        request,
+        url.searchParams.get("workspaceId") ?? "",
+      );
       if (
         !actor.userId ||
         Buffer.byteLength(actor.userId, "utf8") >
@@ -1767,12 +1804,13 @@ export function createSyncRelayHandler({
         throw badRequest("discussion actor id is invalid");
       }
       await claimPendingShares(actor.userId);
+      const query = parseDiscussionActivityQuery(url.searchParams);
       const initialAuthority = requireDiscussionAuthority(
         shareId,
         actor.userId,
         "read",
+        query.workspaceId,
       );
-      const query = parseDiscussionActivityQuery(new URL(request.url).searchParams);
       const observedRevision = storage.getShareDiscussionRevision(shareId);
       if (observedRevision === null) throw notFound();
       if (query.since > observedRevision) {
@@ -1789,6 +1827,7 @@ export function createSyncRelayHandler({
                   shareId,
                   actor.userId,
                   "read",
+                  query.workspaceId,
                 );
                 return (
                   (initialAuthority.viewer !== "owner" ||
@@ -1812,6 +1851,7 @@ export function createSyncRelayHandler({
         shareId,
         actor.userId,
         "read",
+        query.workspaceId,
       );
       if (
         initialAuthority.viewer === "owner" &&
@@ -1828,6 +1868,7 @@ export function createSyncRelayHandler({
         shareId,
         actor.userId,
         "read",
+        query.workspaceId,
       );
       if (
         initialAuthority.viewer === "owner" &&
@@ -4342,12 +4383,44 @@ function parseDiscussionDirection(
   throw badRequest("direction is invalid");
 }
 
+function parseOptionalDiscussionWorkspaceId(
+  searchParams: URLSearchParams,
+): string | undefined {
+  const values = searchParams.getAll("workspaceId");
+  if (values.length === 0) return undefined;
+  if (values.length !== 1) {
+    throw badRequest("workspaceId is invalid");
+  }
+  return parseWorkspaceId(values[0]);
+}
+
+function parseDiscussionListQuery(searchParams: URLSearchParams): {
+  workspaceId?: string;
+  cursor: SyncRelayShareDiscussionCursor | undefined;
+  limit: number;
+  direction: "oldest-first" | "newest-first";
+} {
+  const allowed = new Set(["workspaceId", "cursor", "limit", "direction"]);
+  for (const key of searchParams.keys()) {
+    if (!allowed.has(key) || searchParams.getAll(key).length !== 1) {
+      throw badRequest("discussion query is invalid");
+    }
+  }
+  return {
+    workspaceId: parseOptionalDiscussionWorkspaceId(searchParams),
+    cursor: decodeDiscussionCursor(searchParams.get("cursor")),
+    limit: parseDiscussionLimit(searchParams.get("limit")),
+    direction: parseDiscussionDirection(searchParams.get("direction")),
+  };
+}
+
 function parseDiscussionActivityQuery(searchParams: URLSearchParams): {
+  workspaceId?: string;
   since: number;
   hold: number;
   limit: number;
 } {
-  const allowed = new Set(["since", "hold", "limit"]);
+  const allowed = new Set(["workspaceId", "since", "hold", "limit"]);
   for (const key of searchParams.keys()) {
     if (!allowed.has(key) || searchParams.getAll(key).length !== 1) {
       throw badRequest("discussion activity query is invalid");
@@ -4373,6 +4446,7 @@ function parseDiscussionActivityQuery(searchParams: URLSearchParams): {
     );
   }
   return {
+    workspaceId: parseOptionalDiscussionWorkspaceId(searchParams),
     since,
     hold,
     limit: parseDiscussionLimit(searchParams.get("limit")),
@@ -4407,12 +4481,14 @@ function parseLinkDiscussionAppendBody(input: Record<string, unknown>): {
 }
 
 function parseNamedDiscussionAppendBody(input: Record<string, unknown>): {
+  workspaceId?: string;
   body: string;
   idempotencyKey: string;
 } {
   if (
     Object.keys(input).some(
-      (key) => key !== "body" && key !== "idempotencyKey",
+      (key) =>
+        key !== "workspaceId" && key !== "body" && key !== "idempotencyKey",
     ) ||
     !Object.hasOwn(input, "body") ||
     !Object.hasOwn(input, "idempotencyKey") ||
@@ -4421,7 +4497,13 @@ function parseNamedDiscussionAppendBody(input: Record<string, unknown>): {
   ) {
     throw badRequest("discussion append body is invalid");
   }
-  return { body: input.body, idempotencyKey: input.idempotencyKey };
+  return {
+    ...(Object.hasOwn(input, "workspaceId")
+      ? { workspaceId: parseWorkspaceId(input.workspaceId) }
+      : {}),
+    body: input.body,
+    idempotencyKey: input.idempotencyKey,
+  };
 }
 
 type DiscussionModerationAction =

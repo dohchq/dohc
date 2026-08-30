@@ -242,7 +242,18 @@ describe("main-process owner relay share authorization", () => {
       "/sync/shares/${encodeURIComponent(input.shareId)}/discussion",
     );
     expect(list).toContain("input.cursor");
-    expect(list).toContain("?direction=${input.direction}");
+    expect(list).toContain(
+      "workspaceId=${encodeURIComponent(operation.workspace.workspaceId)}",
+    );
+    expect(
+      list.match(
+        /workspaceId=\$\{encodeURIComponent\(operation\.workspace\.workspaceId\)\}/gu,
+      ),
+    ).toHaveLength(1);
+    expect(list).not.toContain(
+      "workspaceId=${encodeURIComponent(input.workspaceId)}",
+    );
+    expect(list).toContain("&direction=${input.direction}");
     expect(list).toContain("encodeURIComponent(input.cursor)");
     expect(list).not.toContain("payload.cursor");
     expect(list).not.toContain("limit=");
@@ -256,6 +267,17 @@ describe("main-process owner relay share authorization", () => {
     for (const field of ["input.since", "input.hold", "input.limit"]) {
       expect(activity).toContain(field);
     }
+    expect(activity).toContain(
+      "workspaceId=${encodeURIComponent(operation.workspace.workspaceId)}",
+    );
+    expect(
+      activity.match(
+        /workspaceId=\$\{encodeURIComponent\(operation\.workspace\.workspaceId\)\}/gu,
+      ),
+    ).toHaveLength(1);
+    expect(activity).not.toContain(
+      "workspaceId=${encodeURIComponent(input.workspaceId)}",
+    );
     expect(activity).not.toContain("payload.since");
     expect(activity).not.toContain('method: "POST"');
     expect(activity).not.toContain("body: JSON.stringify");
@@ -265,9 +287,15 @@ describe("main-process owner relay share authorization", () => {
       "/sync/shares/${encodeURIComponent(input.shareId)}/discussion",
     );
     expect(append).toContain('method: "POST"');
+    expect(append).toContain("workspaceId: operation.workspace.workspaceId");
+    expect(
+      append.match(/workspaceId: operation\.workspace\.workspaceId/gu),
+    ).toHaveLength(1);
+    expect(append).not.toContain("workspaceId: input.workspaceId");
     expect(append).toContain(
-      "body: JSON.stringify({ body: input.body, idempotencyKey: input.idempotencyKey })",
+      "body: input.body",
     );
+    expect(append).toContain("idempotencyKey: input.idempotencyKey");
     for (const forbidden of [
       "actorUserId",
       "authorUserId",

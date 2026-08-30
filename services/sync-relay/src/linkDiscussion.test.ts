@@ -302,7 +302,7 @@ function addIndependentCommentLink(storage: SyncRelayStorage): LinkFixture {
   return { access: "comment", grantId, secret: linkSecret, capabilityToken };
 }
 
-function request(
+function rawRequest(
   userId: string | null,
   path: string,
   init: RequestInit = {},
@@ -310,6 +310,35 @@ function request(
   const headers = new Headers(init.headers);
   if (userId !== null) headers.set("authorization", `Bearer user:${userId}`);
   return new Request(`http://relay.test${path}`, { ...init, headers });
+}
+
+function request(
+  userId: string | null,
+  path: string,
+  init: RequestInit = {},
+): Request {
+  const url = new URL(path, "http://relay.test");
+  let boundInit = init;
+  if (
+    (userId === OWNER || userId === NEW_OWNER) &&
+    /^\/sync\/shares\/[^/]+\/discussion(?:\/activity)?$/u.test(url.pathname) &&
+    (init.method ?? "GET") === "GET" &&
+    !url.searchParams.has("workspaceId")
+  ) {
+    url.searchParams.set("workspaceId", WORKSPACE);
+  }
+  if (
+    (userId === OWNER || userId === NEW_OWNER) &&
+    /^\/sync\/shares\/[^/]+\/discussion$/u.test(url.pathname) &&
+    init.method === "POST" &&
+    typeof init.body === "string"
+  ) {
+    const parsed = JSON.parse(init.body) as Record<string, unknown>;
+    if (!Object.hasOwn(parsed, "workspaceId")) {
+      boundInit = { ...init, body: JSON.stringify({ ...parsed, workspaceId: WORKSPACE }) };
+    }
+  }
+  return rawRequest(userId, `${url.pathname}${url.search}`, boundInit);
 }
 
 function jsonRequest(body: unknown): RequestInit {
@@ -611,6 +640,353 @@ function seedCrossShareHandles(storage: SyncRelayStorage): {
 }
 
 describe("share discussion HTTP boundary", () => {
+  it("rejects missing and same-account wrong-workspace owner discussion operations before work starts", async () => {
+    const lookupUserDisplayName = vi.fn(() => "Owner Name");
+    const test = await fixture({ lookupUserDisplayName });
+    const baseline = await genericRefusal(
+      await test.handler(
+        rawRequest(
+          OWNER,
+          `/sync/shares/missing-discussion-share/discussion?workspaceId=${WORKSPACE}`,
+        ),
+      ),
+    );
+    const beforeRows = count(test.dbPath, "sync_relay_share_discussion_messages");
+    const beforeRevision = test.storage.getShareDiscussionRevision(SHARE);
+    const beforeUsage = discussionUsage(test.dbPath);
+    const list = vi.spyOn(test.storage, "listShareDiscussionMessages");
+    const revision = vi.spyOn(test.storage, "getShareDiscussionRevision");
+    const activity = vi.spyOn(test.storage, "listShareDiscussionActivity");
+    const append = vi.spyOn(test.storage, "appendAuthenticatedDiscussionMessage");
+
+    const refusals = [
+      await test.handler(rawRequest(OWNER, `/sync/shares/${SHARE}/discussion`)),
+      await test.handler(
+        rawRequest(
+          OWNER,
+          `/sync/shares/${SHARE}/discussion?workspaceId=${OTHER_WORKSPACE}`,
+        ),
+      ),
+      await test.handler(
+        rawRequest(
+          OWNER,
+          `/sync/shares/${SHARE}/discussion/activity?since=0&hold=0&limit=100`,
+        ),
+      ),
+      await test.handler(
+        rawRequest(
+          OWNER,
+          `/sync/shares/${SHARE}/discussion/activity?workspaceId=${OTHER_WORKSPACE}&since=0&hold=0&limit=100`,
+        ),
+      ),
+      await test.handler(
+        rawRequest(
+          OWNER,
+          `/sync/shares/${SHARE}/discussion`,
+          jsonRequest({ body: "missing workspace", idempotencyKey: "missing-workspace" }),
+        ),
+      ),
+      await test.handler(
+        rawRequest(
+          OWNER,
+          `/sync/shares/${SHARE}/discussion`,
+          jsonRequest({
+            workspaceId: OTHER_WORKSPACE,
+            body: "wrong workspace",
+            idempotencyKey: "wrong-workspace",
+          }),
+        ),
+      ),
+    ];
+    for (const response of refusals) {
+      expect(await genericRefusal(response)).toBe(baseline);
+    }
+    expect(list).not.toHaveBeenCalled();
+    expect(revision).not.toHaveBeenCalled();
+    expect(activity).not.toHaveBeenCalled();
+    expect(lookupUserDisplayName).not.toHaveBeenCalled();
+    expect(append).not.toHaveBeenCalled();
+    list.mockRestore();
+    revision.mockRestore();
+    activity.mockRestore();
+    append.mockRestore();
+    expect(count(test.dbPath, "sync_relay_share_discussion_messages")).toBe(
+      beforeRows,
+    );
+    expect(test.storage.getShareDiscussionRevision(SHARE)).toBe(beforeRevision);
+    expect(discussionUsage(test.dbPath)).toBe(beforeUsage);
+
+    for (const malformed of [
+      rawRequest(
+        OWNER,
+        `/sync/shares/${SHARE}/discussion?workspaceId=${WORKSPACE}&workspaceId=${WORKSPACE}`,
+      ),
+      rawRequest(
+        OWNER,
+        `/sync/shares/${SHARE}/discussion?workspaceId=${WORKSPACE}&extra=1`,
+      ),
+      rawRequest(
+        OWNER,
+        `/sync/shares/${SHARE}/discussion/activity?workspaceId=${WORKSPACE}&workspaceId=${WORKSPACE}&since=0&hold=0&limit=100`,
+      ),
+      rawRequest(
+        OWNER,
+        `/sync/shares/${SHARE}/discussion`,
+        jsonRequest({
+          workspaceId: 42,
+          body: "malformed workspace",
+          idempotencyKey: "malformed-workspace",
+        }),
+      ),
+    ]) {
+      const response = await test.handler(malformed);
+      expectPrivate(response);
+      expect(response.status).toBe(400);
+    }
+  });
+
+  it("accepts the current owner workspace on list, activity, and append without exposing it", async () => {
+    const test = await fixture();
+    const appended = await test.handler(
+      request(
+        OWNER,
+        `/sync/shares/${SHARE}/discussion`,
+        jsonRequest({ body: "owner workspace", idempotencyKey: "owner-workspace" }),
+      ),
+    );
+    expect(appended.status).toBe(200);
+    expectPrivate(appended);
+    const list = await test.handler(
+      request(
+        OWNER,
+        `/sync/shares/${SHARE}/discussion?direction=newest-first&limit=100`,
+      ),
+    );
+    expect(list.status).toBe(200);
+    expectPrivate(list);
+    const activity = await test.handler(
+      request(
+        OWNER,
+        `/sync/shares/${SHARE}/discussion/activity?since=0&hold=0&limit=100`,
+      ),
+    );
+    expect(activity.status).toBe(200);
+    expectPrivate(activity);
+    for (const response of [appended, list, activity]) {
+      expect(await response.clone().text()).not.toContain(WORKSPACE);
+    }
+  });
+
+  it("preserves named discussion authority when recipients omit workspaceId", async () => {
+    const test = await fixture();
+    const responses: Response[] = [];
+    for (const [actor, key] of [
+      [COMMENTER, "named-comment-omission"],
+      [EDITOR, "named-edit-omission"],
+    ] as const) {
+      responses.push(
+        await test.handler(
+          rawRequest(
+            actor,
+            `/sync/shares/${SHARE}/discussion`,
+            jsonRequest({ body: `from ${actor}`, idempotencyKey: key }),
+          ),
+        ),
+      );
+      responses.push(
+        await test.handler(
+          rawRequest(actor, `/sync/shares/${SHARE}/discussion?limit=100`),
+        ),
+      );
+      responses.push(
+        await test.handler(
+          rawRequest(
+            actor,
+            `/sync/shares/${SHARE}/discussion/activity?since=0&hold=0&limit=100`,
+          ),
+        ),
+      );
+    }
+    for (const response of responses) {
+      expect(response.status).toBe(200);
+      expectPrivate(response);
+      expect(await response.clone().text()).not.toContain(WORKSPACE);
+    }
+    const viewAppend = await test.handler(
+      rawRequest(
+        VIEWER,
+        `/sync/shares/${SHARE}/discussion`,
+        jsonRequest({ body: "view cannot append", idempotencyKey: "view-omission" }),
+      ),
+    );
+    expect(viewAppend.status).toBe(403);
+    expectPrivate(viewAppend);
+    expect(await viewAppend.text()).not.toContain(WORKSPACE);
+  });
+
+  it("does not let a wrong or missing owner workspace fall through to the same account's named grant", async () => {
+    const test = await fixture({ namedRecipient: OWNER });
+    const baseline = await genericRefusal(
+      await test.handler(
+        rawRequest(
+          OWNER,
+          `/sync/shares/missing-dual-role-share/discussion?workspaceId=${WORKSPACE}`,
+        ),
+      ),
+    );
+    const refusals = [
+      await test.handler(rawRequest(OWNER, `/sync/shares/${SHARE}/discussion`)),
+      await test.handler(
+        rawRequest(
+          OWNER,
+          `/sync/shares/${SHARE}/discussion?workspaceId=${OTHER_WORKSPACE}`,
+        ),
+      ),
+      await test.handler(
+        rawRequest(
+          OWNER,
+          `/sync/shares/${SHARE}/discussion/activity?workspaceId=${OTHER_WORKSPACE}&since=0&hold=0&limit=100`,
+        ),
+      ),
+      await test.handler(
+        rawRequest(
+          OWNER,
+          `/sync/shares/${SHARE}/discussion`,
+          jsonRequest({
+            workspaceId: OTHER_WORKSPACE,
+            body: "dual role",
+            idempotencyKey: "dual-role-fallthrough",
+          }),
+        ),
+      ),
+    ];
+    for (const response of refusals) {
+      expect(await genericRefusal(response)).toBe(baseline);
+    }
+    expect(count(test.dbPath, "sync_relay_share_discussion_messages")).toBe(0);
+  });
+
+  it("rechecks the requested workspace after an owner discussion list reads storage", async () => {
+    const test = await fixture();
+    const original = test.storage.listShareDiscussionMessages.bind(test.storage);
+    test.storage.listShareDiscussionMessages = (input) => {
+      const page = original(input);
+      updateShareWorkspace(test.dbPath, OTHER_WORKSPACE);
+      return page;
+    };
+
+    expect(
+      await genericRefusal(
+        await test.handler(request(OWNER, `/sync/shares/${SHARE}/discussion`)),
+      ),
+    ).toContain('"code":"not_found"');
+  });
+
+  it("prevents an owner activity poll from parking after its share relocates", async () => {
+    const discussionActivity = new DiscussionActivityHub();
+    const test = await fixture({ discussionActivity });
+    let shouldPark: boolean | undefined;
+    vi.spyOn(discussionActivity, "wait").mockImplementation(
+      async (_shareId, _actorId, options) => {
+        updateShareWorkspace(test.dbPath, OTHER_WORKSPACE);
+        shouldPark = options.shouldPark();
+      },
+    );
+    const activityRead = vi.spyOn(test.storage, "listShareDiscussionActivity");
+
+    expect(
+      await genericRefusal(
+        await test.handler(
+          request(
+            OWNER,
+            `/sync/shares/${SHARE}/discussion/activity?since=0&hold=30000&limit=100`,
+          ),
+        ),
+      ),
+    ).toContain('"code":"not_found"');
+    expect(shouldPark).toBe(false);
+    expect(activityRead).not.toHaveBeenCalled();
+  });
+
+  it("rechecks the requested workspace after an owner activity poll wakes", async () => {
+    const discussionActivity = new DiscussionActivityHub();
+    const test = await fixture({ discussionActivity });
+    vi.spyOn(discussionActivity, "wait").mockImplementation(async () => {
+      updateShareWorkspace(test.dbPath, OTHER_WORKSPACE);
+    });
+    const activityRead = vi.spyOn(test.storage, "listShareDiscussionActivity");
+
+    expect(
+      await genericRefusal(
+        await test.handler(
+          request(
+            OWNER,
+            `/sync/shares/${SHARE}/discussion/activity?since=0&hold=30000&limit=100`,
+          ),
+        ),
+      ),
+    ).toContain('"code":"not_found"');
+    expect(activityRead).not.toHaveBeenCalled();
+  });
+
+  it("rechecks the requested workspace after an owner activity page reads storage", async () => {
+    const test = await fixture();
+    const original = test.storage.listShareDiscussionActivity.bind(test.storage);
+    test.storage.listShareDiscussionActivity = (input) => {
+      const page = original(input);
+      updateShareWorkspace(test.dbPath, OTHER_WORKSPACE);
+      return page;
+    };
+
+    expect(
+      await genericRefusal(
+        await test.handler(
+          request(
+            OWNER,
+            `/sync/shares/${SHARE}/discussion/activity?since=0&hold=0&limit=100`,
+          ),
+        ),
+      ),
+    ).toContain('"code":"not_found"');
+  });
+
+  it("rechecks the requested workspace inside the append transaction after an async lookup", async () => {
+    let releaseLookup: (value: string | null) => void = () => {};
+    const deferredName = new Promise<string | null>((resolve) => {
+      releaseLookup = resolve;
+    });
+    let signalLookupStarted: () => void = () => {};
+    const lookupStarted = new Promise<void>((resolve) => {
+      signalLookupStarted = resolve;
+    });
+    const lookupUserDisplayName = vi.fn(() => {
+      signalLookupStarted();
+      return deferredName;
+    });
+    const test = await fixture({ lookupUserDisplayName });
+    const beforeRows = count(test.dbPath, "sync_relay_share_discussion_messages");
+    const beforeRevision = test.storage.getShareDiscussionRevision(SHARE);
+    const beforeUsage = discussionUsage(test.dbPath);
+    const pending = test.handler(
+      request(
+        OWNER,
+        `/sync/shares/${SHARE}/discussion`,
+        jsonRequest({ body: "append race", idempotencyKey: "append-workspace-race" }),
+      ),
+    );
+    await lookupStarted;
+    expect(lookupUserDisplayName).toHaveBeenCalledOnce();
+    updateShareWorkspace(test.dbPath, OTHER_WORKSPACE);
+    releaseLookup("Owner Name");
+
+    expect(await genericRefusal(await pending)).toContain('"code":"not_found"');
+    expect(count(test.dbPath, "sync_relay_share_discussion_messages")).toBe(
+      beforeRows,
+    );
+    expect(test.storage.getShareDiscussionRevision(SHARE)).toBe(beforeRevision);
+    expect(discussionUsage(test.dbPath)).toBe(beforeUsage);
+  });
+
   it("returns a higher discussion revision even when its timestamp moves backward", async () => {
     let now = 10_000;
     const test = await fixture({ nowMs: () => now });

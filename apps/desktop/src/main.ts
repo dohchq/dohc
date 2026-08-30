@@ -8091,7 +8091,7 @@ function registerIpcHandlers(
             const path = `/sync/shares/${encodeURIComponent(input.shareId)}/discussion`;
             return relayShareJsonWithCredentials<unknown>(
               credentials,
-              `${path}?direction=${input.direction}${input.cursor ? `&cursor=${encodeURIComponent(input.cursor)}` : ""}`,
+              `${path}?workspaceId=${encodeURIComponent(operation.workspace.workspaceId)}&direction=${input.direction}${input.cursor ? `&cursor=${encodeURIComponent(input.cursor)}` : ""}`,
             );
           },
         });
@@ -8148,7 +8148,7 @@ function registerIpcHandlers(
                 const path = `/sync/shares/${encodeURIComponent(input.shareId)}/discussion/activity`;
                 return relayShareJsonWithCredentials<unknown>(
                   credentials,
-                  `${path}?since=${input.since}&hold=${input.hold}&limit=${input.limit}`,
+                  `${path}?workspaceId=${encodeURIComponent(operation.workspace.workspaceId)}&since=${input.since}&hold=${input.hold}&limit=${input.limit}`,
                   { signal: poll.signal },
                 );
               },
@@ -8215,7 +8215,11 @@ function registerIpcHandlers(
               `/sync/shares/${encodeURIComponent(input.shareId)}/discussion`,
               {
                 method: "POST",
-                body: JSON.stringify({ body: input.body, idempotencyKey: input.idempotencyKey }),
+                body: JSON.stringify({
+                  workspaceId: operation.workspace.workspaceId,
+                  body: input.body,
+                  idempotencyKey: input.idempotencyKey,
+                }),
               },
             );
           },
