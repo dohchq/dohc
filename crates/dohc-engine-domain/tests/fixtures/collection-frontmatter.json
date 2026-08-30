@@ -55,6 +55,13 @@
       }
     },
     {
+      "name": "integral-float-outside-int64-remains-a-number",
+      "markdown": "---\nexact: 1e20\n---",
+      "expected": {
+        "exact": 100000000000000000000
+      }
+    },
+    {
       "name": "separated-unsafe-integer-is-exact",
       "markdown": "---\nexact: 1_000_000_000_000_000_003\n---",
       "expected": {
@@ -126,6 +133,31 @@
     {
       "name": "duplicate-id-frontmatter-is-rejected",
       "markdown": "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nid: rec_77777777777777777777777774\n---",
+      "expected": null
+    },
+    {
+      "name": "duplicate-escaped-id-before-literal-is-rejected",
+      "markdown": "---\n\"\\u0069d\": rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nid: rec_77777777777777777777777774\n---",
+      "expected": null
+    },
+    {
+      "name": "duplicate-literal-id-before-escaped-is-rejected",
+      "markdown": "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n\"\\u0069d\": rec_77777777777777777777777774\n---",
+      "expected": null
+    },
+    {
+      "name": "duplicate-two-escaped-id-forms-are-rejected",
+      "markdown": "---\n\"\\u0069d\": rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n\"\\x69d\": rec_77777777777777777777777774\n---",
+      "expected": null
+    },
+    {
+      "name": "duplicate-escaped-record-property-is-rejected",
+      "markdown": "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\ntitle: First\n\"ti\\u0074le\": Second\n---",
+      "expected": null
+    },
+    {
+      "name": "duplicate-escaped-nested-record-property-is-rejected",
+      "markdown": "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nmetadata:\n  title: First\n  \"ti\\u0074le\": Second\n---",
       "expected": null
     }
   ]

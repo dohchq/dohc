@@ -86,8 +86,9 @@ describe('Y.Doc markdown import/export', () => {
       .toEqual(expected === null ? {} : decodeFixtureIntegers(expected))
     if (expected === null) {
       const output = yDocToMarkdown(doc)
-      expect(output).toContain('id: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa')
-      expect(output).toContain('id: rec_77777777777777777777777774')
+      for (const line of markdown.split('\n').slice(1, -1)) {
+        expect(output).toContain(line)
+      }
     }
   })
 
@@ -106,19 +107,36 @@ describe('Y.Doc markdown import/export', () => {
     expect(changed).not.toContain('!custom high')
   })
 
-  it('seeds and round-trips an unsafe frontmatter integer exactly', () => {
-    const input = ['---', 'exact: 9007199254740993', 'status: open', '---', '', '# Body'].join('\n')
+  it.each([
+    {
+      name: 'out-of-safe-range integer',
+      source: '9007199254740993',
+      value: 9007199254740993n,
+      settledSource: '9007199254740993',
+    },
+    {
+      name: 'out-of-int64 integral float',
+      source: '1e20',
+      value: 1e20,
+      settledSource: '100000000000000000000.0',
+    },
+  ])('seeds and settles $name without changing its numeric kind', ({
+    source,
+    value,
+    settledSource,
+  }) => {
+    const input = ['---', `exact: ${source}`, 'status: open', '---', '', '# Body'].join('\n')
     const doc = markdownToYDoc(input)
     const replica = new Y.Doc()
     Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc))
 
-    expect(getDohcYDocFrontmatter(replica).exact).toBe(9007199254740993n)
+    expect(getDohcYDocFrontmatter(replica).exact).toBe(value)
     replica.getMap('frontmatter').set('status', 'closed')
     const settled = yDocToMarkdown(replica)
 
-    expect(settled).toContain('exact: 9007199254740993')
+    expect(settled).toContain(`exact: ${settledSource}`)
     expect(getDohcYDocFrontmatter(markdownToYDoc(settled)).exact)
-      .toBe(9007199254740993n)
+      .toBe(value)
   })
 
   it('round-trips CRLF richdoc frontmatter through the internal line-ending hint', () => {

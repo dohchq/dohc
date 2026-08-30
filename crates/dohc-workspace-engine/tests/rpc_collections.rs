@@ -635,7 +635,7 @@ async fn capture_adopts_whitespace_delimited_frontmatter_without_losing_fields()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn capture_adopts_eof_frontmatter_without_rewriting_structure() {
+async fn capture_adopts_uppercase_markdown_extension_without_rewriting_structure() {
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     seed_schema(
@@ -661,7 +661,7 @@ async fn capture_adopts_eof_frontmatter_without_rewriting_structure() {
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
 
-    let record_path = scratch.path().join("tasks/eof.md");
+    let record_path = scratch.path().join("tasks/NOTE.MD");
     let original = format!("---\nid: {RECORD_ID}\ndone: false\npriority: 3\nstatus: open\n---");
     std::fs::write(&record_path, original.as_bytes()).expect("EOF record file");
     reconcile_capture(&transport, &handle, 10).await;
@@ -872,8 +872,46 @@ async fn collection_larger_than_frame_cap_pages_completely_in_sorted_order() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unsafe_integer_round_trips_through_query_and_get_record_wire_results() {
-    const UNSAFE_INTEGER: i64 = 9_007_199_254_740_993;
+async fn big_collection_numbers_cross_every_request_and_response_surface() {
+    struct NumberCase {
+        name: &'static str,
+        collection: &'static str,
+        first_id: &'static str,
+        second_id: &'static str,
+        first_yaml: &'static str,
+        second_yaml: &'static str,
+        first_json: &'static str,
+        second_json: &'static str,
+        first_marker: Value,
+        second_marker: Value,
+    }
+
+    let cases = [
+        NumberCase {
+            name: "out-of-safe-range integer",
+            collection: "integers",
+            first_id: RECORD_ID,
+            second_id: "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb",
+            first_yaml: "9007199254740993",
+            second_yaml: "9007199254740994",
+            first_json: "9007199254740993",
+            second_json: "9007199254740994",
+            first_marker: json!({ "$dohcInt64": "9007199254740993" }),
+            second_marker: json!({ "$dohcInt64": "9007199254740994" }),
+        },
+        NumberCase {
+            name: "out-of-int64 integral float",
+            collection: "floats",
+            first_id: "rec_cccccccccccccccccccccccccc",
+            second_id: "rec_dddddddddddddddddddddddddd",
+            first_yaml: "1e20",
+            second_yaml: "2e20",
+            first_json: "1e20",
+            second_json: "2e20",
+            first_marker: json!({ "$dohcFloat64": "100000000000000000000" }),
+            second_marker: json!({ "$dohcFloat64": "200000000000000000000" }),
+        },
+    ];
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     let db = scratch.engine_db_path().expect("engine db path");
@@ -883,19 +921,65 @@ async fn unsafe_integer_round_trips_through_query_and_get_record_wire_results() 
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");
     let schema = "fields:\n  exact:\n    type: number\n";
-    let record = format!("---\nid: {RECORD_ID}\nexact: {UNSAFE_INTEGER}\n---\n");
-    seed_text(&mut store, "integers/collection.yaml", schema, 2);
-    seed_text(&mut store, "integers/record.md", &record, 3);
+    let mut sequence = 2;
+    for case in &cases {
+        seed_text(
+            &mut store,
+            &format!("{}/collection.yaml", case.collection),
+            schema,
+            sequence,
+        );
+        sequence += 1;
+        for (filename, record_id, number) in [
+            ("first.md", case.first_id, case.first_yaml),
+            ("second.md", case.second_id, case.second_yaml),
+        ] {
+            seed_text(
+                &mut store,
+                &format!("{}/{filename}", case.collection),
+                &format!("---\nid: {record_id}\nexact: {number}\n---\n"),
+                sequence,
+            );
+            sequence += 1;
+        }
+    }
     store
         .write_with(&NoFaults, |tx| {
             reconcile_collections_in_tx(tx, WORKSPACE_ID, "main")
         })
-        .expect("reconcile unsafe integer collection");
+        .expect("reconcile big-number collections");
     drop(store);
-    let collection_dir = scratch.path().join("integers");
-    std::fs::create_dir_all(&collection_dir).expect("collection directory");
-    std::fs::write(collection_dir.join("collection.yaml"), schema).expect("schema file");
-    std::fs::write(collection_dir.join("record.md"), record).expect("record file");
+    let connection = rusqlite::Connection::open(&db).expect("open history database");
+    for case in &cases {
+        connection
+            .execute(
+                "INSERT INTO collection_field_history \
+                 (workspace_id,version_id,record_id,field_name,previous_value_json,\
+                  next_value_json,recorded_at_ms) \
+                 VALUES (?1,'main',?2,'exact',?3,?4,10)",
+                rusqlite::params![
+                    WORKSPACE_ID,
+                    case.first_id,
+                    case.first_json,
+                    case.second_json,
+                ],
+            )
+            .unwrap_or_else(|error| panic!("seed {} history: {error}", case.name));
+        let collection_dir = scratch.path().join(case.collection);
+        std::fs::create_dir_all(&collection_dir).expect("collection directory");
+        std::fs::write(collection_dir.join("collection.yaml"), schema).expect("schema file");
+        for (filename, record_id, number) in [
+            ("first.md", case.first_id, case.first_yaml),
+            ("second.md", case.second_id, case.second_yaml),
+        ] {
+            std::fs::write(
+                collection_dir.join(filename),
+                format!("---\nid: {record_id}\nexact: {number}\n---\n"),
+            )
+            .expect("record file");
+        }
+    }
+    drop(connection);
 
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(Arc::clone(&service));
@@ -917,46 +1001,145 @@ async fn unsafe_integer_round_trips_through_query_and_get_record_wire_results() 
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
 
-    for (id, method, params) in [
-        (
-            10,
-            "collections.query",
-            json!({ "collectionPath": "integers" }),
-        ),
-        (
-            11,
-            "collections.getRecord",
-            json!({
-                "collectionPath": "integers",
-                "recordId": RECORD_ID,
-                "historyLimit": 10,
-            }),
-        ),
-    ] {
-        let output = ProtocolEngineService::call(
+    let mut request_id = 10;
+    for case in &cases {
+        let first_page = ProtocolEngineService::call(
             service.as_ref(),
             RequestContext::unbounded().with_capability("blobs"),
-            request(id, method, Some(handle.clone()), params),
+            request(
+                request_id,
+                "collections.query",
+                Some(handle.clone()),
+                json!({
+                    "collectionPath": case.collection,
+                    "sort": [{ "field": "exact", "direction": "asc" }],
+                    "groupBy": "exact",
+                    "limit": 1,
+                }),
+            ),
         )
         .await
-        .unwrap_or_else(|error| panic!("{method} failed: {error:?}"));
-        assert!(output.blob_egress.is_none());
-        let record = if method == "collections.query" {
-            &output.response.result["records"][0]
-        } else {
-            &output.response.result["record"]
-        };
-        let exact = record["values"]
+        .unwrap_or_else(|error| panic!("{} first query failed: {error:?}", case.name));
+        request_id += 1;
+        assert!(first_page.blob_egress.is_none());
+        let result = &first_page.response.result;
+        let exact = result["records"][0]["values"]
             .as_array()
             .expect("record values")
             .iter()
             .find(|value| value["field"] == "exact")
             .expect("exact indexed value");
-        assert_eq!(
-            exact["value"],
-            json!({ "$dohcInt64": UNSAFE_INTEGER.to_string() })
-        );
+        assert_eq!(exact["value"], case.first_marker, "{} record", case.name);
         assert_eq!(exact["validation"]["status"], json!("valid"));
+        assert_eq!(result["groups"][0]["value"], case.first_marker);
+        assert_eq!(
+            result["nextCursor"]["sortValues"][0]["value"],
+            case.first_marker
+        );
+        let next_cursor = result["nextCursor"].clone();
+        encode_control(
+            &Envelope::Response(first_page.response),
+            &WireLimits::SPIKE_DEFAULTS,
+        )
+        .unwrap_or_else(|error| panic!("{} first query must encode: {error:?}", case.name));
+
+        let second_page = call(
+            &transport,
+            &handle,
+            request_id,
+            "collections.query",
+            json!({
+                "collectionPath": case.collection,
+                "sort": [{ "field": "exact", "direction": "asc" }],
+                "cursor": next_cursor,
+                "limit": 1,
+            }),
+        )
+        .await;
+        request_id += 1;
+        assert_eq!(second_page["records"][0]["id"], json!(case.second_id));
+        assert_eq!(
+            second_page["records"][0]["values"][0]["value"],
+            case.second_marker
+        );
+
+        let filtered = call(
+            &transport,
+            &handle,
+            request_id,
+            "collections.query",
+            json!({
+                "collectionPath": case.collection,
+                "filter": {
+                    "field": "exact",
+                    "operator": "equals",
+                    "value": case.first_marker,
+                },
+            }),
+        )
+        .await;
+        request_id += 1;
+        assert_eq!(
+            filtered["records"]
+                .as_array()
+                .expect("filtered records")
+                .len(),
+            1
+        );
+        assert_eq!(filtered["records"][0]["id"], json!(case.first_id));
+
+        let fetched = ProtocolEngineService::call(
+            service.as_ref(),
+            RequestContext::unbounded().with_capability("blobs"),
+            request(
+                request_id,
+                "collections.getRecord",
+                Some(handle.clone()),
+                json!({
+                    "collectionPath": case.collection,
+                    "recordId": case.first_id,
+                    "historyLimit": 10,
+                }),
+            ),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{} getRecord failed: {error:?}", case.name));
+        request_id += 1;
+        assert_eq!(
+            fetched.response.result["record"]["values"][0]["value"],
+            case.first_marker
+        );
+        assert_eq!(
+            fetched.response.result["history"][0]["previous"]["value"],
+            case.first_marker
+        );
+        assert_eq!(
+            fetched.response.result["history"][0]["next"]["value"],
+            case.second_marker
+        );
+        encode_control(
+            &Envelope::Response(fetched.response),
+            &WireLimits::SPIKE_DEFAULTS,
+        )
+        .unwrap_or_else(|error| panic!("{} getRecord must encode: {error:?}", case.name));
+    }
+
+    for (method, params) in [
+        ("collections.list", json!({})),
+        (
+            "collections.get",
+            json!({ "collectionPath": cases[0].collection }),
+        ),
+        ("collections.listPendingAdoptions", json!({ "limit": 500 })),
+    ] {
+        let output = ProtocolEngineService::call(
+            service.as_ref(),
+            RequestContext::unbounded(),
+            request(request_id, method, Some(handle.clone()), params),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{method} failed: {error:?}"));
+        request_id += 1;
         encode_control(
             &Envelope::Response(output.response),
             &WireLimits::SPIKE_DEFAULTS,

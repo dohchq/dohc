@@ -191,29 +191,45 @@ fn seeded_store() -> (ScratchDir, EngineStore) {
 }
 
 #[test]
-fn duplicate_frontmatter_id_is_rejected_like_the_ydoc_projection() {
+fn duplicate_frontmatter_key_vectors_are_rejected_like_the_ydoc_projection() {
     let (_scratch, mut store) = fresh_store();
     let fixture: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/collection-frontmatter.json"))
             .expect("frontmatter fixture parses");
-    let vector = fixture["vectors"]
+    let vectors = fixture["vectors"]
         .as_array()
         .expect("frontmatter vectors")
         .iter()
-        .find(|vector| vector["name"].as_str() == Some("duplicate-id-frontmatter-is-rejected"))
-        .expect("duplicate-id vector");
-    let markdown = vector["markdown"].as_str().expect("duplicate-id markdown");
-    assert_eq!(vector["expected"], serde_json::Value::Null);
+        .filter(|vector| {
+            vector["name"]
+                .as_str()
+                .is_some_and(|name| name.starts_with("duplicate-"))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        vectors.len() > 1,
+        "the duplicate-key matrix must stay plural"
+    );
     write_text(&mut store, "tasks/collection.yaml", "name: Tasks\n", 2).expect("task schema");
-    write_text(&mut store, "tasks/duplicate.md", markdown, 3).expect("duplicate-id record");
+    for (index, vector) in vectors.iter().enumerate() {
+        assert_eq!(vector["expected"], serde_json::Value::Null);
+        let markdown = vector["markdown"].as_str().expect("duplicate-key markdown");
+        write_text(
+            &mut store,
+            &format!("tasks/duplicate-{index}.md"),
+            markdown,
+            i64::try_from(index).expect("small vector index") + 3,
+        )
+        .expect("duplicate-key record");
+    }
 
     let reconciled = store
         .write_with(&NoFaults, |tx| {
             reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
         })
-        .expect("reconcile duplicate-id record");
+        .expect("reconcile duplicate-key records");
     let TxnOutcome::Committed(reconciled) = reconciled else {
-        panic!("duplicate-id reconciliation crashed");
+        panic!("duplicate-key reconciliation crashed");
     };
 
     assert!(reconciled.adoptions.is_empty());
@@ -221,59 +237,298 @@ fn duplicate_frontmatter_id_is_rejected_like_the_ydoc_projection() {
         .read_with(|conn| {
             conn.query_row(
                 "SELECT COUNT(*) FROM collection_records \
-                 WHERE workspace_id=?1 AND version_id=?2 AND file_path='tasks/duplicate.md'",
+                 WHERE workspace_id=?1 AND version_id=?2 AND file_path LIKE 'tasks/duplicate-%'",
                 params![WORKSPACE_ID, VERSION_ID],
                 |row| row.get::<_, i64>(0),
             )
         })
-        .expect("count duplicate-id bindings");
+        .expect("count duplicate-key bindings");
     assert_eq!(binding_count, 0);
 }
 
 #[test]
-fn number_filter_matches_an_integral_float_to_an_integer() {
+fn numeric_equality_uses_one_rule_across_every_collection_surface() {
+    const FLOAT_TASK_ID: &str = "rec_dddddddddddddddddddddddddd";
+    const INTEGER_TASK_ID: &str = "rec_ffffffffffffffffffffffffff";
     let (_scratch, mut store) = fresh_store();
     write_text(
         &mut store,
-        "tasks/collection.yaml",
-        "fields:\n  priority:\n    type: number\n",
+        "people/collection.yaml",
+        "fields:\n  title:\n    type: text\n",
         2,
     )
-    .expect("task schema");
+    .expect("people schema");
     write_text(
         &mut store,
-        "tasks/alpha.md",
-        &format!("---\nid: {FIRST_TASK_ID}\npriority: 1.0\n---\n"),
+        "people/alice.md",
+        &format!("---\nid: {PERSON_ID}\ntitle: Alice\n---\n"),
         3,
     )
-    .expect("task record");
+    .expect("relation target");
+    write_text(
+        &mut store,
+        "tasks/collection.yaml",
+        "fields:\n  priority:\n    type: number\n  bag:\n    type: text\n  owner:\n    type: relation\n    collection: people\n    many: false\n",
+        4,
+    )
+    .expect("task schema");
+    for (path, id, priority, bag, sequence) in [
+        ("tasks/alpha.md", FIRST_TASK_ID, "1.0", "[1.0]", 5),
+        ("tasks/beta.md", SECOND_TASK_ID, "1", "[2]", 6),
+        (
+            "tasks/float.md",
+            FLOAT_TASK_ID,
+            "9007199254740992.0",
+            "[3]",
+            7,
+        ),
+        (
+            "tasks/integer.md",
+            INTEGER_TASK_ID,
+            "9007199254740993",
+            "[4]",
+            8,
+        ),
+    ] {
+        write_text(
+            &mut store,
+            path,
+            &format!("---\nid: {id}\npriority: {priority}\nbag: {bag}\nowner: {PERSON_ID}\n---\n"),
+            sequence,
+        )
+        .expect("numeric task record");
+    }
     store
         .write_with(&NoFaults, |tx| {
             reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
         })
-        .expect("reconcile task record");
+        .expect("reconcile numeric task records");
 
-    let result = store
+    for (name, filter, expected_ids) in [
+        (
+            "scalar equals",
+            CollectionFilter {
+                field: "priority".to_owned(),
+                operator: CollectionFilterOperator::Equals,
+                value: json!(1),
+            },
+            vec![FIRST_TASK_ID, SECOND_TASK_ID],
+        ),
+        (
+            "array contains",
+            CollectionFilter {
+                field: "bag".to_owned(),
+                operator: CollectionFilterOperator::Contains,
+                value: json!(1),
+            },
+            vec![FIRST_TASK_ID],
+        ),
+        (
+            "unsafe integer remains distinct from adjacent float",
+            CollectionFilter {
+                field: "priority".to_owned(),
+                operator: CollectionFilterOperator::Equals,
+                value: json!(9_007_199_254_740_993_i64),
+            },
+            vec![INTEGER_TASK_ID],
+        ),
+    ] {
+        let result = store
+            .read_with(|conn| {
+                query_collection_records(
+                    conn,
+                    WORKSPACE_ID,
+                    "tasks",
+                    &CollectionQuery {
+                        filter: Some(filter.clone()),
+                        ..CollectionQuery::default()
+                    },
+                )
+            })
+            .unwrap_or_else(|error| panic!("{name} query failed: {error}"))
+            .expect("tasks collection");
+        assert_eq!(
+            result
+                .records
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>(),
+            expected_ids,
+            "{name}"
+        );
+    }
+
+    let sorted_and_grouped = store
         .read_with(|conn| {
             query_collection_records(
                 conn,
                 WORKSPACE_ID,
                 "tasks",
                 &CollectionQuery {
-                    filter: Some(CollectionFilter {
+                    sort: vec![CollectionSort {
                         field: "priority".to_owned(),
-                        operator: CollectionFilterOperator::Equals,
-                        value: json!(1),
-                    }),
+                        direction: ViewSortDirection::Asc,
+                    }],
+                    group_by: Some("priority".to_owned()),
+                    resolve_relations: true,
                     ..CollectionQuery::default()
                 },
             )
         })
-        .expect("number equals query")
+        .expect("numeric sort/group query")
         .expect("tasks collection");
+    assert_eq!(
+        sorted_and_grouped
+            .records
+            .iter()
+            .map(|record| record.id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            FIRST_TASK_ID,
+            SECOND_TASK_ID,
+            FLOAT_TASK_ID,
+            INTEGER_TASK_ID,
+        ]
+    );
+    let groups = sorted_and_grouped.groups.expect("priority groups");
+    assert_eq!(groups.len(), 3);
+    assert_eq!(groups[0].value, json!(1.0));
+    assert_eq!(
+        groups[0]
+            .records
+            .iter()
+            .map(|record| record.id.as_str())
+            .collect::<Vec<_>>(),
+        [FIRST_TASK_ID, SECOND_TASK_ID]
+    );
+    let alpha = groups[0]
+        .records
+        .iter()
+        .find(|record| record.id == FIRST_TASK_ID)
+        .expect("alpha group member");
+    let owner = alpha
+        .values
+        .iter()
+        .find(|value| value.field == "owner")
+        .expect("relation value");
+    assert_eq!(owner.resolved_relations[0].label, "Alice");
 
-    assert_eq!(result.records.len(), 1);
-    assert_eq!(result.records[0].id, FIRST_TASK_ID);
+    let first_page = store
+        .read_with(|conn| {
+            query_collection_records(
+                conn,
+                WORKSPACE_ID,
+                "tasks",
+                &CollectionQuery {
+                    sort: vec![CollectionSort {
+                        field: "priority".to_owned(),
+                        direction: ViewSortDirection::Asc,
+                    }],
+                    limit: 1,
+                    ..CollectionQuery::default()
+                },
+            )
+        })
+        .expect("first numeric cursor page")
+        .expect("tasks collection");
+    assert_eq!(first_page.records[0].id, FIRST_TASK_ID);
+    let second_page = store
+        .read_with(|conn| {
+            query_collection_records(
+                conn,
+                WORKSPACE_ID,
+                "tasks",
+                &CollectionQuery {
+                    sort: vec![CollectionSort {
+                        field: "priority".to_owned(),
+                        direction: ViewSortDirection::Asc,
+                    }],
+                    cursor: first_page.next_cursor.clone(),
+                    limit: 1,
+                    ..CollectionQuery::default()
+                },
+            )
+        })
+        .expect("second numeric cursor page")
+        .expect("tasks collection");
+    assert_eq!(second_page.records[0].id, SECOND_TASK_ID);
+
+    let float_frontmatter = json!({
+        "id": FIRST_TASK_ID,
+        "priority": 1.0,
+        "bag": [1.0],
+        "owner": PERSON_ID,
+    });
+    let integer_frontmatter = json!({
+        "id": FIRST_TASK_ID,
+        "priority": 1,
+        "bag": [1],
+        "owner": PERSON_ID,
+    });
+    let deduplicated = store
+        .write_with(&NoFaults, |tx| {
+            let writes_before = tx.total_changes();
+            index_collection_frontmatter_apply_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                "object-5",
+                &float_frontmatter,
+                &integer_frontmatter,
+                &float_frontmatter,
+                &integer_frontmatter,
+                Some("editor"),
+                None,
+                10,
+            )?;
+            Ok::<_, DomainError>(tx.total_changes() - writes_before)
+        })
+        .expect("deduplicate numeric-kind-only apply");
+    assert!(matches!(deduplicated, TxnOutcome::Committed(0)));
+
+    let changed_frontmatter = json!({
+        "id": FIRST_TASK_ID,
+        "priority": 2,
+        "bag": [1],
+        "owner": PERSON_ID,
+    });
+    store
+        .write_with(&NoFaults, |tx| {
+            index_collection_frontmatter_apply_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                "object-5",
+                &integer_frontmatter,
+                &changed_frontmatter,
+                &integer_frontmatter,
+                &changed_frontmatter,
+                Some("editor"),
+                None,
+                11,
+            )
+        })
+        .expect("apply genuinely different number");
+    let details = store
+        .read_with(|conn| {
+            get_collection_record(conn, WORKSPACE_ID, "tasks", FIRST_TASK_ID, 10, None)
+        })
+        .expect("load numeric history")
+        .expect("alpha details");
+    assert_eq!(details.history.len(), 1);
+    assert_eq!(details.history[0].field, "priority");
+    assert_eq!(details.history[0].previous.value, Some(json!(1)));
+    assert_eq!(details.history[0].next.value, Some(json!(2)));
+    let bag = details
+        .record
+        .values
+        .iter()
+        .find(|value| value.field == "bag")
+        .expect("preserved flagged value");
+    assert!(matches!(
+        bag.validation,
+        CollectionIndexedValueValidation::Flagged { .. }
+    ));
 }
 
 #[test]

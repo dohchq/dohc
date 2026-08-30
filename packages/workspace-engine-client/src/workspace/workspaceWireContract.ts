@@ -320,6 +320,7 @@ export class WorkspaceProtocolShapeError extends Error {
 }
 
 const COLLECTION_INTEGER_MARKER = "$dohcInt64";
+const COLLECTION_FLOAT_MARKER = "$dohcFloat64";
 const COLLECTION_ESCAPED_MARKER = "$dohcEscaped";
 const MAX_SAFE_COLLECTION_INTEGER = BigInt(Number.MAX_SAFE_INTEGER);
 const MIN_COLLECTION_INTEGER = -(1n << 63n);
@@ -370,6 +371,31 @@ function collectionIntegerMarker(value: JsonValue): bigint | null {
   return integer;
 }
 
+function collectionFloatMarker(value: JsonValue): number | null {
+  const entry = singleCollectionWireEntry(value);
+  if (entry?.[0] !== COLLECTION_FLOAT_MARKER) {
+    return null;
+  }
+  const decimal = entry[1];
+  if (typeof decimal !== "string" || !/^-?(?:0|[1-9]\d*)$/.test(decimal)) {
+    throw new WorkspaceProtocolShapeError(
+      "A collection float marker must contain a canonical decimal string.",
+    );
+  }
+  const number = Number(decimal);
+  if (
+    !Number.isFinite(number) ||
+    !Number.isInteger(number) ||
+    Number.isSafeInteger(number) ||
+    BigInt(number).toString() !== decimal
+  ) {
+    throw new WorkspaceProtocolShapeError(
+      "A collection float marker must contain an out-of-safe-range integral float.",
+    );
+  }
+  return number;
+}
+
 export function decodeCollectionValue(value: JsonValue): CollectionValue {
   const entry = singleCollectionWireEntry(value);
   if (entry?.[0] === COLLECTION_ESCAPED_MARKER) {
@@ -379,6 +405,7 @@ export function decodeCollectionValue(value: JsonValue): CollectionValue {
     if (
       escaped === null ||
       (escapedEntry?.[0] !== COLLECTION_INTEGER_MARKER &&
+        escapedEntry?.[0] !== COLLECTION_FLOAT_MARKER &&
         escapedEntry?.[0] !== COLLECTION_ESCAPED_MARKER)
     ) {
       throw new WorkspaceProtocolShapeError(
@@ -394,6 +421,8 @@ export function decodeCollectionValue(value: JsonValue): CollectionValue {
   }
   const integer = collectionIntegerMarker(value);
   if (integer !== null) return integer;
+  const float = collectionFloatMarker(value);
+  if (float !== null) return float;
   if (Array.isArray(value)) return value.map(decodeCollectionValue);
   if (value !== null && typeof value === "object") {
     return Object.fromEntries(
@@ -407,6 +436,14 @@ export function decodeCollectionValue(value: JsonValue): CollectionValue {
 }
 
 export function encodeCollectionValue(value: CollectionValue): JsonValue {
+  if (
+    typeof value === "number" &&
+    Number.isFinite(value) &&
+    Number.isInteger(value) &&
+    !Number.isSafeInteger(value)
+  ) {
+    return { [COLLECTION_FLOAT_MARKER]: BigInt(value).toString() };
+  }
   if (typeof value === "bigint") {
     if (value < MIN_COLLECTION_INTEGER || value > MAX_COLLECTION_INTEGER) {
       throw new WorkspaceProtocolShapeError(
@@ -432,6 +469,7 @@ export function encodeCollectionValue(value: CollectionValue): JsonValue {
     const entry = Object.entries(encoded);
     return entry.length === 1 &&
       (entry[0]?.[0] === COLLECTION_INTEGER_MARKER ||
+        entry[0]?.[0] === COLLECTION_FLOAT_MARKER ||
         entry[0]?.[0] === COLLECTION_ESCAPED_MARKER)
       ? { [COLLECTION_ESCAPED_MARKER]: encoded }
       : encoded;

@@ -20,6 +20,7 @@ import {
   defineMappingTag,
   defineScalarTag,
   defineSequenceTag,
+  floatCoreTag,
   intCoreTag,
   NOT_RESOLVED,
 } from 'js-yaml'
@@ -103,10 +104,29 @@ const losslessIntegerTag = defineScalarTag('tag:yaml.org,2002:int', {
   },
   identify: value =>
     typeof value === 'bigint'
-    || (typeof value === 'number' && Number.isInteger(value) && !Object.is(value, -0)),
+    || (typeof value === 'number'
+      && Number.isSafeInteger(value)
+      && !Object.is(value, -0)),
   represent: value => value.toString(),
 })
-const losslessFrontmatterSchema = CORE_SCHEMA.withTags(losslessIntegerTag)
+const losslessFloatTag = defineScalarTag('tag:yaml.org,2002:float', {
+  implicit: true,
+  implicitFirstChars: floatCoreTag.implicitFirstChars,
+  resolve: floatCoreTag.resolve,
+  identify: value =>
+    typeof value === 'number'
+    && (!Number.isSafeInteger(value) || Object.is(value, -0)),
+  represent: value => {
+    const represented = floatCoreTag.represent(value)
+    return Number.isInteger(value) && !represented.includes('.')
+      ? `${represented}.0`
+      : represented
+  },
+})
+const losslessFrontmatterSchema = CORE_SCHEMA.withTags(
+  losslessIntegerTag,
+  losslessFloatTag,
+)
 
 function prepareRenderedTableCell(markdown: string): string {
   // Raw inline HTML is the canonical representation of cell block boundaries.

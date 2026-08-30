@@ -109,6 +109,59 @@ views:
     dateField: due
 `,
   },
+  {
+    name: "duplicate-and-escaped-schema-properties-use-last-resolved-key",
+    yaml: `fields:
+  title:
+    type: number
+    "ty\\u0070e": text
+  status:
+    type: select
+    options: [Old]
+    "optio\\u006es": [New]
+  owner:
+    type: relation
+    collection: old/people
+    "collectio\\u006e": people
+    many: true
+    "ma\\u006ey": false
+  due:
+    type: date
+views:
+  - name: Old
+    "na\\u006de": All
+    kind: board
+    "ki\\u006ed": table
+    groupBy: status
+    "groupB\\u0079": title
+    sort:
+      - field: status
+        direction: desc
+    "so\\u0072t":
+      - field: status
+        "fie\\u006cd": title
+        direction: desc
+        "directio\\u006e": asc
+    visibleFields: [status]
+    "visibleField\\u0073": [title]
+    dateField: due
+    "dateFiel\\u0064": title
+`,
+  },
+  {
+    name: "duplicate-escaped-unknown-schema-properties-report-once",
+    yaml: `fields:
+  title:
+    type: text
+    mystery: first
+    "myste\\u0072y": second
+views:
+  - name: All
+    kind: table
+    extra: first
+    "ext\\u0072a": second
+`,
+  },
   { name: "valid-empty-schema", yaml: "" },
   {
     name: "degraded-bad-yaml",
@@ -326,6 +379,10 @@ const frontmatter = [
     markdown: "---\nexact: 9007199254740993\n---",
   },
   {
+    name: "integral-float-outside-int64-remains-a-number",
+    markdown: "---\nexact: 1e20\n---",
+  },
+  {
     name: "separated-unsafe-integer-is-exact",
     markdown: "---\nexact: 1_000_000_000_000_000_003\n---",
   },
@@ -368,6 +425,31 @@ const frontmatter = [
   {
     name: "duplicate-id-frontmatter-is-rejected",
     markdown: "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nid: rec_77777777777777777777777774\n---",
+    expected: null,
+  },
+  {
+    name: "duplicate-escaped-id-before-literal-is-rejected",
+    markdown: '---\n"\\u0069d": rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nid: rec_77777777777777777777777774\n---',
+    expected: null,
+  },
+  {
+    name: "duplicate-literal-id-before-escaped-is-rejected",
+    markdown: '---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n"\\u0069d": rec_77777777777777777777777774\n---',
+    expected: null,
+  },
+  {
+    name: "duplicate-two-escaped-id-forms-are-rejected",
+    markdown: '---\n"\\u0069d": rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n"\\x69d": rec_77777777777777777777777774\n---',
+    expected: null,
+  },
+  {
+    name: "duplicate-escaped-record-property-is-rejected",
+    markdown: '---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\ntitle: First\n"ti\\u0074le": Second\n---',
+    expected: null,
+  },
+  {
+    name: "duplicate-escaped-nested-record-property-is-rejected",
+    markdown: '---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nmetadata:\n  title: First\n  "ti\\u0074le": Second\n---',
     expected: null,
   },
 ].map(({ name, markdown, expected }) => {

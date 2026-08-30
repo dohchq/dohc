@@ -4,14 +4,17 @@
 //! hold this port to the same schema recovery, Field value, and Record id
 //! outcomes.
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 use dohc_engine_storage::StorageError;
 use rusqlite::{Connection, OptionalExtension, params};
 use saphyr::{
-    LoadableYamlNode, MappingOwned, MarkedYamlOwned, ScalarOwned, ScalarStyle, YamlDataOwned,
-    YamlOwned,
+    AnnotatedMappingOwned, AnnotatedNodeOwned, LoadableYamlNode, MappingOwned, MarkedYamlOwned,
+    ScalarOwned, ScalarStyle, Tag, Yaml, YamlDataOwned, YamlOwned,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -507,7 +510,7 @@ pub const MAX_COLLECTION_HISTORY_LIMIT: usize = 500;
 // Collection schemas cross the default engine wire as arrays. Capping them
 // while parsing prevents those arrays from exceeding the wire collection limit.
 const MAX_SCHEMA_COLLECTION_ITEMS: usize = 16_384;
-const MAX_COLLECTION_FIELD_VALUE_DEPTH: usize = 24;
+pub const MAX_COLLECTION_FIELD_VALUE_DEPTH: usize = 24;
 
 fn pointer_segment(value: &str) -> String {
     value.replace('~', "~0").replace('/', "~1")
@@ -546,9 +549,9 @@ fn flagged(code: FieldValueReasonCode, path: impl Into<String>) -> FieldValueVal
 }
 
 fn mapping_get<'a>(mapping: &'a MappingOwned, key: &str) -> Option<&'a YamlOwned> {
-    mapping
-        .iter()
-        .find_map(|(candidate, value)| (candidate.as_str() == Some(key)).then_some(value))
+    mapping.iter().rev().find_map(|(candidate, value)| {
+        (yaml_key_text(candidate).as_deref() == Some(key)).then_some(value)
+    })
 }
 
 fn yaml_key_text(value: &YamlOwned) -> Option<String> {
@@ -571,6 +574,7 @@ fn report_unknown_properties(
     path: &str,
     reasons: &mut Vec<CollectionSchemaReason>,
 ) {
+    let mut reported = HashSet::new();
     for (key, _) in mapping {
         let Some(key) = yaml_key_text(key) else {
             push_reason(
@@ -580,7 +584,7 @@ fn report_unknown_properties(
             );
             continue;
         };
-        if !allowed.contains(&key.as_str()) {
+        if !allowed.contains(&key.as_str()) && reported.insert(key.clone()) {
             push_reason(
                 reasons,
                 CollectionSchemaReasonCode::UnknownProperty,
@@ -1161,6 +1165,11 @@ fn path_basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
+fn is_collection_markdown_path(path: &str) -> bool {
+    path.get(path.len().saturating_sub(3)..)
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(".md"))
+}
+
 fn is_frontmatter_delimiter(line: &str) -> bool {
     line.trim_end_matches(['\r', '\n'])
         .strip_prefix("---")
@@ -1171,39 +1180,156 @@ fn is_frontmatter_delimiter(line: &str) -> bool {
         })
 }
 
-fn yaml_source_has_duplicate_root_text_key(source: &str, key: &str) -> bool {
-    let root_indent = source
-        .lines()
-        .filter_map(|line| {
-            let content = line.trim_start_matches([' ', '\t']);
-            (!content.is_empty() && !content.starts_with('#')).then_some(line.len() - content.len())
-        })
-        .min()
-        .unwrap_or(0);
-    let mut matches = 0;
-    for line in source.lines() {
-        let content = line.trim_start_matches([' ', '\t']);
-        if line.len() - content.len() == root_indent
-            && content.split_once(':').is_some_and(|(candidate, _)| {
-                let candidate = candidate.trim();
-                candidate == key
-                    || candidate
-                        .strip_prefix('\'')
-                        .and_then(|value| value.strip_suffix('\''))
-                        == Some(key)
-                    || candidate
-                        .strip_prefix('"')
-                        .and_then(|value| value.strip_suffix('"'))
-                        == Some(key)
-            })
-        {
-            matches += 1;
-            if matches == 2 {
-                return true;
-            }
+static DUPLICATE_YAML_NODE_ID: AtomicUsize = AtomicUsize::new(1);
+
+#[derive(Debug)]
+struct DuplicateYamlNode {
+    id: usize,
+    data: YamlDataOwned<Self>,
+}
+
+impl DuplicateYamlNode {
+    fn new(data: YamlDataOwned<Self>) -> Self {
+        Self {
+            id: DUPLICATE_YAML_NODE_ID.fetch_add(1, AtomicOrdering::Relaxed),
+            data,
         }
     }
-    false
+}
+
+impl Clone for DuplicateYamlNode {
+    fn clone(&self) -> Self {
+        Self::new(self.data.clone())
+    }
+}
+
+impl PartialEq for DuplicateYamlNode {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for DuplicateYamlNode {}
+
+impl Hash for DuplicateYamlNode {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
+}
+
+impl AnnotatedNodeOwned for DuplicateYamlNode {
+    type HashKey = Self;
+
+    fn parse_representation_recursive(&mut self) -> bool {
+        self.data.parse_representation_recursive()
+    }
+}
+
+impl From<YamlDataOwned<DuplicateYamlNode>> for DuplicateYamlNode {
+    fn from(data: YamlDataOwned<Self>) -> Self {
+        Self::new(data)
+    }
+}
+
+impl<'input> LoadableYamlNode<'input> for DuplicateYamlNode {
+    type HashKey = Self;
+
+    fn from_bare_yaml(yaml: Yaml<'input>) -> Self {
+        Self::new(match yaml {
+            Yaml::Sequence(_) => YamlDataOwned::Sequence(Vec::new()),
+            Yaml::Mapping(_) => YamlDataOwned::Mapping(AnnotatedMappingOwned::new()),
+            Yaml::Alias(alias) => YamlDataOwned::Alias(alias),
+            Yaml::BadValue => YamlDataOwned::BadValue,
+            Yaml::Representation(value, style, tag) => {
+                YamlDataOwned::Representation(value.into_owned(), style, tag.map(Cow::into_owned))
+            }
+            Yaml::Tagged(tag, value) => {
+                YamlDataOwned::Tagged(tag.into_owned(), Box::new(Self::from_bare_yaml(*value)))
+            }
+            Yaml::Value(value) => YamlDataOwned::Value(value.into_owned()),
+        })
+    }
+
+    fn is_sequence(&self) -> bool {
+        self.data.is_sequence()
+    }
+
+    fn is_mapping(&self) -> bool {
+        self.data.is_mapping()
+    }
+
+    fn is_badvalue(&self) -> bool {
+        self.data.is_badvalue()
+    }
+
+    fn sequence_mut(&mut self) -> &mut Vec<Self> {
+        self.data.as_vec_mut().expect("sequence node")
+    }
+
+    fn mapping_mut(&mut self) -> &mut AnnotatedMappingOwned<Self> {
+        self.data.as_mapping_mut().expect("mapping node")
+    }
+
+    fn into_tagged(self, tag: Cow<'input, Tag>) -> Self {
+        Self::new(YamlDataOwned::Tagged(tag.into_owned(), Box::new(self)))
+    }
+
+    fn take(&mut self) -> Self {
+        std::mem::replace(self, Self::new(YamlDataOwned::BadValue))
+    }
+}
+
+fn duplicate_yaml_key_text(value: &DuplicateYamlNode) -> Option<String> {
+    match &value.data {
+        YamlDataOwned::Value(ScalarOwned::String(value))
+        | YamlDataOwned::Representation(value, _, _) => Some(value.clone()),
+        YamlDataOwned::Value(ScalarOwned::Integer(value)) => Some(value.to_string()),
+        YamlDataOwned::Value(ScalarOwned::Boolean(value)) => Some(value.to_string()),
+        YamlDataOwned::Value(ScalarOwned::Null) => Some("null".to_owned()),
+        YamlDataOwned::Tagged(_, value) => duplicate_yaml_key_text(value),
+        _ => None,
+    }
+}
+
+fn duplicate_yaml_string(value: &DuplicateYamlNode) -> Option<&str> {
+    match &value.data {
+        YamlDataOwned::Value(ScalarOwned::String(value))
+        | YamlDataOwned::Representation(value, _, _) => Some(value),
+        YamlDataOwned::Tagged(_, value) => duplicate_yaml_string(value),
+        _ => None,
+    }
+}
+
+fn duplicate_yaml_mapping(
+    value: &DuplicateYamlNode,
+) -> Option<&AnnotatedMappingOwned<DuplicateYamlNode>> {
+    match &value.data {
+        YamlDataOwned::Mapping(mapping) => Some(mapping),
+        YamlDataOwned::Tagged(_, value) => duplicate_yaml_mapping(value),
+        _ => None,
+    }
+}
+
+fn duplicate_yaml_value_has_duplicate_mapping_key(value: &DuplicateYamlNode) -> bool {
+    match &value.data {
+        YamlDataOwned::Sequence(values) => values
+            .iter()
+            .any(duplicate_yaml_value_has_duplicate_mapping_key),
+        YamlDataOwned::Mapping(mapping) => {
+            let mut seen = HashSet::new();
+            for (key, value) in mapping {
+                if duplicate_yaml_key_text(key).is_some_and(|key| !seen.insert(key))
+                    || duplicate_yaml_value_has_duplicate_mapping_key(key)
+                    || duplicate_yaml_value_has_duplicate_mapping_key(value)
+                {
+                    return true;
+                }
+            }
+            false
+        }
+        YamlDataOwned::Tagged(_, value) => duplicate_yaml_value_has_duplicate_mapping_key(value),
+        _ => false,
+    }
 }
 
 fn markdown_record_id(markdown: &str) -> Option<String> {
@@ -1226,16 +1352,23 @@ fn markdown_record_id(markdown: &str) -> Option<String> {
         return None;
     }
     let yaml_source = &markdown[yaml_start..yaml_end];
-    if yaml_source_has_duplicate_root_text_key(yaml_source, RECORD_ID_FRONTMATTER_KEY) {
-        return None;
-    }
-    let documents = YamlOwned::load_from_str(yaml_source).ok()?;
+    let documents = DuplicateYamlNode::load_from_str(yaml_source).ok()?;
     if documents.len() != 1 {
         return None;
     }
-    let mapping = documents.first()?.as_mapping()?;
-    mapping_get(mapping, RECORD_ID_FRONTMATTER_KEY)
-        .and_then(YamlOwned::as_str)
+    let document = documents.first()?;
+    if duplicate_yaml_value_has_duplicate_mapping_key(document) {
+        return None;
+    }
+    let mapping = duplicate_yaml_mapping(document)?;
+    mapping
+        .iter()
+        .rev()
+        .find_map(|(key, value)| {
+            (duplicate_yaml_key_text(key).as_deref() == Some(RECORD_ID_FRONTMATTER_KEY))
+                .then_some(value)
+        })
+        .and_then(duplicate_yaml_string)
         .map(str::to_owned)
 }
 
@@ -1425,7 +1558,11 @@ fn parse_markdown_frontmatter(markdown: &str) -> Option<ParsedMarkdownFrontmatte
     }
     let body_start = body_start?;
     let yaml_source = &markdown[yaml_start..yaml_end];
-    if yaml_source_has_duplicate_root_text_key(yaml_source, RECORD_ID_FRONTMATTER_KEY) {
+    let duplicate_documents = DuplicateYamlNode::load_from_str(yaml_source).ok()?;
+    if duplicate_documents
+        .iter()
+        .any(duplicate_yaml_value_has_duplicate_mapping_key)
+    {
         return None;
     }
     let documents = YamlOwned::load_from_str(yaml_source).ok()?;
@@ -1615,7 +1752,7 @@ fn json_field_value(value: &Value) -> CollectionFieldValue {
     }
 }
 
-fn json_value_exceeds_depth(value: &Value, maximum: usize) -> bool {
+pub fn collection_value_exceeds_depth(value: &Value, maximum: usize) -> bool {
     let mut pending = vec![(value, 1_usize)];
     while let Some((value, depth)) = pending.pop() {
         if depth > maximum {
@@ -1665,7 +1802,7 @@ fn validation_columns(
     non_finite_number: bool,
     unsupported_tag: bool,
 ) -> Result<(&'static str, Option<String>), crate::DomainError> {
-    if json_value_exceeds_depth(value, MAX_COLLECTION_FIELD_VALUE_DEPTH) {
+    if collection_value_exceeds_depth(value, MAX_COLLECTION_FIELD_VALUE_DEPTH) {
         let reason = FieldValueReason {
             code: FieldValueReasonCode::ValueDepthExceeded,
             path: String::new(),
@@ -1814,7 +1951,11 @@ fn replace_index_for_record(
             let Some(value) = frontmatter.get(field_name.as_str()) else {
                 continue;
             };
-            if json_text(value)? != previous_value_json {
+            let previous_value: Value =
+                serde_json::from_str(&previous_value_json).map_err(|error| {
+                    crate::DomainError::Storage(StorageError::corrupt_public(error))
+                })?;
+            if !collection_values_equal(value, &previous_value) {
                 continue;
             }
             let Some(reason_json) = reason_json else {
@@ -2082,8 +2223,8 @@ pub fn index_collection_frontmatter_apply_in_tx(
     let after_object = after.as_object();
     let authored_before = authored_before.as_object();
     let authored_after = authored_after.as_object();
-    let applied_frontmatter_unchanged = before == after_object;
-    let authored_frontmatter_unchanged = authored_before == authored_after;
+    let applied_frontmatter_unchanged = collection_mappings_equal(before, after_object);
+    let authored_frontmatter_unchanged = collection_mappings_equal(authored_before, authored_after);
     let mut keys = HashSet::new();
     if let Some(values) = before {
         keys.extend(values.keys().map(String::as_str));
@@ -2099,7 +2240,7 @@ pub fn index_collection_frontmatter_apply_in_tx(
         }
         let previous = before.and_then(|values| values.get(field_name));
         let next = after_object.and_then(|values| values.get(field_name));
-        if previous != next {
+        if !optional_collection_values_equal(previous, next) {
             insert_field_history(
                 conn,
                 workspace_id,
@@ -2131,7 +2272,9 @@ pub fn index_collection_frontmatter_apply_in_tx(
         let applied = after_object.and_then(|values| values.get(field_name));
         let authored_previous = authored_before.and_then(|values| values.get(field_name));
         let authored_next = authored_after.and_then(|values| values.get(field_name));
-        if previous == applied && authored_previous != authored_next {
+        if optional_collection_values_equal(previous, applied)
+            && !optional_collection_values_equal(authored_previous, authored_next)
+        {
             insert_field_history(
                 conn,
                 workspace_id,
@@ -2305,7 +2448,7 @@ fn unindexed_or_conflicted_relation_targets_still_present(
                SELECT s.path,b.text,0 AS moment_order FROM snapshots s \
                JOIN blobs b ON b.sha256=s.blob_sha256 \
                WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.content_kind='text' \
-                 AND substr(s.path,-3)='.md' \
+                 AND lower(substr(s.path,-3))='.md' \
                  AND substr(s.path,1,length(?3))=?3 \
                  AND substr(s.path,length(?3)+1,1)='/' \
                  AND instr(substr(s.path,length(?3)+2),'/')=0 \
@@ -2315,7 +2458,7 @@ fn unindexed_or_conflicted_relation_targets_still_present(
                  AND m.object_id=s.object_id \
                JOIN blobs b ON b.sha256=m.after_blob_sha256 \
                WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.content_kind='text' \
-                 AND m.after_content_kind='text' AND substr(s.path,-3)='.md' \
+                 AND m.after_content_kind='text' AND lower(substr(s.path,-3))='.md' \
                  AND substr(s.path,1,length(?3))=?3 \
                  AND substr(s.path,length(?3)+1,1)='/' \
                  AND instr(substr(s.path,length(?3)+2),'/')=0 \
@@ -2374,7 +2517,7 @@ fn load_collection_snapshots(
                  AND s.content_kind='text' \
                  AND (s.path=?3 \
                    OR substr(s.path,-(length(?3)+1))='/'||?3 \
-                   OR (substr(s.path,-3)='.md' AND EXISTS (\
+                   OR (lower(substr(s.path,-3))='.md' AND EXISTS (\
                      SELECT 1 FROM collection_prefixes c \
                      WHERE substr(s.path,1,length(c.prefix))=c.prefix \
                        AND substr(s.path,length(c.prefix)+1,1)='/' \
@@ -2552,7 +2695,7 @@ pub fn reconcile_collections_in_tx(
         let Some(record) = snapshots_by_path.get(path.as_str()) else {
             return false;
         };
-        if !record.path.ends_with(".md")
+        if !is_collection_markdown_path(&record.path)
             || (!record.text.is_empty()
                 && markdown_frontmatter_json_with_body(&record.text).is_none())
             || markdown_record_id(&record.text).is_some_and(|record_id| is_record_id(&record_id))
@@ -2601,7 +2744,7 @@ pub fn reconcile_collections_in_tx(
     let records: Vec<&CollectionSnapshot> = snapshots
         .iter()
         .filter(|snapshot| {
-            snapshot.path.ends_with(".md")
+            is_collection_markdown_path(&snapshot.path)
                 && collection_schemas.contains_key(parent_path(&snapshot.path))
                 && (snapshot.text.is_empty()
                     || markdown_frontmatter_json_with_body(&snapshot.text).is_some())
@@ -2611,7 +2754,7 @@ pub fn reconcile_collections_in_tx(
     let present_malformed_records: Vec<&CollectionSnapshot> = snapshots
         .iter()
         .filter(|snapshot| {
-            snapshot.path.ends_with(".md")
+            is_collection_markdown_path(&snapshot.path)
                 && collection_schemas.contains_key(parent_path(&snapshot.path))
                 && !current_paths.contains(snapshot.path.as_str())
         })
@@ -2650,7 +2793,7 @@ pub fn reconcile_collections_in_tx(
     let current_object_ids: HashSet<&str> = snapshots
         .iter()
         .filter(|snapshot| {
-            snapshot.path.ends_with(".md")
+            is_collection_markdown_path(&snapshot.path)
                 && collection_schemas.contains_key(parent_path(&snapshot.path))
         })
         .map(|snapshot| snapshot.object_id.as_str())
@@ -3592,7 +3735,7 @@ fn value_contains(value: &Value, needle: &Value) -> bool {
         (Value::String(value), Value::String(needle)) => value.contains(needle),
         (Value::Array(values), needle) => values
             .iter()
-            .any(|value| value == needle || value_contains(value, needle)),
+            .any(|value| collection_values_equal(value, needle) || value_contains(value, needle)),
         _ => false,
     }
 }
@@ -3602,12 +3745,7 @@ fn matches_collection_filter(record: &CollectionRecord, filter: &CollectionFilte
         return false;
     };
     match filter.operator {
-        CollectionFilterOperator::Equals => match (value, &filter.value) {
-            (Value::Number(_), Value::Number(_)) => {
-                compare_json(value, &filter.value) == Ordering::Equal
-            }
-            _ => value == &filter.value,
-        },
+        CollectionFilterOperator::Equals => collection_values_equal(value, &filter.value),
         CollectionFilterOperator::Contains => value_contains(value, &filter.value),
     }
 }
@@ -3623,6 +3761,140 @@ fn json_kind(value: &Value) -> u8 {
     }
 }
 
+enum CollectionNumber {
+    Signed(i64),
+    Unsigned(u64),
+    Float(f64),
+}
+
+fn collection_number(value: &serde_json::Number) -> CollectionNumber {
+    if value.is_f64() {
+        CollectionNumber::Float(value.as_f64().expect("f64 number"))
+    } else if let Some(value) = value.as_i64() {
+        CollectionNumber::Signed(value)
+    } else {
+        CollectionNumber::Unsigned(value.as_u64().expect("u64 number"))
+    }
+}
+
+fn compare_signed_to_float(integer: i64, float: f64) -> Ordering {
+    const I64_UPPER_EXCLUSIVE: f64 = 9_223_372_036_854_775_808.0;
+    if float < i64::MIN as f64 {
+        return Ordering::Greater;
+    }
+    if float >= I64_UPPER_EXCLUSIVE {
+        return Ordering::Less;
+    }
+    let truncated = float.trunc() as i64;
+    integer.cmp(&truncated).then_with(|| {
+        0.0_f64
+            .partial_cmp(&float.fract())
+            .unwrap_or(Ordering::Equal)
+    })
+}
+
+fn compare_unsigned_to_float(integer: u64, float: f64) -> Ordering {
+    const U64_UPPER_EXCLUSIVE: f64 = 18_446_744_073_709_551_616.0;
+    if float < 0.0 {
+        return Ordering::Greater;
+    }
+    if float >= U64_UPPER_EXCLUSIVE {
+        return Ordering::Less;
+    }
+    let truncated = float.trunc() as u64;
+    integer.cmp(&truncated).then_with(|| {
+        0.0_f64
+            .partial_cmp(&float.fract())
+            .unwrap_or(Ordering::Equal)
+    })
+}
+
+fn compare_collection_numbers(left: &serde_json::Number, right: &serde_json::Number) -> Ordering {
+    match (collection_number(left), collection_number(right)) {
+        (CollectionNumber::Signed(left), CollectionNumber::Signed(right)) => left.cmp(&right),
+        (CollectionNumber::Unsigned(left), CollectionNumber::Unsigned(right)) => left.cmp(&right),
+        (CollectionNumber::Signed(left), CollectionNumber::Unsigned(right)) => {
+            if left < 0 {
+                Ordering::Less
+            } else {
+                (left as u64).cmp(&right)
+            }
+        }
+        (CollectionNumber::Unsigned(left), CollectionNumber::Signed(right)) => {
+            if right < 0 {
+                Ordering::Greater
+            } else {
+                left.cmp(&(right as u64))
+            }
+        }
+        (CollectionNumber::Signed(left), CollectionNumber::Float(right)) => {
+            compare_signed_to_float(left, right)
+        }
+        (CollectionNumber::Float(left), CollectionNumber::Signed(right)) => {
+            compare_signed_to_float(right, left).reverse()
+        }
+        (CollectionNumber::Unsigned(left), CollectionNumber::Float(right)) => {
+            compare_unsigned_to_float(left, right)
+        }
+        (CollectionNumber::Float(left), CollectionNumber::Unsigned(right)) => {
+            compare_unsigned_to_float(right, left).reverse()
+        }
+        (CollectionNumber::Float(left), CollectionNumber::Float(right)) => {
+            left.partial_cmp(&right).unwrap_or(Ordering::Equal)
+        }
+    }
+}
+
+fn collection_values_equal(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Number(left), Value::Number(right)) => {
+            compare_collection_numbers(left, right) == Ordering::Equal
+        }
+        (Value::Array(left), Value::Array(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| collection_values_equal(left, right))
+        }
+        (Value::Object(left), Value::Object(right)) => {
+            left.len() == right.len()
+                && left.iter().all(|(key, left)| {
+                    right
+                        .get(key)
+                        .is_some_and(|right| collection_values_equal(left, right))
+                })
+        }
+        _ => left == right,
+    }
+}
+
+fn optional_collection_values_equal(left: Option<&Value>, right: Option<&Value>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => collection_values_equal(left, right),
+        _ => false,
+    }
+}
+
+fn collection_mappings_equal(
+    left: Option<&serde_json::Map<String, Value>>,
+    right: Option<&serde_json::Map<String, Value>>,
+) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => {
+            left.len() == right.len()
+                && left.iter().all(|(key, left)| {
+                    right
+                        .get(key)
+                        .is_some_and(|right| collection_values_equal(left, right))
+                })
+        }
+        _ => false,
+    }
+}
+
 fn compare_json(left: &Value, right: &Value) -> Ordering {
     let kind = json_kind(left).cmp(&json_kind(right));
     if kind != Ordering::Equal {
@@ -3631,17 +3903,7 @@ fn compare_json(left: &Value, right: &Value) -> Ordering {
     match (left, right) {
         (Value::Null, Value::Null) => Ordering::Equal,
         (Value::Bool(left), Value::Bool(right)) => left.cmp(right),
-        (Value::Number(left), Value::Number(right)) => {
-            if let (Some(left), Some(right)) = (left.as_i64(), right.as_i64()) {
-                left.cmp(&right)
-            } else if let (Some(left), Some(right)) = (left.as_u64(), right.as_u64()) {
-                left.cmp(&right)
-            } else {
-                left.as_f64()
-                    .partial_cmp(&right.as_f64())
-                    .unwrap_or(Ordering::Equal)
-            }
-        }
+        (Value::Number(left), Value::Number(right)) => compare_collection_numbers(left, right),
         (Value::String(left), Value::String(right)) => left.cmp(right),
         _ => left.to_string().cmp(&right.to_string()),
     }
@@ -3751,14 +4013,14 @@ fn group_collection_records(
     field: &str,
 ) -> Result<Vec<CollectionRecordGroup>, crate::DomainError> {
     let mut groups = Vec::<CollectionRecordGroup>::new();
-    let mut indexes = HashMap::<String, usize>::new();
     for record in records {
         let value = value_for_field(record, field)
             .cloned()
             .unwrap_or(Value::Null);
-        let key = serde_json::to_string(&value)
-            .map_err(|error| crate::DomainError::Storage(StorageError::corrupt_public(error)))?;
-        let index = match indexes.get(&key).copied() {
+        let index = match groups
+            .iter()
+            .position(|group| collection_values_equal(&group.value, &value))
+        {
             Some(index) => index,
             None => {
                 let index = groups.len();
@@ -3766,7 +4028,6 @@ fn group_collection_records(
                     value,
                     records: Vec::new(),
                 });
-                indexes.insert(key, index);
                 index
             }
         };
@@ -4161,7 +4422,10 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{compare_json, is_record_id, mint_record_id, record_id_from_random};
+    use super::{
+        compare_json, is_record_id, markdown_record_id, mint_record_id, parse_markdown_frontmatter,
+        record_id_from_random,
+    };
 
     #[test]
     fn integer_json_comparison_preserves_precision_beyond_f64() {
@@ -4172,6 +4436,42 @@ mod tests {
             ),
             Ordering::Less
         );
+        assert_eq!(compare_json(&json!(1), &json!(1.0)), Ordering::Equal);
+        assert_eq!(
+            compare_json(
+                &json!(9_007_199_254_740_993_i64),
+                &json!(9_007_199_254_740_992_f64)
+            ),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn duplicate_and_escaped_frontmatter_keys_are_rejected_by_both_rust_parsers() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/collection-frontmatter.json"
+        ))
+        .expect("frontmatter fixture parses");
+        let vectors = fixture["vectors"].as_array().expect("frontmatter vectors");
+        let mut checked = 0;
+        for vector in vectors {
+            if !vector["name"]
+                .as_str()
+                .is_some_and(|name| name.starts_with("duplicate-"))
+            {
+                continue;
+            }
+            let markdown = vector["markdown"].as_str().expect("duplicate markdown");
+            assert_eq!(vector["expected"], serde_json::Value::Null);
+            assert_eq!(markdown_record_id(markdown), None, "{}", vector["name"]);
+            assert!(
+                parse_markdown_frontmatter(markdown).is_none(),
+                "{}",
+                vector["name"]
+            );
+            checked += 1;
+        }
+        assert!(checked > 1, "the duplicate-key matrix must stay plural");
     }
 
     #[test]

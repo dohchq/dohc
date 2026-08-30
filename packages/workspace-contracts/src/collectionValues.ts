@@ -84,6 +84,14 @@ function reason(
   code: CollectionSchemaReason["code"],
   path: string,
 ): void {
+  if (reasons.length >= MAX_SCHEMA_COLLECTION_ITEMS) {
+    reasons.length = MAX_SCHEMA_COLLECTION_ITEMS - 1;
+    reasons.push({
+      code: "schema-collection-limit-exceeded",
+      path: "/reasons",
+    });
+    return;
+  }
   reasons.push({ code, path });
 }
 
@@ -483,12 +491,12 @@ export function parseCollectionSchema(yamlText: string): CollectionSchemaParseRe
   const description = readOptionalText(raw, "description", "", reasons);
   if (fields.length > MAX_SCHEMA_COLLECTION_ITEMS) {
     fields.length = MAX_SCHEMA_COLLECTION_ITEMS;
-    reasons.push({ code: "schema-collection-limit-exceeded", path: "/fields" });
+    reason(reasons, "schema-collection-limit-exceeded", "/fields");
   }
   const views = parseViews(raw.views, fields, reasons);
   if (views.length > MAX_SCHEMA_COLLECTION_ITEMS) {
     views.length = MAX_SCHEMA_COLLECTION_ITEMS;
-    reasons.push({ code: "schema-collection-limit-exceeded", path: "/views" });
+    reason(reasons, "schema-collection-limit-exceeded", "/views");
   }
   const schema: CollectionSchema = {
     name,

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { validateFieldValue } from "@dohc/workspace-contracts/collection-values";
+import type { CollectionValue } from "@dohc/workspace-contracts/collection";
 import reasonCodes from "../../../../crates/dohc-engine-domain/tests/fixtures/collection-reason-codes.json";
 import {
   WORKSPACE_METHOD,
@@ -56,6 +57,12 @@ const conflict = {
   current: state,
   incoming: state,
 };
+
+const reservedCollectionMarkerObjects: CollectionValue[] = [
+  { $dohcInt64: "9007199254740993" },
+  { $dohcFloat64: "100000000000000000000" },
+  { $dohcEscaped: { $dohcFloat64: "100000000000000000000" } },
+];
 
 describe("workspace wire schemas", () => {
   it("preserves the public object-shape error", () => {
@@ -189,8 +196,20 @@ describe("workspace wire schemas", () => {
     }
   });
 
-  it("round-trips exact signed 64-bit collection integers", () => {
-    const markedInteger = { $dohcInt64: "9007199254740993" };
+  it.each([
+    {
+      name: "out-of-safe-range integer",
+      marker: { $dohcInt64: "9007199254740993" },
+      decoded: 9007199254740993n,
+    },
+    {
+      name: "out-of-safe-range integral float",
+      marker: { $dohcFloat64: "100000000000000000000" },
+      decoded: 1e20,
+    },
+  ])(
+    "round-trips $name through every collection request and response surface",
+    ({ marker, decoded }) => {
     const record = {
       id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
       path: "projects/roadmap.md",
@@ -198,7 +217,7 @@ describe("workspace wire schemas", () => {
       values: [
         {
           field: "estimate",
-          value: markedInteger,
+          value: marker,
           validation: { status: "valid" },
           resolvedRelations: [],
         },
@@ -208,18 +227,17 @@ describe("workspace wire schemas", () => {
     const queried = decodeWorkspaceResult(WORKSPACE_METHOD.collectionsQuery, {
       collection: { path: "projects", status: "valid", reasons: [] },
       records: [record],
-      groups: [{ value: markedInteger, records: [record] }],
+      groups: [{ value: marker, records: [record] }],
       nextCursor: {
-        sortValues: [{ present: true, value: markedInteger }],
+        sortValues: [{ present: true, value: marker }],
         recordPath: record.path,
         recordId: record.id,
       },
     });
-    expect(queried.records[0]?.values[0]?.value).toBe(9007199254740993n);
-    expect(queried.groups?.[0]?.value).toBe(9007199254740993n);
-    expect(queried.nextCursor?.sortValues[0]?.value).toBe(
-      9007199254740993n,
-    );
+    expect(queried.records[0]?.values[0]?.value).toBe(decoded);
+    expect(queried.groups?.[0]?.value).toBe(decoded);
+    expect(queried.groups?.[0]?.records[0]?.values[0]?.value).toBe(decoded);
+    expect(queried.nextCursor?.sortValues[0]?.value).toBe(decoded);
 
     const fetched = decodeWorkspaceResult(
       WORKSPACE_METHOD.collectionsGetRecord,
@@ -230,16 +248,17 @@ describe("workspace wire schemas", () => {
           {
             historyId: 1,
             field: "estimate",
-            previous: { present: false, value: null },
-            next: { present: true, value: markedInteger },
+            previous: { present: true, value: marker },
+            next: { present: true, value: marker },
             authorOriginId: null,
             recordedAtMs: 1,
           },
         ],
       },
     );
-    expect(fetched.record.values[0]?.value).toBe(9007199254740993n);
-    expect(fetched.history[0]?.next.value).toBe(9007199254740993n);
+    expect(fetched.record.values[0]?.value).toBe(decoded);
+    expect(fetched.history[0]?.previous.value).toBe(decoded);
+    expect(fetched.history[0]?.next.value).toBe(decoded);
 
     expect(
       encodeCollectionQueryParams({
@@ -247,25 +266,68 @@ describe("workspace wire schemas", () => {
         filter: {
           field: "estimate",
           operator: "equals",
-          value: 9007199254740993n,
+          value: decoded,
         },
         cursor: {
-          sortValues: [{ present: true, value: 9007199254740993n }],
+          sortValues: [{ present: true, value: decoded }],
           recordPath: record.path,
           recordId: record.id,
         },
       }),
     ).toMatchObject({
-      filter: { value: markedInteger },
-      cursor: { sortValues: [{ value: markedInteger }] },
+      filter: { value: marker },
+      cursor: { sortValues: [{ value: marker }] },
     });
-  });
 
-  it("round-trips a marker-shaped user collection object unchanged", () => {
-    const value = { $dohcInt64: "9007199254740993" };
+    expect(
+      validateFieldValue({ name: "estimate", type: "number" }, decoded),
+    ).toEqual({ status: "valid" });
+
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.collectionsList, {
+        collections: [
+          { path: "projects", status: "valid", reasons: [] },
+        ],
+      }).collections,
+    ).toHaveLength(1);
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.collectionsGet, {
+        path: "projects",
+        status: "valid",
+        reasons: [],
+        schema: {
+          name: null,
+          description: null,
+          fields: [],
+          views: [],
+        },
+        recordCount: 1,
+      }).recordCount,
+    ).toBe(1);
+    expect(
+      decodeWorkspaceResult(
+        WORKSPACE_METHOD.collectionsListPendingAdoptions,
+        {
+          adoptions: [
+            {
+              versionId: "main",
+              recordId: record.id,
+              collectionPath: "projects",
+              filePath: record.path,
+              objectId: "object",
+            },
+          ],
+          nextCursor: null,
+        },
+      ).adoptions,
+    ).toHaveLength(1);
+    },
+  );
+
+  it.each(reservedCollectionMarkerObjects)("round-trips reserved marker-shaped user object %j unchanged", (value) => {
     const encoded = encodeCollectionValue(value);
 
-    expect(encoded).toEqual({ $dohcEscaped: value });
+    expect(encoded).toHaveProperty("$dohcEscaped");
     expect(decodeCollectionValue(encoded)).toEqual(value);
   });
 
@@ -351,6 +413,16 @@ describe("workspace wire schemas", () => {
         groups: null,
         nextCursor: null,
       }),
+    ).toThrow(WorkspaceProtocolShapeError);
+  });
+
+  it.each([
+    "01",
+    "9007199254740991",
+    "100000000000000000001",
+  ])("rejects malformed collection float marker %s", (decimal) => {
+    expect(() =>
+      decodeCollectionValue({ $dohcFloat64: decimal }),
     ).toThrow(WorkspaceProtocolShapeError);
   });
 

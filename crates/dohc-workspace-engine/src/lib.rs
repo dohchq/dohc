@@ -27,13 +27,14 @@ use dohc_engine_domain::{
     ConflictFileState, ConflictMetadata, ConflictResolution, ConflictStatus, CreateFileThread,
     CreateNamedVersion, DEFAULT_COLLECTION_QUERY_LIMIT, DeleteTextFile, DispatchClaim,
     DispatchRecord, DomainError, FeedCursorValue, FollowState, FollowTargetKind,
-    LocalAttachmentInput, MAX_COLLECTION_HISTORY_LIMIT, MAX_COLLECTION_QUERY_LIMIT,
-    MAX_COLLECTION_QUERY_SORTS, MentionCursor, MergeTextFileFromVersion, MergeTextFileResult,
-    MergeUnchangedReason, MomentOp, MomentPage, RenameTextFile, ResolveConflictKind,
-    ResolveDecision, ResolveTextConflict, RollbackTextFileMutation, SaveBookmark, SecretDelete,
-    SecretDiskIntent, SecretMomentRecord, SecretWrite, SendMessage, SetFollow, SetReaction,
-    StartChannelThread, TextConflict, TextSnapshot, ThreadDispatchPause, VersionFileChangeStatus,
-    VersionRecord, WriteBinary, WriteText, validate_addressable_plaintext_path,
+    LocalAttachmentInput, MAX_COLLECTION_FIELD_VALUE_DEPTH, MAX_COLLECTION_HISTORY_LIMIT,
+    MAX_COLLECTION_QUERY_LIMIT, MAX_COLLECTION_QUERY_SORTS, MentionCursor,
+    MergeTextFileFromVersion, MergeTextFileResult, MergeUnchangedReason, MomentOp, MomentPage,
+    RenameTextFile, ResolveConflictKind, ResolveDecision, ResolveTextConflict,
+    RollbackTextFileMutation, SaveBookmark, SecretDelete, SecretDiskIntent, SecretMomentRecord,
+    SecretWrite, SendMessage, SetFollow, SetReaction, StartChannelThread, TextConflict,
+    TextSnapshot, ThreadDispatchPause, VersionFileChangeStatus, VersionRecord, WriteBinary,
+    WriteText, collection_value_exceeds_depth, validate_addressable_plaintext_path,
 };
 use dohc_engine_protocol::{
     error::{ErrorCode, WireError},
@@ -141,48 +142,60 @@ const MAX_METADATA_FIELD_BYTES: usize = dohc_engine_domain::MAX_METADATA_FIELD_B
 const COLLECTION_RESPONSE_HARD_CAP_BYTES: usize =
     dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize - 64 * 1024;
 const COLLECTION_INTEGER_MARKER: &str = "$dohcInt64";
+const COLLECTION_FLOAT_MARKER: &str = "$dohcFloat64";
 const COLLECTION_ESCAPED_MARKER: &str = "$dohcEscaped";
 
-fn encode_collection_wire_integers(value: &mut Value) {
+fn is_collection_reserved_marker(marker: &str) -> bool {
+    matches!(
+        marker,
+        COLLECTION_INTEGER_MARKER | COLLECTION_FLOAT_MARKER | COLLECTION_ESCAPED_MARKER
+    )
+}
+
+fn canonical_collection_decimal(decimal: &str) -> bool {
+    decimal == "0"
+        || decimal.strip_prefix('-').is_some_and(|digits| {
+            !digits.is_empty()
+                && !digits.starts_with('0')
+                && digits.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        || (!decimal.starts_with('0') && decimal.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+fn encode_collection_wire_numbers(value: &mut Value) {
     match value {
         Value::Number(number) => {
-            let decimal = number
-                .as_i64()
-                .filter(|number| number.unsigned_abs() > dohc_engine_protocol::MAX_WIRE_INTEGER)
-                .map(|number| number.to_string())
-                .or_else(|| {
-                    number
-                        .as_u64()
-                        .filter(|number| *number > dohc_engine_protocol::MAX_WIRE_INTEGER)
-                        .map(|number| number.to_string())
+            let marker = if number.is_f64() {
+                number.as_f64().and_then(|number| {
+                    (number.is_finite()
+                        && number.fract() == 0.0
+                        && number.abs() > dohc_engine_protocol::MAX_WIRE_INTEGER as f64)
+                        .then(|| (COLLECTION_FLOAT_MARKER, format!("{number:.0}")))
                 })
-                .or_else(|| {
-                    number.as_f64().and_then(|number| {
-                        (number.is_finite()
-                            && number.fract() == 0.0
-                            && number.abs() > dohc_engine_protocol::MAX_WIRE_INTEGER as f64)
-                            .then(|| format!("{number:.0}"))
-                            .filter(|decimal| {
-                                if decimal.starts_with('-') {
-                                    decimal.parse::<i64>().is_ok()
-                                } else {
-                                    decimal.parse::<u64>().is_ok()
-                                }
-                            })
+            } else {
+                number
+                    .as_i64()
+                    .filter(|number| number.unsigned_abs() > dohc_engine_protocol::MAX_WIRE_INTEGER)
+                    .map(|number| (COLLECTION_INTEGER_MARKER, number.to_string()))
+                    .or_else(|| {
+                        number
+                            .as_u64()
+                            .filter(|number| *number > dohc_engine_protocol::MAX_WIRE_INTEGER)
+                            .map(|number| (COLLECTION_INTEGER_MARKER, number.to_string()))
                     })
-                });
-            if let Some(decimal) = decimal {
-                *value = json!({ (COLLECTION_INTEGER_MARKER): decimal });
+            };
+            if let Some((marker, decimal)) = marker {
+                *value = json!({ (marker): decimal });
             }
         }
-        Value::Array(values) => values.iter_mut().for_each(encode_collection_wire_integers),
+        Value::Array(values) => values.iter_mut().for_each(encode_collection_wire_numbers),
         Value::Object(object) => {
-            object
-                .values_mut()
-                .for_each(encode_collection_wire_integers);
+            object.values_mut().for_each(encode_collection_wire_numbers);
             if object.len() == 1
-                && (object.contains_key(COLLECTION_INTEGER_MARKER)
-                    || object.contains_key(COLLECTION_ESCAPED_MARKER))
+                && object
+                    .keys()
+                    .next()
+                    .is_some_and(|key| is_collection_reserved_marker(key))
             {
                 let escaped = std::mem::take(object);
                 object.insert(COLLECTION_ESCAPED_MARKER.to_owned(), Value::Object(escaped));
@@ -192,11 +205,11 @@ fn encode_collection_wire_integers(value: &mut Value) {
     }
 }
 
-fn decode_collection_wire_integer(value: &mut Value) -> Result<(), WireError> {
+fn decode_collection_wire_numbers(value: &mut Value) -> Result<(), WireError> {
     match value {
         Value::Array(values) => {
             for value in values {
-                decode_collection_wire_integer(value)?;
+                decode_collection_wire_numbers(value)?;
             }
         }
         Value::Object(object) => {
@@ -209,8 +222,10 @@ fn decode_collection_wire_integer(value: &mut Value) -> Result<(), WireError> {
                     ));
                 };
                 if escaped.len() != 1
-                    || (!escaped.contains_key(COLLECTION_INTEGER_MARKER)
-                        && !escaped.contains_key(COLLECTION_ESCAPED_MARKER))
+                    || !escaped
+                        .keys()
+                        .next()
+                        .is_some_and(|key| is_collection_reserved_marker(key))
                 {
                     return Err(wire(
                         ErrorCode::InvalidParams,
@@ -218,7 +233,7 @@ fn decode_collection_wire_integer(value: &mut Value) -> Result<(), WireError> {
                     ));
                 }
                 for child in escaped.values_mut() {
-                    decode_collection_wire_integer(child)?;
+                    decode_collection_wire_numbers(child)?;
                 }
                 *value = Value::Object(escaped);
             } else if object.len() == 1 && object.contains_key(COLLECTION_INTEGER_MARKER) {
@@ -231,14 +246,7 @@ fn decode_collection_wire_integer(value: &mut Value) -> Result<(), WireError> {
                             "collection-integer-marker-invalid",
                         )
                     })?;
-                let canonical = decimal == "0"
-                    || decimal.strip_prefix('-').is_some_and(|digits| {
-                        !digits.is_empty()
-                            && !digits.starts_with('0')
-                            && digits.bytes().all(|byte| byte.is_ascii_digit())
-                    })
-                    || (!decimal.starts_with('0')
-                        && decimal.bytes().all(|byte| byte.is_ascii_digit()));
+                let canonical = canonical_collection_decimal(decimal);
                 let number = if canonical && decimal.starts_with('-') {
                     decimal
                         .parse::<i64>()
@@ -263,9 +271,31 @@ fn decode_collection_wire_integer(value: &mut Value) -> Result<(), WireError> {
                     )
                 })?;
                 *value = number;
+            } else if object.len() == 1 && object.contains_key(COLLECTION_FLOAT_MARKER) {
+                let decimal = object
+                    .get(COLLECTION_FLOAT_MARKER)
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        wire(ErrorCode::InvalidParams, "collection-float-marker-invalid")
+                    })?;
+                let number = canonical_collection_decimal(decimal)
+                    .then(|| decimal.parse::<f64>().ok())
+                    .flatten()
+                    .filter(|number| {
+                        number.is_finite()
+                            && number.fract() == 0.0
+                            && number.abs() > dohc_engine_protocol::MAX_WIRE_INTEGER as f64
+                            && format!("{number:.0}") == decimal
+                    })
+                    .and_then(serde_json::Number::from_f64)
+                    .map(Value::Number)
+                    .ok_or_else(|| {
+                        wire(ErrorCode::InvalidParams, "collection-float-marker-invalid")
+                    })?;
+                *value = number;
             } else {
                 for value in object.values_mut() {
-                    decode_collection_wire_integer(value)?;
+                    decode_collection_wire_numbers(value)?;
                 }
             }
         }
@@ -274,24 +304,49 @@ fn decode_collection_wire_integer(value: &mut Value) -> Result<(), WireError> {
     Ok(())
 }
 
-fn decode_collection_query_wire_integers(
+fn decode_collection_query_wire_numbers(
     params: &mut CollectionsQueryParams,
 ) -> Result<(), WireError> {
     if let Some(filter) = params.filter.as_mut() {
-        decode_collection_wire_integer(&mut filter.value)?;
+        decode_collection_wire_numbers(&mut filter.value)?;
     }
     if let Some(cursor) = params.cursor.as_mut() {
         for value in &mut cursor.sort_values {
-            decode_collection_wire_integer(&mut value.value)?;
+            decode_collection_wire_numbers(&mut value.value)?;
         }
     }
     Ok(())
 }
 
+fn elide_overdepth_collection_values(value: &mut Value) {
+    match value {
+        Value::Array(values) => values
+            .iter_mut()
+            .for_each(elide_overdepth_collection_values),
+        Value::Object(object) => {
+            let value_envelope = object.contains_key("value")
+                && (object.contains_key("field")
+                    || object.contains_key("records")
+                    || object.contains_key("present"));
+            for (key, child) in object {
+                if value_envelope && key == "value" {
+                    if collection_value_exceeds_depth(child, MAX_COLLECTION_FIELD_VALUE_DEPTH) {
+                        *child = Value::Null;
+                    }
+                } else {
+                    elide_overdepth_collection_values(child);
+                }
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
 fn collection_response_value(response: impl Serialize) -> Result<Value, WireError> {
     let mut response =
         serde_json::to_value(response).map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?;
-    encode_collection_wire_integers(&mut response);
+    elide_overdepth_collection_values(&mut response);
+    encode_collection_wire_numbers(&mut response);
     Ok(response)
 }
 
@@ -4065,7 +4120,7 @@ impl EngineService {
                 "collection-query-sort-limit-exceeded",
             ));
         }
-        decode_collection_query_wire_integers(&mut params)?;
+        decode_collection_query_wire_numbers(&mut params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let result = Self::read_under_ctx(
@@ -12890,25 +12945,24 @@ mod tests {
     const SHADOW_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     #[test]
-    fn collection_integer_marker_shaped_user_objects_use_the_shared_escape_vector() {
-        let literal = json!({ "$dohcInt64": "9007199254740993" });
-        let mut encoded = literal.clone();
-        encode_collection_wire_integers(&mut encoded);
-        assert_eq!(
-            encoded,
-            json!({
-                "$dohcEscaped": { "$dohcInt64": "9007199254740993" }
-            })
-        );
+    fn collection_number_marker_shaped_user_objects_use_the_shared_escape_vector() {
+        for literal in [
+            json!({ "$dohcInt64": "9007199254740993" }),
+            json!({ "$dohcFloat64": "100000000000000000000" }),
+        ] {
+            let mut encoded = literal.clone();
+            encode_collection_wire_numbers(&mut encoded);
+            assert_eq!(encoded, json!({ "$dohcEscaped": literal }));
 
-        decode_collection_wire_integer(&mut encoded).expect("decode escaped collection object");
-        assert_eq!(encoded, literal);
+            decode_collection_wire_numbers(&mut encoded).expect("decode escaped collection object");
+            assert_eq!(encoded, literal);
+        }
 
         let nested_literal = json!({
             "$dohcEscaped": { "integer": 9_007_199_254_740_993_i64 }
         });
         let mut nested_integer = nested_literal.clone();
-        encode_collection_wire_integers(&mut nested_integer);
+        encode_collection_wire_numbers(&mut nested_integer);
         assert_eq!(
             nested_integer,
             json!({
@@ -12919,43 +12973,190 @@ mod tests {
                 }
             })
         );
-        decode_collection_wire_integer(&mut nested_integer)
+        decode_collection_wire_numbers(&mut nested_integer)
             .expect("decode integer nested below a literal escaped root");
         assert_eq!(nested_integer, nested_literal);
 
         let mut noncanonical = json!({ "$dohcEscaped": { "plain": true } });
-        let error = decode_collection_wire_integer(&mut noncanonical)
+        let error = decode_collection_wire_numbers(&mut noncanonical)
             .expect_err("an escape the encoder cannot produce must be refused");
         assert_eq!(error.code, ErrorCode::InvalidParams);
         assert_eq!(error.message, "collection-escape-marker-invalid");
     }
 
     #[test]
-    fn collection_integer_markers_share_one_wire_domain_in_both_directions() {
+    fn collection_big_number_markers_preserve_integer_and_float_kinds() {
         for integer in [json!(i64::MIN), json!(u64::MAX)] {
             let mut encoded = integer.clone();
-            encode_collection_wire_integers(&mut encoded);
+            encode_collection_wire_numbers(&mut encoded);
             let decimal = integer.as_number().expect("integer").to_string();
             assert_eq!(encoded, json!({ "$dohcInt64": decimal }));
 
-            decode_collection_wire_integer(&mut encoded).expect("decode domain edge");
+            decode_collection_wire_numbers(&mut encoded).expect("decode domain edge");
             assert_eq!(encoded, integer);
         }
 
         for decimal in ["-9223372036854775809", "18446744073709551616"] {
             let mut marker = json!({ "$dohcInt64": decimal });
-            let error = decode_collection_wire_integer(&mut marker)
+            let error = decode_collection_wire_numbers(&mut marker)
                 .expect_err("reject integer immediately outside the marker domain");
             assert_eq!(error.code, ErrorCode::InvalidParams);
             assert_eq!(error.message, "collection-integer-marker-invalid");
         }
 
         let mut out_of_domain_float = json!(100_000_000_000_000_000_000_f64);
-        encode_collection_wire_integers(&mut out_of_domain_float);
-        assert!(
-            out_of_domain_float.is_number(),
-            "a float outside the integer marker domain must stay a number"
+        encode_collection_wire_numbers(&mut out_of_domain_float);
+        assert_eq!(
+            out_of_domain_float,
+            json!({ "$dohcFloat64": "100000000000000000000" })
         );
+        decode_collection_wire_numbers(&mut out_of_domain_float)
+            .expect("decode integral f64 outside the integer domain");
+        assert_eq!(out_of_domain_float, json!(100_000_000_000_000_000_000_f64));
+
+        for decimal in ["01", "9007199254740991", "100000000000000000001"] {
+            let mut marker = json!({ "$dohcFloat64": decimal });
+            let error = decode_collection_wire_numbers(&mut marker)
+                .expect_err("reject malformed, safe, or noncanonical float marker");
+            assert_eq!(error.code, ErrorCode::InvalidParams);
+            assert_eq!(error.message, "collection-float-marker-invalid");
+        }
+    }
+
+    #[test]
+    fn collection_cap_matrix_elides_overdepth_values_on_every_response_surface() {
+        fn nested_value(containers: usize) -> Value {
+            let mut value = json!("leaf");
+            for _ in 0..containers {
+                value = json!([value]);
+            }
+            value
+        }
+
+        let at_limit = nested_value(23);
+        let over_limit = nested_value(24);
+        let record = |value: Value| {
+            json!({
+                "id": "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "path": "tasks/record.md",
+                "conflicted": false,
+                "values": [{
+                    "field": "deep",
+                    "value": value,
+                    "validation": {
+                        "status": "flagged",
+                        "reason": { "code": "value-depth-exceeded", "path": "" }
+                    },
+                    "resolvedRelations": []
+                }]
+            })
+        };
+        let collection = json!({
+            "path": "tasks",
+            "status": "degraded",
+            "reasons": [{ "code": "invalid-yaml", "path": "" }]
+        });
+        let cases = [
+            (
+                "collections.get",
+                json!({
+                    "path": "tasks",
+                    "status": "valid",
+                    "reasons": [],
+                    "schema": {
+                        "name": null,
+                        "description": null,
+                        "fields": [],
+                        "views": []
+                    },
+                    "recordCount": 1
+                }),
+                Vec::<&str>::new(),
+            ),
+            (
+                "collections.query",
+                json!({
+                    "collection": collection,
+                    "records": [record(over_limit.clone()), record(at_limit.clone())],
+                    "groups": [{
+                        "value": over_limit.clone(),
+                        "records": [record(over_limit.clone())]
+                    }],
+                    "nextCursor": {
+                        "sortValues": [{ "present": true, "value": over_limit.clone() }],
+                        "recordPath": "tasks/record.md",
+                        "recordId": "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    }
+                }),
+                vec![
+                    "/records/0/values/0/value",
+                    "/groups/0/value",
+                    "/groups/0/records/0/values/0/value",
+                    "/nextCursor/sortValues/0/value",
+                ],
+            ),
+            (
+                "collections.getRecord",
+                json!({
+                    "collection": collection,
+                    "record": record(over_limit.clone()),
+                    "history": [{
+                        "historyId": 1,
+                        "field": "deep",
+                        "previous": { "present": true, "value": over_limit.clone() },
+                        "next": { "present": true, "value": over_limit.clone() },
+                        "authorOriginId": null,
+                        "recordedAtMs": 1
+                    }]
+                }),
+                vec![
+                    "/record/values/0/value",
+                    "/history/0/previous/value",
+                    "/history/0/next/value",
+                ],
+            ),
+            (
+                "collections.list",
+                json!({ "collections": [collection] }),
+                Vec::<&str>::new(),
+            ),
+            (
+                "collections.listPendingAdoptions",
+                json!({
+                    "adoptions": [{
+                        "versionId": "main",
+                        "recordId": "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "collectionPath": "tasks",
+                        "filePath": "tasks/record.md",
+                        "objectId": "object"
+                    }],
+                    "nextCursor": null
+                }),
+                Vec::<&str>::new(),
+            ),
+        ];
+
+        for (surface, input, elided_paths) in cases {
+            let response = collection_response_value(input.clone())
+                .unwrap_or_else(|error| panic!("{surface} projection failed: {error:?}"));
+            for path in elided_paths {
+                assert_eq!(
+                    response.pointer(path),
+                    Some(&Value::Null),
+                    "{surface} {path}"
+                );
+            }
+            if surface == "collections.query" {
+                assert_eq!(
+                    response.pointer("/records/1/values/0/value"),
+                    Some(&at_limit),
+                    "the boundary value must remain intact"
+                );
+            }
+            if !input.to_string().contains("value-depth-exceeded") {
+                assert_eq!(response, input, "{surface} has no dynamic value to elide");
+            }
+        }
     }
 
     /// #595 round 8: the artifact lock and a busy engine database are two

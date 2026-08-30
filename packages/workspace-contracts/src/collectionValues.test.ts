@@ -111,6 +111,22 @@ describe("Collection schema contract vectors", () => {
     expect(parsed.schema.views[0]?.groupBy).toBeNull();
     expect(parsed.reasons).toEqual(expectedReasons);
   });
+
+  it("caps degradation reasons with the same terminal reason as Rust", () => {
+    const fields = Array.from(
+      { length: 16_385 },
+      (_, index) => `  invalid_${index}: value`,
+    ).join("\n");
+
+    const parsed = parseCollectionSchema(`fields:\n${fields}\n`);
+
+    expect(parsed.status).toBe("degraded");
+    expect(parsed.reasons).toHaveLength(16_384);
+    expect(parsed.reasons.at(-1)).toEqual({
+      code: "schema-collection-limit-exceeded",
+      path: "/reasons",
+    });
+  });
 });
 
 describe("Field value contract vectors", () => {
@@ -123,11 +139,14 @@ describe("Field value contract vectors", () => {
     expect(JSON.stringify(value)).toBe(beforeValue);
   });
 
-  it("accepts a lossless integer as a number-field value", () => {
+  it.each([
+    ["out-of-safe-range integer", 9_007_199_254_740_993n],
+    ["out-of-safe-range integral float", 1e20],
+  ])("accepts %s as a number-field value", (_name, value) => {
     expect(
       validateFieldValue(
         { name: "estimate", type: "number" },
-        9_007_199_254_740_993n,
+        value,
       ),
     ).toEqual({ status: "valid" });
   });

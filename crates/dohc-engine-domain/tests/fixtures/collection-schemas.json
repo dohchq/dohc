@@ -139,6 +139,95 @@
       }
     },
     {
+      "name": "duplicate-and-escaped-schema-properties-use-last-resolved-key",
+      "yaml": "fields:\n  title:\n    type: number\n    \"ty\\u0070e\": text\n  status:\n    type: select\n    options: [Old]\n    \"optio\\u006es\": [New]\n  owner:\n    type: relation\n    collection: old/people\n    \"collectio\\u006e\": people\n    many: true\n    \"ma\\u006ey\": false\n  due:\n    type: date\nviews:\n  - name: Old\n    \"na\\u006de\": All\n    kind: board\n    \"ki\\u006ed\": table\n    groupBy: status\n    \"groupB\\u0079\": title\n    sort:\n      - field: status\n        direction: desc\n    \"so\\u0072t\":\n      - field: status\n        \"fie\\u006cd\": title\n        direction: desc\n        \"directio\\u006e\": asc\n    visibleFields: [status]\n    \"visibleField\\u0073\": [title]\n    dateField: due\n    \"dateFiel\\u0064\": title\n",
+      "expected": {
+        "status": "valid",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [
+            {
+              "name": "title",
+              "type": "text"
+            },
+            {
+              "name": "status",
+              "type": "select",
+              "options": [
+                "New"
+              ]
+            },
+            {
+              "name": "owner",
+              "type": "relation",
+              "collection": "people",
+              "many": false
+            },
+            {
+              "name": "due",
+              "type": "date"
+            }
+          ],
+          "views": [
+            {
+              "name": "All",
+              "kind": "table",
+              "groupBy": "title",
+              "sort": [
+                {
+                  "field": "title",
+                  "direction": "asc"
+                }
+              ],
+              "visibleFields": [
+                "title"
+              ],
+              "dateField": "title"
+            }
+          ]
+        },
+        "reasons": []
+      }
+    },
+    {
+      "name": "duplicate-escaped-unknown-schema-properties-report-once",
+      "yaml": "fields:\n  title:\n    type: text\n    mystery: first\n    \"myste\\u0072y\": second\nviews:\n  - name: All\n    kind: table\n    extra: first\n    \"ext\\u0072a\": second\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [
+            {
+              "name": "title",
+              "type": "text"
+            }
+          ],
+          "views": [
+            {
+              "name": "All",
+              "kind": "table",
+              "groupBy": null,
+              "sort": [],
+              "visibleFields": null,
+              "dateField": null
+            }
+          ]
+        },
+        "reasons": [
+          {
+            "code": "unknown-property",
+            "path": "/fields/title/mystery"
+          },
+          {
+            "code": "unknown-property",
+            "path": "/views/0/extra"
+          }
+        ]
+      }
+    },
+    {
       "name": "valid-empty-schema",
       "yaml": "",
       "expected": {
