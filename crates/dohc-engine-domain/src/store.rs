@@ -2568,7 +2568,7 @@ where
             None => next_moment_order(tx)?,
         },
     };
-    let moment_id = match batch.as_deref_mut() {
+    let moment_id = match batch {
         Some(batch) => derive_capture_moment_id(
             batch.producer_id(tx)?,
             &input.workspace_id,
@@ -3930,7 +3930,7 @@ fn resolve_capture_object(
     version_id: &str,
     path: &str,
     now_ms: i64,
-    mut batch: Option<&mut CaptureIngestBatchContext>,
+    batch: Option<&mut CaptureIngestBatchContext>,
 ) -> Result<ResolvedCaptureObject, DomainError> {
     let mut reserved_moment_order = None;
     let mut known_object = None;
@@ -3954,7 +3954,7 @@ fn resolve_capture_object(
             } else if !object_has_live_alias(tx, workspace_id, &derived_object_id)? {
                 derived_object_id
             } else {
-                let next_order = match batch.as_deref_mut() {
+                let next_order = match batch {
                     Some(batch) => batch.proposed_moment_order(tx)?,
                     None => next_moment_order(tx)?,
                 };
