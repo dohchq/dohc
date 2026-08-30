@@ -965,10 +965,13 @@ describe("durable link discussion storage", () => {
         blockedAtMs: 2_100,
       }),
     ).toBe(true);
-    expect(storage.findLinkSessionByCapabilityHash(blocked.capabilityHash)).toMatchObject({
-      grantId: blocked.grantId,
-      principalId: null,
-    });
+    const blockedRevision = storage.getShareDiscussionRevision(blocked.shareId);
+    const blockedUsage = discussionUsageBytes(dbPath);
+    const blockedPrincipalCount = countRows(dbPath, "sync_relay_link_principals");
+    const blockedMessageCount = countRows(
+      dbPath,
+      "sync_relay_share_discussion_messages",
+    );
     expect(
       append(storage, blocked, {
         profile: "blocked",
@@ -976,6 +979,23 @@ describe("durable link discussion storage", () => {
         createdAtMs: 2_101,
       }),
     ).toMatchObject({ ok: false, reason: "blocked" });
+    expect(
+      append(storage, blocked, {
+        profile: "substituted-profile",
+        idempotencyKey: "refused-substituted-profile-on-blocked-session",
+        createdAtMs: 2_102,
+      }),
+    ).toMatchObject({ ok: false, reason: "not-authorized" });
+    expect(storage.findLinkSessionByCapabilityHash(blocked.capabilityHash)).toMatchObject({
+      grantId: blocked.grantId,
+      principalId: accepted.principal.principalId,
+    });
+    expect(countRows(dbPath, "sync_relay_link_principals")).toBe(blockedPrincipalCount);
+    expect(countRows(dbPath, "sync_relay_share_discussion_messages")).toBe(
+      blockedMessageCount,
+    );
+    expect(storage.getShareDiscussionRevision(blocked.shareId)).toBe(blockedRevision);
+    expect(discussionUsageBytes(dbPath)).toBe(blockedUsage);
     expect(
       storage.mintLinkSession({
         session: {

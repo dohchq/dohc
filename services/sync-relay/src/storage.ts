@@ -4714,15 +4714,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           discussionRevision,
           input.principalId,
         );
-      if (input.blockedAtMs !== null) {
-        this.db
-          .prepare(
-            `UPDATE sync_relay_link_sessions
-             SET principal_id = NULL
-             WHERE principal_id = ?`,
-          )
-          .run(input.principalId);
-      }
       return true;
     });
   }

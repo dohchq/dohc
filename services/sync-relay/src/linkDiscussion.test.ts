@@ -4013,7 +4013,7 @@ describe("share discussion HTTP boundary", () => {
       test.storage.findLinkSessionByCapabilityHash(
         hashLinkBearer(test.comment.capabilityToken, LINK_KEY),
       ),
-    ).toMatchObject({ principalId: null });
+    ).toMatchObject({ principalId });
 
     for (const path of ["/sync/link/discussion", "/sync/link/share"]) {
       const read = await test.handler(linkRequest(test.comment, path));
@@ -4187,7 +4187,7 @@ describe("share discussion HTTP boundary", () => {
     ).toContain("404:");
   });
 
-  it("ejects every session bound to a blocked protected profile", async () => {
+  it("keeps blocked sessions bound and refuses a substituted profile", async () => {
     const test = await fixture();
     const firstSession = { ...test.comment };
     const seeded = await test.handler(
@@ -4237,19 +4237,41 @@ describe("share discussion HTTP boundary", () => {
       "sync_relay_share_discussion_messages",
     );
     const usageBeforeBlock = discussionUsage(test.dbPath);
+    const principalsBeforeBlock = count(test.dbPath, "sync_relay_link_principals");
 
     const blocked = await test.handler(
       moderationRequest(OWNER, { action: "block", principalId }),
     );
     expect(blocked.status).toBe(200);
     expect(await body(blocked)).toEqual({ ok: true, blocked: true });
+    const refreshedSecond = await test.handler(
+      linkRequest(
+        secondSession,
+        "/sync/link-refresh",
+        { method: "POST" },
+        { relayKey: RELAY_KEY },
+      ),
+    );
+    expect(refreshedSecond.status).toBe(200);
+    secondSession.capabilityToken = String(
+      (await body(refreshedSecond)).capabilityToken,
+    );
+    const revisionAfterBlock = test.storage.getShareDiscussionRevision(SHARE);
+    const genericBaseline = await genericRefusal(
+      await test.handler(
+        linkRequest(
+          { ...firstSession, capabilityToken: secret("z") },
+          "/sync/link/discussion",
+          jsonRequest({
+            body: "generic refusal baseline",
+            idempotencyKey: "block-session-generic-baseline",
+          }),
+          { relayKey: RELAY_KEY, profileSecret: PROFILE_B },
+        ),
+      ),
+    );
 
     for (const [index, link] of [firstSession, secondSession].entries()) {
-      expect(
-        test.storage.findLinkSessionByCapabilityHash(
-          hashLinkBearer(link.capabilityToken, LINK_KEY),
-        ),
-      ).toMatchObject({ principalId: null });
       for (const path of ["/sync/link/discussion", "/sync/link/share"]) {
         const read = await test.handler(linkRequest(link, path));
         expect(read.status, `session ${index + 1} ${path}`).toBe(200);
@@ -4270,12 +4292,81 @@ describe("share discussion HTTP boundary", () => {
           "blocked",
         ),
       ).toContain("link_discussion_blocked");
+      expect(
+        await genericRefusal(
+          await test.handler(
+            trustedAppend(
+              link,
+              {
+                body: `substituted session ${index + 1}`,
+                idempotencyKey: `block-all-substituted-${index + 1}`,
+              },
+              PROFILE_B,
+            ),
+          ),
+        ),
+      ).toBe(genericBaseline);
+      expect(
+        test.storage.findLinkSessionByCapabilityHash(
+          hashLinkBearer(link.capabilityToken, LINK_KEY),
+        ),
+      ).toMatchObject({ principalId });
     }
 
     expect(
       count(test.dbPath, "sync_relay_share_discussion_messages"),
     ).toBe(messagesBeforeBlock);
     expect(discussionUsage(test.dbPath)).toBe(usageBeforeBlock);
+    expect(count(test.dbPath, "sync_relay_link_principals")).toBe(
+      principalsBeforeBlock,
+    );
+    expect(test.storage.getShareDiscussionRevision(SHARE)).toBe(revisionAfterBlock);
+
+    const freshSession = {
+      ...test.comment,
+      capabilityToken: await exchangeLink(test, test.comment.secret),
+    };
+    const freshAppend = await test.handler(
+      trustedAppend(
+        freshSession,
+        {
+          body: "fresh profile after block",
+          idempotencyKey: "block-all-fresh-profile",
+        },
+        PROFILE_B,
+      ),
+    );
+    expect(freshAppend.status).toBe(200);
+    await freshAppend.arrayBuffer();
+    const freshPrincipalId = test.storage
+      .listShareDiscussionMessages({ shareId: SHARE, limit: 100 })
+      .messages.find((message) => message.body === "fresh profile after block")!
+      .linkPrincipalId;
+    expect(freshPrincipalId).not.toBe(principalId);
+
+    const unblocked = await test.handler(
+      moderationRequest(OWNER, { action: "unblock", principalId }),
+    );
+    expect(unblocked.status).toBe(200);
+    expect(await body(unblocked)).toEqual({ ok: true, blocked: false });
+    const restored = await test.handler(
+      trustedAppend(
+        firstSession,
+        {
+          body: "same session restored",
+          idempotencyKey: "block-all-restored",
+        },
+        PROFILE_A,
+      ),
+    );
+    expect(restored.status).toBe(200);
+    await restored.arrayBuffer();
+    expect(
+      test.storage
+        .listShareDiscussionMessages({ shareId: SHARE, limit: 100 })
+        .messages.find((message) => message.body === "same session restored")!
+        .linkPrincipalId,
+    ).toBe(principalId);
   });
 
   it("pauses only link-authored writes and resumes without rotating authority or charging debt", async () => {
