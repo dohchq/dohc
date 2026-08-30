@@ -2470,10 +2470,11 @@ where
             .map_err(E::from);
     }
 
-    let target_object_id =
-        alias_object_id(tx, &input.workspace_id, &input.version_id, &input.path)?.unwrap_or_else(
-            || derive_capture_object_id(&input.workspace_id, &input.version_id, &input.path),
-        );
+    let existing_alias =
+        alias_object_id(tx, &input.workspace_id, &input.version_id, &input.path)?;
+    let target_object_id = existing_alias.clone().unwrap_or_else(|| {
+        derive_capture_object_id(&input.workspace_id, &input.version_id, &input.path)
+    });
     admit(&input.workspace_id, &input.version_id, &target_object_id)?;
 
     let resolved = resolve_capture_object(
@@ -2482,14 +2483,19 @@ where
         &input.version_id,
         &input.path,
         input.now_ms,
+        existing_alias,
         batch.as_deref_mut(),
     )?;
-    let before = get_snapshot(
-        tx,
-        &input.workspace_id,
-        &input.version_id,
-        &resolved.object_id,
-    )?;
+    let before = if resolved.known_object.is_some() {
+        None
+    } else {
+        get_snapshot(
+            tx,
+            &input.workspace_id,
+            &input.version_id,
+            &resolved.object_id,
+        )?
+    };
     // OWNERSHIP: capture only overwrites heads written with ITS OWN origin.
     // A head that arrived by another route (RPC, replication) may have no
     // disk counterpart at all, so letting disk bytes overwrite it would
@@ -2893,8 +2899,10 @@ where
             .map_err(E::from);
     }
 
-    let target_object_id = alias_object_id(tx, &input.workspace_id, &input.version_id, &path)?
-        .unwrap_or_else(|| derive_capture_object_id(&input.workspace_id, &input.version_id, &path));
+    let existing_alias = alias_object_id(tx, &input.workspace_id, &input.version_id, &path)?;
+    let target_object_id = existing_alias.clone().unwrap_or_else(|| {
+        derive_capture_object_id(&input.workspace_id, &input.version_id, &path)
+    });
     admit(&input.workspace_id, &input.version_id, &target_object_id)?;
 
     let ResolvedCaptureObject {
@@ -2907,6 +2915,7 @@ where
         &input.version_id,
         &path,
         input.now_ms,
+        existing_alias,
         None,
     )?;
     let before = get_snapshot(tx, &input.workspace_id, &input.version_id, &object_id)?;
@@ -3930,21 +3939,25 @@ fn resolve_capture_object(
     version_id: &str,
     path: &str,
     now_ms: i64,
+    existing_alias: Option<String>,
     batch: Option<&mut CaptureIngestBatchContext>,
 ) -> Result<ResolvedCaptureObject, DomainError> {
     let mut reserved_moment_order = None;
     let mut known_object = None;
-    let object_id = match alias_object_id(tx, workspace_id, version_id, path)? {
+    let object_id = match existing_alias {
         Some(object_id) => object_id,
         None => {
             let derived_object_id = derive_capture_object_id(workspace_id, version_id, path);
-            let object_id = if !object_exists(tx, workspace_id, &derived_object_id)? {
-                tx.execute(
+            let inserted = tx
+                .execute(
                     "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
-                     VALUES (?1, ?2, ?3)",
+                     VALUES (?1, ?2, ?3) \
+                     ON CONFLICT (workspace_id, object_id) DO NOTHING",
                     params![workspace_id, derived_object_id, now_ms],
                 )
-                .map_err(DomainError::sql_persist)?;
+                .map_err(DomainError::sql_persist)?
+                != 0;
+            let object_id = if inserted {
                 known_object = Some(FileObjectRecord {
                     workspace_id: workspace_id.to_owned(),
                     object_id: derived_object_id.clone(),
