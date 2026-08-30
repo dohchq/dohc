@@ -61,6 +61,8 @@ Everything a Notion user touches. All three views ship in this phase.
 
 Settle first: the empty states and first-run flow (a new collection with no records must explain itself); how a flagged invalid value renders in each view.
 
+Settled (2026-08-31): A collection with no records shows one line of explanation and the New record action, nothing else. A folder becomes a collection only through the New collection flow (name plus first fields) or an agent writing `collection.yaml`; the UI never shows the file. A flagged invalid value renders its raw text with the warning treatment and the validation reason on hover, and stays editable everywhere. On a board, a flagged record's card carries a warning dot and groups under its raw value when the grouped field is flagged, else under No value. On the calendar, a record whose keyed date is invalid or missing does not render on the grid; whether those records need a visible tray stays open until the desktop lane proves the need.
+
 Gate: `pnpm typecheck` and `pnpm test:desktop` pass, plus an e2e walkthrough in `test:desktop:e2e`: create a collection from the UI, add fields of every v1 type, create records, drag a card and watch the field change land in the file, rekey the calendar to a second date field, and complete the whole walkthrough without the schema file ever on screen. Two-instance tests prove a drag on one device updates the other's open board.
 
 ## Phase 3: events and the SDK
