@@ -1319,7 +1319,9 @@ function yFrontmatterValueToPlain(value: unknown): unknown {
   if (value instanceof Y.Array) {
     return value.toArray().map(yFrontmatterValueToPlain)
   }
-  if (value instanceof Y.Text) return BigInt(value.toString())
+  // No writer puts Y.Text in frontmatter (bigints ride the shared singleton
+  // map); a foreign one degrades to its visible string instead of throwing.
+  if (value instanceof Y.Text) return value.toString()
   return normalizeFrontmatterValue(value)
 }
 

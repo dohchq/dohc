@@ -345,6 +345,16 @@ describe('Y.Doc markdown import/export', () => {
     expect(yDocToMarkdown(doc)).toContain('9007199254740993')
   })
 
+  it('degrades a foreign frontmatter Y.Text to its string instead of throwing', () => {
+    const doc = markdownToYDoc('---\ntitle: ok\n---\nbody\n')
+    const planted = new Y.Text()
+    doc.getMap<unknown>('frontmatter').set('planted', planted)
+    planted.insert(0, 'not a number')
+
+    expect(getDohcYDocFrontmatter(doc).planted).toBe('not a number')
+    expect(() => yDocToMarkdown(doc)).not.toThrow()
+  })
+
   it('escapes literal keys spelled like the bigint sentinel on the shared branch', () => {
     const vector = frontmatterVectors.find(
       candidate =>
