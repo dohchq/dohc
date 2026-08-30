@@ -24,7 +24,7 @@ const DEFAULT_MAX_SESSIONS = 10_000;
 export const MAX_SESSIONS_PER_GRANT = 512;
 const MAX_BLOB_PROXIES_PER_SESSION = 8;
 const MAX_BLOB_PROXIES_PER_GRANT = 24;
-const DEFAULT_HANDOFF_RELAY_TIMEOUT_MS = 10_000;
+const DEFAULT_RELAY_REQUEST_TIMEOUT_MS = 10_000;
 const LINK_REFRESH_WINDOW_MS = 5 * 60 * 1_000;
 export const LINK_SESSION_RENEWAL_GRACE_MS = 7 * 24 * 60 * 60 * 1_000;
 const PROFILE_COOKIE_MAX_AGE_SECONDS = 400 * 24 * 60 * 60;
@@ -394,7 +394,9 @@ function discussionRelayPath(request: Request): string | null {
   return `/sync/link/discussion${serialized ? `?${serialized}` : ""}`;
 }
 
-function discussionActivityRelayPath(request: Request): string | null {
+function discussionActivityRelayPath(
+  request: Request,
+): { path: string; holdMs: number } | null {
   const url = new URL(request.url);
   if (
     [...url.searchParams.keys()].some(
@@ -420,7 +422,10 @@ function discussionActivityRelayPath(request: Request): string | null {
     return null;
   }
   const relaySearch = new URLSearchParams({ since, hold, limit });
-  return `/sync/link/discussion/activity?${relaySearch}`;
+  return {
+    path: `/sync/link/discussion/activity?${relaySearch}`,
+    holdMs: Number(hold),
+  };
 }
 
 function hasOnlySessionQuery(request: Request, discriminator: string): boolean {
@@ -452,30 +457,42 @@ function relayRequest(relayUrl: string, path: string, init: RequestInit = {}): R
   return new Request(new URL(path, `${relayUrl.replace(/\/+$/u, "")}/`), init);
 }
 
-function boundedHandoffRelayRequest(
-  clientRequest: Request,
+function boundedRelayRequest(
+  clientSignal: AbortSignal | undefined,
   relayUrl: string,
+  path: string,
   init: RequestInit,
   timeoutMs: number,
 ): { request: Request; dispose: () => void } {
   const relayAbort = new AbortController();
-  const abortFromClient = (): void => relayAbort.abort(clientRequest.signal.reason);
-  if (clientRequest.signal.aborted) {
-    abortFromClient();
-  } else {
-    clientRequest.signal.addEventListener("abort", abortFromClient, { once: true });
+  const abortFromClient = (): void => relayAbort.abort(clientSignal?.reason);
+  if (clientSignal) {
+    if (clientSignal.aborted) {
+      abortFromClient();
+    } else {
+      clientSignal.addEventListener("abort", abortFromClient, { once: true });
+    }
   }
   const deadline = setTimeout(() => relayAbort.abort(), timeoutMs);
   return {
-    request: relayRequest(relayUrl, "/sync/link-handoff", {
+    request: relayRequest(relayUrl, path, {
       ...init,
       signal: relayAbort.signal,
     }),
     dispose: () => {
       clearTimeout(deadline);
-      clientRequest.signal.removeEventListener("abort", abortFromClient);
+      clientSignal?.removeEventListener("abort", abortFromClient);
     },
   };
+}
+
+async function completeRelayResponse(relayResponse: Response): Promise<Response> {
+  const bytes = await relayResponse.arrayBuffer();
+  return new Response(bytes.byteLength === 0 ? null : bytes, {
+    status: relayResponse.status,
+    statusText: relayResponse.statusText,
+    headers: relayResponse.headers,
+  });
 }
 
 function sessionCookie(
@@ -700,7 +717,7 @@ export function createShareWebHandler({
   newProfileSecret = () => randomBytes(32).toString("base64url"),
   maxSessions = DEFAULT_MAX_SESSIONS,
   viewerAssetsDir,
-  handoffRelayTimeoutMs = DEFAULT_HANDOFF_RELAY_TIMEOUT_MS,
+  handoffRelayTimeoutMs = DEFAULT_RELAY_REQUEST_TIMEOUT_MS,
 }: CreateShareWebHandlerOptions): (request: Request) => Promise<Response> {
   const sessions = new ShareWebSessionStore(maxSessions);
   const exchangeRateLimiter = new ShareWebExchangeRateLimiter();
@@ -763,18 +780,23 @@ export function createShareWebHandler({
     if (!refresh) {
       const expectedCapabilityToken = capabilityBeforeRefresh;
       const pending = (async (): Promise<RefreshAttempt> => {
+        const boundedRelay = boundedRelayRequest(
+          undefined,
+          relayUrl,
+          "/sync/link-refresh",
+          {
+            method: "POST",
+            headers: {
+              authorization: `LinkCapability ${expectedCapabilityToken}`,
+              ...(relayExchangeKey
+                ? { "x-dohc-relay-exchange-key": relayExchangeKey }
+                : {}),
+            },
+          },
+          DEFAULT_RELAY_REQUEST_TIMEOUT_MS,
+        );
         try {
-          const relayResponse = await fetchRelay(
-            relayRequest(relayUrl, "/sync/link-refresh", {
-              method: "POST",
-              headers: {
-                authorization: `LinkCapability ${expectedCapabilityToken}`,
-                ...(relayExchangeKey
-                  ? { "x-dohc-relay-exchange-key": relayExchangeKey }
-                  : {}),
-              },
-            }),
-          );
+          const relayResponse = await fetchRelay(boundedRelay.request);
           if (relayResponse.status === 401) return { status: "invalid" };
           if (relayResponse.status !== 200) return { status: "unavailable" };
           const refreshed = parsedRelaySession(
@@ -796,6 +818,8 @@ export function createShareWebHandler({
             : { status: "unavailable" };
         } catch {
           return { status: "unavailable" };
+        } finally {
+          boundedRelay.dispose();
         }
       })();
       const tracked = pending.finally(() => {
@@ -910,9 +934,10 @@ export function createShareWebHandler({
         ? { "set-cookie": refreshed.setCookie }
         : {};
       const capabilityToken = authenticated.session.capabilityToken;
-      const boundedRelayRequest = boundedHandoffRelayRequest(
-        request,
+      const boundedRelay = boundedRelayRequest(
+        request.signal,
         relayUrl,
+        "/sync/link-handoff",
         {
           method: "POST",
           headers: {
@@ -925,7 +950,7 @@ export function createShareWebHandler({
         handoffRelayTimeoutMs,
       );
       try {
-        const relayResponse = await fetchRelay(boundedRelayRequest.request);
+        const relayResponse = await fetchRelay(boundedRelay.request);
         if (relayResponse.status === 429) {
           return refused(429, refreshedCookieHeaders);
         }
@@ -956,7 +981,7 @@ export function createShareWebHandler({
       } catch {
         return refused(503, refreshedCookieHeaders);
       } finally {
-        boundedRelayRequest.dispose();
+        boundedRelay.dispose();
       }
     }
 
@@ -975,12 +1000,14 @@ export function createShareWebHandler({
       if (!authenticated) return refused();
 
       let relayPath: string;
+      let relayTimeoutMs = DEFAULT_RELAY_REQUEST_TIMEOUT_MS;
       let appendBody: string | null = null;
       let profileSecret: string | null = null;
       if (isActivity) {
         const parsedPath = discussionActivityRelayPath(request);
         if (!parsedPath) return refused();
-        relayPath = parsedPath;
+        relayPath = parsedPath.path;
+        relayTimeoutMs += parsedPath.holdMs;
         profileSecret = parseCookies(request.headers.get("cookie")).get(
           profileCookieName(authenticated.discriminator),
         ) ?? null;
@@ -1015,25 +1042,31 @@ export function createShareWebHandler({
         ? { "set-cookie": refreshed.setCookie }
         : {};
       const capabilityToken = authenticated.session.capabilityToken;
+      const boundedRelay = boundedRelayRequest(
+        request.signal,
+        relayUrl,
+        relayPath,
+        {
+          method: request.method,
+          headers: {
+            authorization: `LinkCapability ${capabilityToken}`,
+            ...(isActivity
+              ? { "x-dohc-link-profile-secret": profileSecret! }
+              : request.method === "POST"
+              ? {
+                  "content-type": "application/json",
+                  "x-dohc-link-profile-secret": profileSecret!,
+                  "x-dohc-relay-exchange-key": relayExchangeKey!,
+                }
+              : { "x-dohc-link-profile-secret": profileSecret! }),
+          },
+          ...(appendBody === null ? {} : { body: appendBody }),
+        },
+        relayTimeoutMs,
+      );
       try {
-        const relayResponse = await fetchRelay(
-          relayRequest(relayUrl, relayPath, {
-            method: request.method,
-            headers: {
-              authorization: `LinkCapability ${capabilityToken}`,
-              ...(isActivity
-                ? { "x-dohc-link-profile-secret": profileSecret! }
-                : request.method === "POST"
-                ? {
-                    "content-type": "application/json",
-                    "x-dohc-link-profile-secret": profileSecret!,
-                    "x-dohc-relay-exchange-key": relayExchangeKey!,
-                  }
-                : { "x-dohc-link-profile-secret": profileSecret! }),
-            },
-            ...(appendBody === null ? {} : { body: appendBody }),
-            signal: request.signal,
-          }),
+        const relayResponse = await completeRelayResponse(
+          await fetchRelay(boundedRelay.request),
         );
         if (
           !sessions.isCurrent(
@@ -1080,6 +1113,8 @@ export function createShareWebHandler({
         );
       } catch {
         return refused(503, refreshedCookieHeaders);
+      } finally {
+        boundedRelay.dispose();
       }
     }
 

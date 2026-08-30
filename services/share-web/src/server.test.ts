@@ -1449,6 +1449,380 @@ describe("share-web protected discussion proxy", () => {
     };
   }
 
+  async function discussionSession(
+    handler: ReturnType<typeof createShareWebHandler>,
+  ): Promise<{ session: string; cookies: string }> {
+    const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
+    const { session } = (await exchanged.clone().json()) as { session: string };
+    return {
+      session,
+      cookies: cookieHeader(cookiePair(exchanged), profileCookiePair(exchanged)),
+    };
+  }
+
+  function rejectWhenAborted(relayRequest: Request): Promise<Response> {
+    return new Promise<Response>((_resolve, reject) => {
+      const rejectAborted = (): void => reject(relayRequest.signal.reason);
+      if (relayRequest.signal.aborted) rejectAborted();
+      else relayRequest.signal.addEventListener("abort", rejectAborted, { once: true });
+    });
+  }
+
+  async function expectDiscussionUnavailable(response: Response): Promise<void> {
+    expect({ status: response.status, body: await response.text() }).toEqual({
+      status: 503,
+      body: shareWebRefusalBody,
+    });
+  }
+
+  it.each([
+    { name: "page read", method: "GET" as const },
+    { name: "append", method: "POST" as const },
+  ])("times out a stalled discussion $name and keeps the session retryable", async ({ method }) => {
+    vi.useFakeTimers();
+    const browserAbort = new AbortController();
+    try {
+      let discussionCalls = 0;
+      let stalledRequest: Request | undefined;
+      let markRelayStarted: (() => void) | undefined;
+      const relayStarted = new Promise<void>((resolve) => {
+        markRelayStarted = resolve;
+      });
+      const successBody = method === "GET"
+        ? {
+            ok: true,
+            activityRevision: 0,
+            messages: [],
+            nextCursor: null,
+            profileName: null,
+          }
+        : publicMessage("retry succeeded");
+      const handler = createShareWebHandler({
+        relayUrl: "http://relay.test",
+        relayExchangeKey: "discussion-relay-key",
+        publicHosts: new Set([HOST]),
+        nowMs: () => 1_000,
+        newSessionToken: () => Buffer.alloc(32, 61).toString("base64url"),
+        newProfileSecret: () => PROFILE_ALPHA,
+        fetchRelay: async (relayRequest) => {
+          if (new URL(relayRequest.url).pathname === "/sync/link-exchange") {
+            return Response.json({
+              ok: true,
+              grantId: "grant-discussion-timeout",
+              capabilityToken: CAP_ALPHA_1,
+              capabilityExpiresAtMs: 901_000,
+            });
+          }
+          discussionCalls += 1;
+          if (discussionCalls === 1) {
+            stalledRequest = relayRequest;
+            markRelayStarted?.();
+            return await rejectWhenAborted(relayRequest);
+          }
+          return Response.json(successBody);
+        },
+      });
+      const state = await discussionSession(handler);
+      const headers = {
+        ...sessionHeaders(state.session, state.cookies),
+        ...(method === "POST" ? { "content-type": "application/json" } : {}),
+      };
+      const init: RequestInit = {
+        method,
+        headers,
+        signal: browserAbort.signal,
+        ...(method === "POST"
+          ? {
+              body: JSON.stringify({
+                body: "retry succeeded",
+                idempotencyKey: "discussion-timeout",
+              }),
+            }
+          : {}),
+      };
+
+      const pending = handler(request("/api/view/discussion", init));
+      await relayStarted;
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(stalledRequest?.signal.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(stalledRequest?.signal.aborted).toBe(true);
+      await expectDiscussionUnavailable(await pending);
+      const retry = await handler(request("/api/view/discussion", init));
+      expect({ status: retry.status, body: await retry.json() }).toEqual({
+        status: 200,
+        body: successBody,
+      });
+      expect(discussionCalls).toBe(2);
+    } finally {
+      browserAbort.abort();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a legal activity hold live and bounds a later stalled poll", async () => {
+    vi.useFakeTimers();
+    const browserAbort = new AbortController();
+    try {
+      let activityCalls = 0;
+      const activityRequests: Request[] = [];
+      let markFirstActivityStarted: (() => void) | undefined;
+      const firstActivityStarted = new Promise<void>((resolve) => {
+        markFirstActivityStarted = resolve;
+      });
+      let markSecondActivityStarted: (() => void) | undefined;
+      const secondActivityStarted = new Promise<void>((resolve) => {
+        markSecondActivityStarted = resolve;
+      });
+      const activityBody = {
+        ok: true,
+        access: "comment",
+        latestRevision: 7,
+        cursorRevision: 7,
+        hasMore: false,
+        messages: [],
+        composerState: "available",
+      };
+      const handler = createShareWebHandler({
+        relayUrl: "http://relay.test",
+        relayExchangeKey: "discussion-relay-key",
+        publicHosts: new Set([HOST]),
+        nowMs: () => 1_000,
+        newSessionToken: () => Buffer.alloc(32, 62).toString("base64url"),
+        newProfileSecret: () => PROFILE_ALPHA,
+        fetchRelay: async (relayRequest) => {
+          if (new URL(relayRequest.url).pathname === "/sync/link-exchange") {
+            return Response.json({
+              ok: true,
+              grantId: "grant-activity-timeout",
+              capabilityToken: CAP_ALPHA_1,
+              capabilityExpiresAtMs: 901_000,
+            });
+          }
+          activityCalls += 1;
+          activityRequests.push(relayRequest);
+          if (activityCalls === 1) {
+            markFirstActivityStarted?.();
+            return await new Promise<Response>((resolve, reject) => {
+              const complete = setTimeout(() => resolve(Response.json(activityBody)), 30_000);
+              relayRequest.signal.addEventListener("abort", () => {
+                clearTimeout(complete);
+                reject(relayRequest.signal.reason);
+              }, { once: true });
+            });
+          }
+          if (activityCalls === 2) {
+            markSecondActivityStarted?.();
+            return await rejectWhenAborted(relayRequest);
+          }
+          return Response.json(activityBody);
+        },
+      });
+      const state = await discussionSession(handler);
+      const path = "/api/view/discussion/activity?since=7&hold=30000&limit=100";
+      const init: RequestInit = {
+        headers: sessionHeaders(state.session, state.cookies),
+        signal: browserAbort.signal,
+      };
+
+      const held = handler(request(path, init));
+      await firstActivityStarted;
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(activityRequests[0]?.signal.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      const heldResponse = await held;
+      expect({ status: heldResponse.status, body: await heldResponse.json() })
+        .toEqual({ status: 200, body: activityBody });
+
+      const stalled = handler(request(path, init));
+      await secondActivityStarted;
+      await vi.advanceTimersByTimeAsync(39_999);
+      expect(activityRequests[1]?.signal.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(activityRequests[1]?.signal.aborted).toBe(true);
+      await expectDiscussionUnavailable(await stalled);
+
+      const recovered = await handler(request(path, init));
+      expect({ status: recovered.status, body: await recovered.json() }).toEqual({
+        status: 200,
+        body: activityBody,
+      });
+      expect(activityCalls).toBe(3);
+    } finally {
+      browserAbort.abort();
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds a stalled discussion refresh and clears its single-flight entry", async () => {
+    vi.useFakeTimers();
+    const browserAbort = new AbortController();
+    let rejectStalledRefresh: ((reason: Error) => void) | undefined;
+    try {
+      let now = 1_000;
+      let refreshCalls = 0;
+      let stalledRefresh: Request | undefined;
+      let markRefreshStarted: (() => void) | undefined;
+      const refreshStarted = new Promise<void>((resolve) => {
+        markRefreshStarted = resolve;
+      });
+      const page = {
+        ok: true,
+        activityRevision: 0,
+        messages: [],
+        nextCursor: null,
+        profileName: null,
+      };
+      const handler = createShareWebHandler({
+        relayUrl: "http://relay.test",
+        relayExchangeKey: "discussion-relay-key",
+        publicHosts: new Set([HOST]),
+        nowMs: () => now,
+        newSessionToken: () => Buffer.alloc(32, 63).toString("base64url"),
+        newProfileSecret: () => PROFILE_ALPHA,
+        fetchRelay: async (relayRequest) => {
+          const pathname = new URL(relayRequest.url).pathname;
+          if (pathname === "/sync/link-exchange") {
+            return Response.json({
+              ok: true,
+              grantId: "grant-refresh-timeout",
+              capabilityToken: CAP_ALPHA_1,
+              capabilityExpiresAtMs: 11_000,
+            });
+          }
+          if (pathname === "/sync/link-refresh") {
+            refreshCalls += 1;
+            if (refreshCalls === 1) {
+              stalledRefresh = relayRequest;
+              markRefreshStarted?.();
+              return await new Promise<Response>((_resolve, reject) => {
+                rejectStalledRefresh = reject;
+                relayRequest.signal.addEventListener(
+                  "abort",
+                  () => reject(relayRequest.signal.reason),
+                  { once: true },
+                );
+              });
+            }
+            return Response.json({
+              ok: true,
+              grantId: "grant-refresh-timeout",
+              capabilityToken: CAP_ALPHA_2,
+              capabilityExpiresAtMs: 901_000,
+            });
+          }
+          expect(relayRequest.headers.get("authorization")).toBe(
+            `LinkCapability ${CAP_ALPHA_2}`,
+          );
+          return Response.json(page);
+        },
+      });
+      const state = await discussionSession(handler);
+      const init: RequestInit = {
+        headers: sessionHeaders(state.session, state.cookies),
+        signal: browserAbort.signal,
+      };
+
+      const pending = handler(request("/api/view/discussion", init));
+      await refreshStarted;
+      browserAbort.abort();
+      expect(stalledRefresh?.signal.aborted).toBe(false);
+      now = 11_001;
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(stalledRefresh?.signal.aborted).toBe(true);
+      await expectDiscussionUnavailable(await pending);
+
+      const retry = await handler(request("/api/view/discussion", {
+        headers: sessionHeaders(state.session, state.cookies),
+      }));
+      expect({ status: retry.status, body: await retry.json() }).toEqual({
+        status: 200,
+        body: page,
+      });
+      expect(refreshCalls).toBe(2);
+    } finally {
+      rejectStalledRefresh?.(new Error("test cleanup"));
+      browserAbort.abort();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the discussion deadline through a stalled response body", async () => {
+    vi.useFakeTimers();
+    const browserAbort = new AbortController();
+    let cancelStalledBody: (() => void) | undefined;
+    try {
+      let discussionCalls = 0;
+      let bodyRequest: Request | undefined;
+      let markBodyStarted: (() => void) | undefined;
+      const bodyStarted = new Promise<void>((resolve) => {
+        markBodyStarted = resolve;
+      });
+      const page = {
+        ok: true,
+        activityRevision: 0,
+        messages: [],
+        nextCursor: null,
+        profileName: null,
+      };
+      const handler = createShareWebHandler({
+        relayUrl: "http://relay.test",
+        relayExchangeKey: "discussion-relay-key",
+        publicHosts: new Set([HOST]),
+        nowMs: () => 1_000,
+        newSessionToken: () => Buffer.alloc(32, 64).toString("base64url"),
+        newProfileSecret: () => PROFILE_ALPHA,
+        fetchRelay: async (relayRequest) => {
+          if (new URL(relayRequest.url).pathname === "/sync/link-exchange") {
+            return Response.json({
+              ok: true,
+              grantId: "grant-discussion-body-timeout",
+              capabilityToken: CAP_ALPHA_1,
+              capabilityExpiresAtMs: 901_000,
+            });
+          }
+          discussionCalls += 1;
+          if (discussionCalls > 1) return Response.json(page);
+          bodyRequest = relayRequest;
+          markBodyStarted?.();
+          return new Response(new ReadableStream<Uint8Array>({
+            start(controller) {
+              cancelStalledBody = () => controller.error(new Error("test cleanup"));
+              relayRequest.signal.addEventListener("abort", () => {
+                controller.error(relayRequest.signal.reason);
+              }, { once: true });
+            },
+          }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        },
+      });
+      const state = await discussionSession(handler);
+      const init: RequestInit = {
+        headers: sessionHeaders(state.session, state.cookies),
+        signal: browserAbort.signal,
+      };
+
+      const pending = handler(request("/api/view/discussion", init));
+      await bodyStarted;
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(bodyRequest?.signal.aborted).toBe(true);
+      await expectDiscussionUnavailable(await pending);
+
+      const retry = await handler(request("/api/view/discussion", init));
+      expect({ status: retry.status, body: await retry.json() }).toEqual({
+        status: 200,
+        body: page,
+      });
+    } finally {
+      cancelStalledBody?.();
+      browserAbort.abort();
+      vi.useRealTimers();
+    }
+  });
+
   it("persists and renews a profile without making it viewer authority", async () => {
     let sessionNumber = 0;
     let discussionCalls = 0;
