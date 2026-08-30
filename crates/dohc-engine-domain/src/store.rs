@@ -3373,12 +3373,13 @@ fn write_normalized_text_in_tx_with_journal(
         )
         .map_err(DomainError::sql_persist)?;
     }
-    execute_cached(
+    let blob_inserted = execute_cached(
         tx,
         "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
         params![blob, input.text.len() as i64, input.text.as_ref()],
     )
-    .map_err(DomainError::sql_persist)?;
+    .map_err(DomainError::sql_persist)?
+        != 0;
     if bind_alias {
         tx.execute(
             "INSERT OR IGNORE INTO path_aliases (workspace_id, version_id, path, object_id) \
@@ -3475,7 +3476,10 @@ fn write_normalized_text_in_tx_with_journal(
         input.now_ms,
     )?;
 
-    let read_back = known_object.is_none() || before.is_some();
+    // A reused content-addressed row may be corrupt. Preserve the hydration
+    // check that the prepared fast path replaces unless this write inserted
+    // the blob and therefore established its text and recorded byte length.
+    let read_back = !blob_inserted || known_object.is_none() || before.is_some();
     #[cfg(test)]
     if capture_prepared {
         note_capture_prepared_write(read_back);
@@ -6175,15 +6179,18 @@ mod tests {
     use std::borrow::Cow;
 
     use super::{
-        NEXT_MOMENT_ORDER_SQL, ProjectedWriteText, VersionedTextStore,
-        capture_prepared_write_counts, next_moment_order, object_has_references,
-        reset_capture_prepared_write_counts, reset_write_text_ownership_counts,
-        write_projected_text_in_tx, write_text_in_tx, write_text_ownership_counts,
+        MOMENT_TEXT_HYDRATION_CAP_BYTES, NEXT_MOMENT_ORDER_SQL, ProjectedWriteText,
+        VersionedTextStore, capture_prepared_write_counts, derive_capture_object_id,
+        next_moment_order, object_has_references, reset_capture_prepared_write_counts,
+        reset_write_text_ownership_counts, text_blob_sha256, write_projected_text_in_tx,
+        write_text_in_tx, write_text_ownership_counts,
     };
-    use crate::{CaptureIngest, WriteText};
+    use crate::{
+        CaptureIngest, CaptureRetire, DomainError, RenameTextFile, WriteResult, WriteText,
+    };
     use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
     use dohc_engine_testkit::ScratchDir;
-    use rusqlite::Connection;
+    use rusqlite::{Connection, params};
 
     fn moment_order_semantics_connection() -> Connection {
         let conn = Connection::open_in_memory().expect("open in-memory database");
@@ -6196,6 +6203,43 @@ mod tests {
         )
         .expect("create moment-order tables");
         conn
+    }
+
+    fn capture_input(path: &str, text: String, now_ms: i64) -> CaptureIngest {
+        CaptureIngest {
+            workspace_id: "ws".to_owned(),
+            version_id: "main".to_owned(),
+            path: path.to_owned(),
+            text,
+            metadata_origin: "capture".to_owned(),
+            metadata_summary: Some("Captured test file".to_owned()),
+            metadata_correlation_id: Some("capture-pass-1".to_owned()),
+            author_json: Some(r#"{"kind":"capture-test"}"#.to_owned()),
+            now_ms,
+            request_id: None,
+            claim_foreign_head: false,
+        }
+    }
+
+    fn capture_text(store: &mut EngineStore, path: &str, text: String, now_ms: i64) -> WriteResult {
+        VersionedTextStore::new(store)
+            .capture_ingest(&capture_input(path, text, now_ms), &NoFaults)
+            .expect("capture text")
+    }
+
+    fn assert_capture_matches_hydrated(store: &mut EngineStore, captured: &WriteResult) {
+        let versioned = VersionedTextStore::new(store);
+        let hydrated_moment = versioned
+            .get_moment("ws", &captured.moment.moment_id)
+            .expect("read captured moment")
+            .expect("captured moment exists");
+        let hydrated_snapshot = versioned
+            .read_text("ws", "main", &captured.snapshot.path)
+            .expect("read captured snapshot")
+            .expect("captured snapshot exists");
+
+        assert_eq!(captured.moment, hydrated_moment);
+        assert_eq!(captured.snapshot, hydrated_snapshot);
     }
 
     #[test]
@@ -6392,6 +6436,207 @@ mod tests {
 
         assert_eq!(captured.moment, hydrated_moment);
         assert_eq!(captured.snapshot, hydrated_snapshot);
+    }
+
+    #[test]
+    fn fresh_capture_reused_corrupt_blob_fails_closed_and_rolls_back() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let mut store =
+            EngineStore::open(&scratch.engine_db_path().expect("db"), 1).expect("open store");
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .expect("ensure main version");
+
+        let text = "prepared capture body";
+        let blob_sha256 = text_blob_sha256(text);
+        let seed = store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
+                    params![blob_sha256, text.len() as i64, "corrupt"],
+                )
+                .map_err(DomainError::sql_persist)?;
+                Ok::<_, DomainError>(())
+            })
+            .expect("seed corrupt blob");
+        assert!(matches!(seed, TxnOutcome::Committed(())));
+
+        reset_capture_prepared_write_counts();
+        let error = VersionedTextStore::new(&mut store)
+            .capture_ingest(
+                &capture_input("notes/corrupt.md", text.to_owned(), 2),
+                &NoFaults,
+            )
+            .expect_err("capture must reject the corrupt reused blob");
+
+        assert!(matches!(
+            error,
+            DomainError::StateCorrupt {
+                reason: "moment blob length does not match its content"
+            }
+        ));
+        assert_eq!(
+            capture_prepared_write_counts(),
+            (1, 1),
+            "a reused blob must force the prepared capture through result hydration"
+        );
+        let durable_rows = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT \
+                       (SELECT COUNT(*) FROM file_objects WHERE workspace_id = 'ws'), \
+                       (SELECT COUNT(*) FROM path_aliases WHERE workspace_id = 'ws'), \
+                       (SELECT COUNT(*) FROM snapshots WHERE workspace_id = 'ws'), \
+                       (SELECT COUNT(*) FROM moments WHERE workspace_id = 'ws'), \
+                       (SELECT COUNT(*) FROM replication_journal)",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, i64>(4)?,
+                        ))
+                    },
+                )
+            })
+            .expect("inspect rolled-back capture");
+        assert_eq!(
+            durable_rows,
+            (0, 0, 0, 0, 0),
+            "the integrity failure must roll back every capture row"
+        );
+        let corrupt_blob = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT byte_length, text FROM blobs WHERE sha256 = ?1",
+                    [&blob_sha256],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                )
+            })
+            .expect("read corrupt seed after rollback");
+        assert_eq!(corrupt_blob, (text.len() as i64, "corrupt".to_owned()));
+    }
+
+    #[test]
+    fn fresh_capture_fast_path_matches_hydration_at_history_text_cap() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let mut store =
+            EngineStore::open(&scratch.engine_db_path().expect("db"), 1).expect("open store");
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .expect("ensure main version");
+
+        for (index, byte_length) in [
+            MOMENT_TEXT_HYDRATION_CAP_BYTES,
+            MOMENT_TEXT_HYDRATION_CAP_BYTES + 1,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            reset_capture_prepared_write_counts();
+            let captured = capture_text(
+                &mut store,
+                &format!("notes/history-cap-{index}.md"),
+                "x".repeat(byte_length),
+                index as i64 + 2,
+            );
+
+            assert_eq!(capture_prepared_write_counts(), (1, 0));
+            assert_eq!(
+                captured.moment.after_text.is_some(),
+                byte_length == MOMENT_TEXT_HYDRATION_CAP_BYTES
+            );
+            assert_capture_matches_hydrated(&mut store, &captured);
+        }
+    }
+
+    #[test]
+    fn renamed_capture_path_uses_disambiguated_object_fast_path() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let mut store =
+            EngineStore::open(&scratch.engine_db_path().expect("db"), 1).expect("open store");
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .expect("ensure main version");
+
+        let original_path = "notes/renamed.md";
+        let first = capture_text(&mut store, original_path, "first body".to_owned(), 2);
+        assert_eq!(
+            first.object.object_id,
+            derive_capture_object_id("ws", "main", original_path)
+        );
+        VersionedTextStore::new(&mut store)
+            .rename_text_file(
+                &RenameTextFile {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    from_path: original_path.to_owned(),
+                    to_path: "notes/archive.md".to_owned(),
+                    moment_id: "rename-captured-file".to_owned(),
+                    request_id: None,
+                    metadata_origin: "test".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 3,
+                },
+                &NoFaults,
+            )
+            .expect("rename captured file");
+
+        reset_capture_prepared_write_counts();
+        let captured = capture_text(&mut store, original_path, "replacement body".to_owned(), 4);
+
+        assert_ne!(captured.object.object_id, first.object.object_id);
+        assert_eq!(
+            capture_prepared_write_counts(),
+            (1, 0),
+            "capture must keep the fast path after disambiguating the occupied derived object id"
+        );
+        assert_capture_matches_hydrated(&mut store, &captured);
+    }
+
+    #[test]
+    fn retired_capture_reuses_unaliased_object_with_result_hydration() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let mut store =
+            EngineStore::open(&scratch.engine_db_path().expect("db"), 1).expect("open store");
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .expect("ensure main version");
+
+        let path = "notes/recreated.md";
+        let first = capture_text(&mut store, path, "first body".to_owned(), 2);
+        VersionedTextStore::new(&mut store)
+            .capture_retire(
+                &CaptureRetire {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    path: path.to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    now_ms: 3,
+                    request_id: None,
+                    only_if_text_head: true,
+                    only_if_capture_origin: true,
+                    allow_ydoc_origin: false,
+                },
+                &NoFaults,
+            )
+            .expect("retire captured file");
+
+        reset_capture_prepared_write_counts();
+        let captured = capture_text(&mut store, path, "recreated body".to_owned(), 4);
+
+        assert_eq!(captured.object.object_id, first.object.object_id);
+        assert_eq!(
+            capture_prepared_write_counts(),
+            (1, 1),
+            "capture must hydrate a pre-existing object that it did not insert"
+        );
+        assert_capture_matches_hydrated(&mut store, &captured);
     }
 
     #[test]
