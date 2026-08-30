@@ -350,19 +350,25 @@ fn collection_response_value(response: impl Serialize) -> Result<Value, WireErro
     Ok(response)
 }
 
-fn collection_query_response_value(response: CollectionQueryResult) -> Result<Value, WireError> {
+fn collection_query_response_value(
+    mut response: CollectionQueryResult,
+) -> Result<Value, WireError> {
+    if let Some(cursor) = response.next_cursor.as_mut() {
+        for sort_value in &mut cursor.sort_values {
+            if sort_value.present
+                && collection_value_exceeds_depth(
+                    &sort_value.value,
+                    MAX_COLLECTION_FIELD_VALUE_DEPTH,
+                )
+            {
+                sort_value.present = false;
+                sort_value.value = Value::Null;
+            }
+        }
+    }
     let mut response =
         serde_json::to_value(response).map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?;
-    let cursor_sort_values = response
-        .pointer_mut("/nextCursor/sortValues")
-        .map(std::mem::take);
     elide_overdepth_collection_values(&mut response);
-    if let Some(sort_values) = cursor_sort_values {
-        let cursor_sort_values = response
-            .pointer_mut("/nextCursor/sortValues")
-            .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
-        *cursor_sort_values = sort_values;
-    }
     encode_collection_wire_numbers(&mut response);
     Ok(response)
 }
@@ -13040,7 +13046,7 @@ mod tests {
     }
 
     #[test]
-    fn collection_cap_matrix_elides_display_values_but_preserves_query_cursors() {
+    fn collection_cap_matrix_elides_display_and_overdepth_cursor_values() {
         fn nested_value(containers: usize) -> Value {
             let mut value = json!("leaf");
             for _ in 0..containers {
@@ -13175,8 +13181,21 @@ mod tests {
                 );
                 assert_eq!(
                     response.pointer("/nextCursor/sortValues/0/value"),
-                    Some(&over_limit),
-                    "the raw cursor value must remain an opaque continuation token"
+                    Some(&Value::Null),
+                    "an over-depth sort coordinate must not enter the control frame"
+                );
+                assert_eq!(
+                    response.pointer("/nextCursor/sortValues/0/present"),
+                    Some(&Value::Bool(false)),
+                    "the record tiebreaker is the only usable cursor coordinate"
+                );
+                assert_eq!(
+                    response.pointer("/nextCursor/recordPath"),
+                    Some(&json!("tasks/record.md"))
+                );
+                assert_eq!(
+                    response.pointer("/nextCursor/recordId"),
+                    Some(&json!("rec_aaaaaaaaaaaaaaaaaaaaaaaaaa"))
                 );
             }
             if !input.to_string().contains("value-depth-exceeded") {

@@ -1,12 +1,12 @@
 use dohc_engine_domain::{
     CollectionFilter, CollectionFilterOperator, CollectionIndexedValueValidation,
     CollectionPendingAdoptionCursor, CollectionQuery, CollectionSchemaReasonCode,
-    CollectionSchemaStatus, CollectionSort, DomainError, MAX_COLLECTION_HISTORY_LIMIT,
-    MAX_COLLECTION_QUERY_SORTS, NoFaults, RenameTextFile, TxnOutcome, VersionedTextStore,
-    ViewSortDirection, WriteText, collection_record_markdown_with_id, get_collection,
-    get_collection_record, index_collection_frontmatter_apply_in_tx, list_collections,
-    list_pending_collection_adoptions, parse_collection_schema, query_collection_records,
-    reconcile_collections_in_tx, set_collection_adoption_state_in_tx,
+    CollectionSchemaStatus, CollectionSort, DeleteTextFile, DomainError,
+    MAX_COLLECTION_HISTORY_LIMIT, MAX_COLLECTION_QUERY_SORTS, NoFaults, RenameTextFile, TxnOutcome,
+    VersionedTextStore, ViewSortDirection, WriteText, collection_record_markdown_with_id,
+    get_collection, get_collection_record, index_collection_frontmatter_apply_in_tx,
+    list_collections, list_pending_collection_adoptions, parse_collection_schema,
+    query_collection_records, reconcile_collections_in_tx, set_collection_adoption_state_in_tx,
     synchronize_collection_frontmatter_index_in_tx,
 };
 use dohc_engine_storage::{EngineStore, StorageError};
@@ -1194,6 +1194,163 @@ fn changing_an_adopted_record_id_preserves_full_authored_history_under_the_new_i
         })
         .expect("query original id after replacement");
     assert!(old_id.is_none());
+}
+
+#[test]
+fn deleted_record_id_stays_reserved_and_keeps_its_history() {
+    const DELETED_OBJECT_ID: &str = "object-6";
+    const SURVIVING_OBJECT_ID: &str = "object-7";
+    let (_scratch, mut store) = seeded_store();
+
+    store
+        .write_with(&NoFaults, |tx| {
+            set_collection_adoption_state_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                "tasks/alpha.md",
+                FIRST_TASK_ID,
+                "adopted",
+            )?;
+            set_collection_adoption_state_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                "tasks/beta.md",
+                SECOND_TASK_ID,
+                "adopted",
+            )
+        })
+        .expect("adopt records before deleting one");
+
+    let before = json!({
+        "id": FIRST_TASK_ID,
+        "Title": "Alpha",
+        "Status": "Broken",
+        "Rank": 1,
+        "Owner": PERSON_ID,
+    });
+    let after = json!({
+        "id": FIRST_TASK_ID,
+        "Title": "Alpha edited",
+        "Status": "Broken",
+        "Rank": 1,
+        "Owner": PERSON_ID,
+    });
+    store
+        .write_with(&NoFaults, |tx| {
+            index_collection_frontmatter_apply_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                DELETED_OBJECT_ID,
+                &before,
+                &after,
+                &before,
+                &after,
+                Some("alpha-editor"),
+                None,
+                10,
+            )
+        })
+        .expect("record history for the record that will be deleted");
+
+    VersionedTextStore::new(&mut store)
+        .delete_text_file(
+            &DeleteTextFile {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                version_id: VERSION_ID.to_owned(),
+                path: "tasks/alpha.md".to_owned(),
+                moment_id: "delete-alpha".to_owned(),
+                request_id: None,
+                metadata_origin: "test".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 11,
+            },
+            &NoFaults,
+        )
+        .expect("delete alpha");
+    store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile deleted alpha");
+
+    write_text_for_object(
+        &mut store,
+        "tasks/beta.md",
+        &format!(
+            "---\nid: {FIRST_TASK_ID}\nTitle: Beta\nStatus: Todo\nRank: 1\nOwner: {SECOND_PERSON_ID}\n---\n"
+        ),
+        SURVIVING_OBJECT_ID,
+        "claim-deleted-alpha-id",
+        12,
+    )
+    .expect("edit beta to claim alpha's deleted id");
+    let reconciled = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile deleted id claim");
+    let TxnOutcome::Committed(reconciled) = reconciled else {
+        panic!("deleted id claim reconciliation crashed");
+    };
+    let replacement = reconciled
+        .adoptions
+        .iter()
+        .find(|candidate| candidate.object_id == SURVIVING_OBJECT_ID)
+        .expect("surviving record receives a replacement id");
+    assert_ne!(replacement.record_id, FIRST_TASK_ID);
+    assert_ne!(replacement.record_id, SECOND_TASK_ID);
+
+    let replacement_details = store
+        .read_with(|conn| {
+            get_collection_record(
+                conn,
+                WORKSPACE_ID,
+                "tasks",
+                &replacement.record_id,
+                10,
+                None,
+            )
+        })
+        .expect("load surviving record under its replacement id")
+        .expect("surviving record remains indexed");
+    assert_eq!(replacement_details.record.path, "tasks/beta.md");
+    assert!(
+        replacement_details.history.is_empty(),
+        "the survivor must not inherit the deleted record's history"
+    );
+
+    let deleted_history = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT field_name,previous_value_json,next_value_json,author_origin_id \
+                 FROM collection_field_history \
+                 WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3",
+                params![WORKSPACE_ID, VERSION_ID, FIRST_TASK_ID],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+        })
+        .expect("load deleted record history by its reserved id");
+    assert_eq!(
+        deleted_history,
+        (
+            "Title".to_owned(),
+            Some("\"Alpha\"".to_owned()),
+            Some("\"Alpha edited\"".to_owned()),
+            Some("alpha-editor".to_owned()),
+        )
+    );
 }
 
 #[test]

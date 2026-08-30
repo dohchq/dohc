@@ -68,7 +68,7 @@ function yamlKeyText(value: unknown): string | null {
 
 function yamlToPlain(value: unknown): unknown {
   if (value instanceof Map) {
-    const result: Record<string, unknown> = {};
+    const result = Object.create(null) as Record<string, unknown>;
     for (const [key, entry] of value) {
       const text = yamlKeyText(key);
       if (text !== null) result[text] = yamlToPlain(entry);

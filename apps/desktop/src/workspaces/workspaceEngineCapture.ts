@@ -3438,7 +3438,7 @@ export function createWorkspaceEngineCapture(
       cursor = pending.nextCursor;
     } while (cursor !== null);
     await releaseRetainedCollectionAdoptionProviders(pendingAdoptionKeys);
-    if (!found) return;
+    if (!found || pendingCollectionAdoptionProviders.size > 0) return;
     await engine.reconcileCapture?.();
   }
 

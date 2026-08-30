@@ -509,10 +509,17 @@ describe("workspaceEngineCapture batch capture", () => {
       },
     ];
     const completed = new Set<string>();
+    const attempts: string[] = [];
+    const leasedPaths = new Set<string>();
     const store = {
       ensureMainVersion: async () => undefined,
       flushCapture: async () => undefined,
-      reconcileCapture: async () => undefined,
+      reconcileCapture: async () => {
+        attempts.push("reconcile");
+        if (leasedPaths.size > 0) {
+          throw new Error("collection-reconciliation-lease-held");
+        }
+      },
       listPendingCollectionAdoptions: async () => ({
         adoptions: adoptions.filter(
           (adoption) => !completed.has(adoption.filePath),
@@ -528,7 +535,6 @@ describe("workspaceEngineCapture batch capture", () => {
       },
       undefined,
     );
-    const attempts: string[] = [];
     const opens = new Map<string, number>();
     const sessions = {
       run: async (_workspace: unknown, task: (binding: unknown) => unknown) =>
@@ -542,6 +548,7 @@ describe("workspaceEngineCapture batch capture", () => {
       onError: (context, error) => errors.push({ context, error }),
       openRustYDocProviderSession: async (options) => {
         opens.set(options.path, (opens.get(options.path) ?? 0) + 1);
+        leasedPaths.add(options.path);
         let evictions = 0;
         return {
           path: options.path,
@@ -551,6 +558,7 @@ describe("workspaceEngineCapture batch capture", () => {
             if (options.path === "projects/busy.md" && evictions === 1) {
               throw busy;
             }
+            leasedPaths.delete(options.path);
             completed.add(options.path);
           },
         } as EngineYdocProviderSession;
@@ -575,6 +583,7 @@ describe("workspaceEngineCapture batch capture", () => {
       "projects/busy.md:1",
       "projects/healthy.md:1",
       "projects/busy.md:2",
+      "reconcile",
     ]);
     expect(opens).toEqual(
       new Map([

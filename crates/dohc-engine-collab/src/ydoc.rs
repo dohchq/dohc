@@ -2069,9 +2069,13 @@ fn write_yaml_mapping_entry(
             output.push('\n')?;
         }
         Value::Object(map) => {
-            output.push_str(":\n")?;
-            for (k, v) in map {
-                write_yaml_mapping_entry(output, k, v, indent + 2)?;
+            if map.is_empty() {
+                output.push_str(": {}\n")?;
+            } else {
+                output.push_str(":\n")?;
+                for (k, v) in map {
+                    write_yaml_mapping_entry(output, k, v, indent + 2)?;
+                }
             }
         }
         Value::Null => {
@@ -5131,6 +5135,39 @@ fn main() {}
         assert!(
             frontmatter.contains("owner") && frontmatter.contains("ice"),
             "the nested map is real metadata, not body text: {frontmatter}"
+        );
+    }
+
+    #[test]
+    fn empty_frontmatter_mappings_settle_and_roundtrip_as_mappings() {
+        let chosen = "---\ntop: {}\nnested:\n  child: {}\n---\n\nbody text";
+        let canonical = "---\nnested:\n  child: {}\ntop: {}\n---\n\nbody text";
+        let expected_frontmatter = json!({
+            "top": {},
+            "nested": { "child": {} },
+        });
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
+            .expect("seed empty frontmatter mappings");
+
+        assert_eq!(doc.frontmatter_json(), expected_frontmatter);
+        let settled = doc
+            .project(ContentKind::Richdoc)
+            .expect("settle empty frontmatter mappings")
+            .content;
+        assert_eq!(settled, canonical);
+
+        let roundtripped = Ydoc::wire();
+        roundtripped
+            .rewrite_content_to_markdown(ContentKind::Richdoc, &settled)
+            .expect("roundtrip settled frontmatter");
+        assert_eq!(roundtripped.frontmatter_json(), expected_frontmatter);
+        assert_eq!(
+            roundtripped
+                .project(ContentKind::Richdoc)
+                .expect("settle roundtripped frontmatter")
+                .content,
+            settled
         );
     }
 

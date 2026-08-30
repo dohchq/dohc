@@ -2572,6 +2572,24 @@ fn load_record_bindings(
         .map_err(crate::DomainError::sql_corrupt)
 }
 
+fn load_historical_record_ids(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+) -> Result<HashSet<String>, crate::DomainError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT DISTINCT record_id FROM collection_field_history \
+             WHERE workspace_id = ?1 AND version_id = ?2",
+        )
+        .map_err(crate::DomainError::sql_corrupt)?;
+    statement
+        .query_map(params![workspace_id, version_id], |row| row.get(0))
+        .map_err(crate::DomainError::sql_corrupt)?
+        .collect::<Result<HashSet<_>, _>>()
+        .map_err(crate::DomainError::sql_corrupt)
+}
+
 fn latest_historical_record_id(
     conn: &Connection,
     workspace_id: &str,
@@ -2638,6 +2656,7 @@ pub fn reconcile_collections_in_tx(
 ) -> Result<CollectionReconcileResult, crate::DomainError> {
     let snapshots = load_collection_snapshots(tx, workspace_id, version_id)?;
     let existing = load_record_bindings(tx, workspace_id, version_id)?;
+    let historical_record_ids = load_historical_record_ids(tx, workspace_id, version_id)?;
     let mut existing_by_object_id = HashMap::with_capacity(existing.len());
     for binding in &existing {
         existing_by_object_id
@@ -2818,7 +2837,7 @@ pub fn reconcile_collections_in_tx(
         .collect();
     let mut current_owners: HashMap<String, String> = HashMap::new();
     let mut absent_owners = HashSet::new();
-    let mut used_ids = HashSet::new();
+    let mut used_ids = historical_record_ids.clone();
     for binding in &existing {
         let Some(record_id) = binding.record_id.as_ref() else {
             continue;
@@ -2921,8 +2940,10 @@ pub fn reconcile_collections_in_tx(
                         .filter(|record_id| {
                             current_owners.get(*record_id).map_or_else(
                                 || {
-                                    absent_owners.contains(*record_id)
-                                        || !existing_by_record_id.contains_key(record_id.as_str())
+                                    !historical_record_ids.contains(*record_id)
+                                        && (absent_owners.contains(*record_id)
+                                            || !existing_by_record_id
+                                                .contains_key(record_id.as_str()))
                                 },
                                 |owner| owner == &record.object_id,
                             ) && !claimed_ids.contains_key(record_id.as_str())
@@ -2954,10 +2975,12 @@ pub fn reconcile_collections_in_tx(
             let occupied_by_current = current_owners
                 .get(&record_id)
                 .is_some_and(|owner| owner != &record.object_id);
+            let occupied_by_history = historical_record_ids.contains(&record_id)
+                && current_owners.get(&record_id) != Some(&record.object_id);
             let occupied_in_pass = claimed_ids
                 .get(&record_id)
                 .is_some_and(|owner_path| owner_path != &record.path);
-            if occupied_by_current || occupied_in_pass {
+            if occupied_by_current || occupied_by_history || occupied_in_pass {
                 let fresh_id = mint_unused_record_id(&mut used_ids)?;
                 let lossless_remint_required =
                     engine_authored_record_id_range(&record.text, &record_id).is_some();
@@ -3730,6 +3753,21 @@ fn value_for_field<'a>(record: &'a CollectionRecord, field: &str) -> Option<&'a 
         .map(|value| &value.value)
 }
 
+fn sortable_value_for_field<'a>(record: &'a CollectionRecord, field: &str) -> Option<&'a Value> {
+    record
+        .values
+        .iter()
+        .find(|value| value.field == field)
+        .filter(|value| {
+            !matches!(
+                &value.validation,
+                CollectionIndexedValueValidation::Flagged { reason }
+                    if reason.code == FieldValueReasonCode::ValueDepthExceeded
+            )
+        })
+        .map(|value| &value.value)
+}
+
 fn value_contains(value: &Value, needle: &Value) -> bool {
     match (value, needle) {
         (Value::String(value), Value::String(needle)) => value.contains(needle),
@@ -3925,8 +3963,8 @@ fn compare_collection_records(
 ) -> Ordering {
     for sort in sort {
         let ordering = compare_optional_json(
-            value_for_field(left, &sort.field),
-            value_for_field(right, &sort.field),
+            sortable_value_for_field(left, &sort.field),
+            sortable_value_for_field(right, &sort.field),
         );
         let ordering = match sort.direction {
             ViewSortDirection::Asc => ordering,
@@ -3968,7 +4006,7 @@ fn compare_record_to_cursor(
     }
     for (sort, cursor_value) in sort.iter().zip(&cursor.sort_values) {
         let ordering = compare_optional_json(
-            value_for_field(record, &sort.field),
+            sortable_value_for_field(record, &sort.field),
             query_cursor_value(cursor_value)?,
         );
         let ordering = match sort.direction {
@@ -3992,7 +4030,7 @@ fn query_cursor_for_record(
     CollectionQueryCursor {
         sort_values: sort
             .iter()
-            .map(|sort| match value_for_field(record, &sort.field) {
+            .map(|sort| match sortable_value_for_field(record, &sort.field) {
                 Some(value) => CollectionQueryCursorValue {
                     present: true,
                     value: value.clone(),
@@ -4423,8 +4461,11 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        compare_json, is_record_id, markdown_record_id, mint_record_id, parse_markdown_frontmatter,
-        record_id_from_random,
+        CollectionIndexedValue, CollectionIndexedValueValidation, CollectionRecord, CollectionSort,
+        FieldValueReason, FieldValueReasonCode, MAX_COLLECTION_FIELD_VALUE_DEPTH,
+        ViewSortDirection, compare_collection_records, compare_json, compare_record_to_cursor,
+        is_record_id, markdown_record_id, mint_record_id, parse_markdown_frontmatter,
+        query_cursor_for_record, record_id_from_random,
     };
 
     #[test]
@@ -4442,6 +4483,52 @@ mod tests {
                 &json!(9_007_199_254_740_993_i64),
                 &json!(9_007_199_254_740_992_f64)
             ),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn overdepth_sort_coordinates_use_record_tiebreakers() {
+        let record = |path: &str, id: &str, leaf: &str| {
+            let value =
+                (0..MAX_COLLECTION_FIELD_VALUE_DEPTH).fold(json!(leaf), |value, _| json!([value]));
+            CollectionRecord {
+                id: id.to_owned(),
+                path: path.to_owned(),
+                conflicted: false,
+                values: vec![CollectionIndexedValue {
+                    field: "deep".to_owned(),
+                    value,
+                    validation: CollectionIndexedValueValidation::Flagged {
+                        reason: FieldValueReason {
+                            code: FieldValueReasonCode::ValueDepthExceeded,
+                            path: String::new(),
+                        },
+                    },
+                    resolved_relations: Vec::new(),
+                }],
+            }
+        };
+        let first = record("depth/alpha.md", "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa", "zulu");
+        let second = record("depth/beta.md", "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb", "alpha");
+        let sort = [CollectionSort {
+            field: "deep".to_owned(),
+            direction: ViewSortDirection::Asc,
+        }];
+
+        assert_eq!(
+            compare_collection_records(&first, &second, &sort),
+            Ordering::Less,
+            "an unusable sort value must leave record path/id as the page order"
+        );
+        let cursor = query_cursor_for_record(&first, &sort);
+        assert_eq!(cursor.sort_values.len(), 1);
+        assert!(!cursor.sort_values[0].present);
+        assert!(cursor.sort_values[0].value.is_null());
+        assert_eq!(cursor.record_path, first.path.as_str());
+        assert_eq!(cursor.record_id, first.id.as_str());
+        assert_eq!(
+            compare_record_to_cursor(&second, &cursor, &sort).expect("valid cursor"),
             Ordering::Greater
         );
     }

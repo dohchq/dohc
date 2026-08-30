@@ -175,6 +175,76 @@ describe('Y.Doc markdown import/export', () => {
     expect(yDocToMarkdown(doc)).toBe('# Body')
   })
 
+  it('round-trips hostile frontmatter keys as own data properties', () => {
+    const input = [
+      '---',
+      '__proto__: top-proto',
+      'constructor: top-constructor',
+      'prototype: top-prototype',
+      'nested:',
+      '  __proto__: nested-proto',
+      '  constructor: nested-constructor',
+      '  prototype: nested-prototype',
+      'sequence:',
+      '  - __proto__: sequence-proto',
+      '    constructor: sequence-constructor',
+      '    prototype: sequence-prototype',
+      '---',
+      '# Body',
+    ].join('\n')
+    const source = markdownToYDoc(input)
+    const doc = new Y.Doc()
+    Y.applyUpdate(doc, Y.encodeStateAsUpdate(source))
+    const frontmatter = getDohcYDocFrontmatter(doc)
+    const nested = frontmatter.nested as Record<string, unknown>
+    const sequenceEntry = (frontmatter.sequence as Record<string, unknown>[])[0]!
+
+    for (const key of ['__proto__', 'constructor', 'prototype']) {
+      expect(Object.hasOwn(frontmatter, key)).toBe(true)
+      expect(Object.hasOwn(nested, key)).toBe(true)
+      expect(Object.hasOwn(sequenceEntry, key)).toBe(true)
+    }
+    expect(frontmatter.__proto__).toBe('top-proto')
+    expect(nested.__proto__).toBe('nested-proto')
+    expect(sequenceEntry.__proto__).toBe('sequence-proto')
+    expect(Object.getPrototypeOf(frontmatter)).toBe(Object.prototype)
+    expect(Object.getPrototypeOf(nested)).toBe(Object.prototype)
+    expect(Object.getPrototypeOf(sequenceEntry)).toBe(Object.prototype)
+
+    const settled = yDocToMarkdown(doc)
+    const roundTripped = getDohcYDocFrontmatter(markdownToYDoc(settled))
+    expect(roundTripped).toEqual(frontmatter)
+  })
+
+  it('keeps hostile keys in unsupported tagged frontmatter mappings', () => {
+    const input = [
+      '---',
+      'tagged: !custom',
+      '  __proto__: tagged-proto',
+      '  constructor: tagged-constructor',
+      '  prototype: tagged-prototype',
+      '---',
+      '# Body',
+    ].join('\n')
+    const source = markdownToYDoc(input)
+    const doc = new Y.Doc()
+    Y.applyUpdate(doc, Y.encodeStateAsUpdate(source))
+    const tagged = getDohcYDocFrontmatter(doc).tagged as Record<string, unknown>
+
+    for (const key of ['__proto__', 'constructor', 'prototype']) {
+      expect(Object.hasOwn(tagged, key)).toBe(true)
+    }
+    expect(Object.getPrototypeOf(tagged)).toBe(Object.prototype)
+
+    doc.getMap('frontmatter').set('changed', true)
+    const settled = getDohcYDocFrontmatter(markdownToYDoc(yDocToMarkdown(doc)))
+    const settledTagged = settled.tagged as Record<string, unknown>
+    expect(settled.changed).toBe(true)
+    for (const key of ['__proto__', 'constructor', 'prototype']) {
+      expect(Object.hasOwn(settledTagged, key)).toBe(true)
+    }
+  })
+
   it('keeps literal punctuation and explicit escapes byte-stable', () => {
     const input = 'internal_name [label] and \\*literal asterisks\\*'
     expect(yDocToMarkdown(markdownToYDoc(input))).toBe(input)

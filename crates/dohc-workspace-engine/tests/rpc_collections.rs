@@ -961,6 +961,15 @@ async fn overdepth_sort_values_page_without_gaps_or_duplicates() {
         );
         record_paths.push(record["path"].as_str().expect("record path").to_owned());
         cursor = page["nextCursor"].clone();
+        if !cursor.is_null() {
+            assert_eq!(
+                cursor["sortValues"],
+                json!([{ "present": false, "value": null }]),
+                "an over-depth sort key must not enter the continuation frame"
+            );
+            assert_eq!(cursor["recordPath"], record["path"]);
+            assert_eq!(cursor["recordId"], record["id"]);
+        }
     }
 
     assert_eq!(

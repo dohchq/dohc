@@ -1185,20 +1185,11 @@ function loadFrontmatterWithUnsupportedTags(raw: string): {
     matchByTagPrefix: true,
     create: () => {
       markUnsupported()
-      return {} as Record<string, unknown>
+      return nullPrototypeRecord()
     },
     addPair: (mapping, key, value) => {
       const normalizedKey = String(key)
-      if (normalizedKey === '__proto__') {
-        Object.defineProperty(mapping, normalizedKey, {
-          value,
-          enumerable: true,
-          configurable: true,
-          writable: true,
-        })
-      } else {
-        mapping[normalizedKey] = value
-      }
+      mapping[normalizedKey] = value
       return ''
     },
     has: (mapping, key) => Object.hasOwn(mapping, String(key)),
@@ -1211,9 +1202,24 @@ function loadFrontmatterWithUnsupportedTags(raw: string): {
     unsupportedMappingTag,
   )
   return {
-    value: yaml.load(raw, { schema }),
+    value: normalizeFrontmatterValue(yaml.load(raw, { schema })),
     hasUnsupportedTag,
   }
+}
+
+function nullPrototypeRecord(): Record<string, unknown> {
+  return Object.create(null) as Record<string, unknown>
+}
+
+function normalizeFrontmatterValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(normalizeFrontmatterValue)
+  if (!isFrontmatterMap(value)) return value
+
+  const normalized = nullPrototypeRecord()
+  for (const [key, child] of Object.entries(value)) {
+    normalized[key] = normalizeFrontmatterValue(child)
+  }
+  return normalized
 }
 
 function isFrontmatterMap(value: unknown): value is Record<string, unknown> {
@@ -1233,18 +1239,51 @@ function isEmptyFrontmatter(raw: string): boolean {
 
 function writeMap(map: Y.Map<unknown>, values: Record<string, unknown>): void {
   for (const [key, value] of Object.entries(values)) {
-    map.set(key, value)
+    map.set(key, frontmatterValueToY(value))
   }
 }
 
+function frontmatterValueToY(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    const array = new Y.Array<unknown>()
+    array.insert(0, value.map((entry) => {
+      if (typeof entry !== 'bigint') return frontmatterValueToY(entry)
+      const integer = new Y.Text()
+      integer.insert(0, entry.toString())
+      return integer
+    }))
+    return array
+  }
+  if (isFrontmatterMap(value)) {
+    const map = new Y.Map<unknown>()
+    writeMap(map, value)
+    return map
+  }
+  return value
+}
+
+function yFrontmatterValueToPlain(value: unknown): unknown {
+  if (value instanceof Y.Map) return mapToObject(value)
+  if (value instanceof Y.Array) {
+    return value.toArray().map(yFrontmatterValueToPlain)
+  }
+  if (value instanceof Y.Text) return BigInt(value.toString())
+  return normalizeFrontmatterValue(value)
+}
+
 function mapToObject(map: Y.Map<unknown>): Record<string, unknown> {
-  return Object.fromEntries(map.entries())
+  return Object.fromEntries(
+    Array.from(map.entries(), ([key, child]) => [
+      key,
+      yFrontmatterValueToPlain(child),
+    ]),
+  )
 }
 
 function orderFrontmatter(
   frontmatter: Record<string, unknown>,
 ): Record<string, unknown> {
-  const ordered: Record<string, unknown> = {}
+  const ordered = nullPrototypeRecord()
 
   for (const key of FRONTMATTER_PRIORITY_KEYS) {
     if (Object.hasOwn(frontmatter, key)) ordered[key] = frontmatter[key]

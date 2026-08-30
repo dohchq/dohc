@@ -85,6 +85,44 @@ describe("Collection schema contract vectors", () => {
     expect(second.schema.views).toEqual([]);
   });
 
+  it("treats hostile YAML mapping keys as data without prototype inheritance", () => {
+    const parsed = parseCollectionSchema([
+      "__proto__:",
+      "  name: inherited-name",
+      "constructor: root-constructor",
+      "prototype: root-prototype",
+      "fields:",
+      "  Inherited type:",
+      "    __proto__:",
+      "      type: number",
+      "  Nested hostile:",
+      "    type: text",
+      "    __proto__: nested-proto",
+      "  __proto__:",
+      "    type: text",
+      "  constructor:",
+      "    type: text",
+      "  prototype:",
+      "    type: text",
+    ].join("\n"));
+
+    expect(parsed.schema.name).toBeNull();
+    expect(parsed.schema.fields).toEqual([
+      { name: "Nested hostile", type: "text" },
+      { name: "__proto__", type: "text" },
+      { name: "constructor", type: "text" },
+      { name: "prototype", type: "text" },
+    ]);
+    expect(parsed.reasons).toEqual(expect.arrayContaining([
+      { code: "unknown-property", path: "/__proto__" },
+      { code: "unknown-property", path: "/constructor" },
+      { code: "unknown-property", path: "/prototype" },
+      { code: "missing-property", path: "/fields/Inherited type/type" },
+      { code: "unknown-property", path: "/fields/Nested hostile/__proto__" },
+    ]));
+    expect(({} as { name?: unknown }).name).toBeUndefined();
+  });
+
   it.each(schemaLimitVectors)("matches $name", ({
     itemCount,
     expectedItemCount,
