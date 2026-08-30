@@ -3593,6 +3593,36 @@ function MarkdownView(props: {
           </EditorErrorBoundary>
           {backlinks}
         </div>
+      ) : props.truncated ? (
+        // A truncated read is already a bounded prefix and is permanently
+        // read-only. Rendering that prefix as rich Markdown used to schedule
+        // every remaining block for idle backfill, growing a 3 MiB document
+        // past 136,000 DOM nodes after the first window painted. CodeMirror
+        // keeps the source readable with a viewport-bounded DOM and makes the
+        // partial-file boundary explicit instead of presenting it as a whole
+        // rich document. Keep view-markdown: callers use it as the mounted
+        // document surface regardless of which read representation owns it.
+        <div data-testid="view-markdown" className="flex min-h-0 flex-1 flex-col">
+          <Suspense
+            fallback={
+              <div className="flex flex-1 items-center justify-center text-xs text-subtle">
+                Loading source...
+              </div>
+            }
+          >
+            <LazySourceCodeEditor
+              testId="markdown-source-view"
+              value={props.body}
+              valueRevision={props.contentReadTicket}
+              language="markdown"
+              path={props.path}
+              readOnly
+              onChange={() => undefined}
+              onSave={() => undefined}
+            />
+            <MarkdownRenderCommitted onRendered={onMarkdownRendered} />
+          </Suspense>
+        </div>
       ) : (
         <div
           ref={localDocPaneRef}
