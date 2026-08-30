@@ -146,6 +146,48 @@ describe("SourceCodeEditor value synchronization", () => {
     await waitFor(() => expect(content.textContent).toBe("external replacement"));
   });
 
+  it("cannot undo an accepted external revision into the previous local body", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const view = render(
+      <SourceCodeEditor
+        testId="source-editor"
+        value="start"
+        valueRevision={0}
+        language="text"
+        path="notes/plain.txt"
+        onChange={onChange}
+        onSave={() => undefined}
+      />,
+    );
+    const content = (await screen.findByTestId("source-editor")).querySelector(
+      ".cm-content",
+    ) as HTMLElement;
+
+    await user.click(content);
+    await user.keyboard("{Control>}a{/Control}local draft");
+    await waitFor(() => expect(content.textContent).toBe("local draft"));
+
+    view.rerender(
+      <SourceCodeEditor
+        testId="source-editor"
+        value="external replacement"
+        valueRevision={1}
+        language="text"
+        path="notes/plain.txt"
+        onChange={onChange}
+        onSave={() => undefined}
+      />,
+    );
+    await waitFor(() => expect(content.textContent).toBe("external replacement"));
+    onChange.mockClear();
+
+    await user.keyboard("{Control>}z{/Control}");
+
+    expect(content.textContent).toBe("external replacement");
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
   it("applies an external value while a local value is awaiting its echo", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();

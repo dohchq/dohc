@@ -130,6 +130,7 @@ export function SourceCodeEditor(props: {
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
+  const historyCompartment = useRef(new Compartment()).current;
   const readOnlyCompartment = useRef(new Compartment()).current;
   const languageCompartment = useRef(new Compartment()).current;
   const onChangeRef = useRef(props.onChange);
@@ -160,7 +161,7 @@ export function SourceCodeEditor(props: {
           lineNumbers(),
           foldGutter(),
           highlightActiveLineGutter(),
-          history(),
+          historyCompartment.of(history()),
           drawSelection(),
           dropCursor(),
           rectangularSelection(),
@@ -212,18 +213,30 @@ export function SourceCodeEditor(props: {
     if (!view) return;
     const next = valueRef.current;
     const current = view.state.doc.toString();
-    if (current === next) return;
     // Local onChange echoes do not change valueRevision. Accepted external
     // values do, so a delayed local echo cannot replace a newer CodeMirror
     // document. The revision also lets external text match an older local
     // snapshot without being mistaken for that snapshot's delayed echo.
+    //
+    // CodeMirror maps old history entries across an addToHistory=false
+    // replacement. It does not discard them, so Undo after an authoritative
+    // disk or peer revision can splice the old body into the accepted one.
+    // Recreate the history field even when the accepted text is unchanged:
+    // the revision, rather than a text difference, is the authority boundary.
     applyingRemoteValue.current = true;
     view.dispatch({
-      changes: { from: 0, to: current.length, insert: next },
+      ...(current === next
+        ? {}
+        : { changes: { from: 0, to: current.length, insert: next } }),
+      effects: historyCompartment.reconfigure([]),
+      annotations: Transaction.addToHistory.of(false),
+    });
+    view.dispatch({
+      effects: historyCompartment.reconfigure(history()),
       annotations: Transaction.addToHistory.of(false),
     });
     applyingRemoteValue.current = false;
-  }, [props.valueRevision]);
+  }, [props.valueRevision, historyCompartment]);
 
   useEffect(() => {
     const view = viewRef.current;
