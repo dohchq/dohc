@@ -5178,6 +5178,35 @@ fn main() {}
     }
 
     #[test]
+    fn floating_point_frontmatter_key_survives_settlement_roundtrip() {
+        let chosen = "---\n1.5: value\n---\n\nbody text";
+        let canonical = "---\n\"1.5\": value\n---\n\nbody text";
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
+            .expect("seed floating-point frontmatter key");
+
+        assert_eq!(doc.frontmatter_json(), json!({ "1.5": "value" }));
+        let settled = doc
+            .project(ContentKind::Richdoc)
+            .expect("settle floating-point frontmatter key")
+            .content;
+        assert_eq!(settled, canonical);
+
+        let roundtripped = Ydoc::wire();
+        roundtripped
+            .rewrite_content_to_markdown(ContentKind::Richdoc, &settled)
+            .expect("roundtrip settled floating-point frontmatter key");
+        assert_eq!(roundtripped.frontmatter_json(), json!({ "1.5": "value" }));
+        assert_eq!(
+            roundtripped
+                .project(ContentKind::Richdoc)
+                .expect("settle roundtripped floating-point frontmatter key")
+                .content,
+            settled
+        );
+    }
+
+    #[test]
     fn fresh_successor_preserves_frontmatter_integers_outside_the_javascript_safe_range() {
         let key = crate::DocKey::new("ws", "main", "large-integer").expect("valid key");
         let artifact = "---\ndebt: -9007199254740993\nestimate: 9007199254740993\n---\n\nbody text";

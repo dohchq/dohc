@@ -4,6 +4,7 @@ use dohc_engine_domain::{
     CollectionSchemaStatus, FieldDefinition, FieldValueReasonCode, FieldValueValidation,
     is_record_id, parse_collection_schema, validate_field_value,
 };
+use dohc_engine_files::MAX_CANONICAL_WORKSPACE_PATH_BYTES;
 use saphyr::{LoadableYamlNode, ScalarOwned, YamlOwned};
 use serde::Deserialize;
 
@@ -226,6 +227,31 @@ fn collection_schema_item_caps_match_the_shared_boundary_vector() {
         assert_eq!(parsed.schema.views[0].group_by, None, "{}", vector.name);
         assert_eq!(parsed.reasons, vector.expected_reasons, "{}", vector.name);
     }
+}
+
+#[test]
+fn relation_collection_paths_obey_workspace_path_byte_bound() {
+    let parse_relation = |collection: &str| {
+        parse_collection_schema(&format!(
+            "fields:\n  owner:\n    type: relation\n    collection: {collection}\n    many: false\n"
+        ))
+    };
+    let at_limit_path = "é".repeat(MAX_CANONICAL_WORKSPACE_PATH_BYTES / 2);
+    assert_eq!(at_limit_path.len(), MAX_CANONICAL_WORKSPACE_PATH_BYTES);
+    let at_limit = parse_relation(&at_limit_path);
+    assert_eq!(at_limit.status, CollectionSchemaStatus::Valid);
+    assert_eq!(at_limit.schema.fields.len(), 1);
+
+    let over_limit = parse_relation(&format!("{at_limit_path}a"));
+    assert_eq!(over_limit.status, CollectionSchemaStatus::Degraded);
+    assert!(over_limit.schema.fields.is_empty());
+    assert_eq!(
+        over_limit.reasons,
+        [dohc_engine_domain::CollectionSchemaReason {
+            code: CollectionSchemaReasonCode::InvalidRelationTarget,
+            path: "/fields/owner/collection".to_owned(),
+        }]
+    );
 }
 
 #[test]

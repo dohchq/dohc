@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
+use dohc_engine_files::canonical_workspace_path_meets_shared_bounds;
 use dohc_engine_storage::StorageError;
 use rusqlite::{Connection, OptionalExtension, params};
 use saphyr::{
@@ -559,6 +560,8 @@ fn yaml_key_text(value: &YamlOwned) -> Option<String> {
         Some(text.to_owned())
     } else if let Some(integer) = value.as_integer() {
         Some(integer.to_string())
+    } else if let Some(number) = value.as_floating_point() {
+        Some(number.to_string())
     } else if let Some(boolean) = value.as_bool() {
         Some(boolean.to_string())
     } else if value.is_null() {
@@ -641,7 +644,8 @@ fn read_required_text(
 }
 
 fn is_workspace_relative_collection_path(value: &str) -> bool {
-    !value.is_empty()
+    canonical_workspace_path_meets_shared_bounds(value)
+        && !value.is_empty()
         && !value.starts_with('/')
         && !value.ends_with('/')
         && !value.contains('\\')
