@@ -814,7 +814,7 @@ describe("durable link discussion storage", () => {
     expect(countRows(dbPath, "sync_relay_share_discussion_messages")).toBe(1);
   });
 
-  it("acknowledges a committed replay through pause but keeps stronger gates ahead of replay", async () => {
+  it("acknowledges a committed replay through pause and block but keeps authority ahead of replay", async () => {
     const { storage, dbPath } = await openStorage();
     const seeded = seedShare(storage);
     const first = append(storage, seeded, {
@@ -879,6 +879,12 @@ describe("durable link discussion storage", () => {
         blockedAtMs: 2_104,
       }),
     ).toBe(true);
+    const blockedSnapshot = {
+      messages: countRows(dbPath, "sync_relay_share_discussion_messages"),
+      principals: countRows(dbPath, "sync_relay_link_principals"),
+      revision: storage.getShareDiscussionRevision(seeded.shareId),
+      usage: aggregateWorkspaceUsageBytes(dbPath, seeded.workspaceId),
+    };
     expect(
       append(storage, seeded, {
         claimedName: "Alice",
@@ -886,7 +892,37 @@ describe("durable link discussion storage", () => {
         idempotencyKey: "lost-response",
         createdAtMs: 2_105,
       }),
+    ).toMatchObject({
+      ok: true,
+      replayed: true,
+      principal: {
+        principalId: first.principal.principalId,
+        blockedAtMs: 2_104,
+      },
+      message: first.message,
+    });
+    expect(
+      append(storage, seeded, {
+        claimedName: "Alice",
+        body: "Conflicting after block",
+        idempotencyKey: "lost-response",
+        createdAtMs: 2_106,
+      }),
+    ).toEqual({ ok: false, reason: "idempotency-conflict" });
+    expect(
+      append(storage, seeded, {
+        claimedName: "Alice",
+        body: "New after block",
+        idempotencyKey: "new-after-block",
+        createdAtMs: 2_107,
+      }),
     ).toEqual({ ok: false, reason: "blocked" });
+    expect({
+      messages: countRows(dbPath, "sync_relay_share_discussion_messages"),
+      principals: countRows(dbPath, "sync_relay_link_principals"),
+      revision: storage.getShareDiscussionRevision(seeded.shareId),
+      usage: aggregateWorkspaceUsageBytes(dbPath, seeded.workspaceId),
+    }).toEqual(blockedSnapshot);
 
     for (const transition of ["revoke", "rotate", "expire"] as const) {
       const authority = seedShare(storage, { suffix: transition });

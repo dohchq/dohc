@@ -4000,10 +4000,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       ) {
         return { ok: false, reason: "not-authorized" };
       }
-      if (principal && principal.blockedAtMs !== null) {
-        return { ok: false, reason: "blocked" };
-      }
-
       if (principal) {
         const replayRow = this.db
           .prepare(
@@ -4030,6 +4026,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
             message: rowToShareDiscussionMessageRow(replayRow),
           };
         }
+      }
+      if (principal && principal.blockedAtMs !== null) {
+        return { ok: false, reason: "blocked" };
       }
       if (authority.link_writes_paused_at_ms !== null) {
         return { ok: false, reason: "paused" };
