@@ -1412,6 +1412,9 @@ async fn close_cancels_a_paused_fresh_import_and_reopen_converges() {
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     write_file(scratch.path(), "seed.md", b"survives restart");
+    for index in 1..EARLY_IMPORT_MIN_ADDED_FILES {
+        write_file(scratch.path(), &format!("bulk/seed-{index:04}.md"), b"seed");
+    }
     let probe = CaptureApplyProbe::default();
     probe.pause_next_apply();
     let transport = InProcessTransport::new(Arc::new(
