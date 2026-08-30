@@ -1628,6 +1628,78 @@ describe("relay capability reads", () => {
     );
   });
 
+  it.each([
+    ["metadata", "/sync/link/share", "fetchLogPageDescending"],
+    ["current state", "/sync/link/current", "readCurrentFileState"],
+  ] as const)(
+    "serializes the fresh access after a same-generation narrowing during the %s read",
+    async (_description, path, pauseAt) => {
+      const storage = await newStorage();
+      let narrowOnRead = false;
+      let shareId = "";
+      let grantId = "";
+      const narrow = (): void => {
+        if (!narrowOnRead) return;
+        narrowOnRead = false;
+        expect(
+          storage.retuneShareGrant({
+            shareId,
+            grantId,
+            access: "view",
+            changedAtMs: 2_001,
+            expectedDependentGrantIds: [],
+            guard: () => undefined,
+          }),
+        ).toMatchObject({
+          ok: true,
+          grant: { access: "view", generation: 1 },
+        });
+      };
+      const storageWithRace = new Proxy(storage, {
+        get(target, property, receiver) {
+          if (property === "fetchLogPageDescending") {
+            return (
+              input: Parameters<SyncRelayStorage["fetchLogPageDescending"]>[0],
+            ) => {
+              const rows = target.fetchLogPageDescending(input);
+              if (pauseAt === property) narrow();
+              return rows;
+            };
+          }
+          if (property === "readCurrentFileState") {
+            return (
+              input: Parameters<SyncRelayStorage["readCurrentFileState"]>[0],
+            ) => {
+              const snapshot = target.readCurrentFileState(input);
+              if (pauseAt === property) narrow();
+              return snapshot;
+            };
+          }
+          const value = Reflect.get(target, property, receiver) as unknown;
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      const h = handler(storageWithRace);
+      const seeded = await seed(h, "comment");
+      grantId = seeded.grantId;
+      shareId = storage.getShareGrant(grantId)!.shareId;
+      narrowOnRead = true;
+
+      const response = await h(linkRequest(seeded.capability, path));
+
+      expect(response.status).toBe(200);
+      expect(await json(response)).toMatchObject({
+        access: "view",
+        effectiveSelector: {
+          paths: ["docs"],
+          versionId: null,
+          access: "view",
+        },
+      });
+      expect(narrowOnRead).toBe(false);
+    },
+  );
+
   it("streams the accepted current fold once when reopening a pre-table database", async () => {
     const originalStorage = await newStorage();
     const originalHandler = handler(originalStorage);

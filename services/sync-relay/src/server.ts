@@ -2382,14 +2382,14 @@ export function createSyncRelayHandler({
             capability.effectiveSelector,
             epochLogFloor,
           );
-          requireFreshLinkRead(capabilityToken, capability);
+          const fresh = requireFreshLinkRead(capabilityToken, capability);
           const presentation = createAccountlessPathProjection(
-            capability.effectiveSelector,
+            fresh.effectiveSelector,
           );
-          return linkJsonResponse(capability.shareId, capability.grantId, {
+          return linkJsonResponse(fresh.shareId, fresh.grantId, {
             ok: true,
             effectiveSelector: presentation.selector,
-            access: capability.access,
+            access: fresh.access,
             ...freshness,
           });
         }
@@ -2402,8 +2402,14 @@ export function createSyncRelayHandler({
             limit: linkCurrentFileLimit,
           });
           if (snapshot.tooMany) throw notFound();
-          const presentation = createAccountlessPathProjection(
+          const freshness = newestFilteredOpFreshness(
+            share.workspaceId,
             capability.effectiveSelector,
+            snapshot.epochLogFloor,
+          );
+          const fresh = requireFreshLinkRead(capabilityToken, capability);
+          const presentation = createAccountlessPathProjection(
+            fresh.effectiveSelector,
           );
           const files = snapshot.files.map((file) => {
             const path = presentation.projectPath(file.path);
@@ -2414,16 +2420,10 @@ export function createSyncRelayHandler({
               contentKind: file.contentKind,
             };
           });
-          const freshness = newestFilteredOpFreshness(
-            share.workspaceId,
-            capability.effectiveSelector,
-            snapshot.epochLogFloor,
-          );
-          requireFreshLinkRead(capabilityToken, capability);
-          return linkJsonResponse(capability.shareId, capability.grantId, {
+          return linkJsonResponse(fresh.shareId, fresh.grantId, {
             ok: true,
             effectiveSelector: presentation.selector,
-            access: capability.access,
+            access: fresh.access,
             files,
             nextCursor: snapshot.nextCursor,
             epochLogFloor: snapshot.epochLogFloor,
