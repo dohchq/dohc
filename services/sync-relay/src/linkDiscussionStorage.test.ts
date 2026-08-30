@@ -814,6 +814,124 @@ describe("durable link discussion storage", () => {
     expect(countRows(dbPath, "sync_relay_share_discussion_messages")).toBe(1);
   });
 
+  it("acknowledges a committed replay through pause but keeps stronger gates ahead of replay", async () => {
+    const { storage, dbPath } = await openStorage();
+    const seeded = seedShare(storage);
+    const first = append(storage, seeded, {
+      claimedName: "Alice",
+      body: "Committed before pause",
+      idempotencyKey: "lost-response",
+      createdAtMs: 2_000,
+    });
+    expect(first).toMatchObject({ ok: true, replayed: false });
+    expect(
+      storage.setShareLinkWritesPaused({
+        shareId: seeded.shareId,
+        workspaceId: seeded.workspaceId,
+        actorUserId: OWNER,
+        pausedAtMs: 2_100,
+      }),
+    ).toBe(true);
+
+    const snapshot = {
+      messages: countRows(dbPath, "sync_relay_share_discussion_messages"),
+      principals: countRows(dbPath, "sync_relay_link_principals"),
+      revision: storage.getShareDiscussionRevision(seeded.shareId),
+      usage: aggregateWorkspaceUsageBytes(dbPath, seeded.workspaceId),
+    };
+    const replay = append(storage, seeded, {
+      claimedName: "Alice",
+      body: "Committed before pause",
+      idempotencyKey: "lost-response",
+      createdAtMs: 2_101,
+    });
+    expect(replay).toEqual({ ...first, replayed: true });
+    expect(
+      append(storage, seeded, {
+        claimedName: "Alice",
+        body: "Conflicting retry",
+        idempotencyKey: "lost-response",
+        createdAtMs: 2_102,
+      }),
+    ).toEqual({ ok: false, reason: "idempotency-conflict" });
+    expect(
+      append(storage, seeded, {
+        claimedName: "Alice",
+        body: "Genuinely new",
+        idempotencyKey: "new-through-pause",
+        createdAtMs: 2_103,
+      }),
+    ).toEqual({ ok: false, reason: "paused" });
+    expect({
+      messages: countRows(dbPath, "sync_relay_share_discussion_messages"),
+      principals: countRows(dbPath, "sync_relay_link_principals"),
+      revision: storage.getShareDiscussionRevision(seeded.shareId),
+      usage: aggregateWorkspaceUsageBytes(dbPath, seeded.workspaceId),
+    }).toEqual(snapshot);
+
+    if (!first.ok) return;
+    expect(
+      storage.setLinkPrincipalBlocked({
+        shareId: seeded.shareId,
+        workspaceId: seeded.workspaceId,
+        principalId: first.principal.principalId,
+        actorUserId: OWNER,
+        blockedAtMs: 2_104,
+      }),
+    ).toBe(true);
+    expect(
+      append(storage, seeded, {
+        claimedName: "Alice",
+        body: "Committed before pause",
+        idempotencyKey: "lost-response",
+        createdAtMs: 2_105,
+      }),
+    ).toEqual({ ok: false, reason: "blocked" });
+
+    for (const transition of ["revoke", "rotate", "expire"] as const) {
+      const authority = seedShare(storage, { suffix: transition });
+      const accepted = append(storage, authority, {
+        profile: transition,
+        body: `Before ${transition}`,
+        idempotencyKey: `before-${transition}`,
+        createdAtMs: 2_000,
+      });
+      expect(accepted).toMatchObject({ ok: true, replayed: false });
+      if (transition === "revoke") {
+        expect(
+          storage.revokeShareGrant({
+            shareId: authority.shareId,
+            grantId: authority.grantId,
+            revokedAtMs: 2_100,
+            expectedDependentGrantIds: [],
+          }),
+        ).toMatchObject({ ok: true });
+      } else if (transition === "rotate") {
+        expect(
+          storage.rotateLinkGrant({
+            shareId: authority.shareId,
+            grantId: authority.grantId,
+            rotatedAtMs: 2_100,
+            expectedDependentGrantIds: [],
+            guard: () => {},
+            mintCredential: () => ({
+              credentialId: "rotated-replay-credential",
+              secretHash: "rotated-replay-secret-hash",
+            }),
+          }),
+        ).toMatchObject({ ok: true });
+      }
+      expect(
+        append(storage, authority, {
+          profile: transition,
+          body: `Before ${transition}`,
+          idempotencyKey: `before-${transition}`,
+          createdAtMs: transition === "expire" ? 1_001_000 : 2_101,
+        }),
+      ).toEqual({ ok: false, reason: "not-authorized" });
+    }
+  });
+
   it("keeps immutable provenance through refresh, retune, rotation, and block changes", async () => {
     const { storage } = await openStorage();
     const seeded = seedShare(storage);

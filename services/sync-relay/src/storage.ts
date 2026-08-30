@@ -3977,10 +3977,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       ) {
         return { ok: false, reason: "not-authorized" };
       }
-      if (authority.link_writes_paused_at_ms !== null) {
-        return { ok: false, reason: "paused" };
-      }
-
       const grantId = String(authority.grant_id);
       const shareId = String(authority.share_id);
       const workspaceId = String(authority.workspace_id);
@@ -4034,13 +4030,17 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
             message: rowToShareDiscussionMessageRow(replayRow),
           };
         }
-        if (
-          claimedName !== null &&
-          principal.displayName !== null &&
-          claimedName !== principal.displayName
-        ) {
-          return { ok: false, reason: "name-already-set" };
-        }
+      }
+      if (authority.link_writes_paused_at_ms !== null) {
+        return { ok: false, reason: "paused" };
+      }
+      if (
+        principal &&
+        claimedName !== null &&
+        principal.displayName !== null &&
+        claimedName !== principal.displayName
+      ) {
+        return { ok: false, reason: "name-already-set" };
       }
 
       if (!principal) {

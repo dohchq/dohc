@@ -3612,6 +3612,91 @@ describe("share discussion HTTP boundary", () => {
     expect(count(named.dbPath, "sync_relay_share_discussion_messages")).toBe(0);
   });
 
+  it("returns a committed link retry after pause without admitting a new write", async () => {
+    const test = await fixture();
+    const first = await test.handler(
+      trustedAppend(test.comment, {
+        body: "Committed before pause",
+        claimedName: "Retry Name",
+        idempotencyKey: "lost-before-pause",
+      }),
+    );
+    expect(first.status).toBe(200);
+    await first.arrayBuffer();
+    const committed = test.storage.listShareDiscussionMessages({
+      shareId: SHARE,
+      limit: 100,
+    }).messages[0]!;
+
+    const paused = await test.handler(
+      moderationRequest(OWNER, { action: "pause" }),
+    );
+    expect(paused.status).toBe(200);
+    await paused.arrayBuffer();
+    const snapshot = {
+      messages: count(test.dbPath, "sync_relay_share_discussion_messages"),
+      principals: count(test.dbPath, "sync_relay_link_principals"),
+      revision: test.storage.getShareDiscussionRevision(SHARE),
+      usage: workspaceUsage(test.dbPath, WORKSPACE),
+    };
+
+    const replay = await test.handler(
+      trustedAppend(test.comment, {
+        body: "Committed before pause",
+        claimedName: "Retry Name",
+        idempotencyKey: "lost-before-pause",
+      }),
+    );
+    expect(replay.status).toBe(200);
+    expect(await body(replay)).toMatchObject({
+      ok: true,
+      message: { messageId: committed.messageId, body: "Committed before pause" },
+    });
+    expect(
+      await genericRefusal(
+        await test.handler(
+          trustedAppend(test.comment, {
+            body: "Conflicting retry",
+            claimedName: "Retry Name",
+            idempotencyKey: "lost-before-pause",
+          }),
+        ),
+      ),
+    ).toContain("404:");
+    await discussionStateRefusal(
+      await test.handler(
+        trustedAppend(test.comment, {
+          body: "Genuinely new",
+          claimedName: "Retry Name",
+          idempotencyKey: "new-after-pause",
+        }),
+      ),
+      "paused",
+    );
+    expect({
+      messages: count(test.dbPath, "sync_relay_share_discussion_messages"),
+      principals: count(test.dbPath, "sync_relay_link_principals"),
+      revision: test.storage.getShareDiscussionRevision(SHARE),
+      usage: workspaceUsage(test.dbPath, WORKSPACE),
+    }).toEqual(snapshot);
+
+    const activity = await test.handler(
+      linkRequest(
+        test.comment,
+        `/sync/link/discussion/activity?since=${snapshot.revision}&hold=0&limit=100`,
+        {},
+        { profileSecret: PROFILE_A },
+      ),
+    );
+    expect(activity.status).toBe(200);
+    expect(await body(activity)).toMatchObject({
+      latestRevision: snapshot.revision,
+      cursorRevision: snapshot.revision,
+      messages: [],
+      composerState: "paused",
+    });
+  });
+
   it("admits link, named, and owner messages only at their complete deterministic quota charge", async () => {
     const actorBound = await fixture();
     const oversizedActor = await actorBound.handler(
@@ -4219,15 +4304,15 @@ describe("share discussion HTTP boundary", () => {
           trustedAppend(
             test.comment,
             {
-              body: "paused before blocked",
-              idempotencyKey: "paused-before-blocked",
+              body: "blocked while share paused",
+              idempotencyKey: "blocked-while-paused",
             },
             PROFILE_A,
           ),
         ),
-        "paused",
+        "blocked",
       ),
-    ).toContain("link_discussion_paused");
+    ).toContain("link_discussion_blocked");
     expect(
       (
         await test.handler(moderationRequest(OWNER, { action: "resume" }))
@@ -5502,11 +5587,11 @@ describe("share discussion HTTP boundary", () => {
     await discussionStateRefusal(
       await test.handler(
         trustedAppend(test.comment, {
-          body: "trusted paused",
-          idempotencyKey: "trusted-paused",
+          body: "trusted blocked while paused",
+          idempotencyKey: "trusted-blocked-while-paused",
         }),
       ),
-      "paused",
+      "blocked",
     );
     expect(
       (
