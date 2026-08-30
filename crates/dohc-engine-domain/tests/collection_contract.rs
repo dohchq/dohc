@@ -40,6 +40,22 @@ struct SchemaLimitVector {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SchemaReasonLimitVector {
+    name: String,
+    item_count: usize,
+    expected_reason_count: usize,
+    expected_terminal_reason: dohc_engine_domain::CollectionSchemaReason,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SchemaLimitFixture {
+    vectors: Vec<SchemaLimitVector>,
+    reason_vectors: Vec<SchemaReasonLimitVector>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct FieldValueVector {
     name: String,
     field: FieldDefinition,
@@ -134,32 +150,42 @@ fn collection_schema_results_match_the_typescript_oracle() {
 }
 
 #[test]
-fn collection_schema_caps_degradation_reasons_with_a_terminal_truncation_reason() {
-    let mut yaml = String::from("fields:\n");
-    for index in 0..16_385 {
-        yaml.push_str(&format!("  invalid_{index}: value\n"));
+fn collection_schema_reason_cap_matches_the_shared_boundary_vector() {
+    let fixture: SchemaLimitFixture =
+        serde_json::from_str(SCHEMA_LIMIT_FIXTURE).expect("schema-limit fixture parses");
+    for vector in fixture.reason_vectors {
+        let mut yaml = String::from("fields:\n");
+        for index in 0..vector.item_count {
+            yaml.push_str(&format!("  invalid_{index}: value\n"));
+        }
+
+        let parsed = parse_collection_schema(&yaml);
+
+        assert_eq!(
+            parsed.status,
+            CollectionSchemaStatus::Degraded,
+            "{}",
+            vector.name
+        );
+        assert!(parsed.schema.fields.is_empty(), "{}", vector.name);
+        assert_eq!(
+            parsed.reasons.len(),
+            vector.expected_reason_count,
+            "{}",
+            vector.name
+        );
+        assert_eq!(
+            parsed.reasons.last(),
+            Some(&vector.expected_terminal_reason),
+            "{}",
+            vector.name
+        );
     }
-
-    let parsed = parse_collection_schema(&yaml);
-
-    assert_eq!(parsed.status, CollectionSchemaStatus::Degraded);
-    assert!(parsed.schema.fields.is_empty());
-    assert_eq!(parsed.reasons.len(), 16_384);
-    assert_eq!(
-        parsed
-            .reasons
-            .last()
-            .map(|reason| (reason.code, reason.path.as_str())),
-        Some((
-            CollectionSchemaReasonCode::SchemaCollectionLimitExceeded,
-            "/reasons",
-        ))
-    );
 }
 
 #[test]
 fn collection_schema_item_caps_match_the_shared_boundary_vector() {
-    let fixture: Fixture<SchemaLimitVector> =
+    let fixture: SchemaLimitFixture =
         serde_json::from_str(SCHEMA_LIMIT_FIXTURE).expect("schema-limit fixture parses");
     for vector in fixture.vectors {
         let mut yaml = String::from("fields:\n");

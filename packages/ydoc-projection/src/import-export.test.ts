@@ -92,6 +92,36 @@ describe('Y.Doc markdown import/export', () => {
     }
   })
 
+  it('encodes unsafe frontmatter integers recursively as Y.Text', () => {
+    const vector = frontmatterVectors.find(
+      candidate => candidate.name === 'unsafe-integer-nesting-is-exact',
+    )
+    expect(vector).toBeDefined()
+    const doc = markdownToYDoc(vector!.markdown)
+    const replica = new Y.Doc()
+    Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc))
+
+    const frontmatter = replica.getMap<unknown>('frontmatter')
+    const nested = frontmatter.get('nested')
+    const sequence = frontmatter.get('sequence')
+    expect(nested).toBeInstanceOf(Y.Map)
+    expect(sequence).toBeInstanceOf(Y.Array)
+    const integers = [
+      frontmatter.get('exact'),
+      (nested as Y.Map<unknown>).get('exact'),
+      (sequence as Y.Array<unknown>).get(0),
+    ]
+    for (const integer of integers) {
+      expect(integer).toBeInstanceOf(Y.Text)
+      expect((integer as Y.Text).toString()).toBe('9007199254740993')
+    }
+    expect(getDohcYDocFrontmatter(replica)).toEqual({
+      exact: 9007199254740993n,
+      nested: { exact: 9007199254740993n },
+      sequence: [9007199254740993n],
+    })
+  })
+
   it('round-trips unsupported tagged frontmatter until its raw value changes', () => {
     const vector = frontmatterVectors.find(
       candidate => candidate.name === 'unsupported-explicit-tag-keeps-raw-value',

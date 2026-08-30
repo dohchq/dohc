@@ -46,10 +46,18 @@ interface SchemaLimitVector {
   expectedReasons: CollectionSchemaParseResult["reasons"];
 }
 
+interface SchemaReasonLimitVector {
+  name: string;
+  itemCount: number;
+  expectedReasonCount: number;
+  expectedTerminalReason: CollectionSchemaParseResult["reasons"][number];
+}
+
 const schemaVectors = schemaFixtureJson.vectors as SchemaVector[];
 const fieldValueVectors = fieldValueFixtureJson.vectors as FieldValueVector[];
 const recordIdVectors = recordIdFixtureJson.vectors as RecordIdVector[];
 const schemaLimitVectors = schemaLimitFixtureJson.vectors as SchemaLimitVector[];
+const reasonLimitVectors = schemaLimitFixtureJson.reasonVectors as SchemaReasonLimitVector[];
 
 describe("Collection reason-code contract", () => {
   it("matches the shared full reason-code set", () => {
@@ -150,20 +158,22 @@ describe("Collection schema contract vectors", () => {
     expect(parsed.reasons).toEqual(expectedReasons);
   });
 
-  it("caps degradation reasons with the same terminal reason as Rust", () => {
+  it.each(reasonLimitVectors)("matches $name", ({
+    itemCount,
+    expectedReasonCount,
+    expectedTerminalReason,
+  }) => {
     const fields = Array.from(
-      { length: 16_385 },
+      { length: itemCount },
       (_, index) => `  invalid_${index}: value`,
     ).join("\n");
 
     const parsed = parseCollectionSchema(`fields:\n${fields}\n`);
 
     expect(parsed.status).toBe("degraded");
-    expect(parsed.reasons).toHaveLength(16_384);
-    expect(parsed.reasons.at(-1)).toEqual({
-      code: "schema-collection-limit-exceeded",
-      path: "/reasons",
-    });
+    expect(parsed.schema.fields).toEqual([]);
+    expect(parsed.reasons).toHaveLength(expectedReasonCount);
+    expect(parsed.reasons.at(-1)).toEqual(expectedTerminalReason);
   });
 });
 

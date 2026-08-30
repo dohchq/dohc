@@ -55,6 +55,25 @@
       }
     },
     {
+      "name": "unsafe-integer-nesting-is-exact",
+      "markdown": "---\nexact: 9007199254740993\nnested:\n  exact: 9007199254740993\nsequence:\n  - 9007199254740993\n---",
+      "expected": {
+        "exact": {
+          "$dohcInt64": "9007199254740993"
+        },
+        "nested": {
+          "exact": {
+            "$dohcInt64": "9007199254740993"
+          }
+        },
+        "sequence": [
+          {
+            "$dohcInt64": "9007199254740993"
+          }
+        ]
+      }
+    },
+    {
       "name": "integral-float-outside-int64-remains-a-number",
       "markdown": "---\nexact: 1e20\n---",
       "expected": {

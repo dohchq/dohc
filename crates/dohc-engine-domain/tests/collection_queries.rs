@@ -1197,6 +1197,94 @@ fn changing_an_adopted_record_id_preserves_full_authored_history_under_the_new_i
 }
 
 #[test]
+fn deleted_record_id_without_field_history_stays_reserved() {
+    const SURVIVING_OBJECT_ID: &str = "object-7";
+    let (_scratch, mut store) = seeded_store();
+
+    store
+        .write_with(&NoFaults, |tx| {
+            set_collection_adoption_state_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                "tasks/alpha.md",
+                FIRST_TASK_ID,
+                "adopted",
+            )?;
+            set_collection_adoption_state_in_tx(
+                tx,
+                WORKSPACE_ID,
+                VERSION_ID,
+                "tasks/beta.md",
+                SECOND_TASK_ID,
+                "adopted",
+            )
+        })
+        .expect("adopt records before deleting one");
+    let history_count = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM collection_field_history \
+                 WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3",
+                params![WORKSPACE_ID, VERSION_ID, FIRST_TASK_ID],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .expect("count deleted record history before deletion");
+    assert_eq!(history_count, 0);
+
+    VersionedTextStore::new(&mut store)
+        .delete_text_file(
+            &DeleteTextFile {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                version_id: VERSION_ID.to_owned(),
+                path: "tasks/alpha.md".to_owned(),
+                moment_id: "delete-unedited-alpha".to_owned(),
+                request_id: None,
+                metadata_origin: "test".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 10,
+            },
+            &NoFaults,
+        )
+        .expect("delete unedited alpha");
+    store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile deleted unedited alpha");
+
+    write_text_for_object(
+        &mut store,
+        "tasks/beta.md",
+        &format!(
+            "---\nid: {FIRST_TASK_ID}\nTitle: Beta\nStatus: Todo\nRank: 1\nOwner: {SECOND_PERSON_ID}\n---\n"
+        ),
+        SURVIVING_OBJECT_ID,
+        "claim-unedited-deleted-alpha-id",
+        11,
+    )
+    .expect("edit beta to claim the unedited deleted id");
+    let reconciled = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile unedited deleted id claim");
+    let TxnOutcome::Committed(reconciled) = reconciled else {
+        panic!("unedited deleted id claim reconciliation crashed");
+    };
+    let replacement = reconciled
+        .adoptions
+        .iter()
+        .find(|candidate| candidate.object_id == SURVIVING_OBJECT_ID)
+        .expect("surviving record receives a replacement id");
+    assert_ne!(replacement.record_id, FIRST_TASK_ID);
+    assert_ne!(replacement.record_id, SECOND_TASK_ID);
+}
+
+#[test]
 fn deleted_record_id_stays_reserved_and_keeps_its_history() {
     const DELETED_OBJECT_ID: &str = "object-6";
     const SURVIVING_OBJECT_ID: &str = "object-7";

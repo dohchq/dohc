@@ -379,6 +379,18 @@ const frontmatter = [
     markdown: "---\nexact: 9007199254740993\n---",
   },
   {
+    name: "unsafe-integer-nesting-is-exact",
+    markdown: [
+      "---",
+      "exact: 9007199254740993",
+      "nested:",
+      "  exact: 9007199254740993",
+      "sequence:",
+      "  - 9007199254740993",
+      "---",
+    ].join("\n"),
+  },
+  {
     name: "integral-float-outside-int64-remains-a-number",
     markdown: "---\nexact: 1e20\n---",
   },
@@ -492,6 +504,17 @@ writeFixture("collection-schema-limits.json", {
         { code: "unknown-field-reference", path: "/views/0/groupBy" },
         { code: "schema-collection-limit-exceeded", path: "/views" },
       ],
+    },
+  ],
+  reasonVectors: [
+    {
+      name: "reasons-one-over-collection-limit",
+      itemCount: 16_385,
+      expectedReasonCount: 16_384,
+      expectedTerminalReason: {
+        code: "schema-collection-limit-exceeded",
+        path: "/reasons",
+      },
     },
   ],
 });

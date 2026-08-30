@@ -2572,22 +2572,35 @@ fn load_record_bindings(
         .map_err(crate::DomainError::sql_corrupt)
 }
 
-fn load_historical_record_ids(
+fn load_historical_record_owners(
     conn: &Connection,
     workspace_id: &str,
     version_id: &str,
-) -> Result<HashSet<String>, crate::DomainError> {
+) -> Result<HashMap<String, HashSet<String>>, crate::DomainError> {
     let mut statement = conn
         .prepare(
-            "SELECT DISTINCT record_id FROM collection_field_history \
-             WHERE workspace_id = ?1 AND version_id = ?2",
+            "SELECT m.object_id,b.text FROM moments m \
+             JOIN blobs b ON b.sha256=m.after_blob_sha256 \
+             WHERE m.workspace_id=?1 AND m.version_id=?2 \
+               AND m.after_content_kind='text' AND lower(substr(m.path,-3))='.md'",
         )
         .map_err(crate::DomainError::sql_corrupt)?;
-    statement
-        .query_map(params![workspace_id, version_id], |row| row.get(0))
-        .map_err(crate::DomainError::sql_corrupt)?
-        .collect::<Result<HashSet<_>, _>>()
-        .map_err(crate::DomainError::sql_corrupt)
+    let rows = statement
+        .query_map(params![workspace_id, version_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(crate::DomainError::sql_corrupt)?;
+    let mut owners_by_record_id: HashMap<String, HashSet<String>> = HashMap::new();
+    for row in rows {
+        let (object_id, text) = row.map_err(crate::DomainError::sql_corrupt)?;
+        if let Some(record_id) = markdown_record_id(&text).filter(|value| is_record_id(value)) {
+            owners_by_record_id
+                .entry(record_id)
+                .or_default()
+                .insert(object_id);
+        }
+    }
+    Ok(owners_by_record_id)
 }
 
 fn latest_historical_record_id(
@@ -2656,7 +2669,7 @@ pub fn reconcile_collections_in_tx(
 ) -> Result<CollectionReconcileResult, crate::DomainError> {
     let snapshots = load_collection_snapshots(tx, workspace_id, version_id)?;
     let existing = load_record_bindings(tx, workspace_id, version_id)?;
-    let historical_record_ids = load_historical_record_ids(tx, workspace_id, version_id)?;
+    let historical_record_owners = load_historical_record_owners(tx, workspace_id, version_id)?;
     let mut existing_by_object_id = HashMap::with_capacity(existing.len());
     for binding in &existing {
         existing_by_object_id
@@ -2837,7 +2850,7 @@ pub fn reconcile_collections_in_tx(
         .collect();
     let mut current_owners: HashMap<String, String> = HashMap::new();
     let mut absent_owners = HashSet::new();
-    let mut used_ids = historical_record_ids.clone();
+    let mut used_ids: HashSet<String> = historical_record_owners.keys().cloned().collect();
     for binding in &existing {
         let Some(record_id) = binding.record_id.as_ref() else {
             continue;
@@ -2940,7 +2953,13 @@ pub fn reconcile_collections_in_tx(
                         .filter(|record_id| {
                             current_owners.get(*record_id).map_or_else(
                                 || {
-                                    !historical_record_ids.contains(*record_id)
+                                    historical_record_owners
+                                        .get(*record_id)
+                                        .is_none_or(|owners| {
+                                            owners.iter().all(|owner| owner == &record.object_id)
+                                                || (existing_same_object.is_none()
+                                                    && absent_owners.contains(*record_id))
+                                        })
                                         && (absent_owners.contains(*record_id)
                                             || !existing_by_record_id
                                                 .contains_key(record_id.as_str()))
@@ -2975,8 +2994,13 @@ pub fn reconcile_collections_in_tx(
             let occupied_by_current = current_owners
                 .get(&record_id)
                 .is_some_and(|owner| owner != &record.object_id);
-            let occupied_by_history = historical_record_ids.contains(&record_id)
-                && current_owners.get(&record_id) != Some(&record.object_id);
+            let rebinds_absent_owner =
+                existing_same_object.is_none() && absent_owners.contains(&record_id);
+            let occupied_by_history = historical_record_owners
+                .get(&record_id)
+                .is_some_and(|owners| owners.iter().any(|owner| owner != &record.object_id))
+                && current_owners.get(&record_id) != Some(&record.object_id)
+                && !rebinds_absent_owner;
             let occupied_in_pass = claimed_ids
                 .get(&record_id)
                 .is_some_and(|owner_path| owner_path != &record.path);

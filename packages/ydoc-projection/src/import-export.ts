@@ -1244,14 +1244,14 @@ function writeMap(map: Y.Map<unknown>, values: Record<string, unknown>): void {
 }
 
 function frontmatterValueToY(value: unknown): unknown {
+  if (typeof value === 'bigint') {
+    const integer = new Y.Text()
+    integer.insert(0, value.toString())
+    return integer
+  }
   if (Array.isArray(value)) {
     const array = new Y.Array<unknown>()
-    array.insert(0, value.map((entry) => {
-      if (typeof entry !== 'bigint') return frontmatterValueToY(entry)
-      const integer = new Y.Text()
-      integer.insert(0, entry.toString())
-      return integer
-    }))
+    array.insert(0, value.map(frontmatterValueToY))
     return array
   }
   if (isFrontmatterMap(value)) {

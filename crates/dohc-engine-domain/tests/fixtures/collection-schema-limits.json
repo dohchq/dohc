@@ -20,5 +20,16 @@
         }
       ]
     }
+  ],
+  "reasonVectors": [
+    {
+      "name": "reasons-one-over-collection-limit",
+      "itemCount": 16385,
+      "expectedReasonCount": 16384,
+      "expectedTerminalReason": {
+        "code": "schema-collection-limit-exceeded",
+        "path": "/reasons"
+      }
+    }
   ]
 }
