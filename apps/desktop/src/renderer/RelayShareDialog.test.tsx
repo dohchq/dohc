@@ -1990,6 +1990,58 @@ describe("RelayShareDialog", () => {
     });
   });
 
+  it("refreshes the link and closes confirmation after a stale lifecycle failure", async () => {
+    const retune = controllable<{ outcome: "widened"; url: string }>();
+    const viewRow = readableLink("stale-retune", {
+      shareId: "share-stale-retune",
+      access: "view",
+    });
+    const commentRow = readableLink("stale-retune", {
+      shareId: "share-stale-retune",
+      access: "comment",
+    });
+    bridgeMock.listRelayShareLinks
+      .mockResolvedValueOnce({ links: [viewRow] })
+      .mockResolvedValueOnce({ links: [commentRow] });
+    bridgeMock.retuneRelayShareLink.mockReturnValueOnce(retune.promise);
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+
+    let row = await screen.findByTestId("share-link-row-stale-retune");
+    await user.click(within(row).getByRole("button", { name: "Turn on comments" }));
+    await user.click(
+      within(screen.getByTestId("share-link-confirmation")).getByRole("button", {
+        name: "Turn on comments",
+      }),
+    );
+    expect(bridgeMock.retuneRelayShareLink).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      retune.reject(new Error("The link changed on another device."));
+    });
+
+    expect(
+      await screen.findByText("The link changed on another device."),
+    ).toBeTruthy();
+    await vi.waitFor(() => {
+      expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
+    });
+    expect(screen.queryByTestId("share-link-confirmation")).toBeNull();
+    row = screen.getByTestId("share-link-row-stale-retune");
+    expect(within(row).getByText("Comment")).toBeTruthy();
+    expect(
+      within(row).getByRole("button", { name: "Turn off comments" }),
+    ).toBeTruthy();
+    expect(bridgeMock.retuneRelayShareLink).toHaveBeenCalledTimes(1);
+  });
+
   it("updates retune conflicts without retrying and requires fresh confirmation", async () => {
     const oldRow = readableLink("retune-conflict", {
       shareId: "share-retune",

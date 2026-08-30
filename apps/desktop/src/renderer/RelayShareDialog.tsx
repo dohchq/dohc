@@ -1426,6 +1426,8 @@ export function RelayShareDialog(props: {
         return;
       }
       setLifecycleError(errorMessage(cause));
+      setConfirmation(null);
+      void refreshLinks(scopeGeneration);
     } finally {
       if (
         isCurrentLinkScope(scopeGeneration) &&
