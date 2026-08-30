@@ -251,7 +251,6 @@ export function CommentsPanel(props: {
   const [submitError, setSubmitError] = useState(false);
   const sessionRef = useRef(props.session);
   const messagesRef = useRef<PublicDiscussionMessage[] | null>(null);
-  const activityRevisionRef = useRef(0);
   const pageTokenRef = useRef<symbol | null>(null);
   const pageControllerRef = useRef<AbortController | null>(null);
   const earlierPendingRef = useRef(false);
@@ -277,7 +276,6 @@ export function CommentsPanel(props: {
     pendingRef.current = false;
     intentRef.current = null;
     messagesRef.current = null;
-    activityRevisionRef.current = 0;
     earlierPendingRef.current = false;
     hasEarlierHistoryRef.current = false;
     seenEarlierCursorsRef.current = new Set();
@@ -299,7 +297,6 @@ export function CommentsPanel(props: {
       .then((loaded) => {
         if (!isCurrent()) return;
         messagesRef.current = loaded.messages;
-        activityRevisionRef.current = loaded.activityRevision;
         hasEarlierHistoryRef.current = loaded.nextCursor !== null;
         setMessages(loaded.messages);
         setEarlierCursor(loaded.nextCursor);
@@ -325,7 +322,6 @@ export function CommentsPanel(props: {
             if (!merged) return false;
             onAccessChangeRef.current?.(props.session, activity.access);
             messagesRef.current = merged;
-            activityRevisionRef.current = activity.cursorRevision;
             setMessages(merged);
             setComposerState(activity.composerState);
             return true;
@@ -375,9 +371,6 @@ export function CommentsPanel(props: {
         isCurrent,
       );
       if (!isCurrent() || !messagesRef.current) return;
-      if (page.activityRevision < activityRevisionRef.current) {
-        throw new Error("refused");
-      }
       if (
         page.nextCursor !== null &&
         seenEarlierCursorsRef.current.has(page.nextCursor)

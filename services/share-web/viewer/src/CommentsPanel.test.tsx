@@ -836,6 +836,108 @@ describe("CommentsPanel", () => {
     await settle(() => parkedSignal !== undefined);
   });
 
+  it("loads an earlier page after concurrent activity advances", async () => {
+    const stalePageMessage = {
+      ...LINK_MESSAGE,
+      messageId: "message-page-race",
+      createdAtMs: 2_000,
+      body: "Stale page body",
+    };
+    const deletedPageMessage = {
+      messageId: stalePageMessage.messageId,
+      createdAtMs: stalePageMessage.createdAtMs,
+      deleted: true as const,
+    };
+    const earlierMessage = {
+      ...NAMED_MESSAGE,
+      messageId: "message-earlier",
+      createdAtMs: 1_000,
+      body: "Earlier history",
+    };
+    const initialTail = {
+      ...NAMED_MESSAGE,
+      messageId: "message-initial-tail",
+      createdAtMs: 4_000,
+      body: "Initial tail",
+    };
+    const concurrentMessage = {
+      ...LINK_MESSAGE,
+      messageId: "message-concurrent",
+      createdAtMs: 5_000,
+      body: "Concurrent activity",
+    };
+    const activity = heldJsonResponse(200);
+    const earlierPage = heldJsonResponse(200);
+    let parkedSignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/view/discussion?direction=newest-first") {
+        return discussionPageAt(
+          7,
+          [stalePageMessage, initialTail],
+          "cursor_concurrent",
+        );
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        return activity.response;
+      }
+      if (
+        path ===
+        "/api/view/discussion?direction=newest-first&cursor=cursor_concurrent"
+      ) {
+        return earlierPage.response;
+      }
+      if (path === "/api/view/discussion/activity?since=8&hold=30000&limit=100") {
+        parkedSignal = init?.signal ?? undefined;
+        return await new Promise<Response>(() => undefined);
+      }
+      throw new Error(`unexpected request: ${path}`);
+    }));
+
+    await render("view");
+    await settle(activity.bodyStarted);
+    clickButton("Load earlier comments");
+    await settle(earlierPage.bodyStarted);
+
+    activity.release({
+      ok: true,
+      access: "view",
+      latestRevision: 8,
+      cursorRevision: 8,
+      hasMore: false,
+      messages: [deletedPageMessage, concurrentMessage],
+      composerState: "available",
+    });
+    await settle(() =>
+      parkedSignal !== undefined &&
+      container.textContent?.includes("Concurrent activity") === true &&
+      container.textContent?.includes("Comment deleted by the owner") === true
+    );
+
+    earlierPage.release({
+      ok: true,
+      activityRevision: 7,
+      messages: [earlierMessage, stalePageMessage].reverse(),
+      nextCursor: null,
+      profileName: null,
+    });
+    await settle(() =>
+      container.textContent?.includes("Earlier history") === true ||
+      container.textContent?.includes("Earlier comments didn't load.") === true
+    );
+
+    expect([...container.querySelectorAll(".comment-row")].map((row) => row.textContent))
+      .toEqual([
+        "Named PersonEarlier history",
+        "Comment deleted by the owner",
+        "Named PersonInitial tail",
+        "Link PersonUnverifiedConcurrent activity",
+      ]);
+    expect(container.textContent).not.toContain("Stale page body");
+    expect(container.textContent).not.toContain("Earlier comments didn't load.");
+    expect(container.textContent).not.toContain("Load earlier comments");
+  });
+
   it("keeps backdated activity before a complete initial history and follows its revision", async () => {
     const initial = {
       ...LINK_MESSAGE,
