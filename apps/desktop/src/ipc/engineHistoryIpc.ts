@@ -4,14 +4,18 @@
 // Electron or process state.
 import type { VersionedTextMomentSummary } from "@dohc/workspace-contracts/engine";
 import type {
+  WorkspaceEngineCapture,
   WorkspaceEngineMomentDetail,
   WorkspaceEngineMomentSummary,
 } from "../workspaces/workspaceEngineCapture";
 import type {
   EngineMomentDetailRecord,
   EngineMomentRecord,
+  ListEngineMomentsResponse,
   WorkspaceVersionConflict,
 } from "./bridgeContract";
+import { ListEngineMomentsResponse as ListEngineMomentsResponseSchema } from "./bridgeContract";
+import { isHistoryUpdatingRefusal } from "@dohc/workspace-engine-client";
 
 // PR 0N-1: main supplies the SAME display-name rule the chat rail uses
 // (onBehalfOf "local" -> the cloud email or "You"; anything else is already
@@ -19,6 +23,29 @@ import type {
 export type EngineMomentAuthorNamer = (
   author: NonNullable<VersionedTextMomentSummary["author"]>,
 ) => string;
+
+export async function listEngineMomentsForIpc(
+  read: () => ReturnType<WorkspaceEngineCapture["listMoments"]>,
+  agentAuthorDisplayName: EngineMomentAuthorNamer,
+): Promise<ListEngineMomentsResponse> {
+  try {
+    const page = await read();
+    return ListEngineMomentsResponseSchema.parse({
+      moments: page.moments.map((moment) =>
+        engineMomentForIpc(moment, agentAuthorDisplayName),
+      ),
+      nextBeforeMomentOrder: page.nextBeforeMomentOrder,
+      latestMomentOrder: page.latestMomentOrder,
+      activeVersionId: page.activeVersionId,
+      protectedTruncated: page.protectedTruncated,
+    });
+  } catch (error) {
+    if (isHistoryUpdatingRefusal(error)) {
+      return ListEngineMomentsResponseSchema.parse({ status: "updating" });
+    }
+    throw error;
+  }
+}
 
 // The shared id/version/path/timestamp/metadata shape both engine-moment
 // record formats are built from — one mapper so they can never drift.

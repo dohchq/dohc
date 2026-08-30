@@ -148,11 +148,17 @@ test("switching A->B while panels load never shows A's history or chats in B", a
           listEngineMoments(payload: {
             workspaceId: string;
             limit: number;
-          }): Promise<{ moments: unknown[]; latestMomentOrder: number }>;
+          }): Promise<
+            | { moments: unknown[]; latestMomentOrder: number }
+            | { status: "updating" }
+          >;
         };
       }).dohcDesktop;
       const start = performance.now();
       const pageResult = await api.listEngineMoments({ workspaceId: id, limit: 200 });
+      if ("status" in pageResult) {
+        throw new Error("History was still updating after its first row rendered.");
+      }
       return {
         ms: performance.now() - start,
         momentCount: pageResult.moments.length,

@@ -37,6 +37,7 @@ import type {
   EngineMomentRecord,
   EngineStoreRefusal,
   ImportWorkspaceFilesResult,
+  ListEngineMomentsResult,
   MyShareChangeRow,
   RefreshSharedViewResult,
   RebuildEngineStoreResult,
@@ -679,6 +680,15 @@ const LazyRelayShareDialog = lazy(() =>
   import("./RelayShareDialog").then((mod) => ({ default: mod.RelayShareDialog })),
 );
 const MARKDOWN_PRELOAD_IDLE_DELAY_MS = 150;
+// A history read already spent one second in the daemon's capture-flush
+// ladder before it can answer `updating`. Four renderer retries give that
+// flush another 1.85 seconds of breathing room without leaving the panel in
+// an unbounded spinner. After this ladder, the inline Try again remains.
+const HISTORY_UPDATING_RETRY_DELAYS_MS = [100, 250, 500, 1_000] as const;
+
+function waitForHistoryRetry(delayMs: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
 
 // How often an open workspace re-reads the share state only the relay knows:
 // a recipient's mounts, and a granter's waiting changes. Slow on purpose —
@@ -2719,7 +2729,9 @@ export function DesktopWorkspaceShell(props: {
   // stale and asked again. "No changes yet" is an assertion about the
   // WORKSPACE, so only a read that answered may reach it (#593) — this says
   // whether the newest read answered at all.
-  const [engineHistoryReadFailed, setEngineHistoryReadFailed] = useState(false);
+  const [engineHistoryReadState, setEngineHistoryReadState] = useState<
+    "loading" | "failed" | "updating"
+  >("loading");
   // The newest history refresh ISSUED. Only it may call the surface
   // unloadable: an older read failing while a newer one is still in flight
   // has settled nothing. Kept apart from the committed-page watermark on
@@ -2943,7 +2955,7 @@ export function DesktopWorkspaceShell(props: {
       // A read is on the way, so the surface does not know yet — which is a
       // different thing from knowing the last read failed. Saying so here is
       // also what makes the retry control show that it is working.
-      setEngineHistoryReadFailed(false);
+      setEngineHistoryReadState("loading");
       // Four reads ride one refresh, and they answer four different
       // questions. One batch made every answer hostage to the worst of them:
       // a try-state failure discarded a history page the engine had already
@@ -2959,7 +2971,29 @@ export function DesktopWorkspaceShell(props: {
       // user has already acted on — a dismissed review card, most visibly.
       // Each is handed whole to the lane rule, which judges both ways it can
       // settle.
-      const pageRead = bridge().listEngineMoments({ workspaceId, limit: 200 });
+      const pageRead = (async () => {
+        for (
+          let attempt = 0;
+          attempt <= HISTORY_UPDATING_RETRY_DELAYS_MS.length;
+          attempt += 1
+        ) {
+          const response = await bridge().listEngineMoments({
+            workspaceId,
+            limit: 200,
+          });
+          if (!("status" in response)) return response;
+          if (
+            attempt === HISTORY_UPDATING_RETRY_DELAYS_MS.length ||
+            token !== newestEngineHistoryRefresh.current
+          ) {
+            return response;
+          }
+          await waitForHistoryRetry(HISTORY_UPDATING_RETRY_DELAYS_MS[attempt]!);
+          if (token !== newestEngineHistoryRefresh.current) return response;
+        }
+        // The loop's inclusive bound always returns on its final attempt.
+        throw new Error("History retry ladder ended without an answer.");
+      })();
       // Asking again IS this refresh: it re-reads all four, so the lane that
       // failed is read again. Same control the History surface offers for its
       // own read, and the same one the caller runs on any activity.
@@ -2993,19 +3027,26 @@ export function DesktopWorkspaceShell(props: {
             askAgain,
           ),
       );
-      let page: Awaited<typeof pageRead>;
+      let response: Awaited<typeof pageRead>;
       try {
-        page = await pageRead;
+        response = await pageRead;
       } catch (error) {
         // A failure is an answer too — about why the surface is blank, not
         // about what the timeline holds. Only the newest read may give it:
         // an older one failing while a newer is still in flight has settled
         // nothing, and after unmount the counter belongs to no read at all.
         if (token === newestEngineHistoryRefresh.current) {
-          setEngineHistoryReadFailed(true);
+          setEngineHistoryReadState("failed");
         }
         throw error;
       }
+      if ("status" in response) {
+        if (token === newestEngineHistoryRefresh.current) {
+          setEngineHistoryReadState("updating");
+        }
+        return "waiting" as const;
+      }
+      const page: ListEngineMomentsResult = response;
       if (token <= committedEngineHistoryToken.current) return;
       // An answer describing the version the user left is not late — it is
       // about somewhere else.
@@ -3039,7 +3080,7 @@ export function DesktopWorkspaceShell(props: {
         return;
       }
       commit();
-      return;
+      return "ready" as const;
     }
     // Opted-out workspace (retirement Phase C): no history source exists —
     // only status and agent state refresh. They ride the same issue order as
@@ -3054,6 +3095,7 @@ export function DesktopWorkspaceShell(props: {
     ]);
     syncStatusLane.commit(token, status);
     agentActiveLane.commit(token, agent.activeRun !== null);
+    return "ready" as const;
   }, [
     agentActiveLane,
     engineEnabled,
@@ -3085,6 +3127,10 @@ export function DesktopWorkspaceShell(props: {
         limit: 200,
         beforeMomentOrder: cursor,
       });
+      // The displayed page remains the honest last answer while capture is
+      // settling. Releasing the loading button below gives the user a bounded
+      // retry; this expected progress result is never a global error.
+      if ("status" in page) return;
       // The committed-answer rule, applied to this page as well: display it
       // unless a NEWER answer already took the timeline. Superseding on issue
       // here let a newer refresh that merely FAILED throw this page away.
@@ -3232,8 +3278,8 @@ export function DesktopWorkspaceShell(props: {
   useEffect(() => {
     if (!workspaceIsReady || engineReadForWorkspace === null) return;
     void refreshHistory()
-      .then(() => {
-        markCurrentSwitchPhase("history-ready");
+      .then((outcome) => {
+        if (outcome === "ready") markCurrentSwitchPhase("history-ready");
       })
       .catch((error) => reportShellError("Could not refresh history.", error));
   }, [
@@ -5451,17 +5497,30 @@ export function DesktopWorkspaceShell(props: {
         onLoadMore={() => void loadMoreEngineHistory()}
         onOpenMoment={openMomentDiffTab}
       />
-    ) : engineHistoryReadFailed ? (
+    ) : engineHistoryReadState === "failed" ||
+      engineHistoryReadState === "updating" ? (
       // The same state its two siblings render — ChatsView and LinkedChats
       // both say a panel could not load beside a Try again — so it takes
       // their look, not the empty-state recipe next door. One line, and a
       // Next that works on this surface: the read this panel runs itself.
       <div
-        data-testid="history-load-failed"
+        data-testid={
+          engineHistoryReadState === "updating"
+            ? "history-updating"
+            : "history-load-failed"
+        }
         className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center"
       >
-        <span className="text-xs text-danger">
-          dohc could not load this workspace&apos;s history.
+        <span
+          className={
+            engineHistoryReadState === "updating"
+              ? "text-xs text-muted"
+              : "text-xs text-danger"
+          }
+        >
+          {engineHistoryReadState === "updating"
+            ? "Recent changes are still being added to History."
+            : "dohc could not load this workspace's history."}
         </span>
         <button
           type="button"

@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   engineMomentDetailForIpc,
+  listEngineMomentsForIpc,
   versionConflictForIpc,
   type EngineMomentAuthorNamer,
 } from "./engineHistoryIpc";
@@ -17,12 +18,46 @@ import type {
   VersionedTextMoment,
 } from "@dohc/workspace-contracts/engine";
 import type { WorkspaceEngineMomentDetail } from "../workspaces/workspaceEngineCapture";
+import { DaemonRefusalError } from "@dohc/workspace-engine-client";
 
 const namer: EngineMomentAuthorNamer = (author) =>
   author.onBehalfOf === "local" ? "You" : author.onBehalfOf;
 
 const TEXT_SHA = "a".repeat(64);
 const BINARY_SHA = "b".repeat(64);
+
+describe("listEngineMomentsForIpc", () => {
+  it("preserves the expected updating refusal as a structured IPC result", async () => {
+    const updating = new DaemonRefusalError(
+      {
+        code: "OVERLOADED",
+        message: "History is still updating. Try again.",
+        retry: "afterBackoff",
+      },
+      null,
+    );
+    const read = vi.fn(() => Promise.reject(updating));
+
+    await expect(listEngineMomentsForIpc(read, namer)).resolves.toEqual({
+      status: "updating",
+    });
+  });
+
+  it("does not reclassify an unknown daemon failure", async () => {
+    const unknown = new DaemonRefusalError(
+      {
+        code: "OVERLOADED",
+        message: "The engine is overloaded.",
+        retry: "afterBackoff",
+      },
+      null,
+    );
+
+    await expect(
+      listEngineMomentsForIpc(() => Promise.reject(unknown), namer),
+    ).rejects.toBe(unknown);
+  });
+});
 
 function textSide(text: string) {
   return {

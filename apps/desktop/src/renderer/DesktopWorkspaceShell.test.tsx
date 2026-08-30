@@ -32,6 +32,7 @@ import type {
   EngineMomentRecord,
   FileChatThreadRecord,
   ImportWorkspaceFilesResult,
+  ListEngineMomentsResponse,
   ListEngineMomentsResult,
   ListFileChatsResult,
   ListMyShareChangesResult,
@@ -694,7 +695,7 @@ function makeEngineBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     // Typed to the contract, not to this empty default: a test that drives
     // real pages must be able to swap the implementation.
     listEngineMoments: vi.fn(
-      async (): Promise<ListEngineMomentsResult> => ({
+      async (): Promise<ListEngineMomentsResponse> => ({
         moments: [],
         nextBeforeMomentOrder: null,
         latestMomentOrder: 0,
@@ -9911,6 +9912,63 @@ describe("history page", () => {
       protectedTruncated: false,
     };
   }
+
+  it("retries an updating history inline until it is ready without a global error", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let issued = 0;
+      const bridge = makeEngineBridge(Promise.resolve(null));
+      bridge.listEngineMoments = vi.fn(async (): Promise<ListEngineMomentsResponse> => {
+        issued += 1;
+        return issued === 1
+          ? { status: "updating" }
+          : historyPage([historyMoment("m-ready", "Captured after updating")]);
+      });
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      renderShell(bridge);
+
+      await user.click(screen.getByTestId("activity-history"));
+      await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+      expect(screen.getByText("Loading history...")).toBeTruthy();
+      expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+
+      await act(async () => {
+        await vi.runOnlyPendingTimersAsync();
+      });
+
+      expect(await screen.findByText("Captured after updating")).toBeTruthy();
+      expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+      expect(document.body.textContent).not.toContain(
+        "History is still updating. Try again.",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops retrying an updating history and leaves the retry inline", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const bridge = makeEngineBridge(Promise.resolve(null));
+      bridge.listEngineMoments = vi.fn(
+        async (): Promise<ListEngineMomentsResponse> => ({ status: "updating" }),
+      );
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      renderShell(bridge);
+
+      await user.click(screen.getByTestId("activity-history"));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000);
+      });
+
+      expect(bridge.listEngineMoments).toHaveBeenCalledTimes(5);
+      expect(await screen.findByTestId("history-updating")).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
+      expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it("shows the protected truncation marker from the history page", async () => {
     const bridge = makeEngineBridge(Promise.resolve(null));

@@ -1062,6 +1062,23 @@ export const ListEngineMomentsResult = z.object({
 });
 export type ListEngineMomentsResult = z.infer<typeof ListEngineMomentsResult>;
 
+// `history.page` can answer that its capture flush is still settling. Main
+// classifies that typed daemon refusal before Electron serializes it into a
+// generic rejected invoke, then sends this small progress result instead.
+export const ListEngineMomentsUpdatingResult = z.object({
+  status: z.literal("updating"),
+});
+export type ListEngineMomentsUpdatingResult = z.infer<
+  typeof ListEngineMomentsUpdatingResult
+>;
+export const ListEngineMomentsResponse = z.union([
+  ListEngineMomentsResult,
+  ListEngineMomentsUpdatingResult,
+]);
+export type ListEngineMomentsResponse = z.infer<
+  typeof ListEngineMomentsResponse
+>;
+
 export const ReadEngineMomentPayload = z.object({
   workspaceId: WORKSPACE_ID,
   momentId: MOMENT_ID,
@@ -5312,7 +5329,7 @@ export interface DohcDesktopBridge {
   // workspace-engine alpha flag: for unflagged workspaces every call rejects.
   listEngineMoments(
     payload: ListEngineMomentsPayload,
-  ): Promise<ListEngineMomentsResult>;
+  ): Promise<ListEngineMomentsResponse>;
   readEngineMoment(
     payload: ReadEngineMomentPayload,
   ): Promise<ReadEngineMomentResult>;

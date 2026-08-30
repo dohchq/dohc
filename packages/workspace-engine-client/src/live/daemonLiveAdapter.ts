@@ -128,6 +128,18 @@ function refusalMessageOf(
   return typeof wireError.message === "string" ? wireError.message : null;
 }
 
+// `history.page` flushes capture before it reads. When that bounded flush has
+// not settled yet, OVERLOADED is a progress answer rather than a broken
+// history store. Keep the exact discriminator at the daemon boundary, while
+// the typed refusal still exists; Electron does not preserve this prototype
+// on a rejected invoke.
+export function isHistoryUpdatingRefusal(error: unknown): boolean {
+  return (
+    refusalMessageOf(error, "OVERLOADED") ===
+    "History is still updating. Try again."
+  );
+}
+
 export function isYdocSessionNotFoundRefusal(error: unknown): boolean {
   return refusalMessageOf(error) === "ydoc-session-not-found";
 }

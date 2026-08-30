@@ -147,7 +147,6 @@ import {
   TryInWorkspaceVersionResult,
   WorkspaceVersionRecord,
   ListEngineMomentsPayload,
-  ListEngineMomentsResult,
   ReadEngineMomentPayload,
   ReadEngineMomentResult,
   RestoreEngineMomentFilePayload,
@@ -544,7 +543,7 @@ import {
 } from "./workspaces/workspaceSecretEnrollmentState";
 import {
   engineMomentDetailForIpc,
-  engineMomentForIpc,
+  listEngineMomentsForIpc,
   versionConflictForIpc,
 } from "./ipc/engineHistoryIpc";
 import {
@@ -10123,21 +10122,16 @@ function registerIpcHandlers(
       input.workspaceId,
       "Engine history",
     );
-    const page = await capture.listMoments({
-      ...(input.limit !== undefined ? { limit: input.limit } : {}),
-      ...(input.beforeMomentOrder !== undefined
-        ? { beforeMomentOrder: input.beforeMomentOrder }
-        : {}),
-    });
-    return ListEngineMomentsResult.parse({
-      moments: page.moments.map((moment) =>
-        engineMomentForIpc(moment, agentAuthorDisplayName),
-      ),
-      nextBeforeMomentOrder: page.nextBeforeMomentOrder,
-      latestMomentOrder: page.latestMomentOrder,
-      activeVersionId: page.activeVersionId,
-      protectedTruncated: page.protectedTruncated,
-    });
+    return listEngineMomentsForIpc(
+      () =>
+        capture.listMoments({
+          ...(input.limit !== undefined ? { limit: input.limit } : {}),
+          ...(input.beforeMomentOrder !== undefined
+            ? { beforeMomentOrder: input.beforeMomentOrder }
+            : {}),
+        }),
+      agentAuthorDisplayName,
+    );
   });
 
   ipcMain.handle(CHANNELS.readEngineMoment, async (event, payload) => {
