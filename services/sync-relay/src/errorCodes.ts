@@ -6,6 +6,8 @@ export const RELAY_ERROR_STATUSES = Object.freeze({
   blob_not_found: 404,
   conflict: 409,
   dependents_changed: 409,
+  discussion_limit_reached: 413,
+  discussion_rate_limited: 429,
   empty_selector: 400,
   epoch_superseded: 409,
   identity_not_recognized: 409,

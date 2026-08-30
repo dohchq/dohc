@@ -12739,10 +12739,12 @@ fn map_relay_code(error: RelayError) -> ErrorCode {
         // it, because the share-view pull records it as a skipped op instead.
         | RelayError::ShareBlobOverCeiling { .. } => ErrorCode::PayloadTooLarge,
         RelayError::QuotaExceeded => ErrorCode::QuotaExceeded,
-        // A 429 on link reads asks the caller to back off and retry, which is
-        // exactly Overloaded's wire contract (Retryability::AfterBackoff) —
-        // unlike QuotaExceeded, which reads as a persistent ceiling.
-        RelayError::LinkReadRateLimited => ErrorCode::Overloaded,
+        // A 429 asks the caller to back off and retry, which is exactly
+        // Overloaded's wire contract (Retryability::AfterBackoff) — unlike
+        // QuotaExceeded, which reads as a persistent ceiling.
+        RelayError::DiscussionRateLimited | RelayError::LinkReadRateLimited => {
+            ErrorCode::Overloaded
+        }
         RelayError::NoProgress => ErrorCode::RelayNoProgress,
         RelayError::BlobMissing => ErrorCode::BlobMissing,
         RelayError::BlobReferenceMissing => ErrorCode::BlobReferenceMissing,
@@ -14161,6 +14163,8 @@ mod tests {
                 ErrorCode::IdentityNotRecognized,
             ),
             (RelayError::QuotaExceeded, ErrorCode::QuotaExceeded),
+            (RelayError::DiscussionRateLimited, ErrorCode::Overloaded),
+            (RelayError::LinkReadRateLimited, ErrorCode::Overloaded),
             (RelayError::PayloadTooLarge, ErrorCode::PayloadTooLarge),
             (RelayError::Forbidden, ErrorCode::Forbidden),
             (RelayError::ShareReadOnly, ErrorCode::ShareReadOnly),
@@ -14210,6 +14214,17 @@ mod tests {
             map_relay_code(RelayError::Partitioned),
             ErrorCode::WorkspaceUnavailable
         );
+        for relay in [
+            RelayError::DiscussionRateLimited,
+            RelayError::LinkReadRateLimited,
+        ] {
+            let wire = map_runtime(RuntimeError::Relay(relay));
+            assert_eq!(wire.code, ErrorCode::Overloaded);
+            assert_eq!(
+                wire.retry,
+                dohc_engine_protocol::Retryability::AfterBackoff
+            );
+        }
     }
 
     #[test]

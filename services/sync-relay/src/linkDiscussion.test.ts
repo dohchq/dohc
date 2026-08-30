@@ -9,6 +9,7 @@ import { DiscussionActivityHub } from "./discussionActivity";
 import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
 import {
   openSyncRelayStorage,
+  type OpenSyncRelayStorageOptions,
   type SyncRelayStorage,
 } from "./storage";
 
@@ -32,6 +33,7 @@ interface InspectionStatement {
 
 interface InspectionDatabase {
   prepare(sql: string): InspectionStatement;
+  exec(sql: string): void;
   close(): void;
 }
 
@@ -85,6 +87,12 @@ async function fixture(
     namedRecipient?: string;
     discussionActivity?: DiscussionActivityHub;
     nowMs?: () => number;
+    discussionLimits?: Pick<
+      OpenSyncRelayStorageOptions,
+      | "discussionMessageRateLimit"
+      | "discussionLifetimeMessageLimit"
+      | "discussionNonOwnerShareRowLimit"
+    >;
   } = {},
 ): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), "dohc-link-discussion-http-"));
@@ -94,6 +102,7 @@ async function fixture(
   const storage = openSyncRelayStorage(dbPath, {
     newDiscussionId: () => `discussion-row-${++discussionId}`,
     workspaceQuotaBytes: overrides.workspaceQuotaBytes,
+    ...overrides.discussionLimits,
   });
   storages.push(storage);
   expect(
@@ -1618,8 +1627,221 @@ describe("share discussion HTTP boundary", () => {
     expect(
       test.storage
         .listShareDiscussionMessages({ shareId: SHARE, limit: 100 })
-        .messages.map((message) => message.authorUserId),
-    ).toEqual([OWNER, COMMENTER, EDITOR]);
+        .messages.map((message) => ({
+          authorKind: message.authorKind,
+          authorUserId: message.authorUserId,
+        })),
+    ).toEqual([
+      { authorKind: "owner", authorUserId: OWNER },
+      { authorKind: "named", authorUserId: COMMENTER },
+      { authorKind: "named", authorUserId: EDITOR },
+    ]);
+    const projected = (await body(
+      await test.handler(request(COMMENTER, `/sync/shares/${SHARE}/discussion`)),
+    )).messages as Array<{ author: { kind: string } }>;
+    expect(projected.map((message) => message.author.kind)).toEqual([
+      "named",
+      "named",
+      "named",
+    ]);
+  });
+
+  it("returns authenticated rate, recipient, and share limit errors exactly", async () => {
+    const rate = await fixture({
+      discussionLimits: {
+        discussionMessageRateLimit: 1,
+        discussionLifetimeMessageLimit: 10,
+        discussionNonOwnerShareRowLimit: 10,
+      },
+    });
+    expect(
+      await rate.handler(
+        request(
+          COMMENTER,
+          `/sync/shares/${SHARE}/discussion`,
+          jsonRequest({ body: "first", idempotencyKey: "rate-first" }),
+        ),
+      ),
+    ).toMatchObject({ status: 200 });
+    const rateLimited = await rate.handler(
+      request(
+        COMMENTER,
+        `/sync/shares/${SHARE}/discussion`,
+        jsonRequest({ body: "second", idempotencyKey: "rate-second" }),
+      ),
+    );
+    expect(rateLimited.status).toBe(429);
+    expect(rateLimited.headers.get("cache-control")).toBe("private, no-store");
+    expect(await body(rateLimited)).toEqual({
+      ok: false,
+      error: "discussion message rate limit reached",
+      code: "discussion_rate_limited",
+    });
+
+    const lifetime = await fixture({
+      discussionLimits: {
+        discussionMessageRateLimit: 10,
+        discussionLifetimeMessageLimit: 1,
+        discussionNonOwnerShareRowLimit: 10,
+      },
+    });
+    await lifetime.handler(
+      request(
+        COMMENTER,
+        `/sync/shares/${SHARE}/discussion`,
+        jsonRequest({ body: "first", idempotencyKey: "lifetime-first" }),
+      ),
+    );
+    const lifetimeLimited = await lifetime.handler(
+      request(
+        COMMENTER,
+        `/sync/shares/${SHARE}/discussion`,
+        jsonRequest({ body: "second", idempotencyKey: "lifetime-second" }),
+      ),
+    );
+    expect(lifetimeLimited.status).toBe(413);
+    expect(lifetimeLimited.headers.get("cache-control")).toBe("private, no-store");
+    expect(await body(lifetimeLimited)).toEqual({
+      ok: false,
+      error: "recipient discussion message limit reached",
+      code: "discussion_limit_reached",
+    });
+
+    const share = await fixture({
+      discussionLimits: {
+        discussionMessageRateLimit: 10,
+        discussionLifetimeMessageLimit: 10,
+        discussionNonOwnerShareRowLimit: 1,
+      },
+    });
+    await share.handler(
+      request(
+        COMMENTER,
+        `/sync/shares/${SHARE}/discussion`,
+        jsonRequest({ body: "first", idempotencyKey: "share-first" }),
+      ),
+    );
+    const shareLimited = await share.handler(
+      request(
+        EDITOR,
+        `/sync/shares/${SHARE}/discussion`,
+        jsonRequest({ body: "second", idempotencyKey: "share-second" }),
+      ),
+    );
+    expect(shareLimited.status).toBe(413);
+    expect(shareLimited.headers.get("cache-control")).toBe("private, no-store");
+    expect(await body(shareLimited)).toEqual({
+      ok: false,
+      error: "share discussion message limit reached",
+      code: "discussion_limit_reached",
+    });
+    const ownerAfterLimit = await share.handler(
+      request(
+        OWNER,
+        `/sync/shares/${SHARE}/discussion`,
+        jsonRequest({ body: "owner", idempotencyKey: "share-owner" }),
+      ),
+    );
+    expect(ownerAfterLimit.status).toBe(200);
+    expect(
+      share.storage.listShareDiscussionMessages({ shareId: SHARE, limit: 10 }).messages,
+    ).toMatchObject([
+      { authorKind: "named", authorUserId: COMMENTER },
+      { authorKind: "owner", authorUserId: OWNER },
+    ]);
+  });
+
+  it("charges the transaction-current recipient role after an owner loses ownership", async () => {
+    let dbPath = "";
+    let moveOwnerDuringNameLookup = false;
+    const setOwner = (ownerUserId: string) => {
+      const inspection = new InspectionDatabaseSync(dbPath);
+      try {
+        inspection.exec("BEGIN IMMEDIATE");
+        inspection
+          .prepare(
+            `UPDATE sync_relay_workspaces
+             SET owner_user_id = ?
+             WHERE workspace_id = ?`,
+          )
+          .run(ownerUserId, WORKSPACE);
+        inspection
+          .prepare(
+            `UPDATE sync_relay_shares
+             SET granter_user_id = ?
+             WHERE share_id = ?`,
+          )
+          .run(ownerUserId, SHARE);
+        inspection.exec("COMMIT");
+      } catch (error) {
+        try {
+          inspection.exec("ROLLBACK");
+        } catch {}
+        throw error;
+      } finally {
+        inspection.close();
+      }
+    };
+    const test = await fixture({
+      discussionLimits: {
+        discussionMessageRateLimit: 10,
+        discussionLifetimeMessageLimit: 1,
+        discussionNonOwnerShareRowLimit: 10,
+      },
+      lookupUserDisplayName: (userId) => {
+        if (userId === OWNER && moveOwnerDuringNameLookup) {
+          moveOwnerDuringNameLookup = false;
+          setOwner(NEW_OWNER);
+        }
+        return userId === OWNER ? "Owner Name" : null;
+      },
+    });
+    dbPath = test.dbPath;
+    expect(
+      test.storage.convertLinkGrant({
+        shareId: SHARE,
+        parentGrantId: test.comment.grantId,
+        grantId: "former-owner-comment-grant-sentinel",
+        principalUserId: OWNER,
+        createdAtMs: 1_030,
+      }),
+    ).toMatchObject({ ok: true });
+    setOwner(NEW_OWNER);
+    expect(
+      test.storage.appendAuthenticatedDiscussionMessage({
+        shareId: SHARE,
+        authorUserId: OWNER,
+        displayName: "Owner Name",
+        body: "Debt from an earlier recipient role",
+        idempotencyKey: "former-owner-debt",
+        createdAtMs: 9_000,
+        guard: () => "recipient",
+      }),
+    ).toMatchObject({ ok: true, message: { authorKind: "named" } });
+    setOwner(OWNER);
+
+    moveOwnerDuringNameLookup = true;
+    const response = await test.handler(
+      request(
+        OWNER,
+        `/sync/shares/${SHARE}/discussion`,
+        jsonRequest({
+          body: "Must use the role at commit time",
+          idempotencyKey: "owner-to-recipient",
+        }),
+      ),
+    );
+    expect(response.status).toBe(413);
+    expect(await body(response)).toEqual({
+      ok: false,
+      error: "recipient discussion message limit reached",
+      code: "discussion_limit_reached",
+    });
+    expect(
+      test.storage.listShareDiscussionMessages({ shareId: SHARE, limit: 10 }).messages,
+    ).toMatchObject([
+      { authorKind: "named", authorUserId: OWNER },
+    ]);
   });
 
   it("lets a named Comment recipient discuss a pinned version without file authority", async () => {
@@ -2046,16 +2268,16 @@ describe("share discussion HTTP boundary", () => {
     }
 
     const named = await fixture();
-    const originalNamed = named.storage.appendNamedDiscussionMessage.bind(
+    const originalAuthenticated = named.storage.appendAuthenticatedDiscussionMessage.bind(
       named.storage,
     );
-    named.storage.appendNamedDiscussionMessage = (input) => {
+    named.storage.appendAuthenticatedDiscussionMessage = (input) => {
       named.storage.revokeShareGrant({
         shareId: SHARE,
         grantId: "named-comment-grant-sentinel",
         revokedAtMs: 30_000,
       });
-      return originalNamed(input);
+      return originalAuthenticated(input);
     };
     const namedRace = await named.handler(
       request(

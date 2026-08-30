@@ -1698,7 +1698,7 @@ export function createSyncRelayHandler({
       const input = parseNamedDiscussionAppendBody(await readJsonObject(request));
       const lookedUpName = await lookupUserDisplayName?.(actor.userId);
       const displayName = normalizeDiscussionDisplayName(lookedUpName) ?? "Unnamed";
-      const result = storage.appendNamedDiscussionMessage({
+      const result = storage.appendAuthenticatedDiscussionMessage({
         shareId,
         authorUserId: actor.userId,
         displayName,
@@ -1706,7 +1706,8 @@ export function createSyncRelayHandler({
         idempotencyKey: input.idempotencyKey,
         createdAtMs: nowMs(),
         guard: () => {
-          requireDiscussionAuthority(shareId, actor.userId, "append");
+          const current = requireDiscussionAuthority(shareId, actor.userId, "append");
+          return current.viewer === "owner" ? "owner" : "recipient";
         },
       });
       if (!result.ok) {
@@ -1714,6 +1715,24 @@ export function createSyncRelayHandler({
           throw relayHttpError(
             RELAY_ERRORS.conflict,
             "idempotency key was already used for a different message",
+          );
+        }
+        if (result.reason === "rate-limit") {
+          throw relayHttpError(
+            RELAY_ERRORS.discussion_rate_limited,
+            "discussion message rate limit reached",
+          );
+        }
+        if (result.reason === "lifetime-limit") {
+          throw relayHttpError(
+            RELAY_ERRORS.discussion_limit_reached,
+            "recipient discussion message limit reached",
+          );
+        }
+        if (result.reason === "share-limit") {
+          throw relayHttpError(
+            RELAY_ERRORS.discussion_limit_reached,
+            "share discussion message limit reached",
           );
         }
         if (result.reason === "workspace-quota") {

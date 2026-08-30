@@ -147,7 +147,7 @@ export interface SyncRelayShareDiscussionMessageRow {
   shareId: string;
   idempotencyKey: string;
   requestHash: string;
-  authorKind: "named" | "link";
+  authorKind: "owner" | "named" | "link";
   authorUserId: string | null;
   linkGrantId: string | null;
   linkPrincipalId: string | null;
@@ -219,7 +219,7 @@ export type AppendLinkDiscussionMessageResult =
         | "workspace-quota";
     };
 
-export type AppendNamedDiscussionMessageResult =
+export type AppendAuthenticatedDiscussionMessageResult =
   | {
       ok: true;
       replayed: boolean;
@@ -227,7 +227,13 @@ export type AppendNamedDiscussionMessageResult =
     }
   | {
       ok: false;
-      reason: "invalid-input" | "idempotency-conflict" | "workspace-quota";
+      reason:
+        | "invalid-input"
+        | "idempotency-conflict"
+        | "rate-limit"
+        | "lifetime-limit"
+        | "share-limit"
+        | "workspace-quota";
     };
 
 export interface SyncRelayLinkHandoffCodeRow {
@@ -556,15 +562,15 @@ export interface SyncRelayStorage {
     createdAtMs: number;
     guard?: () => void;
   }): AppendLinkDiscussionMessageResult;
-  appendNamedDiscussionMessage(input: {
+  appendAuthenticatedDiscussionMessage(input: {
     shareId: string;
     authorUserId: string;
     displayName: string;
     body: string;
     idempotencyKey: string;
     createdAtMs: number;
-    guard: () => void;
-  }): AppendNamedDiscussionMessageResult;
+    guard: () => "owner" | "recipient";
+  }): AppendAuthenticatedDiscussionMessageResult;
   listShareDiscussionMessages(input: {
     shareId: string;
     after?: SyncRelayShareDiscussionCursor | null;
@@ -825,10 +831,10 @@ export const LINK_DISCUSSION_NAME_CODE_POINT_LIMIT = 40;
 export const LINK_DISCUSSION_NAME_BYTE_LIMIT = 160;
 export const LINK_DISCUSSION_IDEMPOTENCY_KEY_LIMIT = 64;
 export const LINK_DISCUSSION_PRINCIPAL_LIMIT = 100;
-export const LINK_DISCUSSION_MESSAGE_RATE_LIMIT = 10;
-export const LINK_DISCUSSION_MESSAGE_RATE_WINDOW_MS = 60_000;
-export const LINK_DISCUSSION_LIFETIME_MESSAGE_LIMIT = 500;
-export const LINK_DISCUSSION_SHARE_ROW_LIMIT = 5_000;
+export const DISCUSSION_MESSAGE_RATE_LIMIT = 10;
+export const DISCUSSION_MESSAGE_RATE_WINDOW_MS = 60_000;
+export const DISCUSSION_LIFETIME_MESSAGE_LIMIT = 500;
+export const DISCUSSION_NON_OWNER_SHARE_ROW_LIMIT = 5_000;
 export const LINK_DISCUSSION_PAGE_LIMIT = 100;
 // Share creation accepts account ids up to 256 characters. Reserve the
 // four-byte UTF-8 worst case so a later owner tombstone never grows quota.
@@ -868,9 +874,9 @@ export interface OpenSyncRelayStorageOptions {
   blobGraceMs?: number;
   linkSessionsPerGrantLimit?: number;
   linkDiscussionPrincipalLimit?: number;
-  linkDiscussionMessageRateLimit?: number;
-  linkDiscussionLifetimeMessageLimit?: number;
-  linkDiscussionShareRowLimit?: number;
+  discussionMessageRateLimit?: number;
+  discussionLifetimeMessageLimit?: number;
+  discussionNonOwnerShareRowLimit?: number;
   newDiscussionId?: () => string;
 }
 
@@ -1005,7 +1011,7 @@ const NORMALIZED_SHARE_SCHEMA_SQL = `
     share_id TEXT NOT NULL,
     idempotency_key TEXT NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 64),
     request_hash TEXT NOT NULL CHECK (length(request_hash) > 0),
-    author_kind TEXT NOT NULL CHECK (author_kind IN ('named', 'link')),
+    author_kind TEXT NOT NULL CHECK (author_kind IN ('owner', 'named', 'link')),
     author_user_id TEXT,
     link_grant_id TEXT,
     link_principal_id TEXT,
@@ -1025,7 +1031,7 @@ const NORMALIZED_SHARE_SCHEMA_SQL = `
     discussion_revision INTEGER NOT NULL DEFAULT 0 CHECK (discussion_revision >= 0),
     storage_bytes INTEGER NOT NULL CHECK (storage_bytes > 0),
     CHECK (
-      (author_kind = 'named'
+      (author_kind IN ('owner', 'named')
        AND author_user_id IS NOT NULL
        AND link_grant_id IS NULL
        AND link_principal_id IS NULL)
@@ -1055,9 +1061,16 @@ const NORMALIZED_SHARE_SCHEMA_SQL = `
     ON sync_relay_share_discussion_messages(
       link_principal_id, created_at_ms, message_id
     ) WHERE author_kind = 'link';
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_relay_share_discussion_named_replay
+  CREATE INDEX IF NOT EXISTS idx_sync_relay_share_discussion_named_budget
+    ON sync_relay_share_discussion_messages(
+      share_id, author_user_id, created_at_ms, message_id
+    ) WHERE author_kind = 'named';
+  CREATE INDEX IF NOT EXISTS idx_sync_relay_share_discussion_non_owner_budget
+    ON sync_relay_share_discussion_messages(share_id, author_kind, message_id)
+    WHERE author_kind IN ('named', 'link');
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_relay_share_discussion_user_replay
     ON sync_relay_share_discussion_messages(share_id, author_user_id, idempotency_key)
-    WHERE author_kind = 'named';
+    WHERE author_kind IN ('owner', 'named');
   CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_relay_share_discussion_link_replay
     ON sync_relay_share_discussion_messages(
       share_id, link_principal_id, idempotency_key
@@ -1422,6 +1435,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
         `length(CAST(display_name AS BLOB)) <= ${LINK_DISCUSSION_NAME_BYTE_LIMIT}`,
       ) ||
       !discussionSchemaSql.includes("discussion_revision") ||
+      !discussionSchemaSql.includes("author_kind IN ('owner', 'named', 'link')") ||
       !discussionSchemaSql.includes(
         `length(display_name_snapshot) BETWEEN 1 AND ${LINK_DISCUSSION_NAME_CODE_POINT_LIMIT}`,
       ) ||
@@ -2311,7 +2325,7 @@ function discussionMessageStorageBytes(input: {
   shareId: string;
   idempotencyKey: string;
   requestHash: string;
-  authorKind: "named" | "link";
+  authorKind: "owner" | "named" | "link";
   authorUserId: string | null;
   linkGrantId: string | null;
   linkPrincipalId: string | null;
@@ -2398,18 +2412,18 @@ export function openSyncRelayStorage(
   }
   const linkDiscussionPrincipalLimit =
     options.linkDiscussionPrincipalLimit ?? LINK_DISCUSSION_PRINCIPAL_LIMIT;
-  const linkDiscussionMessageRateLimit =
-    options.linkDiscussionMessageRateLimit ?? LINK_DISCUSSION_MESSAGE_RATE_LIMIT;
-  const linkDiscussionLifetimeMessageLimit =
-    options.linkDiscussionLifetimeMessageLimit ??
-    LINK_DISCUSSION_LIFETIME_MESSAGE_LIMIT;
-  const linkDiscussionShareRowLimit =
-    options.linkDiscussionShareRowLimit ?? LINK_DISCUSSION_SHARE_ROW_LIMIT;
+  const discussionMessageRateLimit =
+    options.discussionMessageRateLimit ?? DISCUSSION_MESSAGE_RATE_LIMIT;
+  const discussionLifetimeMessageLimit =
+    options.discussionLifetimeMessageLimit ??
+    DISCUSSION_LIFETIME_MESSAGE_LIMIT;
+  const discussionNonOwnerShareRowLimit =
+    options.discussionNonOwnerShareRowLimit ?? DISCUSSION_NON_OWNER_SHARE_ROW_LIMIT;
   for (const [name, value] of [
     ["linkDiscussionPrincipalLimit", linkDiscussionPrincipalLimit],
-    ["linkDiscussionMessageRateLimit", linkDiscussionMessageRateLimit],
-    ["linkDiscussionLifetimeMessageLimit", linkDiscussionLifetimeMessageLimit],
-    ["linkDiscussionShareRowLimit", linkDiscussionShareRowLimit],
+    ["discussionMessageRateLimit", discussionMessageRateLimit],
+    ["discussionLifetimeMessageLimit", discussionLifetimeMessageLimit],
+    ["discussionNonOwnerShareRowLimit", discussionNonOwnerShareRowLimit],
   ] as const) {
     if (!Number.isSafeInteger(value) || value <= 0) {
       throw new Error(`${name} must be a positive safe integer, got ${String(value)}`);
@@ -2428,9 +2442,9 @@ export function openSyncRelayStorage(
       blobGraceMs,
       linkSessionsPerGrantLimit,
       linkDiscussionPrincipalLimit,
-      linkDiscussionMessageRateLimit,
-      linkDiscussionLifetimeMessageLimit,
-      linkDiscussionShareRowLimit,
+      discussionMessageRateLimit,
+      discussionLifetimeMessageLimit,
+      discussionNonOwnerShareRowLimit,
       newDiscussionId,
     );
   } catch (error) {
@@ -2448,9 +2462,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     private readonly blobGraceMs: number,
     private readonly linkSessionsPerGrantLimit: number,
     private readonly linkDiscussionPrincipalLimit: number,
-    private readonly linkDiscussionMessageRateLimit: number,
-    private readonly linkDiscussionLifetimeMessageLimit: number,
-    private readonly linkDiscussionShareRowLimit: number,
+    private readonly discussionMessageRateLimit: number,
+    private readonly discussionLifetimeMessageLimit: number,
+    private readonly discussionNonOwnerShareRowLimit: number,
     private readonly newDiscussionId: () => string,
   ) {}
 
@@ -4063,10 +4077,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
             )
             .get(
               principal.principalId,
-              createdAtMs - LINK_DISCUSSION_MESSAGE_RATE_WINDOW_MS,
+              createdAtMs - DISCUSSION_MESSAGE_RATE_WINDOW_MS,
             )?.count ?? 0,
         );
-        if (rateCount >= this.linkDiscussionMessageRateLimit) {
+        if (rateCount >= this.discussionMessageRateLimit) {
           return { ok: false, reason: "rate-limit" };
         }
         const lifetimeCount = Number(
@@ -4078,7 +4092,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
             )
             .get(principal.principalId)?.count ?? 0,
         );
-        if (lifetimeCount >= this.linkDiscussionLifetimeMessageLimit) {
+        if (lifetimeCount >= this.discussionLifetimeMessageLimit) {
           return { ok: false, reason: "lifetime-limit" };
         }
       }
@@ -4087,11 +4101,11 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           .prepare(
             `SELECT COUNT(*) AS count
              FROM sync_relay_share_discussion_messages
-             WHERE share_id = ? AND author_kind = 'link'`,
+             WHERE share_id = ? AND author_kind IN ('named', 'link')`,
           )
           .get(shareId)?.count ?? 0,
       );
-      if (shareRowCount >= this.linkDiscussionShareRowLimit) {
+      if (shareRowCount >= this.discussionNonOwnerShareRowLimit) {
         return { ok: false, reason: "share-limit" };
       }
 
@@ -4215,15 +4229,15 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     });
   }
 
-  appendNamedDiscussionMessage(input: {
+  appendAuthenticatedDiscussionMessage(input: {
     shareId: string;
     authorUserId: string;
     displayName: string;
     body: string;
     idempotencyKey: string;
     createdAtMs: number;
-    guard: () => void;
-  }): AppendNamedDiscussionMessageResult {
+    guard: () => "owner" | "recipient";
+  }): AppendAuthenticatedDiscussionMessageResult {
     const body = normalizeLinkDiscussionBody(input.body);
     const displayName = normalizeDiscussionDisplayName(input.displayName);
     if (
@@ -4244,7 +4258,11 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return this.tx(() => {
       // The caller's server-derived identity and current share authority are
       // rechecked under this write lock, immediately before replay or insert.
-      input.guard();
+      const authorRole = input.guard();
+      if (authorRole !== "owner" && authorRole !== "recipient") {
+        throw new Error("discussion authority guard returned an invalid role");
+      }
+      const authorKind = authorRole === "owner" ? "owner" : "named";
       const share = this.db
         .prepare(
           `SELECT workspace_id
@@ -4263,7 +4281,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
                   deleted_by_user_id, discussion_revision, storage_bytes
            FROM sync_relay_share_discussion_messages
            WHERE share_id = ?
-             AND author_kind = 'named'
+             AND author_kind IN ('owner', 'named')
              AND author_user_id = ?
              AND idempotency_key = ?
            LIMIT 1`,
@@ -4280,6 +4298,54 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         };
       }
 
+      if (authorRole === "recipient") {
+        const rateCount = Number(
+          this.db
+            .prepare(
+              `SELECT COUNT(*) AS count
+               FROM sync_relay_share_discussion_messages
+               WHERE share_id = ?
+                 AND author_kind = 'named'
+                 AND author_user_id = ?
+                 AND created_at_ms > ?`,
+            )
+            .get(
+              input.shareId,
+              input.authorUserId,
+              createdAtMs - DISCUSSION_MESSAGE_RATE_WINDOW_MS,
+            )?.count ?? 0,
+        );
+        if (rateCount >= this.discussionMessageRateLimit) {
+          return { ok: false, reason: "rate-limit" };
+        }
+        const lifetimeCount = Number(
+          this.db
+            .prepare(
+              `SELECT COUNT(*) AS count
+               FROM sync_relay_share_discussion_messages
+               WHERE share_id = ?
+                 AND author_kind = 'named'
+                 AND author_user_id = ?`,
+            )
+            .get(input.shareId, input.authorUserId)?.count ?? 0,
+        );
+        if (lifetimeCount >= this.discussionLifetimeMessageLimit) {
+          return { ok: false, reason: "lifetime-limit" };
+        }
+        const shareRowCount = Number(
+          this.db
+            .prepare(
+              `SELECT COUNT(*) AS count
+               FROM sync_relay_share_discussion_messages
+               WHERE share_id = ? AND author_kind IN ('named', 'link')`,
+            )
+            .get(input.shareId)?.count ?? 0,
+        );
+        if (shareRowCount >= this.discussionNonOwnerShareRowLimit) {
+          return { ok: false, reason: "share-limit" };
+        }
+      }
+
       const messageId = this.newDiscussionId();
       if (!messageId) {
         throw new Error("discussion id generator returned an invalid identifier");
@@ -4289,7 +4355,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         shareId: input.shareId,
         idempotencyKey: input.idempotencyKey,
         requestHash,
-        authorKind: "named",
+        authorKind,
         authorUserId: input.authorUserId,
         linkGrantId: null,
         linkPrincipalId: null,
@@ -4311,13 +4377,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
              author_user_id, link_grant_id, link_principal_id,
              display_name_snapshot, body, created_at_ms, deleted_at_ms,
              deleted_by_user_id, discussion_revision, storage_bytes
-           ) VALUES (?, ?, ?, ?, 'named', ?, NULL, NULL, ?, ?, ?, NULL, NULL, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, NULL, NULL, ?, ?)`,
         )
         .run(
           messageId,
           input.shareId,
           input.idempotencyKey,
           requestHash,
+          authorKind,
           input.authorUserId,
           displayName,
           body,
@@ -6334,7 +6401,7 @@ function rowToShareDiscussionMessageRow(
   row: Record<string, unknown>,
 ): SyncRelayShareDiscussionMessageRow {
   const authorKind = String(row.author_kind);
-  if (authorKind !== "named" && authorKind !== "link") {
+  if (authorKind !== "owner" && authorKind !== "named" && authorKind !== "link") {
     throw new Error("stored discussion message has an invalid author kind");
   }
   return {
