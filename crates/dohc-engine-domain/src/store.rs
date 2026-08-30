@@ -55,6 +55,12 @@ pub const INBAND_CONTENT_CAP_BYTES: usize = 48 * 1024;
 // constant so they cannot drift.
 const _: () = assert!(INBAND_CONTENT_CAP_BYTES == 49152);
 
+// `get_moment` hydrates text payloads through this larger history-only cap.
+// Its SQL is static, so keep the construction path for prepared capture
+// results pinned to the same literal.
+const MOMENT_TEXT_HYDRATION_CAP_BYTES: usize = 128 * 1024;
+const _: () = assert!(MOMENT_TEXT_HYDRATION_CAP_BYTES == 131072);
+
 /// The versioning domain bound to one workspace store. Cheap to construct per
 /// call; holds only a mutable borrow of the writer.
 pub struct VersionedTextStore<'a> {
@@ -2093,6 +2099,27 @@ pub struct ProjectedWriteText<'a> {
     pub request_id: Option<&'a str>,
 }
 
+/// State the caller has already proved for one text mutation. Keeping this
+/// private makes the domain write the only persistence implementation while
+/// letting autonomous capture reuse the object binding, preimage, and moment
+/// order it had to resolve before deriving its collision-resistant moment id.
+struct PreparedTextWrite {
+    object_id: String,
+    before: Option<SnapshotRecord>,
+    moment_order: i64,
+    bind_object: bool,
+    bind_alias: bool,
+    known_object: Option<FileObjectRecord>,
+    #[cfg(test)]
+    capture_prepared: bool,
+}
+
+struct ResolvedCaptureObject {
+    object_id: String,
+    reserved_moment_order: Option<i64>,
+    known_object: Option<FileObjectRecord>,
+}
+
 impl<'a> From<&'a WriteText> for ProjectedWriteText<'a> {
     fn from(input: &'a WriteText) -> Self {
         Self {
@@ -2116,6 +2143,8 @@ impl<'a> From<&'a WriteText> for ProjectedWriteText<'a> {
 thread_local! {
     static WRITE_TEXT_OWNERSHIP_COUNTS: std::cell::Cell<(usize, usize)> =
         const { std::cell::Cell::new((0, 0)) };
+    static CAPTURE_PREPARED_WRITE_COUNTS: std::cell::Cell<(usize, usize)> =
+        const { std::cell::Cell::new((0, 0)) };
 }
 
 #[cfg(test)]
@@ -2138,6 +2167,24 @@ fn reset_write_text_ownership_counts() {
 #[cfg(test)]
 fn write_text_ownership_counts() -> (usize, usize) {
     WRITE_TEXT_OWNERSHIP_COUNTS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn reset_capture_prepared_write_counts() {
+    CAPTURE_PREPARED_WRITE_COUNTS.with(|counts| counts.set((0, 0)));
+}
+
+#[cfg(test)]
+fn note_capture_prepared_write(read_back: bool) {
+    CAPTURE_PREPARED_WRITE_COUNTS.with(|counts| {
+        let (prepared, read_backs) = counts.get();
+        counts.set((prepared + 1, read_backs + usize::from(read_back)));
+    });
+}
+
+#[cfg(test)]
+fn capture_prepared_write_counts() -> (usize, usize) {
+    CAPTURE_PREPARED_WRITE_COUNTS.with(std::cell::Cell::get)
 }
 
 /// Validate a write and normalize only its path through the R07
@@ -2296,14 +2343,19 @@ where
         );
     admit(&input.workspace_id, &input.version_id, &target_object_id)?;
 
-    let (object_id, reserved_moment_order) = resolve_capture_object(
+    let resolved = resolve_capture_object(
         tx,
         &input.workspace_id,
         &input.version_id,
         &input.path,
         input.now_ms,
     )?;
-    let before = get_snapshot(tx, &input.workspace_id, &input.version_id, &object_id)?;
+    let before = get_snapshot(
+        tx,
+        &input.workspace_id,
+        &input.version_id,
+        &resolved.object_id,
+    )?;
     // OWNERSHIP: capture only overwrites heads written with ITS OWN origin.
     // A head that arrived by another route (RPC, replication) may have no
     // disk counterpart at all, so letting disk bytes overwrite it would
@@ -2332,7 +2384,7 @@ where
                     input.metadata_origin,
                     input.workspace_id,
                     input.version_id,
-                    object_id
+                    resolved.object_id
                 ],
             )
             .map_err(DomainError::sql_persist)?;
@@ -2375,7 +2427,7 @@ where
         author_json,
         now_ms.as_bytes(),
     ]);
-    let next_order = match reserved_moment_order {
+    let next_order = match resolved.reserved_moment_order {
         Some(next_order) => next_order,
         None => next_moment_order(tx)?,
     };
@@ -2383,26 +2435,41 @@ where
     let moment_id = derive_capture_moment_id(
         &producer_id,
         &input.workspace_id,
-        &object_id,
+        &resolved.object_id,
         next_order,
         "write",
         &mutation_identity,
     );
-    let write = WriteText {
-        workspace_id: input.workspace_id.clone(),
-        version_id: input.version_id.clone(),
-        object_id,
-        path: input.path.clone(),
-        text: input.text.clone(),
-        moment_id,
-        metadata_origin: input.metadata_origin.clone(),
-        metadata_summary,
-        metadata_correlation_id: input.metadata_correlation_id.clone(),
-        author_json: input.author_json.clone(),
+    let write = normalized_write_input(ProjectedWriteText {
+        workspace_id: &input.workspace_id,
+        version_id: &input.version_id,
+        object_id: &resolved.object_id,
+        path: Cow::Borrowed(&input.path),
+        text: Cow::Borrowed(&input.text),
+        moment_id: &moment_id,
+        metadata_origin: &input.metadata_origin,
+        metadata_summary: metadata_summary.as_deref(),
+        metadata_correlation_id: input.metadata_correlation_id.as_deref(),
+        author_json: input.author_json.as_deref(),
         now_ms: input.now_ms,
         request_id: None,
-    };
-    let result = write_text_in_tx(tx, &write)?;
+    })?;
+    let result = write_normalized_text_in_tx_with_journal(
+        tx,
+        write,
+        true,
+        false,
+        Some(PreparedTextWrite {
+            object_id: resolved.object_id.clone(),
+            before,
+            moment_order: next_order,
+            bind_object: false,
+            bind_alias: false,
+            known_object: resolved.known_object,
+            #[cfg(test)]
+            capture_prepared: true,
+        }),
+    )?;
     if result.moment.moment_order != next_order {
         return Err(DomainError::StateCorrupt {
             reason: "capture moment order diverged from reserved order",
@@ -2683,7 +2750,11 @@ where
         .unwrap_or_else(|| derive_capture_object_id(&input.workspace_id, &input.version_id, &path));
     admit(&input.workspace_id, &input.version_id, &target_object_id)?;
 
-    let (object_id, reserved_moment_order) = resolve_capture_object(
+    let ResolvedCaptureObject {
+        object_id,
+        reserved_moment_order,
+        ..
+    } = resolve_capture_object(
         tx,
         &input.workspace_id,
         &input.version_id,
@@ -3142,7 +3213,7 @@ pub fn write_projected_text_in_tx<'a>(
     // alias exists — the settle that follows is binding ITS OWN object,
     // not colliding with another.
     let input = normalized_write_input(input.into())?;
-    write_normalized_text_in_tx_with_journal(tx, input, false, true)
+    write_normalized_text_in_tx_with_journal(tx, input, false, true, None)
 }
 
 fn write_text_in_tx_with_journal(
@@ -3152,7 +3223,7 @@ fn write_text_in_tx_with_journal(
     allow_preallocated_object: bool,
 ) -> Result<WriteResult, DomainError> {
     let input = normalized_write_input(input.into())?;
-    write_normalized_text_in_tx_with_journal(tx, input, journal, allow_preallocated_object)
+    write_normalized_text_in_tx_with_journal(tx, input, journal, allow_preallocated_object, None)
 }
 
 fn write_normalized_text_in_tx_with_journal(
@@ -3160,11 +3231,12 @@ fn write_normalized_text_in_tx_with_journal(
     input: ProjectedWriteText<'_>,
     journal: bool,
     allow_preallocated_object: bool,
+    prepared: Option<PreparedTextWrite>,
 ) -> Result<WriteResult, DomainError> {
     #[cfg(test)]
     note_write_text_ownership(matches!(&input.text, Cow::Owned(_)));
     let ws = input.workspace_id;
-    if !version_exists(tx, ws, input.version_id)? {
+    if prepared.is_none() && !version_exists(tx, ws, input.version_id)? {
         return Err(DomainError::VersionNotFound);
     }
 
@@ -3195,7 +3267,12 @@ fn write_normalized_text_in_tx_with_journal(
         }
         return reconstruct_write(tx, input.workspace_id, input.moment_id);
     }
-    if let Some(existing) = get_moment(tx, ws, input.moment_id)? {
+    if moment_exists(tx, ws, input.moment_id)? {
+        let Some(existing) = get_moment(tx, ws, input.moment_id)? else {
+            // Text and protected history share one workspace-wide moment-id
+            // namespace, while `get_moment` resolves only plaintext history.
+            return Err(DomainError::DuplicateMomentId);
+        };
         let exact = existing.version_id == input.version_id
             && existing.path == input.path.as_ref()
             && existing.operation == MomentOp::Write
@@ -3209,56 +3286,71 @@ fn write_normalized_text_in_tx_with_journal(
             return write_result_from_moment(tx, ws, existing, true);
         }
         // The oracle's contract: a caller-supplied moment id reused with
-        // DIFFERENT content is duplicate-moment-id (the exact-match arm
-        // above is the idempotent replay; only requestId reuse maps to the
-        // idempotency-mismatch code).
-        return Err(DomainError::DuplicateMomentId);
-    }
-    // Text and protected history share one workspace-wide moment-id namespace.
-    // `get_moment` intentionally resolves only plaintext history, so retain
-    // the exact-text replay above and then reject a secret-table collision in
-    // this same transaction before inserting the text row.
-    if moment_exists(tx, ws, input.moment_id)? {
+        // DIFFERENT content is duplicate-moment-id (the exact-match arm above
+        // is the idempotent replay; only requestId reuse maps to mismatch).
         return Err(DomainError::DuplicateMomentId);
     }
 
-    let existing_object = alias_object_id(tx, ws, input.version_id, &input.path)?;
-    let before = match &existing_object {
-        Some(object_id) => get_snapshot(tx, ws, input.version_id, object_id)?,
+    let prepared = match prepared {
+        Some(prepared) => prepared,
         None => {
-            if input.object_id.is_empty() {
-                return Err(DomainError::InvalidInput {
-                    reason: "object_id must not be empty for a new path",
-                });
-            }
-            if object_exists(tx, ws, input.object_id)? {
-                let bare_preallocation =
-                    allow_preallocated_object && !object_has_any_binding(tx, ws, input.object_id)?;
-                if !bare_preallocation {
-                    return Err(DomainError::InvalidInput {
-                        reason: "object_id is already bound to another object",
-                    });
+            let existing_object = alias_object_id(tx, ws, input.version_id, &input.path)?;
+            let before = match &existing_object {
+                Some(object_id) => get_snapshot(tx, ws, input.version_id, object_id)?,
+                None => {
+                    if input.object_id.is_empty() {
+                        return Err(DomainError::InvalidInput {
+                            reason: "object_id must not be empty for a new path",
+                        });
+                    }
+                    if object_exists(tx, ws, input.object_id)? {
+                        let bare_preallocation = allow_preallocated_object
+                            && !object_has_any_binding(tx, ws, input.object_id)?;
+                        if !bare_preallocation {
+                            return Err(DomainError::InvalidInput {
+                                reason: "object_id is already bound to another object",
+                            });
+                        }
+                    }
+                    None
                 }
+            };
+            let is_new_object = existing_object.is_none();
+            PreparedTextWrite {
+                object_id: existing_object.unwrap_or_else(|| input.object_id.to_owned()),
+                before,
+                moment_order: next_moment_order(tx)?,
+                bind_object: is_new_object,
+                bind_alias: true,
+                known_object: None,
+                #[cfg(test)]
+                capture_prepared: false,
             }
-            None
         }
     };
-    let is_new_object = existing_object.is_none();
-    let object_id = existing_object.unwrap_or_else(|| input.object_id.to_owned());
+    let PreparedTextWrite {
+        object_id,
+        before,
+        moment_order,
+        bind_object,
+        bind_alias,
+        known_object,
+        #[cfg(test)]
+        capture_prepared,
+    } = prepared;
     let before_blob = before.as_ref().and_then(|s| s.blob_sha256.clone());
     let before_content_kind = before
         .as_ref()
         .map_or_else(|| "text".to_owned(), |s| s.content_kind.clone());
     let before_binary_sha256 = before.as_ref().and_then(|s| s.binary_sha256.clone());
     let before_latest_moment_id = before.as_ref().map(|s| s.latest_moment_id.clone());
-    let moment_order = next_moment_order(tx)?;
 
-    if is_new_object {
+    if bind_object {
         // OR IGNORE: the preallocated-object path (live Y.Doc seed) already
         // holds this row; every other new-object path inserts fresh.
         tx.execute(
             "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms)              VALUES (?1, ?2, ?3)",
-            params![ws, object_id, input.now_ms],
+            params![input.workspace_id, object_id, input.now_ms],
         )
         .map_err(DomainError::sql_persist)?;
     }
@@ -3267,12 +3359,19 @@ fn write_normalized_text_in_tx_with_journal(
         params![blob, input.text.len() as i64, input.text.as_ref()],
     )
     .map_err(DomainError::sql_persist)?;
-    tx.execute(
-        "INSERT OR IGNORE INTO path_aliases (workspace_id, version_id, path, object_id) \
-         VALUES (?1, ?2, ?3, ?4)",
-        params![ws, input.version_id, input.path.as_ref(), object_id],
-    )
-    .map_err(DomainError::sql_persist)?;
+    if bind_alias {
+        tx.execute(
+            "INSERT OR IGNORE INTO path_aliases (workspace_id, version_id, path, object_id) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                input.workspace_id,
+                input.version_id,
+                input.path.as_ref(),
+                object_id
+            ],
+        )
+        .map_err(DomainError::sql_persist)?;
+    }
     tx.execute(
         "INSERT INTO moments \
          (workspace_id, moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
@@ -3288,7 +3387,7 @@ fn write_normalized_text_in_tx_with_journal(
                   CASE WHEN ?9 = 2 THEN ?6 END, CASE WHEN ?9 = 2 THEN ?16 END, \
                   CASE ?16 WHEN 'binary' THEN ?17 ELSE ?10 END, ?6, 'text', ?8)",
         params![
-            ws,
+            input.workspace_id,
             moment_order,
             input.moment_id,
             input.version_id,
@@ -3324,7 +3423,7 @@ fn write_normalized_text_in_tx_with_journal(
            content_kind = excluded.content_kind, \
            binary_sha256 = excluded.binary_sha256",
         params![
-            ws,
+            input.workspace_id,
             input.version_id,
             object_id,
             input.path.as_ref(),
@@ -3353,20 +3452,69 @@ fn write_normalized_text_in_tx_with_journal(
         input.now_ms,
     )?;
 
-    let object = get_file_object(tx, ws, &object_id)?.ok_or(DomainError::StateCorrupt {
-        reason: "written snapshot points at a missing object",
-    })?;
-    let moment = get_moment(tx, ws, input.moment_id)?.ok_or(DomainError::StateCorrupt {
-        reason: "moment vanished within its own write transaction",
-    })?;
+    let read_back = known_object.is_none() || before.is_some();
+    #[cfg(test)]
+    if capture_prepared {
+        note_capture_prepared_write(read_back);
+    }
+    let result_path = input.path.into_owned();
+    let result_text = input.text.into_owned();
+    let (object, moment) = if read_back {
+        let object = get_file_object(tx, input.workspace_id, &object_id)?.ok_or(
+            DomainError::StateCorrupt {
+                reason: "written snapshot points at a missing object",
+            },
+        )?;
+        let moment = get_moment(tx, input.workspace_id, input.moment_id)?.ok_or(
+            DomainError::StateCorrupt {
+                reason: "moment vanished within its own write transaction",
+            },
+        )?;
+        (object, moment)
+    } else {
+        let object = known_object.ok_or(DomainError::StateCorrupt {
+            reason: "prepared capture result is missing its known object",
+        })?;
+        let byte_length = result_text.len() as i64;
+        let after_text =
+            (result_text.len() <= MOMENT_TEXT_HYDRATION_CAP_BYTES).then(|| result_text.clone());
+        let moment = MomentRecord {
+            moment_order,
+            moment_id: input.moment_id.to_owned(),
+            version_id: input.version_id.to_owned(),
+            object_id: object_id.clone(),
+            path: result_path.clone(),
+            recorded_at_ms: input.now_ms,
+            operation: MomentOp::Write,
+            after_content_kind: "text".to_owned(),
+            after_blob_sha256: Some(blob.clone()),
+            after_binary_sha256: None,
+            before_present: false,
+            before_blob_sha256: None,
+            before_content_kind: "text".to_owned(),
+            before_binary_sha256: None,
+            before_latest_moment_id: None,
+            metadata_origin: input.metadata_origin.to_owned(),
+            metadata_summary: input.metadata_summary.map(str::to_owned),
+            metadata_correlation_id: input.metadata_correlation_id.map(str::to_owned),
+            author_json: input.author_json.map(str::to_owned),
+            sync_record_only: false,
+            after_text,
+            after_byte_length: Some(byte_length),
+            before_text: None,
+            before_byte_length: None,
+            before_path: None,
+        };
+        (object, moment)
+    };
     Ok(WriteResult {
         object,
         snapshot: TextSnapshot {
-            workspace_id: ws.to_owned(),
+            workspace_id: input.workspace_id.to_owned(),
             version_id: input.version_id.to_owned(),
             object_id: object_id.clone(),
-            path: input.path.into_owned(),
-            text: input.text.into_owned(),
+            path: result_path,
+            text: result_text,
             blob_sha256: blob.clone(),
             updated_at_ms: input.now_ms,
             latest_moment_id: input.moment_id.to_owned(),
@@ -3613,15 +3761,17 @@ fn reconstruct_binary_write(
 /// reuse a live alias; else derive the framed object id and reuse it ONLY when
 /// it has no live alias anywhere; else mint an order-disambiguated id, with
 /// that reserved order returned so the caller can pin it against the moment
-/// the write actually persists.
+/// the write actually persists. A freshly inserted object record is returned
+/// too, so capture does not have to read back state it just established.
 fn resolve_capture_object(
     tx: &Transaction<'_>,
     workspace_id: &str,
     version_id: &str,
     path: &str,
     now_ms: i64,
-) -> Result<(String, Option<i64>), DomainError> {
+) -> Result<ResolvedCaptureObject, DomainError> {
     let mut reserved_moment_order = None;
+    let mut known_object = None;
     let object_id = match alias_object_id(tx, workspace_id, version_id, path)? {
         Some(object_id) => object_id,
         None => {
@@ -3633,6 +3783,11 @@ fn resolve_capture_object(
                     params![workspace_id, derived_object_id, now_ms],
                 )
                 .map_err(DomainError::sql_persist)?;
+                known_object = Some(FileObjectRecord {
+                    workspace_id: workspace_id.to_owned(),
+                    object_id: derived_object_id.clone(),
+                    created_at_ms: now_ms,
+                });
                 derived_object_id
             } else if !object_has_live_alias(tx, workspace_id, &derived_object_id)? {
                 derived_object_id
@@ -3650,6 +3805,11 @@ fn resolve_capture_object(
                     params![workspace_id, disambiguated_object_id, now_ms],
                 )
                 .map_err(DomainError::sql_persist)?;
+                known_object = Some(FileObjectRecord {
+                    workspace_id: workspace_id.to_owned(),
+                    object_id: disambiguated_object_id.clone(),
+                    created_at_ms: now_ms,
+                });
                 reserved_moment_order = Some(next_order);
                 disambiguated_object_id
             };
@@ -3662,7 +3822,11 @@ fn resolve_capture_object(
             object_id
         }
     };
-    Ok((object_id, reserved_moment_order))
+    Ok(ResolvedCaptureObject {
+        object_id,
+        reserved_moment_order,
+        known_object,
+    })
 }
 
 fn reconstruct_capture_write(
@@ -5984,11 +6148,12 @@ mod tests {
     use std::borrow::Cow;
 
     use super::{
-        NEXT_MOMENT_ORDER_SQL, ProjectedWriteText, VersionedTextStore, next_moment_order,
-        object_has_references, reset_write_text_ownership_counts, write_projected_text_in_tx,
-        write_text_in_tx, write_text_ownership_counts,
+        NEXT_MOMENT_ORDER_SQL, ProjectedWriteText, VersionedTextStore,
+        capture_prepared_write_counts, next_moment_order, object_has_references,
+        reset_capture_prepared_write_counts, reset_write_text_ownership_counts,
+        write_projected_text_in_tx, write_text_in_tx, write_text_ownership_counts,
     };
-    use crate::WriteText;
+    use crate::{CaptureIngest, WriteText};
     use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
     use dohc_engine_testkit::ScratchDir;
     use rusqlite::Connection;
@@ -6152,6 +6317,54 @@ mod tests {
             (1, 1),
             "the shared writer must exercise one borrowed and one owned text path"
         );
+    }
+
+    #[test]
+    fn fresh_capture_reuses_prepared_state_without_result_readback() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let mut store =
+            EngineStore::open(&scratch.engine_db_path().expect("db"), 1).expect("open store");
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .expect("ensure main version");
+
+        reset_capture_prepared_write_counts();
+        let captured = VersionedTextStore::new(&mut store)
+            .capture_ingest(
+                &CaptureIngest {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    path: "notes/fresh.md".to_owned(),
+                    text: "prepared capture body".to_owned(),
+                    metadata_origin: "capture".to_owned(),
+                    metadata_summary: Some("Captured fresh file".to_owned()),
+                    metadata_correlation_id: Some("capture-pass-1".to_owned()),
+                    author_json: Some(r#"{"kind":"capture-test"}"#.to_owned()),
+                    now_ms: 2,
+                    request_id: None,
+                    claim_foreign_head: false,
+                },
+                &NoFaults,
+            )
+            .expect("capture fresh text");
+
+        assert_eq!(
+            capture_prepared_write_counts(),
+            (1, 0),
+            "fresh capture must persist its resolved state without rereading the wide result"
+        );
+        let versioned = VersionedTextStore::new(&mut store);
+        let hydrated_moment = versioned
+            .get_moment("ws", &captured.moment.moment_id)
+            .expect("read captured moment")
+            .expect("captured moment exists");
+        let hydrated_snapshot = versioned
+            .read_text("ws", "main", "notes/fresh.md")
+            .expect("read captured snapshot")
+            .expect("captured snapshot exists");
+
+        assert_eq!(captured.moment, hydrated_moment);
+        assert_eq!(captured.snapshot, hydrated_snapshot);
     }
 
     #[test]
