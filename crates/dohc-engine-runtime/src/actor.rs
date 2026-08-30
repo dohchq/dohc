@@ -32,9 +32,9 @@ use crate::search::{
     GranularChatMessageSearchBatch, SearchPageBatch, SearchResult, SearchResultKey,
     delete_file_search_index, ensure_search_index_for_version,
     query_chat_messages_granular_bounded, search_workspace, search_workspace_page,
-    upsert_file_search_index,
+    upsert_file_search_index, upsert_file_search_index_with_policy,
 };
-use crate::search::{read_engine_search_policy, resolve_effective_policy};
+use crate::search::{SearchPolicySnapshot, read_engine_search_policy, resolve_effective_policy};
 use dohc_engine_collab::{
     AppendOutcome, CacheStats, CloseOutcome, CollabError, ContentKind, DocKey, LeaseRegistry,
     LineageClaimStatus, Projection, Regime, SceneAsset, WriterDocCache, Ydoc,
@@ -109,7 +109,7 @@ use dohc_engine_sync::{
     ydoc_update_payload,
 };
 use dohc_engine_sync_http::HttpRelayTransport;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
@@ -127,6 +127,11 @@ pub use dohc_engine_sync::SharingDeclined;
 /// Bound on the actor's command queue. Backpressure blocks the sender rather
 /// than growing an unbounded queue (`plan §Rust policy`: bounded everything).
 const COMMAND_QUEUE_CAPACITY: usize = 64;
+
+/// Maximum work accepted by one capture batch actor command. Keeping both
+/// bounds here lets the actor serve queued interactive work between chunks.
+pub const MAX_CAPTURE_INGEST_BATCH_OPS: usize = 256;
+pub const MAX_CAPTURE_INGEST_BATCH_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PostCommitMaterializeOutcome {
@@ -1314,10 +1319,19 @@ enum Command {
     CaptureIngest {
         input: CaptureIngest,
         root_dir: Option<PathBuf>,
+        search_policy: Option<Arc<SearchPolicySnapshot>>,
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<WriteResult, RuntimeError>>,
+    },
+    CaptureIngestBatch {
+        inputs: Vec<CaptureIngest>,
+        search_policy: Arc<SearchPolicySnapshot>,
+        leases: LeaseRegistry,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError>>,
     },
     CaptureIngestBinary {
         input: CaptureIngestBinary,
@@ -2516,7 +2530,45 @@ impl ActorHandle {
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<WriteResult, RuntimeError> {
-        self.capture_ingest_blocking_with_root(input, Some(root_dir), leases, faults)
+        self.capture_ingest_blocking_with_search(input, Some(root_dir), None, leases, faults)
+    }
+
+    /// Capture and index text against one reconcile-owned policy snapshot.
+    pub fn capture_ingest_with_search_policy_blocking(
+        &self,
+        input: CaptureIngest,
+        search_policy: Arc<SearchPolicySnapshot>,
+        leases: LeaseRegistry,
+        faults: Arc<dyn FaultInjector>,
+    ) -> Result<WriteResult, RuntimeError> {
+        self.capture_ingest_blocking_with_search(input, None, Some(search_policy), leases, faults)
+    }
+
+    /// Capture a bounded text chunk in one durable transaction. Each item is
+    /// isolated by a savepoint and receives its own result after the chunk
+    /// commit succeeds.
+    pub fn capture_ingest_batch_blocking(
+        &self,
+        inputs: Vec<CaptureIngest>,
+        search_policy: Arc<SearchPolicySnapshot>,
+        leases: LeaseRegistry,
+        faults: Arc<dyn FaultInjector>,
+    ) -> Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError> {
+        debug_assert_sync_context();
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::CaptureIngestBatch {
+                inputs,
+                search_policy,
+                leases,
+                faults,
+                token: CancellationToken::new(),
+                reply,
+            })
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx
+            .blocking_recv()
+            .map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
     fn capture_ingest_blocking_with_root(
@@ -2526,12 +2578,24 @@ impl ActorHandle {
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<WriteResult, RuntimeError> {
+        self.capture_ingest_blocking_with_search(input, root_dir, None, leases, faults)
+    }
+
+    fn capture_ingest_blocking_with_search(
+        &self,
+        input: CaptureIngest,
+        root_dir: Option<PathBuf>,
+        search_policy: Option<Arc<SearchPolicySnapshot>>,
+        leases: LeaseRegistry,
+        faults: Arc<dyn FaultInjector>,
+    ) -> Result<WriteResult, RuntimeError> {
         debug_assert_sync_context();
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .blocking_send(Command::CaptureIngest {
                 input,
                 root_dir,
+                search_policy,
                 leases,
                 faults,
                 token: CancellationToken::new(),
@@ -3040,6 +3104,7 @@ impl ActorHandle {
             .send(Command::CaptureIngest {
                 input,
                 root_dir,
+                search_policy: None,
                 leases,
                 faults,
                 token,
@@ -7860,6 +7925,7 @@ fn worker_main(
             Command::CaptureIngest {
                 input,
                 root_dir,
+                search_policy,
                 leases,
                 faults,
                 token,
@@ -7870,6 +7936,27 @@ fn worker_main(
                         &mut store,
                         &input,
                         root_dir.as_deref(),
+                        search_policy.as_deref(),
+                        &leases,
+                        faults.as_ref(),
+                        &token,
+                    )
+                });
+                let _ = reply.send(outcome);
+            }
+            Command::CaptureIngestBatch {
+                inputs,
+                search_policy,
+                leases,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
+                    capture_ingest_batch_on_store(
+                        &mut store,
+                        &inputs,
+                        &search_policy,
                         &leases,
                         faults.as_ref(),
                         &token,
@@ -14280,6 +14367,7 @@ fn capture_ingest_on_store(
     store: &mut EngineStore,
     input: &CaptureIngest,
     root_dir: Option<&std::path::Path>,
+    search_policy: Option<&SearchPolicySnapshot>,
     leases: &LeaseRegistry,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
@@ -14297,35 +14385,57 @@ fn capture_ingest_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    let actor_origin_id = capture_agent_origin_id(input.author_json.as_deref());
     let outcome = store.write_with(faults, |tx| {
-        let mut admitted = false;
-        let result = capture_ingest_with_admission_in_tx(
+        capture_ingest_in_tx(tx, input, root_dir, search_policy, leases)
+    })?;
+    match outcome {
+        TxnOutcome::Committed(result) => Ok(result),
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
+}
+
+fn capture_ingest_in_tx(
+    tx: &Transaction<'_>,
+    input: &CaptureIngest,
+    root_dir: Option<&std::path::Path>,
+    search_policy: Option<&SearchPolicySnapshot>,
+    leases: &LeaseRegistry,
+) -> Result<WriteResult, RuntimeError> {
+    let actor_origin_id = capture_agent_origin_id(input.author_json.as_deref());
+    let mut admitted = false;
+    let result =
+        capture_ingest_with_admission_in_tx(tx, input, |workspace_id, version_id, object_id| {
+            ensure_capture_target_not_leased(leases, workspace_id, version_id, object_id)?;
+            admitted = true;
+            Ok::<_, RuntimeError>(())
+        })?;
+    if admitted {
+        dohc_engine_sync::reconcile_local_resulting_head_in_tx(
             tx,
-            input,
-            |workspace_id, version_id, object_id| {
-                ensure_capture_target_not_leased(leases, workspace_id, version_id, object_id)?;
-                admitted = true;
-                Ok::<_, RuntimeError>(())
+            &input.workspace_id,
+            &input.version_id,
+            &result.snapshot.object_id,
+            dohc_engine_sync::ResultingHead::Text {
+                path: &result.snapshot.path,
+                text: &result.snapshot.text,
             },
+            actor_origin_id.as_deref(),
+            input.now_ms,
         )?;
-        if admitted {
-            dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+    }
+    if !result.deduped {
+        if let Some(policy) = search_policy {
+            upsert_file_search_index_with_policy(
                 tx,
+                policy,
                 &input.workspace_id,
                 &input.version_id,
                 &result.snapshot.object_id,
-                dohc_engine_sync::ResultingHead::Text {
-                    path: &result.snapshot.path,
-                    text: &result.snapshot.text,
-                },
-                actor_origin_id.as_deref(),
-                input.now_ms,
-            )?;
-        }
-        if !result.deduped
-            && let Some(root_dir) = root_dir
-        {
+                &result.snapshot.path,
+                &result.snapshot.text,
+            )
+            .map_err(RuntimeError::from)?;
+        } else if let Some(root_dir) = root_dir {
             upsert_file_search_index(
                 tx,
                 root_dir,
@@ -14337,17 +14447,87 @@ fn capture_ingest_on_store(
             )
             .map_err(RuntimeError::from)?;
         }
-        journal_moment_outbound_in_tx(
-            tx,
-            &input.workspace_id,
-            &result.moment.moment_id,
-            result.deduped,
-        )
-        .map_err(RuntimeError::from)?;
-        Ok::<_, RuntimeError>(result)
+    }
+    journal_moment_outbound_in_tx(
+        tx,
+        &input.workspace_id,
+        &result.moment.moment_id,
+        result.deduped,
+    )
+    .map_err(RuntimeError::from)?;
+    Ok(result)
+}
+
+fn capture_ingest_batch_on_store(
+    store: &mut EngineStore,
+    inputs: &[CaptureIngest],
+    search_policy: &SearchPolicySnapshot,
+    leases: &LeaseRegistry,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError> {
+    let Some(first) = inputs.first() else {
+        return Ok(Vec::new());
+    };
+    let total_bytes = inputs
+        .iter()
+        .try_fold(0usize, |total, input| total.checked_add(input.text.len()))
+        .ok_or(DomainError::InvalidInput {
+            reason: "capture batch byte count overflowed",
+        })?;
+    if inputs.len() > MAX_CAPTURE_INGEST_BATCH_OPS || total_bytes > MAX_CAPTURE_INGEST_BATCH_BYTES {
+        return Err(DomainError::InvalidInput {
+            reason: "capture batch exceeds actor bounds",
+        }
+        .into());
+    }
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    if inputs.iter().any(|input| {
+        input.workspace_id != first.workspace_id || input.version_id != first.version_id
+    }) {
+        return Err(DomainError::InvalidInput {
+            reason: "capture batch coordinates do not match",
+        }
+        .into());
+    }
+    ensure_mutation_version_on_store(
+        store,
+        &first.workspace_id,
+        &first.version_id,
+        first.now_ms,
+        faults,
+    )?;
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+
+    let outcome = store.write_with(faults, |tx| {
+        let mut results = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            tx.execute_batch("SAVEPOINT dohc_capture_batch_item")
+                .map_err(StorageError::persist_public)?;
+            match capture_ingest_in_tx(tx, input, None, Some(search_policy), leases) {
+                Ok(result) => {
+                    tx.execute_batch("RELEASE dohc_capture_batch_item")
+                        .map_err(StorageError::persist_public)?;
+                    results.push(Ok(result));
+                }
+                Err(error) => {
+                    tx.execute_batch(
+                        "ROLLBACK TO dohc_capture_batch_item; \
+                         RELEASE dohc_capture_batch_item",
+                    )
+                    .map_err(StorageError::persist_public)?;
+                    results.push(Err(error));
+                }
+            }
+        }
+        Ok::<_, RuntimeError>(results)
     })?;
     match outcome {
-        TxnOutcome::Committed(result) => Ok(result),
+        TxnOutcome::Committed(results) => Ok(results),
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
     }
 }

@@ -3150,9 +3150,8 @@ async fn apply_run_with_handle(
     }
     let clean = result.failed_applies.is_empty() && !result.degraded;
     // ONE event per settled batch/reconcile pass that settled anything. The
-    // domain writes are already durable here (each ingest/retire committed in
-    // its own transaction), so the announce happens even if the files-layer
-    // ack below fails — the renderer must never stay stale over bookkeeping.
+    // domain writes are already durable here, so the announce happens even if
+    // the files-layer ack below fails — the renderer must never stay stale over bookkeeping.
     //
     // NOT-OWNED settlements count: several of them APPEND retire/delete
     // moments — a policy-narrowed head ("Stopped tracking by policy"),

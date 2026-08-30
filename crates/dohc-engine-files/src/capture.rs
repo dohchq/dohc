@@ -1,11 +1,10 @@
-//! Two-phase reconcile capture: apply one operation, then acknowledge it.
+//! Two-phase reconcile capture: durably apply operations, then acknowledge them.
 //!
-//! Each [`CaptureOp`](crate::reconcile::CaptureOp) is sent to its sink in a
-//! separate call. A bad path is recorded and the remaining bounded batch keeps
-//! moving, matching the TS desktop capture chain's per-path transaction
-//! posture. Only successfully applied paths enter the acknowledgement receipt;
-//! failed paths retain their prior manifest entry and keep the controller dirty
-//! for retry.
+//! The default path sends each [`CaptureOp`](crate::reconcile::CaptureOp) to its
+//! sink separately. A sink may durably batch a bounded all-ingest plan while
+//! preserving one outcome per path. Only successfully applied paths enter the
+//! acknowledgement receipt; failed paths retain their prior manifest entry and
+//! keep the controller dirty for retry.
 //!
 //! The crash seam sits after the sink call and before the receipt records that
 //! path. A restart may therefore reapply an operation whose domain transaction
@@ -61,8 +60,10 @@ pub struct CapturedIngest {
     pub sha256: String,
 }
 
-/// The narrow downstream contract. Each call is one idempotent domain
-/// transaction; the capture loop never batches multiple paths into one commit.
+/// The narrow downstream contract. The default path applies one idempotent
+/// domain transaction per operation. A sink may override [`Self::ingest_batch`]
+/// when it can commit a bounded all-ingest plan atomically while returning one
+/// durable outcome per path.
 pub trait CaptureSink {
     fn ingest(
         &mut self,
@@ -74,6 +75,17 @@ pub trait CaptureSink {
     ) -> Result<IngestOutcome, CaptureError>;
 
     fn retire(&mut self, path: &str) -> Result<(), CaptureError>;
+
+    /// Try a bounded all-ingest fast path. `None` asks the capture loop to use
+    /// the ordinary per-operation contract. `Some` means every returned path
+    /// outcome is durable before this method returns; outcomes must align with
+    /// `ops` exactly.
+    fn ingest_batch(
+        &mut self,
+        _ops: &[CaptureOp],
+    ) -> Option<Vec<Result<IngestOutcome, CaptureError>>> {
+        None
+    }
 }
 
 /// Bounded receipt from the apply phase.
@@ -117,13 +129,16 @@ fn should_crash(_faults: &dyn FaultInjector) -> bool {
     false
 }
 
-/// Apply a prepared plan one operation at a time. Sink errors are contained and
-/// surfaced in the receipt; the loop continues with the next independent path.
+/// Apply a prepared plan. Sink errors are contained and surfaced in the
+/// receipt; independent paths continue.
 pub fn apply_reconcile_plan(
     plan: &ReconcilePlan,
     sink: &mut dyn CaptureSink,
     faults: &dyn FaultInjector,
 ) -> CaptureApplyResult {
+    if let Some(outcomes) = sink.ingest_batch(&plan.ops) {
+        return batch_apply_result(plan, outcomes, faults);
+    }
     let mut applied_paths = Vec::with_capacity(plan.ops.len());
     let mut captured = Vec::new();
     let mut not_owned_paths = Vec::new();
@@ -180,6 +195,69 @@ pub fn apply_reconcile_plan(
             }
             Applied::Retired => applied_paths.push(op.path().to_owned()),
             Applied::NotOwned => not_owned_paths.push(op.path().to_owned()),
+        }
+    }
+    let degraded = plan.degraded || !failed_applies.is_empty();
+    CaptureApplyResult {
+        applied_paths,
+        captured,
+        not_owned_paths,
+        failed_applies,
+        crashed_after_apply: None,
+        degraded,
+    }
+}
+
+fn batch_apply_result(
+    plan: &ReconcilePlan,
+    outcomes: Vec<Result<IngestOutcome, CaptureError>>,
+    faults: &dyn FaultInjector,
+) -> CaptureApplyResult {
+    if outcomes.len() != plan.ops.len()
+        || plan
+            .ops
+            .iter()
+            .any(|op| !matches!(op, CaptureOp::Ingest { .. }))
+    {
+        return CaptureApplyResult {
+            applied_paths: Vec::new(),
+            captured: Vec::new(),
+            not_owned_paths: Vec::new(),
+            failed_applies: plan.ops.iter().map(|op| op.path().to_owned()).collect(),
+            crashed_after_apply: None,
+            degraded: true,
+        };
+    }
+
+    let mut applied_paths = Vec::with_capacity(outcomes.len());
+    let mut captured = Vec::with_capacity(outcomes.len());
+    let mut not_owned_paths = Vec::new();
+    let mut failed_applies = Vec::new();
+    for (op, outcome) in plan.ops.iter().zip(outcomes) {
+        let Ok(outcome) = outcome else {
+            failed_applies.push(op.path().to_owned());
+            continue;
+        };
+        if should_crash(faults) {
+            return CaptureApplyResult {
+                applied_paths,
+                captured,
+                not_owned_paths,
+                failed_applies,
+                crashed_after_apply: Some(op.path().to_owned()),
+                degraded: true,
+            };
+        }
+        match outcome {
+            IngestOutcome::Captured { size, sha256 } => {
+                applied_paths.push(op.path().to_owned());
+                captured.push(CapturedIngest {
+                    path: op.path().to_owned(),
+                    size,
+                    sha256,
+                });
+            }
+            IngestOutcome::NotOwned => not_owned_paths.push(op.path().to_owned()),
         }
     }
     let degraded = plan.degraded || !failed_applies.is_empty();

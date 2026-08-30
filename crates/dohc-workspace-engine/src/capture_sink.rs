@@ -6,15 +6,16 @@ use dohc_engine_domain::{COLLECTION_SCHEMA_FILENAME, DomainError};
 use dohc_engine_files::media::is_text_media_type;
 use dohc_engine_files::policy::{PathClassification, classify_engine_file_path_normalized};
 use dohc_engine_files::{
-    CaptureError, CaptureSink, IngestOutcome, IngestReason, MAX_CAPTURE_BINARY_BYTES,
+    CaptureError, CaptureOp, CaptureSink, IngestOutcome, IngestReason, MAX_CAPTURE_BINARY_BYTES,
     MAX_CAPTURE_TEXT_BYTES,
 };
 use dohc_engine_runtime::search::{
-    FilesPolicyRule, read_engine_search_policy, resolve_effective_policy,
+    FilesPolicyRule, SearchPolicySnapshot, read_engine_search_policy, resolve_effective_policy,
 };
 use dohc_engine_runtime::{
     ActorHandle, CaptureIngest, CaptureIngestBinary, CaptureRetire, CaptureSecret,
-    CaptureSecretRetire, NoFaults, RuntimeError,
+    CaptureSecretRetire, MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS, NoFaults,
+    RuntimeError,
 };
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -214,6 +215,7 @@ pub struct StoreCaptureSink {
     shadow_root: PathBuf,
     now_ms: i64,
     author_json: Option<String>,
+    search_policy: Arc<SearchPolicySnapshot>,
     files_policy: PolicyState,
     /// Set when any op this run was HELD on an unreadable policy. The driver
     /// reads it after the apply to arm its policy-recovery trigger — a
@@ -285,7 +287,7 @@ impl StoreCaptureSink {
         // floor. See [`PolicyState`] for the absent/malformed/unreadable
         // split: only a file that exists but cannot be READ makes ownership
         // unknown; malformed keeps the WS-F floor-only rule.
-        let snapshot = read_engine_search_policy(&shadow_root);
+        let snapshot = Arc::new(read_engine_search_policy(&shadow_root));
         let files_unreadable = snapshot.diagnostics.iter().any(|diagnostic| {
             diagnostic.file == "files.toml"
                 && diagnostic.reason == dohc_engine_runtime::search::DiagnosticReason::Unreadable
@@ -293,7 +295,7 @@ impl StoreCaptureSink {
         let files_policy = if files_unreadable {
             PolicyState::Unavailable
         } else {
-            PolicyState::Known(snapshot.files_policy)
+            PolicyState::Known(snapshot.files_policy.clone())
         };
         StoreCaptureSink {
             actor,
@@ -303,6 +305,7 @@ impl StoreCaptureSink {
             shadow_root,
             now_ms,
             author_json,
+            search_policy: snapshot,
             files_policy,
             policy_held: std::cell::Cell::new(false),
             secret_key: None,
@@ -493,7 +496,7 @@ impl StoreCaptureSink {
         text: String,
         claim_foreign_head: bool,
     ) -> Result<DomainIngest, CaptureError> {
-        match self.actor.capture_ingest_indexed_blocking(
+        match self.actor.capture_ingest_with_search_policy_blocking(
             CaptureIngest {
                 workspace_id: self.workspace_id.clone(),
                 version_id: self.version_id.clone(),
@@ -507,7 +510,7 @@ impl StoreCaptureSink {
                 request_id: None,
                 claim_foreign_head,
             },
-            self.shadow_root.clone(),
+            Arc::clone(&self.search_policy),
             self.leases.clone(),
             Arc::new(NoFaults),
         ) {
@@ -750,7 +753,86 @@ enum DomainIngest {
     ForeignHead,
 }
 
+struct PreparedTextCapture {
+    input: CaptureIngest,
+    size: u64,
+    sha256: String,
+}
+
 impl StoreCaptureSink {
+    fn prepare_added_text(&self, path: &str, media_type: &str) -> Option<PreparedTextCapture> {
+        match classify_engine_file_path_normalized(path) {
+            (PathClassification::Tracked, Some(normalized)) if normalized == path => {}
+            _ => return None,
+        }
+        if !self.policy_tracks(path).ok()? {
+            return None;
+        }
+        let CurrentContent::Text(text) = self.read_current(path, media_type).ok()? else {
+            return None;
+        };
+        let size = text.len() as u64;
+        let sha256 = sha256_hex(text.as_bytes());
+        Some(PreparedTextCapture {
+            input: CaptureIngest {
+                workspace_id: self.workspace_id.clone(),
+                version_id: self.version_id.clone(),
+                path: path.to_owned(),
+                text,
+                metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
+                metadata_summary: self.provenance.summary.clone(),
+                metadata_correlation_id: self.provenance.correlation_id.clone(),
+                author_json: self.author_json.clone(),
+                now_ms: self.now_ms,
+                request_id: None,
+                claim_foreign_head: false,
+            },
+            size,
+            sha256,
+        })
+    }
+
+    fn flush_added_text_batch(
+        &self,
+        pending: &mut Vec<PreparedTextCapture>,
+        outcomes: &mut Vec<Result<IngestOutcome, CaptureError>>,
+    ) {
+        if pending.is_empty() {
+            return;
+        }
+        let batch = std::mem::take(pending);
+        let mut inputs = Vec::with_capacity(batch.len());
+        let mut identities = Vec::with_capacity(batch.len());
+        for prepared in batch {
+            inputs.push(prepared.input);
+            identities.push((prepared.size, prepared.sha256));
+        }
+        let results = self.actor.capture_ingest_batch_blocking(
+            inputs,
+            Arc::clone(&self.search_policy),
+            self.leases.clone(),
+            Arc::new(NoFaults),
+        );
+        match results {
+            Ok(results) if results.len() == identities.len() => {
+                for (result, (size, sha256)) in results.into_iter().zip(identities) {
+                    outcomes.push(match result {
+                        Ok(_) | Err(RuntimeError::Domain(DomainError::CaptureNotOwned)) => {
+                            Ok(IngestOutcome::Captured { size, sha256 })
+                        }
+                        Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => {
+                            Ok(IngestOutcome::NotOwned)
+                        }
+                        Err(_) => Err(INGEST_FAILED),
+                    });
+                }
+            }
+            Ok(_) | Err(_) => {
+                outcomes.extend(identities.into_iter().map(|_| Err(INGEST_FAILED)));
+            }
+        }
+    }
+
     /// Retire a path the CURRENT policy excludes, WITHOUT the absence check.
     ///
     /// The driver calls this for `retained_over_cap` paths: they are still on
@@ -772,6 +854,66 @@ impl StoreCaptureSink {
 }
 
 impl CaptureSink for StoreCaptureSink {
+    fn ingest_batch(
+        &mut self,
+        ops: &[CaptureOp],
+    ) -> Option<Vec<Result<IngestOutcome, CaptureError>>> {
+        if ops.len() < 2
+            || ops.iter().any(|op| {
+                !matches!(
+                    op,
+                    CaptureOp::Ingest {
+                        reason: IngestReason::Added,
+                        ..
+                    }
+                )
+            })
+        {
+            return None;
+        }
+
+        let mut outcomes = Vec::with_capacity(ops.len());
+        let mut pending = Vec::with_capacity(MAX_CAPTURE_INGEST_BATCH_OPS);
+        let mut pending_bytes = 0usize;
+        for op in ops {
+            let CaptureOp::Ingest {
+                path,
+                size,
+                sha256,
+                media_type,
+                reason,
+                ..
+            } = op
+            else {
+                unreachable!("all operations were checked as Added ingests");
+            };
+            let Some(prepared) = self.prepare_added_text(path, media_type) else {
+                self.flush_added_text_batch(&mut pending, &mut outcomes);
+                pending_bytes = 0;
+                outcomes.push(self.ingest(path, *size, sha256, media_type, *reason));
+                continue;
+            };
+            let text_bytes = prepared.input.text.len();
+            if text_bytes > MAX_CAPTURE_INGEST_BATCH_BYTES {
+                self.flush_added_text_batch(&mut pending, &mut outcomes);
+                pending_bytes = 0;
+                outcomes.push(self.ingest(path, *size, sha256, media_type, *reason));
+                continue;
+            }
+            if !pending.is_empty()
+                && (pending.len() >= MAX_CAPTURE_INGEST_BATCH_OPS
+                    || pending_bytes.saturating_add(text_bytes) > MAX_CAPTURE_INGEST_BATCH_BYTES)
+            {
+                self.flush_added_text_batch(&mut pending, &mut outcomes);
+                pending_bytes = 0;
+            }
+            pending_bytes = pending_bytes.saturating_add(text_bytes);
+            pending.push(prepared);
+        }
+        self.flush_added_text_batch(&mut pending, &mut outcomes);
+        Some(outcomes)
+    }
+
     fn ingest(
         &mut self,
         path: &str,

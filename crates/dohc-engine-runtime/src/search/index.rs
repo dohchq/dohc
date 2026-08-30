@@ -117,6 +117,30 @@ pub fn upsert_file_search_index(
     text: &str,
 ) -> Result<(), SearchError> {
     let policy = read_engine_search_policy(root_dir);
+    upsert_file_search_index_with_policy(
+        conn,
+        &policy,
+        workspace_id,
+        version_id,
+        object_id,
+        path,
+        text,
+    )
+}
+
+/// Upsert a single text file using the policy snapshot owned by the caller's
+/// reconcile pass. This keeps one capture generation internally consistent:
+/// a policy edit that lands mid-pass takes effect on the next generation, not
+/// on an arbitrary suffix of the current one.
+pub fn upsert_file_search_index_with_policy(
+    conn: &Connection,
+    policy: &SearchPolicySnapshot,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+    path: &str,
+    text: &str,
+) -> Result<(), SearchError> {
     if policy.is_degraded() {
         // Freeze, don't drop. Invalidate an existing healthy certification in
         // this mutation transaction; no row already means ensure must rebuild.
@@ -128,7 +152,7 @@ pub fn upsert_file_search_index(
         return Ok(());
     }
     delete_file_index_row(conn, workspace_id, version_id, object_id)?;
-    if !path_is_search_indexed(&policy, path) {
+    if !path_is_search_indexed(policy, path) {
         return Ok(());
     }
     let search_text = extract_search_text(path, text);

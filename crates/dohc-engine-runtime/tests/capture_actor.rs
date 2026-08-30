@@ -57,6 +57,116 @@ fn blocking_capture_variants_round_trip_through_the_actor() {
     supervisor.close(&db).expect("close actor");
 }
 
+#[test]
+fn bounded_capture_batch_contains_a_leased_path_and_replays_without_duplicates() {
+    const WORKSPACE_ID: &str = "ws-capture-batch";
+    const VERSION_ID: &str = "main";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let supervisor = WorkspaceSupervisor::new();
+    let policy = Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
+        scratch.path(),
+    ));
+    std::fs::create_dir_all(scratch.path().join(".dohc")).expect("policy directory");
+    std::fs::write(
+        scratch.path().join(".dohc/files.toml"),
+        "[[rule]]\npath = \"**\"\nsearchable = false\n",
+    )
+    .expect("narrow search policy after the pass snapshot");
+
+    let input = |path: &str, text: &str| CaptureIngest {
+        workspace_id: WORKSPACE_ID.to_owned(),
+        version_id: VERSION_ID.to_owned(),
+        path: path.to_owned(),
+        text: text.to_owned(),
+        metadata_origin: "capture".to_owned(),
+        metadata_summary: Some("Reconciled offline edits".to_owned()),
+        metadata_correlation_id: Some("batch-pass".to_owned()),
+        author_json: None,
+        now_ms: 10,
+        request_id: None,
+        claim_foreign_head: false,
+    };
+    let inputs = vec![
+        input("notes/a.md", "alpha batch needle"),
+        input("notes/b.md", "bravo batch needle"),
+        input("notes/c.md", "charlie batch needle"),
+    ];
+    let leased_object =
+        dohc_engine_domain::derive_capture_object_id(WORKSPACE_ID, VERSION_ID, "notes/b.md");
+    let leased_key =
+        dohc_engine_collab::DocKey::new(WORKSPACE_ID, VERSION_ID, &leased_object).expect("key");
+    let leases = dohc_engine_collab::LeaseRegistry::new();
+    let held = leases.acquire(&leased_key).expect("hold middle path live");
+
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let first = handle
+        .capture_ingest_batch_blocking(
+            inputs.clone(),
+            Arc::clone(&policy),
+            leases.clone(),
+            Arc::new(NoFaults),
+        )
+        .expect("commit successful siblings");
+    assert_eq!(first.len(), 3);
+    assert!(first[0].as_ref().is_ok_and(|write| !write.deduped));
+    assert!(matches!(
+        &first[1],
+        Err(RuntimeError::Sync(
+            dohc_engine_sync::SyncError::RetryableState {
+                reason: "ydoc-session-live"
+            }
+        ))
+    ));
+    assert!(first[2].as_ref().is_ok_and(|write| !write.deduped));
+    supervisor.close(&db).expect("close after partial batch");
+
+    let state = |expected_paths: &[&str]| {
+        let store = EngineStore::open(&db, 100).expect("inspect batch state");
+        store
+            .read_with(|conn| {
+                let read_paths = |table: &str| -> rusqlite::Result<Vec<String>> {
+                    let mut statement = conn.prepare(&format!(
+                        "SELECT path FROM {table} WHERE workspace_id=?1 ORDER BY path"
+                    ))?;
+                    statement
+                        .query_map([WORKSPACE_ID], |row| row.get(0))?
+                        .collect()
+                };
+                let paths = read_paths("snapshots")?;
+                let moments: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM moments WHERE workspace_id=?1",
+                    [WORKSPACE_ID],
+                    |row| row.get(0),
+                )?;
+                let search_paths = read_paths("engine_search_files_fts")?;
+                Ok::<_, rusqlite::Error>((paths, moments, search_paths))
+            })
+            .map(|(paths, moments, search_paths)| {
+                let expected = expected_paths
+                    .iter()
+                    .map(|path| (*path).to_owned())
+                    .collect::<Vec<_>>();
+                assert_eq!(paths, expected);
+                assert_eq!(moments, expected_paths.len() as i64);
+                assert_eq!(search_paths, expected);
+            })
+            .expect("query batch state");
+    };
+    state(&["notes/a.md", "notes/c.md"]);
+
+    drop(held);
+    let handle = supervisor.open(&db, 2).expect("reopen actor").actor;
+    let replay = handle
+        .capture_ingest_batch_blocking(inputs, policy, leases, Arc::new(NoFaults))
+        .expect("retry whole chunk after lease release");
+    assert!(replay[0].as_ref().is_ok_and(|write| write.deduped));
+    assert!(replay[1].as_ref().is_ok_and(|write| !write.deduped));
+    assert!(replay[2].as_ref().is_ok_and(|write| write.deduped));
+    supervisor.close(&db).expect("close after replay");
+    state(&["notes/a.md", "notes/b.md", "notes/c.md"]);
+}
+
 #[tokio::test]
 async fn async_capture_variants_round_trip_and_honor_precancellation() {
     let scratch = ScratchDir::new().expect("scratch");

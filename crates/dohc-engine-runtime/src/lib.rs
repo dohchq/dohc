@@ -32,10 +32,10 @@ pub mod supervisor;
 
 pub use actor::{
     ActiveVersionSwitch, ActorHandle, BinaryWriteExecutionResult, HistoryPageRead, LifecycleState,
-    MergeExecutionResult, PostCommitMaterializeOutcome, RelayConfiguration, RelayOperation,
-    RelayOperationOutcome, RollbackExecutionResult, SelfWriteRecorder, ShareViewIdentityRecord,
-    SharingDeclined, StoreSnapshot, UnitsOutcome, WorkspaceActor, YdocAppend, YdocOpenState,
-    YdocSettlement,
+    MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS, MergeExecutionResult,
+    PostCommitMaterializeOutcome, RelayConfiguration, RelayOperation, RelayOperationOutcome,
+    RollbackExecutionResult, SelfWriteRecorder, ShareViewIdentityRecord, SharingDeclined,
+    StoreSnapshot, UnitsOutcome, WorkspaceActor, YdocAppend, YdocOpenState, YdocSettlement,
 };
 pub use error::RuntimeError;
 pub use identity::EngineDbIdentity;
