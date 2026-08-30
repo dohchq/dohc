@@ -84,6 +84,7 @@ async function fixture(
     workspaceQuotaBytes?: number;
     namedRecipient?: string;
     discussionActivity?: DiscussionActivityHub;
+    nowMs?: () => number;
   } = {},
 ): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), "dohc-link-discussion-http-"));
@@ -229,7 +230,7 @@ async function fixture(
       lookupUserEmail: (userId) => `${userId}@email-sentinel.test`,
       lookupUserDisplayName:
         overrides.lookupUserDisplayName ?? ((userId) => names[userId] ?? null),
-      nowMs: () => clock++,
+      nowMs: overrides.nowMs ?? (() => clock++),
       newId: () => `http-id-${++id}`,
       linkKey: LINK_KEY,
       shareWebOrigin: "https://share.test",
@@ -601,6 +602,48 @@ function seedCrossShareHandles(storage: SyncRelayStorage): {
 }
 
 describe("share discussion HTTP boundary", () => {
+  it("returns a higher discussion revision even when its timestamp moves backward", async () => {
+    let now = 10_000;
+    const test = await fixture({ nowMs: () => now });
+    const first = await body(
+      await test.handler(
+        trustedAppend(test.comment, {
+          body: "clock first",
+          claimedName: "Clock Link",
+          idempotencyKey: "clock-first",
+        }),
+      ),
+    );
+    now = 9_000;
+    const second = await body(
+      await test.handler(
+        trustedAppend(test.comment, {
+          body: "clock second",
+          idempotencyKey: "clock-second",
+        }),
+      ),
+    );
+
+    expect(first.message).toMatchObject({ createdAtMs: 10_000 });
+    expect(second.message).toMatchObject({ createdAtMs: 9_000 });
+    const activity = await body(
+      await test.handler(
+        linkRequest(
+          test.view,
+          "/sync/link/discussion/activity?since=1&hold=0&limit=100",
+          {},
+          { profileSecret: PROFILE_A },
+        ),
+      ),
+    );
+    expect(activity).toMatchObject({
+      latestRevision: 2,
+      cursorRevision: 2,
+      hasMore: false,
+    });
+    expect(messages(activity)).toEqual([second.message]);
+  });
+
   it("relays durable current-state activity across waits, lifecycle changes, restart, timeout, abort, and capacity", async () => {
     const activityHub = new DiscussionActivityHub({
       maxTotalWaiters: 2,

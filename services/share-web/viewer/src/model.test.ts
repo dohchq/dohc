@@ -448,7 +448,7 @@ describe("public discussion projection", () => {
     }])).toBeNull();
   });
 
-  it("refuses an unseen row with an earlier creation time", () => {
+  it("inserts an unseen row with an earlier creation time into canonical order", () => {
     const tail = {
       ...link,
       messageId: "message-a",
@@ -459,7 +459,10 @@ describe("public discussion projection", () => {
       createdAtMs: tail.createdAtMs - 1,
     };
 
-    expect(mergeDiscussionMessages([tail], [earlierTime])).toBeNull();
+    expect(mergeDiscussionMessages([tail], [earlierTime])).toEqual([
+      earlierTime,
+      tail,
+    ]);
   });
 
   it("uses relay keyset order for message ids with the same creation time", () => {
@@ -511,7 +514,7 @@ describe("public discussion projection", () => {
     ])).toBeNull();
   });
 
-  it("ignores unseen activity before a loaded window without hiding conflicts", () => {
+  it("accepts unseen live activity before a loaded window without importing tombstones", () => {
     const olderUnseen = {
       ...named,
       messageId: "message-before-window",
@@ -522,17 +525,17 @@ describe("public discussion projection", () => {
       messageId: "message-after-window",
       createdAtMs: link.createdAtMs + 1,
     };
-    const sameMillisecondBeforeWindow = {
-      ...named,
-      messageId: "message-before-window",
-      createdAtMs: link.createdAtMs,
+    const unseenTombstone = {
+      messageId: "message-deleted-before-window",
+      createdAtMs: link.createdAtMs - 2,
+      deleted: true as const,
     };
 
     expect(mergeDiscussionWindowMessages(
       [link],
-      [olderUnseen, sameMillisecondBeforeWindow, newerUnseen],
+      [unseenTombstone, olderUnseen, newerUnseen],
     ))
-      .toEqual([link, newerUnseen]);
+      .toEqual([olderUnseen, link, newerUnseen]);
     expect(mergeDiscussionWindowMessages([link], [{ ...link, body: "conflict" }]))
       .toBeNull();
   });

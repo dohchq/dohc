@@ -749,7 +749,7 @@ describe("CommentsPanel", () => {
     await settle(() => parkedSignal !== undefined);
   });
 
-  it("keeps same-millisecond activity before a complete initial history", async () => {
+  it("keeps backdated activity before a complete initial history and follows its revision", async () => {
     const initial = {
       ...LINK_MESSAGE,
       messageId: "message-b",
@@ -759,7 +759,7 @@ describe("CommentsPanel", () => {
     const concurrent = {
       ...NAMED_MESSAGE,
       messageId: "message-a",
-      createdAtMs: initial.createdAtMs,
+      createdAtMs: initial.createdAtMs - 1_000,
       body: "Concurrent body",
     };
     let parkedSignal: AbortSignal | undefined;
@@ -793,6 +793,134 @@ describe("CommentsPanel", () => {
       .toEqual([
         "Named PersonConcurrent body",
         "Link PersonUnverifiedInitial body",
+      ]);
+  });
+
+  it("accepts a committed backdated submit and clears its draft", async () => {
+    const initial = {
+      ...LINK_MESSAGE,
+      messageId: "message-submit-tail",
+      createdAtMs: 4_000,
+      body: "Existing tail",
+    };
+    const committed = {
+      ...LINK_MESSAGE,
+      messageId: "message-backdated-submit",
+      createdAtMs: 3_000,
+      body: "Backdated submit",
+    };
+    let posts = 0;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/view/discussion" && init?.method === "POST") {
+        posts += 1;
+        return jsonResponse({ ok: true, message: committed });
+      }
+      if (path === "/api/view/discussion?direction=newest-first") {
+        return discussionPageAt(7, [initial]);
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        return await new Promise<Response>(() => undefined);
+      }
+      throw new Error(`unexpected request: ${path}`);
+    }));
+
+    await render("comment");
+    setControlValue(bodyInput(), committed.body);
+    submit();
+    await settle(() => bodyInput().value === "" ||
+      container.textContent?.includes("The comment didn't post. Try again.") === true);
+
+    expect(posts).toBe(1);
+    expect(bodyInput().value).toBe("");
+    expect(container.textContent).not.toContain("The comment didn't post. Try again.");
+    expect([...container.querySelectorAll(".comment-row")].map((row) => row.textContent))
+      .toEqual([
+        "Link PersonUnverifiedBackdated submit",
+        "Link PersonUnverifiedExisting tail",
+      ]);
+  });
+
+  it("adds a backdated live revision to a partial window without importing its tombstone", async () => {
+    const loadedOldest = {
+      ...LINK_MESSAGE,
+      messageId: "message-loaded-oldest",
+      createdAtMs: 4_000,
+      body: "Loaded oldest",
+    };
+    const loadedTail = {
+      ...NAMED_MESSAGE,
+      messageId: "message-loaded-tail",
+      createdAtMs: 6_000,
+      body: "Loaded tail",
+    };
+    const hiddenTombstone = {
+      messageId: "message-hidden-deleted",
+      createdAtMs: 2_000,
+      deleted: true as const,
+    };
+    const backdatedLive = {
+      ...NAMED_MESSAGE,
+      messageId: "message-backdated-live",
+      createdAtMs: 3_000,
+      body: "Backdated live",
+    };
+    const paths: string[] = [];
+    let parkedSignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      paths.push(path);
+      if (path === "/api/view/discussion?direction=newest-first") {
+        return discussionPageAt(7, [loadedOldest, loadedTail], "cursor_hidden");
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        return jsonResponse({
+          ok: true,
+          access: "view",
+          latestRevision: 8,
+          cursorRevision: 8,
+          hasMore: false,
+          messages: [hiddenTombstone, backdatedLive],
+          composerState: "available",
+        });
+      }
+      if (path === "/api/view/discussion/activity?since=8&hold=30000&limit=100") {
+        parkedSignal = init?.signal ?? undefined;
+        return await new Promise<Response>(() => undefined);
+      }
+      if (
+        path ===
+        "/api/view/discussion?direction=newest-first&cursor=cursor_hidden"
+      ) {
+        return discussionPageAt(8, [hiddenTombstone]);
+      }
+      throw new Error(`unexpected request: ${path}`);
+    }));
+
+    await render("view");
+    await settle(() => parkedSignal !== undefined);
+
+    expect(paths.filter((path) => path.includes("cursor=cursor_hidden"))).toHaveLength(0);
+    expect([...container.querySelectorAll(".comment-row")].map((row) => row.textContent))
+      .toEqual([
+        "Named PersonBackdated live",
+        "Link PersonUnverifiedLoaded oldest",
+        "Named PersonLoaded tail",
+      ]);
+
+    clickButton("Load earlier comments");
+    await settle(() =>
+      container.textContent?.includes("Comment deleted by the owner") === true
+    );
+    expect(paths.filter((path) => path.includes("cursor=cursor_hidden"))).toEqual([
+      "/api/view/discussion?direction=newest-first&cursor=cursor_hidden",
+    ]);
+    expect([...container.querySelectorAll(".comment-row")].map((row) => row.textContent))
+      .toEqual([
+        "Comment deleted by the owner",
+        "Named PersonBackdated live",
+        "Link PersonUnverifiedLoaded oldest",
+        "Named PersonLoaded tail",
       ]);
   });
 

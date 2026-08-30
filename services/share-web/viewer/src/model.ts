@@ -308,8 +308,6 @@ export function mergeDiscussionMessages(
   for (const message of incoming) {
     const existing = known.get(message.messageId);
     if (!existing) {
-      const tail = merged.at(-1);
-      if (tail && message.createdAtMs < tail.createdAtMs) return null;
       known.set(message.messageId, message);
       merged.push(message);
       needsSort = true;
@@ -344,13 +342,11 @@ export function mergeDiscussionWindowMessages(
   current: readonly PublicDiscussionMessage[],
   incoming: readonly PublicDiscussionMessage[],
 ): PublicDiscussionMessage[] | null {
-  const oldest = current.at(0);
-  if (!oldest) return mergeDiscussionMessages(current, incoming);
   const loadedIds = new Set(current.map((message) => message.messageId));
   return mergeDiscussionMessages(
     current,
     incoming.filter((message) =>
-      loadedIds.has(message.messageId) || discussionOrder(message, oldest) >= 0
+      loadedIds.has(message.messageId) || !message.deleted
     ),
   );
 }
