@@ -2120,6 +2120,25 @@ struct ResolvedCaptureObject {
     known_object: Option<FileObjectRecord>,
 }
 
+/// Rusqlite's `Connection::{execute, query_row}` conveniences prepare and
+/// finalize their SQL on every call. Capture runs this static SQL once per
+/// file, so keep the statement handles in the connection's bounded cache.
+fn execute_cached<P: rusqlite::Params>(
+    conn: &Connection,
+    sql: &str,
+    params: P,
+) -> rusqlite::Result<usize> {
+    conn.prepare_cached(sql)?.execute(params)
+}
+
+fn query_row_cached<T, P, F>(conn: &Connection, sql: &str, params: P, map: F) -> rusqlite::Result<T>
+where
+    P: rusqlite::Params,
+    F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+{
+    conn.prepare_cached(sql)?.query_row(params, map)
+}
+
 impl<'a> From<&'a WriteText> for ProjectedWriteText<'a> {
     fn from(input: &'a WriteText) -> Self {
         Self {
@@ -3354,7 +3373,8 @@ fn write_normalized_text_in_tx_with_journal(
         )
         .map_err(DomainError::sql_persist)?;
     }
-    tx.execute(
+    execute_cached(
+        tx,
         "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
         params![blob, input.text.len() as i64, input.text.as_ref()],
     )
@@ -3372,7 +3392,8 @@ fn write_normalized_text_in_tx_with_journal(
         )
         .map_err(DomainError::sql_persist)?;
     }
-    tx.execute(
+    execute_cached(
+        tx,
         "INSERT INTO moments \
          (workspace_id, moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
            operation, after_blob_sha256, before_present, before_blob_sha256, \
@@ -3408,7 +3429,8 @@ fn write_normalized_text_in_tx_with_journal(
     )
     .map_err(DomainError::sql_persist)?;
     crate::collections::index_historical_record_owner_moment_in_tx(tx, ws, moment_order)?;
-    tx.execute(
+    execute_cached(
+        tx,
         "INSERT INTO snapshots \
          (workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms, \
            latest_moment_id, metadata_origin, metadata_summary, \
@@ -3437,7 +3459,8 @@ fn write_normalized_text_in_tx_with_journal(
     )
     .map_err(DomainError::sql_persist)?;
     if journal {
-        tx.execute(
+        execute_cached(
+            tx,
             "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
              VALUES (?1, 'moment.append', ?2)",
             params![object_id, input.now_ms],
@@ -3777,7 +3800,8 @@ fn resolve_capture_object(
         None => {
             let derived_object_id = derive_capture_object_id(workspace_id, version_id, path);
             let object_id = if !object_exists(tx, workspace_id, &derived_object_id)? {
-                tx.execute(
+                execute_cached(
+                    tx,
                     "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
                      VALUES (?1, ?2, ?3)",
                     params![workspace_id, derived_object_id, now_ms],
@@ -3799,7 +3823,8 @@ fn resolve_capture_object(
                     path,
                     next_order,
                 );
-                tx.execute(
+                execute_cached(
+                    tx,
                     "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
                      VALUES (?1, ?2, ?3)",
                     params![workspace_id, disambiguated_object_id, now_ms],
@@ -3813,7 +3838,8 @@ fn resolve_capture_object(
                 reserved_moment_order = Some(next_order);
                 disambiguated_object_id
             };
-            tx.execute(
+            execute_cached(
+                tx,
                 "INSERT INTO path_aliases (workspace_id, version_id, path, object_id) \
                  VALUES (?1, ?2, ?3, ?4)",
                 params![workspace_id, version_id, path, object_id],
@@ -4489,14 +4515,14 @@ fn version_exists(
     workspace_id: &str,
     version_id: &str,
 ) -> Result<bool, DomainError> {
-    let found: Option<i64> = conn
-        .query_row(
-            "SELECT 1 FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
-            params![workspace_id, version_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(DomainError::sql_corrupt)?;
+    let found: Option<i64> = query_row_cached(
+        conn,
+        "SELECT 1 FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
+        params![workspace_id, version_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(DomainError::sql_corrupt)?;
     Ok(found.is_some())
 }
 
@@ -4517,16 +4543,16 @@ pub(crate) fn moment_exists(
     workspace_id: &str,
     moment_id: &str,
 ) -> Result<bool, DomainError> {
-    let found: Option<i64> = conn
-        .query_row(
-            "SELECT 1 WHERE \
+    let found: Option<i64> = query_row_cached(
+        conn,
+        "SELECT 1 WHERE \
              EXISTS (SELECT 1 FROM moments WHERE workspace_id = ?1 AND moment_id = ?2) OR \
              EXISTS (SELECT 1 FROM secret_moments WHERE workspace_id = ?1 AND moment_id = ?2)",
-            params![workspace_id, moment_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(DomainError::sql_corrupt)?;
+        params![workspace_id, moment_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(DomainError::sql_corrupt)?;
     Ok(found.is_some())
 }
 
@@ -4553,14 +4579,14 @@ fn object_exists(
     workspace_id: &str,
     object_id: &str,
 ) -> Result<bool, DomainError> {
-    let found: Option<i64> = conn
-        .query_row(
-            "SELECT 1 FROM file_objects WHERE workspace_id = ?1 AND object_id = ?2",
-            params![workspace_id, object_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(DomainError::sql_corrupt)?;
+    let found: Option<i64> = query_row_cached(
+        conn,
+        "SELECT 1 FROM file_objects WHERE workspace_id = ?1 AND object_id = ?2",
+        params![workspace_id, object_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(DomainError::sql_corrupt)?;
     Ok(found.is_some())
 }
 
@@ -4572,14 +4598,14 @@ pub fn object_has_live_alias(
     workspace_id: &str,
     object_id: &str,
 ) -> Result<bool, DomainError> {
-    let found: Option<i64> = conn
-        .query_row(
-            "SELECT 1 FROM path_aliases WHERE workspace_id = ?1 AND object_id = ?2 LIMIT 1",
-            params![workspace_id, object_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(DomainError::sql_corrupt)?;
+    let found: Option<i64> = query_row_cached(
+        conn,
+        "SELECT 1 FROM path_aliases WHERE workspace_id = ?1 AND object_id = ?2 LIMIT 1",
+        params![workspace_id, object_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(DomainError::sql_corrupt)?;
     Ok(found.is_some())
 }
 
@@ -4620,7 +4646,8 @@ fn alias_object_id(
     version_id: &str,
     path: &str,
 ) -> Result<Option<String>, DomainError> {
-    conn.query_row(
+    query_row_cached(
+        conn,
         "SELECT object_id FROM path_aliases WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
         params![workspace_id, version_id, path],
         |row| row.get(0),
@@ -4647,8 +4674,7 @@ pub(crate) fn next_moment_order(conn: &Connection) -> Result<i64, DomainError> {
     // newer than an already-issued compensating restore. Version-switch
     // projections use snapshot timestamps as generations, so they are a
     // separate ordering domain and must not advance the mutation sequence.
-    let max: i64 = conn
-        .query_row(NEXT_MOMENT_ORDER_SQL, [], |row| row.get(0))
+    let max: i64 = query_row_cached(conn, NEXT_MOMENT_ORDER_SQL, [], |row| row.get(0))
         .map_err(DomainError::sql_corrupt)?;
     Ok(max + 1)
 }
@@ -4748,20 +4774,20 @@ fn get_snapshot(
     version_id: &str,
     object_id: &str,
 ) -> Result<Option<SnapshotRecord>, DomainError> {
-    let row = conn
-        .query_row(
-            "SELECT s.object_id, s.path, b.text, s.blob_sha256, s.updated_at_ms, \
+    let row = query_row_cached(
+        conn,
+        "SELECT s.object_id, s.path, b.text, s.blob_sha256, s.updated_at_ms, \
          s.latest_moment_id, s.metadata_origin, s.metadata_summary, \
          s.metadata_correlation_id, COALESCE(s.content_kind, 'text'), \
          bb.sha256 FROM snapshots s \
          LEFT JOIN blobs b ON b.sha256 = s.blob_sha256 \
          LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
          WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.object_id = ?3",
-            params![workspace_id, version_id, object_id],
-            |row| map_snapshot_row(row, workspace_id, version_id),
-        )
-        .optional()
-        .map_err(DomainError::sql_corrupt)?;
+        params![workspace_id, version_id, object_id],
+        |row| map_snapshot_row(row, workspace_id, version_id),
+    )
+    .optional()
+    .map_err(DomainError::sql_corrupt)?;
     row.transpose()
 }
 
@@ -6044,7 +6070,8 @@ fn derive_disambiguated_capture_object_id(
 }
 
 fn capture_producer_id(tx: &Transaction<'_>, workspace_id: &str) -> Result<String, DomainError> {
-    tx.query_row(
+    query_row_cached(
+        tx,
         "SELECT COALESCE(\
              (SELECT origin_id FROM sync_identity WHERE workspace_id = ?1), \
              (SELECT engine_uuid FROM engine_ownership WHERE rowid_guard = 1))",
