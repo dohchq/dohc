@@ -210,7 +210,10 @@ export class VersionedLiveAdapter {
         options,
       ) as Promise<WorkspaceMethodResultMap[M]>;
     }
-    if (method === WORKSPACE_METHOD.collectionsGetRecord) {
+    if (
+      method === WORKSPACE_METHOD.collectionsGet ||
+      method === WORKSPACE_METHOD.collectionsGetRecord
+    ) {
       return this.collectionRequest(
         method,
         params as unknown as JsonValue,
@@ -226,6 +229,7 @@ export class VersionedLiveAdapter {
 
   private async collectionRequest<
     M extends
+      | typeof WORKSPACE_METHOD.collectionsGet
       | typeof WORKSPACE_METHOD.collectionsQuery
       | typeof WORKSPACE_METHOD.collectionsGetRecord,
   >(

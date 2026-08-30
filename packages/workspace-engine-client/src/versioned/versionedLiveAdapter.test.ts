@@ -1568,7 +1568,7 @@ describe("VersionedLiveAdapter", () => {
     ]);
   });
 
-  it("hydrates near-limit collection records from correlated blob egress", async () => {
+  it("hydrates near-limit collection results from correlated blob egress", async () => {
     const notes = "x".repeat(10 * 1024 * 1024 - 1024);
     const markedInteger = { $dohcInt64: "9007199254740993" };
     const record = {
@@ -1591,6 +1591,18 @@ describe("VersionedLiveAdapter", () => {
       ],
     };
     const results = {
+      [WORKSPACE_METHOD.collectionsGet]: {
+        path: "projects",
+        status: "valid",
+        reasons: [],
+        schema: {
+          name: "Projects",
+          description: notes,
+          fields: [],
+          views: [],
+        },
+        recordCount: 1,
+      },
       [WORKSPACE_METHOD.collectionsQuery]: {
         collection: { path: "projects", status: "valid", reasons: [] },
         records: [record],
@@ -1641,6 +1653,9 @@ describe("VersionedLiveAdapter", () => {
       workspaceId: WORKSPACE,
     });
 
+    const collection = await adapter.getCollection({
+      collectionPath: "projects",
+    });
     const queried = await adapter.queryCollectionRecords({
       collectionPath: "projects",
       limit: 1,
@@ -1651,6 +1666,7 @@ describe("VersionedLiveAdapter", () => {
       historyLimit: 1,
     });
 
+    expect(collection.schema.description).toBe(notes);
     expect(queried.records[0]?.values[0]?.value).toBe(notes);
     expect(queried.records[0]?.values[1]?.value).toBe(9007199254740993n);
     expect(fetched.record.values[0]?.value).toBe(notes);

@@ -191,6 +191,92 @@ fn seeded_store() -> (ScratchDir, EngineStore) {
 }
 
 #[test]
+fn duplicate_frontmatter_id_is_rejected_like_the_ydoc_projection() {
+    let (_scratch, mut store) = fresh_store();
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/collection-frontmatter.json"))
+            .expect("frontmatter fixture parses");
+    let vector = fixture["vectors"]
+        .as_array()
+        .expect("frontmatter vectors")
+        .iter()
+        .find(|vector| vector["name"].as_str() == Some("duplicate-id-frontmatter-is-rejected"))
+        .expect("duplicate-id vector");
+    let markdown = vector["markdown"].as_str().expect("duplicate-id markdown");
+    assert_eq!(vector["expected"], serde_json::Value::Null);
+    write_text(&mut store, "tasks/collection.yaml", "name: Tasks\n", 2).expect("task schema");
+    write_text(&mut store, "tasks/duplicate.md", markdown, 3).expect("duplicate-id record");
+
+    let reconciled = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile duplicate-id record");
+    let TxnOutcome::Committed(reconciled) = reconciled else {
+        panic!("duplicate-id reconciliation crashed");
+    };
+
+    assert!(reconciled.adoptions.is_empty());
+    let binding_count = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM collection_records \
+                 WHERE workspace_id=?1 AND version_id=?2 AND file_path='tasks/duplicate.md'",
+                params![WORKSPACE_ID, VERSION_ID],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .expect("count duplicate-id bindings");
+    assert_eq!(binding_count, 0);
+}
+
+#[test]
+fn number_filter_matches_an_integral_float_to_an_integer() {
+    let (_scratch, mut store) = fresh_store();
+    write_text(
+        &mut store,
+        "tasks/collection.yaml",
+        "fields:\n  priority:\n    type: number\n",
+        2,
+    )
+    .expect("task schema");
+    write_text(
+        &mut store,
+        "tasks/alpha.md",
+        &format!("---\nid: {FIRST_TASK_ID}\npriority: 1.0\n---\n"),
+        3,
+    )
+    .expect("task record");
+    store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile task record");
+
+    let result = store
+        .read_with(|conn| {
+            query_collection_records(
+                conn,
+                WORKSPACE_ID,
+                "tasks",
+                &CollectionQuery {
+                    filter: Some(CollectionFilter {
+                        field: "priority".to_owned(),
+                        operator: CollectionFilterOperator::Equals,
+                        value: json!(1),
+                    }),
+                    ..CollectionQuery::default()
+                },
+            )
+        })
+        .expect("number equals query")
+        .expect("tasks collection");
+
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(result.records[0].id, FIRST_TASK_ID);
+}
+
+#[test]
 fn body_only_collection_apply_does_not_rewrite_index_or_history() {
     let (_scratch, mut store) = seeded_store();
     let frontmatter = json!({

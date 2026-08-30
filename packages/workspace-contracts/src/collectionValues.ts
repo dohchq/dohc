@@ -481,11 +481,11 @@ export function parseCollectionSchema(yamlText: string): CollectionSchemaParseRe
   const fields = parseFields(raw.fields, reasons, preservedFieldEntries);
   const name = readOptionalText(raw, "name", "", reasons);
   const description = readOptionalText(raw, "description", "", reasons);
-  const views = parseViews(raw.views, fields, reasons);
   if (fields.length > MAX_SCHEMA_COLLECTION_ITEMS) {
     fields.length = MAX_SCHEMA_COLLECTION_ITEMS;
     reasons.push({ code: "schema-collection-limit-exceeded", path: "/fields" });
   }
+  const views = parseViews(raw.views, fields, reasons);
   if (views.length > MAX_SCHEMA_COLLECTION_ITEMS) {
     views.length = MAX_SCHEMA_COLLECTION_ITEMS;
     reasons.push({ code: "schema-collection-limit-exceeded", path: "/views" });

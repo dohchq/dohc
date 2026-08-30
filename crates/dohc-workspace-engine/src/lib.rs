@@ -1134,6 +1134,15 @@ impl EngineService {
                 blob_egress: Some(blob_egress),
             });
         }
+        if request.method == "collections.get" {
+            let (result, blob_egress) = self
+                .collections_get(&ctx, request.workspace, request.params, id)
+                .await?;
+            return Ok(ServiceResponse {
+                response: Response { id, result },
+                blob_egress,
+            });
+        }
         if request.method == "collections.query" {
             let (result, blob_egress) = self
                 .collections_query(&ctx, request.workspace, request.params, id)
@@ -1314,10 +1323,6 @@ impl EngineService {
             }
             "collections.listPendingAdoptions" => {
                 self.collections_list_pending_adoptions(&ctx, request.workspace, request.params)
-                    .await?
-            }
-            "collections.get" => {
-                self.collections_get(&ctx, request.workspace, request.params)
                     .await?
             }
             "watcher.status" => self.watcher_status(request.workspace)?,
@@ -4017,7 +4022,8 @@ impl EngineService {
         ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
         params: Value,
-    ) -> Result<Value, WireError> {
+        request_id: u64,
+    ) -> Result<(Value, Option<BlobEgress>), WireError> {
         let params: CollectionsGetParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
@@ -4029,7 +4035,14 @@ impl EngineService {
         )
         .await?
         .ok_or_else(|| wire(ErrorCode::InvalidParams, "collection-not-found"))?;
-        collection_response_json(collection)
+        self.collection_response_with_blob(
+            ctx,
+            &cancellation,
+            request_id,
+            "collections.get",
+            collection,
+        )
+        .await
     }
 
     async fn collections_query(

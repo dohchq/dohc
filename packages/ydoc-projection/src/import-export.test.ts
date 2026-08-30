@@ -22,7 +22,7 @@ type ExpectedMarkdownFragment = string | RegExp
 interface FrontmatterVector {
   name: string
   markdown: string
-  expected: Record<string, unknown>
+  expected: Record<string, unknown> | null
 }
 
 function decodeFixtureIntegers(value: unknown): unknown {
@@ -81,8 +81,14 @@ function expectStableMarkdownRoundTrip(
 
 describe('Y.Doc markdown import/export', () => {
   it.each(frontmatterVectors)('matches the shared frontmatter vector $name', ({ markdown, expected }) => {
-    expect(getDohcYDocFrontmatter(markdownToYDoc(markdown)))
-      .toEqual(decodeFixtureIntegers(expected))
+    const doc = markdownToYDoc(markdown)
+    expect(getDohcYDocFrontmatter(doc))
+      .toEqual(expected === null ? {} : decodeFixtureIntegers(expected))
+    if (expected === null) {
+      const output = yDocToMarkdown(doc)
+      expect(output).toContain('id: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa')
+      expect(output).toContain('id: rec_77777777777777777777777774')
+    }
   })
 
   it('round-trips unsupported tagged frontmatter until its raw value changes', () => {

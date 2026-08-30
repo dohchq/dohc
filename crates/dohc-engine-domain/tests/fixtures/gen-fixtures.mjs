@@ -365,12 +365,18 @@ const frontmatter = [
     name: "unsupported-explicit-tag-keeps-raw-value",
     markdown: "---\npriority: !custom high\n---\n\n# Body",
   },
+  {
+    name: "duplicate-id-frontmatter-is-rejected",
+    markdown: "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nid: rec_77777777777777777777777774\n---",
+    expected: null,
+  },
 ].map(({ name, markdown, expected }) => {
   const parsed = getDohcYDocFrontmatter(markdownToYDoc(markdown));
-  if (expected !== undefined && !isDeepStrictEqual(expected, parsed)) {
+  const expectedProjection = expected === null ? {} : expected;
+  if (expected !== undefined && !isDeepStrictEqual(expectedProjection, parsed)) {
     throw new Error(`frontmatter fixture ${name} disagrees with markdownToYDoc`);
   }
-  return { name, markdown, expected: expected ?? parsed };
+  return { name, markdown, expected: expected === undefined ? parsed : expected };
 });
 
 function writeFixture(name, value) {
@@ -398,8 +404,10 @@ writeFixture("collection-schema-limits.json", {
       name: "fields-and-views-one-over-collection-limit",
       itemCount: 16_385,
       expectedItemCount: 16_384,
+      referencedFieldIndex: 16_384,
       expectedReasons: [
         { code: "schema-collection-limit-exceeded", path: "/fields" },
+        { code: "unknown-field-reference", path: "/views/0/groupBy" },
         { code: "schema-collection-limit-exceeded", path: "/views" },
       ],
     },

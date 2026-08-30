@@ -1584,23 +1584,6 @@ mod tests {
             .expect("Y.Doc actor origin")
     }
 
-    fn engine_authored_ydoc_update_count(db: &Path, path: &str) -> i64 {
-        let store = EngineStore::open(db, 100).expect("reopen store");
-        store
-            .read_with(|conn| {
-                conn.query_row(
-                    "SELECT COUNT(*) FROM ydoc_updates u \
-                     JOIN collection_records r ON r.workspace_id = u.workspace_id \
-                       AND r.version_id = u.version_id AND r.object_id = u.object_id \
-                     WHERE r.workspace_id = ?1 AND r.version_id = ?2 AND r.file_path = ?3 \
-                       AND u.actor_origin_id = 'engine'",
-                    [WORKSPACE_ID, VERSION_ID, path],
-                    |row| row.get(0),
-                )
-            })
-            .expect("engine-authored Y.Doc update count")
-    }
-
     fn ydoc_update_count(db: &Path, path: &str) -> i64 {
         let store = EngineStore::open(db, 100).expect("reopen store");
         store
@@ -2440,7 +2423,7 @@ mod tests {
             latest_ydoc_actor_origin(&db, "tasks/source.md").as_deref(),
             Some("engine")
         );
-        assert_eq!(engine_authored_ydoc_update_count(&db, "tasks/source.md"), 1);
+        assert_eq!(engine_ydoc_update_count(&db, "tasks/source.md"), 1);
 
         drop(sink);
         supervisor.close(&db).expect("close actor");

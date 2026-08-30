@@ -42,6 +42,7 @@ interface SchemaLimitVector {
   name: string;
   itemCount: number;
   expectedItemCount: number;
+  referencedFieldIndex: number;
   expectedReasons: CollectionSchemaParseResult["reasons"];
 }
 
@@ -84,14 +85,22 @@ describe("Collection schema contract vectors", () => {
     expect(second.schema.views).toEqual([]);
   });
 
-  it.each(schemaLimitVectors)("matches $name", ({ itemCount, expectedItemCount, expectedReasons }) => {
+  it.each(schemaLimitVectors)("matches $name", ({
+    itemCount,
+    expectedItemCount,
+    referencedFieldIndex,
+    expectedReasons,
+  }) => {
     const fields = Array.from(
       { length: itemCount },
       (_, index) => `  field_${index}:\n    type: text`,
     ).join("\n");
     const views = Array.from(
       { length: itemCount },
-      (_, index) => `  - name: View ${index}\n    kind: table`,
+      (_, index) =>
+        `  - name: View ${index}\n    kind: table${
+          index === 0 ? `\n    groupBy: field_${referencedFieldIndex}` : ""
+        }`,
     ).join("\n");
 
     const parsed = parseCollectionSchema(`fields:\n${fields}\nviews:\n${views}\n`);
@@ -99,6 +108,7 @@ describe("Collection schema contract vectors", () => {
     expect(parsed.status).toBe("degraded");
     expect(parsed.schema.fields).toHaveLength(expectedItemCount);
     expect(parsed.schema.views).toHaveLength(expectedItemCount);
+    expect(parsed.schema.views[0]?.groupBy).toBeNull();
     expect(parsed.reasons).toEqual(expectedReasons);
   });
 });

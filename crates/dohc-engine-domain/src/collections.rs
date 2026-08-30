@@ -1108,7 +1108,6 @@ pub fn parse_collection_schema(yaml_text: &str) -> CollectionSchemaParseResult {
     let mut fields = parse_fields(mapping_get(root, "fields"), &mut reasons);
     let name = read_optional_text(root, "name", "", &mut reasons);
     let description = read_optional_text(root, "description", "", &mut reasons);
-    let mut views = parse_views(mapping_get(root, "views"), &fields, &mut reasons);
     if fields.len() > MAX_SCHEMA_COLLECTION_ITEMS {
         fields.truncate(MAX_SCHEMA_COLLECTION_ITEMS);
         push_reason(
@@ -1117,6 +1116,7 @@ pub fn parse_collection_schema(yaml_text: &str) -> CollectionSchemaParseResult {
             "/fields",
         );
     }
+    let mut views = parse_views(mapping_get(root, "views"), &fields, &mut reasons);
     if views.len() > MAX_SCHEMA_COLLECTION_ITEMS {
         views.truncate(MAX_SCHEMA_COLLECTION_ITEMS);
         push_reason(
@@ -1171,6 +1171,41 @@ fn is_frontmatter_delimiter(line: &str) -> bool {
         })
 }
 
+fn yaml_source_has_duplicate_root_text_key(source: &str, key: &str) -> bool {
+    let root_indent = source
+        .lines()
+        .filter_map(|line| {
+            let content = line.trim_start_matches([' ', '\t']);
+            (!content.is_empty() && !content.starts_with('#')).then_some(line.len() - content.len())
+        })
+        .min()
+        .unwrap_or(0);
+    let mut matches = 0;
+    for line in source.lines() {
+        let content = line.trim_start_matches([' ', '\t']);
+        if line.len() - content.len() == root_indent
+            && content.split_once(':').is_some_and(|(candidate, _)| {
+                let candidate = candidate.trim();
+                candidate == key
+                    || candidate
+                        .strip_prefix('\'')
+                        .and_then(|value| value.strip_suffix('\''))
+                        == Some(key)
+                    || candidate
+                        .strip_prefix('"')
+                        .and_then(|value| value.strip_suffix('"'))
+                        == Some(key)
+            })
+        {
+            matches += 1;
+            if matches == 2 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn markdown_record_id(markdown: &str) -> Option<String> {
     let mut lines = markdown.split_inclusive('\n');
     let first = lines.next()?;
@@ -1190,7 +1225,11 @@ fn markdown_record_id(markdown: &str) -> Option<String> {
     if !found_end {
         return None;
     }
-    let documents = YamlOwned::load_from_str(&markdown[yaml_start..yaml_end]).ok()?;
+    let yaml_source = &markdown[yaml_start..yaml_end];
+    if yaml_source_has_duplicate_root_text_key(yaml_source, RECORD_ID_FRONTMATTER_KEY) {
+        return None;
+    }
+    let documents = YamlOwned::load_from_str(yaml_source).ok()?;
     if documents.len() != 1 {
         return None;
     }
@@ -1386,6 +1425,9 @@ fn parse_markdown_frontmatter(markdown: &str) -> Option<ParsedMarkdownFrontmatte
     }
     let body_start = body_start?;
     let yaml_source = &markdown[yaml_start..yaml_end];
+    if yaml_source_has_duplicate_root_text_key(yaml_source, RECORD_ID_FRONTMATTER_KEY) {
+        return None;
+    }
     let documents = YamlOwned::load_from_str(yaml_source).ok()?;
     let marked_documents = yaml_source
         .contains('_')
@@ -3560,7 +3602,12 @@ fn matches_collection_filter(record: &CollectionRecord, filter: &CollectionFilte
         return false;
     };
     match filter.operator {
-        CollectionFilterOperator::Equals => value == &filter.value,
+        CollectionFilterOperator::Equals => match (value, &filter.value) {
+            (Value::Number(_), Value::Number(_)) => {
+                compare_json(value, &filter.value) == Ordering::Equal
+            }
+            _ => value == &filter.value,
+        },
         CollectionFilterOperator::Contains => value_contains(value, &filter.value),
     }
 }

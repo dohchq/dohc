@@ -34,6 +34,7 @@ struct SchemaLimitVector {
     name: String,
     item_count: usize,
     expected_item_count: usize,
+    referenced_field_index: usize,
     expected_reasons: Vec<dohc_engine_domain::CollectionSchemaReason>,
 }
 
@@ -58,7 +59,7 @@ struct RecordIdVector {
 struct FrontmatterVector {
     name: String,
     markdown: String,
-    expected: serde_json::Value,
+    expected: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -168,6 +169,12 @@ fn collection_schema_item_caps_match_the_shared_boundary_vector() {
         yaml.push_str("views:\n");
         for index in 0..vector.item_count {
             yaml.push_str(&format!("  - name: View {index}\n    kind: table\n"));
+            if index == 0 {
+                yaml.push_str(&format!(
+                    "    groupBy: field_{}\n",
+                    vector.referenced_field_index
+                ));
+            }
         }
 
         let parsed = parse_collection_schema(&yaml);
@@ -190,6 +197,7 @@ fn collection_schema_item_caps_match_the_shared_boundary_vector() {
             "{}",
             vector.name
         );
+        assert_eq!(parsed.schema.views[0].group_by, None, "{}", vector.name);
         assert_eq!(parsed.reasons, vector.expected_reasons, "{}", vector.name);
     }
 }
@@ -235,10 +243,12 @@ fn frontmatter_delimiters_match_the_typescript_oracle() {
     let fixture: Fixture<FrontmatterVector> =
         serde_json::from_str(FRONTMATTER_FIXTURE).expect("frontmatter fixture parses");
     for mut vector in fixture.vectors {
-        decode_fixture_integers(&mut vector.expected);
+        if let Some(expected) = vector.expected.as_mut() {
+            decode_fixture_integers(expected);
+        }
         assert_eq!(
             markdown_frontmatter_json(&vector.markdown),
-            Some(vector.expected),
+            vector.expected,
             "frontmatter vector {} disagrees with the TypeScript oracle",
             vector.name
         );

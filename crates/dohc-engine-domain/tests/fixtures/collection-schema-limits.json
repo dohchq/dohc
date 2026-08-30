@@ -4,10 +4,15 @@
       "name": "fields-and-views-one-over-collection-limit",
       "itemCount": 16385,
       "expectedItemCount": 16384,
+      "referencedFieldIndex": 16384,
       "expectedReasons": [
         {
           "code": "schema-collection-limit-exceeded",
           "path": "/fields"
+        },
+        {
+          "code": "unknown-field-reference",
+          "path": "/views/0/groupBy"
         },
         {
           "code": "schema-collection-limit-exceeded",

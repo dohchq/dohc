@@ -122,6 +122,11 @@
       "expected": {
         "priority": "high"
       }
+    },
+    {
+      "name": "duplicate-id-frontmatter-is-rejected",
+      "markdown": "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nid: rec_77777777777777777777777774\n---",
+      "expected": null
     }
   ]
 }

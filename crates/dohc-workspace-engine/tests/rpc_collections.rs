@@ -311,13 +311,14 @@ async fn collections_get_caps_schema_arrays_at_the_wire_collection_limit() {
     );
     assert_eq!(
         collection["schema"]["views"][0]["groupBy"],
-        format!("field{SCHEMA_LIMIT:05}"),
-        "views must be parsed against all fields before the response arrays are capped"
+        Value::Null,
+        "views must be validated against the capped field set"
     );
     assert_eq!(
         collection["reasons"],
         json!([
             { "code": "schema-collection-limit-exceeded", "path": "/fields" },
+            { "code": "unknown-field-reference", "path": "/views/0/groupBy" },
             { "code": "schema-collection-limit-exceeded", "path": "/views" },
         ])
     );
@@ -1084,6 +1085,142 @@ async fn near_limit_record_round_trips_via_query_and_get_record_blob_egress() {
             LARGE_FIELD_BYTES
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn collection_get_uses_blob_egress_only_above_inband_limit() {
+    const RESPONSE_CAP: usize = WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize - 64 * 1024;
+    let response_with_empty_description = json!({
+        "path": "at-limit",
+        "status": "valid",
+        "reasons": [],
+        "schema": {
+            "name": Value::Null,
+            "description": "",
+            "fields": [],
+            "views": [],
+        },
+        "recordCount": 0,
+    });
+    let response_overhead = serde_json::to_vec(&response_with_empty_description)
+        .expect("serialize collection response skeleton")
+        .len();
+    let exact_description = "x".repeat(RESPONSE_CAP - response_overhead);
+    let over_description = "x".repeat(RESPONSE_CAP - response_overhead + 1);
+    let exact_schema = format!("description: {exact_description}\n");
+    let over_schema = format!("description: {over_description}\n");
+    assert!(exact_schema.len() < dohc_engine_domain::MAX_TEXT_BYTES);
+    assert!(over_schema.len() < dohc_engine_domain::MAX_TEXT_BYTES);
+
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let db = scratch.engine_db_path().expect("engine db path");
+    let mut store = EngineStore::open(&db, 1).expect("open store");
+    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
+        .expect("main version");
+    seed_text(&mut store, "at-limit/collection.yaml", &exact_schema, 2);
+    seed_text(&mut store, "over-cap/collection.yaml", &over_schema, 3);
+    store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, "main")
+        })
+        .expect("reconcile boundary collections");
+    drop(store);
+    for (path, schema) in [("at-limit", &exact_schema), ("over-cap", &over_schema)] {
+        let collection_dir = scratch.path().join(path);
+        std::fs::create_dir_all(&collection_dir).expect("collection directory");
+        std::fs::write(collection_dir.join("collection.yaml"), schema).expect("schema file");
+    }
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+
+    let exact = ProtocolEngineService::call(
+        service.as_ref(),
+        RequestContext::unbounded().with_capability("blobs"),
+        request(
+            10,
+            "collections.get",
+            Some(handle.clone()),
+            json!({ "collectionPath": "at-limit" }),
+        ),
+    )
+    .await
+    .expect("exact-limit collection");
+    assert!(exact.blob_egress.is_none());
+    assert_eq!(
+        serde_json::to_vec(&exact.response.result)
+            .expect("serialize exact-limit response")
+            .len(),
+        RESPONSE_CAP
+    );
+
+    let refusal = ProtocolEngineService::call(
+        service.as_ref(),
+        RequestContext::unbounded(),
+        request(
+            11,
+            "collections.get",
+            Some(handle.clone()),
+            json!({ "collectionPath": "over-cap" }),
+        ),
+    )
+    .await
+    .expect_err("an over-limit collection without blobs must be refused");
+    assert_eq!(
+        refusal.code,
+        dohc_engine_protocol::error::ErrorCode::LimitExceeded
+    );
+    assert_eq!(refusal.message, "collection-response-exceeds-wire-limit");
+
+    let over = ProtocolEngineService::call(
+        service.as_ref(),
+        RequestContext::unbounded().with_capability("blobs"),
+        request(
+            12,
+            "collections.get",
+            Some(handle),
+            json!({ "collectionPath": "over-cap" }),
+        ),
+    )
+    .await
+    .expect("over-limit collection with blobs");
+    assert_eq!(over.response.result["collectionJson"], Value::Null);
+    let egress = over.blob_egress.expect("collection blob egress");
+    assert_eq!(egress.stream_id, 12);
+    assert_eq!(egress.bytes.len(), RESPONSE_CAP + 1);
+    assert_eq!(
+        over.response.result["blobSha256"].as_str(),
+        Some(egress.sha256.as_str())
+    );
+    let hydrated: Value =
+        serde_json::from_slice(&egress.bytes).expect("blob-backed collection JSON");
+    assert_eq!(
+        hydrated["schema"]["description"]
+            .as_str()
+            .expect("hydrated description")
+            .len(),
+        over_description.len()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
