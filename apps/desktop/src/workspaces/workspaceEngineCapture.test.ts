@@ -595,6 +595,83 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
+  it("retains the provider after a cancelled eviction and reuses it on a later pass", async () => {
+    const root = await tempRoot();
+    const adoption = {
+      versionId: "main",
+      recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      collectionPath: "projects",
+      filePath: "projects/cancelled.md",
+      objectId: "object-cancelled",
+    };
+    const completed = new Set<string>();
+    const attempts: string[] = [];
+    const leasedPaths = new Set<string>();
+    const store = {
+      ensureMainVersion: async () => undefined,
+      flushCapture: async () => undefined,
+      reconcileCapture: async () => {
+        attempts.push("reconcile");
+        if (leasedPaths.size > 0) {
+          throw new Error("collection-reconciliation-lease-held");
+        }
+      },
+      listPendingCollectionAdoptions: async () => ({
+        adoptions: completed.has(adoption.filePath) ? [] : [adoption],
+        nextCursor: null,
+      }),
+    } as unknown as CaptureVersionedTextStore;
+    const cancelled = new Error("cancelled while ydoc.evict was queued");
+    const sessions = {
+      run: async (_workspace: unknown, task: (binding: unknown) => unknown) =>
+        await task({ client: {}, workspace: "workspace" }),
+    } as unknown as EngineWorkspaceSessions;
+    const errors: Array<{ context: string; error: unknown }> = [];
+    let opens = 0;
+    const engine = capture(root, {
+      store,
+      rustEngineSessions: sessions,
+      daemonOwnsCapture: true,
+      onError: (context, error) => errors.push({ context, error }),
+      openRustYDocProviderSession: async (options) => {
+        opens += 1;
+        leasedPaths.add(options.path);
+        let evictions = 0;
+        return {
+          path: options.path,
+          evict: async () => {
+            evictions += 1;
+            attempts.push(`${options.path}:${evictions}`);
+            if (evictions === 1) throw cancelled;
+            leasedPaths.delete(options.path);
+            completed.add(options.path);
+          },
+        } as EngineYdocProviderSession;
+      },
+    });
+
+    await engine.flush();
+
+    expect(attempts).toEqual(["projects/cancelled.md:1"]);
+    expect(errors).toEqual([
+      {
+        context: "collection adoption of projects/cancelled.md",
+        error: cancelled,
+      },
+    ]);
+
+    await engine.flush();
+
+    expect(completed).toEqual(new Set(["projects/cancelled.md"]));
+    expect(attempts).toEqual([
+      "projects/cancelled.md:1",
+      "projects/cancelled.md:2",
+      "reconcile",
+    ]);
+    expect(opens).toBe(1);
+    await engine.stop();
+  });
+
   it("releases a retained busy collection adoption provider after the file is deleted", async () => {
     const root = await tempRoot();
     const adoption = {

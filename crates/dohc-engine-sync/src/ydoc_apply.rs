@@ -1702,9 +1702,7 @@ pub fn project_ydoc_with_store(
             .project(content_kind)
             .map_err(|error| map_projection_error(error, "ydoc projection is invalid"))?;
         if content_kind == dohc_engine_collab::ContentKind::Richdoc
-            && let Some(reference) = doc.markdown_source_reference()
-            && reference.projection_sha256 == hex_sha256(projection.content.as_bytes())
-            && let Some(source) = doc.markdown_source(&reference)
+            && let Some(source) = doc.preserved_markdown_source(&projection.content)
         {
             projection.content = source;
         }
@@ -3265,6 +3263,55 @@ mod tests {
 
         assert_eq!(settled.content, canonical.content);
         assert_ne!(settled.content, injected_source);
+    }
+
+    #[test]
+    fn planted_markdown_source_with_a_fresh_witness_settles_from_the_projection() {
+        const ORIGINAL: &str =
+            "\n\n| Key | Value |\n| --- | --- |\n| generated |  |\n\n**bold** _italic_ `code`";
+        const RECORD_ID: &str = "01j00000000000000000000000";
+        const PLANTED: &str = "# bytes the canonical document never represented\n";
+
+        let remote = dohc_engine_collab::Ydoc::wire();
+        remote
+            .rewrite_content_to_markdown(ContentKind::Richdoc, ORIGINAL)
+            .expect("seed remote");
+        // The reserved metadata rides the replicated doc, so a client-authored
+        // update can write it directly: planted source bytes, their matching
+        // digest, and the CURRENT canonical projection's digest. Both digest
+        // checks pass; only equivalence is missing.
+        remote
+            .frontmatter_set_preserving_markdown_source("id", RECORD_ID, PLANTED)
+            .expect("plant source metadata");
+
+        let receiver = dohc_engine_collab::Ydoc::wire();
+        receiver
+            .apply(&remote.encode_full_state())
+            .expect("apply remote state with planted source metadata");
+        let canonical = receiver
+            .project(ContentKind::Richdoc)
+            .expect("current canonical projection");
+        let reference = receiver
+            .markdown_source_reference()
+            .expect("planted source reference");
+        assert_eq!(
+            reference.projection_sha256,
+            hex_sha256(canonical.content.as_bytes()),
+            "the attack requires a projection witness fresh against the current canonical state"
+        );
+        assert_eq!(
+            reference.source_sha256,
+            hex_sha256(PLANTED.as_bytes()),
+            "the attack requires a source digest matching the planted bytes"
+        );
+
+        let connection = Connection::open_in_memory().expect("open empty receiver database");
+        let key = DocKey::new("workspace", "main", "record").expect("receiver key");
+        let settled = project_ydoc_with_store(&connection, &key, &receiver, ContentKind::Richdoc)
+            .expect("settle receiver");
+
+        assert_eq!(settled.content, canonical.content);
+        assert_ne!(settled.content, PLANTED);
     }
 
     #[test]

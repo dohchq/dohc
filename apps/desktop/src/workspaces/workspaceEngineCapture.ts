@@ -3425,13 +3425,21 @@ export function createWorkspaceEngineCapture(
           );
           pendingCollectionAdoptionProviders.delete(adoptionKey);
         } catch (error) {
-          if (isEngineStoreBusyRefusal(error)) {
-            if (retained !== undefined) {
-              pendingCollectionAdoptionProviders.set(adoptionKey, retained);
-            }
-            continue;
+          // Every unconfirmed eviction — busy, cancelled while queued, or any
+          // other failure — leaves the daemon session live and its lease
+          // held. Deleting the only handle here would leak that lease:
+          // reconciliation then fails with collection-reconciliation-lease-
+          // held, and later drains can only open another provider into the
+          // same lease. Retain until eviction is confirmed; a daemon restart
+          // is the one case the handle goes stale, and the binding check
+          // above replaces it then. The not-pending sweep below releases it
+          // once the adoption clears.
+          if (retained !== undefined) {
+            pendingCollectionAdoptionProviders.set(adoptionKey, retained);
+          } else {
+            pendingCollectionAdoptionProviders.delete(adoptionKey);
           }
-          pendingCollectionAdoptionProviders.delete(adoptionKey);
+          if (isEngineStoreBusyRefusal(error)) continue;
           onError(`collection adoption of ${adoption.filePath}`, error);
         }
       }

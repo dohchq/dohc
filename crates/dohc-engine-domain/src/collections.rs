@@ -1176,7 +1176,10 @@ fn path_basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-fn is_collection_markdown_path(path: &str) -> bool {
+/// Whether `path` carries the Markdown extension (ASCII case-insensitive) —
+/// the one extension predicate for collection record membership. Every caller
+/// that decides membership or schedules its reconciliation must share it.
+pub fn is_collection_markdown_path(path: &str) -> bool {
     path.get(path.len().saturating_sub(3)..)
         .is_some_and(|extension| extension.eq_ignore_ascii_case(".md"))
 }

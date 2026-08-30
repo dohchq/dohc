@@ -1900,7 +1900,7 @@ fn is_collection_record_path(root: &Path, path: &str) -> bool {
         // v1 does not admit the workspace root as a collection.
         return false;
     };
-    if parent.is_empty() || !name.ends_with(".md") {
+    if parent.is_empty() || !dohc_engine_domain::collections::is_collection_markdown_path(name) {
         return false;
     }
     match std::fs::symlink_metadata(root.join(parent).join(COLLECTION_SCHEMA_FILENAME)) {
@@ -3421,6 +3421,32 @@ mod collection_reconcile_scheduling_tests {
         assert!(!collection_reconcile_required(
             scratch.path(),
             &plan_with(ingest("root.md", IngestReason::Added)),
+        ));
+    }
+
+    #[test]
+    fn collection_reconcile_predicate_matches_the_markdown_extension_case_insensitively() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let collection_dir = scratch.path().join("tasks");
+        std::fs::create_dir_all(&collection_dir).expect("collection directory");
+        std::fs::write(collection_dir.join("collection.yaml"), b"name: Tasks\n")
+            .expect("collection schema");
+
+        // The watcher path: adding NOTE.MD to a live collection must schedule
+        // the reconciliation that adopts it, exactly like note.md.
+        assert!(collection_reconcile_required(
+            scratch.path(),
+            &plan_with(ingest("tasks/NOTE.MD", IngestReason::Added)),
+        ));
+        assert!(collection_reconcile_required(
+            scratch.path(),
+            &plan_with(CaptureOp::Retire {
+                path: "tasks/NOTE.MD".to_owned(),
+            }),
+        ));
+        assert!(!collection_reconcile_required(
+            scratch.path(),
+            &plan_with(ingest("notes/NOTE.MD", IngestReason::Added)),
         ));
     }
 

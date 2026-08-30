@@ -476,6 +476,29 @@ impl Ydoc {
         (crate::hex_sha256(source.as_bytes()) == reference.source_sha256).then_some(source)
     }
 
+    /// Resolve exact Markdown source ONLY when it is equivalent to
+    /// `canonical_projection`: the projection witness must be fresh, the
+    /// source digest must match, and parsing the source must reproject to
+    /// exactly the canonical projection. The digests alone prove freshness
+    /// and self-consistency, never equivalence — the metadata rides the
+    /// replicated doc, so a crafted update can pair the current projection's
+    /// digest with foreign source bytes, and settlement would write bytes the
+    /// canonical Y.Doc never represented. Reprojection admits only lexical
+    /// variants of the canonical state — the authority every collaborator
+    /// already has by editing the document.
+    pub fn preserved_markdown_source(&self, canonical_projection: &str) -> Option<String> {
+        let reference = self.markdown_source_reference()?;
+        if reference.projection_sha256 != crate::hex_sha256(canonical_projection.as_bytes()) {
+            return None;
+        }
+        let source = self.markdown_source(&reference)?;
+        let staged = Ydoc::wire();
+        staged
+            .rewrite_content_to_markdown(ContentKind::Richdoc, &source)
+            .ok()?;
+        (staged.project_richdoc().ok()? == canonical_projection).then_some(source)
+    }
+
     pub(crate) fn has_missing_updates(&self) -> bool {
         self.doc.transact().has_missing_updates()
     }
