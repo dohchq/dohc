@@ -48,6 +48,7 @@ async function appendNamedComment(input: {
 async function deleteComment(input: {
   relayUrl: string;
   shareId: string;
+  workspaceId: string;
   ownerUserId: string;
   messageId: string;
 }): Promise<void> {
@@ -57,7 +58,11 @@ async function deleteComment(input: {
       {
         method: "POST",
         headers: ownerHeaders(input.ownerUserId, true),
-        body: JSON.stringify({ action: "delete", messageId: input.messageId }),
+        body: JSON.stringify({
+          action: "delete",
+          messageId: input.messageId,
+          workspaceId: input.workspaceId,
+        }),
       },
     ),
     "delete comment",
@@ -90,6 +95,7 @@ async function retuneLink(input: {
         body: JSON.stringify({
           access: input.access,
           expectedDependentGrantIds: [],
+          workspaceId: input.seeded.workspaceId,
         }),
       },
     ),
@@ -253,6 +259,7 @@ test("keeps two open public comment sessions current", async ({ browser, stack }
     await deleteComment({
       relayUrl: stack.relayUrl,
       shareId: seeded.shareId,
+      workspaceId: seeded.workspaceId,
       ownerUserId: seeded.ownerUserId,
       messageId: appendBody.message.messageId,
     });
@@ -339,6 +346,7 @@ test("keeps mixed View and Comment links isolated over one committed discussion"
     await deleteComment({
       relayUrl: stack.relayUrl,
       shareId: seeded.shareId,
+      workspaceId: seeded.workspaceId,
       ownerUserId: seeded.ownerUserId,
       messageId: namedMessageId,
     });
