@@ -777,35 +777,46 @@ describe("share discussion HTTP boundary", () => {
     }
   });
 
-  it("preserves named discussion authority when recipients omit workspaceId", async () => {
+  it("preserves named discussion authority when recipients omit or correctly supply workspaceId", async () => {
     const test = await fixture();
     const responses: Response[] = [];
-    for (const [actor, key] of [
-      [COMMENTER, "named-comment-omission"],
-      [EDITOR, "named-edit-omission"],
+    for (const [workspaceId, suffix] of [
+      [undefined, "omission"],
+      [WORKSPACE, "supplied"],
     ] as const) {
-      responses.push(
-        await test.handler(
-          rawRequest(
-            actor,
-            `/sync/shares/${SHARE}/discussion`,
-            jsonRequest({ body: `from ${actor}`, idempotencyKey: key }),
+      const workspaceQuery =
+        workspaceId === undefined ? "" : `workspaceId=${workspaceId}&`;
+      for (const actor of [COMMENTER, EDITOR] as const) {
+        responses.push(
+          await test.handler(
+            rawRequest(
+              actor,
+              `/sync/shares/${SHARE}/discussion`,
+              jsonRequest({
+                ...(workspaceId === undefined ? {} : { workspaceId }),
+                body: `from ${actor}`,
+                idempotencyKey: `named-${actor}-${suffix}`,
+              }),
+            ),
           ),
-        ),
-      );
-      responses.push(
-        await test.handler(
-          rawRequest(actor, `/sync/shares/${SHARE}/discussion?limit=100`),
-        ),
-      );
-      responses.push(
-        await test.handler(
-          rawRequest(
-            actor,
-            `/sync/shares/${SHARE}/discussion/activity?since=0&hold=0&limit=100`,
+        );
+        responses.push(
+          await test.handler(
+            rawRequest(
+              actor,
+              `/sync/shares/${SHARE}/discussion?${workspaceQuery}limit=100`,
+            ),
           ),
-        ),
-      );
+        );
+        responses.push(
+          await test.handler(
+            rawRequest(
+              actor,
+              `/sync/shares/${SHARE}/discussion/activity?${workspaceQuery}since=0&hold=0&limit=100`,
+            ),
+          ),
+        );
+      }
     }
     for (const response of responses) {
       expect(response.status).toBe(200);
@@ -822,6 +833,41 @@ describe("share discussion HTTP boundary", () => {
     expect(viewAppend.status).toBe(403);
     expectPrivate(viewAppend);
     expect(await viewAppend.text()).not.toContain(WORKSPACE);
+  });
+
+  it("refuses a named discussion read when grant authorization observes a relocated share", async () => {
+    const test = await fixture();
+    const baseline = await genericRefusal(
+      await test.handler(
+        rawRequest(
+          COMMENTER,
+          `/sync/shares/missing-named-relocation-share/discussion?workspaceId=${WORKSPACE}`,
+        ),
+      ),
+    );
+    const originalGetShare = test.storage.getShare.bind(test.storage);
+    let shareLoads = 0;
+    vi.spyOn(test.storage, "getShare").mockImplementation((shareId) => {
+      if (shareId === SHARE) {
+        shareLoads += 1;
+        if (shareLoads === 2) updateShareWorkspace(test.dbPath, OTHER_WORKSPACE);
+      }
+      return originalGetShare(shareId);
+    });
+    const discussionRead = vi.spyOn(test.storage, "listShareDiscussionMessages");
+
+    expect(
+      await genericRefusal(
+        await test.handler(
+          rawRequest(
+            COMMENTER,
+            `/sync/shares/${SHARE}/discussion?workspaceId=${WORKSPACE}`,
+          ),
+        ),
+      ),
+    ).toBe(baseline);
+    expect(discussionRead).not.toHaveBeenCalled();
+    expect(shareLoads).toBe(2);
   });
 
   it("does not let a wrong or missing owner workspace fall through to the same account's named grant", async () => {
