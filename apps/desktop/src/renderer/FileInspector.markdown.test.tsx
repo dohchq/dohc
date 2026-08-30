@@ -93,6 +93,7 @@ describe("FileInspector renders markdown through the shared component map", () =
     })),
     writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
     openFileExternally: vi.fn(async () => undefined),
+    getBacklinks: vi.fn(async () => ({ sources: [] })),
     listWorkspaceFiles: vi.fn(async () => ({
       files: [{ path: "a.md", kind: "file" }],
       folders: [],
@@ -146,6 +147,22 @@ describe("FileInspector renders markdown through the shared component map", () =
       text: "# Large document\n\nThis is the bounded prefix.\n",
       truncated: true,
     });
+    bridgeMock.getBacklinks.mockResolvedValueOnce({
+      sources: [
+        {
+          sourcePath: "notes/launch.md",
+          sourceTitle: "Launch",
+          snippets: [
+            {
+              text: "Review [[Large document]].",
+              line: 3,
+              highlightStart: 7,
+              highlightEnd: 25,
+            },
+          ],
+        },
+      ],
+    });
     const view = render(<FileInspector workspaceId="ws-1" path="large.md" />);
 
     const source = await screen.findByTestId("markdown-source-view");
@@ -160,6 +177,7 @@ describe("FileInspector renders markdown through the shared component map", () =
     expect(screen.getByTestId("view-markdown")).toBeTruthy();
     expect(view.container.querySelector(".dohc-readable-text")).toBeNull();
     expect(screen.getByTestId("truncated-notice")).toBeTruthy();
+    expect(await screen.findByText("Linked mentions")).toBeTruthy();
 
     fireEvent.click(
       screen.getByRole("button", { name: "Open the full file externally" }),

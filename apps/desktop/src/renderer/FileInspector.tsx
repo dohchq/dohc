@@ -3628,6 +3628,7 @@ function MarkdownView(props: {
             />
             <MarkdownRenderCommitted onRendered={onMarkdownRendered} />
           </Suspense>
+          {backlinks}
         </div>
       ) : (
         <div
