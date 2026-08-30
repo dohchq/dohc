@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { hashLinkBearer } from "./linkSecurity";
 import { DiscussionActivityHub } from "./discussionActivity";
 import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
@@ -18,6 +18,7 @@ const COMMENTER = "commenter-account-sentinel";
 const VIEWER = "viewer-account-sentinel";
 const EDITOR = "editor-account-sentinel";
 const WORKSPACE = "workspace-discussion-sentinel";
+const OTHER_WORKSPACE = "workspace-discussion-other-sentinel";
 const SHARE = "share-discussion-sentinel";
 const LINK_KEY = "discussion-link-key-with-at-least-32-bytes";
 const RELAY_KEY = "discussion-relay-key-with-at-least-32-bytes";
@@ -97,6 +98,13 @@ async function fixture(
   expect(
     storage.claimWorkspace({
       workspaceId: WORKSPACE,
+      ownerUserId: OWNER,
+      createdAtMs: 1_000,
+    }),
+  ).toBe("created");
+  expect(
+    storage.claimWorkspace({
+      workspaceId: OTHER_WORKSPACE,
       ownerUserId: OWNER,
       createdAtMs: 1_000,
     }),
@@ -340,7 +348,7 @@ function moderationRequest(
   return request(
     userId,
     `/sync/shares/${SHARE}/discussion/moderation`,
-    { ...jsonRequest(action), ...init },
+    { ...jsonRequest({ workspaceId: WORKSPACE, ...action }), ...init },
   );
 }
 
@@ -407,6 +415,17 @@ function updateWorkspaceOwner(dbPath: string, ownerUserId: string): void {
         "UPDATE sync_relay_workspaces SET owner_user_id = ? WHERE workspace_id = ?",
       )
       .run(ownerUserId, WORKSPACE);
+  } finally {
+    db.close();
+  }
+}
+
+function updateShareWorkspace(dbPath: string, workspaceId: string): void {
+  const db = new InspectionDatabaseSync(dbPath);
+  try {
+    db
+      .prepare("UPDATE sync_relay_shares SET workspace_id = ? WHERE share_id = ?")
+      .run(workspaceId, SHARE);
   } finally {
     db.close();
   }
@@ -1114,7 +1133,11 @@ describe("share discussion HTTP boundary", () => {
           jsonRequest(
             transition === "rotate"
               ? { workspaceId: WORKSPACE, expectedDependentGrantIds: [] }
-              : { access: "view", expectedDependentGrantIds: [] },
+              : {
+                  workspaceId: WORKSPACE,
+                  access: "view",
+                  expectedDependentGrantIds: [],
+                },
           ),
         ),
       );
@@ -1178,7 +1201,7 @@ describe("share discussion HTTP boundary", () => {
       request(
         OWNER,
         "/sync/shares/share-discussion-sentinel/grants/named-comment-grant-sentinel/revoke",
-        { method: "POST" },
+        jsonRequest({ workspaceId: WORKSPACE }),
       ),
     );
     expect(revoke.status).toBe(200);
@@ -1285,6 +1308,7 @@ describe("share discussion HTTP boundary", () => {
     expect(
       test.storage.setLinkPrincipalBlocked({
         shareId: SHARE,
+        workspaceId: WORKSPACE,
         principalId: firstPrincipal!,
         actorUserId: OWNER,
         blockedAtMs: 20_000,
@@ -1293,6 +1317,7 @@ describe("share discussion HTTP boundary", () => {
     expect(
       test.storage.setLinkPrincipalBlocked({
         shareId: SHARE,
+        workspaceId: WORKSPACE,
         principalId: firstPrincipal!,
         actorUserId: OWNER,
         blockedAtMs: null,
@@ -1940,12 +1965,14 @@ describe("share discussion HTTP boundary", () => {
         } else if (transition === "pause") {
           test.storage.setShareLinkWritesPaused({
             shareId: SHARE,
+            workspaceId: WORKSPACE,
             actorUserId: OWNER,
             pausedAtMs: 20_000,
           });
         } else {
           test.storage.setLinkPrincipalBlocked({
             shareId: SHARE,
+            workspaceId: WORKSPACE,
             principalId: principalId!,
             actorUserId: OWNER,
             blockedAtMs: 20_000,
@@ -2041,6 +2068,7 @@ describe("share discussion HTTP boundary", () => {
     expect(
       linkExact.storage.deleteShareDiscussionMessage({
         shareId: SHARE,
+        workspaceId: WORKSPACE,
         messageId: linkMessage.messageId,
         deletedAtMs: 40_000,
         actorUserId: "x".repeat(DELETING_USER_ID_RESERVATION_BYTES + 1),
@@ -2049,6 +2077,7 @@ describe("share discussion HTTP boundary", () => {
     expect(
       linkExact.storage.deleteShareDiscussionMessage({
         shareId: SHARE,
+        workspaceId: WORKSPACE,
         messageId: linkMessage.messageId,
         deletedAtMs: 40_001,
         actorUserId: OWNER,
@@ -2137,6 +2166,7 @@ describe("share discussion HTTP boundary", () => {
     expect(
       test.storage.deleteShareDiscussionMessage({
         shareId: SHARE,
+        workspaceId: WORKSPACE,
         messageId: tombstoneTarget.messageId,
         deletedAtMs: 50_000,
         actorUserId: OWNER,
@@ -2265,6 +2295,7 @@ describe("share discussion HTTP boundary", () => {
     expect(
       test.storage.deleteShareDiscussionMessage({
         shareId: SHARE,
+        workspaceId: WORKSPACE,
         messageId: rawLink.messageId,
         deletedAtMs: 60_000,
         actorUserId: OWNER,
@@ -2342,6 +2373,7 @@ describe("share discussion HTTP boundary", () => {
     expect(
       test.storage.setLinkPrincipalBlocked({
         shareId: SHARE,
+        workspaceId: WORKSPACE,
         principalId,
         actorUserId: OWNER,
         blockedAtMs: 70_000,
@@ -2350,6 +2382,7 @@ describe("share discussion HTTP boundary", () => {
     expect(
       test.storage.setShareLinkWritesPaused({
         shareId: SHARE,
+        workspaceId: WORKSPACE,
         actorUserId: OWNER,
         pausedAtMs: 70_001,
       }),
@@ -2361,6 +2394,7 @@ describe("share discussion HTTP boundary", () => {
       expect(
         test.storage.setLinkPrincipalBlocked({
           shareId: SHARE,
+          workspaceId: WORKSPACE,
           principalId,
           actorUserId: OWNER,
           blockedAtMs: null,
@@ -2369,6 +2403,7 @@ describe("share discussion HTTP boundary", () => {
       expect(
         test.storage.setShareLinkWritesPaused({
           shareId: SHARE,
+          workspaceId: WORKSPACE,
           actorUserId: OWNER,
           pausedAtMs: null,
         }),
@@ -3012,6 +3047,7 @@ describe("share discussion HTTP boundary", () => {
           expect(
             buffered.storage.setShareLinkWritesPaused({
               shareId: SHARE,
+              workspaceId: WORKSPACE,
               actorUserId: OWNER,
               pausedAtMs: 19_000,
             }),
@@ -3144,7 +3180,7 @@ describe("share discussion HTTP boundary", () => {
         linkRequest(
           test.comment,
           `/sync/shares/${SHARE}/discussion/moderation`,
-          jsonRequest({ action: "pause" }),
+          jsonRequest({ action: "pause", workspaceId: WORKSPACE }),
         ),
       ),
       test.handler(
@@ -3166,7 +3202,7 @@ describe("share discussion HTTP boundary", () => {
         }),
       ),
       test.handler(
-        moderationRequest(OWNER, { action: "pause", workspaceId: WORKSPACE }),
+        moderationRequest(OWNER, { action: "pause", ownerUserId: OWNER }),
       ),
       test.handler(moderationRequest(OWNER, { action: "mute" })),
       test.handler(
@@ -3245,6 +3281,233 @@ describe("share discussion HTTP boundary", () => {
     });
   });
 
+  it("binds every owner moderation mutation to the requested workspace", async () => {
+    const test = await fixture();
+    for (const suffix of ["delete-missing", "delete-wrong", "delete-correct"]) {
+      const response = await test.handler(
+        trustedAppend(test.comment, {
+          body: `workspace ${suffix}`,
+          idempotencyKey: `workspace-${suffix}`,
+        }),
+      );
+      expect(response.status).toBe(200);
+      await response.arrayBuffer();
+    }
+    const seeded = test.storage.listShareDiscussionMessages({
+      shareId: SHARE,
+      limit: 100,
+    }).messages;
+    const messageId = (suffix: string): string =>
+      seeded.find((message) => message.body === `workspace ${suffix}`)!.messageId;
+    const principalId = seeded.find(
+      (message) => message.body === "workspace delete-correct",
+    )!.linkPrincipalId!;
+
+    const expectMissingWorkspace = async (response: Response): Promise<void> => {
+      expectPrivate(response);
+      expect(response.status).toBe(400);
+      expect(await body(response)).toMatchObject({ ok: false, code: "bad_request" });
+    };
+
+    const deleteMessage = vi.spyOn(test.storage, "deleteShareDiscussionMessage");
+    await expectMissingWorkspace(
+      await test.handler(
+        moderationRequest(OWNER, {
+          action: "delete",
+          messageId: messageId("delete-missing"),
+          workspaceId: undefined,
+        }),
+      ),
+    );
+    expect(deleteMessage).not.toHaveBeenCalled();
+    expect(
+      test.storage.listShareDiscussionMessages({ shareId: SHARE, limit: 100 })
+        .messages.find(
+          (message) => message.messageId === messageId("delete-missing"),
+        ),
+    ).toMatchObject({ deletedAtMs: null });
+
+    expect(
+      await genericRefusal(
+        await test.handler(
+          moderationRequest(OWNER, {
+            action: "delete",
+            messageId: messageId("delete-wrong"),
+            workspaceId: OTHER_WORKSPACE,
+          }),
+        ),
+      ),
+    ).toContain('"code":"not_found"');
+    expect(deleteMessage).not.toHaveBeenCalled();
+    expect(
+      test.storage.listShareDiscussionMessages({ shareId: SHARE, limit: 100 })
+        .messages.find(
+          (message) => message.messageId === messageId("delete-wrong"),
+        ),
+    ).toMatchObject({ deletedAtMs: null });
+
+    const deleted = await test.handler(
+      moderationRequest(OWNER, {
+        action: "delete",
+        messageId: messageId("delete-correct"),
+        workspaceId: WORKSPACE,
+      }),
+    );
+    expect(deleted.status).toBe(200);
+    await deleted.arrayBuffer();
+    expect(deleteMessage).toHaveBeenCalledTimes(1);
+    expect(
+      test.storage.listShareDiscussionMessages({ shareId: SHARE, limit: 100 })
+        .messages.find(
+          (message) => message.messageId === messageId("delete-correct"),
+        ),
+    ).toMatchObject({ deletedAtMs: expect.any(Number) });
+
+    const setBlocked = vi.spyOn(test.storage, "setLinkPrincipalBlocked");
+    await expectMissingWorkspace(
+      await test.handler(
+        moderationRequest(OWNER, {
+          action: "block",
+          principalId,
+          workspaceId: undefined,
+        }),
+      ),
+    );
+    expect(setBlocked).not.toHaveBeenCalled();
+    expect(test.storage.getLinkPrincipal(principalId)).toMatchObject({
+      blockedAtMs: null,
+    });
+
+    expect(
+      await genericRefusal(
+        await test.handler(
+          moderationRequest(OWNER, {
+            action: "block",
+            principalId,
+            workspaceId: OTHER_WORKSPACE,
+          }),
+        ),
+      ),
+    ).toContain('"code":"not_found"');
+    expect(setBlocked).not.toHaveBeenCalled();
+    expect(test.storage.getLinkPrincipal(principalId)).toMatchObject({
+      blockedAtMs: null,
+    });
+
+    const blocked = await test.handler(
+      moderationRequest(OWNER, {
+        action: "block",
+        principalId,
+        workspaceId: WORKSPACE,
+      }),
+    );
+    expect(blocked.status).toBe(200);
+    await blocked.arrayBuffer();
+    expect(setBlocked).toHaveBeenCalledTimes(1);
+    expect(test.storage.getLinkPrincipal(principalId)?.blockedAtMs).not.toBeNull();
+
+    setBlocked.mockClear();
+    await expectMissingWorkspace(
+      await test.handler(
+        moderationRequest(OWNER, {
+          action: "unblock",
+          principalId,
+          workspaceId: undefined,
+        }),
+      ),
+    );
+    expect(setBlocked).not.toHaveBeenCalled();
+    expect(test.storage.getLinkPrincipal(principalId)?.blockedAtMs).not.toBeNull();
+
+    expect(
+      await genericRefusal(
+        await test.handler(
+          moderationRequest(OWNER, {
+            action: "unblock",
+            principalId,
+            workspaceId: OTHER_WORKSPACE,
+          }),
+        ),
+      ),
+    ).toContain('"code":"not_found"');
+    expect(setBlocked).not.toHaveBeenCalled();
+    expect(test.storage.getLinkPrincipal(principalId)?.blockedAtMs).not.toBeNull();
+
+    const unblocked = await test.handler(
+      moderationRequest(OWNER, {
+        action: "unblock",
+        principalId,
+        workspaceId: WORKSPACE,
+      }),
+    );
+    expect(unblocked.status).toBe(200);
+    await unblocked.arrayBuffer();
+    expect(setBlocked).toHaveBeenCalledTimes(1);
+    expect(test.storage.getLinkPrincipal(principalId)).toMatchObject({
+      blockedAtMs: null,
+    });
+
+    const setPaused = vi.spyOn(test.storage, "setShareLinkWritesPaused");
+    await expectMissingWorkspace(
+      await test.handler(
+        moderationRequest(OWNER, { action: "pause", workspaceId: undefined }),
+      ),
+    );
+    expect(setPaused).not.toHaveBeenCalled();
+    expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).toBeNull();
+
+    expect(
+      await genericRefusal(
+        await test.handler(
+          moderationRequest(OWNER, {
+            action: "pause",
+            workspaceId: OTHER_WORKSPACE,
+          }),
+        ),
+      ),
+    ).toContain('"code":"not_found"');
+    expect(setPaused).not.toHaveBeenCalled();
+    expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).toBeNull();
+
+    const paused = await test.handler(
+      moderationRequest(OWNER, { action: "pause", workspaceId: WORKSPACE }),
+    );
+    expect(paused.status).toBe(200);
+    await paused.arrayBuffer();
+    expect(setPaused).toHaveBeenCalledTimes(1);
+    expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).not.toBeNull();
+
+    setPaused.mockClear();
+    await expectMissingWorkspace(
+      await test.handler(
+        moderationRequest(OWNER, { action: "resume", workspaceId: undefined }),
+      ),
+    );
+    expect(setPaused).not.toHaveBeenCalled();
+    expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).not.toBeNull();
+
+    expect(
+      await genericRefusal(
+        await test.handler(
+          moderationRequest(OWNER, {
+            action: "resume",
+            workspaceId: OTHER_WORKSPACE,
+          }),
+        ),
+      ),
+    ).toContain('"code":"not_found"');
+    expect(setPaused).not.toHaveBeenCalled();
+    expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).not.toBeNull();
+
+    const resumed = await test.handler(
+      moderationRequest(OWNER, { action: "resume", workspaceId: WORKSPACE }),
+    );
+    expect(resumed.status).toBe(200);
+    await resumed.arrayBuffer();
+    expect(setPaused).toHaveBeenCalledTimes(1);
+    expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).toBeNull();
+  });
+
   it("rechecks current workspace ownership inside every moderation transaction", async () => {
     for (const transition of ["delete", "block", "pause"] as const) {
       const test = await fixture();
@@ -3305,6 +3568,75 @@ describe("share discussion HTTP boundary", () => {
       ).toMatchObject({
         messageId: target.messageId,
         body: `ownership-race-${transition}`,
+        deletedAtMs: null,
+        linkPrincipalBlocked: false,
+      });
+      expect(test.storage.getLinkPrincipal(target.linkPrincipalId!)!.blockedAtMs).toBeNull();
+      expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).toBeNull();
+      expect(discussionUsage(test.dbPath)).toBe(beforeUsage);
+    }
+  });
+
+  it("rechecks the requested workspace inside every moderation transaction", async () => {
+    for (const transition of ["delete", "block", "pause"] as const) {
+      const test = await fixture();
+      const seeded = await test.handler(
+        trustedAppend(test.comment, {
+          body: `workspace-race-${transition}`,
+          claimedName: "Workspace Race",
+          idempotencyKey: `workspace-race-${transition}`,
+        }),
+      );
+      expect(seeded.status).toBe(200);
+      await seeded.arrayBuffer();
+      const target = test.storage.listShareDiscussionMessages({
+        shareId: SHARE,
+        limit: 100,
+      }).messages[0]!;
+      const beforeUsage = discussionUsage(test.dbPath);
+      const baseline = await genericRefusal(
+        await test.handler(moderationRequest(COMMENTER, { action: "pause" })),
+      );
+
+      if (transition === "delete") {
+        const original = test.storage.deleteShareDiscussionMessage.bind(
+          test.storage,
+        );
+        test.storage.deleteShareDiscussionMessage = (input) => {
+          updateShareWorkspace(test.dbPath, OTHER_WORKSPACE);
+          return original(input);
+        };
+      } else if (transition === "block") {
+        const original = test.storage.setLinkPrincipalBlocked.bind(test.storage);
+        test.storage.setLinkPrincipalBlocked = (input) => {
+          updateShareWorkspace(test.dbPath, OTHER_WORKSPACE);
+          return original(input);
+        };
+      } else {
+        const original = test.storage.setShareLinkWritesPaused.bind(test.storage);
+        test.storage.setShareLinkWritesPaused = (input) => {
+          updateShareWorkspace(test.dbPath, OTHER_WORKSPACE);
+          return original(input);
+        };
+      }
+
+      const response = await test.handler(
+        moderationRequest(
+          OWNER,
+          transition === "delete"
+            ? { action: "delete", messageId: target.messageId }
+            : transition === "block"
+              ? { action: "block", principalId: target.linkPrincipalId }
+              : { action: "pause" },
+        ),
+      );
+      expect(await genericRefusal(response), transition).toBe(baseline);
+      expect(
+        test.storage.listShareDiscussionMessages({ shareId: SHARE, limit: 100 })
+          .messages[0],
+      ).toMatchObject({
+        messageId: target.messageId,
+        body: `workspace-race-${transition}`,
         deletedAtMs: null,
         linkPrincipalBlocked: false,
       });

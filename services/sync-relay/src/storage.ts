@@ -585,18 +585,21 @@ export interface SyncRelayStorage {
   ): SyncRelayLinkPrincipalRow | null;
   setLinkPrincipalBlocked(input: {
     shareId: string;
+    workspaceId: string;
     principalId: string;
     actorUserId: string;
     blockedAtMs: number | null;
   }): boolean;
   setShareLinkWritesPaused(input: {
     shareId: string;
+    workspaceId: string;
     actorUserId: string;
     pausedAtMs: number | null;
   }): boolean;
   getShareLinkWritesPausedAtMs(shareId: string): number | null;
   deleteShareDiscussionMessage(input: {
     shareId: string;
+    workspaceId: string;
     messageId: string;
     deletedAtMs: number;
     actorUserId: string;
@@ -4606,6 +4609,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   setLinkPrincipalBlocked(input: {
     shareId: string;
+    workspaceId: string;
     principalId: string;
     actorUserId: string;
     blockedAtMs: number | null;
@@ -4628,9 +4632,15 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
              ON workspace.workspace_id = share.workspace_id
            WHERE principal.principal_id = ?
              AND share.share_id = ?
+             AND workspace.workspace_id = ?
              AND workspace.owner_user_id = ?`,
         )
-        .get(input.principalId, input.shareId, input.actorUserId);
+        .get(
+          input.principalId,
+          input.shareId,
+          input.workspaceId,
+          input.actorUserId,
+        );
       if (!principal) return false;
       const discussionRevision = this.nextShareDiscussionRevision(input.shareId);
       this.db
@@ -4659,6 +4669,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   setShareLinkWritesPaused(input: {
     shareId: string;
+    workspaceId: string;
     actorUserId: string;
     pausedAtMs: number | null;
   }): boolean {
@@ -4681,12 +4692,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
                SELECT 1
                FROM sync_relay_workspaces AS workspace
                WHERE workspace.workspace_id = sync_relay_shares.workspace_id
+                 AND workspace.workspace_id = ?
                  AND workspace.owner_user_id = ?
              )`,
         )
         .run(
           input.pausedAtMs === null ? null : Math.trunc(input.pausedAtMs),
           input.shareId,
+          input.workspaceId,
           input.actorUserId,
         );
       return Number(updated.changes ?? 0) === 1;
@@ -4706,6 +4719,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   deleteShareDiscussionMessage(input: {
     shareId: string;
+    workspaceId: string;
     messageId: string;
     deletedAtMs: number;
     actorUserId: string;
@@ -4728,10 +4742,16 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
            WHERE message.share_id = ?
              AND message.message_id = ?
              AND message.deleted_at_ms IS NULL
+             AND workspace.workspace_id = ?
              AND workspace.owner_user_id = ?
            LIMIT 1`,
         )
-        .get(input.shareId, input.messageId, input.actorUserId);
+        .get(
+          input.shareId,
+          input.messageId,
+          input.workspaceId,
+          input.actorUserId,
+        );
       if (!message) return null;
       const deletedAtMs = Math.trunc(input.deletedAtMs);
       const discussionRevision = this.nextShareDiscussionRevision(input.shareId);

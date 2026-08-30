@@ -7911,6 +7911,7 @@ function registerIpcHandlers(
               {
                 method: "POST",
                 body: JSON.stringify({
+                  workspaceId: operation.workspace.workspaceId,
                   access: input.access,
                   expectedDependentGrantIds: input.expectedDependentGrantIds,
                 }),
@@ -8260,7 +8261,11 @@ function registerIpcHandlers(
                 `/sync/shares/${encodeURIComponent(input.shareId)}/discussion/moderation`,
                 {
                   method: "POST",
-                  body: JSON.stringify({ action: "delete", messageId: input.messageId }),
+                  body: JSON.stringify({
+                    workspaceId: operation.workspace.workspaceId,
+                    action: "delete",
+                    messageId: input.messageId,
+                  }),
                 },
               );
             },
@@ -8307,7 +8312,11 @@ function registerIpcHandlers(
                 `/sync/shares/${encodeURIComponent(input.shareId)}/discussion/moderation`,
                 {
                   method: "POST",
-                  body: JSON.stringify({ action: "block", principalId: input.principalId }),
+                  body: JSON.stringify({
+                    workspaceId: operation.workspace.workspaceId,
+                    action: "block",
+                    principalId: input.principalId,
+                  }),
                 },
               );
             },
@@ -8352,7 +8361,11 @@ function registerIpcHandlers(
                 `/sync/shares/${encodeURIComponent(input.shareId)}/discussion/moderation`,
                 {
                   method: "POST",
-                  body: JSON.stringify({ action: "unblock", principalId: input.principalId }),
+                  body: JSON.stringify({
+                    workspaceId: operation.workspace.workspaceId,
+                    action: "unblock",
+                    principalId: input.principalId,
+                  }),
                 },
               );
             },
@@ -8397,7 +8410,10 @@ function registerIpcHandlers(
               `/sync/shares/${encodeURIComponent(input.shareId)}/discussion/moderation`,
               {
                 method: "POST",
-                body: JSON.stringify({ action: "pause" }),
+                body: JSON.stringify({
+                  workspaceId: operation.workspace.workspaceId,
+                  action: "pause",
+                }),
               },
             );
           },
@@ -8441,7 +8457,10 @@ function registerIpcHandlers(
               `/sync/shares/${encodeURIComponent(input.shareId)}/discussion/moderation`,
               {
                 method: "POST",
-                body: JSON.stringify({ action: "resume" }),
+                body: JSON.stringify({
+                  workspaceId: operation.workspace.workspaceId,
+                  action: "resume",
+                }),
               },
             );
           },
@@ -8486,6 +8505,7 @@ function registerIpcHandlers(
               {
                 method: "POST",
                 body: JSON.stringify({
+                  workspaceId: operation.workspace.workspaceId,
                   expectedParentGrantId: input.expectedParentGrantId,
                   expectedParentGeneration: input.expectedParentGeneration,
                 }),
@@ -8535,7 +8555,12 @@ function registerIpcHandlers(
             return relayShareJsonWithCredentials<unknown>(
               credentials,
               `/sync/shares/${encodeURIComponent(input.shareId)}/grants/${encodeURIComponent(input.grantId)}/revoke`,
-              { method: "POST" },
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  workspaceId: operation.workspace.workspaceId,
+                }),
+              },
             );
           },
         });

@@ -459,6 +459,7 @@ describe("durable link discussion storage", () => {
     expect(
       storage.setLinkPrincipalBlocked({
         shareId: seeded.shareId,
+        workspaceId: seeded.workspaceId,
         principalId: first.principal.principalId,
         actorUserId: OWNER,
         blockedAtMs: 2_100,
@@ -467,6 +468,7 @@ describe("durable link discussion storage", () => {
     expect(
       storage.setShareLinkWritesPaused({
         shareId: seeded.shareId,
+        workspaceId: seeded.workspaceId,
         actorUserId: OWNER,
         pausedAtMs: 2_101,
       }),
@@ -474,6 +476,7 @@ describe("durable link discussion storage", () => {
     expect(
       storage.deleteShareDiscussionMessage({
         shareId: seeded.shareId,
+        workspaceId: seeded.workspaceId,
         messageId: second.message.messageId,
         deletedAtMs: 2_102,
         actorUserId: OWNER,
@@ -522,6 +525,7 @@ describe("durable link discussion storage", () => {
     expect(
       storage.setShareLinkWritesPaused({
         shareId: stateOnly.shareId,
+        workspaceId: stateOnly.workspaceId,
         actorUserId: OWNER,
         pausedAtMs: 2_200,
       }),
@@ -555,6 +559,7 @@ describe("durable link discussion storage", () => {
     expect(
       storage.setShareLinkWritesPaused({
         shareId: capped.shareId,
+        workspaceId: capped.workspaceId,
         actorUserId: OWNER,
         pausedAtMs: 2_201,
       }),
@@ -751,6 +756,7 @@ describe("durable link discussion storage", () => {
     expect(
       storage.setLinkPrincipalBlocked({
         shareId: seeded.shareId,
+        workspaceId: seeded.workspaceId,
         principalId,
         actorUserId: OWNER,
         blockedAtMs: 2_400,
@@ -759,6 +765,7 @@ describe("durable link discussion storage", () => {
     expect(
       storage.setLinkPrincipalBlocked({
         shareId: seeded.shareId,
+        workspaceId: seeded.workspaceId,
         principalId,
         actorUserId: OWNER,
         blockedAtMs: null,
@@ -836,6 +843,7 @@ describe("durable link discussion storage", () => {
     expect(
       storage.setShareLinkWritesPaused({
         shareId: paused.shareId,
+        workspaceId: paused.workspaceId,
         actorUserId: OWNER,
         pausedAtMs: 1_500,
       }),
@@ -855,6 +863,7 @@ describe("durable link discussion storage", () => {
     expect(
       storage.setLinkPrincipalBlocked({
         shareId: blocked.shareId,
+        workspaceId: blocked.workspaceId,
         principalId: accepted.principal.principalId,
         actorUserId: OWNER,
         blockedAtMs: 2_100,
@@ -1206,6 +1215,7 @@ describe("durable link discussion storage", () => {
     expect(
       debtStore.storage.deleteShareDiscussionMessage({
         shareId: debtSeed.shareId,
+        workspaceId: debtSeed.workspaceId,
         messageId: debtFirst.message.messageId,
         deletedAtMs: 2_100,
         actorUserId: OWNER,
@@ -1617,6 +1627,7 @@ describe("durable link discussion storage", () => {
     expect(
       storage.deleteShareDiscussionMessage({
         shareId: seeded.shareId,
+        workspaceId: seeded.workspaceId,
         messageId: linkMessage.message.messageId,
         deletedAtMs: 2_002,
         actorUserId: OWNER,
@@ -1706,6 +1717,7 @@ describe("durable link discussion storage", () => {
     expect(
       storage.deleteShareDiscussionMessage({
         shareId: seeded.shareId,
+        workspaceId: seeded.workspaceId,
         messageId: ids[2]!,
         deletedAtMs: 3_000,
         actorUserId: OWNER,
@@ -1788,6 +1800,7 @@ describe("durable link discussion storage", () => {
     expect(
       storage.deleteShareDiscussionMessage({
         shareId: seeded.shareId,
+        workspaceId: seeded.workspaceId,
         messageId: blocked.message.messageId,
         deletedAtMs: 2_100,
         actorUserId: OWNER,
@@ -1796,6 +1809,7 @@ describe("durable link discussion storage", () => {
     expect(
       storage.setLinkPrincipalBlocked({
         shareId: seeded.shareId,
+        workspaceId: seeded.workspaceId,
         principalId: blocked.principal.principalId,
         actorUserId: OWNER,
         blockedAtMs: 2_200,
@@ -1804,6 +1818,7 @@ describe("durable link discussion storage", () => {
     expect(
       storage.setShareLinkWritesPaused({
         shareId: seeded.shareId,
+        workspaceId: seeded.workspaceId,
         actorUserId: OWNER,
         pausedAtMs: 2_300,
       }),
@@ -1861,6 +1876,7 @@ describe("durable link discussion storage", () => {
     expect(
       reopened.setShareLinkWritesPaused({
         shareId: seeded.shareId,
+        workspaceId: seeded.workspaceId,
         actorUserId: OWNER,
         pausedAtMs: null,
       }),

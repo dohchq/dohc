@@ -2455,7 +2455,11 @@ describe("relay capability reads", () => {
           request(
             OWNER,
             `/sync/shares/${shareId}/links/${grantId}/retune`,
-            jsonBody({ access: "view", expectedDependentGrantIds: [] }),
+            jsonBody({
+              workspaceId: WORKSPACE,
+              access: "view",
+              expectedDependentGrantIds: [],
+            }),
           ),
         );
       },
@@ -2626,7 +2630,11 @@ describe("relay capability reads", () => {
         const body =
           operation === "rotate"
             ? { workspaceId: WORKSPACE, expectedDependentGrantIds: [] }
-            : { access: "view", expectedDependentGrantIds: [] };
+            : {
+                workspaceId: WORKSPACE,
+                access: "view",
+                expectedDependentGrantIds: [],
+              };
         const missing = await denialBytes(
           await h(request(OWNER, missingRoute, jsonBody(body))),
         );

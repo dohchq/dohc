@@ -1832,20 +1832,29 @@ export function createSyncRelayHandler({
     if (request.method !== "POST") return refused();
     let actorUserId: string;
     let action: DiscussionModerationAction;
+    let workspaceId: string;
+    let input: Record<string, unknown>;
     try {
-      const actor = await resolveActor(request, "");
+      input = await readJsonObject(request);
+      workspaceId = parseWorkspaceId(input.workspaceId);
+    } catch (error) {
+      return privateErrorResponse(error);
+    }
+    try {
+      const actor = await resolveActor(request, workspaceId);
+      const share = storage.getShare(shareId);
       if (
         !actor.userId ||
         Buffer.byteLength(actor.userId, "utf8") >
           LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT ||
+        !share ||
         !isCurrentDiscussionOwner(shareId, actor.userId)
       ) {
         return refused();
       }
+      requireShareWorkspace(share, workspaceId);
       actorUserId = actor.userId;
-      action = parseDiscussionModerationAction(
-        await readJsonObject(request),
-      );
+      action = parseDiscussionModerationAction(input);
     } catch {
       return refused();
     }
@@ -1854,6 +1863,7 @@ export function createSyncRelayHandler({
       if (action.action === "delete") {
         const deleted = storage.deleteShareDiscussionMessage({
           shareId,
+          workspaceId,
           messageId: action.messageId,
           deletedAtMs: changedAtMs,
           actorUserId,
@@ -1874,6 +1884,7 @@ export function createSyncRelayHandler({
         if (
           !storage.setLinkPrincipalBlocked({
             shareId,
+            workspaceId,
             principalId: action.principalId,
             actorUserId,
             blockedAtMs: blocked ? changedAtMs : null,
@@ -1888,6 +1899,7 @@ export function createSyncRelayHandler({
       if (
         !storage.setShareLinkWritesPaused({
           shareId,
+          workspaceId,
           actorUserId,
           pausedAtMs: linkCommentsPaused ? changedAtMs : null,
         })
@@ -2555,14 +2567,17 @@ export function createSyncRelayHandler({
       if (route.route === "share-link-rotate") throw methodNotAllowed();
 
       if (route.route === "share-link-retune" && request.method === "POST") {
+        const input = await readJsonObject(request);
+        const workspaceId = parseWorkspaceId(input.workspaceId);
         const { share, grant } = requireOwnedLinkGrant(
           route.shareId,
           route.grantId,
           actor,
         );
+        requireShareWorkspace(share, workspaceId);
         if (!isPublicLinkAccess(grant.access)) throw notFound();
-        const input = await readJsonObject(request);
         const expectedDependentGrantIds = parseExpectedDependentGrantIds(input, [
+          "workspaceId",
           "access",
           "expectedDependentGrantIds",
         ]);
@@ -2577,7 +2592,12 @@ export function createSyncRelayHandler({
           changedAtMs: nowMs(),
           expectedDependentGrantIds,
           guard: () => {
-            requireOwnedLinkGrant(share.shareId, grant.grantId, actor);
+            const current = requireOwnedLinkGrant(
+              share.shareId,
+              grant.grantId,
+              actor,
+            );
+            requireShareWorkspace(current.share, workspaceId);
           },
           ...(widening
             ? {
@@ -2610,8 +2630,14 @@ export function createSyncRelayHandler({
       if (route.route === "share-link-retune") throw methodNotAllowed();
 
       if (route.route === "share-grant-promote" && request.method === "POST") {
-        requireOwnedNamedGrant(route.shareId, route.grantId, actor);
         const input = await readJsonObject(request);
+        const workspaceId = parseWorkspaceId(input.workspaceId);
+        const { share } = requireOwnedNamedGrant(
+          route.shareId,
+          route.grantId,
+          actor,
+        );
+        requireShareWorkspace(share, workspaceId);
         const { expectedParentGrantId, expectedParentGeneration } =
           parsePromotionExpectation(input);
         const result = storage.promoteShareGrant({
@@ -2620,7 +2646,12 @@ export function createSyncRelayHandler({
           expectedParentGrantId,
           expectedParentGeneration,
           guard: () => {
-            requireOwnedNamedGrant(route.shareId, route.grantId, actor);
+            const current = requireOwnedNamedGrant(
+              route.shareId,
+              route.grantId,
+              actor,
+            );
+            requireShareWorkspace(current.share, workspaceId);
           },
         });
         if (!result.ok) throw notFound();
@@ -2633,17 +2664,28 @@ export function createSyncRelayHandler({
       if (route.route === "share-grant-promote") throw methodNotAllowed();
 
       if (route.route === "share-grant-revoke" && request.method === "POST") {
-        requireOwnedNamedGrant(route.shareId, route.grantId, actor);
-        const input = await readOptionalJsonObject(request);
-        if (input !== null && Object.keys(input).length > 0) {
+        const input = await readJsonObject(request);
+        const workspaceId = parseWorkspaceId(input.workspaceId);
+        if (Object.keys(input).some((key) => key !== "workspaceId")) {
           throw badRequest("request body contains an unknown field");
         }
+        const { share } = requireOwnedNamedGrant(
+          route.shareId,
+          route.grantId,
+          actor,
+        );
+        requireShareWorkspace(share, workspaceId);
         const result = storage.revokeShareGrant({
           shareId: route.shareId,
           grantId: route.grantId,
           revokedAtMs: nowMs(),
           guard: () => {
-            requireOwnedNamedGrant(route.shareId, route.grantId, actor);
+            const current = requireOwnedNamedGrant(
+              route.shareId,
+              route.grantId,
+              actor,
+            );
+            requireShareWorkspace(current.share, workspaceId);
           },
         });
         if (!result.ok) throw notFound();
@@ -4377,7 +4419,8 @@ function parseDiscussionModerationAction(
     value.length <= DISCUSSION_MODERATION_HANDLE_MAX_CHARS;
   if (input.action === "delete") {
     if (
-      Object.keys(input).sort().join("\0") !== ["action", "messageId"].join("\0") ||
+      Object.keys(input).sort().join("\0") !==
+        ["action", "messageId", "workspaceId"].join("\0") ||
       !validHandle(input.messageId)
     ) {
       throw notFound();
@@ -4386,7 +4429,8 @@ function parseDiscussionModerationAction(
   }
   if (input.action === "block" || input.action === "unblock") {
     if (
-      Object.keys(input).sort().join("\0") !== ["action", "principalId"].join("\0") ||
+      Object.keys(input).sort().join("\0") !==
+        ["action", "principalId", "workspaceId"].join("\0") ||
       !validHandle(input.principalId)
     ) {
       throw notFound();
@@ -4394,7 +4438,12 @@ function parseDiscussionModerationAction(
     return { action: input.action, principalId: input.principalId };
   }
   if (input.action === "pause" || input.action === "resume") {
-    if (Object.keys(input).length !== 1) throw notFound();
+    if (
+      Object.keys(input).sort().join("\0") !==
+      ["action", "workspaceId"].join("\0")
+    ) {
+      throw notFound();
+    }
     return { action: input.action };
   }
   throw notFound();
@@ -4430,7 +4479,11 @@ function parsePromotionExpectation(input: Record<string, unknown>): {
   expectedParentGrantId: string;
   expectedParentGeneration: number;
 } {
-  const allowedKeys = ["expectedParentGrantId", "expectedParentGeneration"];
+  const allowedKeys = [
+    "workspaceId",
+    "expectedParentGrantId",
+    "expectedParentGeneration",
+  ];
   if (Object.keys(input).some((key) => !allowedKeys.includes(key))) {
     throw badRequest("request body contains an unknown field");
   }

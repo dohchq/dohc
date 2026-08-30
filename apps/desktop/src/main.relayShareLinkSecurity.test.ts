@@ -179,7 +179,18 @@ describe("main-process owner relay share authorization", () => {
       "/sync/${encodeURIComponent(operation.workspace.workspaceId)}/shares/${encodeURIComponent(input.shareId)}/links",
     );
     expect(add).not.toContain("/sync/${encodeURIComponent(input.workspaceId)}");
-    for (const channel of ["rotateRelayShareLink", "revokeRelayShareLink"]) {
+    for (const channel of [
+      "retuneRelayShareLink",
+      "rotateRelayShareLink",
+      "revokeRelayShareLink",
+      "deleteRelayShareDiscussionMessage",
+      "blockRelayShareDiscussionPrincipal",
+      "unblockRelayShareDiscussionPrincipal",
+      "pauseRelayShareDiscussion",
+      "resumeRelayShareDiscussion",
+      "promoteRelayShareGrant",
+      "revokeRelayShareGrant",
+    ]) {
       const handler = handlerSource(channel);
       expect(handler, channel).toContain(
         "workspaceId: operation.workspace.workspaceId",
@@ -190,6 +201,7 @@ describe("main-process owner relay share authorization", () => {
     expect(retune).toContain(
       "/sync/shares/${encodeURIComponent(input.shareId)}/links/${encodeURIComponent(input.grantId)}/retune",
     );
+    expect(retune).toContain("workspaceId: operation.workspace.workspaceId");
     expect(retune).not.toContain("workspaceId: input.workspaceId");
   });
 
@@ -212,6 +224,7 @@ describe("main-process owner relay share authorization", () => {
     expect(retune).toContain(
       "expectedDependentGrantIds: input.expectedDependentGrantIds",
     );
+    expect(retune).toContain("workspaceId: operation.workspace.workspaceId");
     expect(retune).not.toContain("workspaceId: input.workspaceId");
     expect(retune).not.toContain("ownerUserId");
   });
@@ -267,28 +280,37 @@ describe("main-process owner relay share authorization", () => {
     }
 
     const moderation = {
-      deleteRelayShareDiscussionMessage:
-        'body: JSON.stringify({ action: "delete", messageId: input.messageId })',
-      blockRelayShareDiscussionPrincipal:
-        'body: JSON.stringify({ action: "block", principalId: input.principalId })',
-      unblockRelayShareDiscussionPrincipal:
-        'body: JSON.stringify({ action: "unblock", principalId: input.principalId })',
-      pauseRelayShareDiscussion: 'body: JSON.stringify({ action: "pause" })',
-      resumeRelayShareDiscussion: 'body: JSON.stringify({ action: "resume" })',
+      deleteRelayShareDiscussionMessage: [
+        'action: "delete"',
+        "messageId: input.messageId",
+      ],
+      blockRelayShareDiscussionPrincipal: [
+        'action: "block"',
+        "principalId: input.principalId",
+      ],
+      unblockRelayShareDiscussionPrincipal: [
+        'action: "unblock"',
+        "principalId: input.principalId",
+      ],
+      pauseRelayShareDiscussion: ['action: "pause"'],
+      resumeRelayShareDiscussion: ['action: "resume"'],
     } as const;
-    for (const [channel, body] of Object.entries(moderation)) {
+    for (const [channel, actionFields] of Object.entries(moderation)) {
       const handler = handlerSource(channel);
       expect(handler, channel).toContain(
         "/sync/shares/${encodeURIComponent(input.shareId)}/discussion/moderation",
       );
       expect(handler, channel).toContain('method: "POST"');
-      expect(handler, channel).toContain(body);
+      expect(handler, channel).toContain(
+        "workspaceId: operation.workspace.workspaceId",
+      );
+      for (const field of actionFields) expect(handler, channel).toContain(field);
       expect(handler, channel).not.toContain("workspaceId: input.workspaceId");
       expect(handler, channel).not.toContain("actorUserId");
     }
   });
 
-  it("uses exact promotion expectations and a bodyless direct named revoke", () => {
+  it("uses exact promotion expectations and workspace-bound named revoke", () => {
     const promote = handlerSource("promoteRelayShareGrant");
     expect(promote).toContain(
       "/sync/shares/${encodeURIComponent(input.shareId)}/grants/${encodeURIComponent(input.grantId)}/promote",
@@ -298,6 +320,7 @@ describe("main-process owner relay share authorization", () => {
     expect(promote).toContain(
       "expectedParentGeneration: input.expectedParentGeneration",
     );
+    expect(promote).toContain("workspaceId: operation.workspace.workspaceId");
     expect(promote).not.toContain("expectedDependentGrantIds");
     expect(promote).not.toContain("recipientUserId");
 
@@ -306,8 +329,8 @@ describe("main-process owner relay share authorization", () => {
       "/sync/shares/${encodeURIComponent(input.shareId)}/grants/${encodeURIComponent(input.grantId)}/revoke",
     );
     expect(revoke).toContain('method: "POST"');
-    expect(revoke).not.toContain("JSON.stringify");
-    expect(revoke).not.toContain("workspaceId:");
+    expect(revoke).toContain("JSON.stringify");
+    expect(revoke).toContain("workspaceId: operation.workspace.workspaceId");
     expect(revoke).not.toContain("expectedDependentGrantIds");
     expect(revoke).not.toContain("recipientUserId");
   });
