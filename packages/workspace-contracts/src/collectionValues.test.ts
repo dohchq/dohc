@@ -53,11 +53,19 @@ interface SchemaReasonLimitVector {
   expectedTerminalReason: CollectionSchemaParseResult["reasons"][number];
 }
 
+interface SchemaOptionLimitVector {
+  name: string;
+  itemCount: number;
+  expectedItemCount: number;
+  expectedReasons: CollectionSchemaParseResult["reasons"];
+}
+
 const schemaVectors = schemaFixtureJson.vectors as SchemaVector[];
 const fieldValueVectors = fieldValueFixtureJson.vectors as FieldValueVector[];
 const recordIdVectors = recordIdFixtureJson.vectors as RecordIdVector[];
 const schemaLimitVectors = schemaLimitFixtureJson.vectors as SchemaLimitVector[];
 const reasonLimitVectors = schemaLimitFixtureJson.reasonVectors as SchemaReasonLimitVector[];
+const optionLimitVectors = schemaLimitFixtureJson.optionVectors as SchemaOptionLimitVector[];
 
 describe("Collection reason-code contract", () => {
   it("matches the shared full reason-code set", () => {
@@ -174,6 +182,30 @@ describe("Collection schema contract vectors", () => {
     expect(parsed.schema.fields).toEqual([]);
     expect(parsed.reasons).toHaveLength(expectedReasonCount);
     expect(parsed.reasons.at(-1)).toEqual(expectedTerminalReason);
+  });
+
+  it.each(optionLimitVectors)("matches $name", ({
+    itemCount,
+    expectedItemCount,
+    expectedReasons,
+  }) => {
+    const options = Array.from(
+      { length: itemCount },
+      (_, index) => `option_${index}`,
+    );
+    const parsed = parseCollectionSchema(
+      `fields:\n  status:\n    type: select\n    options: ${JSON.stringify(options)}\n`,
+    );
+
+    expect(parsed.status).toBe("degraded");
+    expect(parsed.schema.fields).toEqual([
+      {
+        name: "status",
+        type: "select",
+        options: options.slice(0, expectedItemCount),
+      },
+    ]);
+    expect(parsed.reasons).toEqual(expectedReasons);
   });
 });
 

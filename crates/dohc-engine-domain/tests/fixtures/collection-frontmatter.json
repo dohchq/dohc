@@ -150,6 +150,11 @@
       }
     },
     {
+      "name": "duplicate-floating-point-key-is-rejected",
+      "markdown": "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n1.5: first\n1.5: second\n---",
+      "expected": null
+    },
+    {
       "name": "duplicate-id-frontmatter-is-rejected",
       "markdown": "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nid: rec_77777777777777777777777774\n---",
       "expected": null

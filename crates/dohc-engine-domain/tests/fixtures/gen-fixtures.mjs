@@ -295,6 +295,68 @@ views:
     visibleFields: [title]
 `,
   },
+  {
+    name: "view-sort-one-over-query-limit-flags-and-keeps-first-eight",
+    yaml: `fields:
+  title:
+    type: text
+views:
+  - name: All
+    kind: table
+    sort:
+      - field: title
+        direction: asc
+      - field: title
+        direction: desc
+      - field: title
+        direction: asc
+      - field: title
+        direction: desc
+      - field: title
+        direction: asc
+      - field: title
+        direction: desc
+      - field: title
+        direction: asc
+      - field: title
+        direction: desc
+      - field: title
+        direction: asc
+`,
+    expected: {
+      status: "degraded",
+      schema: {
+        name: null,
+        description: null,
+        fields: [{ name: "title", type: "text" }],
+        views: [
+          {
+            name: "All",
+            kind: "table",
+            groupBy: null,
+            sort: [
+              { field: "title", direction: "asc" },
+              { field: "title", direction: "desc" },
+              { field: "title", direction: "asc" },
+              { field: "title", direction: "desc" },
+              { field: "title", direction: "asc" },
+              { field: "title", direction: "desc" },
+              { field: "title", direction: "asc" },
+              { field: "title", direction: "desc" },
+            ],
+            visibleFields: null,
+            dateField: null,
+          },
+        ],
+      },
+      reasons: [
+        {
+          code: "schema-collection-limit-exceeded",
+          path: "/views/0/sort",
+        },
+      ],
+    },
+  },
 ];
 
 const relationSingle = {
@@ -636,6 +698,12 @@ const frontmatter = [
     markdown: "---\npriority: !custom high\n---\n\n# Body",
   },
   {
+    name: "duplicate-floating-point-key-is-rejected",
+    markdown:
+      "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n1.5: first\n1.5: second\n---",
+    expected: null,
+  },
+  {
     name: "duplicate-id-frontmatter-is-rejected",
     markdown: "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nid: rec_77777777777777777777777774\n---",
     expected: null,
@@ -716,6 +784,19 @@ writeFixture("collection-schema-limits.json", {
         code: "schema-collection-limit-exceeded",
         path: "/reasons",
       },
+    },
+  ],
+  optionVectors: [
+    {
+      name: "select-options-one-over-collection-limit",
+      itemCount: 16_385,
+      expectedItemCount: 16_384,
+      expectedReasons: [
+        {
+          code: "schema-collection-limit-exceeded",
+          path: "/fields/status/options",
+        },
+      ],
     },
   ],
 });

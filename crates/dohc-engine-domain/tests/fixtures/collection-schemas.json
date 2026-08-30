@@ -512,6 +512,72 @@
           }
         ]
       }
+    },
+    {
+      "name": "view-sort-one-over-query-limit-flags-and-keeps-first-eight",
+      "yaml": "fields:\n  title:\n    type: text\nviews:\n  - name: All\n    kind: table\n    sort:\n      - field: title\n        direction: asc\n      - field: title\n        direction: desc\n      - field: title\n        direction: asc\n      - field: title\n        direction: desc\n      - field: title\n        direction: asc\n      - field: title\n        direction: desc\n      - field: title\n        direction: asc\n      - field: title\n        direction: desc\n      - field: title\n        direction: asc\n",
+      "expected": {
+        "status": "degraded",
+        "schema": {
+          "name": null,
+          "description": null,
+          "fields": [
+            {
+              "name": "title",
+              "type": "text"
+            }
+          ],
+          "views": [
+            {
+              "name": "All",
+              "kind": "table",
+              "groupBy": null,
+              "sort": [
+                {
+                  "field": "title",
+                  "direction": "asc"
+                },
+                {
+                  "field": "title",
+                  "direction": "desc"
+                },
+                {
+                  "field": "title",
+                  "direction": "asc"
+                },
+                {
+                  "field": "title",
+                  "direction": "desc"
+                },
+                {
+                  "field": "title",
+                  "direction": "asc"
+                },
+                {
+                  "field": "title",
+                  "direction": "desc"
+                },
+                {
+                  "field": "title",
+                  "direction": "asc"
+                },
+                {
+                  "field": "title",
+                  "direction": "desc"
+                }
+              ],
+              "visibleFields": null,
+              "dateField": null
+            }
+          ]
+        },
+        "reasons": [
+          {
+            "code": "schema-collection-limit-exceeded",
+            "path": "/views/0/sort"
+          }
+        ]
+      }
     }
   ]
 }

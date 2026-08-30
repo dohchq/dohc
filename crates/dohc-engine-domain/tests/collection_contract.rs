@@ -50,9 +50,19 @@ struct SchemaReasonLimitVector {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SchemaOptionLimitVector {
+    name: String,
+    item_count: usize,
+    expected_item_count: usize,
+    expected_reasons: Vec<dohc_engine_domain::CollectionSchemaReason>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SchemaLimitFixture {
     vectors: Vec<SchemaLimitVector>,
     reason_vectors: Vec<SchemaReasonLimitVector>,
+    option_vectors: Vec<SchemaOptionLimitVector>,
 }
 
 #[derive(Deserialize)]
@@ -225,6 +235,35 @@ fn collection_schema_item_caps_match_the_shared_boundary_vector() {
             vector.name
         );
         assert_eq!(parsed.schema.views[0].group_by, None, "{}", vector.name);
+        assert_eq!(parsed.reasons, vector.expected_reasons, "{}", vector.name);
+    }
+}
+
+#[test]
+fn collection_schema_option_cap_matches_the_shared_boundary_vector() {
+    let fixture: SchemaLimitFixture =
+        serde_json::from_str(SCHEMA_LIMIT_FIXTURE).expect("schema-limit fixture parses");
+    for vector in fixture.option_vectors {
+        let mut yaml = String::from("fields:\n  status:\n    type: select\n    options:\n");
+        for index in 0..vector.item_count {
+            yaml.push_str(&format!("      - option_{index}\n"));
+        }
+
+        let parsed = parse_collection_schema(&yaml);
+        let [FieldDefinition::Select { options, .. }] = parsed.schema.fields.as_slice() else {
+            panic!("{} did not retain its select field", vector.name);
+        };
+        let expected = (0..vector.expected_item_count)
+            .map(|index| format!("option_{index}"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            parsed.status,
+            CollectionSchemaStatus::Degraded,
+            "{}",
+            vector.name
+        );
+        assert_eq!(options, &expected, "{}", vector.name);
         assert_eq!(parsed.reasons, vector.expected_reasons, "{}", vector.name);
     }
 }

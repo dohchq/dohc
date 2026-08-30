@@ -18,6 +18,7 @@ const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
 const URL_PATTERN = /^[A-Za-z][A-Za-z0-9+.-]*:\S+$/;
 const MAX_COLLECTION_FIELD_VALUE_DEPTH = 24;
 const MAX_SCHEMA_COLLECTION_ITEMS = 16_384;
+const MAX_COLLECTION_QUERY_SORTS = 8;
 const COLLECTION_SCHEMA = CORE_SCHEMA.withTags(realMapTag);
 const YAML_MAPPING_KEYS = new WeakMap<Record<string, unknown>, readonly (string | null)[]>();
 
@@ -212,6 +213,10 @@ function parseOptions(
       options.push(option);
     }
   });
+  if (options.length > MAX_SCHEMA_COLLECTION_ITEMS) {
+    options.length = MAX_SCHEMA_COLLECTION_ITEMS;
+    reason(reasons, "schema-collection-limit-exceeded", path);
+  }
   return options;
 }
 
@@ -368,6 +373,10 @@ function parseSort(
       sort.push({ field, direction });
     }
   });
+  if (sort.length > MAX_COLLECTION_QUERY_SORTS) {
+    sort.length = MAX_COLLECTION_QUERY_SORTS;
+    reason(reasons, "schema-collection-limit-exceeded", path);
+  }
   return sort;
 }
 

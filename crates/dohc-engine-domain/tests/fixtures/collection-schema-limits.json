@@ -31,5 +31,18 @@
         "path": "/reasons"
       }
     }
+  ],
+  "optionVectors": [
+    {
+      "name": "select-options-one-over-collection-limit",
+      "itemCount": 16385,
+      "expectedItemCount": 16384,
+      "expectedReasons": [
+        {
+          "code": "schema-collection-limit-exceeded",
+          "path": "/fields/status/options"
+        }
+      ]
+    }
   ]
 }

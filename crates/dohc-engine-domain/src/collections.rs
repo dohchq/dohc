@@ -691,6 +691,14 @@ fn parse_options(
             options.push(option.to_owned());
         }
     }
+    if options.len() > MAX_SCHEMA_COLLECTION_ITEMS {
+        options.truncate(MAX_SCHEMA_COLLECTION_ITEMS);
+        push_reason(
+            reasons,
+            CollectionSchemaReasonCode::SchemaCollectionLimitExceeded,
+            path,
+        );
+    }
     options
 }
 
@@ -944,6 +952,14 @@ fn parse_sort(
                 );
             }
         }
+    }
+    if sort.len() > MAX_COLLECTION_QUERY_SORTS {
+        sort.truncate(MAX_COLLECTION_QUERY_SORTS);
+        push_reason(
+            reasons,
+            CollectionSchemaReasonCode::SchemaCollectionLimitExceeded,
+            path,
+        );
     }
     sort
 }
@@ -1298,6 +1314,7 @@ fn duplicate_yaml_key_text(value: &DuplicateYamlNode) -> Option<String> {
         YamlDataOwned::Value(ScalarOwned::String(value))
         | YamlDataOwned::Representation(value, _, _) => Some(value.clone()),
         YamlDataOwned::Value(ScalarOwned::Integer(value)) => Some(value.to_string()),
+        YamlDataOwned::Value(ScalarOwned::FloatingPoint(value)) => Some(value.to_string()),
         YamlDataOwned::Value(ScalarOwned::Boolean(value)) => Some(value.to_string()),
         YamlDataOwned::Value(ScalarOwned::Null) => Some("null".to_owned()),
         YamlDataOwned::Tagged(_, value) => duplicate_yaml_key_text(value),
@@ -2486,6 +2503,7 @@ fn unindexed_or_conflicted_relation_targets_still_present(
         .map_err(crate::DomainError::sql_corrupt)?;
     let mut present = HashSet::new();
     for (collection_path, wanted_ids) in targets_by_collection {
+        let mut matched_count = 0_usize;
         let rows = statement
             .query_map(params![workspace_id, version_id, collection_path], |row| {
                 row.get::<_, String>(0)
@@ -2497,13 +2515,10 @@ fn unindexed_or_conflicted_relation_targets_still_present(
             else {
                 continue;
             };
-            present.insert((record_id, collection_path.clone()));
-            if present
-                .iter()
-                .filter(|(_, path)| path == &collection_path)
-                .count()
-                == wanted_ids.len()
-            {
+            if present.insert((record_id, collection_path.clone())) {
+                matched_count += 1;
+            }
+            if matched_count == wanted_ids.len() {
                 break;
             }
         }
@@ -3947,6 +3962,61 @@ fn collection_values_equal(left: &Value, right: &Value) -> bool {
     }
 }
 
+#[derive(Debug, Eq, Hash, PartialEq)]
+enum CollectionNumberKey {
+    Integer(i128),
+    Float(u64),
+}
+
+fn collection_number_key(value: &serde_json::Number) -> CollectionNumberKey {
+    const U64_UPPER_EXCLUSIVE: f64 = 18_446_744_073_709_551_616.0;
+    match collection_number(value) {
+        CollectionNumber::Signed(value) => CollectionNumberKey::Integer(i128::from(value)),
+        CollectionNumber::Unsigned(value) => CollectionNumberKey::Integer(i128::from(value)),
+        CollectionNumber::Float(value)
+            if value.fract() == 0.0 && value >= i64::MIN as f64 && value < U64_UPPER_EXCLUSIVE =>
+        {
+            let integer = if value < 0.0 {
+                i128::from(value as i64)
+            } else {
+                i128::from(value as u64)
+            };
+            CollectionNumberKey::Integer(integer)
+        }
+        CollectionNumber::Float(value) => CollectionNumberKey::Float(value.to_bits()),
+    }
+}
+
+#[derive(Debug, Eq, Hash, PartialEq)]
+enum CollectionValueKey {
+    Null,
+    Bool(bool),
+    Number(CollectionNumberKey),
+    String(String),
+    Array(Vec<CollectionValueKey>),
+    Object(Vec<(String, CollectionValueKey)>),
+}
+
+fn collection_value_key(value: &Value) -> CollectionValueKey {
+    match value {
+        Value::Null => CollectionValueKey::Null,
+        Value::Bool(value) => CollectionValueKey::Bool(*value),
+        Value::Number(value) => CollectionValueKey::Number(collection_number_key(value)),
+        Value::String(value) => CollectionValueKey::String(value.clone()),
+        Value::Array(values) => {
+            CollectionValueKey::Array(values.iter().map(collection_value_key).collect())
+        }
+        Value::Object(values) => {
+            let mut entries = values
+                .iter()
+                .map(|(key, value)| (key.clone(), collection_value_key(value)))
+                .collect::<Vec<_>>();
+            entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+            CollectionValueKey::Object(entries)
+        }
+    }
+}
+
 fn optional_collection_values_equal(left: Option<&Value>, right: Option<&Value>) -> bool {
     match (left, right) {
         (None, None) => true,
@@ -4091,17 +4161,17 @@ fn group_collection_records(
     field: &str,
 ) -> Result<Vec<CollectionRecordGroup>, crate::DomainError> {
     let mut groups = Vec::<CollectionRecordGroup>::new();
+    let mut group_indexes = HashMap::<CollectionValueKey, usize>::new();
     for record in records {
         let value = value_for_field(record, field)
             .cloned()
             .unwrap_or(Value::Null);
-        let index = match groups
-            .iter()
-            .position(|group| collection_values_equal(&group.value, &value))
-        {
+        let key = collection_value_key(&value);
+        let index = match group_indexes.get(&key).copied() {
             Some(index) => index,
             None => {
                 let index = groups.len();
+                group_indexes.insert(key, index);
                 groups.push(CollectionRecordGroup {
                     value,
                     records: Vec::new(),
@@ -4430,27 +4500,33 @@ pub fn validate_field_value(
             CollectionFieldValue::Text(_) => flagged(FieldValueReasonCode::InvalidUrl, ""),
             _ => flagged(FieldValueReasonCode::ExpectedText, ""),
         },
-        FieldDefinition::Select { options, .. } => match value {
-            CollectionFieldValue::Text(value) if options.contains(value) => {
-                FieldValueValidation::Valid
+        FieldDefinition::Select { options, .. } => {
+            let options = options.iter().map(String::as_str).collect::<HashSet<_>>();
+            match value {
+                CollectionFieldValue::Text(value) if options.contains(value.as_str()) => {
+                    FieldValueValidation::Valid
+                }
+                CollectionFieldValue::Text(_) => flagged(FieldValueReasonCode::UnknownOption, ""),
+                _ => flagged(FieldValueReasonCode::ExpectedText, ""),
             }
-            CollectionFieldValue::Text(_) => flagged(FieldValueReasonCode::UnknownOption, ""),
-            _ => flagged(FieldValueReasonCode::ExpectedText, ""),
-        },
-        FieldDefinition::MultiSelect { options, .. } => match value {
-            CollectionFieldValue::Sequence(values) => {
-                validate_sequence(values, |value, path| match value {
-                    CollectionFieldValue::Text(value) if options.contains(value) => {
-                        FieldValueValidation::Valid
-                    }
-                    CollectionFieldValue::Text(_) => {
-                        flagged(FieldValueReasonCode::UnknownOption, path)
-                    }
-                    _ => flagged(FieldValueReasonCode::ExpectedText, path),
-                })
+        }
+        FieldDefinition::MultiSelect { options, .. } => {
+            let options = options.iter().map(String::as_str).collect::<HashSet<_>>();
+            match value {
+                CollectionFieldValue::Sequence(values) => {
+                    validate_sequence(values, |value, path| match value {
+                        CollectionFieldValue::Text(value) if options.contains(value.as_str()) => {
+                            FieldValueValidation::Valid
+                        }
+                        CollectionFieldValue::Text(_) => {
+                            flagged(FieldValueReasonCode::UnknownOption, path)
+                        }
+                        _ => flagged(FieldValueReasonCode::ExpectedText, path),
+                    })
+                }
+                _ => flagged(FieldValueReasonCode::ExpectedSequence, ""),
             }
-            _ => flagged(FieldValueReasonCode::ExpectedSequence, ""),
-        },
+        }
         FieldDefinition::Relation { many, .. } => {
             let validate_record_id = |value: &CollectionFieldValue, path: &str| match value {
                 CollectionFieldValue::Text(value) if is_record_id(value) => {
@@ -4497,15 +4573,20 @@ fn record_id_from_random(random: [u8; 16]) -> String {
 #[cfg(test)]
 mod tests {
     use std::cmp::Ordering;
+    use std::collections::HashSet;
+    use std::time::{Duration, Instant};
 
+    use rusqlite::Connection;
     use serde_json::json;
 
     use super::{
-        CollectionIndexedValue, CollectionIndexedValueValidation, CollectionRecord, CollectionSort,
-        FieldValueReason, FieldValueReasonCode, MAX_COLLECTION_FIELD_VALUE_DEPTH,
-        ViewSortDirection, compare_collection_records, compare_json, compare_record_to_cursor,
-        is_record_id, markdown_record_id, mint_record_id, parse_markdown_frontmatter,
-        query_cursor_for_record, record_id_from_random,
+        CollectionFieldValue, CollectionIndexedValue, CollectionIndexedValueValidation,
+        CollectionRecord, CollectionSort, FieldDefinition, FieldValueReason, FieldValueReasonCode,
+        FieldValueValidation, MAX_COLLECTION_FIELD_VALUE_DEPTH, ViewSortDirection,
+        collection_value_key, collection_values_equal, compare_collection_records, compare_json,
+        compare_record_to_cursor, group_collection_records, is_record_id, markdown_record_id,
+        mint_record_id, parse_markdown_frontmatter, query_cursor_for_record, record_id_from_random,
+        unindexed_or_conflicted_relation_targets_still_present, validate_field_value,
     };
 
     #[test]
@@ -4524,6 +4605,159 @@ mod tests {
                 &json!(9_007_199_254_740_992_f64)
             ),
             Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn collection_group_keys_match_collection_value_equality() {
+        let values = [
+            json!(null),
+            json!(false),
+            json!(true),
+            json!(0),
+            json!(0.0),
+            json!(-0.0),
+            json!(-1),
+            json!(-1.0),
+            json!(i64::MIN),
+            json!(i64::MIN as f64),
+            json!(i64::MAX),
+            json!(i64::MAX as f64),
+            json!(u64::MAX),
+            json!(u64::MAX as f64),
+            json!(9_007_199_254_740_993_i64),
+            json!(9_007_199_254_740_992_f64),
+            json!("0"),
+            json!([1, { "nested": 2.0 }]),
+            serde_json::from_str(r#"{"b":2,"a":[1.0]}"#).expect("first object"),
+            serde_json::from_str(r#"{"a":[1],"b":2.0}"#).expect("second object"),
+        ];
+
+        for left in &values {
+            for right in &values {
+                assert_eq!(
+                    collection_value_key(left) == collection_value_key(right),
+                    collection_values_equal(left, right),
+                    "canonical grouping key disagrees for {left} and {right}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn collection_scale_sweeps_stay_linear() {
+        const SCALE_ITEMS: usize = 100_000;
+        const SCALE_BUDGET: Duration = Duration::from_secs(30);
+
+        let records = (0..SCALE_ITEMS)
+            .map(|index| CollectionRecord {
+                id: String::new(),
+                path: String::new(),
+                conflicted: false,
+                values: vec![CollectionIndexedValue {
+                    field: "group".to_owned(),
+                    value: json!(format!("group_{index}")),
+                    validation: CollectionIndexedValueValidation::Valid,
+                    resolved_relations: Vec::new(),
+                }],
+            })
+            .collect::<Vec<_>>();
+        let started = Instant::now();
+        let groups = group_collection_records(&records, "group").expect("group scale records");
+        let group_elapsed = started.elapsed();
+        assert_eq!(groups.len(), SCALE_ITEMS);
+        drop(groups);
+        drop(records);
+
+        let options = (0..SCALE_ITEMS)
+            .map(|index| format!("option_{index}"))
+            .collect::<Vec<_>>();
+        let values = CollectionFieldValue::Sequence(
+            options
+                .iter()
+                .cloned()
+                .map(CollectionFieldValue::Text)
+                .collect(),
+        );
+        let field = FieldDefinition::MultiSelect {
+            name: "labels".to_owned(),
+            options,
+        };
+        let started = Instant::now();
+        let validation = validate_field_value(&field, &values);
+        let options_elapsed = started.elapsed();
+        assert_eq!(validation, FieldValueValidation::Valid);
+        drop(field);
+        drop(values);
+
+        let mut connection = Connection::open_in_memory().expect("open scale database");
+        connection
+            .execute_batch(
+                "CREATE TABLE blobs(sha256 TEXT PRIMARY KEY,text TEXT NOT NULL);\
+                 CREATE TABLE snapshots(\
+                   workspace_id TEXT NOT NULL,version_id TEXT NOT NULL,path TEXT NOT NULL,\
+                   object_id TEXT NOT NULL,blob_sha256 TEXT NOT NULL,content_kind TEXT NOT NULL\
+                 );\
+                 CREATE INDEX snapshots_relation_presence \
+                   ON snapshots(workspace_id,version_id,path);\
+                 CREATE TABLE moments(\
+                   workspace_id TEXT NOT NULL,version_id TEXT NOT NULL,object_id TEXT NOT NULL,\
+                   after_blob_sha256 TEXT NOT NULL,after_content_kind TEXT NOT NULL,\
+                   moment_order INTEGER NOT NULL\
+                 );\
+                 CREATE TABLE conflicts(\
+                   workspace_id TEXT NOT NULL,target_version_id TEXT NOT NULL,status TEXT NOT NULL,\
+                   current_object_id TEXT,incoming_object_id TEXT,path TEXT NOT NULL\
+                 );",
+            )
+            .expect("create scale tables");
+        let collection_path = "scale";
+        let relation_targets = (0..SCALE_ITEMS)
+            .map(|index| (format!("record_{index}"), collection_path.to_owned()))
+            .collect::<HashSet<_>>();
+        let transaction = connection.transaction().expect("begin scale seed");
+        {
+            let mut insert_blob = transaction
+                .prepare("INSERT INTO blobs(sha256,text) VALUES (?1,?2)")
+                .expect("prepare scale blobs");
+            let mut insert_snapshot = transaction
+                .prepare(
+                    "INSERT INTO snapshots(\
+                       workspace_id,version_id,path,object_id,blob_sha256,content_kind\
+                     ) VALUES ('workspace','version',?1,?2,?3,'text')",
+                )
+                .expect("prepare scale snapshots");
+            for index in 0..SCALE_ITEMS {
+                let record_id = format!("record_{index}");
+                let blob_sha = format!("blob_{index}");
+                insert_blob
+                    .execute((&blob_sha, format!("---\nid: {record_id}\n---\n")))
+                    .expect("insert scale blob");
+                insert_snapshot
+                    .execute((
+                        format!("{collection_path}/{index:06}.md"),
+                        format!("object_{index}"),
+                        blob_sha,
+                    ))
+                    .expect("insert scale snapshot");
+            }
+        }
+        transaction.commit().expect("commit scale seed");
+        let started = Instant::now();
+        let present = unindexed_or_conflicted_relation_targets_still_present(
+            &connection,
+            "workspace",
+            "version",
+            relation_targets,
+        )
+        .expect("scan scale relation targets");
+        let relations_elapsed = started.elapsed();
+        assert_eq!(present.len(), SCALE_ITEMS);
+
+        let elapsed = group_elapsed + options_elapsed + relations_elapsed;
+        assert!(
+            elapsed <= SCALE_BUDGET,
+            "linear collection sweeps took {elapsed:?} (group {group_elapsed:?}, options {options_elapsed:?}, relations {relations_elapsed:?}); budget {SCALE_BUDGET:?}"
         );
     }
 
