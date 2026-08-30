@@ -17,6 +17,7 @@ import { FileInspector } from "./FileInspector";
 // Mocks the full UseEngineDoc contract, not just the fields this file reads —
 // a partial mock silently hands undefined to a `!== null` check elsewhere in
 // FileInspector.tsx (removalInProgress), which is not the same as null.
+const flushPendingLocalUpdates = vi.fn(async () => undefined);
 const engineDocState: UseEngineDoc = {
   available: false,
   opening: false,
@@ -39,6 +40,7 @@ const engineDocState: UseEngineDoc = {
   readArtifactAsset: async () => {
     throw new Error("no artifact asset");
   },
+  flushPendingLocalUpdates,
 };
 
 vi.mock("./collab/useEngineDoc", () => ({
@@ -129,6 +131,25 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
 
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(LIVE_BODY));
     expect(writeText).not.toHaveBeenCalledWith("# Stale disk body\n");
+  });
+
+  it("flushes pending live edits before the shell starts a path mutation", async () => {
+    let registeredFlush: (() => Promise<void>) | null = null;
+    render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        registerDraftFlush={(flush) => {
+          registeredFlush = flush;
+        }}
+      />,
+    );
+    await screen.findByTestId("editor-stub");
+    await waitFor(() => expect(registeredFlush).not.toBeNull());
+
+    await registeredFlush!();
+
+    expect(flushPendingLocalUpdates).toHaveBeenCalledOnce();
   });
 
   it("carries LIVE frontmatter (title/icon) edits, not the mount-time markdown", async () => {

@@ -2233,6 +2233,10 @@ function MarkdownView(props: {
   const writesBlocked = () =>
     readOnlyRef.current || writesRefusedRef.current || staleBaseline.current;
   const engineMode = engine.available && engine.doc !== null;
+  const engineModeRef = useRef(engineMode);
+  engineModeRef.current = engineMode;
+  const flushEngineUpdatesRef = useRef(engine.flushPendingLocalUpdates);
+  flushEngineUpdatesRef.current = engine.flushPendingLocalUpdates;
 
   // "View markdown as source" (engine mode): a READ-ONLY projection of the
   // canonical Y.Doc through the same yDocToMarkdown the settle uses to write
@@ -3125,6 +3129,9 @@ function MarkdownView(props: {
   useEffect(() => {
     if (!registerDraftFlush) return;
     registerDraftFlush((options) => {
+      if (engineModeRef.current) {
+        return flushEngineUpdatesRef.current();
+      }
       if (flushInFlight.current) {
         const inFlight = flushInFlight.current;
         if (!options?.captureOnFailure) return inFlight;

@@ -236,6 +236,10 @@ export interface EngineYDocBinding {
   onDocumentReplaced(
     listener: (doc: Y.Doc, recoveredPaths: string[]) => void,
   ): () => void;
+  // Force every accepted local edit through the transport and wait for main's
+  // acknowledgement. Path mutations use this barrier before main settles and
+  // closes the old-path session.
+  flushPendingLocalUpdates(): Promise<void>;
   // Tear down: stop shipping edits, unsubscribe, close the engine session, and
   // destroy the mirror doc. Idempotent. If main has not acknowledged an edit,
   // teardown waits and keeps the session open. It completes after recovery.
@@ -297,6 +301,9 @@ export async function bindEngineYDoc(
       },
       onDocumentReplaced() {
         return () => undefined;
+      },
+      flushPendingLocalUpdates() {
+        return Promise.resolve();
       },
       async destroy() {
         // Best-effort close even on the unavailable path: main may have taken a
@@ -598,6 +605,7 @@ export async function bindEngineYDoc(
       replacementListeners.add(listener);
       return () => replacementListeners.delete(listener);
     },
+    flushPendingLocalUpdates,
     destroy() {
       if (destroyPromise !== null) return destroyPromise;
       destroyed = true;

@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { access } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
@@ -7,6 +7,9 @@ import {
   createTempWorkspace,
   explorerRow,
   openWorkspaceFromFirstRun,
+  seedWorkspaceSettings,
+  waitForWorkspaceFile,
+  writeWorkspaceFiles,
 } from "./helpers/workspace";
 
 async function pathExists(path: string): Promise<boolean> {
@@ -77,6 +80,61 @@ test("Explorer creates, renames, cancels, and confirms recoverable deletion", as
     await expect(renamed).toHaveCount(0);
     await expect
       .poll(() => pathExists(join(temp.rootPath, "Research", "plan.txt")))
+      .toBe(false);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+test("renaming a live Markdown file first lands the newest editor update", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  const marker = "rename-keeps-this-edit";
+
+  try {
+    await seedWorkspaceSettings(temp, {
+      experimental: { workspaceEngineAlpha: true },
+    });
+    await writeWorkspaceFiles(temp, [
+      { path: "notes.md", contents: "# Notes\n\nBase.\n" },
+    ]);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+    const workspace = await openWorkspaceFromFirstRun(page, temp);
+    await waitForWorkspaceFile(page, workspace.workspaceId, "notes.md");
+
+    const row = explorerRow(page, "notes.md");
+    await row.click();
+    const editor = page.getByTestId("markdown-editor");
+    await expect(editor).toBeVisible();
+    await editor.click();
+    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.insertText(`\n${marker}`);
+    await expect(editor).toContainText(marker);
+
+    // Do not wait for the provider's batch timer or save indicator. Explorer's
+    // mutation barrier must force this renderer-only edit to main before main
+    // settles and closes the old-path live session.
+    await row.press("F2");
+    const rename = page.getByRole("textbox", { name: "New name" });
+    await rename.fill("plan.md");
+    await rename.press("Enter");
+
+    await expect(explorerRow(page, "plan.md")).toBeVisible();
+    await expect(explorerRow(page, "notes.md")).toHaveCount(0);
+    await expect(page.getByTestId("editor-tabs")).toContainText("plan.md");
+    await expect(page.getByTestId("workspace-shell-error")).toHaveCount(0);
+    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute(
+      "data-state",
+      "saved",
+    );
+    await expect
+      .poll(async () =>
+        await readFile(join(temp.rootPath, "plan.md"), "utf8").catch(() => ""),
+      )
+      .toContain(marker);
+    await expect
+      .poll(() => pathExists(join(temp.rootPath, "notes.md")))
       .toBe(false);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);

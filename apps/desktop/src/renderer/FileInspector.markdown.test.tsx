@@ -53,6 +53,7 @@ const engineDocState: UseEngineDoc = {
   readArtifactAsset: async () => {
     throw new Error("no artifact asset");
   },
+  flushPendingLocalUpdates: async () => undefined,
 };
 
 vi.mock("./collab/useEngineDoc", () => ({
