@@ -7,9 +7,7 @@ import {
 } from "./harness";
 
 test("profiles eight Quick Open keystrokes and Graph construction", async () => {
-  const context = await launchFixture("large-flat", "profile-quickopen-graph", {
-    engine: false,
-  });
+  const context = await launchFixture("large-flat", "profile-quickopen-graph");
   try {
     const { page, manifest } = context;
     await startLongTaskObserver(page);

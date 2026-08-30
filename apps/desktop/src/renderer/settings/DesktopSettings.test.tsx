@@ -411,6 +411,12 @@ describe("DesktopSettings", () => {
     );
 
     const input = await screen.findByTestId("general-preferred-name-input");
+    expect((input as HTMLInputElement).value).toBe("");
+    expect(input.getAttribute("placeholder")).toBe("Enter your name");
+    expect(screen.getByTestId("general-preferred-name-preview").textContent).toContain(
+      "Your agent",
+    );
+    expect(screen.queryByText("Launch behavior")).toBeNull();
     await user.type(input, "Ice");
     expect(screen.getByTestId("general-preferred-name-preview").textContent).toContain(
       "Ice's agent",
@@ -554,7 +560,9 @@ describe("DesktopSettings", () => {
     );
 
     const command = await screen.findByTestId("runner-command-input");
-    expect(command.getAttribute("placeholder")).toContain("Bash(dohc chat:*)");
+    expect(command.getAttribute("placeholder")).toBe(
+      "Enter the command that starts your agent",
+    );
     expect(screen.getByText(/unsandboxed runner can read anything/i)).toBeTruthy();
     expect(screen.getByTestId("runner-multi-device-note").textContent).toContain(
       "Enable the runner on one device per workspace",
@@ -1536,6 +1544,38 @@ describe("DesktopSettings", () => {
       }),
     ).toBeTruthy();
     expect(screen.queryByTestId("settings-workspace-engine-share-view")).toBeNull();
+  });
+
+  it("shows one scoped reset action for each settings scope", async () => {
+    bridge.getUserSettings.mockResolvedValueOnce({
+      settings: {
+        ...DEFAULT_USER_SETTINGS,
+        appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark" },
+      },
+      source: "default",
+    });
+    workspaceSettingsOnDisk = {
+      ...DEFAULT_WORKSPACE_SETTINGS,
+      experimental: { workspaceEngineAlpha: false },
+    };
+
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="advanced"
+        onClose={() => {}}
+      />,
+    );
+
+    const userRow = await screen.findByTestId("settings-row-reset-user");
+    const workspaceRow = screen.getByTestId("settings-row-reset-workspace");
+    expect(within(userRow).getAllByRole("button")).toHaveLength(1);
+    expect(within(userRow).getByRole("button").textContent).toBe("Reset user");
+    expect(within(workspaceRow).getAllByRole("button")).toHaveLength(1);
+    expect(within(workspaceRow).getByRole("button").textContent).toBe(
+      "Reset workspace",
+    );
   });
 
   it("persists an edited attachment folder name", async () => {

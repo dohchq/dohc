@@ -11,6 +11,7 @@ const FULL_COUNTS = {
   flatFolderFiles: 5_000,
   largeDeepFiles: 8_000,
   drawingElements: [300, 1_500],
+  editableDocBytes: 250 * 1024,
   bigDocBytes: [1, 2, 3, 4, 5].map((mib) => mib * 1024 * 1024),
 };
 const TINY_COUNTS = {
@@ -18,6 +19,7 @@ const TINY_COUNTS = {
   flatFolderFiles: 100,
   largeDeepFiles: 200,
   drawingElements: [30, 100],
+  editableDocBytes: 250 * 1024,
   bigDocBytes: [1, 2, 3, 4, 5].map((unit) => unit * 64 * 1024),
 };
 
@@ -192,13 +194,22 @@ function exactMarkdownBytes(targetBytes, documentNumber) {
 }
 
 async function seedBigDocs(root, counts) {
-  const files = counts.bigDocBytes.map((bytes, index) => ({
-    path: `docs/doc-${index + 1}mb.md`,
-    contents: exactMarkdownBytes(bytes, index + 1),
-  }));
+  const files = [
+    {
+      path: "docs/doc-250kb.md",
+      contents: exactMarkdownBytes(counts.editableDocBytes, 1),
+    },
+    ...counts.bigDocBytes.map((bytes, index) => ({
+      path: `docs/doc-${index + 1}mb.md`,
+      contents: exactMarkdownBytes(bytes, index + 1),
+    })),
+  ];
   await writeFiles(root, files, 5);
   return {
-    files: files.map((file, index) => ({ path: file.path, bytes: counts.bigDocBytes[index] })),
+    files: files.map((file) => ({
+      path: file.path,
+      bytes: Buffer.byteLength(file.contents),
+    })),
   };
 }
 

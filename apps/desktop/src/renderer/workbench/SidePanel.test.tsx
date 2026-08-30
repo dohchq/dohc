@@ -31,6 +31,20 @@ afterEach(() => {
 });
 
 describe("sidebar resize guards", () => {
+  it("supports keyboard resizing and reports its current value", () => {
+    const onWidthChange = vi.fn();
+    const handle = renderPanel(onWidthChange, 240);
+
+    expect(handle.getAttribute("tabindex")).toBe("0");
+    expect(handle.getAttribute("aria-valuenow")).toBe("240");
+    fireEvent.keyDown(handle, { key: "ArrowRight" });
+    expect(onWidthChange).toHaveBeenCalledWith(256);
+    fireEvent.keyDown(handle, { key: "ArrowLeft" });
+    expect(onWidthChange).toHaveBeenCalledWith(224);
+    fireEvent.keyDown(handle, { key: "Enter" });
+    expect(onWidthChange).toHaveBeenCalledTimes(2);
+  });
+
   it("previews every move locally and commits one clamped width on release", () => {
     const onWidthChange = vi.fn();
     const handle = renderPanel(onWidthChange);

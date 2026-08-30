@@ -26,6 +26,51 @@ afterEach(() => {
 });
 
 describe("NewFileDialog", () => {
+  it("exposes a labelled modal with visible create and cancel actions", async () => {
+    const onClose = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <NewFileDialog
+        workspaceId="ws-1"
+        onClose={onClose}
+        onCreated={() => undefined}
+      />,
+    );
+
+    expect(
+      screen.getByRole("dialog", { name: "New file" }).getAttribute("aria-modal"),
+    ).toBe("true");
+    expect(
+      (screen.getByRole("button", { name: "Create file" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("creates from the visible action", async () => {
+    bridgeMock.createWorkspaceFile.mockResolvedValueOnce({ path: "notes/today.md" });
+    const onCreated = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <NewFileDialog
+        workspaceId="ws-1"
+        onClose={() => undefined}
+        onCreated={onCreated}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("File name"), "notes/today");
+    await user.click(screen.getByRole("button", { name: "Create file" }));
+
+    expect(bridgeMock.createWorkspaceFile).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      relativePath: "notes/today.md",
+      initialText: "",
+    });
+    expect(onCreated).toHaveBeenCalledWith("notes/today.md");
+  });
+
   it("ignores duplicate create submits while a create is pending", async () => {
     const create = deferred<{ path: string }>();
     bridgeMock.createWorkspaceFile.mockImplementationOnce(() => create.promise);

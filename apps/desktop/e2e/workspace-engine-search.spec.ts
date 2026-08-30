@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";
@@ -159,6 +160,65 @@ test("flagged: search finds file content and a chat message; .env.local content 
     expect(dump).toContain("quasar sync cadence");
     expect(dump).not.toContain(SECRET_VALUE);
     expect(dump).not.toContain(".env");
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+test("flagged: a newly saved editor change is searchable before relaunch", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  const workspaceId = "engine-live-search-e2e";
+  const sentinel = "live-search-sentinel-august-30";
+
+  try {
+    await seedWorkspaceManifest(temp, workspaceId);
+    await seedWorkspaceSettings(temp, {
+      experimental: { workspaceEngineAlpha: true },
+    });
+    await writeWorkspaceFiles(temp, [
+      { path: "notes/live.md", contents: "# Live search\n\nBefore the edit.\n" },
+    ]);
+
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+    const workspace = await openWorkspaceFromFirstRun(page, temp);
+    await waitForWorkspaceFile(page, workspace.workspaceId, "notes/live.md");
+
+    await revealExplorerPath(page, "notes/live.md");
+    await explorerRow(page, "notes/live.md").click();
+    await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0, {
+      timeout: 15_000,
+    });
+    const editor = page.getByTestId("markdown-editor");
+    const saveState = page.getByTestId("markdown-save-state");
+    await expect(editor).toBeVisible();
+    await editor.click();
+    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.type(` ${sentinel}`);
+    await expect(editor).toContainText(sentinel);
+    await expect(saveState).toHaveAttribute("data-state", "saved", {
+      timeout: 20_000,
+    });
+    await expect
+      .poll(
+        async () =>
+          await readFile(join(temp.rootPath, "notes/live.md"), "utf8").catch(
+            () => "",
+          ),
+        { timeout: 20_000 },
+      )
+      .toContain(sentinel);
+
+    await page.getByTestId("activity-search").click();
+    await expect(page.getByTestId("search-view")).toBeVisible();
+    await page.getByTestId("search-input").fill(sentinel);
+
+    await expect(
+      page.locator(
+        '[data-testid="search-result-group"][data-path="notes/live.md"]',
+      ),
+    ).toBeVisible({ timeout: 20_000 });
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

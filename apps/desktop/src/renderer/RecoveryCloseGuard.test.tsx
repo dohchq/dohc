@@ -85,6 +85,37 @@ afterEach(() => {
 // irreversible exit. The guard announces it first — and carries the recovery
 // list, so the warning offers the very actions it demands.
 describe("RecoveryCloseGuard", () => {
+  it("contains focus and returns it after the user goes back", async () => {
+    const user = userEvent.setup();
+    captureOrphanedDraft("ws-1", "a.md", "Kept!");
+    render(
+      <RecoveryCloseGuard>
+        <button type="button">Open document</button>
+      </RecoveryCloseGuard>,
+    );
+    const opener = screen.getByRole("button", { name: "Open document" });
+    opener.focus();
+
+    act(() => {
+      window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
+    });
+    const dialog = await screen.findByTestId("recovery-close-warning");
+    const buttons = within(dialog).getAllByRole("button");
+    const first = buttons[0];
+    const last = buttons[buttons.length - 1];
+
+    expect(document.activeElement).toBe(dialog);
+    await user.keyboard("{Tab}");
+    expect(document.activeElement).toBe(first);
+
+    last.focus();
+    await user.keyboard("{Tab}");
+    expect(document.activeElement).toBe(first);
+
+    await user.click(screen.getByTestId("recovery-close-goback"));
+    expect(document.activeElement).toBe(opener);
+  });
+
   it("warns before closing while set-aside edits exist, offers the list, and closes on 'Close anyway'", async () => {
     const user = userEvent.setup();
     noteWorkspaceLabel("ws-1", "Personal notes");

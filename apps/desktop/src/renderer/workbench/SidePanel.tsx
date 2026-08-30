@@ -1,7 +1,13 @@
 import { useRef } from "react";
 import { SectionLabel } from "../ui/controls";
-import { clampSidebarWidth } from "./workbenchState";
+import {
+  clampSidebarWidth,
+  SIDEBAR_MAX_WIDTH,
+  SIDEBAR_MIN_WIDTH,
+} from "./workbenchState";
 import { useCommitOnRelease } from "./useCommitOnRelease";
+
+const KEYBOARD_RESIZE_STEP = 16;
 
 // The workbench's collapsible, resizable side panel. The host unmounts it
 // entirely when hidden (windowChrome pins file-tree toHaveCount(0) on
@@ -38,8 +44,19 @@ export function SidePanel(props: {
       <div
         data-testid="sidebar-resize"
         role="separator"
+        tabIndex={0}
         aria-orientation="vertical"
         aria-label="Resize sidebar"
+        aria-valuemin={SIDEBAR_MIN_WIDTH}
+        aria-valuemax={SIDEBAR_MAX_WIDTH}
+        aria-valuenow={width}
+        onKeyDown={(event) => {
+          const direction =
+            event.key === "ArrowLeft" ? -1 : event.key === "ArrowRight" ? 1 : 0;
+          if (direction === 0) return;
+          event.preventDefault();
+          props.onWidthChange(clampSidebarWidth(width + direction * KEYBOARD_RESIZE_STEP));
+        }}
         onPointerDown={(event) => {
           // Left button only — a right/middle press must never start a resize.
           if (event.button !== 0) return;
@@ -58,7 +75,7 @@ export function SidePanel(props: {
         onPointerUp={(event) => resize.commit(event.pointerId)}
         onPointerCancel={(event) => resize.commit(event.pointerId)}
         onLostPointerCapture={(event) => resize.commit(event.pointerId)}
-        className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize bg-transparent transition-colors hover:bg-line/80"
+        className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize bg-transparent transition-colors hover:bg-line/80 focus-visible:bg-accent/35"
       />
     </aside>
   );

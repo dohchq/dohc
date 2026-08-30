@@ -134,7 +134,7 @@ export function TextControl(props: {
       maxLength={props.maxLength}
       data-testid={props.testId}
       onChange={(event) => props.onChange(event.target.value)}
-      className="h-7 w-40 rounded-md border border-line bg-bg px-2 font-mono text-[11px] text-ink placeholder:text-subtle focus:border-ink focus-visible:outline-none"
+      className="h-7 w-40 rounded-md border border-line bg-bg px-2 font-mono text-[11px] text-ink placeholder:text-subtle focus:border-ink"
     />
   );
 }

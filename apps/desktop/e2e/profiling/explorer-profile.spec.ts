@@ -9,23 +9,61 @@ import {
 } from "./harness";
 
 test("profiles the expanded 5,000-file Explorer folder", async () => {
-  const context = await launchFixture("large-flat", "profile-explorer", { engine: false });
+  const context = await launchFixture("large-flat", "profile-explorer");
   try {
     const { page, desktop, manifest } = context;
+    const explorerActivity = page.getByTestId("activity-explorer");
+    if ((await explorerActivity.getAttribute("aria-current")) !== "page") {
+      await explorerActivity.click();
+    }
     const folder = explorerRow(page, "flat-5000");
     await expect(folder).toBeVisible();
+    if ((await folder.getAttribute("aria-expanded")) === "true") {
+      await folder.click();
+      await expect(folder).toHaveAttribute("aria-expanded", "false");
+    }
 
     const capture = await startCdpCapture(desktop.app, page);
     const startedAt = performance.now();
+    const expandStartedAt = await page.evaluate(() => performance.now());
     await folder.click();
     await expect(folder).toHaveAttribute("aria-expanded", "true");
-    const finalFlatIndex = manifest.fixtures["large-flat"].flatFolderFiles - 1;
-    const finalFlatName = `${finalFlatIndex % 5 < 3 ? "flatnote" : "text"}-${String(
-      finalFlatIndex,
-    ).padStart(5, "0")}.${finalFlatIndex % 5 < 3 ? "md" : "txt"}`;
-    await expect(explorerRow(page, `flat-5000/${finalFlatName}`)).toBeAttached({
+    const expandedAt = await page.evaluate(() => performance.now());
+    await expect(explorerRow(page, "flat-5000/flatnote-00000.md")).toBeAttached({
       timeout: 120_000,
     });
+    const firstChildAt = await page.evaluate(() => performance.now());
+    const mountedRowsAfterExpand = await page
+      .locator('[data-testid="tree-row"]')
+      .count();
+    expect(mountedRowsAfterExpand).toBeLessThanOrEqual(96);
+    const initiallyMountedPaths = await page
+      .locator('[data-testid="tree-row"]')
+      .evaluateAll((rows) => rows.map((row) => (row as HTMLElement).dataset.path ?? ""));
+    await folder.focus();
+    await expect(folder).toBeFocused();
+    const endNavigationStartedAt = await page.evaluate(() => performance.now());
+    await page.keyboard.press("End");
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const active = document.activeElement as HTMLElement | null;
+          return (
+            active?.dataset.testid === "tree-row" &&
+            active.dataset.path !== undefined &&
+            active.dataset.path !== "flat-5000"
+          );
+        }),
+      )
+      .toBe(true);
+    const endTargetPath = await page.evaluate(
+      () => (document.activeElement as HTMLElement | null)?.dataset.path ?? null,
+    );
+    expect(endTargetPath).not.toBeNull();
+    expect(initiallyMountedPaths).not.toContain(endTargetPath);
+    const endTarget = explorerRow(page, endTargetPath!);
+    await expect(endTarget).toBeFocused();
+    const lastRowAt = await page.evaluate(() => performance.now());
 
     const tree = page.getByTestId("file-tree");
     const box = await tree.boundingBox();
@@ -46,6 +84,7 @@ test("profiles the expanded 5,000-file Explorer folder", async () => {
 
     const captured = await capture.stop();
     const mountedRows = await page.locator('[data-testid="tree-row"]').count();
+    expect(mountedRows).toBeLessThanOrEqual(96);
     const treeGeometry = await tree.evaluate((element) => ({
       clientHeight: element.clientHeight,
       scrollHeight: element.scrollHeight,
@@ -60,6 +99,12 @@ test("profiles the expanded 5,000-file Explorer folder", async () => {
       },
       measurements: {
         elapsedMs: performance.now() - startedAt,
+        expandToAriaMs: expandedAt - expandStartedAt,
+        expandToFirstChildMs: firstChildAt - expandStartedAt,
+        expandToLastRowMs: null,
+        endNavigationToLastRowMs: lastRowAt - endNavigationStartedAt,
+        endNavigationTargetPath: endTargetPath,
+        mountedRowsAfterExpand,
         interactionDurationMs: durationMs,
         interactionIterations: iterations,
         mountedRows,

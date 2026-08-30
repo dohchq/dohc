@@ -961,7 +961,7 @@ export function SettingsDialog(props: {
               title="Reset user settings"
               description="Restore local user settings for this desktop install to defaults."
               modified={isModified(userSettings, DEFAULT_USER_SETTINGS)}
-              onReset={() => void resetUserSettings()}
+              testId="settings-row-reset-user"
             >
               <button
                 type="button"
@@ -975,7 +975,7 @@ export function SettingsDialog(props: {
               title="Reset workspace settings"
               description="Restore local settings for this workspace without touching workspace content."
               modified={isModified(workspaceSettings, DEFAULT_WORKSPACE_SETTINGS)}
-              onReset={() => void resetWorkspaceSettings()}
+              testId="settings-row-reset-workspace"
             >
               <button
                 type="button"
@@ -1025,39 +1025,6 @@ export function SettingsDialog(props: {
               <code className="max-w-sm select-text cursor-text truncate rounded-md bg-panel-2 px-2 py-1 font-mono text-[11px] text-ink">
                 {props.workspacePath}
               </code>
-            </SettingRow>
-            <SettingRow
-              title="Launch behavior"
-              description="Choose what dohc opens when the desktop app starts."
-              modified={isModified(
-                userSettings.general.launchBehavior,
-                DEFAULT_USER_SETTINGS.general.launchBehavior,
-              )}
-              onReset={() =>
-                void saveUserSettings({
-                  ...userSettings,
-                  general: {
-                    ...userSettings.general,
-                    launchBehavior: DEFAULT_USER_SETTINGS.general.launchBehavior,
-                  },
-                })
-              }
-            >
-              <SegmentedControl
-                label="Launch behavior"
-                value={userSettings.general.launchBehavior}
-                options={[
-                  { value: "last-workspace", label: "Last" },
-                  { value: "workspace-picker", label: "Picker" },
-                  { value: "new-workspace", label: "New" },
-                ]}
-                onChange={(launchBehavior) =>
-                  void saveUserSettings({
-                    ...userSettings,
-                    general: { ...userSettings.general, launchBehavior },
-                  })
-                }
-              />
             </SettingRow>
             <SettingRow
               title="Desktop updates"

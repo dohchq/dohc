@@ -921,7 +921,9 @@ export function GraphView(props: {
       ) : graph.nodes.length === 0 ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center">
           <FileText size={18} aria-hidden className="text-subtle" />
-          <span className="text-xs text-muted">No markdown files</span>
+          <span className="text-xs text-muted">
+            Add a Markdown file to start building your graph.
+          </span>
         </div>
       ) : (
         <div

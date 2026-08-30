@@ -1,7 +1,15 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import type { UpdateActionResult } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { useGuestBlockingUiWhile } from "./guestBlockingUi";
+import { trapModalTabKey } from "./modalFocus";
 import { atRiskOrphanedDraftIds, useAllOrphanedDrafts } from "./orphanedDrafts";
 import { RecoveryList } from "./RecoveryList";
 
@@ -143,7 +151,6 @@ function beginInstall(): Promise<UpdateActionResult> {
 // back on its own. Not a rejection limit — real unloads land in
 // milliseconds; this only bounds how long the drafts go unguarded.
 const BYPASS_REARM_MS = 10_000;
-
 // Set-aside drafts (#567) are persisted on capture and restored on launch
 // (#600), so most of them now survive closing, reloading, quitting, and
 // restarting into an update. What CANNOT be persisted still dies with the app
@@ -176,9 +183,42 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
   );
   const liveCount = liveDrafts.length;
   const warningOpen = closeWarning !== null;
+  const warningRef = useRef<HTMLDivElement | null>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+  const showCloseWarning = (warning: {
+    kind: UnloadKind;
+    resume: (() => Promise<boolean>) | null;
+  }) => {
+    const active = document.activeElement;
+    if (
+      active instanceof HTMLElement &&
+      !warningRef.current?.contains(active)
+    ) {
+      returnFocusRef.current = active;
+    }
+    setCloseWarning(warning);
+  };
   useEffect(() => {
     if (warningOpen && liveCount === 0) setCloseWarning(null);
   }, [warningOpen, liveCount]);
+  useLayoutEffect(() => {
+    if (warningOpen) warningRef.current?.focus();
+  }, [warningOpen]);
+  useEffect(() => {
+    if (!warningOpen) return;
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      trapModalTabKey(event, warningRef.current);
+    };
+
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown, true);
+      const returnTarget = returnFocusRef.current;
+      if (returnTarget?.isConnected) returnTarget.focus();
+      returnFocusRef.current = null;
+    };
+  }, [warningOpen]);
   // An open plugin web app's guest composites above this renderer, so the
   // dialog below paints inside it and the guest takes the clicks that answer
   // it — the user cannot answer the warning blocking their own exit. The guest
@@ -227,7 +267,7 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
       // a "close". Confirming that would call window.close(), which does not
       // quit on macOS.
       void bridge().holdQuit();
-      setCloseWarning({
+      showCloseWarning({
         kind: pending?.kind ?? "close",
         resume: pending?.resume ?? null,
       });
@@ -268,13 +308,13 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
         return;
       }
       void bridge().holdQuit();
-      setCloseWarning({ kind: "quit", resume: () => resumeExit("quit") });
+      showCloseWarning({ kind: "quit", resume: () => resumeExit("quit") });
     });
     // Registered LAST, so a preload that fails the contract above leaves no
     // listener and no opener behind — a half-installed guard is worse than
     // none, because the cleanup React skips would never remove it.
     window.addEventListener("beforeunload", onBeforeUnload);
-    openRecoveryWarning = (warning) => setCloseWarning(warning);
+    openRecoveryWarning = showCloseWarning;
     return () => {
       openRecoveryWarning = null;
       window.removeEventListener("beforeunload", onBeforeUnload);
@@ -293,10 +333,12 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
       {closeWarning !== null && liveCount > 0 ? (
         <div className="fixed inset-0 z-50 grid place-items-center bg-ink/20">
           <div
+            ref={warningRef}
             data-testid="recovery-close-warning"
             role="dialog"
             aria-modal="true"
             aria-labelledby="recovery-close-warning-title"
+            tabIndex={-1}
             className="dohc-elevated w-[min(480px,calc(100vw-32px))] rounded-xl border border-line bg-panel p-5"
           >
             <h3
@@ -385,7 +427,7 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                     // silence, exactly as before: nothing new is at stake.
                     const uncovered = hasUnapprovedDrafts();
                     rearmGuard();
-                    if (uncovered) setCloseWarning({ kind, resume });
+                    if (uncovered) showCloseWarning({ kind, resume });
                   });
                 }}
                 className="h-8 cursor-pointer rounded-md bg-accent px-3 text-xs font-semibold text-bg hover:opacity-90"

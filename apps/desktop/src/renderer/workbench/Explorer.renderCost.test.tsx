@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EditorTabs } from "./EditorTabs";
@@ -25,6 +25,10 @@ afterEach(() => {
 });
 
 const FILE_PATHS = ["a.md", "b.md", "c.md", "d.md"];
+const LARGE_FILE_PATHS = Array.from(
+  { length: 500 },
+  (_, index) => `file-${String(index).padStart(4, "0")}.md`,
+);
 
 function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
   return {
@@ -127,5 +131,169 @@ describe("Explorer render cost", () => {
     // Moving the selection: b.md clears, d.md gains — two rows, not four.
     fireEvent.click(rowButton("d.md"));
     expect(leafOfCalls()).toBe(baseline + 3);
+  });
+
+  it("mounts only a bounded window for a large tree", () => {
+    render(
+      <Explorer
+        {...explorerProps({
+          files: LARGE_FILE_PATHS.map((path) => ({ path, kind: "file" as const })),
+        })}
+      />,
+    );
+
+    const mounted = screen.getAllByTestId("tree-row");
+    expect(mounted.length).toBeLessThanOrEqual(64);
+    expect(rowButton("file-0000.md").getAttribute("aria-posinset")).toBe("1");
+    expect(rowButton("file-0000.md").getAttribute("aria-setsize")).toBe("500");
+    expect(
+      mounted.some((row) => row.dataset.path === "file-0499.md"),
+    ).toBe(false);
+  });
+
+  it("windows scrolled rows while retaining the focused tree item", () => {
+    render(
+      <Explorer
+        {...explorerProps({
+          files: LARGE_FILE_PATHS.map((path) => ({ path, kind: "file" as const })),
+        })}
+      />,
+    );
+
+    const first = rowButton("file-0000.md");
+    first.focus();
+    fireEvent.click(first);
+    expect(document.activeElement).toBe(first);
+
+    const container = screen.getByTestId("file-tree");
+    const list = screen.getByRole("tree", { name: "Workspace files" });
+    Object.defineProperty(container, "clientHeight", { configurable: true, value: 280 });
+    Object.defineProperty(container, "scrollTop", {
+      configurable: true,
+      value: 2_800,
+      writable: true,
+    });
+    vi.spyOn(container, "getBoundingClientRect").mockReturnValue({
+      x: 0,
+      y: 0,
+      top: 0,
+      right: 280,
+      bottom: 280,
+      left: 0,
+      width: 280,
+      height: 280,
+      toJSON: () => ({}),
+    });
+    vi.spyOn(list, "getBoundingClientRect").mockReturnValue({
+      x: 0,
+      y: -2_800,
+      top: -2_800,
+      right: 280,
+      bottom: 137_200,
+      left: 0,
+      width: 280,
+      height: 140_000,
+      toJSON: () => ({}),
+    });
+    fireEvent.scroll(container);
+
+    expect(document.body.contains(rowButton("file-0100.md"))).toBe(true);
+    expect(document.body.contains(rowButton("file-0000.md"))).toBe(true);
+    expect(document.activeElement).toBe(first);
+    expect(screen.getAllByTestId("tree-row").length).toBeLessThanOrEqual(36);
+  });
+
+  it("keeps a virtualized drag origin mounted until the gesture ends", async () => {
+    render(
+      <Explorer
+        {...explorerProps({
+          files: LARGE_FILE_PATHS.map((path) => ({ path, kind: "file" as const })),
+        })}
+      />,
+    );
+
+    const first = rowButton("file-0000.md");
+    fireEvent.dragStart(first, {
+      dataTransfer: { effectAllowed: "none", setData: vi.fn() },
+    });
+
+    const container = screen.getByTestId("file-tree");
+    const list = screen.getByRole("tree", { name: "Workspace files" });
+    Object.defineProperty(container, "clientHeight", { configurable: true, value: 280 });
+    Object.defineProperty(container, "scrollTop", {
+      configurable: true,
+      value: 2_800,
+      writable: true,
+    });
+    vi.spyOn(container, "getBoundingClientRect").mockReturnValue({
+      x: 0,
+      y: 0,
+      top: 0,
+      right: 280,
+      bottom: 280,
+      left: 0,
+      width: 280,
+      height: 280,
+      toJSON: () => ({}),
+    });
+    vi.spyOn(list, "getBoundingClientRect").mockReturnValue({
+      x: 0,
+      y: -2_800,
+      top: -2_800,
+      right: 280,
+      bottom: 137_200,
+      left: 0,
+      width: 280,
+      height: 140_000,
+      toJSON: () => ({}),
+    });
+    fireEvent.scroll(container);
+
+    expect(document.body.contains(first)).toBe(true);
+    fireEvent.dragEnd(first);
+    await waitFor(() => {
+      expect(
+        screen
+          .queryAllByTestId("tree-row")
+          .some((row) => row.dataset.path === "file-0000.md"),
+      ).toBe(false);
+    });
+  });
+
+  it("moves keyboard focus to an unmounted End target", async () => {
+    render(
+      <Explorer
+        {...explorerProps({
+          files: LARGE_FILE_PATHS.map((path) => ({ path, kind: "file" as const })),
+        })}
+      />,
+    );
+
+    fireEvent.click(rowButton("file-0000.md"));
+    fireEvent.keyDown(screen.getByTestId("file-tree"), { key: "End" });
+
+    await waitFor(() => {
+      const last = rowButton("file-0499.md");
+      expect(document.activeElement).toBe(last);
+      expect(last.getAttribute("tabindex")).toBe("0");
+      expect(last.getAttribute("aria-posinset")).toBe("500");
+    });
+    expect(screen.getAllByTestId("tree-row").length).toBeLessThanOrEqual(64);
+  });
+
+  it("keeps a root create row reachable while the large tree is windowed", async () => {
+    const props = explorerProps({
+      files: LARGE_FILE_PATHS.map((path) => ({ path, kind: "file" as const })),
+    });
+    const view = render(<Explorer {...props} />);
+
+    view.rerender(
+      <Explorer {...props} createRequest={{ kind: "file", id: 1 }} />,
+    );
+
+    const input = await screen.findByTestId("tree-edit-input");
+    expect(input.getAttribute("aria-label")).toBe("New file name");
+    expect(document.activeElement).toBe(input);
+    expect(screen.getAllByTestId("tree-row").length).toBeLessThanOrEqual(64);
   });
 });

@@ -77,10 +77,6 @@ export const DesktopUserSettings = z.object({
     zoomLevel: z.number().int().min(MIN_ZOOM_LEVEL).max(MAX_ZOOM_LEVEL)
       .default(DEFAULT_ZOOM_LEVEL),
   }).strict(),
-  general: z.object({
-    launchBehavior: z.enum(["last-workspace", "workspace-picker", "new-workspace"]),
-    defaultWorkspaceRoot: z.string().min(1).max(4096).optional(),
-  }).strict(),
   editor: z.object({
     fontSize: z.number().int().min(11).max(24),
     lineWrap: z.boolean(),
@@ -102,9 +98,6 @@ export const DEFAULT_USER_SETTINGS: DesktopUserSettings = {
     density: "comfortable",
     reduceMotion: false,
     zoomLevel: DEFAULT_ZOOM_LEVEL,
-  },
-  general: {
-    launchBehavior: "last-workspace",
   },
   editor: {
     fontSize: 15,
@@ -129,10 +122,9 @@ export const DesktopUserSettingsResult = z.object({
 export type DesktopUserSettingsResult = z.infer<typeof DesktopUserSettingsResult>;
 
 export type DesktopUserSettingsPatch =
-  Partial<Omit<DesktopUserSettings, "profile" | "appearance" | "general" | "editor" | "notifications" | "runner">> & {
+  Partial<Omit<DesktopUserSettings, "profile" | "appearance" | "editor" | "notifications" | "runner">> & {
     profile?: Partial<DesktopUserSettings["profile"]>;
     appearance?: Partial<DesktopUserSettings["appearance"]>;
-    general?: Partial<DesktopUserSettings["general"]>;
     editor?: Partial<DesktopUserSettings["editor"]>;
     notifications?: Partial<DesktopUserSettings["notifications"]>;
     runner?: Partial<DesktopUserSettings["runner"]>;
@@ -164,7 +156,6 @@ export function mergeDesktopUserSettings(
     ...patch,
     profile: { ...current.profile, ...patch.profile },
     appearance: { ...current.appearance, ...patch.appearance },
-    general: { ...current.general, ...patch.general },
     editor: { ...current.editor, ...patch.editor },
     notifications: { ...current.notifications, ...patch.notifications },
     runner: { ...current.runner, ...patch.runner },
