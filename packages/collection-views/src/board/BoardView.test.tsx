@@ -1,0 +1,255 @@
+// @vitest-environment jsdom
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// @dnd-kit/dom references ResizeObserver while its module evaluates and
+// tracks droppable geometry with IntersectionObserver. jsdom implements
+// neither, so the stubs must exist before the imports below run.
+vi.hoisted(() => {
+  class ObserverStub {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+    takeRecords(): never[] {
+      return [];
+    }
+  }
+  Object.assign(globalThis, {
+    ResizeObserver: ObserverStub,
+    IntersectionObserver: ObserverStub,
+  });
+});
+
+import { BoardView } from "./BoardView";
+import { flaggedValue, indexedValue, makeGroup, makeRecord, makeSchema } from "../testSupport";
+
+Element.prototype.scrollIntoView = () => {};
+Document.prototype.getAnimations = () => [];
+Element.prototype.getAnimations = () => [];
+Document.prototype.elementFromPoint = () => null;
+Element.prototype.animate = () => ({ finished: Promise.resolve() }) as unknown as Animation;
+window.matchMedia = (query: string): MediaQueryList =>
+  ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    addListener: () => {},
+    removeListener: () => {},
+    dispatchEvent: () => false,
+  }) as MediaQueryList;
+
+afterEach(() => {
+  cleanup();
+});
+
+/**
+ * jsdom reports every rect as 0x0 at the origin, which would make every
+ * column collide at the same point. Give an element real geometry so the
+ * keyboard sensor's collision detection can tell columns apart. The drag
+ * feedback moves the lifted card with a CSS translate, which a fixed rect
+ * would hide, so the rect follows the element's translate style.
+ */
+function setRect(element: Element, x: number, y: number, width: number, height: number): void {
+  element.getBoundingClientRect = () => {
+    const translate =
+      element instanceof HTMLElement ? element.style.getPropertyValue("--dnd-translate") : "";
+    const match = /(-?[\d.]+)px\s+(-?[\d.]+)px/.exec(translate ?? "");
+    const left = x + (match ? Number(match[1]) : 0);
+    const top = y + (match ? Number(match[2]) : 0);
+    return {
+      x: left,
+      y: top,
+      width,
+      height,
+      top,
+      left,
+      right: left + width,
+      bottom: top + height,
+      toJSON: () => ({}),
+    } as DOMRect;
+  };
+}
+
+function makeGroups() {
+  return [
+    makeGroup("todo", [
+      makeRecord("rec-a", [
+        indexedValue("title", "Write the spec"),
+        indexedValue("status", "todo"),
+        indexedValue("estimate", 3),
+      ]),
+    ]),
+    makeGroup("doing", [
+      makeRecord("rec-b", [indexedValue("title", "Ship the board"), indexedValue("status", "doing")]),
+    ]),
+  ];
+}
+
+/** Lays out the rendered columns side by side and the cards inside them. */
+function layOutBoard(): void {
+  const columns = screen.getAllByRole("list");
+  // jsdom computes every overflow style as "", which @dnd-kit/dom reads as a
+  // clipping ancestor; with 0x0 ancestor rects every droppable would be
+  // invisible. Give the whole ancestor chain viewport-sized rects first,
+  // then the real geometry below.
+  let ancestor: Element | null = columns[0] ?? null;
+  while (ancestor) {
+    setRect(ancestor, 0, 0, 1024, 768);
+    ancestor = ancestor.parentElement;
+  }
+  columns.forEach((column, index) => {
+    setRect(column, index * 300 + 10, 30, 240, 360);
+    const columnElement = column.closest("section");
+    if (columnElement) setRect(columnElement, index * 300, 0, 260, 400);
+    within(column)
+      .queryAllByRole("listitem")
+      .forEach((card, cardIndex) => {
+        setRect(card, index * 300 + 20, 40 + cardIndex * 90, 220, 80);
+      });
+  });
+}
+
+/** Lets the drag manager's frame-scheduled work (lift, collisions) run. */
+async function settle() {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  });
+}
+
+/** Keyboard drag per the default keyboard sensor: Enter lifts, arrows move, Enter drops. */
+async function keyboardDrag(card: HTMLElement, arrows: { key: string; code: string }[]) {
+  card.focus();
+  fireEvent.keyDown(card, { key: "Enter", code: "Enter" });
+  await settle();
+  for (const arrow of arrows) {
+    fireEvent.keyDown(card.ownerDocument, { ...arrow, shiftKey: true });
+    await settle();
+  }
+  fireEvent.keyDown(card.ownerDocument, { key: "Enter", code: "Enter" });
+  await settle();
+}
+
+describe("BoardView", () => {
+  it("renders a column per group with its label and count", () => {
+    render(<BoardView schema={makeSchema()} groups={makeGroups()} groupBy="status" />);
+    const columns = screen.getAllByRole("list");
+    expect(columns.map((column) => column.getAttribute("aria-label"))).toEqual(["todo", "doing"]);
+    expect(within(columns[0]!).getAllByRole("listitem")).toHaveLength(1);
+  });
+
+  it("shows the first visible field as the card title and the rest as cells", () => {
+    render(
+      <BoardView
+        schema={makeSchema()}
+        groups={makeGroups()}
+        groupBy="status"
+        visibleFields={["title", "estimate"]}
+      />,
+    );
+    const card = screen.getByRole("listitem", { name: "Write the spec" });
+    expect(within(card).getByText("Write the spec")).toBeDefined();
+    expect(within(card).getByText("3")).toBeDefined();
+    // The grouped field is not in visibleFields, so it stays off the card.
+    expect(within(card).queryByText("todo")).toBeNull();
+  });
+
+  it("labels the null group No value and marks a flagged card with a warning dot", () => {
+    const groups = [
+      makeGroup(null, [makeRecord("rec-none", [indexedValue("title", "No status yet")])]),
+      // A flagged grouped field groups under its raw value.
+      makeGroup("shipped!!", [
+        makeRecord("rec-flagged", [
+          indexedValue("title", "Bad status"),
+          flaggedValue("status", "shipped!!"),
+        ]),
+      ]),
+    ];
+    render(<BoardView schema={makeSchema()} groups={groups} groupBy="status" />);
+    const columns = screen.getAllByRole("list");
+    expect(columns.map((column) => column.getAttribute("aria-label"))).toEqual([
+      "No value",
+      "shipped!!",
+    ]);
+    const flaggedCard = screen.getByRole("listitem", { name: "Bad status" });
+    expect(within(flaggedCard).getByRole("img", { name: "Invalid value" })).toBeDefined();
+    const cleanCard = screen.getByRole("listitem", { name: "No status yet" });
+    expect(within(cleanCard).queryByRole("img", { name: "Invalid value" })).toBeNull();
+  });
+
+  it("emits the grouped-field change when a keyboard drag lands on another column", async () => {
+    const onCellChange = vi.fn();
+    render(
+      <BoardView
+        schema={makeSchema()}
+        groups={makeGroups()}
+        groupBy="status"
+        onCellChange={onCellChange}
+      />,
+    );
+    layOutBoard();
+    const card = screen.getByRole("listitem", { name: "Write the spec" });
+    // Seven shifted right arrows carry the card from column todo into doing.
+    await keyboardDrag(card, Array.from({ length: 7 }, () => ({ key: "ArrowRight", code: "ArrowRight" })));
+    expect(onCellChange).toHaveBeenCalledExactlyOnceWith({
+      recordId: "rec-a",
+      recordPath: "tasks/rec-a.md",
+      field: "status",
+      value: "doing",
+    });
+  });
+
+  it("emits null when a card lands on the No value column", async () => {
+    const onCellChange = vi.fn();
+    const groups = [
+      makeGroup(null, []),
+      makeGroup("doing", [
+        makeRecord("rec-b", [indexedValue("title", "Ship the board"), indexedValue("status", "doing")]),
+      ]),
+    ];
+    render(
+      <BoardView schema={makeSchema()} groups={groups} groupBy="status" onCellChange={onCellChange} />,
+    );
+    layOutBoard();
+    const card = screen.getByRole("listitem", { name: "Ship the board" });
+    await keyboardDrag(card, Array.from({ length: 7 }, () => ({ key: "ArrowLeft", code: "ArrowLeft" })));
+    expect(onCellChange).toHaveBeenCalledExactlyOnceWith({
+      recordId: "rec-b",
+      recordPath: "tasks/rec-b.md",
+      field: "status",
+      value: null,
+    });
+  });
+
+  it("emits nothing when the drag is canceled or stays in its column", async () => {
+    const onCellChange = vi.fn();
+    render(
+      <BoardView
+        schema={makeSchema()}
+        groups={makeGroups()}
+        groupBy="status"
+        onCellChange={onCellChange}
+      />,
+    );
+    layOutBoard();
+    const card = screen.getByRole("listitem", { name: "Write the spec" });
+
+    // Escape cancels the lifted card.
+    card.focus();
+    fireEvent.keyDown(card, { key: "Enter", code: "Enter" });
+    fireEvent.keyDown(card.ownerDocument, { key: "Escape", code: "Escape" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // A drop without leaving the column keeps the field as it is.
+    await keyboardDrag(card, []);
+    expect(onCellChange).not.toHaveBeenCalled();
+  });
+
+  it("shows the empty state when no group has records", () => {
+    render(
+      <BoardView schema={makeSchema()} groups={[makeGroup("todo", []), makeGroup(null, [])]} groupBy="status" />,
+    );
+    expect(screen.getByText("No records in this collection yet.")).toBeDefined();
+  });
+});

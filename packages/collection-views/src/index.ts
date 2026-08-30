@@ -9,9 +9,20 @@ export {
 } from "./store";
 export { useCollectionStore } from "./useCollectionStore";
 export { deriveColumns } from "./columns";
-export { FieldCell, type FieldCellProps } from "./table/cells";
+export {
+  FieldCell,
+  fieldDisplayText,
+  fieldValueText,
+  type FieldCellProps,
+} from "./table/cells";
 export {
   TableView,
   type CollectionCellChange,
   type TableViewProps,
 } from "./table/TableView";
+export { BoardView, type BoardViewProps } from "./board/BoardView";
+export {
+  CalendarView,
+  type CalendarRecordEvent,
+  type CalendarViewProps,
+} from "./calendar/CalendarView";

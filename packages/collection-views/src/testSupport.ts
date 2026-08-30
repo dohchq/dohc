@@ -2,9 +2,11 @@ import type {
   CollectionIndexedValue,
   CollectionQueryResult,
   CollectionRecord,
+  CollectionRecordGroup,
   CollectionSchema,
   CollectionSummary,
   CollectionValue,
+  FieldValueReasonCode,
 } from "@dohc/workspace-contracts";
 
 /** One field of every v1 type, for tests. */
@@ -36,6 +38,26 @@ export function indexedValue(
     resolvedRelations: [],
     ...extra,
   };
+}
+
+export function flaggedValue(
+  field: string,
+  value: CollectionValue,
+  code: FieldValueReasonCode = "unknown-option",
+): CollectionIndexedValue {
+  return {
+    field,
+    value,
+    validation: { status: "flagged", reason: { code, path: field } },
+    resolvedRelations: [],
+  };
+}
+
+export function makeGroup(
+  value: CollectionValue,
+  records: CollectionRecord[],
+): CollectionRecordGroup {
+  return { value, records };
 }
 
 export function makeRecord(

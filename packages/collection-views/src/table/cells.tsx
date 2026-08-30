@@ -19,6 +19,11 @@ export interface FieldCellProps {
   onChange?: (value: CollectionValue) => void;
 }
 
+/** Plain text for a raw collection value: board group labels, fallbacks. */
+export function fieldValueText(value: CollectionValue): string {
+  return asText(value);
+}
+
 function asText(value: CollectionValue): string {
   if (value === null) return "";
   if (Array.isArray(value)) return value.map(asText).join(", ");
@@ -35,7 +40,13 @@ function asTextArray(value: CollectionValue): string[] {
   return Array.isArray(value) ? value.map(asText) : [asText(value)];
 }
 
-function displayText(
+/**
+ * The text a cell shows for a field value: person ids mapped through
+ * `personLabel`, relations through their resolved labels. Board card titles
+ * and calendar event titles reuse it so every view names a value the same
+ * way.
+ */
+export function fieldDisplayText(
   field: FieldDefinition,
   indexed: CollectionIndexedValue | undefined,
   personLabel?: (userId: string) => string | null,
@@ -61,10 +72,10 @@ function displayText(
   }
 }
 
-// TODO(collections/p2): how a flagged invalid value renders in each view is
-// an unsettled Phase 2 decision (docs/plans/collections.md, "Settle first").
-// This warning-color wrapper is the minimal placeholder until the
-// orchestrator settles the final treatment.
+// Settled 2026-08-31 (docs/plans/collections.md): a flagged value renders
+// its raw text with the warning treatment and stays editable. The hover
+// title still shows a generic label; the per-reason copy is the desktop
+// lane's work.
 function wrapFlagged(flagged: boolean, children: ReactNode): ReactNode {
   if (!flagged) return children;
   return (
@@ -228,7 +239,7 @@ export function FieldCell({ field, indexed, personLabel, onChange }: FieldCellPr
     );
   }
 
-  const text = displayText(field, indexed, personLabel);
+  const text = fieldDisplayText(field, indexed, personLabel);
   if (!editable) {
     return wrapFlagged(flagged, <span className="truncate text-[13px]">{text}</span>);
   }
