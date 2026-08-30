@@ -1,5 +1,6 @@
 import { Check, Copy, Share2, X } from "lucide-react";
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { normalizeShareDiscussionBody } from "@dohc/security-contract/share-discussion";
 import type {
   CreateRelayShareLinkPayload,
   CreateRelaySharePayload,
@@ -977,10 +978,11 @@ export function RelayShareDialog(props: {
       return;
     }
     const state = ownerDiscussionByShareId[shareId] ?? emptyOwnerDiscussion();
+    const normalizedDraft = normalizeShareDiscussionBody(state.draft);
     const intent = retry
       ? state.appendIntent
-      : state.draft.length > 0
-        ? { body: state.draft, idempotencyKey: crypto.randomUUID() }
+      : normalizedDraft !== null
+        ? { body: normalizedDraft, idempotencyKey: crypto.randomUUID() }
         : null;
     if (intent === null) return;
 
@@ -1749,6 +1751,12 @@ export function RelayShareDialog(props: {
               const addAccess = addAccessByShareId[group.shareId] ?? "view";
               const ownerDiscussion =
                 ownerDiscussionByShareId[group.shareId] ?? emptyOwnerDiscussion();
+              const ownerDraftInvalid =
+                ownerDiscussion.draft.length > 0 &&
+                normalizeShareDiscussionBody(ownerDiscussion.draft) === null;
+              const showOwnerAppendRetry =
+                ownerDiscussion.appendError && !ownerDraftInvalid;
+              const ownerDraftErrorId = `share-comment-body-error-${group.shareId}`;
               const displayedDependentIds = new Set(
                 group.rows.flatMap((row) =>
                   row.status === "active"
@@ -2044,6 +2052,10 @@ export function RelayShareDialog(props: {
                               <textarea
                                 value={ownerDiscussion.draft}
                                 disabled={ownerAppendBusy !== null}
+                                aria-invalid={ownerDraftInvalid || undefined}
+                                aria-describedby={
+                                  ownerDraftInvalid ? ownerDraftErrorId : undefined
+                                }
                                 rows={3}
                                 onChange={(event) => {
                                   const draft = event.currentTarget.value;
@@ -2057,7 +2069,15 @@ export function RelayShareDialog(props: {
                                 className="w-full resize-y rounded-md border border-line bg-bg px-2.5 py-2 text-[13px] leading-relaxed text-ink placeholder:text-subtle focus:border-ink disabled:opacity-50"
                               />
                             </label>
-                            {ownerDiscussion.appendError ? (
+                            {ownerDraftInvalid ? (
+                              <p
+                                id={ownerDraftErrorId}
+                                role="alert"
+                                className="m-0 text-xs text-danger"
+                              >
+                                This comment is too long. Shorten it before posting.
+                              </p>
+                            ) : showOwnerAppendRetry ? (
                               <p role="alert" className="m-0 text-xs text-danger">
                                 Couldn't post comment.
                               </p>
@@ -2066,18 +2086,19 @@ export function RelayShareDialog(props: {
                               <SecondaryButton
                                 disabled={
                                   ownerAppendBusy !== null ||
-                                  (!ownerDiscussion.appendError &&
+                                  ownerDraftInvalid ||
+                                  (!showOwnerAppendRetry &&
                                     ownerDiscussion.draft.length === 0)
                                 }
                                 aria-busy={ownerAppendBusy === group.shareId}
                                 onClick={() =>
                                   void appendOwnerComment(
                                     group.shareId,
-                                    ownerDiscussion.appendError,
+                                    showOwnerAppendRetry,
                                   )
                                 }
                               >
-                                {ownerDiscussion.appendError ? "Retry" : "Post"}
+                                {showOwnerAppendRetry ? "Retry" : "Post"}
                               </SecondaryButton>
                             </div>
                           </div>

@@ -1,4 +1,5 @@
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
+import { normalizeShareDiscussionBody } from "@dohc/security-contract/share-discussion";
 import { SHARE_ACCESS_VALUES } from "@dohc/security-contract/share-selector";
 import {
   hasEngineIgnoredSegment,
@@ -3826,17 +3827,7 @@ const RELAY_SHARE_DISCUSSION_CURSOR = z
 const RELAY_SHARE_DISCUSSION_HANDLE = z.string().min(1).max(512);
 const RELAY_SHARE_DISCUSSION_DISPLAY_NAME = z.string().min(1).max(512);
 const RELAY_SHARE_DISCUSSION_BODY = z.string().superRefine((body, ctx) => {
-  if (utf8ByteLength(body) > 8_000) {
-    ctx.addIssue({
-      code: "custom",
-      message: "discussion body exceeds the relay limit",
-    });
-    return;
-  }
-  const codePoints = Array.from(body.normalize("NFC")).length;
-  if (codePoints >= 1 && codePoints <= 2_000) {
-    return;
-  }
+  if (normalizeShareDiscussionBody(body) !== null) return;
   ctx.addIssue({
     code: "custom",
     message: "discussion body exceeds the relay limit",

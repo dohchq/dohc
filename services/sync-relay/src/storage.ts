@@ -4,6 +4,11 @@ import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { AGENT_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
+import {
+  normalizeShareDiscussionBody,
+  SHARE_DISCUSSION_BODY_CODE_POINT_LIMIT,
+  SHARE_DISCUSSION_BODY_INPUT_BYTE_LIMIT,
+} from "@dohc/security-contract/share-discussion";
 import { shareAccessRank } from "@dohc/security-contract/share-selector";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import {
@@ -825,8 +830,10 @@ function nodeSqlite(): SqliteModule {
 
 export const SYNC_RELAY_BUSY_TIMEOUT_MS = 5_000;
 export const DEFAULT_WORKSPACE_QUOTA_BYTES = 2 * 1024 * 1024 * 1024;
-export const LINK_DISCUSSION_BODY_CODE_POINT_LIMIT = 2_000;
-export const LINK_DISCUSSION_BODY_INPUT_BYTE_LIMIT = 8_000;
+export const LINK_DISCUSSION_BODY_CODE_POINT_LIMIT =
+  SHARE_DISCUSSION_BODY_CODE_POINT_LIMIT;
+export const LINK_DISCUSSION_BODY_INPUT_BYTE_LIMIT =
+  SHARE_DISCUSSION_BODY_INPUT_BYTE_LIMIT;
 export const LINK_DISCUSSION_NAME_CODE_POINT_LIMIT = 40;
 export const LINK_DISCUSSION_NAME_BYTE_LIMIT = 160;
 export const LINK_DISCUSSION_IDEMPOTENCY_KEY_LIMIT = 64;
@@ -2266,20 +2273,6 @@ const LINK_DISCUSSION_NAME_REMOVALS =
 
 function codePointLength(value: string): number {
   return Array.from(value).length;
-}
-
-function normalizeLinkDiscussionBody(value: unknown): string | null {
-  if (
-    typeof value !== "string" ||
-    Buffer.byteLength(value, "utf8") > LINK_DISCUSSION_BODY_INPUT_BYTE_LIMIT
-  ) {
-    return null;
-  }
-  const normalized = value.normalize("NFC");
-  const points = codePointLength(normalized);
-  return points >= 1 && points <= LINK_DISCUSSION_BODY_CODE_POINT_LIMIT
-    ? normalized
-    : null;
 }
 
 export function normalizeDiscussionDisplayName(value: unknown): string | null {
@@ -3925,7 +3918,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     createdAtMs: number;
     guard?: () => void;
   }): AppendLinkDiscussionMessageResult {
-    const body = normalizeLinkDiscussionBody(input.body);
+    const body = normalizeShareDiscussionBody(input.body);
     const hasClaimedName =
       input.claimedName !== undefined && input.claimedName !== null;
     const claimedName = hasClaimedName
@@ -4238,7 +4231,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     createdAtMs: number;
     guard: () => "owner" | "recipient";
   }): AppendAuthenticatedDiscussionMessageResult {
-    const body = normalizeLinkDiscussionBody(input.body);
+    const body = normalizeShareDiscussionBody(input.body);
     const displayName = normalizeDiscussionDisplayName(input.displayName);
     if (
       body === null ||

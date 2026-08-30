@@ -479,6 +479,25 @@ function replaceSession(
 }
 
 describe("durable link discussion storage", () => {
+  it("stores the normalized owner discussion body", async () => {
+    const { storage } = await openStorage();
+    const seeded = seedShare(storage, { suffix: "owner-body-normalization" });
+
+    expect(
+      appendAuthenticated(storage, seeded, {
+        authorUserId: OWNER,
+        role: "owner",
+        displayName: "Owner",
+        body: "e\u0301",
+        idempotencyKey: "owner-body-normalization",
+        createdAtMs: 2_000,
+      }),
+    ).toMatchObject({
+      ok: true,
+      message: { body: "é" },
+    });
+  });
+
   it("stamps one durable revision per current-state change and pages newest-first toward older messages", async () => {
     const { storage, dbPath } = await openStorage();
     const seeded = seedShare(storage, { suffix: "activity" });

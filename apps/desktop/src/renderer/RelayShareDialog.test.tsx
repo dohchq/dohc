@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -2309,6 +2309,82 @@ describe("RelayShareDialog", () => {
     });
     expect((field as HTMLTextAreaElement).value).toBe("");
     expect(within(group).getAllByText("Keep this draft!")).toHaveLength(1);
+  });
+
+  it.each([
+    {
+      label: "more than 2,000 normalized code points",
+      body: "a".repeat(2_001),
+    },
+    {
+      label: "more than 8,000 raw bytes despite a short NFC form",
+      body: "\u1100\u1161\u11a8".repeat(889),
+    },
+  ])("keeps an owner draft with $label local and editable", async ({ body }) => {
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("link-1", { shareId: "share-1" })],
+    });
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await openOwnerComments(user, "share-1");
+    const field = within(group).getByRole("textbox", { name: "Add a comment" });
+
+    fireEvent.change(field, { target: { value: body } });
+
+    const alert = within(group).queryByRole("alert");
+    expect(alert).not.toBeNull();
+    if (alert === null) return;
+    expect(alert.textContent).toBe(
+      "This comment is too long. Shorten it before posting.",
+    );
+    expect(alert.id).not.toBe("");
+    expect(field.getAttribute("aria-invalid")).toBe("true");
+    expect(field.getAttribute("aria-describedby")).toBe(alert.id);
+    expect((field as HTMLTextAreaElement).disabled).toBe(false);
+    expect(within(group).getByRole("button", { name: "Post" }).hasAttribute("disabled"))
+      .toBe(true);
+    expect(within(group).queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(bridgeMock.appendRelayShareDiscussion).not.toHaveBeenCalled();
+  });
+
+  it("posts an owner draft at the exact body boundary", async () => {
+    const body = "😀".repeat(2_000);
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("link-1", { shareId: "share-1" })],
+    });
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await openOwnerComments(user, "share-1");
+    const field = within(group).getByRole("textbox", { name: "Add a comment" });
+
+    fireEvent.change(field, { target: { value: body } });
+
+    expect(field.hasAttribute("aria-invalid")).toBe(false);
+    expect(field.hasAttribute("aria-describedby")).toBe(false);
+    expect(within(group).queryByText("This comment is too long.")).toBeNull();
+    const post = within(group).getByRole("button", { name: "Post" });
+    expect(post.hasAttribute("disabled")).toBe(false);
+    await user.click(post);
+    expect(bridgeMock.appendRelayShareDiscussion).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      shareId: "share-1",
+      body,
+      idempotencyKey: expect.stringMatching(/^[\x20-\x7e]{1,64}$/u),
+    });
   });
 
   it("retries a failed discussion load without changing the draft", async () => {

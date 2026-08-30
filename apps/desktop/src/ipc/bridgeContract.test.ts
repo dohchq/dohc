@@ -627,28 +627,20 @@ describe("owner relay share discussion IPC contract", () => {
       expect(ListRelayShareDiscussionPayload.safeParse(malformed).success).toBe(false);
     }
 
-    const exactEightThousandBytes = `${"\u1100\u1161\u11a8".repeat(888)}abcdefgh`;
-    const eightThousandAndOneBytes = "\u1100\u1161\u11a8".repeat(889);
-    const twoThousandAndOneAsciiCodePoints = "a".repeat(2_001);
-    expect(Buffer.byteLength(twoThousandAndOneAsciiCodePoints, "utf8")).toBe(2_001);
     const exact = {
       workspaceId: "workspace-1",
       shareId: "share-1",
-      body: "😀".repeat(2_000),
+      body: "e\u0301",
       idempotencyKey: "~".repeat(64),
     };
     expect(AppendRelayShareDiscussionPayload.parse(exact)).toEqual(exact);
     expect(
       AppendRelayShareDiscussionPayload.safeParse({
         ...exact,
-        body: exactEightThousandBytes,
+        body: "\u1100\u1161\u11a8".repeat(889),
       }).success,
-    ).toBe(true);
+    ).toBe(false);
     for (const malformed of [
-      { ...exact, body: twoThousandAndOneAsciiCodePoints },
-      { ...exact, body: "" },
-      { ...exact, body: "😀".repeat(2_001) },
-      { ...exact, body: eightThousandAndOneBytes },
       { ...exact, idempotencyKey: "" },
       { ...exact, idempotencyKey: "x".repeat(65) },
       { ...exact, idempotencyKey: "line\nbreak" },
