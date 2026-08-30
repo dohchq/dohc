@@ -14225,6 +14225,13 @@ mod tests {
                 dohc_engine_protocol::Retryability::AfterBackoff
             );
         }
+        let permanent_limit = map_runtime(RuntimeError::Relay(RelayError::QuotaExceeded));
+        assert_eq!(permanent_limit.code, ErrorCode::QuotaExceeded);
+        assert_eq!(
+            permanent_limit.retry,
+            dohc_engine_protocol::Retryability::No,
+            "MUTATION: a permanent discussion limit must not ask the client to retry"
+        );
     }
 
     #[test]

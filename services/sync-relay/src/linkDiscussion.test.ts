@@ -1646,6 +1646,131 @@ describe("share discussion HTTP boundary", () => {
     ]);
   });
 
+  it("projects durable owner rows exactly before and after deletion", async () => {
+    const test = await fixture();
+    const appendedResponse = await test.handler(
+      request(
+        OWNER,
+        `/sync/shares/${SHARE}/discussion`,
+        jsonRequest({
+          body: "Owner projection body",
+          idempotencyKey: "owner-projection",
+        }),
+      ),
+    );
+    expect(appendedResponse.status).toBe(200);
+    expectPrivate(appendedResponse);
+    const appended = await body(appendedResponse);
+    const stored = test.storage.listShareDiscussionMessages({
+      shareId: SHARE,
+      limit: 10,
+    }).messages[0]!;
+    expect(stored).toMatchObject({
+      authorKind: "owner",
+      authorUserId: OWNER,
+      linkGrantId: null,
+      linkPrincipalId: null,
+    });
+    const live = {
+      messageId: stored.messageId,
+      createdAtMs: stored.createdAtMs,
+      deleted: false,
+      body: "Owner projection body",
+      author: { kind: "named", displayName: "Owner Name" },
+    };
+    expect(appended.message).toEqual(live);
+    expect(Object.keys(appended.message as object).sort()).toEqual([
+      "author",
+      "body",
+      "createdAtMs",
+      "deleted",
+      "messageId",
+    ]);
+    expect(
+      Object.keys((appended.message as { author: object }).author).sort(),
+    ).toEqual(["displayName", "kind"]);
+
+    for (const response of await Promise.all([
+      test.handler(linkRequest(test.view, "/sync/link/discussion")),
+      test.handler(request(COMMENTER, `/sync/shares/${SHARE}/discussion`)),
+      test.handler(request(OWNER, `/sync/shares/${SHARE}/discussion`)),
+    ])) {
+      expect(response.status).toBe(200);
+      expectPrivate(response);
+      const projectedLive = messages(await body(response));
+      expect(projectedLive).toEqual([live]);
+      expect(Object.keys(projectedLive[0]!).sort()).toEqual([
+        "author",
+        "body",
+        "createdAtMs",
+        "deleted",
+        "messageId",
+      ]);
+      expect(Object.keys(projectedLive[0]!.author as object).sort()).toEqual([
+        "displayName",
+        "kind",
+      ]);
+    }
+
+    const deletedResponse = await test.handler(
+      moderationRequest(OWNER, {
+        action: "delete",
+        messageId: stored.messageId,
+      }),
+    );
+    expect(deletedResponse.status).toBe(200);
+    expectPrivate(deletedResponse);
+    expect(await body(deletedResponse)).toEqual({
+      ok: true,
+      message: {
+        messageId: stored.messageId,
+        createdAtMs: stored.createdAtMs,
+        deleted: true,
+      },
+    });
+
+    const publicTombstone = {
+      messageId: stored.messageId,
+      createdAtMs: stored.createdAtMs,
+      deleted: true,
+    };
+    for (const response of await Promise.all([
+      test.handler(linkRequest(test.view, "/sync/link/discussion")),
+      test.handler(request(COMMENTER, `/sync/shares/${SHARE}/discussion`)),
+    ])) {
+      expect(response.status).toBe(200);
+      expectPrivate(response);
+      const projectedTombstone = messages(await body(response));
+      expect(projectedTombstone).toEqual([publicTombstone]);
+      expect(Object.keys(projectedTombstone[0]!).sort()).toEqual([
+        "createdAtMs",
+        "deleted",
+        "messageId",
+      ]);
+    }
+
+    const ownerTombstoneResponse = await test.handler(
+      request(OWNER, `/sync/shares/${SHARE}/discussion`),
+    );
+    expect(ownerTombstoneResponse.status).toBe(200);
+    expectPrivate(ownerTombstoneResponse);
+    const ownerTombstone = messages(await body(ownerTombstoneResponse));
+    expect(ownerTombstone).toEqual([{
+      ...publicTombstone,
+      author: { kind: "named", displayName: "Owner Name" },
+    }]);
+    expect(Object.keys(ownerTombstone[0]!).sort()).toEqual([
+      "author",
+      "createdAtMs",
+      "deleted",
+      "messageId",
+    ]);
+    expect(Object.keys(ownerTombstone[0]!.author as object).sort()).toEqual([
+      "displayName",
+      "kind",
+    ]);
+  });
+
   it("returns authenticated rate, recipient, and share limit errors exactly", async () => {
     const rate = await fixture({
       discussionLimits: {
@@ -1749,6 +1874,54 @@ describe("share discussion HTTP boundary", () => {
       { authorKind: "named", authorUserId: COMMENTER },
       { authorKind: "owner", authorUserId: OWNER },
     ]);
+  });
+
+  it("keeps authenticated conflicts exact when every discussion budget is full", async () => {
+    const test = await fixture({
+      discussionLimits: {
+        discussionMessageRateLimit: 1,
+        discussionLifetimeMessageLimit: 1,
+        discussionNonOwnerShareRowLimit: 1,
+      },
+    });
+    const first = await test.handler(
+      request(
+        COMMENTER,
+        `/sync/shares/${SHARE}/discussion`,
+        jsonRequest({
+          body: "Original conflict body",
+          idempotencyKey: "conflict-at-full-budget",
+        }),
+      ),
+    );
+    expect(first.status).toBe(200);
+    expectPrivate(first);
+    await first.arrayBuffer();
+
+    const conflict = await test.handler(
+      request(
+        COMMENTER,
+        `/sync/shares/${SHARE}/discussion`,
+        jsonRequest({
+          body: "Changed conflict body",
+          idempotencyKey: "conflict-at-full-budget",
+        }),
+      ),
+    );
+    expect(conflict.status).toBe(409);
+    expectPrivate(conflict);
+    expect(await body(conflict)).toEqual({
+      ok: false,
+      error: "idempotency key was already used for a different message",
+      code: "conflict",
+    });
+    expect(
+      test.storage.listShareDiscussionMessages({ shareId: SHARE, limit: 10 }).messages,
+    ).toMatchObject([{
+      authorKind: "named",
+      authorUserId: COMMENTER,
+      body: "Original conflict body",
+    }]);
   });
 
   it("charges the transaction-current recipient role after an owner loses ownership", async () => {
@@ -2383,6 +2556,11 @@ describe("share discussion HTTP boundary", () => {
       );
       expect(refused.status, named.actor).toBe(413);
       expectPrivate(refused);
+      expect(await body(refused)).toEqual({
+        ok: false,
+        error: "workspace quota exceeded",
+        code: "quota_exceeded",
+      });
 
       const exact = await fixture({ workspaceQuotaBytes: charge });
       const accepted = await exact.handler(
