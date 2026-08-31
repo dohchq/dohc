@@ -59,7 +59,12 @@ test("profiles the expanded 5,000-file Explorer folder", async () => {
     const endTargetPath = await page.evaluate(
       () => (document.activeElement as HTMLElement | null)?.dataset.path ?? null,
     );
-    expect(endTargetPath).not.toBeNull();
+    const finalIndex = manifest.fixtures["large-flat"].flatFolderFiles - 1;
+    const finalIsMarkdown = finalIndex % 5 < 3;
+    const expectedEndTargetPath = `flat-5000/${
+      finalIsMarkdown ? "flatnote" : "text"
+    }-${String(finalIndex).padStart(5, "0")}.${finalIsMarkdown ? "md" : "txt"}`;
+    expect(endTargetPath).toBe(expectedEndTargetPath);
     expect(initiallyMountedPaths).not.toContain(endTargetPath);
     const endTarget = explorerRow(page, endTargetPath!);
     await expect(endTarget).toBeFocused();

@@ -182,9 +182,11 @@ function commonSummary(measurements) {
     longTaskCount: measurements.longTasks?.count ?? null,
     longTaskTotalDurationMs: measurements.longTasks?.totalDurationMs ?? null,
     longestTaskMs:
-      longTaskEntries.length > 0
-        ? Math.max(...longTaskEntries.map(({ duration }) => duration))
-        : 0,
+      measurements.longTasks?.supported === true
+        ? longTaskEntries.length > 0
+          ? Math.max(...longTaskEntries.map(({ duration }) => duration))
+          : 0
+        : null,
     reactCommitCount: measurements.reactCommitCount ?? null,
   };
 }

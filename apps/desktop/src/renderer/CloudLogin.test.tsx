@@ -49,6 +49,29 @@ afterEach(() => {
 });
 
 describe("CloudLogin", () => {
+  it("keeps managed Cloud unknown and offers retry when status loading fails", async () => {
+    bridgeMock.cloudStatus
+      .mockRejectedValueOnce(new Error("engine unavailable"))
+      .mockResolvedValueOnce({
+        connected: false,
+        managedCloudStatus: "ready",
+        workspaceSynced: false,
+      });
+
+    render(<CloudLogin workspaceId="ws-1" />);
+
+    expect((await screen.findByTestId("cloud-status-error")).textContent).toBe(
+      "dohc could not check the cloud connection.",
+    );
+    expect(screen.queryByTestId("cloud-managed-unconfigured")).toBeNull();
+    expect(screen.queryByTestId("cloud-server-url")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("cloud-status-retry"));
+
+    expect(await screen.findByTestId("cloud-use-self-host")).toBeTruthy();
+    expect(bridgeMock.cloudStatus).toHaveBeenCalledTimes(2);
+  });
+
   it("uses the configured managed Cloud flow without showing infrastructure fields", async () => {
     bridgeMock.cloudStatus.mockResolvedValue({
       connected: false,

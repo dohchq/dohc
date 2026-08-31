@@ -448,7 +448,11 @@ fn hash_one(job: &Job, buffer: &mut [u8], max_file_bytes: u64) -> HashOutcome {
     }
 }
 
-fn mtime_ms(metadata: &std::fs::Metadata) -> i64 {
+/// Milliseconds since the Unix epoch for a file's mtime, or `0` when the
+/// platform cannot supply it or the time predates the epoch. A zero mtime is
+/// "no observation": it never authorizes hash reuse, so the fallback fails
+/// safe toward hashing.
+pub(crate) fn mtime_ms(metadata: &std::fs::Metadata) -> i64 {
     metadata
         .modified()
         .ok()

@@ -191,6 +191,8 @@ import {
   momentDiffTabPath,
   parseMomentDiffTabPath,
   defaultWorkbenchState,
+  CHATS_MAX_WIDTH,
+  CHATS_MIN_WIDTH,
   CHATS_TAB_PATH,
   GRAPH_TAB_PATH,
   HISTORY_TAB_PATH,
@@ -1297,6 +1299,7 @@ const CHATS_PANEL_TAB_LABELS: Record<ChatsPanelTab, string> = {
   all: "Chats",
   file: "This file",
 };
+const CHATS_KEYBOARD_RESIZE_STEP = 16;
 // Every workspace this machine owns offers both. A shared view offers the
 // file tab only: it has no workspace-wide chat listing, by design (#646).
 
@@ -1328,8 +1331,21 @@ function ChatsPanel(props: {
       <div
         data-testid="chats-panel-resize"
         role="separator"
+        tabIndex={0}
         aria-orientation="vertical"
         aria-label="Resize chats"
+        aria-valuemin={CHATS_MIN_WIDTH}
+        aria-valuemax={CHATS_MAX_WIDTH}
+        aria-valuenow={width}
+        onKeyDown={(event) => {
+          const direction =
+            event.key === "ArrowLeft" ? 1 : event.key === "ArrowRight" ? -1 : 0;
+          if (direction === 0) return;
+          event.preventDefault();
+          props.onWidthChange(
+            clampChatsWidth(width + direction * CHATS_KEYBOARD_RESIZE_STEP),
+          );
+        }}
         onPointerDown={(event) => {
           // Left button only — a right/middle press must never start a resize.
           if (event.button !== 0) return;
@@ -1349,7 +1365,7 @@ function ChatsPanel(props: {
         onPointerUp={(event) => resize.commit(event.pointerId)}
         onPointerCancel={(event) => resize.commit(event.pointerId)}
         onLostPointerCapture={(event) => resize.commit(event.pointerId)}
-        className="absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize bg-transparent transition-colors hover:bg-line/80"
+        className="absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize bg-transparent transition-colors hover:bg-line/80 focus-visible:bg-accent/35"
       />
       {/* Same header grammar + h-9 band as the side panel: the two
           peer chrome surfaces speak one language and their hairlines
@@ -1916,6 +1932,7 @@ export function DesktopWorkspaceShell(props: {
     workspaceId: string;
     selectionGeneration: number;
   } | null>(null);
+  const [workspaceOpenAttempt, setWorkspaceOpenAttempt] = useState(0);
   const workspaceOpenFailed =
     workspaceOpenFailedFor?.workspaceId === workspaceId &&
     workspaceOpenFailedFor.selectionGeneration === workspaceSelectionGeneration;
@@ -2600,16 +2617,19 @@ export function DesktopWorkspaceShell(props: {
     focusedTabPath,
   ]);
 
-  const reportShellError = useCallback((fallback: string, error: unknown) => {
-    const detail = error instanceof Error ? error.message.trim() : "";
-    setShellError({
-      message:
-        detail && detail !== fallback && !detail.startsWith(`${fallback} `)
-          ? `${fallback} ${detail}`
-          : detail || fallback,
-      retry: null,
-    });
-  }, []);
+  const reportShellError = useCallback(
+    (fallback: string, error: unknown, retry: (() => void) | null = null) => {
+      const detail = error instanceof Error ? error.message.trim() : "";
+      setShellError({
+        message:
+          detail && detail !== fallback && !detail.startsWith(`${fallback} `)
+            ? `${fallback} ${detail}`
+            : detail || fallback,
+        retry,
+      });
+    },
+    [],
+  );
   // Snapshot lanes share one banner. Keep the lane in the message so the user
   // can tell which value went stale, then show the cause and a retry control.
   //
@@ -4762,9 +4782,10 @@ export function DesktopWorkspaceShell(props: {
     if (syncStatus) rendererMarks.markOnce("workspace-shell-interactive");
   }, [syncStatus]);
 
-  // Open the workspace exactly once for this renderer selection. Main admits
-  // the exact session before watcher readiness, then returns the capture
-  // decision and status once the workspace is ready.
+  // Open the workspace for this renderer selection. Main admits the exact
+  // session before watcher readiness, then returns the capture decision and
+  // status once the workspace is ready. A failed attempt runs again only when
+  // the user asks the error banner to retry it.
   useEffect(() => {
     let cancelled = false;
     // The open carries a status, so it takes its place in the same issue order
@@ -4790,6 +4811,7 @@ export function DesktopWorkspaceShell(props: {
           workspaceId,
           selectionGeneration: workspaceSelectionGeneration,
         });
+        setWorkspaceOpenFailedFor(null);
         const paintedCachedListing = await refreshFiles({ allowCached: true });
         if (cancelled || !paintedCachedListing) return;
         void refreshFiles().catch((error) =>
@@ -4801,7 +4823,10 @@ export function DesktopWorkspaceShell(props: {
             workspaceId,
             selectionGeneration: workspaceSelectionGeneration,
           });
-          reportShellError("Could not open this workspace.", error);
+          reportShellError("Could not open this workspace.", error, () => {
+            setWorkspaceOpenFailedFor(null);
+            setWorkspaceOpenAttempt((attempt) => attempt + 1);
+          });
         }
       }
     })();
@@ -4811,6 +4836,7 @@ export function DesktopWorkspaceShell(props: {
   }, [
     workspaceId,
     workspaceSelectionGeneration,
+    workspaceOpenAttempt,
     markCurrentSwitchPhase,
     refreshFiles,
     reportShellError,
@@ -6014,7 +6040,7 @@ export function DesktopWorkspaceShell(props: {
       ) : null}
       <div
         data-testid="workspace-workbench"
-        inert={!workspaceIsReady && !workspaceOpenFailed ? true : undefined}
+        inert={!workspaceIsReady ? true : undefined}
         className="flex min-h-0 flex-1"
       >
         <ActivityBar

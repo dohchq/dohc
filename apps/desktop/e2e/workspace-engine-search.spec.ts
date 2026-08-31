@@ -187,12 +187,10 @@ test("flagged: a newly saved editor change is searchable before relaunch", async
 
     await revealExplorerPath(page, "notes/live.md");
     await explorerRow(page, "notes/live.md").click();
-    await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0, {
-      timeout: 15_000,
-    });
     const editor = page.getByTestId("markdown-editor");
     const saveState = page.getByTestId("markdown-save-state");
     await expect(editor).toBeVisible();
+    await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0);
     await editor.click();
     await page.keyboard.press("ControlOrMeta+End");
     await page.keyboard.type(` ${sentinel}`);

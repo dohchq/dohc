@@ -144,6 +144,7 @@ describe("Explorer render cost", () => {
 
     const mounted = screen.getAllByTestId("tree-row");
     expect(mounted.length).toBeLessThanOrEqual(64);
+    expect(mounted.every((row) => row.style.height === "28px")).toBe(true);
     expect(rowButton("file-0000.md").getAttribute("aria-posinset")).toBe("1");
     expect(rowButton("file-0000.md").getAttribute("aria-setsize")).toBe("500");
     expect(

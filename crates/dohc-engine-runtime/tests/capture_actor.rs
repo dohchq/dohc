@@ -1,6 +1,7 @@
 use dohc_engine_domain::VersionedTextStore;
 use dohc_engine_runtime::{
-    CancellationToken, CaptureIngest, CaptureRetire, NoFaults, RuntimeError, WorkspaceSupervisor,
+    CancellationToken, CaptureIngest, CaptureRetire, MAX_CAPTURE_INGEST_BATCH_BYTES,
+    MAX_CAPTURE_INGEST_BATCH_OPS, NoFaults, RuntimeError, WorkspaceSupervisor,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
@@ -325,6 +326,124 @@ fn bounded_capture_batch_contains_a_leased_path_and_replays_without_duplicates()
     );
     supervisor.close(&db).expect("close after replay");
     state(&["notes/a.md", "notes/b.md", "notes/c.md"]);
+}
+
+#[test]
+fn capture_batch_rejects_a_missing_named_version_before_writing() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    initialize_replicating_workspace(&db);
+    let mut inputs = capture_batch_inputs();
+    for input in &mut inputs {
+        input.version_id = "missing-version".to_owned();
+    }
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let error = handle
+        .capture_ingest_batch_blocking(
+            inputs,
+            Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
+                scratch.path(),
+            )),
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+        )
+        .expect_err("missing named version must be rejected");
+    assert!(matches!(
+        error,
+        RuntimeError::Domain(dohc_engine_domain::DomainError::VersionNotFound)
+    ));
+    supervisor.close(&db).expect("close actor");
+
+    let store = EngineStore::open(&db, 100).expect("inspect refused batch");
+    let written: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT \
+                   (SELECT COUNT(*) FROM path_aliases WHERE workspace_id=?1) + \
+                   (SELECT COUNT(*) FROM snapshots WHERE workspace_id=?1) + \
+                   (SELECT COUNT(*) FROM moments WHERE workspace_id=?1) + \
+                   (SELECT COUNT(*) FROM file_objects WHERE workspace_id=?1)",
+                [BATCH_WORKSPACE_ID],
+                |row| row.get(0),
+            )
+        })
+        .expect("count refused batch state");
+    assert_eq!(written, 0);
+}
+
+#[test]
+fn capture_batch_refuses_invalid_shapes_before_mutation() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let policy = Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
+        scratch.path(),
+    ));
+    let leases = dohc_engine_collab::LeaseRegistry::new();
+
+    let empty = handle
+        .capture_ingest_batch_blocking(
+            Vec::new(),
+            Arc::clone(&policy),
+            leases.clone(),
+            Arc::new(NoFaults),
+        )
+        .expect("empty batch is a no-op");
+    assert!(empty.is_empty());
+
+    let template = capture_batch_inputs().remove(0);
+    let error = handle
+        .capture_ingest_batch_blocking(
+            vec![template.clone(); MAX_CAPTURE_INGEST_BATCH_OPS + 1],
+            Arc::clone(&policy),
+            leases.clone(),
+            Arc::new(NoFaults),
+        )
+        .expect_err("overlong batch must be refused");
+    assert!(matches!(
+        error,
+        RuntimeError::Domain(dohc_engine_domain::DomainError::InvalidInput {
+            reason: "capture batch exceeds actor bounds"
+        })
+    ));
+
+    let mut oversized = template.clone();
+    oversized.text = "x".repeat(MAX_CAPTURE_INGEST_BATCH_BYTES + 1);
+    let error = handle
+        .capture_ingest_batch_blocking(
+            vec![oversized],
+            Arc::clone(&policy),
+            leases.clone(),
+            Arc::new(NoFaults),
+        )
+        .expect_err("oversized batch must be refused");
+    assert!(matches!(
+        error,
+        RuntimeError::Domain(dohc_engine_domain::DomainError::InvalidInput {
+            reason: "capture batch exceeds actor bounds"
+        })
+    ));
+
+    let mut mismatched = template.clone();
+    mismatched.version_id = "another-version".to_owned();
+    let error = handle
+        .capture_ingest_batch_blocking(
+            vec![template, mismatched],
+            policy,
+            leases,
+            Arc::new(NoFaults),
+        )
+        .expect_err("mixed coordinates must be refused");
+    assert!(matches!(
+        error,
+        RuntimeError::Domain(dohc_engine_domain::DomainError::InvalidInput {
+            reason: "capture batch coordinates do not match"
+        })
+    ));
+
+    supervisor.close(&db).expect("close actor");
 }
 
 #[test]

@@ -14573,7 +14573,7 @@ fn capture_ingest_batch_on_store(
         let mut results = Vec::with_capacity(inputs.len());
         let indexing = CaptureIndexing::UseSnapshot(Arc::clone(search_policy));
         let mut batch = CaptureBatchSharedContext {
-            capture: CaptureIngestBatchContext::new(&first.workspace_id, &first.version_id),
+            capture: CaptureIngestBatchContext::new(tx, &first.workspace_id, &first.version_id)?,
             has_ydoc_state: None,
             journals_file_moments: None,
         };

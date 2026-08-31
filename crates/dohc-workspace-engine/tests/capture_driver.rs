@@ -1155,6 +1155,11 @@ async fn fresh_import_opens_early_fences_partial_reads_and_preserves_foreign_hea
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     write_file(scratch.path(), "same.md", b"same bytes");
     write_file(scratch.path(), "different.md", b"disk bytes");
+    write_file(
+        scratch.path(),
+        "tasks/collection.yaml",
+        b"name: Tasks\nfields:\n  title:\n    type: text\n",
+    );
     for index in 2..EARLY_IMPORT_MIN_ADDED_FILES {
         write_file(scratch.path(), &format!("bulk/seed-{index:04}.md"), b"seed");
     }
@@ -1204,6 +1209,11 @@ async fn fresh_import_opens_early_fences_partial_reads_and_preserves_foreign_hea
         (5, "history.page"),
         (6, "search.query"),
         (7, "versions.list"),
+        (50, "collections.list"),
+        (51, "collections.get"),
+        (52, "collections.query"),
+        (53, "collections.getRecord"),
+        (54, "collections.listPendingAdoptions"),
     ] {
         let error = transport
             .call(
@@ -1298,11 +1308,19 @@ async fn fresh_import_opens_early_fences_partial_reads_and_preserves_foreign_hea
         Some("rpc bytes"),
         "a later Added capture must not claim or overwrite a foreign head"
     );
+    let collections = transport
+        .call(
+            RequestContext::unbounded(),
+            request(32, "collections.list", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("collections become readable after the import");
+    assert_eq!(collections.result["collections"][0]["path"], json!("tasks"));
 
     transport
         .call(
             RequestContext::unbounded(),
-            request(32, "workspace.close", Some(handle), json!({})),
+            request(33, "workspace.close", Some(handle), json!({})),
         )
         .await
         .expect("close");
@@ -1397,10 +1415,34 @@ async fn existing_store_and_unreadable_policy_keep_the_strict_open_barrier() {
             .await
             .expect("watcher.status");
         assert_ne!(status.result["phase"], json!("importing"));
+        if unreadable_policy {
+            assert_eq!(status.result["phase"], json!("degraded"));
+            let versions = transport
+                .call(
+                    RequestContext::unbounded(),
+                    request(5, "versions.list", Some(handle.clone()), json!({})),
+                )
+                .await
+                .expect("bounded degraded startup must release safe reads");
+            assert_eq!(versions.result["versions"][0]["id"], json!("main"));
+            let files = transport
+                .call(
+                    RequestContext::unbounded(),
+                    request(
+                        6,
+                        "versionedText.list",
+                        Some(handle.clone()),
+                        json!({ "versionId": "main" }),
+                    ),
+                )
+                .await
+                .expect("bounded degraded startup must release file reads");
+            assert!(files.result["files"].is_array());
+        }
         transport
             .call(
                 RequestContext::unbounded(),
-                request(5, "workspace.close", Some(handle), json!({})),
+                request(7, "workspace.close", Some(handle), json!({})),
             )
             .await
             .expect("close");

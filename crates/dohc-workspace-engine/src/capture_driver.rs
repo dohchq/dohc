@@ -634,6 +634,10 @@ impl DriverStatus {
     }
 }
 
+fn may_publish_early_import(status: &DriverStatus) -> bool {
+    status.snapshot().phase == CapturePhase::Starting
+}
+
 #[cfg(test)]
 mod startup_contract_tests {
     use super::*;
@@ -715,6 +719,18 @@ mod startup_contract_tests {
         let snapshot = status.snapshot();
         assert_eq!(snapshot.phase, CapturePhase::Ready);
         assert!(snapshot.degraded);
+    }
+
+    #[test]
+    fn a_restarted_layer_cannot_republish_the_startup_import_phase() {
+        let status = DriverStatus::default();
+        assert!(may_publish_early_import(&status));
+        status.mark_initial_degraded();
+        assert!(!may_publish_early_import(&status));
+        status.set_initial_phase(CapturePhase::Importing);
+        assert!(!may_publish_early_import(&status));
+        status.mark_initial_ready();
+        assert!(!may_publish_early_import(&status));
     }
 }
 
@@ -1835,14 +1851,6 @@ impl CaptureDriver {
         }
     }
 
-    /// Request cooperative shutdown without taking ownership of the driver.
-    /// Close calls this before waiting on the apply gate, so a long fresh
-    /// import stops at the next bounded chunk instead of making close wait for
-    /// the whole manifest.
-    pub(crate) fn request_shutdown(&self) {
-        self.cancel.cancel();
-    }
-
     /// Cancel the loop SYNCHRONOUSLY and hand back the join handle; the
     /// driver winds itself down (watcher joined, files actor closed) whether
     /// or not the caller awaits. Callers that need ordered teardown await
@@ -2706,6 +2714,7 @@ impl DriverEnv for RealEnv {
         let fingerprint_after_scan = policy_fingerprint(&self.root);
         let refresh_after_scan = self.refresh_epoch.load(Ordering::Acquire);
         let early_import = self.store_freshly_created
+            && may_publish_early_import(&self.status)
             && seed_loaded
             && workspace_missing
             && is_safe_fresh_import_plan(&initial)
@@ -3242,9 +3251,10 @@ async fn apply_run_with_handle(
     let changed_collection_paths = changed_collection_record_paths(root, &plan);
     // A DEDICATED plain thread, not spawn_blocking: the sink's blocking actor
     // calls assert they run OUTSIDE any tokio runtime context, and
-    // spawn_blocking threads carry the runtime handle. Awaiting the oneshot
-    // (uncancellable await) is also exactly the drain-before-close property —
-    // teardown cannot interrupt a half-applied plan.
+    // spawn_blocking threads carry the runtime handle. Each accepted operation
+    // finishes before the worker checks cancellation; the unapplied suffix
+    // remains dirty for the next reconcile. Joining the thread is the
+    // drain-before-close boundary.
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
     let apply_plan = plan.clone();
     let apply_author_json = author_json.clone();

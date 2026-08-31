@@ -870,14 +870,6 @@ impl OpenWorkspace {
         }
     }
 
-    /// Ask capture to stop before close waits on its apply gate. The driver
-    /// remains owned here until teardown takes and joins it.
-    fn request_capture_shutdown(&self) {
-        if let Some(driver) = lock(&self.capture).as_ref() {
-            driver.request_shutdown();
-        }
-    }
-
     /// Take the driver and cancel it SYNCHRONOUSLY (no await point, so an
     /// aborted RPC future can never leave a driver un-cancelled), returning
     /// the join handle for callers that must await the full drain.
@@ -1825,10 +1817,12 @@ impl EngineService {
         Ok(())
     }
 
-    /// Fence reads and barriers whose answer is defined over a complete
-    /// initial file baseline. The classifier is centralized so a new early
-    /// handle cannot accidentally expose a partial prefix through one handler
-    /// while another blocks behind the capture driver.
+    /// Fence reads and barriers while the initial file baseline has no declared
+    /// outcome. The bounded startup decision releases them in either `Ready` or
+    /// explicit `Degraded`; recovery may continue from there, like any later
+    /// watcher pass. The classifier is centralized so an early handle cannot
+    /// leak an unreported import prefix through one handler while another stays
+    /// fenced.
     fn require_initial_capture_ready(
         &self,
         handle: Option<&WorkspaceHandle>,
@@ -1845,7 +1839,7 @@ impl EngineService {
             .as_ref()
             .map(|driver| driver.status().snapshot().phase)
             .unwrap_or(capture_driver::CapturePhase::Ready);
-        if phase == capture_driver::CapturePhase::Ready {
+        if !initial_capture_phase_requires_fence(phase) {
             return Ok(());
         }
         Err(initial_capture_updating())
@@ -2154,10 +2148,11 @@ impl EngineService {
                     self.capture_apply_probe.clone(),
                 )
             });
-            // STARTUP ORDERING BARRIER: the baseline reconcile (closed-period
-            // disk state) must apply before the handle is handed out, or a
-            // caller's first write could later be overwritten by a capture of
-            // stale disk bytes.
+            // STARTUP ORDERING BARRIER: existing stores and uncertain scans
+            // apply the closed-period baseline before the handle is handed
+            // out. A proven fresh, all-Added import may return earlier; Added
+            // capture never claims a foreign head, so a caller's first write
+            // wins while the bounded import finishes behind the handle.
             //
             // CANCELLATION: nothing owns the store actor yet (the handle is
             // inserted below), so an abort here would leak it. The `open_guard`
@@ -2272,25 +2267,14 @@ impl EngineService {
             lock(&self.sessions).retain(|_, session| session.workspace != handle);
             return Ok(json!({ "closed": false, "attachmentClosed": removed }));
         }
-        // Cancellation must precede the capture-gate wait. During a large
-        // fresh import this stops the sink at the next bounded batch; waiting
-        // first would turn close into a wait for the whole import.
-        open.request_capture_shutdown();
-        // The same capture→sessions order as `fence_version_snapshot`.
-        // Holding the capture gate through driver cancellation/drain means no
-        // apply can be queued behind a session-first close and form the
-        // close→driver→switch deadlock triangle.
-        let _barriers = self
-            .acquire_workspace_barriers(&open, None, "workspace.close", false)
-            .await?;
         let supervisor = self.supervisor;
-        // Hold open_lock only across the handle removal and the synchronous
-        // begin_close, so a workspace_open already waiting on `handles` cannot
-        // slip in after the removal and reach supervisor.open before the global
-        // Closing marker is installed. Once begin_close has marked Closing, the
-        // lock is released — the marker (not this lock) serializes reopen, and
-        // the detached finish stays cancellation-safe.
-        let (closing, removed) = {
+        // This await is the last cancellable point. After it, close installs the
+        // global Closing marker, removes every handle, takes the capture driver,
+        // and gives a detached task the whole teardown before yielding again.
+        // A dropped RPC therefore leaves either a fully usable open workspace
+        // or an owned close that will finish; it can never strand a permanently
+        // cancelled driver behind a live handle.
+        let (closing, removed, attached_handles) = {
             let _serial = self.open_lock.lock().await;
             let db_path = {
                 let guard = lock(&self.handles);
@@ -2321,43 +2305,40 @@ impl EngineService {
             lock(&self.pending_cursors).retain(|_, pending| {
                 pending.handle != handle && !attached_handles.contains(&pending.handle)
             });
-            // Sessions (and their lease guards) evict only AFTER this close
-            // owns the teardown — evicting earlier meant a close future
-            // dropped while waiting on open_lock had already stranded live
-            // editors (ydoc-session-not-found) and released their leases for
-            // a workspace that stayed open.
-            lock(&self.sessions).retain(|_, session| {
-                session.workspace != handle && !attached_handles.contains(&session.workspace)
-            });
-            (closing, removed)
+            (closing, removed, attached_handles)
         };
-        // The capture driver is CANCELLED synchronously here (an aborted close
-        // future can never leave it running), and the detached task below owns
-        // both the drain and the actor close from the start — so cancellation
-        // at ANY await point leaves the #201 backstop semantics intact while
-        // the teardown order stays strictly files-then-actor: the driver
-        // drains its in-flight apply BEFORE the store actor goes down.
-        let capture_drain = removed
-            .as_ref()
-            .and_then(OpenWorkspace::begin_capture_shutdown);
+        let removed = removed.ok_or_else(workspace_unavailable)?;
         let closed = closing.is_some();
+        let capture_gate = Arc::clone(&removed.capture_apply_gate);
+        let session_gate = Arc::clone(&removed.session_ops);
+        let sessions = Arc::clone(&self.sessions);
+        // Cancellation happens only after the close owns the handle and global
+        // actor marker. It remains prompt for a large fresh import: the sink
+        // stops at its next bounded operation while the detached task waits in
+        // the same capture→sessions order as version fencing.
+        let capture_drain = removed.begin_capture_shutdown();
         // Suppression entries clear AFTER the capture drain: an in-flight
         // reconcile apply still consults the registry, and clearing first
         // would let it re-ingest the daemon's own just-settled file as a
         // capture write (provenance flip) during teardown.
-        let clear_suppression = removed.as_ref().map(|removed| {
-            (
-                self.self_writes.scoped(&removed.root),
-                removed.workspace_id.clone(),
-            )
-        });
+        let clear_suppression = (
+            self.self_writes.scoped(&removed.root),
+            removed.workspace_id.clone(),
+        );
         let close_task = tokio::spawn(async move {
+            // Owning both fair gates prevents a new apply from queuing behind a
+            // session-first close and forming the close→driver→switch
+            // deadlock triangle. Session rows stay present until in-flight
+            // session work has drained, then their lease guards are released.
+            let _capture = capture_gate.lock_owned().await;
+            let _session = session_gate.lock_owned().await;
+            lock(&sessions).retain(|_, session| {
+                session.workspace != handle && !attached_handles.contains(&session.workspace)
+            });
             if let Some(drain) = capture_drain {
                 let _ = drain.await;
             }
-            if let Some((self_writes, workspace_id)) = clear_suppression {
-                self_writes.clear_workspace(&workspace_id);
-            }
+            clear_suppression.0.clear_workspace(&clear_suppression.1);
             tokio::task::spawn_blocking(move || match closing {
                 Some(closing) => closing.finish(),
                 None => Ok(()),
@@ -12977,6 +12958,7 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
     method.starts_with("sync.")
         || method.starts_with("share.")
         || method.starts_with("search.")
+        || method.starts_with("collections.")
         || (method.starts_with("versions.") && method != "versions.ensureMain")
         || method.starts_with("conflicts.")
         || matches!(
@@ -12998,6 +12980,13 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
                 | "secrets.list"
                 | "secrets.stateExists"
         )
+}
+
+fn initial_capture_phase_requires_fence(phase: capture_driver::CapturePhase) -> bool {
+    matches!(
+        phase,
+        capture_driver::CapturePhase::Starting | capture_driver::CapturePhase::Importing
+    )
 }
 
 fn initial_capture_updating() -> WireError {
@@ -13329,9 +13318,30 @@ mod tests {
             "versions.list",
             "versions.createNamed",
             "versions.setActive",
+            "collections.list",
+            "collections.get",
+            "collections.query",
+            "collections.getRecord",
+            "collections.listPendingAdoptions",
         ] {
             assert!(method_requires_initial_capture_ready(method), "{method}");
         }
+    }
+
+    #[test]
+    fn bounded_degraded_startup_releases_safe_reads() {
+        assert!(initial_capture_phase_requires_fence(
+            capture_driver::CapturePhase::Starting
+        ));
+        assert!(initial_capture_phase_requires_fence(
+            capture_driver::CapturePhase::Importing
+        ));
+        assert!(!initial_capture_phase_requires_fence(
+            capture_driver::CapturePhase::Ready
+        ));
+        assert!(!initial_capture_phase_requires_fence(
+            capture_driver::CapturePhase::Degraded
+        ));
     }
 
     /// #595 round 8: the artifact lock and a busy engine database are two
@@ -14833,6 +14843,100 @@ mod tests {
             .await
             .expect("final workspace close");
         assert_eq!(supervisor.actor_count(), baseline);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn aborted_workspace_close_cannot_retain_a_cancelled_capture_driver() {
+        let scratch = ScratchDir::new().expect("scratch");
+        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
+            .expect("shadow marker");
+        std::fs::write(scratch.path().join("seed.md"), "captured before close").expect("seed file");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = Arc::new(EngineService::with_supervisor(supervisor));
+        let open_params = json!({
+            "rootDir": scratch.path().to_string_lossy(),
+            "workspaceId": "cancelled-capture-close"
+        });
+        let opened = service
+            .workspace_open(&RequestContext::unbounded(), open_params.clone())
+            .await
+            .expect("initial workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+        let held_sessions = {
+            let open = lock(&service.handles)
+                .get(&handle)
+                .expect("open workspace")
+                .clone();
+            Arc::clone(&open.session_ops).lock_owned().await
+        };
+
+        let closing_service = Arc::clone(&service);
+        let closing_handle = handle.clone();
+        let closing =
+            tokio::spawn(
+                async move { closing_service.workspace_close(Some(closing_handle)).await },
+            );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while lock(&service.handles).contains_key(&handle) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("close must own and remove the handle before waiting on sessions");
+
+        closing.abort();
+        assert!(
+            closing
+                .await
+                .expect_err("close RPC was cancelled")
+                .is_cancelled()
+        );
+        let stale = service
+            .capture_flush(&RequestContext::unbounded(), Some(handle.clone()))
+            .await
+            .expect_err("an owned close must not retain a live handle");
+        assert_eq!(stale.code, ErrorCode::WorkspaceUnavailable);
+
+        let reopening_service = Arc::clone(&service);
+        let mut reopening = tokio::spawn(async move {
+            reopening_service
+                .workspace_open(&RequestContext::unbounded(), open_params)
+                .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut reopening)
+                .await
+                .is_err(),
+            "the detached close must retain the global Closing marker"
+        );
+        drop(held_sessions);
+
+        let reopened = tokio::time::timeout(Duration::from_secs(10), reopening)
+            .await
+            .expect("reopen completed after the session barrier released")
+            .expect("reopen task")
+            .expect("workspace reopen");
+        let reopened_handle: WorkspaceHandle =
+            serde_json::from_value(reopened["workspace"].clone()).expect("reopened handle");
+        let flush = service
+            .capture_flush(&RequestContext::unbounded(), Some(reopened_handle.clone()))
+            .await
+            .expect("reopened capture flush");
+        assert_eq!(flush["settled"], json!(true));
+        service
+            .history_page(
+                &RequestContext::unbounded(),
+                Some(reopened_handle.clone()),
+                json!({ "workspaceId": "cancelled-capture-close" }),
+            )
+            .await
+            .expect("reopened history read");
+        service
+            .workspace_close(Some(reopened_handle))
+            .await
+            .expect("final workspace close");
     }
 
     #[tokio::test]

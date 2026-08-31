@@ -15,12 +15,13 @@ use crate::bounds::{OverCapPolicy, ScanBounds};
 use crate::diff::ScanManifest;
 use crate::error::FilesError;
 use crate::floor;
-use crate::hash::{HashInput, HashOutcome, HashPool, HashRun, PostHashExpectation, PostHashProbe};
+use crate::hash::{
+    HashInput, HashOutcome, HashPool, HashRun, PostHashExpectation, PostHashProbe, mtime_ms,
+};
 use crate::media::media_type_for_path;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
 use tokio_util::sync::CancellationToken;
 
 /// One tracked file in a normalized listing.
@@ -594,18 +595,4 @@ fn relative(root: &Path, path: &Path) -> String {
 
 fn display(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
-}
-
-/// Milliseconds since the Unix epoch for a file's mtime, or `0` when the
-/// platform cannot supply it or the time predates the epoch. A zero mtime is
-/// "no observation": it never authorizes hash reuse, so the fallback fails
-/// safe toward hashing.
-fn mtime_ms(metadata: &std::fs::Metadata) -> i64 {
-    let Ok(modified) = metadata.modified() else {
-        return 0;
-    };
-    let Ok(since_epoch) = modified.duration_since(UNIX_EPOCH) else {
-        return 0;
-    };
-    i64::try_from(since_epoch.as_millis()).unwrap_or(i64::MAX)
 }

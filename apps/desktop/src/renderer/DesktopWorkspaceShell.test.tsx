@@ -7065,7 +7065,7 @@ describe("workspace shell errors", () => {
     ).toBe(false);
   });
 
-  it("reports openWorkspace failures instead of leaving an unhandled rejection", async () => {
+  it("keeps a failed workspace inert and opens it when the user retries", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.openWorkspace.mockRejectedValueOnce(new Error("Watcher failed"));
 
@@ -7074,6 +7074,16 @@ describe("workspace shell errors", () => {
     expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
       "Watcher failed",
     );
+    expect(screen.getByTestId("workspace-workbench").hasAttribute("inert")).toBe(true);
+
+    fireEvent.click(screen.getByTestId("workspace-shell-error-retry"));
+
+    await waitFor(() => expect(bridge.openWorkspace).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(screen.getByTestId("workspace-workbench").hasAttribute("inert")).toBe(false);
   });
 
   it("reports refresh failures after a successful file import without retrying import", async () => {
@@ -14632,6 +14642,25 @@ describe("chats panel (right side)", () => {
     await waitFor(() => {
       expect(panel.style.width).toBe("900px");
     });
+  });
+
+  it("exposes the chats resize separator to keyboard users", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    renderShell(bridge);
+
+    const panel = await screen.findByTestId("chats-panel");
+    const handle = screen.getByTestId("chats-panel-resize");
+    expect(handle.tabIndex).toBe(0);
+    expect(handle.getAttribute("aria-valuemin")).toBe("240");
+    expect(handle.getAttribute("aria-valuemax")).toBe("2400");
+    expect(handle.getAttribute("aria-valuenow")).toBe("360");
+
+    fireEvent.keyDown(handle, { key: "ArrowLeft" });
+    await waitFor(() => expect(panel.style.width).toBe("376px"));
+    expect(handle.getAttribute("aria-valuenow")).toBe("376");
+
+    fireEvent.keyDown(handle, { key: "ArrowRight" });
+    await waitFor(() => expect(panel.style.width).toBe("360px"));
   });
 
   it("the 'This file' tab shows the active file's chats surface", async () => {

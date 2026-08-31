@@ -132,11 +132,11 @@ pub fn upsert_file_search_index(
 /// Maintain the FTS row for a newly committed capture moment.
 ///
 /// A non-deduped moment minted by the current schema records whether it had a
-/// concrete preimage. With no preimage there cannot be an existing valid FTS
-/// row: file writes, deletes, rebuilds, and their search side effects share one
-/// transaction. Skipping the otherwise full-table FTS5 metadata-key DELETE is
-/// therefore safe for a first write. Public upsert callers stay conservative
-/// and always remove an existing row first.
+/// concrete live preimage. A version fork can still have an indexed fallback
+/// from `fork_base_snapshots`, so that indexed preimage is checked by its
+/// primary key before skipping the otherwise full-table FTS5 metadata-key
+/// DELETE. Public upsert callers stay conservative and always remove an
+/// existing row first.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn update_file_search_index_for_capture(
     conn: &Connection,
@@ -148,6 +148,17 @@ pub(crate) fn update_file_search_index_for_capture(
     text: &str,
     had_preimage: bool,
 ) -> Result<(), SearchError> {
+    let inherited_preimage = if had_preimage || policy.is_degraded() {
+        false
+    } else {
+        conn.prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM fork_base_snapshots \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3)",
+        )?
+        .query_row(params![workspace_id, version_id, object_id], |row| {
+            row.get::<_, bool>(0)
+        })?
+    };
     maintain_file_search_index_with_policy(
         conn,
         policy,
@@ -156,7 +167,7 @@ pub(crate) fn update_file_search_index_for_capture(
         object_id,
         path,
         text,
-        had_preimage,
+        had_preimage || inherited_preimage,
     )
 }
 
@@ -619,6 +630,11 @@ mod tests {
             "CREATE VIRTUAL TABLE engine_search_files_fts USING fts5(\
                  workspace_id UNINDEXED, version_id UNINDEXED, \
                  object_id UNINDEXED, path UNINDEXED, text, tokenize='trigram'\
+             );\
+             CREATE TABLE fork_base_snapshots (\
+                 workspace_id TEXT NOT NULL, version_id TEXT NOT NULL, \
+                 object_id TEXT NOT NULL, \
+                 PRIMARY KEY (workspace_id, version_id, object_id)\
              );",
         )
         .expect("create file FTS");
@@ -668,6 +684,59 @@ mod tests {
             .expect("count fresh FTS rows");
         assert_eq!((rows, objects), (ROWS as i64, ROWS as i64));
         assert_eq!(deletes.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn fork_base_capture_replaces_its_fallback_fts_row() {
+        let scratch = dohc_engine_testkit::ScratchDir::new().expect("scratch");
+        let policy = read_engine_search_policy(scratch.path());
+        let conn = Connection::open_in_memory().expect("open memory database");
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE engine_search_files_fts USING fts5(\
+                 workspace_id UNINDEXED, version_id UNINDEXED, \
+                 object_id UNINDEXED, path UNINDEXED, text, tokenize='trigram'\
+             );\
+             CREATE TABLE fork_base_snapshots (\
+                 workspace_id TEXT NOT NULL, version_id TEXT NOT NULL, \
+                 object_id TEXT NOT NULL, \
+                 PRIMARY KEY (workspace_id, version_id, object_id)\
+             );\
+             INSERT INTO fork_base_snapshots (workspace_id, version_id, object_id) \
+             VALUES ('workspace', 'branch', 'object');\
+             INSERT INTO engine_search_files_fts \
+             (workspace_id, version_id, object_id, path, text) \
+             VALUES ('workspace', 'branch', 'object', 'old.md', 'stale fallback text');",
+        )
+        .expect("seed fork fallback index");
+
+        update_file_search_index_for_capture(
+            &conn,
+            &policy,
+            "workspace",
+            "branch",
+            "object",
+            "new.md",
+            "replacement text",
+            false,
+        )
+        .expect("replace fallback index row");
+
+        let rows: Vec<(String, String)> = conn
+            .prepare(
+                "SELECT path, text FROM engine_search_files_fts \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+            )
+            .expect("prepare index query")
+            .query_map(params!["workspace", "branch", "object"], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .expect("query index")
+            .collect::<rusqlite::Result<_>>()
+            .expect("read index rows");
+        assert_eq!(
+            rows,
+            vec![("new.md".to_owned(), "replacement text".to_owned())]
+        );
     }
 
     #[test]

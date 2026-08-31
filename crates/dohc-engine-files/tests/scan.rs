@@ -395,7 +395,7 @@ impl ScanIoFaultInjector for ConcurrentHashProbe {
         } else if !state.released {
             let (next, timeout) = self
                 .ready
-                .wait_timeout_while(state, std::time::Duration::from_secs(1), |state| {
+                .wait_timeout_while(state, std::time::Duration::from_secs(30), |state| {
                     !state.released
                 })
                 .expect("probe wait");

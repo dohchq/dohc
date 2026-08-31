@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -52,23 +53,43 @@ export function validateUiAuditDirectory(directory) {
     if (size < MIN_SCREENSHOT_BYTES) {
       throw new Error(`${name} is only ${size} bytes; the capture may be blank`);
     }
-    const dimensions = readPngDimensions(readFileSync(path));
+    const bytes = readFileSync(path);
+    const dimensions = readPngDimensions(bytes);
     if (dimensions.width < MIN_WIDTH || dimensions.height < MIN_HEIGHT) {
       throw new Error(
         `${name} is ${dimensions.width}x${dimensions.height}; expected at least ${MIN_WIDTH}x${MIN_HEIGHT}`,
       );
     }
-    return { name, size, modifiedAt: metadata.mtime.toISOString(), ...dimensions };
+    return {
+      name,
+      size,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      modifiedAt: metadata.mtime.toISOString(),
+      ...dimensions,
+    };
   });
 
   return { directory: resolve(directory), shots };
 }
 
+function repoRoot() {
+  return resolve(fileURLToPath(import.meta.url), "../../../../");
+}
+
 function currentCommit() {
   return execFileSync("git", ["rev-parse", "HEAD"], {
-    cwd: resolve(fileURLToPath(import.meta.url), "../../../../"),
+    cwd: repoRoot(),
     encoding: "utf8",
   }).trim();
+}
+
+function worktreeDirty() {
+  return (
+    execFileSync("git", ["status", "--porcelain"], {
+      cwd: repoRoot(),
+      encoding: "utf8",
+    }).trim() !== ""
+  );
 }
 
 function runCli(args) {
@@ -77,6 +98,7 @@ function runCli(args) {
   }
   const result = {
     validatedCommit: currentCommit(),
+    worktreeDirty: worktreeDirty(),
     validatedAt: new Date().toISOString(),
     ...validateUiAuditDirectory(args[0]),
   };

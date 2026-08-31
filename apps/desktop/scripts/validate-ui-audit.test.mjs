@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +19,12 @@ function pngHeader(width, height) {
   return bytes;
 }
 
+async function writeAuditShots(directory, image) {
+  await Promise.all(
+    expectedUiAuditShots.map((name) => writeFile(join(directory, name), image)),
+  );
+}
+
 test("reads dimensions from the PNG IHDR header", () => {
   assert.deepEqual(readPngDimensions(pngHeader(1920, 1200)), {
     width: 1920,
@@ -28,6 +35,32 @@ test("reads dimensions from the PNG IHDR header", () => {
 test("rejects a missing or malformed PNG header", () => {
   assert.throws(() => readPngDimensions(Buffer.alloc(24)), /not a PNG file/);
   assert.throws(() => readPngDimensions(Buffer.alloc(8)), /not a PNG file/);
+  const noIhdr = pngHeader(1920, 1200);
+  noIhdr.write("IDAT", 12, "ascii");
+  assert.throws(() => readPngDimensions(noIhdr), /PNG has no IHDR header/);
+});
+
+test("rejects a capture below the byte floor", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-ui-audit-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const image = Buffer.alloc(64);
+  pngHeader(1920, 1200).copy(image);
+  await writeAuditShots(directory, image);
+
+  assert.throws(() => validateUiAuditDirectory(directory), /capture may be blank/);
+});
+
+test("rejects a capture below the dimension floor", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-ui-audit-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const image = Buffer.alloc(10_001);
+  pngHeader(999, 700).copy(image);
+  await writeAuditShots(directory, image);
+
+  assert.throws(
+    () => validateUiAuditDirectory(directory),
+    /expected at least 1000x700/,
+  );
 });
 
 test("attributes each validated screenshot to its filesystem capture time", async (t) => {
@@ -48,4 +81,8 @@ test("attributes each validated screenshot to its filesystem capture time", asyn
   const result = validateUiAuditDirectory(directory);
   assert.equal(result.shots.length, expectedUiAuditShots.length);
   assert.equal(result.shots[0].modifiedAt, capturedAt.toISOString());
+  assert.equal(
+    result.shots[0].sha256,
+    createHash("sha256").update(image).digest("hex"),
+  );
 });

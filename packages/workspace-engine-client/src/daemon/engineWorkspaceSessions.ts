@@ -91,10 +91,11 @@ export interface EngineWorkspaceSessionsOptions {
   now?: () => number;
   /**
    * Deadline for a single daemon `workspace.open`. Defaults to
-   * WORKSPACE_OPEN_DEADLINE_MS. An application may pass a larger finite bound
-   * when it has measured work that is deliberately part of `workspace.open`;
-   * test harnesses may also account for aggregate suite contention. This
-   * changes only the request deadline, never when a handle becomes usable.
+   * WORKSPACE_OPEN_DEADLINE_MS. An application may pass a larger positive
+   * integer within the supported timer range when measured work is deliberately
+   * part of `workspace.open`. Test harnesses may also account for aggregate
+   * suite contention. This changes only the request deadline, never when a
+   * handle becomes usable.
    */
   workspaceOpenDeadlineMs?: number;
 }

@@ -8,12 +8,13 @@ import { PrimaryButton, SecondaryButton } from "./ui/controls";
 
 type WorkspaceSecretState = "none" | "protected-key-present" | "protected-key-missing";
 type PassphrasePurpose = "enable" | "protect" | "unlock";
-type ManagedCloudStatus = "ready" | "unconfigured" | "invalid";
+type ManagedCloudStatus = "unknown" | "ready" | "unconfigured" | "invalid";
 type ConnectionMode = "managed" | "self-host";
 const MIN_PASSPHRASE_LENGTH = 8;
 
 type Phase =
   | { kind: "loading" }
+  | { kind: "status-failed" }
   | { kind: "disconnected" }
   | { kind: "code"; userCode: string; verificationUri: string }
   | { kind: "connected"; email: string }
@@ -44,7 +45,8 @@ export function CloudLogin(props: {
   const [workspaceSecretState, setWorkspaceSecretState] =
     useState<WorkspaceSecretState>("none");
   const [managedCloudStatus, setManagedCloudStatus] =
-    useState<ManagedCloudStatus>("unconfigured");
+    useState<ManagedCloudStatus>("unknown");
+  const [statusAttempt, setStatusAttempt] = useState(0);
   const [connectionMode, setConnectionMode] = useState<ConnectionMode>("self-host");
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [serverUrl, setServerUrl] = useState("");
@@ -78,7 +80,7 @@ export function CloudLogin(props: {
     setPassphrasePurpose("enable");
     setPassphrase("");
     setWorkspaceSecretState("none");
-    setManagedCloudStatus("unconfigured");
+    setManagedCloudStatus("unknown");
     setConnectionMode("self-host");
     setConnectionError(null);
     setServerUrl("");
@@ -102,13 +104,13 @@ export function CloudLogin(props: {
         );
       })
       .catch(() => {
-        if (session === sessionRef.current) setPhase({ kind: "disconnected" });
+        if (session === sessionRef.current) setPhase({ kind: "status-failed" });
       });
     return () => {
       if (sessionRef.current === session) sessionRef.current += 1;
       clearPollTimer();
     };
-  }, [props.workspaceId]);
+  }, [props.workspaceId, statusAttempt]);
 
   async function enableSync() {
     if (!props.workspaceId || syncBusy) return;
@@ -323,6 +325,26 @@ export function CloudLogin(props: {
 
       {phase.kind === "loading" ? (
         <p className="mb-0 mt-2 text-xs text-subtle">Checking connection…</p>
+      ) : null}
+
+      {phase.kind === "status-failed" ? (
+        <div>
+          <p
+            data-testid="cloud-status-error"
+            role="alert"
+            className="mb-0 mt-2 text-xs text-danger"
+          >
+            dohc could not check the cloud connection.
+          </p>
+          <SecondaryButton
+            type="button"
+            data-testid="cloud-status-retry"
+            onClick={() => setStatusAttempt((attempt) => attempt + 1)}
+            className="mt-3"
+          >
+            Retry
+          </SecondaryButton>
+        </div>
       ) : null}
 
       {phase.kind === "disconnected" || phase.kind === "failed" ? (

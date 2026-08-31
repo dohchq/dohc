@@ -11,7 +11,7 @@ import {
   type EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import {
-  DaemonRefusalError,
+  isHistoryUpdatingRefusal,
   VersionedLiveAdapter,
 } from "@dohc/workspace-engine-client";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
@@ -110,9 +110,7 @@ async function waitForDurableMoments(
       return await countDurableMoments(sessions, workspace, onFirstPage);
     } catch (error) {
       if (
-        !(error instanceof DaemonRefusalError) ||
-        error.wireCode !== "OVERLOADED" ||
-        error.message !== "Workspace is still updating. Try again." ||
+        !isHistoryUpdatingRefusal(error) ||
         performance.now() >= deadline
       ) {
         throw error;
@@ -166,7 +164,9 @@ it.skipIf(fileCount === 0 || engine.missing)(
       await sessions.run(workspace, async () => undefined);
       openMs = performance.now() - openedAt;
       captured = await waitForDurableMoments(sessions, workspace, () => {
-        historyAcceptedMs = performance.now() - openedAt;
+        if (historyAcceptedMs === 0) {
+          historyAcceptedMs = performance.now() - openedAt;
+        }
       });
       readyMs = performance.now() - openedAt;
 

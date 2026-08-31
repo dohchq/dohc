@@ -2146,13 +2146,20 @@ impl CaptureIngestBatchContext {
     /// Establish the shared coordinate. Producer and order stay lazy so an
     /// all-dedupe replay keeps the legacy short-circuit and does not gain
     /// unrelated failure modes.
-    pub fn new(workspace_id: &str, version_id: &str) -> Self {
-        Self {
+    pub fn new(
+        tx: &Transaction<'_>,
+        workspace_id: &str,
+        version_id: &str,
+    ) -> Result<Self, DomainError> {
+        if !version_exists(tx, workspace_id, version_id)? {
+            return Err(DomainError::VersionNotFound);
+        }
+        Ok(Self {
             workspace_id: workspace_id.to_owned(),
             version_id: version_id.to_owned(),
             producer_id: None,
             moment_order_cursor: CaptureMomentOrderCursor::Uninitialized,
-        }
+        })
     }
 
     /// Advance after the item's savepoint has committed all of its side
@@ -6531,7 +6538,7 @@ mod tests {
 
         let outcome = batched
             .write_with(&NoFaults, |tx| {
-                let mut context = CaptureIngestBatchContext::new("ws", "main");
+                let mut context = CaptureIngestBatchContext::new(tx, "ws", "main")?;
                 let mut results = Vec::with_capacity(inputs.len());
                 for input in &inputs {
                     tx.execute_batch("SAVEPOINT capture_batch_parity")
@@ -6574,7 +6581,7 @@ mod tests {
 
         let outcome = store
             .write_with(&NoFaults, |tx| {
-                let mut context = CaptureIngestBatchContext::new("ws", "main");
+                let mut context = CaptureIngestBatchContext::new(tx, "ws", "main")?;
                 tx.execute_batch("SAVEPOINT capture_batch_failed_item")
                     .map_err(DomainError::sql_persist)?;
                 let rolled_back = capture_ingest_in_batch_with_admission_in_tx(
@@ -6650,7 +6657,7 @@ mod tests {
 
         let outcome = store
             .write_with(&NoFaults, |tx| {
-                let mut context = CaptureIngestBatchContext::new("ws", "main");
+                let mut context = CaptureIngestBatchContext::new(tx, "ws", "main")?;
                 tx.execute_batch("SAVEPOINT capture_maximum_order")
                     .map_err(DomainError::sql_persist)?;
                 let captured = capture_ingest_in_batch_with_admission_in_tx(
@@ -6955,7 +6962,7 @@ mod tests {
         let outcome = store
             .write_with(&NoFaults, |tx| {
                 let proposed_order = next_moment_order(tx)?;
-                let mut context = CaptureIngestBatchContext::new("ws", "main");
+                let mut context = CaptureIngestBatchContext::new(tx, "ws", "main")?;
                 tx.execute_batch("SAVEPOINT capture_disambiguation")
                     .map_err(DomainError::sql_persist)?;
                 let captured = capture_ingest_in_batch_with_admission_in_tx(

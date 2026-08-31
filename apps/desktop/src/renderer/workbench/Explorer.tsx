@@ -336,7 +336,8 @@ const TreeRow = memo(function TreeRow(props: {
         // Background style) — box-shadow/background only, NEVER `outline`:
         // the base outline-none nulls --tw-outline-style later in the same
         // cascade layer, which made an outline-based highlight unrenderable.
-        className={`relative flex h-7 w-full items-center gap-1.5 rounded-md pr-2 text-left text-[13px] outline-none transition-colors duration-75 ${
+        style={{ height: TREE_ROW_HEIGHT }}
+        className={`relative flex w-full items-center gap-1.5 rounded-md pr-2 text-left text-[13px] outline-none transition-colors duration-75 ${
           props.dropPreview
             ? dropClass
             : props.active
@@ -1305,7 +1306,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
   const editRow = (depth: number): ReactNode => (
     <li role="none" key="edit-row">
-      <div className="flex h-7 items-center gap-1.5 pr-2">
+      <div style={{ height: TREE_ROW_HEIGHT }} className="flex items-center gap-1.5 pr-2">
         <span aria-hidden className="w-1 shrink-0" />
         <IndentGuides depth={depth} />
         {editing?.mode === "rename" && editing.isFolder ? (

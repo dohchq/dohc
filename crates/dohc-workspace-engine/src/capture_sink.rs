@@ -341,27 +341,7 @@ impl StoreCaptureSink {
     }
 
     fn path_containment(&self, rel_path: &str) -> Containment {
-        let absolute = self.shadow_root.join(rel_path);
-        let Some(parent) = absolute.parent() else {
-            return Containment::Escaped;
-        };
-        // Resolve the parent first to preserve the established distinction:
-        // an absent path settles as absent, while any other resolution error
-        // fails closed. Root resolution is attempted only once a parent is
-        // present, then reused for the rest of this sink's generation.
-        let canonical_parent = match parent.canonicalize() {
-            Ok(real) => real,
-            Err(err) if absent_error(&err) => return Containment::Absent,
-            Err(_) => return Containment::Escaped,
-        };
-        let Ok(canonical_root) = self.canonical_shadow_root() else {
-            return Containment::Escaped;
-        };
-        // A root moved behind a symlink now resolves somewhere other than
-        // this cached location and is refused. Replacing a directory in place
-        // at the same canonical pathname remains indistinguishable by path,
-        // the same identity limitation as the previous per-read resolution.
-        contained_parent(canonical_root, rel_path, &canonical_parent)
+        path_containment_with_root(&self.shadow_root, rel_path, || self.canonical_shadow_root())
     }
 
     fn ensure_secret_key(&mut self) -> Result<&SecretDataKey, CaptureError> {
@@ -1270,24 +1250,15 @@ enum CurrentContent {
 }
 
 /// Parallel preparation already owns the generation's canonical root, so it
-/// repeats the same strict parent check without touching `StoreCaptureSink`'s
-/// non-`Sync` policy state.
+/// can apply the shared strict parent check without touching
+/// `StoreCaptureSink`'s non-`Sync` policy state.
 fn read_current_with_canonical_root(
     root: &Path,
     canonical_root: &Path,
     path: &str,
     media_type: &str,
 ) -> Result<CurrentContent, CaptureError> {
-    let absolute = root.join(path);
-    let Some(parent) = absolute.parent() else {
-        return Err(ESCAPES_ROOT);
-    };
-    let canonical_parent = match parent.canonicalize() {
-        Ok(real) => real,
-        Err(err) if absent_error(&err) => return Ok(CurrentContent::Absent),
-        Err(_) => return Err(ESCAPES_ROOT),
-    };
-    match contained_parent(canonical_root, path, &canonical_parent) {
+    match path_containment_with_root(root, path, || Ok(canonical_root)) {
         Containment::Contained => read_contained_current(root, canonical_root, path, media_type),
         Containment::Absent => Ok(CurrentContent::Absent),
         Containment::Escaped => Err(ESCAPES_ROOT),
@@ -1385,6 +1356,34 @@ enum Containment {
     Contained,
     Absent,
     Escaped,
+}
+
+/// Resolve a path's parent before resolving the root. This preserves the
+/// established distinction: an absent path settles as absent, while any other
+/// resolution error fails closed. The root resolver stays lazy so an absent
+/// path does not introduce an unrelated root-resolution failure.
+fn path_containment_with_root<'a>(
+    root: &Path,
+    rel_path: &str,
+    canonical_root: impl FnOnce() -> Result<&'a Path, CaptureError>,
+) -> Containment {
+    let absolute = root.join(rel_path);
+    let Some(parent) = absolute.parent() else {
+        return Containment::Escaped;
+    };
+    let canonical_parent = match parent.canonicalize() {
+        Ok(real) => real,
+        Err(err) if absent_error(&err) => return Containment::Absent,
+        Err(_) => return Containment::Escaped,
+    };
+    let Ok(canonical_root) = canonical_root() else {
+        return Containment::Escaped;
+    };
+    // A root moved behind a symlink now resolves somewhere other than this
+    // cached location and is refused. Replacing a directory in place at the
+    // same canonical pathname remains indistinguishable by path, the same
+    // identity limitation as the previous per-read resolution.
+    contained_parent(canonical_root, rel_path, &canonical_parent)
 }
 
 /// The canonical location `rel_path` would have if NO ancestor were a
