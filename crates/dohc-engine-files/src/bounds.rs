@@ -61,7 +61,7 @@ pub struct ScanBounds {
 
 impl Default for ScanBounds {
     /// Tuned defaults for a desktop workspace: 200k files, 64 MiB per file,
-    /// 64 KiB read buffer (matching the TS/accelerator scan buffer), 4 hash
+    /// 64 KiB read buffer (matching the TS/accelerator scan buffer), 8 hash
     /// workers, 200k diff entries.
     fn default() -> Self {
         ScanBounds {
@@ -72,7 +72,7 @@ impl Default for ScanBounds {
             max_file_bytes: 64 * 1024 * 1024,
             // Infallible: 64 * 1024 is non-zero.
             read_buffer_bytes: NonZeroUsize::new(64 * 1024).unwrap_or(NonZeroUsize::MIN),
-            hash_workers: NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+            hash_workers: NonZeroUsize::new(8).unwrap_or(NonZeroUsize::MIN),
             max_diff_entries: 200_000,
             over_cap: OverCapPolicy::Skip,
         }
