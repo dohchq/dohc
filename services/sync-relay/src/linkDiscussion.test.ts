@@ -2160,7 +2160,8 @@ describe("share discussion HTTP boundary", () => {
         expect(settled.status).toBe(200);
         expect(await body(settled)).toMatchObject({
           access: "view",
-          cursorRevision: 0,
+          latestRevision: 1,
+          cursorRevision: 1,
           messages: [],
         });
       } else {
@@ -2220,6 +2221,45 @@ describe("share discussion HTTP boundary", () => {
     await revoke.arrayBuffer();
     expect(await genericRefusal(await recipientWait)).toContain("404:");
     expect(accessHub.stats()).toEqual({ shares: 0, waiters: 0 });
+  });
+
+  it("does not park when link access narrows between observation and waiter registration", async () => {
+    const activityHub = new DiscussionActivityHub();
+    const test = await fixture({ discussionActivity: activityHub });
+    let shouldPark: boolean | undefined;
+    vi.spyOn(activityHub, "wait").mockImplementation(
+      async (_shareId, _actorId, options) => {
+        const narrowed = test.storage.retuneShareGrant({
+          shareId: SHARE,
+          grantId: test.comment.grantId,
+          access: "view",
+          changedAtMs: 20_000,
+          expectedDependentGrantIds: [],
+          guard: () => {},
+        });
+        expect(narrowed.ok).toBe(true);
+        shouldPark = options.shouldPark();
+      },
+    );
+
+    const response = await test.handler(
+      linkRequest(
+        test.comment,
+        "/sync/link/discussion/activity?since=0&hold=30000&limit=100",
+        {},
+        { profileSecret: PROFILE_A },
+      ),
+    );
+
+    expect(response.status).toBe(200);
+    expectPrivate(response);
+    expect(shouldPark).toBe(false);
+    expect(await body(response)).toMatchObject({
+      access: "view",
+      latestRevision: 1,
+      cursorRevision: 1,
+      messages: [],
+    });
   });
 
   it("shares one mixed timeline across View and Comment links without aggregating write authority", async () => {

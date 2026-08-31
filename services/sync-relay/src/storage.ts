@@ -3607,6 +3607,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         this.pruneRetiredLinkCredentials(grant.grantId);
         this.incrementActiveDependentGenerations(grant.grantId);
       } else {
+        this.nextShareDiscussionRevision(grant.shareId);
         for (const dependent of dependents) {
           const dependentRank = shareAccessRank(dependent.access);
           if (dependentRank > to) {
