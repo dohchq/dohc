@@ -398,6 +398,7 @@ export function RelayShareDialog(props: {
   const latestMutationRequest = useRef(0);
   const latestNamedInventoryRequest = useRef(0);
   const latestDiscussionRequestByShareId = useRef(new Map<string, number>());
+  const activeFullDiscussionRequestByShareId = useRef(new Map<string, number>());
   const latestActivityGenerationByShareId = useRef(new Map<string, number>());
   const ownerActivityByShareId = useRef(new Map<string, OwnerActivityControl>());
   const expandedOwnerShareIdsRef = useRef(new Set<string>());
@@ -877,8 +878,17 @@ export function RelayShareDialog(props: {
     ) {
       return;
     }
+    if (
+      cursor !== undefined &&
+      activeFullDiscussionRequestByShareId.current.has(shareId)
+    ) {
+      return;
+    }
     if (cursor === undefined) stopOwnerActivity(shareId);
     const requestId = nextDiscussionRequest(shareId);
+    if (cursor === undefined) {
+      activeFullDiscussionRequestByShareId.current.set(shareId, requestId);
+    }
     updateOwnerDiscussion(shareId, (current) => ({
       ...current,
       loading: cursor === undefined,
@@ -950,6 +960,12 @@ export function RelayShareDialog(props: {
         failedReadCursor: cursor ?? null,
       }));
     } finally {
+      if (
+        cursor === undefined &&
+        activeFullDiscussionRequestByShareId.current.get(shareId) === requestId
+      ) {
+        activeFullDiscussionRequestByShareId.current.delete(shareId);
+      }
       if (isCurrentDiscussionRequest(scopeGeneration, requestId, shareId)) {
         updateOwnerDiscussion(shareId, (current) => ({
           ...current,
@@ -2081,7 +2097,7 @@ export function RelayShareDialog(props: {
 
                           {ownerDiscussion.nextCursor !== null ? (
                             <SecondaryButton
-                              disabled={ownerDiscussion.paging}
+                              disabled={ownerDiscussion.loading || ownerDiscussion.paging}
                               onClick={() =>
                                 void refreshOwnerDiscussion(
                                   group.shareId,

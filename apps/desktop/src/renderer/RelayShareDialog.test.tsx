@@ -3084,6 +3084,106 @@ describe("RelayShareDialog", () => {
     );
   });
 
+  it("keeps an authoritative reconciliation ahead of a blocked history-page request", async () => {
+    const available = linkComment("message-1", "Moderate after commit");
+    const blocked = linkComment("message-1", "Moderate after commit", {
+      blocked: true,
+    });
+    const reconciliation = controllable<DiscussionPage>();
+    const mutation = controllable<unknown>();
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("link-1", { shareId: "share-1" })],
+    });
+    bridgeMock.listRelayShareDiscussion
+      .mockResolvedValueOnce(
+        discussionPage([available], {
+          activityRevision: 81,
+          nextCursor: "older-page",
+        }),
+      )
+      .mockReturnValueOnce(reconciliation.promise);
+    bridgeMock.blockRelayShareDiscussionPrincipal.mockReturnValueOnce(
+      mutation.promise,
+    );
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await openOwnerComments(user, "share-1");
+    const row = await within(group).findByTestId("share-comment-message-1");
+    await vi.waitFor(() => {
+      expect(bridgeMock.pollRelayShareDiscussionActivity).toHaveBeenCalledTimes(1);
+    });
+    const oldPoll = bridgeMock.pollRelayShareDiscussionActivity.mock.calls[0]![0];
+    const showMore = within(group).getByRole("button", {
+      name: "Show more comments",
+    });
+
+    await user.click(within(row).getByRole("button", { name: "Block" }));
+    await user.click(
+      within(within(group).getByTestId("owner-comments-confirmation")).getByRole(
+        "button",
+        { name: "Block" },
+      ),
+    );
+
+    await act(async () => {
+      mutation.reject(new Error("block response lost after commit"));
+      await Promise.resolve();
+      fireEvent.click(showMore);
+    });
+    await vi.waitFor(() => {
+      expect(bridgeMock.listRelayShareDiscussion).toHaveBeenCalledTimes(2);
+    });
+    expect(bridgeMock.listRelayShareDiscussion).toHaveBeenNthCalledWith(2, {
+      workspaceId: "ws-1",
+      shareId: "share-1",
+      direction: "newest-first",
+    });
+    expect(within(group).queryByText("Couldn't complete that change.")).not.toBeNull();
+    expect(
+      within(group)
+        .getByRole("button", { name: "Show more comments" })
+        .hasAttribute("disabled"),
+    ).toBe(true);
+    expect(bridgeMock.listRelayShareDiscussion).toHaveBeenCalledTimes(2);
+    expect(within(group).queryByText("Couldn't complete that change.")).not.toBeNull();
+
+    await act(async () => {
+      reconciliation.resolve(
+        discussionPage([blocked], {
+          activityRevision: 82,
+          nextCursor: "older-page",
+        }),
+      );
+    });
+
+    const refreshedRow = within(group).getByTestId("share-comment-message-1");
+    expect(
+      within(refreshedRow).queryByRole("button", { name: "Unblock" }),
+    ).not.toBeNull();
+    expect(within(group).queryByText("Couldn't complete that change.")).toBeNull();
+    expect(bridgeMock.cancelRelayShareDiscussionActivity).toHaveBeenCalledWith({
+      pollId: oldPoll.pollId,
+    });
+    await vi.waitFor(() => {
+      expect(bridgeMock.pollRelayShareDiscussionActivity).toHaveBeenCalledTimes(2);
+    });
+    expect(bridgeMock.pollRelayShareDiscussionActivity).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        workspaceId: "ws-1",
+        shareId: "share-1",
+        since: 82,
+      }),
+    );
+  });
+
   it("reconciles lost block and unblock responses without reading either inventory", async () => {
     const available = linkComment("message-1", "Moderate after commit");
     const blocked = linkComment("message-1", "Moderate after commit", {
