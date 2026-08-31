@@ -2123,10 +2123,11 @@ struct ResolvedCaptureObject {
 
 /// Transaction-local facts shared by one actor-owned capture batch.
 ///
-/// The runtime advances `next_moment_order` only after an item's savepoint has
-/// been released. Keeping the proposed order immutable while an item runs
-/// makes a failed or deduped item consume nothing, while still giving object
-/// disambiguation and moment derivation the exact same candidate.
+/// The runtime advances `next_moment_order` only after an item's effects have
+/// been accepted by the surrounding rollback scope. Keeping the proposed order
+/// immutable while an item runs makes a failed or deduped item consume nothing,
+/// while still giving object disambiguation and moment derivation the same
+/// candidate.
 #[doc(hidden)]
 pub struct CaptureIngestBatchContext {
     workspace_id: String,
@@ -2162,7 +2163,7 @@ impl CaptureIngestBatchContext {
         })
     }
 
-    /// Advance after the item's savepoint has committed all of its side
+    /// Advance after the surrounding rollback scope accepts the item's side
     /// effects. A dedupe points at an existing moment and consumes no order.
     pub fn commit_result(&mut self, result: &WriteResult) -> Result<(), DomainError> {
         if result.deduped {

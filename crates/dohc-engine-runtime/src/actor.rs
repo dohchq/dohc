@@ -2573,9 +2573,9 @@ impl ActorHandle {
         )
     }
 
-    /// Capture a bounded text chunk in one durable transaction. Each item is
-    /// isolated by a savepoint and receives its own result after the chunk
-    /// commit succeeds.
+    /// Capture a bounded text chunk in one durable transaction. A clean chunk
+    /// shares one rollback scope. If an item fails, the chunk is replayed with
+    /// per-item savepoints so successful siblings still commit.
     pub fn capture_ingest_batch_blocking(
         &self,
         inputs: Vec<CaptureIngest>,
@@ -14741,38 +14741,163 @@ fn capture_ingest_batch_on_store(
     }
 
     let outcome = store.write_with(faults, |tx| {
-        let mut results = Vec::with_capacity(inputs.len());
         let indexing = CaptureIndexing::UseSnapshot(Arc::clone(search_policy));
-        let mut batch = CaptureBatchSharedContext {
-            capture: CaptureIngestBatchContext::new(tx, &first.workspace_id, &first.version_id)?,
-            has_ydoc_state: None,
-            journals_file_moments: None,
-        };
-        for input in inputs {
-            tx.execute_batch("SAVEPOINT dohc_capture_batch_item")
-                .map_err(StorageError::persist_public)?;
-            match capture_ingest_in_tx(tx, input, &indexing, leases, Some(&mut batch)) {
-                Ok(result) => {
-                    tx.execute_batch("RELEASE dohc_capture_batch_item")
-                        .map_err(StorageError::persist_public)?;
-                    batch.capture.commit_result(&result)?;
-                    results.push(Ok(result));
-                }
-                Err(error) => {
-                    tx.execute_batch(
-                        "ROLLBACK TO dohc_capture_batch_item; \
-                         RELEASE dohc_capture_batch_item",
-                    )
+
+        // Most startup batches are clean. Keep their database and FTS work in
+        // one rollback scope instead of preparing and releasing a savepoint
+        // for every file. If any item needs isolation, roll the optimistic
+        // attempt back and replay through the existing partial-success path.
+        // Callers therefore keep the same per-item result contract while the
+        // common case pays one savepoint per batch rather than one per file.
+        tx.execute_batch("SAVEPOINT dohc_capture_batch_fast")
+            .map_err(StorageError::persist_public)?;
+        match capture_ingest_batch_all_or_none_in_tx(tx, inputs, &indexing, leases) {
+            Ok(results) => {
+                tx.execute_batch("RELEASE dohc_capture_batch_fast")
                     .map_err(StorageError::persist_public)?;
-                    results.push(Err(error));
-                }
+                Ok(results.into_iter().map(Ok).collect())
+            }
+            Err(_) => {
+                tx.execute_batch(
+                    "ROLLBACK TO dohc_capture_batch_fast; \
+                     RELEASE dohc_capture_batch_fast",
+                )
+                .map_err(StorageError::persist_public)?;
+                capture_ingest_batch_with_item_savepoints_in_tx(tx, inputs, &indexing, leases)
             }
         }
-        Ok::<_, RuntimeError>(results)
     })?;
     match outcome {
         TxnOutcome::Committed(results) => Ok(results),
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
+}
+
+fn capture_ingest_batch_all_or_none_in_tx(
+    tx: &Transaction<'_>,
+    inputs: &[CaptureIngest],
+    indexing: &CaptureIndexing,
+    leases: &LeaseRegistry,
+) -> Result<Vec<WriteResult>, RuntimeError> {
+    let first = inputs.first().ok_or(DomainError::InvalidInput {
+        reason: "capture batch is empty",
+    })?;
+    let mut results = Vec::with_capacity(inputs.len());
+    let mut batch = CaptureBatchSharedContext {
+        capture: CaptureIngestBatchContext::new(tx, &first.workspace_id, &first.version_id)?,
+        has_ydoc_state: None,
+        journals_file_moments: None,
+    };
+    for input in inputs {
+        let result = capture_ingest_in_tx(tx, input, indexing, leases, Some(&mut batch))?;
+        batch.capture.commit_result(&result)?;
+        results.push(result);
+    }
+    Ok(results)
+}
+
+fn capture_ingest_batch_with_item_savepoints_in_tx(
+    tx: &Transaction<'_>,
+    inputs: &[CaptureIngest],
+    indexing: &CaptureIndexing,
+    leases: &LeaseRegistry,
+) -> Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError> {
+    let first = inputs.first().ok_or(DomainError::InvalidInput {
+        reason: "capture batch is empty",
+    })?;
+    let mut results = Vec::with_capacity(inputs.len());
+    let mut batch = CaptureBatchSharedContext {
+        capture: CaptureIngestBatchContext::new(tx, &first.workspace_id, &first.version_id)?,
+        has_ydoc_state: None,
+        journals_file_moments: None,
+    };
+    for input in inputs {
+        tx.execute_batch("SAVEPOINT dohc_capture_batch_item")
+            .map_err(StorageError::persist_public)?;
+        match capture_ingest_in_tx(tx, input, indexing, leases, Some(&mut batch)) {
+            Ok(result) => {
+                tx.execute_batch("RELEASE dohc_capture_batch_item")
+                    .map_err(StorageError::persist_public)?;
+                batch.capture.commit_result(&result)?;
+                results.push(Ok(result));
+            }
+            Err(error) => {
+                tx.execute_batch(
+                    "ROLLBACK TO dohc_capture_batch_item; \
+                     RELEASE dohc_capture_batch_item",
+                )
+                .map_err(StorageError::persist_public)?;
+                results.push(Err(error));
+            }
+        }
+    }
+    Ok(results)
+}
+
+#[cfg(test)]
+mod capture_batch_fast_path_tests {
+    use super::*;
+    use dohc_engine_testkit::ScratchDir;
+    use rusqlite::hooks::{AuthAction, Authorization, TransactionOperation};
+    use std::sync::Mutex;
+
+    #[test]
+    fn clean_capture_batch_uses_one_batch_savepoint() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let db = scratch.engine_db_path().expect("engine database path");
+        let mut store = EngineStore::open(&db, 1).expect("open store");
+        let begun_savepoints = Arc::new(Mutex::new(Vec::new()));
+        let observed_savepoints = Arc::clone(&begun_savepoints);
+        store
+            .read_with(|conn| {
+                conn.authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
+                    if let AuthAction::Savepoint {
+                        operation: TransactionOperation::Begin,
+                        savepoint_name,
+                    } = context.action
+                    {
+                        observed_savepoints
+                            .lock()
+                            .expect("record begun savepoint")
+                            .push(savepoint_name.to_owned());
+                    }
+                    Authorization::Allow
+                }))
+            })
+            .expect("install savepoint observer");
+        let inputs = (0..3)
+            .map(|index| CaptureIngest {
+                workspace_id: "fresh-batch-workspace".to_owned(),
+                version_id: "main".to_owned(),
+                path: format!("note-{index}.md"),
+                text: format!("body {index}"),
+                metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
+                metadata_summary: Some("Reconciled offline edits".to_owned()),
+                metadata_correlation_id: Some("fresh-batch".to_owned()),
+                author_json: None,
+                now_ms: 2,
+                request_id: None,
+                claim_foreign_head: false,
+            })
+            .collect::<Vec<_>>();
+        let policy = Arc::new(read_engine_search_policy(scratch.path()));
+
+        let results = capture_ingest_batch_on_store(
+            &mut store,
+            &inputs,
+            &policy,
+            &LeaseRegistry::new(),
+            &NoFaults,
+            &CancellationToken::new(),
+        )
+        .expect("capture clean batch");
+
+        assert!(results.iter().all(Result::is_ok));
+        assert_eq!(
+            *begun_savepoints.lock().expect("read begun savepoints"),
+            vec!["dohc_capture_batch_fast"],
+            "a clean batch must use one rollback scope instead of one per item"
+        );
     }
 }
 

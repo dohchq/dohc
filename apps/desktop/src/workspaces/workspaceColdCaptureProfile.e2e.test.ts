@@ -1,5 +1,5 @@
-import { randomBytes } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { createHash, randomBytes } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { setTimeout as delay } from "node:timers/promises";
@@ -149,14 +149,17 @@ it.skipIf(fileCount === 0 || engine.missing)(
       attachmentId: Symbol(`cold-capture-profile-${fileCount}`),
     };
     const binary = engine.require();
+    const engineSha256 = createHash("sha256")
+      .update(await readFile(binary))
+      .digest("hex");
     let client = await startClient(binary);
     let sessions = createRealDaemonWorkspaceSessions(
       { currentClient: () => client },
       { workspaceOpenDeadlineMs: PROFILE_OPEN_DEADLINE_MS },
     );
     let openMs = 0;
-    let historyAcceptedMs = 0;
     let readyMs = 0;
+    let verificationMs = 0;
     let captured = { moments: 0, paths: 0, latestMomentOrder: 0 };
     let restarted = { moments: 0, paths: 0, latestMomentOrder: 0 };
     try {
@@ -164,11 +167,11 @@ it.skipIf(fileCount === 0 || engine.missing)(
       await sessions.run(workspace, async () => undefined);
       openMs = performance.now() - openedAt;
       captured = await waitForDurableMoments(sessions, workspace, () => {
-        if (historyAcceptedMs === 0) {
-          historyAcceptedMs = performance.now() - openedAt;
+        if (readyMs === 0) {
+          readyMs = performance.now() - openedAt;
         }
       });
-      readyMs = performance.now() - openedAt;
+      verificationMs = performance.now() - openedAt;
 
       await sessions.closeAll();
       await stopClient(client);
@@ -191,13 +194,14 @@ it.skipIf(fileCount === 0 || engine.missing)(
     const result = {
       fileCount,
       openMs,
-      historyAcceptedMs,
       readyMs,
+      verificationMs,
       captured,
       restarted,
       maxOpenMs,
       maxReadyMs,
       searchMode,
+      engineSha256,
     };
     console.log(`COLD_CAPTURE_PROFILE ${JSON.stringify(result)}`);
     const output = process.env[OUTPUT_ENV]?.trim();
