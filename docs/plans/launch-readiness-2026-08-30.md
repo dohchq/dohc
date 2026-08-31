@@ -197,8 +197,8 @@ Raw evidence stays out of Git. The manifest, checks, findings, and decisions sta
 - Release configuration: set both managed Cloud origins for a managed-service
   build. Missing or invalid configuration is now an honest, recoverable state.
 - Final gates: the canonical Rust gate passed 2,255 workspace tests and the
-  195-test crash tier; the desktop gate passed 7,687 tests; all 21 typecheck
-  projects and the production desktop build passed.
+  195-test crash tier; every desktop test, all 21 typecheck projects, and the
+  production desktop build passed.
 - Final Windows tour: the packaged Cloud dialog clearly separated an
   unconfigured managed build from self-hosting, used neutral HTTPS examples,
   and focused the first field after a specific blank-submit error.
