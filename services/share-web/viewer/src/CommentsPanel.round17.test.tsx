@@ -565,6 +565,96 @@ describe("CommentsPanel monotonic composer", () => {
     expect(container.textContent).not.toContain("The owner turned off comments");
   });
 
+  it("keeps earlier history behind recovery and adopts the recovery cursor", async () => {
+    const terminal = heldJsonResponse(200);
+    const recoveryPage = heldJsonResponse(200);
+    const recoveryActivity = heldJsonResponse(200);
+    const earlierRequests: string[] = [];
+    let newestLoads = 0;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/discussion?direction=newest-first") {
+        newestLoads += 1;
+        return newestLoads === 1
+          ? page({ messages: [OLD_MESSAGE], nextCursor: "old_cursor" })
+          : recoveryPage.response;
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        return terminal.response;
+      }
+      if (path === "/api/view/discussion/activity?since=12&hold=0&limit=100") {
+        return recoveryActivity.response;
+      }
+      if (path.includes("/api/view/discussion?direction=newest-first&cursor=")) {
+        earlierRequests.push(path);
+        if (path.endsWith("cursor=new_cursor")) {
+          return page({
+            messages: [{
+              messageId: "message-earlier-recovered",
+              createdAtMs: 1_500,
+              deleted: false,
+              body: "Earlier recovered timeline",
+              author: { kind: "named", displayName: "Owner" },
+            }],
+          });
+        }
+        return await new Promise<Response>(() => undefined);
+      }
+      return await new Promise<Response>(() => undefined);
+    }));
+
+    await render();
+    await settle(terminal.bodyStarted);
+    terminal.release({ ok: true, internal: true });
+    await settle(() => container.textContent?.includes("Comments stopped updating.") === true);
+
+    click("Try again");
+    await settle(recoveryPage.bodyStarted);
+    expect(button("Load earlier comments").disabled).toBe(true);
+
+    const guardedEarlierButton = button("Load earlier comments");
+    guardedEarlierButton.disabled = false;
+    click("Load earlier comments");
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(earlierRequests).toEqual([]);
+
+    recoveryPage.release({
+      ok: true,
+      activityRevision: 12,
+      messages: [NEW_MESSAGE],
+      nextCursor: "new_cursor",
+      profileName: null,
+    });
+    await settle(recoveryActivity.bodyStarted);
+    expect(container.textContent).toContain("Recovered timeline");
+    expect(container.textContent).not.toContain("Old timeline");
+
+    recoveryActivity.release({
+      ok: true,
+      access: "comment",
+      latestRevision: 13,
+      cursorRevision: 13,
+      hasMore: false,
+      messages: [],
+      composerState: "available",
+      profileName: null,
+    });
+    await settle(() => button("Load earlier comments").disabled === false);
+    click("Load earlier comments");
+    await settle(() => earlierRequests.length === 1);
+
+    expect(earlierRequests).toEqual([
+      "/api/view/discussion?direction=newest-first&cursor=new_cursor",
+    ]);
+    await settle(() =>
+      container.textContent?.includes("Earlier recovered timeline") === true
+    );
+    expect(container.textContent).toContain("Recovered timeline");
+    expect(container.textContent).not.toContain("Old timeline");
+  });
+
   it("preserves a pending post through terminal entry and recovery", async () => {
     const heldPost = heldJsonResponse(403);
     const terminal = heldJsonResponse(200);

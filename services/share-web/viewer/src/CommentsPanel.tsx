@@ -441,6 +441,7 @@ export function CommentsPanel(props: {
       cursor === null ||
       token === null ||
       controller === null ||
+      followerPhaseRef.current !== "live" ||
       earlierPendingRef.current
     ) {
       return;
@@ -696,7 +697,7 @@ export function CommentsPanel(props: {
           <div className="comment-submit-row">
             <button
               type="button"
-              disabled={earlierPending}
+              disabled={earlierPending || followerPhase !== "live"}
               onClick={() => void loadEarlierComments()}
             >
               Load earlier comments
