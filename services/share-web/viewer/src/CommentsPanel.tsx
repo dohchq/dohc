@@ -1,3 +1,4 @@
+import { normalizeShareDiscussionBody } from "@dohc/security-contract/share-discussion";
 import {
   type FormEvent,
   useEffect,
@@ -265,6 +266,8 @@ export function CommentsPanel(props: {
   const pendingRef = useRef(false);
   const intentRef = useRef<SubmitIntent | null>(null);
   const onAccessChangeRef = useRef(props.onAccessChange);
+  const normalizedBody = normalizeShareDiscussionBody(body);
+  const bodyInvalid = body.length > 0 && normalizedBody === null;
   sessionRef.current = props.session;
   onAccessChangeRef.current = props.onAccessChange;
 
@@ -444,12 +447,12 @@ export function CommentsPanel(props: {
     if (
       props.access !== "comment" ||
       composerState !== "available" ||
-      body.length === 0 ||
+      normalizedBody === null ||
       pendingRef.current
     ) {
       return;
     }
-    const intent = exactIntent(intentRef.current, body, claimedName);
+    const intent = exactIntent(intentRef.current, normalizedBody, claimedName);
     intentRef.current = intent;
     const token = Symbol("discussion-submit");
     const session = props.session;
@@ -533,9 +536,11 @@ export function CommentsPanel(props: {
     ? "The owner turned off comments for this browser."
     : composerState === "paused"
       ? "The owner paused comments. You can still read everything."
-      : submitError
-        ? "The comment didn't post. Try again."
-        : "";
+      : bodyInvalid
+        ? "This comment is too long. Shorten it before posting."
+        : submitError
+          ? "The comment didn't post. Try again."
+          : "";
   return (
     <aside className="comments-panel" aria-labelledby="comments-title">
       <h2 id="comments-title">Comments</h2>
@@ -608,7 +613,7 @@ export function CommentsPanel(props: {
             onChange={(event) => editDraft("body", event.currentTarget.value)}
           />
           <div className="comment-submit-row">
-            <button type="submit" disabled={disabled || body.length === 0}>
+            <button type="submit" disabled={disabled || normalizedBody === null}>
               Post comment
             </button>
           </div>

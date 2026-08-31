@@ -462,6 +462,65 @@ describe("CommentsPanel", () => {
     expect(row?.querySelector("article.markdown")).toBeNull();
   });
 
+  it.each([
+    ["2,001 normalized code points", "\u00e9".repeat(2_001)],
+    [
+      "a raw UTF-8-over-limit value that NFC could otherwise shrink",
+      "\u1100\u1161\u11a8".repeat(889),
+    ],
+  ] as const)(
+    "blocks %s locally and recovers after the draft becomes valid",
+    async (_case, invalidDraft) => {
+      const posted: Array<Record<string, unknown>> = [];
+      vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+        if (requestPath(input) !== "/api/view/discussion" || init?.method !== "POST") {
+          return discussionPage();
+        }
+        const intent = JSON.parse(String(init.body)) as Record<string, unknown>;
+        posted.push(intent);
+        return jsonResponse({
+          ok: true,
+          message: {
+            ...LINK_MESSAGE,
+            messageId: "recovered-post",
+            createdAtMs: 4_000,
+            body: intent.body,
+          },
+        });
+      }));
+
+      await render("comment");
+      setControlValue(bodyInput(), invalidDraft);
+
+      expect(bodyInput().value).toBe(invalidDraft);
+      expect(bodyInput().disabled).toBe(false);
+      expect(submitButton().disabled).toBe(true);
+      expect(submitButton().textContent).toBe("Post comment");
+      const submitStatus = container.querySelector(".comment-submit-status");
+      expect(submitStatus?.textContent).toBe(
+        "This comment is too long. Shorten it before posting.",
+      );
+      expect(submitStatus?.id).toBe("comment-submit-status");
+      expect(bodyInput().getAttribute("aria-describedby")).toContain(submitStatus?.id);
+      submit();
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(posted).toHaveLength(0);
+
+      const validDraft = "Recovered e\u0301";
+      setControlValue(bodyInput(), validDraft);
+
+      expect(container.querySelector(".comment-submit-status")?.textContent).toBe("");
+      expect(submitButton().disabled).toBe(false);
+      submit();
+      await settle(() => posted.length === 1 && bodyInput().value === "");
+
+      expect(posted).toHaveLength(1);
+      expect(posted[0]?.body).toBe("Recovered \u00e9");
+    },
+  );
+
   it("keeps one intent key through a generic failure and deliberate retry, then changes it on edit", async () => {
     let releaseFirst: (() => void) | undefined;
     const heldFirst = new Promise<void>((resolve) => {
