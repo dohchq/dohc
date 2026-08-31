@@ -139,6 +139,37 @@ describe("TableView", () => {
     });
   });
 
+  it("emits an option create carrying the record, field, option, and value", () => {
+    const onCellChange = vi.fn();
+    const onCreateOption = vi.fn();
+    const records = [
+      makeRecord("rec-0", [
+        indexedValue("title", "Task 0"),
+        indexedValue("status", "todo"),
+      ]),
+    ];
+    render(
+      <TableView
+        schema={makeSchema()}
+        records={records}
+        onCellChange={onCellChange}
+        onCreateOption={onCreateOption}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "todo" }));
+    const input = screen.getByLabelText<HTMLInputElement>("Add option");
+    fireEvent.change(input, { target: { value: "later" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onCreateOption).toHaveBeenCalledExactlyOnceWith({
+      recordId: "rec-0",
+      recordPath: "tasks/rec-0.md",
+      field: "status",
+      option: "later",
+      value: "later",
+    });
+    expect(onCellChange).not.toHaveBeenCalled();
+  });
+
   it("shows the empty state when the collection has no records", () => {
     render(<TableView schema={makeSchema()} records={[]} />);
     expect(screen.getByText("No records in this collection yet.")).toBeDefined();

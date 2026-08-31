@@ -194,6 +194,80 @@ describe("FieldCell editing", () => {
     expect(onChange).toHaveBeenCalledExactlyOnceWith("2026-10-01");
   });
 
+  it("hands a typed unknown select option to onCreateOption, not onChange", () => {
+    const onChange = vi.fn();
+    const onCreateOption = vi.fn();
+    render(
+      <FieldCell
+        field={field("status")}
+        indexed={indexedValue("status", "todo")}
+        onChange={onChange}
+        onCreateOption={onCreateOption}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button"));
+    const input = screen.getByLabelText<HTMLInputElement>("Add option");
+    fireEvent.change(input, { target: { value: "later" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onCreateOption).toHaveBeenCalledExactlyOnceWith("later", "later");
+    expect(onChange).not.toHaveBeenCalled();
+    // The editor closed; the cell is back to its display button.
+    expect(screen.getByRole("button")).toBeDefined();
+  });
+
+  it("picks an existing option typed into the add input instead of forking it", () => {
+    const onChange = vi.fn();
+    const onCreateOption = vi.fn();
+    render(
+      <FieldCell
+        field={field("status")}
+        indexed={indexedValue("status", "todo")}
+        onChange={onChange}
+        onCreateOption={onCreateOption}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button"));
+    const input = screen.getByLabelText<HTMLInputElement>("Add option");
+    fireEvent.change(input, { target: { value: "shipped" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onChange).toHaveBeenCalledExactlyOnceWith("shipped");
+    expect(onCreateOption).not.toHaveBeenCalled();
+  });
+
+  it("hands a typed unknown multi-select option with the extended selection", () => {
+    const onChange = vi.fn();
+    const onCreateOption = vi.fn();
+    render(
+      <FieldCell
+        field={field("tags")}
+        indexed={indexedValue("tags", ["alpha"])}
+        onChange={onChange}
+        onCreateOption={onCreateOption}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button"));
+    const input = screen.getByLabelText<HTMLInputElement>("Add option");
+    fireEvent.change(input, { target: { value: "delta" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onCreateOption).toHaveBeenCalledExactlyOnceWith("delta", [
+      "alpha",
+      "delta",
+    ]);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("offers no add input without onCreateOption", () => {
+    render(
+      <FieldCell
+        field={field("status")}
+        indexed={indexedValue("status", "todo")}
+        onChange={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button"));
+    expect(screen.queryByLabelText("Add option")).toBeNull();
+  });
+
   it("commits a select choice, empty as null", () => {
     const onChange = vi.fn();
     render(

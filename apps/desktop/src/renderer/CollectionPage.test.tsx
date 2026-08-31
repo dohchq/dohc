@@ -3,10 +3,12 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import type {
-  CollectionRecord,
-  CollectionSchema,
+import {
+  parseCollectionSchema,
+  type CollectionRecord,
+  type CollectionSchema,
 } from "@dohc/workspace-contracts";
+import { serializeCollectionSchema } from "./collections/schemaAuthoring";
 import type {
   GetCollectionResult,
   QueryCollectionRecordsResult,
@@ -118,8 +120,18 @@ function record(id: string, title: string): CollectionRecord {
   };
 }
 
-function makeBridge(records: CollectionRecord[]) {
+// A content hash the stub can advance per write; main's real hashes are
+// SHA-256, but the renderer only round-trips the value.
+const hashFor = (writes: number) => String(writes).padStart(64, "0");
+
+function makeBridge(records: CollectionRecord[], schema: CollectionSchema = SCHEMA) {
   const activityCallbacks = new Set<(event: WorkspaceActivityEvent) => void>();
+  // The schema round-trips through the stub the way it does through the
+  // engine: reads serve the last written text's parse, writes conflict on a
+  // stale expected identity.
+  let currentSchema = schema;
+  let contentHash = hashFor(0);
+  let writes = 0;
   return {
     emitWorkspaceActivity: (event: WorkspaceActivityEvent) => {
       for (const callback of [...activityCallbacks]) callback(event);
@@ -129,9 +141,28 @@ function makeBridge(records: CollectionRecord[]) {
         path: "tasks",
         status: "valid",
         reasons: [],
-        schema: SCHEMA,
+        schema: currentSchema,
         recordCount: records.length,
       }),
+    ),
+    listCollections: vi.fn(async () => ({
+      collections: [{ path: "tasks", status: "valid", reasons: [] }],
+    })),
+    readWorkspaceText: vi.fn(async () => ({
+      text: serializeCollectionSchema(currentSchema),
+      truncated: false as const,
+      contentHash,
+    })),
+    writeWorkspaceText: vi.fn(
+      async (payload: { text: string; expectedContentHash: string }) => {
+        if (payload.expectedContentHash !== contentHash) {
+          return { status: "conflict" as const, currentContentHash: contentHash };
+        }
+        currentSchema = parseCollectionSchema(payload.text).schema;
+        writes += 1;
+        contentHash = hashFor(writes);
+        return { status: "written" as const, contentHash };
+      },
     ),
     queryCollectionRecords: vi.fn(
       async (): Promise<QueryCollectionRecordsResult> => ({
@@ -224,6 +255,202 @@ describe("CollectionPage", () => {
     expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(2);
     // Schema edits arrive the same way, so the details re-read rides along.
     expect(bridge.getCollection.mock.calls.length).toBe(detailReads + 1);
+  });
+});
+
+const SELECT_SCHEMA: CollectionSchema = {
+  name: "Tasks",
+  description: null,
+  fields: [
+    { name: "title", type: "text" },
+    { name: "status", type: "select", options: ["Todo"] },
+  ],
+  views: [],
+};
+
+function selectRecord(): CollectionRecord {
+  return {
+    id: "rec-1",
+    path: "tasks/Plan.md",
+    conflicted: false,
+    values: [
+      {
+        field: "title",
+        value: "Plan",
+        validation: { status: "valid" },
+        resolvedRelations: [],
+      },
+      {
+        field: "status",
+        value: "Todo",
+        validation: { status: "valid" },
+        resolvedRelations: [],
+      },
+    ],
+  };
+}
+
+function lastWrittenSchema(bridge: ReturnType<typeof makeBridge>) {
+  const call = bridge.writeWorkspaceText.mock.calls.at(-1);
+  if (!call) throw new Error("no schema write");
+  return parseCollectionSchema(call[0].text);
+}
+
+describe("collection authoring", () => {
+  it("adds a field through one schema rewrite with the file's expected identity", async () => {
+    const bridge = makeBridge([record("rec-1", "Plan")]);
+    renderPage(bridge);
+    await screen.findByText("Plan");
+
+    fireEvent.click(screen.getByTestId("collection-fields-button"));
+    fireEvent.change(screen.getByLabelText("Field name"), {
+      target: { value: "Status" },
+    });
+    fireEvent.change(screen.getByLabelText("Field type"), {
+      target: { value: "select" },
+    });
+    fireEvent.change(screen.getByLabelText("Options"), {
+      target: { value: "Todo, Done" },
+    });
+    fireEvent.click(screen.getByTestId("collection-add-field"));
+
+    await waitFor(() =>
+      expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce(),
+    );
+    const payload = bridge.writeWorkspaceText.mock.calls[0]?.[0] as {
+      workspaceId: string;
+      relativePath: string;
+      expectedContentHash: string;
+      text: string;
+    };
+    expect(payload.workspaceId).toBe("ws-1");
+    expect(payload.relativePath).toBe("tasks/collection.yaml");
+    expect(payload.expectedContentHash).toBe(hashFor(0));
+    const written = parseCollectionSchema(payload.text);
+    expect(written.status).toBe("valid");
+    expect(written.schema.fields).toEqual([
+      { name: "title", type: "text" },
+      { name: "Status", type: "select", options: ["Todo", "Done"] },
+    ]);
+    // Round trip: the refreshed schema reaches the dialog's field list and
+    // the table header.
+    expect((await screen.findAllByText("Status")).length).toBeGreaterThan(0);
+  });
+
+  it("changes a select field's options without touching its name", async () => {
+    const bridge = makeBridge([selectRecord()], SELECT_SCHEMA);
+    renderPage(bridge);
+    await screen.findByText("Plan");
+
+    fireEvent.click(screen.getByTestId("collection-fields-button"));
+    // Renaming ships with the record-key rewrite: no edit affordance on
+    // non-select fields, and the name input stays disabled.
+    expect(screen.queryByLabelText("Edit field title")).toBeNull();
+    fireEvent.click(screen.getByLabelText("Edit field status"));
+    const name = screen.getByDisplayValue<HTMLInputElement>("status");
+    expect(name.disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText("Options"), {
+      target: { value: "Todo, Done, Later" },
+    });
+    fireEvent.click(screen.getByText("Save field"));
+
+    await waitFor(() =>
+      expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce(),
+    );
+    expect(lastWrittenSchema(bridge).schema.fields).toEqual([
+      { name: "title", type: "text" },
+      { name: "status", type: "select", options: ["Todo", "Done", "Later"] },
+    ]);
+  });
+
+  it("writes a created select option to the schema before the cell write", async () => {
+    const doc = new Y.Doc();
+    docMock.current = engineDocState({ available: true, doc });
+    const bridge = makeBridge([selectRecord()], SELECT_SCHEMA);
+    let releaseWrite!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    const write = bridge.writeWorkspaceText.getMockImplementation();
+    if (!write) throw new Error("write stub missing");
+    bridge.writeWorkspaceText.mockImplementationOnce(async (payload) => {
+      await gate;
+      return write(payload);
+    });
+    renderPage(bridge);
+    await screen.findByText("Plan");
+
+    fireEvent.click(screen.getByText("Todo"));
+    const addOption = screen.getByLabelText("Add option");
+    fireEvent.change(addOption, { target: { value: "Later" } });
+    fireEvent.keyDown(addOption, { key: "Enter" });
+
+    await waitFor(() =>
+      expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce(),
+    );
+    // The schema write has not settled: the cell write must not have run.
+    expect(doc.getMap("frontmatter").get("status")).toBeUndefined();
+
+    releaseWrite();
+    await waitFor(() =>
+      expect(doc.getMap("frontmatter").get("status")).toBe("Later"),
+    );
+    const written = lastWrittenSchema(bridge).schema;
+    expect(written.fields[1]).toEqual({
+      name: "status",
+      type: "select",
+      options: ["Todo", "Later"],
+    });
+  });
+
+  it("creates, renames, and deletes a view through schema rewrites", async () => {
+    const bridge = makeBridge([selectRecord()], SELECT_SCHEMA);
+    renderPage(bridge);
+    await screen.findByText("Plan");
+
+    fireEvent.click(screen.getByTestId("collection-views-button"));
+    fireEvent.change(screen.getByLabelText("View name"), {
+      target: { value: "Board" },
+    });
+    fireEvent.change(screen.getByLabelText("View kind"), {
+      target: { value: "board" },
+    });
+    fireEvent.change(await screen.findByLabelText("Group by"), {
+      target: { value: "status" },
+    });
+    fireEvent.click(screen.getByTestId("collection-add-view"));
+    await waitFor(() =>
+      expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce(),
+    );
+    expect(lastWrittenSchema(bridge).schema.views).toEqual([
+      {
+        name: "Board",
+        kind: "board",
+        groupBy: "status",
+        sort: [],
+        visibleFields: null,
+        dateField: null,
+      },
+    ]);
+
+    // The dialog lists the view once the refreshed schema arrives.
+    fireEvent.click(await screen.findByLabelText("Rename view Board"));
+    fireEvent.change(screen.getByDisplayValue("Board"), {
+      target: { value: "My board" },
+    });
+    fireEvent.click(screen.getByText("Save view"));
+    await waitFor(() =>
+      expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2),
+    );
+    expect(
+      lastWrittenSchema(bridge).schema.views.map((view) => view.name),
+    ).toEqual(["My board"]);
+
+    fireEvent.click(await screen.findByLabelText("Delete view My board"));
+    await waitFor(() =>
+      expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(3),
+    );
+    expect(lastWrittenSchema(bridge).schema.views).toEqual([]);
   });
 });
 

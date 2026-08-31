@@ -147,6 +147,7 @@ export function DemoSidebar(props: {
           folders={folders}
           collectionFolders={emptyCollectionFolders}
           onOpenCollection={noopOpenCollection}
+          onNewCollection={noopOpenCollection}
           editorGroups={[
             {
               id: DEMO_EDITOR_GROUP_ID,

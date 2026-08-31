@@ -124,6 +124,10 @@ export interface ExplorerProps {
   onShare: (path: string) => void;
   onRefresh: () => void;
   onNewFileDialog: () => void;
+  // "New Collection…" from the main-owned context menu: opens the shell's
+  // new-collection dialog seeded with the folder that was right-clicked
+  // ("" = root).
+  onNewCollection: (targetDir: string) => void;
 }
 
 type EditingState =
@@ -895,6 +899,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         case "new-folder":
           beginCreate("folder", targetDir);
           break;
+        case "new-collection":
+          props.onNewCollection(targetDir);
+          break;
         case "rename":
           if (path) beginRename(path, kind === "folder");
           break;
@@ -938,6 +945,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       props.onShare,
       props.onRefreshShareMounts,
       props.onUnmountShare,
+      props.onNewCollection,
     ],
   );
 

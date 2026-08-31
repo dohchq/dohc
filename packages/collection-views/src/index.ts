@@ -18,6 +18,7 @@ export {
 export {
   TableView,
   type CollectionCellChange,
+  type CollectionOptionCreate,
   type TableViewProps,
 } from "./table/TableView";
 export { BoardView, type BoardViewProps } from "./board/BoardView";

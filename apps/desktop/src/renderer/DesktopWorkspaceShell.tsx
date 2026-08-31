@@ -96,6 +96,7 @@ import {
   type ScrollTarget,
 } from "./FileInspector";
 import { NewFileDialog } from "./NewFileDialog";
+import { NewCollectionDialog } from "./collections/NewCollectionDialog";
 import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
 import { ShareHandoffSurface } from "./ShareHandoffSurface";
@@ -1553,6 +1554,11 @@ export function DesktopWorkspaceShell(props: {
   const [presenceClientId] = useState(() => crypto.randomUUID());
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [newFileOpen, setNewFileOpen] = useState(false);
+  // The New collection dialog: null = closed, otherwise the folder to
+  // create inside ("" = workspace root).
+  const [newCollectionFolder, setNewCollectionFolder] = useState<string | null>(
+    null,
+  );
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
   const [cloudOpen, setCloudOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId | null>(null);
@@ -5027,6 +5033,11 @@ export function DesktopWorkspaceShell(props: {
         run: () => requestExplorerCreate("folder"),
       },
       {
+        id: "new-collection",
+        label: "New collection",
+        run: () => setNewCollectionFolder(""),
+      },
+      {
         id: "quick-open",
         label: "Go to file",
         run: () => setQuickOpenOpen(true),
@@ -5656,6 +5667,7 @@ export function DesktopWorkspaceShell(props: {
         onShare={onSharePath}
         onRefresh={onExplorerRefresh}
         onNewFileDialog={openNewFileDialog}
+        onNewCollection={setNewCollectionFolder}
       />
     </>
   );
@@ -6914,6 +6926,32 @@ export function DesktopWorkspaceShell(props: {
             void refreshFiles().catch((error) =>
               reportShellError("Could not refresh workspace files.", error),
             );
+          }}
+        />
+      ) : null}
+      {newCollectionFolder !== null ? (
+        <NewCollectionDialog
+          workspaceId={props.workspace.workspaceId}
+          {...(newCollectionFolder !== ""
+            ? { initialFolder: newCollectionFolder }
+            : {})}
+          onClose={() => setNewCollectionFolder(null)}
+          onCreated={(path) => {
+            setNewCollectionFolder(null);
+            // Reveal the new collection folder in the tree and open its
+            // views. The engine adopts the folder from the schema write;
+            // refreshCollections routes Explorer clicks to the tab.
+            mutateWb((state) =>
+              ancestorDirs(path).reduce(
+                (acc, dir) => setFolderExpanded(acc, dir, true),
+                state,
+              ),
+            );
+            void refreshCollections();
+            void refreshFiles().catch((error) =>
+              reportShellError("Could not refresh workspace files.", error),
+            );
+            openCollectionTab(path);
           }}
         />
       ) : null}

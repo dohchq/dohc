@@ -12,6 +12,7 @@ import {
   TableView,
   useCollectionStore,
   type CollectionCellChange,
+  type CollectionOptionCreate,
 } from "@dohc/collection-views";
 import type {
   CollectionQueryParams,
@@ -22,6 +23,11 @@ import type {
 import type { WorkspaceActivityEvent } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { useEngineDoc } from "./collab/useEngineDoc";
+import { SecondaryButton } from "./ui/controls";
+import { FieldsDialog } from "./collections/FieldsDialog";
+import { ViewsDialog } from "./collections/ViewsDialog";
+import { addSelectOption } from "./collections/schemaAuthoring";
+import { rewriteCollectionSchema } from "./collections/schemaWrite";
 
 // The collection surface behind a dohc://collection/<path> tab: the shared
 // @dohc/collection-views components bound to the desktop's collections.*
@@ -287,6 +293,76 @@ export function CollectionPage({
     [onNewRecord, collectionPath],
   );
 
+  // Schema authoring: fields and views change by rewriting the schema
+  // through the authored write path (collections/schemaWrite). Returns a
+  // user-facing sentence on failure, null on success, so the dialogs and
+  // the in-cell option flow share one contract.
+  const [fieldsOpen, setFieldsOpen] = useState(false);
+  const [viewsOpen, setViewsOpen] = useState(false);
+  const [schemaError, setSchemaError] = useState<string | null>(null);
+  const applySchemaChange = useCallback(
+    async (
+      mutate: (schema: CollectionSchema) => CollectionSchema,
+    ): Promise<string | null> => {
+      const result = await rewriteCollectionSchema({
+        workspaceId,
+        collectionPath,
+        mutate,
+      });
+      if (result.status === "written") {
+        void refreshDetails();
+        void store.refresh();
+        return null;
+      }
+      if (result.status === "conflict") {
+        // The conflict machinery holds the other write; re-read and retry.
+        void refreshDetails();
+        return "This collection changed while you were editing. Try again.";
+      }
+      return result.detail
+        ? `dohc could not update this collection. ${result.detail}`
+        : "dohc could not update this collection.";
+    },
+    [workspaceId, collectionPath, refreshDetails, store],
+  );
+
+  // A typed select value not in the options yet: the option lands in the
+  // schema FIRST; the cell write is enqueued only after that write settles.
+  const createOption = useCallback(
+    async (create: CollectionOptionCreate) => {
+      const failure = await applySchemaChange((schema) =>
+        addSelectOption(schema, create.field, create.option),
+      );
+      setSchemaError(failure);
+      if (failure !== null) return;
+      enqueueCellChange({
+        recordId: create.recordId,
+        recordPath: create.recordPath,
+        field: create.field,
+        value: create.value,
+      });
+    },
+    [applySchemaChange, enqueueCellChange],
+  );
+
+  // Relation fields target other collections; the list loads when the
+  // fields dialog opens. Best-effort: without it there is nothing to pick.
+  const [relationTargets, setRelationTargets] = useState<string[]>([]);
+  useEffect(() => {
+    if (!fieldsOpen) return;
+    let stale = false;
+    void bridge()
+      .listCollections({ workspaceId })
+      .then((result) => {
+        if (stale) return;
+        setRelationTargets(result.collections.map((entry) => entry.path));
+      })
+      .catch(() => undefined);
+    return () => {
+      stale = true;
+    };
+  }, [fieldsOpen, workspaceId]);
+
   if (loadError !== null && details === null) {
     return (
       <div
@@ -385,7 +461,23 @@ export function CollectionPage({
           <span data-testid="collection-write-error" className="truncate text-[11px] text-danger">
             {writeError}
           </span>
+        ) : schemaError ? (
+          <span data-testid="collection-schema-error" className="truncate text-[11px] text-danger">
+            {schemaError}
+          </span>
         ) : null}
+        <SecondaryButton
+          data-testid="collection-fields-button"
+          onClick={() => setFieldsOpen(true)}
+        >
+          Fields
+        </SecondaryButton>
+        <SecondaryButton
+          data-testid="collection-views-button"
+          onClick={() => setViewsOpen(true)}
+        >
+          Views
+        </SecondaryButton>
         <NewRecordButton onClick={newRecord} />
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
@@ -413,9 +505,31 @@ export function CollectionPage({
             visibleFields={activeView?.visibleFields ?? null}
             onSortChange={(sort) => void store.setQuery({ sort })}
             onCellChange={enqueueCellChange}
+            onCreateOption={createOption}
           />
         )}
       </div>
+      {fieldsOpen ? (
+        <FieldsDialog
+          schema={schema}
+          relationTargets={relationTargets}
+          apply={applySchemaChange}
+          onClose={() => setFieldsOpen(false)}
+        />
+      ) : null}
+      {viewsOpen ? (
+        <ViewsDialog
+          schema={schema}
+          apply={applySchemaChange}
+          onClose={() => setViewsOpen(false)}
+          onRenamed={(from, to) =>
+            setActiveViewName((current) => (current === from ? to : current))
+          }
+          onDeleted={(name) =>
+            setActiveViewName((current) => (current === name ? null : current))
+          }
+        />
+      ) : null}
       {headWrite ? (
         <CollectionRecordFieldWrite
           key={headWrite.id}

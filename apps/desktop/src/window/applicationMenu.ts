@@ -59,6 +59,7 @@ export function buildMenuTemplate(options: {
       submenu: [
         command("New File", "new-file", "CommandOrControl+N"),
         command("New Folder…", "new-folder"),
+        command("New Collection…", "new-collection"),
         { type: "separator" },
         command("Open Workspace…", "open-workspace"),
         {

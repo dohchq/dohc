@@ -17,6 +17,13 @@ export interface FieldCellProps {
    * path; this package never writes. Absent means the cell is read-only.
    */
   onChange?: (value: CollectionValue) => void;
+  /**
+   * Select and multi-select cells offer to add a typed value the field's
+   * options do not have yet. The host must add `option` to the schema FIRST
+   * and only then write `nextValue` to the cell; this package never writes.
+   * Absent means cells only pick existing options.
+   */
+  onCreateOption?: (option: string, nextValue: CollectionValue) => void;
 }
 
 /** Plain text for a raw collection value: board group labels, fallbacks. */
@@ -108,14 +115,45 @@ function CellInput({ defaultValue, type = "text", commit, cancel }: CellInputPro
   );
 }
 
+/**
+ * The typed text of an option that does not exist yet. Enter with a known
+ * option picks it instead, so typing never forks an existing option.
+ */
+function AddOptionInput({
+  options,
+  onPick,
+  cancel,
+}: {
+  options: readonly string[];
+  onPick: (option: string, isNew: boolean) => void;
+  cancel: () => void;
+}) {
+  return (
+    <input
+      type="text"
+      aria-label="Add option"
+      placeholder="Add option"
+      className="w-full rounded border border-line bg-bg px-1 text-[13px] placeholder:text-subtle"
+      onKeyDown={(event) => {
+        if (event.key === "Escape") return cancel();
+        if (event.key !== "Enter") return;
+        const option = event.currentTarget.value.trim();
+        if (option === "") return;
+        onPick(option, !options.includes(option));
+      }}
+    />
+  );
+}
+
 interface EditorProps {
   field: FieldDefinition;
   indexed: CollectionIndexedValue | undefined;
   emit: (value: CollectionValue) => void;
   close: () => void;
+  onCreateOption?: (option: string, nextValue: CollectionValue) => void;
 }
 
-function CellEditor({ field, indexed, emit, close }: EditorProps) {
+function CellEditor({ field, indexed, emit, close, onCreateOption }: EditorProps) {
   const value = indexed?.value ?? null;
   const commitAndClose = (next: CollectionValue) => {
     emit(next);
@@ -145,8 +183,8 @@ function CellEditor({ field, indexed, emit, close }: EditorProps) {
           cancel={close}
         />
       );
-    case "select":
-      return (
+    case "select": {
+      const picker = (
         <select
           autoFocus
           defaultValue={typeof value === "string" ? value : ""}
@@ -157,7 +195,7 @@ function CellEditor({ field, indexed, emit, close }: EditorProps) {
           onKeyDown={(event) => {
             if (event.key === "Escape") close();
           }}
-          onBlur={close}
+          onBlur={onCreateOption ? undefined : close}
         >
           <option value="" />
           {field.options.map((option) => (
@@ -167,33 +205,76 @@ function CellEditor({ field, indexed, emit, close }: EditorProps) {
           ))}
         </select>
       );
+      if (!onCreateOption) return picker;
+      return (
+        <span
+          className="flex w-full flex-col gap-0.5"
+          onBlur={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget)) close();
+          }}
+        >
+          {picker}
+          <AddOptionInput
+            options={field.options}
+            cancel={close}
+            onPick={(option, isNew) => {
+              if (isNew) {
+                onCreateOption(option, option);
+                close();
+              } else {
+                commitAndClose(option);
+              }
+            }}
+          />
+        </span>
+      );
+    }
     case "multi-select": {
       const selected = asTextArray(value);
       return (
-        <span
-          role="listbox"
-          aria-multiselectable="true"
-          className="flex flex-col gap-0.5"
-          onKeyDown={(event) => {
-            if (event.key === "Escape") close();
-          }}
-        >
-          {field.options.map((option) => (
-            <label key={option} className="flex items-center gap-1.5 text-[13px]">
-              <input
-                type="checkbox"
-                checked={selected.includes(option)}
-                onChange={() =>
-                  emit(
-                    selected.includes(option)
-                      ? selected.filter((entry) => entry !== option)
-                      : [...selected, option],
-                  )
+        <span className="flex w-full flex-col gap-0.5">
+          <span
+            role="listbox"
+            aria-multiselectable="true"
+            className="flex flex-col gap-0.5"
+            onKeyDown={(event) => {
+              if (event.key === "Escape") close();
+            }}
+          >
+            {field.options.map((option) => (
+              <label key={option} className="flex items-center gap-1.5 text-[13px]">
+                <input
+                  type="checkbox"
+                  checked={selected.includes(option)}
+                  onChange={() =>
+                    emit(
+                      selected.includes(option)
+                        ? selected.filter((entry) => entry !== option)
+                        : [...selected, option],
+                    )
+                  }
+                />
+                {option}
+              </label>
+            ))}
+          </span>
+          {onCreateOption ? (
+            <AddOptionInput
+              options={field.options}
+              cancel={close}
+              onPick={(option, isNew) => {
+                const next = selected.includes(option)
+                  ? selected
+                  : [...selected, option];
+                if (isNew) {
+                  onCreateOption(option, next);
+                  close();
+                } else {
+                  emit(next);
                 }
-              />
-              {option}
-            </label>
-          ))}
+              }}
+            />
+          ) : null}
         </span>
       );
     }
@@ -210,7 +291,13 @@ function CellEditor({ field, indexed, emit, close }: EditorProps) {
   }
 }
 
-export function FieldCell({ field, indexed, personLabel, onChange }: FieldCellProps) {
+export function FieldCell({
+  field,
+  indexed,
+  personLabel,
+  onChange,
+  onCreateOption,
+}: FieldCellProps) {
   const [editing, setEditing] = useState(false);
   const flagged = indexed !== undefined && indexed.validation.status === "flagged";
   const value = indexed?.value ?? null;
@@ -235,7 +322,13 @@ export function FieldCell({ field, indexed, personLabel, onChange }: FieldCellPr
   if (editing && onChange && editable) {
     return wrapFlagged(
       flagged,
-      <CellEditor field={field} indexed={indexed} emit={onChange} close={() => setEditing(false)} />,
+      <CellEditor
+        field={field}
+        indexed={indexed}
+        emit={onChange}
+        close={() => setEditing(false)}
+        onCreateOption={onCreateOption}
+      />,
     );
   }
 

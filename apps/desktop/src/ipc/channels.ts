@@ -5,6 +5,7 @@
 export const MENU_COMMANDS = [
   "new-file",
   "new-folder",
+  "new-collection",
   "open-workspace",
   "import-files",
   "export-workspace",
@@ -42,6 +43,7 @@ export function isMenuCommand(value: unknown): value is MenuCommandId {
 export const EXPLORER_MENU_COMMANDS = [
   "new-file",
   "new-folder",
+  "new-collection",
   "rename",
   "delete",
   "pin",

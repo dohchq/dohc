@@ -22,6 +22,19 @@ export interface CollectionCellChange {
   value: CollectionValue;
 }
 
+/**
+ * A typed select value the field's options do not have yet. The host adds
+ * `option` to the schema first and writes `value` to the cell only after
+ * that write succeeds; the package never writes either.
+ */
+export interface CollectionOptionCreate {
+  recordId: string;
+  recordPath: string;
+  field: string;
+  option: string;
+  value: CollectionValue;
+}
+
 export interface TableViewProps {
   schema: CollectionSchema;
   records: CollectionRecord[];
@@ -31,6 +44,7 @@ export interface TableViewProps {
   visibleFields?: readonly string[] | null;
   onSortChange?: (sort: CollectionQuerySort[]) => void;
   onCellChange?: (change: CollectionCellChange) => void;
+  onCreateOption?: (create: CollectionOptionCreate) => void;
   /** Maps a person field's user id to a display name. Falls back to the id. */
   personLabel?: (userId: string) => string | null;
   rowHeight?: number;
@@ -48,6 +62,7 @@ export function TableView({
   visibleFields,
   onSortChange,
   onCellChange,
+  onCreateOption,
   personLabel,
   rowHeight = 28,
   className,
@@ -81,13 +96,25 @@ export function TableView({
                           })
                       : undefined
                   }
+                  onCreateOption={
+                    onCreateOption
+                      ? (option, value) =>
+                          onCreateOption({
+                            recordId: context.row.original.id,
+                            recordPath: context.row.original.path,
+                            field: field.name,
+                            option,
+                            value,
+                          })
+                      : undefined
+                  }
                 />
               ),
             },
           ),
         ),
       ),
-    [fields, onCellChange, personLabel],
+    [fields, onCellChange, onCreateOption, personLabel],
   );
 
   const table = useTable({
