@@ -55,7 +55,8 @@ parentPort?.once("message", (message: unknown) => {
           body: data.operation.body,
           idempotencyKey: data.operation.idempotencyKey,
           createdAtMs: data.operation.createdAtMs,
-          guard: () => "recipient",
+          readGuard: () => "recipient",
+          appendGuard: () => "recipient",
         })
       : storage.appendLinkDiscussionMessage({
           capabilityHash: data.operation.capabilityHash,

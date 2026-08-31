@@ -202,7 +202,8 @@ function appendAuthenticated(
     body: input.body ?? "Hello",
     idempotencyKey: input.idempotencyKey,
     createdAtMs: input.createdAtMs,
-    guard: () => input.role ?? "recipient",
+    readGuard: () => input.role ?? "recipient",
+    appendGuard: () => input.role ?? "recipient",
   });
 }
 
@@ -516,7 +517,8 @@ describe("durable link discussion storage", () => {
       body: "second",
       idempotencyKey: "activity-second",
       createdAtMs: 2_001,
-      guard: () => "recipient",
+      readGuard: () => "recipient",
+      appendGuard: () => "recipient",
     });
     expect(second.ok).toBe(true);
     if (!second.ok) return;
@@ -527,7 +529,8 @@ describe("durable link discussion storage", () => {
       body: "third",
       idempotencyKey: "activity-third",
       createdAtMs: 2_002,
-      guard: () => "owner",
+      readGuard: () => "owner",
+      appendGuard: () => "owner",
     });
     expect(third.ok).toBe(true);
     if (!third.ok) return;
@@ -1972,7 +1975,8 @@ describe("durable link discussion storage", () => {
         body: "Replay at every ceiling",
         idempotencyKey: "replay-ceilings",
         createdAtMs: 70_001,
-        guard: () => "recipient",
+        readGuard: () => "recipient",
+        appendGuard: () => "recipient",
       }),
     ).toMatchObject({
       ok: true,
@@ -2638,7 +2642,8 @@ describe("durable link discussion storage", () => {
         body: "traced named comment",
         idempotencyKey: "quota-trace-named",
         createdAtMs: 2_002,
-        guard: () => "recipient",
+        readGuard: () => "recipient",
+        appendGuard: () => "recipient",
       })
     );
     const asserted = tracePreparedSql(storage, () => {
@@ -2872,7 +2877,8 @@ describe("durable link discussion storage", () => {
         body: "counted named comment",
         idempotencyKey: "usage-named",
         createdAtMs: 2_001,
-        guard: () => "recipient",
+        readGuard: () => "recipient",
+        appendGuard: () => "recipient",
       }),
     ).toMatchObject({ ok: true, replayed: false });
     const afterNamed = expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
@@ -2884,7 +2890,8 @@ describe("durable link discussion storage", () => {
         body: "counted named comment",
         idempotencyKey: "usage-named",
         createdAtMs: 2_001,
-        guard: () => "recipient",
+        readGuard: () => "recipient",
+        appendGuard: () => "recipient",
       }),
     ).toMatchObject({ ok: true, replayed: true });
     expect(expectExactWorkspaceUsage(dbPath, seeded.workspaceId)).toBe(afterNamed);
@@ -3369,7 +3376,8 @@ describe("durable link discussion storage", () => {
         body: "bounded",
         idempotencyKey: "named-bounded",
         createdAtMs: 2_000,
-        guard: () => "recipient",
+        readGuard: () => "recipient",
+        appendGuard: () => "recipient",
       }),
     ).toMatchObject({ ok: true });
     expect(
@@ -3380,7 +3388,8 @@ describe("durable link discussion storage", () => {
         body: "overbound",
         idempotencyKey: "named-overbound",
         createdAtMs: 2_001,
-        guard: () => "recipient",
+        readGuard: () => "recipient",
+        appendGuard: () => "recipient",
       }),
     ).toEqual({ ok: false, reason: "invalid-input" });
 
@@ -3400,7 +3409,8 @@ describe("durable link discussion storage", () => {
         body: "overbound after restart",
         idempotencyKey: "named-overbound-restart",
         createdAtMs: 2_002,
-        guard: () => "recipient",
+        readGuard: () => "recipient",
+        appendGuard: () => "recipient",
       }),
     ).toEqual({ ok: false, reason: "invalid-input" });
   });

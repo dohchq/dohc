@@ -3178,7 +3178,8 @@ describe("share discussion HTTP boundary", () => {
         body: "Existing recipient message",
         idempotencyKey: "named-recipient-debt",
         createdAtMs: 9_000,
-        guard: () => "recipient",
+        readGuard: () => "recipient",
+        appendGuard: () => "recipient",
       }),
     ).toMatchObject({ ok: true, message: { authorKind: "named" } });
 
@@ -3735,6 +3736,95 @@ describe("share discussion HTTP boundary", () => {
       messages: [],
       composerState: "paused",
     });
+  });
+
+  it("returns a committed named retry after narrowing without admitting a new write", async () => {
+    const recipient = "narrowed-recipient-sentinel";
+    const grantId = "narrowed-recipient-grant-sentinel";
+    const test = await fixture({
+      lookupUserDisplayName: (userId) =>
+        userId === recipient ? "Narrowed Recipient" : null,
+    });
+    expect(
+      test.storage.convertLinkGrant({
+        shareId: SHARE,
+        parentGrantId: test.comment.grantId,
+        grantId,
+        principalUserId: recipient,
+        createdAtMs: 20_000,
+      }),
+    ).toMatchObject({ ok: true, grant: { access: "comment" } });
+    const input = {
+      body: "Committed before named narrowing",
+      idempotencyKey: "named-lost-before-narrowing",
+    };
+    const first = await test.handler(
+      request(
+        recipient,
+        `/sync/shares/${SHARE}/discussion`,
+        jsonRequest(input),
+      ),
+    );
+    expect(first.status).toBe(200);
+    const committed = await body(first);
+
+    expect(
+      test.storage.retuneShareGrant({
+        shareId: SHARE,
+        grantId: test.comment.grantId,
+        access: "view",
+        changedAtMs: 30_000,
+        expectedDependentGrantIds: [grantId],
+        guard: () => {},
+      }),
+    ).toMatchObject({ ok: true, grant: { access: "view", generation: 1 } });
+    expect(test.storage.getShareGrant(grantId)).toMatchObject({
+      access: "view",
+      generation: 2,
+    });
+    const snapshot = {
+      rows: count(test.dbPath, "sync_relay_share_discussion_messages"),
+      revision: test.storage.getShareDiscussionRevision(SHARE),
+      usage: discussionUsage(test.dbPath),
+    };
+
+    const replay = await test.handler(
+      request(
+        recipient,
+        `/sync/shares/${SHARE}/discussion`,
+        jsonRequest(input),
+      ),
+    );
+    expect(replay.status).toBe(200);
+    expect(await body(replay)).toEqual(committed);
+
+    const conflict = await test.handler(
+      request(
+        recipient,
+        `/sync/shares/${SHARE}/discussion`,
+        jsonRequest({ ...input, body: "Conflicting named retry" }),
+      ),
+    );
+    expect(conflict.status).toBe(409);
+    expect(await body(conflict)).toMatchObject({ code: "conflict" });
+
+    const fresh = await test.handler(
+      request(
+        recipient,
+        `/sync/shares/${SHARE}/discussion`,
+        jsonRequest({
+          body: "Fresh after named narrowing",
+          idempotencyKey: "named-new-after-narrowing",
+        }),
+      ),
+    );
+    expect(fresh.status).toBe(403);
+    expect(await body(fresh)).toMatchObject({ code: "share_read_only" });
+    expect({
+      rows: count(test.dbPath, "sync_relay_share_discussion_messages"),
+      revision: test.storage.getShareDiscussionRevision(SHARE),
+      usage: discussionUsage(test.dbPath),
+    }).toEqual(snapshot);
   });
 
   it("admits link, named, and owner messages only at their complete deterministic quota charge", async () => {

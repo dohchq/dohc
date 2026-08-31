@@ -1744,7 +1744,7 @@ export function createSyncRelayHandler({
       const authority = requireDiscussionAuthority(
         shareId,
         actor.userId,
-        "append",
+        "read",
         input.workspaceId,
       );
       const displayName = await discussionDisplayName(
@@ -1758,7 +1758,16 @@ export function createSyncRelayHandler({
         body: input.body,
         idempotencyKey: input.idempotencyKey,
         createdAtMs: nowMs(),
-        guard: () => {
+        readGuard: () => {
+          const current = requireDiscussionAuthority(
+            shareId,
+            actor.userId,
+            "read",
+            input.workspaceId,
+          );
+          return current.viewer === "owner" ? "owner" : "recipient";
+        },
+        appendGuard: () => {
           const current = requireDiscussionAuthority(
             shareId,
             actor.userId,

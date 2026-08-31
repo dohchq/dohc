@@ -574,7 +574,8 @@ export interface SyncRelayStorage {
     body: string;
     idempotencyKey: string;
     createdAtMs: number;
-    guard: () => "owner" | "recipient";
+    readGuard: () => "owner" | "recipient";
+    appendGuard: () => "owner" | "recipient";
   }): AppendAuthenticatedDiscussionMessageResult;
   listShareDiscussionMessages(input: {
     shareId: string;
@@ -4231,7 +4232,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     body: string;
     idempotencyKey: string;
     createdAtMs: number;
-    guard: () => "owner" | "recipient";
+    readGuard: () => "owner" | "recipient";
+    appendGuard: () => "owner" | "recipient";
   }): AppendAuthenticatedDiscussionMessageResult {
     const body = normalizeShareDiscussionBody(input.body);
     const displayName = normalizeDiscussionDisplayName(input.displayName);
@@ -4251,13 +4253,12 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     const requestHash = namedDiscussionRequestHash(body);
 
     return this.tx(() => {
-      // The caller's server-derived identity and current share authority are
-      // rechecked under this write lock, immediately before replay or insert.
-      const authorRole = input.guard();
-      if (authorRole !== "owner" && authorRole !== "recipient") {
+      // The caller's server-derived identity and current read authority are
+      // rechecked under this write lock before any durable replay is exposed.
+      const readerRole = input.readGuard();
+      if (readerRole !== "owner" && readerRole !== "recipient") {
         throw new Error("discussion authority guard returned an invalid role");
       }
-      const authorKind = authorRole === "owner" ? "owner" : "named";
       const share = this.db
         .prepare(
           `SELECT workspace_id
@@ -4292,6 +4293,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           message: rowToShareDiscussionMessageRow(replayRow),
         };
       }
+
+      // Only a genuinely new insert needs current Comment/Edit authority. This
+      // second check shares the transaction's write lock with all budget work.
+      const authorRole = input.appendGuard();
+      if (authorRole !== "owner" && authorRole !== "recipient") {
+        throw new Error("discussion append guard returned an invalid role");
+      }
+      const authorKind = authorRole === "owner" ? "owner" : "named";
 
       if (authorRole === "recipient") {
         const rateCount = Number(
