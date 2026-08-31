@@ -1110,6 +1110,23 @@ export function createSyncRelayHandler({
     };
   };
 
+  const independentGrantSummary = async (grant: SyncRelayShareGrantRow) => {
+    let recipientEmail = grant.principalEmail;
+    if (lookupUserEmail && grant.principalUserId) {
+      try {
+        recipientEmail = await lookupUserEmail(grant.principalUserId);
+      } catch {
+        recipientEmail = null;
+      }
+    }
+    return {
+      shareId: grant.shareId,
+      grantId: grant.grantId,
+      recipientUserId: grant.principalUserId,
+      recipientEmail,
+    };
+  };
+
   const linkInventorySummary = async (row: SyncRelayLinkInventoryRow) => {
     const { share, grant } = row;
     const storedSelector = parseStoredAnyShareSelectorJson(share.selectorJson);
@@ -3624,13 +3641,19 @@ export function createSyncRelayHandler({
           route.workspaceId,
           decodeLinkInventoryCursor(url.searchParams.get("cursor")),
         );
-        const links = await Promise.all(
-          page.links.map(linkInventorySummary),
-        );
+        const independentGrantRows = storage.listActiveIndependentShareGrants({
+          workspaceId: route.workspaceId,
+          shareIds: page.links.map((row) => row.share.shareId),
+        });
+        const [links, independentGrants] = await Promise.all([
+          Promise.all(page.links.map(linkInventorySummary)),
+          Promise.all(independentGrantRows.map(independentGrantSummary)),
+        ]);
         if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
         return jsonResponse({
           ok: true,
           links,
+          independentGrants,
           ...(page.nextCursor
             ? { nextCursor: encodeLinkInventoryCursor(page.nextCursor) }
             : {}),

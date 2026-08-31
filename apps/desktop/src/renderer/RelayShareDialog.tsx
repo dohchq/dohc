@@ -5,8 +5,8 @@ import type {
   CreateRelayShareLinkPayload,
   CreateRelaySharePayload,
   RelayShareDiscussionMessage,
-  RelayShareGrantedRow,
   RelayShareLinkDependent,
+  RelayShareLinkIndependentGrant,
   RelayShareLinkRow,
   ShareAccess,
 } from "../ipc/bridgeContract";
@@ -273,7 +273,7 @@ function applyDiscussionPrincipalOverrides(
   });
 }
 
-function namedGrantName(grant: RelayShareGrantedRow): string {
+function namedGrantName(grant: RelayShareLinkIndependentGrant): string {
   return grant.recipientEmail ?? grant.recipientUserId ?? "Unknown recipient";
 }
 
@@ -383,9 +383,8 @@ export function RelayShareDialog(props: {
     Record<string, OwnerDiscussionState>
   >({});
   const [independentGrants, setIndependentGrants] = useState<
-    RelayShareGrantedRow[]
+    RelayShareLinkIndependentGrant[]
   >([]);
-  const [independentGrantsError, setIndependentGrantsError] = useState(false);
   const [ownerAppendBusy, setOwnerAppendBusy] = useState<string | null>(null);
   const [ownerMutationBusy, setOwnerMutationBusy] =
     useState<OwnerMutationBusy | null>(null);
@@ -398,7 +397,6 @@ export function RelayShareDialog(props: {
   const latestCopyRequest = useRef(0);
   const latestInventoryRequest = useRef(0);
   const latestMutationRequest = useRef(0);
-  const latestNamedInventoryRequest = useRef(0);
   const latestDiscussionRequestByShareId = useRef(new Map<string, number>());
   const activeFullDiscussionRequestByShareId = useRef(new Map<string, symbol>());
   const pendingDiscussionReconciliationByShareId = useRef(new Set<string>());
@@ -441,11 +439,8 @@ export function RelayShareDialog(props: {
     group.rows.some((row) => rowMatchesTarget(row, props.target)),
   );
   const activeRootGrantShareIds = useMemo(
-    () =>
-      independentGrantsError
-        ? new Set<string>()
-        : new Set(independentGrants.map((grant) => grant.shareId)),
-    [independentGrants, independentGrantsError],
+    () => new Set(independentGrants.map((grant) => grant.shareId)),
+    [independentGrants],
   );
   const eligibleShareIds = useMemo(
     () =>
@@ -501,7 +496,6 @@ export function RelayShareDialog(props: {
     latestCopyRequest.current += 1;
     latestInventoryRequest.current += 1;
     latestMutationRequest.current += 1;
-    latestNamedInventoryRequest.current += 1;
     latestDiscussionRequestByShareId.current.clear();
     clearOwnerDiscussionPriority();
     latestOwnerAppendRequest.current += 1;
@@ -525,7 +519,6 @@ export function RelayShareDialog(props: {
     setLifecycleError(null);
     setOwnerDiscussionByShareId({});
     setIndependentGrants([]);
-    setIndependentGrantsError(false);
     setOwnerAppendBusy(null);
     setOwnerMutationBusy(null);
     setOwnerMutationError(null);
@@ -538,7 +531,6 @@ export function RelayShareDialog(props: {
       latestCopyRequest.current += 1;
       latestInventoryRequest.current += 1;
       latestMutationRequest.current += 1;
-      latestNamedInventoryRequest.current += 1;
       latestDiscussionRequestByShareId.current.clear();
       clearOwnerDiscussionPriority();
       latestOwnerAppendRequest.current += 1;
@@ -554,11 +546,9 @@ export function RelayShareDialog(props: {
     if (shareWith !== "link") return;
     const scopeGeneration = linkScopeGeneration.current;
     void refreshLinks(scopeGeneration);
-    void refreshIndependentGrants(scopeGeneration);
     return () => {
       stopAllOwnerActivity();
       latestInventoryRequest.current += 1;
-      latestNamedInventoryRequest.current += 1;
       for (const [
         shareId,
         requestId,
@@ -856,46 +846,6 @@ export function RelayShareDialog(props: {
     void pollOwnerActivity(control);
   }
 
-  async function refreshIndependentGrants(
-    scopeGeneration = linkScopeGeneration.current,
-    options: { preserveOwnerMutationError?: boolean } = {},
-  ) {
-    if (!isCurrentLinkScope(scopeGeneration)) return;
-    const requestId = ++latestNamedInventoryRequest.current;
-    try {
-      const result = await bridge().listRelayShares();
-      if (
-        !isCurrentLinkScope(scopeGeneration) ||
-        latestNamedInventoryRequest.current !== requestId
-      ) {
-        return;
-      }
-      setIndependentGrants(
-        result.granted.filter(
-          (grant) =>
-            grant.workspaceId === props.workspaceId &&
-            grant.revokedAtMs === null,
-        ),
-      );
-      setIndependentGrantsError(false);
-      if (!options.preserveOwnerMutationError) {
-        setOwnerMutationError((current) =>
-          current !== null && isGrantMutationAction(current.actionKey)
-            ? null
-            : current,
-        );
-      }
-    } catch {
-      if (
-        !isCurrentLinkScope(scopeGeneration) ||
-        latestNamedInventoryRequest.current !== requestId
-      ) {
-        return;
-      }
-      setIndependentGrantsError(true);
-    }
-  }
-
   async function refreshOwnerDiscussion(
     shareId: string,
     cursor?: string,
@@ -1153,7 +1103,6 @@ export function RelayShareDialog(props: {
         void refreshOwnerDiscussion(shareId, undefined, scopeGeneration);
       } else {
         void refreshLinks(scopeGeneration);
-        void refreshIndependentGrants(scopeGeneration);
       }
     } catch {
       if (
@@ -1176,8 +1125,7 @@ export function RelayShareDialog(props: {
         }));
         void refreshOwnerDiscussion(shareId, undefined, scopeGeneration);
       } else {
-        void refreshLinks(scopeGeneration);
-        void refreshIndependentGrants(scopeGeneration, {
+        void refreshLinks(scopeGeneration, {
           preserveOwnerMutationError: true,
         });
       }
@@ -1254,13 +1202,20 @@ export function RelayShareDialog(props: {
     );
   }
 
-  async function refreshLinks(scopeGeneration = linkScopeGeneration.current) {
+  async function refreshLinks(
+    scopeGeneration = linkScopeGeneration.current,
+    options: { preserveOwnerMutationError?: boolean } = {},
+  ) {
     if (!isCurrentLinkScope(scopeGeneration)) return;
     const requestId = ++latestInventoryRequest.current;
     setLinksLoading(true);
     setLinksError(null);
     try {
       const inventory: RelayShareLinkRow[] = [];
+      const independentInventory = new Map<
+        string,
+        RelayShareLinkIndependentGrant
+      >();
       const seenCursors = new Set<string>();
       let cursor: string | undefined;
       while (true) {
@@ -1281,6 +1236,9 @@ export function RelayShareDialog(props: {
           return;
         }
         inventory.push(...result.links);
+        for (const grant of result.independentGrants) {
+          independentInventory.set(grant.grantId, grant);
+        }
         if (result.nextCursor === undefined) break;
         if (seenCursors.has(result.nextCursor)) {
           throw new Error("dohc could not load all links.");
@@ -1289,6 +1247,14 @@ export function RelayShareDialog(props: {
         cursor = result.nextCursor;
       }
       setLinks(inventory);
+      setIndependentGrants([...independentInventory.values()]);
+      if (!options.preserveOwnerMutationError) {
+        setOwnerMutationError((current) =>
+          current !== null && isGrantMutationAction(current.actionKey)
+            ? null
+            : current,
+        );
+      }
       setConfirmation((current) =>
         current !== null &&
         !inventory.some(
@@ -1307,6 +1273,7 @@ export function RelayShareDialog(props: {
       ) {
         return;
       }
+      setIndependentGrants([]);
       setLinksError(errorMessage(cause));
     } finally {
       if (
@@ -1548,7 +1515,6 @@ export function RelayShareDialog(props: {
     latestCopyRequest.current += 1;
     latestInventoryRequest.current += 1;
     latestMutationRequest.current += 1;
-    latestNamedInventoryRequest.current += 1;
     latestDiscussionRequestByShareId.current.clear();
     clearOwnerDiscussionPriority();
     clearAllOwnerDiscussionPendingState();
@@ -1829,20 +1795,6 @@ export function RelayShareDialog(props: {
                   {linksError}
                 </p>
                 <SecondaryButton onClick={() => void refreshLinks()}>Retry</SecondaryButton>
-              </div>
-            ) : null}
-
-            {independentGrantsError ? (
-              <div
-                data-testid="share-independent-inventory-error"
-                className="flex items-center justify-between gap-3 border-t border-line pt-3"
-              >
-                <p role="alert" className="m-0 text-xs text-danger">
-                  Couldn't load people with independent access.
-                </p>
-                <SecondaryButton onClick={() => void refreshIndependentGrants()}>
-                  Retry
-                </SecondaryButton>
               </div>
             ) : null}
 

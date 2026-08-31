@@ -305,6 +305,7 @@ export interface SyncRelayLinkInventoryPage {
 }
 
 export const LINK_INVENTORY_PAGE_SIZE = 1_000;
+export const LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT = 1_000;
 
 export interface SyncRelayLinkCredentialMint {
   credentialId: string;
@@ -649,6 +650,10 @@ export interface SyncRelayStorage {
     workspaceId: string,
     cursor?: SyncRelayLinkInventoryCursor,
   ): SyncRelayLinkInventoryPage;
+  listActiveIndependentShareGrants(input: {
+    workspaceId: string;
+    shareIds: readonly string[];
+  }): SyncRelayShareGrantRow[];
   // Received listings exclude revoked shares entirely: after revocation the
   // recipient must not be able to read even the share's metadata (paths,
   // version names) — a revoked share is indistinguishable from one that
@@ -5421,6 +5426,39 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
             }
           : null,
     };
+  }
+
+  listActiveIndependentShareGrants(input: {
+    workspaceId: string;
+    shareIds: readonly string[];
+  }): SyncRelayShareGrantRow[] {
+    const shareIds = [...new Set(input.shareIds)];
+    if (shareIds.length === 0) return [];
+    if (shareIds.length > LINK_INVENTORY_PAGE_SIZE) {
+      throw new Error("link inventory share page exceeds its limit");
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT grant.grant_id, grant.share_id, grant.principal_kind,
+                grant.principal_user_id, grant.principal_email, grant.access,
+                grant.generation, grant.status, grant.created_at_ms,
+                grant.revoked_at_ms, grant.parent_grant_id
+         FROM sync_relay_share_grants grant
+         JOIN sync_relay_shares share ON share.share_id = grant.share_id
+         WHERE share.workspace_id = ?
+           AND grant.share_id IN (${shareIds.map(() => "?").join(", ")})
+           AND grant.status = 'active'
+           AND grant.parent_grant_id IS NULL
+           AND grant.principal_kind != 'link'
+         ORDER BY grant.share_id, grant.created_at_ms, grant.grant_id
+         LIMIT ${LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT + 1}`,
+      )
+      .all(input.workspaceId, ...shareIds)
+      .map(rowToShareGrantRow);
+    if (rows.length > LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT) {
+      throw new Error("link inventory independent grant page exceeds its limit");
+    }
+    return rows;
   }
 
   listSharesReceivedBy(recipientUserId: string): SyncRelayShareWithGrantRow[] {

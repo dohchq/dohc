@@ -19,6 +19,7 @@ import { linkSecret } from "./linkTestHelpers";
 import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
 import { authorizeShareAction } from "./shareAuthorization";
 import {
+  LINK_INVENTORY_PAGE_SIZE,
   openSyncRelayStorage,
   type SyncRelayStorage,
 } from "./storage";
@@ -2144,7 +2145,23 @@ describe("Phase 3 owner link contract", () => {
 describe("owner link inventory and impact preconditions", () => {
   it("pages 1,001 links without splitting dependents or losing concurrent changes", async () => {
     const storage = await newStorage();
-    const h = handler(storage, {
+    const independentGrantPageReads: unknown[][] = [];
+    const countedStorage = new Proxy(storage, {
+      get(target, property, receiver) {
+        const value = Reflect.get(target, property, receiver) as unknown;
+        if (property === "listActiveIndependentShareGrants") {
+          return (...args: unknown[]) => {
+            independentGrantPageReads.push(args);
+            return (value as (...callArgs: unknown[]) => unknown).apply(
+              target,
+              args,
+            );
+          };
+        }
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const h = handler(countedStorage, {
       lookupUserEmail: (userId) => `${userId}@example.test`,
     });
     await seedFileShare(h);
@@ -2160,9 +2177,10 @@ describe("owner link inventory and impact preconditions", () => {
         grant: {
           grantId: `${shareId}-recipient`,
           shareId,
-          principalKind: "user",
-          principalUserId: RECIPIENT,
-          principalEmail: null,
+          principalKind: shareId === "share-a-tail" ? "email" : "user",
+          principalUserId: shareId === "share-a-tail" ? null : RECIPIENT,
+          principalEmail:
+            shareId === "share-a-tail" ? "pending@example.test" : null,
           access: "view",
           generation: 1,
           status: "active",
@@ -2172,6 +2190,40 @@ describe("owner link inventory and impact preconditions", () => {
         },
       });
       expect(storage.getShare(shareId)).not.toBeNull();
+    }
+    expect(
+      storage.claimWorkspace({
+        workspaceId: OTHER_WORKSPACE,
+        ownerUserId: OWNER,
+        createdAtMs: 2_600,
+      }),
+    ).toBe("created");
+    for (const [shareId, workspaceId] of [
+      ["share-unlinked", WORKSPACE],
+      ["share-other-workspace", OTHER_WORKSPACE],
+    ] as const) {
+      storage.createShare({
+        share: {
+          shareId,
+          workspaceId,
+          granterUserId: OWNER,
+          selectorJson: JSON.stringify({ paths: [shareId], versionId: null }),
+          createdAtMs: 2_600,
+        },
+        grant: {
+          grantId: `${shareId}-recipient`,
+          shareId,
+          principalKind: "user",
+          principalUserId: `${shareId}-user`,
+          principalEmail: null,
+          access: "view",
+          generation: 1,
+          status: "active",
+          createdAtMs: 2_600,
+          revokedAtMs: null,
+          parentGrantId: null,
+        },
+      });
     }
     const linkSeeds = [
       ...Array.from({ length: 997 }, (_, index) => ({
@@ -2205,6 +2257,40 @@ describe("owner link inventory and impact preconditions", () => {
         }),
       ).toMatchObject({ ok: true });
     }
+    expect(
+      storage.convertLinkGrant({
+        shareId: "share-z-tail",
+        parentGrantId: boundaryGrantId,
+        grantId: "independent-revoked",
+        principalUserId: "revoked-user",
+        createdAtMs: 5_001,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      storage.promoteShareGrant({
+        shareId: "share-z-tail",
+        grantId: "independent-revoked",
+        expectedParentGrantId: boundaryGrantId,
+        expectedParentGeneration: 1,
+        guard: () => {},
+      }),
+    ).toMatchObject({ ok: true, grant: { parentGrantId: null } });
+    expect(
+      storage.revokeShareGrant({
+        shareId: "share-z-tail",
+        grantId: "independent-revoked",
+        revokedAtMs: 5_002,
+      }),
+    ).toMatchObject({ ok: true, grant: { status: "revoked" } });
+
+    expect(
+      storage
+        .listActiveIndependentShareGrants({
+          workspaceId: WORKSPACE,
+          shareIds: ["share-existing", "share-other-workspace"],
+        })
+        .map((grant) => grant.grantId),
+    ).toEqual(["grant-0"]);
 
     const storageFirst = storage.listLinkGrantsByWorkspace(WORKSPACE);
     expect(storageFirst.links).toHaveLength(1_000);
@@ -2235,8 +2321,39 @@ describe("owner link inventory and impact preconditions", () => {
     expect(firstResponse.status).toBe(200);
     const firstBody = await json(firstResponse);
     const firstLinks = firstBody.links as Array<Record<string, unknown>>;
+    const firstIndependentGrants = firstBody.independentGrants as Array<
+      Record<string, unknown>
+    >;
     const cursor = String(firstBody.nextCursor);
-    expect(firstLinks).toHaveLength(1_000);
+    expect(firstBody).not.toHaveProperty("granted");
+    expect(firstBody).not.toHaveProperty("received");
+    expect(firstLinks).toHaveLength(LINK_INVENTORY_PAGE_SIZE);
+    expect(firstIndependentGrants.map((grant) => grant.grantId)).toEqual([
+      "share-a-tail-recipient",
+      "grant-0",
+      "share-z-tail-recipient",
+    ]);
+    expect(firstIndependentGrants[0]).toMatchObject({
+      recipientUserId: null,
+      recipientEmail: "pending@example.test",
+    });
+    expect(firstIndependentGrants[1]).toMatchObject({
+      recipientUserId: RECIPIENT,
+      recipientEmail: `${RECIPIENT}@example.test`,
+    });
+    expect(firstIndependentGrants.map((grant) => grant.grantId)).not.toContain(
+      "independent-revoked",
+    );
+    expect(firstIndependentGrants.map((grant) => grant.grantId)).not.toContain(
+      "dependent-boundary-a",
+    );
+    expect(firstIndependentGrants.map((grant) => grant.grantId)).not.toContain(
+      "share-unlinked-recipient",
+    );
+    expect(firstIndependentGrants.map((grant) => grant.grantId)).not.toContain(
+      "share-other-workspace-recipient",
+    );
+    expect(independentGrantPageReads).toHaveLength(1);
     expect(cursor).toMatch(/^[A-Za-z0-9_-]{1,1024}$/u);
     expect(firstLinks.at(-1)).toMatchObject({
       grantId: boundaryGrantId,
@@ -2271,9 +2388,16 @@ describe("owner link inventory and impact preconditions", () => {
     expect(secondResponse.status).toBe(200);
     const secondBody = await json(secondResponse);
     const secondLinks = secondBody.links as Array<Record<string, unknown>>;
+    const secondIndependentGrants = secondBody.independentGrants as Array<
+      Record<string, unknown>
+    >;
     expect(secondLinks).toEqual([
       expect.objectContaining({ grantId: tailGrantId, status: "revoked" }),
     ]);
+    expect(secondIndependentGrants.map((grant) => grant.grantId)).toEqual([
+      "share-z-tail-recipient",
+    ]);
+    expect(independentGrantPageReads).toHaveLength(2);
     expect(secondBody).not.toHaveProperty("nextCursor");
     const union = [...firstLinks, ...secondLinks].map((row) => String(row.grantId));
     expect(union).toEqual(originalIds);
