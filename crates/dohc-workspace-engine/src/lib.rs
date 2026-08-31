@@ -870,6 +870,15 @@ impl OpenWorkspace {
         }
     }
 
+    /// Signal the capture loop to stop without removing its handle. A version
+    /// fence that already owns the apply gate can still finish against the
+    /// driver; teardown takes the handle only after acquiring that gate.
+    fn request_capture_shutdown(&self) {
+        if let Some(driver) = lock(&self.capture).as_ref() {
+            driver.request_shutdown();
+        }
+    }
+
     /// Take the driver and cancel it SYNCHRONOUSLY (no await point, so an
     /// aborted RPC future can never leave a driver un-cancelled), returning
     /// the join handle for callers that must await the full drain.
@@ -2259,36 +2268,24 @@ impl EngineService {
 
     async fn workspace_close(&self, handle: Option<WorkspaceHandle>) -> Result<Value, WireError> {
         let handle = handle.ok_or_else(workspace_unavailable)?;
-        let open = self.open(Some(&handle))?;
-        if !open.handle_kind.owns_binding() {
-            let _serial = self.open_lock.lock().await;
-            let removed = lock(&self.handles).remove(&handle).is_some();
-            lock(&self.pending_cursors).retain(|_, pending| pending.handle != handle);
-            lock(&self.sessions).retain(|_, session| session.workspace != handle);
-            return Ok(json!({ "closed": false, "attachmentClosed": removed }));
-        }
         let supervisor = self.supervisor;
-        // This await is the last cancellable point. After it, close installs the
-        // global Closing marker, removes every handle, takes the capture driver,
-        // and gives a detached task the whole teardown before yielding again.
-        // A dropped RPC therefore leaves either a fully usable open workspace
-        // or an owned close that will finish; it can never strand a permanently
-        // cancelled driver behind a live handle.
+        // Revalidate and claim teardown under the same serial lock as open.
+        // After this await there is no cancellable point until a detached task
+        // owns every remaining step.
         let (closing, removed, attached_handles) = {
             let _serial = self.open_lock.lock().await;
-            let db_path = {
-                let guard = lock(&self.handles);
-                guard
-                    .get(&handle)
-                    .ok_or_else(workspace_unavailable)?
-                    .db_path
-                    .clone()
-            };
+            let open = self.open(Some(&handle))?;
+            if !open.handle_kind.owns_binding() {
+                let removed = lock(&self.handles).remove(&handle).is_some();
+                lock(&self.pending_cursors).retain(|_, pending| pending.handle != handle);
+                lock(&self.sessions).retain(|_, session| session.workspace != handle);
+                return Ok(json!({ "closed": false, "attachmentClosed": removed }));
+            }
             // Install the GLOBAL Closing marker BEFORE removing the handle, so a
             // workspace_open on another EngineService (which does not take this
             // service's open_lock) observes Closing at supervisor.open and waits
             // for a fresh actor instead of the one being torn down.
-            let closing = supervisor.begin_close(&db_path).map_err(map_runtime)?;
+            let closing = supervisor.begin_close(&open.db_path).map_err(map_runtime)?;
             let (removed, attached_handles) = {
                 let mut handles = lock(&self.handles);
                 let removed = handles.remove(&handle);
@@ -2312,11 +2309,6 @@ impl EngineService {
         let capture_gate = Arc::clone(&removed.capture_apply_gate);
         let session_gate = Arc::clone(&removed.session_ops);
         let sessions = Arc::clone(&self.sessions);
-        // Cancellation happens only after the close owns the handle and global
-        // actor marker. It remains prompt for a large fresh import: the sink
-        // stops at its next bounded operation while the detached task waits in
-        // the same capture→sessions order as version fencing.
-        let capture_drain = removed.begin_capture_shutdown();
         // Suppression entries clear AFTER the capture drain: an in-flight
         // reconcile apply still consults the registry, and clearing first
         // would let it re-ingest the daemon's own just-settled file as a
@@ -2325,13 +2317,17 @@ impl EngineService {
             self.self_writes.scoped(&removed.root),
             removed.workspace_id.clone(),
         );
+        // Signal cancellation without taking the driver. A paused fresh import
+        // releases the capture gate promptly, while a version fence that already
+        // owns the gate can still read the driver and finish. Cancellation is
+        // idempotent when the detached task takes the driver below.
+        removed.request_capture_shutdown();
         let close_task = tokio::spawn(async move {
-            // Owning both fair gates prevents a new apply from queuing behind a
-            // session-first close and forming the close→driver→switch
-            // deadlock triangle. Session rows stay present until in-flight
-            // session work has drained, then their lease guards are released.
             let _capture = capture_gate.lock_owned().await;
+            let capture_drain = removed.begin_capture_shutdown();
             let _session = session_gate.lock_owned().await;
+            // Session rows stay present until in-flight session work drains,
+            // then their lease guards are released.
             lock(&sessions).retain(|_, session| {
                 session.workspace != handle && !attached_handles.contains(&session.workspace)
             });

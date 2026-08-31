@@ -1851,6 +1851,13 @@ impl CaptureDriver {
         }
     }
 
+    /// Signal shutdown without taking the driver handle. Close uses this to
+    /// release a capture pass that currently owns the apply gate, then takes
+    /// and joins the driver after it acquires that same gate.
+    pub(crate) fn request_shutdown(&self) {
+        self.cancel.cancel();
+    }
+
     /// Cancel the loop SYNCHRONOUSLY and hand back the join handle; the
     /// driver winds itself down (watcher joined, files actor closed) whether
     /// or not the caller awaits. Callers that need ordered teardown await
