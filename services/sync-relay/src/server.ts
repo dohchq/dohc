@@ -2626,32 +2626,36 @@ export function createSyncRelayHandler({
             return { fallback, granterEmail };
           }),
         );
-        const receivedRows = receivedLookups.map(({ fallback, granterEmail }) => {
+        const received = receivedLookups.flatMap(({ fallback, granterEmail }) => {
           const effective = resolveReceivedShareAuthority({
             storage,
             actorUserId: actor.userId,
             shareId: fallback.share.shareId,
           });
-          const row = effective.ok
-            ? { share: effective.share, grant: effective.grant }
-            : fallback;
-          return {
-            row,
-            summary: receivedShareSummary(
-              row,
-              granterEmail,
-              effective.genericChatWritable,
-            ),
-          };
-        });
-        // Re-evaluate AFTER the async display-name lookups, immediately before
-        // serialization. A pre-provisioned wire that became an agent channel
-        // during those awaits must not get one final recipient-list exposure.
-        const received = receivedRows.flatMap(({ row, summary }) => {
-          const selector = parseStoredAnyShareSelectorJson(row.share.selectorJson);
-          return selector && selectorTargetsBlockedChannel(storage, row.share.workspaceId, selector)
+          if (effective.ok) {
+            return [
+              receivedShareSummary(
+                { share: effective.share, grant: effective.grant },
+                granterEmail,
+                effective.genericChatWritable,
+              ),
+            ];
+          }
+
+          // A damaged fallback does not carry validated authority. Recheck its
+          // selector immediately before serialization so a channel that became
+          // blocked during the email lookup does not get one final exposure.
+          const selector = parseStoredAnyShareSelectorJson(fallback.share.selectorJson);
+          return selector &&
+            selectorTargetsBlockedChannel(storage, fallback.share.workspaceId, selector)
             ? []
-            : [summary];
+            : [
+                receivedShareSummary(
+                  fallback,
+                  granterEmail,
+                  effective.genericChatWritable,
+                ),
+              ];
         });
         return jsonResponse({ ok: true, granted, received });
       }
