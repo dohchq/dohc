@@ -76,7 +76,15 @@ export interface PublicDiscussionActivity {
   hasMore: boolean;
   messages: PublicDiscussionMessage[];
   composerState: DiscussionComposerState;
+  profileName: string | null;
 }
+
+export type DiscussionWriteState =
+  | {
+      state: "blocked" | "paused";
+      activityRevision: number;
+    }
+  | { state: "limit-reached" };
 
 export type FileAccumulator = Map<string, SharedFile>;
 
@@ -226,6 +234,7 @@ export function parseDiscussionActivity(value: unknown): PublicDiscussionActivit
       "hasMore",
       "messages",
       "composerState",
+      "profileName",
     ]) ||
     activity.ok !== true ||
     (activity.access !== "view" && activity.access !== "comment") ||
@@ -237,6 +246,8 @@ export function parseDiscussionActivity(value: unknown): PublicDiscussionActivit
       ? activity.cursorRevision >= activity.latestRevision
       : activity.cursorRevision !== activity.latestRevision) ||
     !Array.isArray(activity.messages) ||
+    (activity.profileName !== null &&
+      (typeof activity.profileName !== "string" || activity.profileName.length === 0)) ||
     (activity.composerState !== "available" &&
       activity.composerState !== "blocked" &&
       activity.composerState !== "paused")
@@ -258,6 +269,7 @@ export function parseDiscussionActivity(value: unknown): PublicDiscussionActivit
     hasMore: activity.hasMore,
     messages,
     composerState: activity.composerState,
+    profileName: activity.profileName as string | null,
   };
 }
 
@@ -275,21 +287,23 @@ export function parseDiscussionAppendResult(value: unknown): DiscussionAppendRes
 
 export function parseDiscussionWriteState(
   value: unknown,
-): "blocked" | "paused" | "limit-reached" | null {
+): DiscussionWriteState | null {
   const result = record(value);
-  if (
-    !result ||
-    result.ok !== false ||
-    !hasExactKeys(result, ["ok", "state"])
-  ) {
-    return null;
+  if (!result || result.ok !== false) return null;
+  if (result.state === "limit-reached") {
+    return hasExactKeys(result, ["ok", "state"])
+      ? { state: "limit-reached" }
+      : null;
   }
   if (
-    result.state === "blocked" ||
-    result.state === "paused" ||
-    result.state === "limit-reached"
+    (result.state === "blocked" || result.state === "paused") &&
+    hasExactKeys(result, ["ok", "state", "activityRevision"]) &&
+    isRevision(result.activityRevision)
   ) {
-    return result.state;
+    return {
+      state: result.state,
+      activityRevision: result.activityRevision,
+    };
   }
   return null;
 }

@@ -277,6 +277,45 @@ test("keeps two open public comment sessions current", async ({ browser, stack }
   }
 });
 
+test("converges one browser profile name across two open tabs", async ({ browser, stack }) => {
+  const seeded = await seedShare({
+    access: "comment",
+    relayUrl: stack.relayUrl,
+    files: [{ path: "docs/profile.md", content: "# Shared profile\n" }],
+  });
+  const context = await browser.newContext();
+  try {
+    const firstPage = await openLink(context, stack.shareWebUrl, seeded);
+    const secondPage = await openLink(context, stack.shareWebUrl, seeded);
+    await expect(firstPage.getByText("No comments yet.", { exact: true })).toBeVisible();
+    await expect(secondPage.getByText("No comments yet.", { exact: true })).toBeVisible();
+
+    const retainedBody = "Tab B keeps this unposted body.";
+    await secondPage.getByLabel("Name (optional)").fill("Conflicting Name");
+    await secondPage.getByLabel("Comment", { exact: true }).fill(retainedBody);
+
+    await firstPage.getByLabel("Name (optional)").fill("Stable Name");
+    await firstPage.getByLabel("Comment", { exact: true }).fill("Tab A commits the name.");
+    await firstPage.getByRole("button", { name: "Post comment" }).click();
+    await expect(firstPage.getByText("Tab A commits the name.", { exact: true }))
+      .toBeVisible();
+
+    await expect(secondPage.getByLabel("Name (optional)")).toHaveValue("Stable Name");
+    await expect(secondPage.getByLabel("Name (optional)")).toBeDisabled();
+    await expect(secondPage.getByLabel("Comment", { exact: true })).toHaveValue(retainedBody);
+    await expect(secondPage.getByLabel("Comment", { exact: true })).toBeEnabled();
+
+    await secondPage.getByRole("button", { name: "Post comment" }).click();
+    const retainedRow = secondPage.locator(".comment-row").filter({ hasText: retainedBody });
+    await expect(retainedRow).toBeVisible();
+    await expect(retainedRow.locator(".comment-author")).toHaveText("Stable NameUnverified");
+    await expect(secondPage.getByText("The comment didn't post. Try again.", { exact: true }))
+      .toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
+
 test("keeps mixed View and Comment links isolated over one committed discussion", async ({
   browser,
   stack,

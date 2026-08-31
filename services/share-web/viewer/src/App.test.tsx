@@ -32,7 +32,25 @@ const DEFAULT_META: ViewMeta = {
 };
 
 function jsonResponse(value: unknown, status = 200): Response {
-  return new Response(JSON.stringify(value), {
+  let responseValue = value;
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    if (
+      "composerState" in value &&
+      "latestRevision" in value &&
+      !("profileName" in value)
+    ) {
+      responseValue = { ...value, profileName: null };
+    } else if (
+      "ok" in value &&
+      value.ok === false &&
+      "state" in value &&
+      (value.state === "blocked" || value.state === "paused") &&
+      !("activityRevision" in value)
+    ) {
+      responseValue = { ...value, activityRevision: 7 };
+    }
+  }
+  return new Response(JSON.stringify(responseValue), {
     status,
     headers: { "content-type": "application/json" },
   });

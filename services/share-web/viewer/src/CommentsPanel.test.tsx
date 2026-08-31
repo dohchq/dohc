@@ -33,8 +33,34 @@ const TOMBSTONE = {
   deleted: true as const,
 };
 
+function withActivityProfileName(value: unknown): unknown {
+  if (
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    "composerState" in value &&
+    "latestRevision" in value &&
+    !("profileName" in value)
+  ) {
+    return { ...value, profileName: null };
+  }
+  if (
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    "ok" in value &&
+    value.ok === false &&
+    "state" in value &&
+    (value.state === "blocked" || value.state === "paused") &&
+    !("activityRevision" in value)
+  ) {
+    return { ...value, activityRevision: 7 };
+  }
+  return value;
+}
+
 function jsonResponse(value: unknown, status = 200): Response {
-  return new Response(JSON.stringify(value), {
+  return new Response(JSON.stringify(withActivityProfileName(value)), {
     status,
     headers: { "content-type": "application/json" },
   });
@@ -73,7 +99,7 @@ function heldJsonResponse(status: number): {
   });
   return {
     bodyStarted: () => bodyStarted,
-    release: (value) => releaseBody(value),
+    release: (value) => releaseBody(withActivityProfileName(value)),
     response,
   };
 }
@@ -405,7 +431,7 @@ describe("CommentsPanel", () => {
           profileName: session === THIRD_SESSION ? null : committedName,
         });
       }
-      return discussionPageAt(7);
+      return await new Promise<Response>(() => undefined);
     }));
 
     await render("comment", FIRST_SESSION);
@@ -473,7 +499,11 @@ describe("CommentsPanel", () => {
     async (_case, invalidDraft) => {
       const posted: Array<Record<string, unknown>> = [];
       vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
-        if (requestPath(input) !== "/api/view/discussion" || init?.method !== "POST") {
+        const path = requestPath(input);
+        if (path.includes("/activity?")) {
+          return await new Promise<Response>(() => undefined);
+        }
+        if (path !== "/api/view/discussion" || init?.method !== "POST") {
           return discussionPage();
         }
         const intent = JSON.parse(String(init.body)) as Record<string, unknown>;
@@ -529,7 +559,11 @@ describe("CommentsPanel", () => {
     const posted: Array<Record<string, unknown>> = [];
     let posts = 0;
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
-      if (requestPath(input) !== "/api/view/discussion" || init?.method !== "POST") {
+      const path = requestPath(input);
+      if (path.includes("/activity?")) {
+        return await new Promise<Response>(() => undefined);
+      }
+      if (path !== "/api/view/discussion" || init?.method !== "POST") {
         return discussionPage();
       }
       posted.push(JSON.parse(String(init.body)) as Record<string, unknown>);
@@ -585,7 +619,11 @@ describe("CommentsPanel", () => {
       const held = heldJsonResponse(outcome === "success" ? 200 : 403);
       const posted: Array<Record<string, unknown>> = [];
       vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
-        if (requestPath(input) !== "/api/view/discussion" || init?.method !== "POST") {
+        const path = requestPath(input);
+        if (path.includes("/activity?")) {
+          return await new Promise<Response>(() => undefined);
+        }
+        if (path !== "/api/view/discussion" || init?.method !== "POST") {
           return discussionPage();
         }
         posted.push(JSON.parse(String(init.body)) as Record<string, unknown>);
@@ -641,7 +679,11 @@ describe("CommentsPanel", () => {
     vi.useFakeTimers();
     const posted: Array<Record<string, unknown>> = [];
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
-      if (requestPath(input) !== "/api/view/discussion" || init?.method !== "POST") {
+      const path = requestPath(input);
+      if (path.includes("/activity?")) {
+        return await new Promise<Response>(() => undefined);
+      }
+      if (path !== "/api/view/discussion" || init?.method !== "POST") {
         return discussionPage();
       }
       posted.push(JSON.parse(String(init.body)) as Record<string, unknown>);
@@ -814,11 +856,13 @@ describe("CommentsPanel", () => {
     ["blocked", "The owner turned off comments for this browser."],
     ["paused", "The owner paused comments. You can still read everything."],
   ] as const)("learns %s only from POST and keeps the timeline", async (state, copy) => {
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) =>
-      init?.method === "POST"
-        ? jsonResponse({ ok: false, state }, 403)
-        : discussionPage([NAMED_MESSAGE])
-    ));
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      if (init?.method === "POST") return jsonResponse({ ok: false, state }, 403);
+      if (requestPath(input).includes("/activity?")) {
+        return await new Promise<Response>(() => undefined);
+      }
+      return discussionPage([NAMED_MESSAGE]);
+    }));
 
     await render("comment");
     expect(container.textContent).not.toContain(copy);
@@ -990,8 +1034,12 @@ describe("CommentsPanel", () => {
     "keeps the %i and %s write-state cross-pair retryable",
     async (status, state) => {
       let posts = 0;
-      vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (_input, init) => {
-        if (init?.method !== "POST") return discussionPage([NAMED_MESSAGE]);
+      vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+        if (init?.method !== "POST") {
+          return requestPath(input).includes("/activity?")
+            ? await new Promise<Response>(() => undefined)
+            : discussionPage([NAMED_MESSAGE]);
+        }
         posts += 1;
         return jsonResponse({ ok: false, state }, status);
       }));
@@ -1804,6 +1852,10 @@ describe("CommentsPanel", () => {
 
   it.each([
     [
+      "non-retryable response",
+      () => new Response(null, { status: 404 }),
+    ],
+    [
       "malformed JSON",
       () => new Response("{", {
         status: 200,
@@ -1823,7 +1875,31 @@ describe("CommentsPanel", () => {
         internal: true,
       }),
     ],
-  ])("keeps %s activity terminal", async (_label, activityResponse) => {
+    [
+      "regressed cursor",
+      () => jsonResponse({
+        ok: true,
+        access: "comment",
+        latestRevision: 7,
+        cursorRevision: 6,
+        hasMore: true,
+        messages: [],
+        composerState: "available",
+      }),
+    ],
+    [
+      "refused message merge",
+      () => jsonResponse({
+        ok: true,
+        access: "comment",
+        latestRevision: 8,
+        cursorRevision: 8,
+        hasMore: false,
+        messages: [{ ...NAMED_MESSAGE, body: "Conflicting body" }],
+        composerState: "available",
+      }),
+    ],
+  ])("stops after terminal %s activity", async (_label, activityResponse) => {
     vi.useFakeTimers();
     let activityAttempts = 0;
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
@@ -1849,7 +1925,10 @@ describe("CommentsPanel", () => {
     expect(container.textContent).not.toContain(
       "The owner turned off comments for this browser.",
     );
-    expect(bodyInput().disabled).toBe(false);
+    expect(container.textContent).toContain("Comments stopped updating.");
+    expect(bodyInput().disabled).toBe(true);
+    expect([...container.querySelectorAll("button")]
+      .some((button) => button.textContent === "Try again")).toBe(true);
   });
 
   it("cancels a pending body retry across session replacement and unmount", async () => {
@@ -2005,6 +2084,7 @@ describe("CommentsPanel", () => {
       hasMore: false,
       messages: [{ ...LINK_MESSAGE, body: "Old activity body" }],
       composerState: "blocked",
+      profileName: "Old Profile",
     });
     await act(async () => {
       await Promise.resolve();
@@ -2015,6 +2095,8 @@ describe("CommentsPanel", () => {
     expect(container.textContent).not.toContain(
       "The owner turned off comments for this browser.",
     );
+    expect(nameInput().value).toBe("");
+    expect(nameInput().disabled).toBe(false);
     expect(bodyInput().disabled).toBe(false);
 
     act(() => root.unmount());
@@ -2067,6 +2149,9 @@ describe("CommentsPanel", () => {
           oldSignal = init.signal ?? undefined;
           return heldOld;
         }
+        if (requestPath(input).includes("/activity?")) {
+          return await new Promise<Response>(() => undefined);
+        }
         return requestSession(init) === FIRST_SESSION
           ? discussionPage()
           : discussionPage([{ ...NAMED_MESSAGE, body: "Replacement timeline" }]);
@@ -2106,10 +2191,13 @@ describe("CommentsPanel", () => {
     async (outcome) => {
       const held = heldJsonResponse(outcome === "success" ? 200 : 403);
       let oldSignal: AbortSignal | undefined;
-      vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (_input, init) => {
+      vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
         if (init?.method === "POST") {
           oldSignal = init.signal ?? undefined;
           return held.response;
+        }
+        if (requestPath(input).includes("/activity?")) {
+          return await new Promise<Response>(() => undefined);
         }
         return requestSession(init) === FIRST_SESSION
           ? discussionPage()

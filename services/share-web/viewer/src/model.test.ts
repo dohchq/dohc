@@ -581,6 +581,7 @@ describe("public discussion projection", () => {
       hasMore: true,
       messages: [named, link],
       composerState: "blocked",
+      profileName: "Stable Name",
     })).toEqual({
       access: "comment",
       latestRevision: 9,
@@ -588,6 +589,7 @@ describe("public discussion projection", () => {
       hasMore: true,
       messages: [named, link],
       composerState: "blocked",
+      profileName: "Stable Name",
     });
 
     for (const value of [
@@ -659,13 +661,60 @@ describe("public discussion projection", () => {
     }
   });
 
-  it("parses only the exact durable discussion limit write state", () => {
+  it("requires the exact current-profile field on public activity", () => {
+    const activity = {
+      ok: true,
+      access: "comment",
+      latestRevision: 9,
+      cursorRevision: 9,
+      hasMore: false,
+      messages: [],
+      composerState: "available",
+    };
+
+    expect(parseDiscussionActivity({ ...activity, profileName: null }))
+      .toMatchObject({ profileName: null });
+    expect(parseDiscussionActivity({ ...activity, profileName: "Stable Name" }))
+      .toMatchObject({ profileName: "Stable Name" });
+    expect(parseDiscussionActivity(activity)).toBeNull();
+    expect(parseDiscussionActivity({ ...activity, profileName: "" })).toBeNull();
+    expect(parseDiscussionActivity({
+      ...activity,
+      profileName: "Stable Name",
+      profileTokenHash: "private",
+    })).toBeNull();
+  });
+
+  it("parses only exact revisioned reversible states and a revisionless durable limit", () => {
+    expect(parseDiscussionWriteState({
+      ok: false,
+      state: "blocked",
+      activityRevision: 8,
+    })).toEqual({ state: "blocked", activityRevision: 8 });
+    expect(parseDiscussionWriteState({
+      ok: false,
+      state: "paused",
+      activityRevision: Number.MAX_SAFE_INTEGER,
+    })).toEqual({
+      state: "paused",
+      activityRevision: Number.MAX_SAFE_INTEGER,
+    });
     expect(parseDiscussionWriteState({
       ok: false,
       state: "limit-reached",
-    })).toBe("limit-reached");
+    })).toEqual({ state: "limit-reached" });
 
     for (const value of [
+      { ok: false, state: "blocked" },
+      { ok: false, state: "paused", activityRevision: -1 },
+      { ok: false, state: "blocked", activityRevision: 1.5 },
+      {
+        ok: false,
+        state: "paused",
+        activityRevision: Number.MAX_SAFE_INTEGER + 1,
+      },
+      { ok: false, state: "blocked", activityRevision: 8, internal: true },
+      { ok: false, state: "limit-reached", activityRevision: 8 },
       { ok: false, state: "limit-reached", code: "discussion_limit_reached" },
       { ok: false, state: "limit-reach" },
       { ok: true, state: "limit-reached" },

@@ -1,4 +1,7 @@
-import { normalizeShareDiscussionBody } from "@dohc/security-contract/share-discussion";
+import {
+  normalizeShareDiscussionBody,
+  normalizeShareDiscussionDisplayName,
+} from "@dohc/security-contract/share-discussion";
 import {
   type FormEvent,
   useEffect,
@@ -31,6 +34,8 @@ const NAME_HELP_ID = "comment-name-help";
 
 type ComposerState = "available" | "blocked" | "paused" | "limit-reached";
 type InitialLoadState = "loading" | "failed" | "ready";
+type FollowerPhase = "live" | "stopped" | "recovering";
+type ActivityFollowerResult = "cancelled" | "stopped";
 
 interface SubmitIntent {
   body: string;
@@ -130,7 +135,7 @@ async function followDiscussionActivity(
   signal: AbortSignal,
   isCurrent: () => boolean,
   apply: (activity: NonNullable<ReturnType<typeof parseDiscussionActivity>>) => boolean,
-): Promise<void> {
+): Promise<ActivityFollowerResult> {
   let since = baselineRevision;
   let holdMs = 0;
   let retryDelayMs = RETRY_INITIAL_MS;
@@ -149,14 +154,14 @@ async function followDiscussionActivity(
         signal,
       );
     } catch {
-      if (!isCurrent() || signal.aborted) return;
+      if (!isCurrent() || signal.aborted) return "cancelled";
       await waitForRetry(retryDelayMs, signal).catch(() => undefined);
       retryDelayMs = Math.min(retryDelayMs * 2, RETRY_MAX_MS);
       continue;
     }
     if (!isCurrent()) {
       await response.body?.cancel().catch(() => undefined);
-      return;
+      return "cancelled";
     }
     if (response.status === 409 || response.status === 429 || response.status >= 500) {
       await response.body?.cancel().catch(() => undefined);
@@ -166,18 +171,19 @@ async function followDiscussionActivity(
     }
     if (!response.ok) {
       await response.body?.cancel().catch(() => undefined);
-      return;
+      return "stopped";
     }
     let body: unknown;
     try {
       body = await response.json();
     } catch (error: unknown) {
-      if (!isCurrent() || signal.aborted || error instanceof SyntaxError) return;
+      if (!isCurrent() || signal.aborted) return "cancelled";
+      if (error instanceof SyntaxError) return "stopped";
       await waitForRetry(retryDelayMs, signal).catch(() => undefined);
       retryDelayMs = Math.min(retryDelayMs * 2, RETRY_MAX_MS);
       continue;
     }
-    if (!isCurrent()) return;
+    if (!isCurrent()) return "cancelled";
     const activity = parseDiscussionActivity(body);
     if (
       !activity ||
@@ -185,12 +191,13 @@ async function followDiscussionActivity(
       (activity.hasMore && activity.cursorRevision === since) ||
       !apply(activity)
     ) {
-      return;
+      return "stopped";
     }
     since = activity.cursorRevision;
     holdMs = activity.hasMore ? 0 : DISCUSSION_ACTIVITY_HOLD_MS;
     retryDelayMs = RETRY_INITIAL_MS;
   }
+  return "cancelled";
 }
 
 function newIdempotencyKey(): string {
@@ -206,8 +213,7 @@ function exactIntent(
   const nextClaimedName = claimedName.length === 0 ? undefined : claimedName;
   if (
     previous &&
-    previous.body === body &&
-    previous.claimedName === nextClaimedName
+    previous.body === body
   ) {
     return previous;
   }
@@ -251,6 +257,7 @@ export function CommentsPanel(props: {
   const [pending, setPending] = useState(false);
   const [composerState, setComposerState] = useState<ComposerState>("available");
   const [submitError, setSubmitError] = useState(false);
+  const [followerPhase, setFollowerPhase] = useState<FollowerPhase>("live");
   const sessionRef = useRef(props.session);
   const messagesRef = useRef<PublicDiscussionMessage[] | null>(null);
   const pageTokenRef = useRef<symbol | null>(null);
@@ -265,11 +272,93 @@ export function CommentsPanel(props: {
   const submitControllerRef = useRef<AbortController | null>(null);
   const pendingRef = useRef(false);
   const intentRef = useRef<SubmitIntent | null>(null);
+  const composerRevisionRef = useRef(0);
+  const followerPhaseRef = useRef<FollowerPhase>("live");
   const onAccessChangeRef = useRef(props.onAccessChange);
   const normalizedBody = normalizeShareDiscussionBody(body);
   const bodyInvalid = body.length > 0 && normalizedBody === null;
+  const normalizedName = claimedName.length === 0
+    ? null
+    : normalizeShareDiscussionDisplayName(claimedName);
+  const nameInvalid = normalizedName?.ok === false ? normalizedName.reason : null;
   sessionRef.current = props.session;
   onAccessChangeRef.current = props.onAccessChange;
+
+  const adoptProfileName = (profileName: string | null) => {
+    if (profileName === null) return;
+    setClaimedName(profileName);
+    setNameLocked(true);
+  };
+
+  const enterFollowerPhase = (phase: FollowerPhase) => {
+    followerPhaseRef.current = phase;
+    setFollowerPhase(phase);
+  };
+
+  const applyActivity = (
+    session: string,
+    activity: NonNullable<ReturnType<typeof parseDiscussionActivity>>,
+    recovering: boolean,
+  ): boolean => {
+    if (!messagesRef.current) return false;
+    let merged: PublicDiscussionMessage[] | null;
+    if (hasEarlierHistoryRef.current) {
+      const windowMerge = mergeDiscussionWindowMessages(
+        messagesRef.current,
+        activity.messages,
+      );
+      if (!windowMerge) return false;
+      const retained = mergeDiscussionMessages(
+        [...withheldTombstonesRef.current.values()],
+        windowMerge.withheldTombstones,
+      );
+      if (!retained) return false;
+      const retainedTombstones: DeletedDiscussionMessage[] = [];
+      for (const message of retained) {
+        if (!message.deleted) return false;
+        retainedTombstones.push(message);
+      }
+      withheldTombstonesRef.current = new Map(
+        retainedTombstones.map((message) => [message.messageId, message]),
+      );
+      merged = windowMerge.messages;
+    } else {
+      merged = mergeDiscussionMessages(messagesRef.current, activity.messages);
+    }
+    if (!merged) return false;
+    onAccessChangeRef.current?.(session, activity.access);
+    messagesRef.current = merged;
+    setMessages(merged);
+    composerRevisionRef.current = Math.max(
+      composerRevisionRef.current,
+      activity.latestRevision,
+    );
+    adoptProfileName(activity.profileName);
+    setComposerState((current) => {
+      if (current === "limit-reached") return current;
+      return activity.composerState;
+    });
+    if (recovering) enterFollowerPhase("live");
+    return true;
+  };
+
+  const startFollower = (
+    session: string,
+    baselineRevision: number,
+    controller: AbortController,
+    isCurrent: () => boolean,
+    recovering: boolean,
+  ) => {
+    void followDiscussionActivity(
+      session,
+      baselineRevision,
+      controller.signal,
+      isCurrent,
+      (activity) => applyActivity(session, activity, recovering),
+    ).then((result) => {
+      if (result === "stopped" && isCurrent()) enterFollowerPhase("stopped");
+    });
+  };
 
   useEffect(() => {
     const token = Symbol("discussion-page");
@@ -282,6 +371,8 @@ export function CommentsPanel(props: {
     submitControllerRef.current = null;
     pendingRef.current = false;
     intentRef.current = null;
+    composerRevisionRef.current = 0;
+    followerPhaseRef.current = "live";
     messagesRef.current = null;
     earlierPendingRef.current = false;
     hasEarlierHistoryRef.current = false;
@@ -299,6 +390,7 @@ export function CommentsPanel(props: {
     setPending(false);
     setComposerState("available");
     setSubmitError(false);
+    setFollowerPhase("live");
     const isCurrent = () =>
       pageTokenRef.current === token && sessionRef.current === props.session;
     void loadDiscussionPage(props.session, null, controller.signal, isCurrent)
@@ -311,52 +403,16 @@ export function CommentsPanel(props: {
         if (loaded.nextCursor !== null) {
           seenEarlierCursorsRef.current.add(loaded.nextCursor);
         }
+        composerRevisionRef.current = loaded.activityRevision;
         setClaimedName(loaded.profileName ?? "");
         setNameLocked(loaded.profileName !== null);
         setLoadState("ready");
-        void followDiscussionActivity(
+        startFollower(
           props.session,
           loaded.activityRevision,
-          controller.signal,
+          controller,
           isCurrent,
-          (activity) => {
-            if (!messagesRef.current) return false;
-            let merged: PublicDiscussionMessage[] | null;
-            if (hasEarlierHistoryRef.current) {
-              const windowMerge = mergeDiscussionWindowMessages(
-                messagesRef.current,
-                activity.messages,
-              );
-              if (!windowMerge) return false;
-              const retained = mergeDiscussionMessages(
-                [...withheldTombstonesRef.current.values()],
-                windowMerge.withheldTombstones,
-              );
-              if (!retained) return false;
-              const retainedTombstones: DeletedDiscussionMessage[] = [];
-              for (const message of retained) {
-                if (!message.deleted) return false;
-                retainedTombstones.push(message);
-              }
-              withheldTombstonesRef.current = new Map(
-                retainedTombstones.map((message) => [message.messageId, message]),
-              );
-              merged = windowMerge.messages;
-            } else {
-              merged = mergeDiscussionMessages(
-                messagesRef.current,
-                activity.messages,
-              );
-            }
-            if (!merged) return false;
-            onAccessChangeRef.current?.(props.session, activity.access);
-            messagesRef.current = merged;
-            setMessages(merged);
-            setComposerState((current) =>
-              current === "limit-reached" ? current : activity.composerState
-            );
-            return true;
-          },
+          false,
         );
       })
       .catch(() => {
@@ -437,6 +493,51 @@ export function CommentsPanel(props: {
     }
   };
 
+  const recoverDiscussion = () => {
+    if (followerPhaseRef.current !== "stopped") return;
+    const session = props.session;
+    const token = Symbol("discussion-recovery");
+    const controller = new AbortController();
+    pageControllerRef.current?.abort();
+    pageControllerRef.current = controller;
+    pageTokenRef.current = token;
+    enterFollowerPhase("recovering");
+    const isCurrent = () =>
+      pageTokenRef.current === token &&
+      sessionRef.current === session &&
+      !controller.signal.aborted;
+    void loadDiscussionPage(session, null, controller.signal, isCurrent)
+      .then((loaded) => {
+        if (!isCurrent()) return;
+        messagesRef.current = loaded.messages;
+        hasEarlierHistoryRef.current = loaded.nextCursor !== null;
+        seenEarlierCursorsRef.current = new Set(
+          loaded.nextCursor === null ? [] : [loaded.nextCursor],
+        );
+        withheldTombstonesRef.current = new Map();
+        earlierPendingRef.current = false;
+        setMessages(loaded.messages);
+        setEarlierCursor(loaded.nextCursor);
+        setEarlierPending(false);
+        setEarlierError(false);
+        composerRevisionRef.current = Math.max(
+          composerRevisionRef.current,
+          loaded.activityRevision,
+        );
+        adoptProfileName(loaded.profileName);
+        startFollower(
+          session,
+          loaded.activityRevision,
+          controller,
+          isCurrent,
+          true,
+        );
+      })
+      .catch(() => {
+        if (isCurrent()) enterFollowerPhase("stopped");
+      });
+  };
+
   const editDraft = (field: "body" | "name", value: string) => {
     intentRef.current = null;
     setSubmitError(false);
@@ -448,13 +549,19 @@ export function CommentsPanel(props: {
     event.preventDefault();
     if (
       props.access !== "comment" ||
+      followerPhaseRef.current !== "live" ||
       composerState !== "available" ||
       normalizedBody === null ||
+      nameInvalid !== null ||
       pendingRef.current
     ) {
       return;
     }
-    const intent = exactIntent(intentRef.current, normalizedBody, claimedName);
+    const intent = exactIntent(
+      intentRef.current,
+      normalizedBody,
+      normalizedName?.ok === true ? normalizedName.value : "",
+    );
     intentRef.current = intent;
     const token = Symbol("discussion-submit");
     const session = props.session;
@@ -492,14 +599,33 @@ export function CommentsPanel(props: {
       if (response.status === 403 || response.status === 413) {
         const result = await response.json();
         if (!isCurrent()) return;
-        const state = parseDiscussionWriteState(result);
+        const resultState = parseDiscussionWriteState(result);
         const recognizedState =
-          (response.status === 403 && (state === "blocked" || state === "paused")) ||
-          (response.status === 413 && state === "limit-reached");
-        if (recognizedState) {
-          intentRef.current = null;
-          setSubmitError(false);
-          setComposerState(state);
+          (response.status === 403 &&
+            resultState !== null &&
+            (resultState.state === "blocked" || resultState.state === "paused")) ||
+          (response.status === 413 && resultState?.state === "limit-reached");
+        if (recognizedState && resultState) {
+          if (resultState.state === "limit-reached") {
+            intentRef.current = null;
+            setSubmitError(false);
+            setComposerState("limit-reached");
+            return;
+          }
+          if (resultState.activityRevision >= composerRevisionRef.current) {
+            composerRevisionRef.current = Math.max(
+              composerRevisionRef.current,
+              resultState.activityRevision,
+            );
+            intentRef.current = null;
+            setSubmitError(false);
+            setComposerState((current) => {
+              if (current === "limit-reached") return current;
+              return resultState.state;
+            });
+          } else {
+            setSubmitError(true);
+          }
           return;
         }
       } else if (response.ok) {
@@ -536,18 +662,22 @@ export function CommentsPanel(props: {
   };
 
   const currentLoadState = loadStateSession === props.session ? loadState : "loading";
-  const disabled = pending || composerState !== "available";
+  const disabled = pending || composerState !== "available" || followerPhase !== "live";
   const stateCopy = composerState === "blocked"
     ? "The owner turned off comments for this browser."
     : composerState === "paused"
       ? "The owner paused comments. You can still read everything."
       : composerState === "limit-reached"
         ? "You can't post more comments here. You can still read everything."
-      : bodyInvalid
-        ? "This comment is too long. Shorten it before posting."
-        : submitError
-          ? "The comment didn't post. Try again."
-          : "";
+        : bodyInvalid
+          ? "This comment is too long. Shorten it before posting."
+          : nameInvalid === "too-long"
+            ? "This name is too long. Use 40 characters or fewer."
+            : nameInvalid === "empty"
+              ? "This name has no visible characters. Type a name or clear the field."
+              : submitError
+                ? "The comment didn't post. Try again."
+                : "";
   return (
     <aside className="comments-panel" aria-labelledby="comments-title">
       <h2 id="comments-title">Comments</h2>
@@ -592,6 +722,22 @@ export function CommentsPanel(props: {
           ))}
         </ol>
       )}
+      {currentLoadState === "ready" && followerPhase !== "live" ? (
+        <div>
+          <p className="comment-submit-status" role="status">
+            Comments stopped updating.
+          </p>
+          <div className="comment-submit-row">
+            <button
+              type="button"
+              disabled={followerPhase === "recovering"}
+              onClick={recoverDiscussion}
+            >
+              Try again
+            </button>
+          </div>
+        </div>
+      ) : null}
       {currentLoadState === "ready" && props.access === "comment" ? (
         <form
           className="comment-composer"
@@ -620,7 +766,10 @@ export function CommentsPanel(props: {
             onChange={(event) => editDraft("body", event.currentTarget.value)}
           />
           <div className="comment-submit-row">
-            <button type="submit" disabled={disabled || normalizedBody === null}>
+            <button
+              type="submit"
+              disabled={disabled || normalizedBody === null || nameInvalid !== null}
+            >
               Post comment
             </button>
           </div>
