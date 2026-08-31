@@ -17,6 +17,7 @@ export const SHARE_WEB_SECURITY_HEADERS = Object.freeze({
 const REFUSAL_BODY = JSON.stringify({ ok: false, error: "not found" });
 const MAX_EXCHANGE_BODY_BYTES = 8 * 1024;
 const MAX_DISCUSSION_ENVELOPE_BYTES = 16 * 1024;
+const MAX_RELAY_RESPONSE_BYTES = 2 * 1024 * 1024;
 export const EXCHANGE_BUCKET_CAPACITY = 12;
 const EXCHANGE_REFILL_PER_SECOND = 0.2;
 const EXCHANGE_MAX_IPS = 10_000;
@@ -24,6 +25,8 @@ const DEFAULT_MAX_SESSIONS = 10_000;
 export const MAX_SESSIONS_PER_GRANT = 512;
 const MAX_BLOB_PROXIES_PER_SESSION = 8;
 const MAX_BLOB_PROXIES_PER_GRANT = 24;
+const MAX_ACTIVITY_HOLDS_PER_SESSION = 8;
+const MAX_ACTIVITY_HOLDS_PER_GRANT = 24;
 const DEFAULT_RELAY_REQUEST_TIMEOUT_MS = 10_000;
 const LINK_REFRESH_WINDOW_MS = 5 * 60 * 1_000;
 export const LINK_SESSION_RENEWAL_GRACE_MS = 7 * 24 * 60 * 60 * 1_000;
@@ -219,16 +222,21 @@ class ShareWebExchangeRateLimiter {
   }
 }
 
-class ShareWebBlobProxyLimiter {
+class ShareWebInFlightLimiter {
   private readonly inFlightBySession = new Map<string, number>();
   private readonly inFlightByGrant = new Map<string, number>();
+
+  constructor(
+    private readonly maxPerSession: number,
+    private readonly maxPerGrant: number,
+  ) {}
 
   acquire(sessionIdentity: string, grantIdentity: string): (() => void) | null {
     const sessionInFlight = this.inFlightBySession.get(sessionIdentity) ?? 0;
     const grantInFlight = this.inFlightByGrant.get(grantIdentity) ?? 0;
     if (
-      sessionInFlight >= MAX_BLOB_PROXIES_PER_SESSION ||
-      grantInFlight >= MAX_BLOB_PROXIES_PER_GRANT
+      sessionInFlight >= this.maxPerSession ||
+      grantInFlight >= this.maxPerGrant
     ) {
       return null;
     }
@@ -494,8 +502,47 @@ function boundedRelayRequest(
 }
 
 async function completeRelayResponse(relayResponse: Response): Promise<Response> {
-  const bytes = await relayResponse.arrayBuffer();
-  return new Response(bytes.byteLength === 0 ? null : bytes, {
+  const declaredLength = relayResponse.headers.get("content-length");
+  if (
+    declaredLength !== null &&
+    /^[0-9]+$/u.test(declaredLength) &&
+    Number(declaredLength) > MAX_RELAY_RESPONSE_BYTES
+  ) {
+    await relayResponse.body?.cancel().catch(() => undefined);
+    throw new Error("relay response exceeds the public proxy limit");
+  }
+
+  const reader = relayResponse.body?.getReader();
+  const chunks: Uint8Array[] = [];
+  let bufferedBytes = 0;
+  if (reader) {
+    while (true) {
+      const read = await reader.read();
+      if (read.done) break;
+      if (read.value.byteLength === 0) continue;
+      if (read.value.byteLength > MAX_RELAY_RESPONSE_BYTES - bufferedBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error("relay response exceeds the public proxy limit");
+      }
+      chunks.push(read.value);
+      bufferedBytes += read.value.byteLength;
+    }
+  }
+
+  let chunkIndex = 0;
+  const body = bufferedBytes === 0
+    ? null
+    : new ReadableStream<Uint8Array>({
+        pull(controller) {
+          const chunk = chunks[chunkIndex++];
+          if (chunk) controller.enqueue(chunk);
+          if (chunkIndex === chunks.length) controller.close();
+        },
+        cancel() {
+          chunks.length = 0;
+        },
+      });
+  return new Response(body, {
     status: relayResponse.status,
     statusText: relayResponse.statusText,
     headers: relayResponse.headers,
@@ -728,7 +775,14 @@ export function createShareWebHandler({
 }: CreateShareWebHandlerOptions): (request: Request) => Promise<Response> {
   const sessions = new ShareWebSessionStore(maxSessions);
   const exchangeRateLimiter = new ShareWebExchangeRateLimiter();
-  const blobProxyLimiter = new ShareWebBlobProxyLimiter();
+  const blobProxyLimiter = new ShareWebInFlightLimiter(
+    MAX_BLOB_PROXIES_PER_SESSION,
+    MAX_BLOB_PROXIES_PER_GRANT,
+  );
+  const activityHoldLimiter = new ShareWebInFlightLimiter(
+    MAX_ACTIVITY_HOLDS_PER_SESSION,
+    MAX_ACTIVITY_HOLDS_PER_GRANT,
+  );
   const refreshes = new Map<string, Promise<RefreshAttempt>>();
 
   async function readSession(request: Request): Promise<{
@@ -1049,6 +1103,15 @@ export function createShareWebHandler({
         ? { "set-cookie": refreshed.setCookie }
         : {};
       const capabilityToken = authenticated.session.capabilityToken;
+      const releaseActivityHold = isActivity
+        ? activityHoldLimiter.acquire(
+            sessionKey(authenticated.discriminator, authenticated.token),
+            authenticated.session.grantId,
+          )
+        : null;
+      if (isActivity && !releaseActivityHold) {
+        return refused(429, refreshedCookieHeaders);
+      }
       const boundedRelay = boundedRelayRequest(
         request.signal,
         relayUrl,
@@ -1128,6 +1191,7 @@ export function createShareWebHandler({
         return refused(503, refreshedCookieHeaders);
       } finally {
         boundedRelay.dispose();
+        releaseActivityHold?.();
       }
     }
 
