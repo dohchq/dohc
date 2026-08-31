@@ -11,10 +11,11 @@ longer holds `workspace.open` until the complete History baseline exists.
 
 Large first imports remain visible work. The original release profile opened a
 fresh 15,000-file workspace in 14.746 seconds and needed 77.226 seconds to
-finish History. The final repeatable daemon profile opens in 11.702-12.131
-seconds and reaches `Ready` in 24.650-25.171 seconds. Both final runs recovered
-exactly 15,000 moments and paths after a daemon restart. Operations that require
-a complete baseline return an explicit updating response during import.
+finish History. The exact-head daemon profiles return from `workspace.open` in
+10.743-12.503 seconds, accept the first History page in 21.032-24.655 seconds,
+and verify all History pages in 22.344-26.011 seconds. Both exact-head runs
+recovered exactly 15,000 moments and paths after a daemon restart. Operations
+that require a complete baseline return an explicit updating response during import.
 Plans below 1,000 Added files retain the strict baseline barrier, so ordinary
 small workspaces do not pay the complexity of a partial-ready shell.
 
@@ -30,6 +31,7 @@ small workspaces do not pay the complexity of a partial-ready shell.
 | Repeat the complete 15,000-file capture before the final cold-path changes | 22,679.4 ms to named `Importing`; 46,176.8 ms to `Ready` | Repeatable real-daemon profiler; exact 15,000 moments and paths survive restart | Baseline for the final optimization |
 | Repeat the complete 15,000-file capture after the final cold-path changes | 11,702.0 ms to named `Importing`; 24,650.3 ms to `Ready` | Gate-built daemon; exact 15,000 moments and paths survive restart | Pass |
 | Confirm the final complete 15,000-file capture | 12,131.4 ms to named `Importing`; 25,170.7 ms to `Ready` | Independent cold fixture and daemon restart; 30,000 ms readiness ceiling | Pass |
+| Repeat after removing clean-batch savepoint churn | 10,742.7-12,503.0 ms to return from `workspace.open`; 21,032.3-24,655.1 ms to the first accepted History page; 22,343.7-26,011.2 ms to traverse every History page | Code commit `8aa59647`; default search; exact 15,000 moments, paths, and order before and after restart; engine hashes recorded outside the measured interval | Pass; 66.3%-71.1% faster than the original complete History run |
 | Open the 15,000-file control with capture disabled | 202.7 ms | Separates file listing/open cost from initial History capture | Diagnostic control |
 | Expand a 5,000-file folder, before the fix | 2,407 ms to the complete tree | 5,004 mounted rows; seven long tasks; longest 732 ms | Fail |
 | Expand that folder after fixed-height virtualization | 80 ms to the first child; 40 ms to focus an initially unmounted End target | 37 mounted rows after expansion; one 53 ms long task; 178 interactions over 10 seconds | Pass for the measured boundary |
@@ -55,7 +57,7 @@ and remains an unsuccessful run.
 
 ## Remaining performance work
 
-1. Keep profiling growth beyond 15,000 files. A 25-second History import is
+1. Keep profiling growth beyond 15,000 files. A 22.3-26.0-second History import is
    bounded and nonblocking after the safe scan, but it remains visible work.
 2. Reconnect the committed performance budget table to a candidate-build gate.
    The current profiles are diagnostic evidence, not the complete release gate.
@@ -63,7 +65,9 @@ and remains an unsuccessful run.
 The first-import path now batches capture writes, prepares secure file reads in
 bounded parallel windows, reuses fresh-capture state, keeps mtime fences in an
 eight-worker scan pool, indexes generation high-water reads, and avoids
-unnecessary FTS deletes for brand-new moments. The safety layer releases only a
+unnecessary FTS deletes for brand-new moments. A clean capture batch now uses
+one rollback scope and falls back to the original per-item scopes after any
+failure. The safety layer releases only a
 proven fresh, clean all-Added import of at least 1,000 files; smaller, existing,
 recovered, migrated, unreadable-policy, or otherwise uncertain stores keep the
 strict baseline barrier. Explorer, graph, large Markdown, and the measured

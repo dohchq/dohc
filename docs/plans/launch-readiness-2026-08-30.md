@@ -16,10 +16,11 @@ the test waited for a durable save.
 
 A first import is still visible work at large scale. The original packaged
 profile opened a fresh 15,000-file workspace in 14.746 seconds and reached full
-History readiness after 77.226 seconds. The final repeatable daemon profiles
-open in 11.702-12.131 seconds and reach `Ready` in 24.650-25.171 seconds.
+History readiness after 77.226 seconds. The exact-head daemon profiles return
+from `workspace.open` in 10.743-12.503 seconds, accept the first History page in
+21.032-24.655 seconds, and verify the full History in 22.344-26.011 seconds.
 Baseline-dependent operations fail fast with an updating response during
-import. Both final runs recovered all 15,000 moments and paths after restart.
+import. Both exact-head runs recovered all 15,000 moments and paths after restart.
 This is an explicit background-import boundary, not an unexplained wait or raw
 deadline.
 Fresh plans below 1,000 files keep the simpler strict barrier and do not expose
