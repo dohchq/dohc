@@ -54,6 +54,9 @@ function Harness(props: {
     <div>
       <span data-testid="opening">{String(engine.opening)}</span>
       <span data-testid="available">{String(engine.available)}</span>
+      <span data-testid="engine-may-hold-document">
+        {String(engine.engineMayHoldDocument)}
+      </span>
     </div>
   );
 }
@@ -147,6 +150,30 @@ it("separates 'not engine-backed' from 'opening' — both are available:false", 
   await waitFor(() =>
     expect(screen.getByTestId("opening").textContent).toBe("false"),
   );
+  expect(screen.getByTestId("available").textContent).toBe("false");
+});
+
+it("keeps a classified open refusal out of the writable fallback", async () => {
+  vi.stubGlobal("dohcDesktop", {
+    openEngineYDocSession: vi.fn(async () => ({
+      available: false,
+      engineMayHoldDocument: true,
+    })),
+    applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
+    onEngineYDocRemoteUpdate: () => () => undefined,
+    onEngineYDocLineageReplacement: () => () => undefined,
+    onEngineYDocSaveState: () => () => undefined,
+    closeEngineYDocSession: vi.fn(async () => undefined),
+  });
+
+  render(<Harness path="notes/a.md" />);
+
+  await waitFor(() =>
+    expect(
+      screen.getByTestId("engine-may-hold-document").textContent,
+    ).toBe("true"),
+  );
+  expect(screen.getByTestId("opening").textContent).toBe("false");
   expect(screen.getByTestId("available").textContent).toBe("false");
 });
 

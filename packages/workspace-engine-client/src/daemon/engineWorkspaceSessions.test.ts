@@ -161,6 +161,15 @@ describe("EngineWorkspaceSessions", () => {
     ).toBe(false);
   });
 
+  it("keeps a document read-only while initial capture installs its head", () => {
+    const refusal = daemonRefusal(
+      "OVERLOADED",
+      "Workspace is still updating. Try again.",
+      "afterBackoff",
+    );
+    expect(isEngineWorkspaceOpenRefusedError(refusal)).toBe(true);
+  });
+
   it("keeps a canonical scene read-only when linked asset authority is corrupt", () => {
     const refusal = new DaemonRefusalError(
       {

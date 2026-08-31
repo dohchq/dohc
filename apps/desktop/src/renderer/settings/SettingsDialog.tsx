@@ -33,7 +33,6 @@ import {
   type WorkspaceSettingsResult,
 } from "../../workspaces/workspaceSettings";
 import { bridge } from "../bridge";
-import { trapModalTabKey } from "../modalFocus";
 import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
 import { applyAppearanceSettings } from "../theme";
 import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
@@ -171,19 +170,6 @@ export function SettingsDialog(props: {
   useEffect(() => {
     closeRef.current?.focus();
   }, []);
-
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        props.onClose();
-        return;
-      }
-      trapModalTabKey(event, dialogRef.current);
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [props.onClose]);
 
   useEffect(() => () => clearSaveStateTimer(), [clearSaveStateTimer]);
 

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -12,6 +12,8 @@ import {
   type WorkspaceSettingsPatch,
   type WorkspaceSettingsResult,
 } from "../../workspaces/workspaceSettings";
+import { pushOverlay, removeOverlay } from "../guestBlockingUi";
+import { Overlay } from "../Overlay";
 import { DesktopSettings } from "./DesktopSettings";
 
 const config = {
@@ -232,11 +234,44 @@ describe("DesktopSettings", () => {
   it("closes from Escape", async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
-    render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={onClose} />);
+    render(
+      <Overlay onClose={onClose}>
+        <DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={onClose} />
+      </Overlay>,
+    );
 
     expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
     await user.keyboard("{Escape}");
     expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("leaves keyboard handling to a recovery warning above settings", async () => {
+    const onClose = vi.fn();
+    render(
+      <>
+        <button type="button" data-testid="recovery-warning-action">
+          Go back
+        </button>
+        <Overlay onClose={onClose}>
+          <DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={onClose} />
+        </Overlay>
+      </>,
+    );
+
+    await screen.findByTestId("settings-dialog");
+    const recoveryAction = screen.getByTestId("recovery-warning-action");
+    recoveryAction.focus();
+    const recoveryLayer = Symbol("recovery-warning-test");
+    pushOverlay(recoveryLayer);
+    try {
+      fireEvent.keyDown(document, { key: "Tab" });
+      expect(document.activeElement).toBe(recoveryAction);
+
+      fireEvent.keyDown(document, { key: "Escape" });
+      expect(onClose).not.toHaveBeenCalled();
+    } finally {
+      removeOverlay(recoveryLayer);
+    }
   });
 
   it("persists appearance changes and applies them immediately", async () => {

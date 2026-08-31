@@ -2,6 +2,7 @@ import {
   DaemonRefusalError,
   isDaemonReconnectError,
   isEngineStoreBusyRefusal,
+  isHistoryUpdatingRefusal,
   isYdocOpenOperationCrashedRefusal,
   isYdocOpenStorageFailureRefusal,
   isYdocSessionBusyRefusal,
@@ -218,8 +219,9 @@ export class EngineWorkspaceShuttingDownError extends Error {
 
 // The refusals a document open must NOT answer with the writable plain editor.
 // Each means the same thing to the surface — the engine did not open this
-// document, and may still own it — so each keeps it read-only
-// (#533/#564/#616).
+// document, and the writable plain editor is not safe. The engine may still
+// own the document, or initial capture may not have installed its head yet,
+// so each keeps it read-only (#533/#564/#616).
 //
 // `ydoc-session-busy` is the daemon SAYING SO, and it is not scoped to the
 // timeout that motivated it. Whenever a lease is held, the daemon's Y.Doc is
@@ -234,6 +236,7 @@ export function isEngineWorkspaceOpenRefusedError(error: unknown): boolean {
     error instanceof EngineWorkspaceRetryDeadlineError ||
     error instanceof EngineWorkspaceShuttingDownError ||
     error instanceof YdocOpenTimedOutError ||
+    isHistoryUpdatingRefusal(error) ||
     isYdocSessionBusyRefusal(error) ||
     isYdocArtifactAssetsPendingRefusal(error) ||
     isYdocArtifactAssetsInvalidRefusal(error) ||
