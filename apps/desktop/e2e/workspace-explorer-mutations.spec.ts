@@ -34,6 +34,10 @@ test("Explorer creates, renames, cancels, and confirms recoverable deletion", as
     await page.getByRole("button", { name: "Create file" }).click();
     await expect(explorerRow(page, "Welcome.md")).toBeVisible();
     await expect.poll(() => pathExists(join(temp.rootPath, "Welcome.md"))).toBe(true);
+    const welcomeTab = page.getByTestId("tab-Welcome.md");
+    await expect(welcomeTab).toBeVisible({ timeout: 15_000 });
+    await expect(welcomeTab).toHaveAttribute("data-active", "true");
+    await expect(page.getByTestId("markdown-editor")).toBeVisible({ timeout: 15_000 });
 
     await filesHeader.getByRole("button", { name: "New folder" }).click();
     await page.getByRole("textbox", { name: "New folder name" }).fill("Research");

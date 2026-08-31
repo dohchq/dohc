@@ -274,9 +274,10 @@ pub struct StoreCaptureSink {
     version_id: String,
     shadow_root: PathBuf,
     /// The root binding is stable for one reconcile generation. Resolving it
-    /// lazily lets an initially absent root recover without rebuilding the
-    /// sink. Every later read validates both its path and physical identity.
+    /// eagerly fixes every present root before policy is read. A truly absent
+    /// root may bind later; every other binding refusal is sticky.
     captured_root: OnceLock<CapturedRoot>,
+    root_binding_refused: std::cell::Cell<bool>,
     now_ms: i64,
     author_json: Option<String>,
     search_policy: Arc<SearchPolicySnapshot>,
@@ -347,6 +348,20 @@ impl StoreCaptureSink {
         provenance: CaptureProvenance,
     ) -> Self {
         let shadow_root = shadow_root.into();
+        // Bind before reading any root-scoped policy. A present workspace is
+        // therefore fixed to one physical directory from sink construction,
+        // including runs whose first operation is a policy-driven retire. If
+        // the root is initially absent, leave the cell empty: the first later
+        // operation can still bind it after the directory recovers.
+        let captured_root = OnceLock::new();
+        let root_binding_refused = match CapturedRoot::bind(&shadow_root) {
+            Ok(root) => {
+                let _ = captured_root.set(root);
+                false
+            }
+            Err(_) => !std::fs::symlink_metadata(&shadow_root)
+                .is_err_and(|error| error.kind() == ErrorKind::NotFound),
+        };
         // `.dohc/files.toml` can only NARROW engine ownership below the hard
         // floor. See [`PolicyState`] for the absent/malformed/unreadable
         // split: only a file that exists but cannot be READ makes ownership
@@ -367,7 +382,8 @@ impl StoreCaptureSink {
             workspace_id: workspace_id.into(),
             version_id: version_id.into(),
             shadow_root,
-            captured_root: OnceLock::new(),
+            captured_root,
+            root_binding_refused: std::cell::Cell::new(root_binding_refused),
             now_ms,
             author_json,
             search_policy: snapshot,
@@ -380,13 +396,22 @@ impl StoreCaptureSink {
     }
 
     fn captured_root(&self) -> Result<&CapturedRoot, CaptureError> {
+        if self.root_binding_refused.get() {
+            return Err(ESCAPES_ROOT);
+        }
         if let Some(root) = self.captured_root.get() {
             return root
                 .still_names(&self.shadow_root)
                 .then_some(root)
                 .ok_or(ESCAPES_ROOT);
         }
-        let root = CapturedRoot::bind(&self.shadow_root)?;
+        let root = CapturedRoot::bind(&self.shadow_root).inspect_err(|_| {
+            if !std::fs::symlink_metadata(&self.shadow_root)
+                .is_err_and(|metadata_error| metadata_error.kind() == ErrorKind::NotFound)
+            {
+                self.root_binding_refused.set(true);
+            }
+        })?;
         // StoreCaptureSink is actor-owned. OnceLock prevents any later read
         // from changing this generation's chosen physical directory.
         let _ = self.captured_root.set(root);
@@ -399,6 +424,10 @@ impl StoreCaptureSink {
     fn canonical_shadow_root(&self) -> Result<&Path, CaptureError> {
         self.captured_root()
             .map(|root| root.canonical_path.as_path())
+    }
+
+    fn require_captured_root(&self) -> Result<(), CaptureError> {
+        self.captured_root().map(|_| ())
     }
 
     fn path_containment(&self, rel_path: &str) -> Containment {
@@ -414,7 +443,14 @@ impl StoreCaptureSink {
 
     fn ensure_secret_key(&mut self) -> Result<&SecretDataKey, CaptureError> {
         if self.secret_key.is_none() {
-            let key = match load_key_file(&self.shadow_root).map_err(|_| SECRET_KEY_UNAVAILABLE)? {
+            // Key I/O is workspace-scoped state, not a best-effort read. Check
+            // the physical root before and after every path-based operation so
+            // a renamed-and-recreated workspace cannot supply or receive this
+            // workspace's encryption key.
+            self.require_captured_root()?;
+            let loaded = load_key_file(&self.shadow_root).map_err(|_| SECRET_KEY_UNAVAILABLE)?;
+            self.require_captured_root()?;
+            let key = match loaded {
                 Some(key) => key,
                 None => {
                     // NEVER mint over existing encrypted state: a missing key
@@ -430,7 +466,11 @@ impl StoreCaptureSink {
                     if has_state {
                         return Err(SECRET_KEY_UNAVAILABLE);
                     }
-                    create_key_file(&self.shadow_root).map_err(|_| SECRET_KEY_UNAVAILABLE)?
+                    self.require_captured_root()?;
+                    let key =
+                        create_key_file(&self.shadow_root).map_err(|_| SECRET_KEY_UNAVAILABLE)?;
+                    self.require_captured_root()?;
+                    key
                 }
             };
             self.secret_key = Some(key);
@@ -616,7 +656,19 @@ impl StoreCaptureSink {
         claim_foreign_head: bool,
         suppress_self_write: bool,
     ) -> Result<IngestOutcome, CaptureError> {
-        match self.read_current_secret(path)? {
+        let content = self.read_current_secret(path)?;
+        self.ingest_secret_content(path, claim_foreign_head, suppress_self_write, content)
+    }
+
+    fn ingest_secret_content(
+        &mut self,
+        path: &str,
+        claim_foreign_head: bool,
+        suppress_self_write: bool,
+        content: SecretContent,
+    ) -> Result<IngestOutcome, CaptureError> {
+        self.require_captured_root()?;
+        match content {
             SecretContent::Text(text) => {
                 let size = text.len() as u64;
                 let sha256 = sha256_hex(text.as_bytes());
@@ -627,6 +679,7 @@ impl StoreCaptureSink {
                 }
                 self.ensure_secret_key()?;
                 let key = self.secret_key.clone().expect("key ensured just above");
+                self.require_captured_root()?;
                 match self.actor.capture_secret_blocking(
                     CaptureSecret {
                         workspace_id: self.workspace_id.clone(),
@@ -722,6 +775,7 @@ impl StoreCaptureSink {
     }
 
     fn retire_secret(&self, path: &str) -> Result<(), CaptureError> {
+        self.require_captured_root()?;
         match self.actor.capture_secret_retire_blocking(
             CaptureSecretRetire {
                 workspace_id: self.workspace_id.clone(),
@@ -763,6 +817,7 @@ impl StoreCaptureSink {
         summary: Option<String>,
         allow_ydoc_origin: bool,
     ) -> Result<(), CaptureError> {
+        self.require_captured_root()?;
         match self.actor.capture_retire_materialized_blocking(
             CaptureRetire {
                 workspace_id: self.workspace_id.clone(),
@@ -821,6 +876,13 @@ struct PreparedTextContent {
 enum PreparedTextPrefix {
     Ready(Vec<PreparedTextContent>),
     FallbackFirst,
+    RootMismatch { attempted: usize },
+}
+
+enum PreparedCandidate {
+    Text(PreparedTextContent),
+    Fallback,
+    RootMismatch,
 }
 
 /// Securely prepare an ordered batch prefix with a fixed reader ceiling.
@@ -834,6 +896,15 @@ fn prepare_added_text_prefix_parallel(
     captured_root: &CapturedRoot,
     candidates: &[AddedTextCandidate<'_>],
 ) -> PreparedTextPrefix {
+    prepare_added_text_prefix_parallel_with(candidates, |candidate| {
+        read_current_with_canonical_root(root, captured_root, candidate.path, candidate.media_type)
+    })
+}
+
+fn prepare_added_text_prefix_parallel_with(
+    candidates: &[AddedTextCandidate<'_>],
+    read_candidate: impl Fn(AddedTextCandidate<'_>) -> Result<CurrentContent, CaptureError> + Sync,
+) -> PreparedTextPrefix {
     let workers = std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
         .min(MAX_ADDED_TEXT_PREPARE_WORKERS)
@@ -842,34 +913,30 @@ fn prepare_added_text_prefix_parallel(
     let mut pending_bytes = 0usize;
 
     std::thread::scope(|scope| {
-        let (result_tx, result_rx) =
-            mpsc::sync_channel::<(usize, Option<PreparedTextContent>)>(workers);
+        let (result_tx, result_rx) = mpsc::sync_channel::<(usize, PreparedCandidate)>(workers);
         let mut task_txs = Vec::with_capacity(workers);
 
         for _ in 0..workers {
             let (task_tx, task_rx) = mpsc::sync_channel::<usize>(1);
             task_txs.push(task_tx);
             let result_tx = result_tx.clone();
+            let read_candidate = &read_candidate;
             scope.spawn(move || {
                 while let Ok(index) = task_rx.recv() {
                     let candidate = candidates[index];
-                    let prepared = match read_current_with_canonical_root(
-                        root,
-                        captured_root,
-                        candidate.path,
-                        candidate.media_type,
-                    ) {
+                    let prepared = match read_candidate(candidate) {
                         Ok(CurrentContent::Text(text)) => {
                             let size = text.len() as u64;
                             let sha256 = sha256_hex(text.as_bytes());
-                            Some(PreparedTextContent { text, size, sha256 })
+                            PreparedCandidate::Text(PreparedTextContent { text, size, sha256 })
                         }
                         Ok(
                             CurrentContent::Binary(_)
                             | CurrentContent::Absent
                             | CurrentContent::NonOwnable,
-                        )
-                        | Err(_) => None,
+                        ) => PreparedCandidate::Fallback,
+                        Err(error) if error == ESCAPES_ROOT => PreparedCandidate::RootMismatch,
+                        Err(_) => PreparedCandidate::Fallback,
                     };
                     if result_tx.send((index, prepared)).is_err() {
                         return;
@@ -893,7 +960,7 @@ fn prepare_added_text_prefix_parallel(
 
             let mut window = (window_start..window_end)
                 .map(|_| None)
-                .collect::<Vec<Option<PreparedTextContent>>>();
+                .collect::<Vec<Option<PreparedCandidate>>>();
             for _ in window_start..window_end {
                 let Ok((index, prepared)) = result_rx.recv() else {
                     return if pending.is_empty() {
@@ -902,11 +969,20 @@ fn prepare_added_text_prefix_parallel(
                         PreparedTextPrefix::Ready(pending)
                     };
                 };
-                window[index - window_start] = prepared;
+                window[index - window_start] = Some(prepared);
+            }
+
+            if window
+                .iter()
+                .any(|prepared| matches!(prepared, Some(PreparedCandidate::RootMismatch)))
+            {
+                return PreparedTextPrefix::RootMismatch {
+                    attempted: window_end,
+                };
             }
 
             for prepared in window {
-                let Some(prepared) = prepared else {
+                let Some(PreparedCandidate::Text(prepared)) = prepared else {
                     if pending.is_empty() {
                         return PreparedTextPrefix::FallbackFirst;
                     }
@@ -979,6 +1055,11 @@ impl StoreCaptureSink {
     }
 
     fn commit_added_text_batch(&self, batch: Vec<PreparedTextCapture>) -> BatchIngestResult {
+        if self.require_captured_root().is_err() {
+            return BatchIngestResult::Uncertain {
+                attempted: batch.len(),
+            };
+        }
         let mut inputs = Vec::with_capacity(batch.len());
         let mut identities = Vec::with_capacity(batch.len());
         for prepared in batch {
@@ -1076,8 +1157,14 @@ impl CaptureSink for StoreCaptureSink {
         };
         let prepared =
             prepare_added_text_prefix_parallel(&self.shadow_root, captured_root, &candidates);
-        let PreparedTextPrefix::Ready(prepared) = prepared else {
-            return Some(self.ingest_single_added_op(&ops[0]));
+        let prepared = match prepared {
+            PreparedTextPrefix::Ready(prepared) => prepared,
+            PreparedTextPrefix::FallbackFirst => {
+                return Some(self.ingest_single_added_op(&ops[0]));
+            }
+            PreparedTextPrefix::RootMismatch { attempted } => {
+                return Some(BatchIngestResult::Uncertain { attempted });
+            }
         };
         debug_assert!(!prepared.is_empty());
         let pending = candidates
@@ -1679,6 +1766,61 @@ mod tests {
         assert!(matches!(
             prepare_added_text_prefix_parallel(scratch.path(), &captured_root, &candidates[2..],),
             PreparedTextPrefix::FallbackFirst
+        ));
+    }
+
+    #[test]
+    fn parallel_root_mismatch_discards_an_already_prepared_prefix() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let scratch = ScratchDir::new().expect("scratch");
+        let root = scratch.path().to_path_buf();
+        let moved_root = root.with_file_name(format!(
+            "{}-moved",
+            root.file_name().expect("root name").to_string_lossy()
+        ));
+        write_file(&root, "a.md", b"alpha");
+        write_file(&root, "b.md", b"bravo");
+        let captured_root = CapturedRoot::bind(&root).expect("captured root");
+        let candidates = [
+            AddedTextCandidate {
+                path: "a.md",
+                media_type: "text/markdown",
+            },
+            AddedTextCandidate {
+                path: "b.md",
+                media_type: "text/markdown",
+            },
+        ];
+        let first_prepared = AtomicBool::new(false);
+        let swapped = AtomicBool::new(false);
+
+        let prepared = prepare_added_text_prefix_parallel_with(&candidates, |candidate| {
+            if candidate.path == "a.md" {
+                first_prepared.store(true, Ordering::Release);
+                return Ok(CurrentContent::Text("alpha".to_owned()));
+            }
+            while !first_prepared.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            if !swapped.swap(true, Ordering::AcqRel) {
+                std::fs::rename(&root, &moved_root).expect("move original capture root");
+                std::fs::create_dir(&root).expect("recreate capture root");
+                write_file(&root, "b.md", b"replacement workspace content");
+            }
+            read_current_with_canonical_root(
+                &root,
+                &captured_root,
+                candidate.path,
+                candidate.media_type,
+            )
+        });
+
+        std::fs::remove_dir_all(&root).expect("remove replacement capture root");
+        std::fs::rename(&moved_root, &root).expect("restore original capture root");
+        assert!(matches!(
+            prepared,
+            PreparedTextPrefix::RootMismatch { attempted: 2 }
         ));
     }
 
@@ -4403,14 +4545,90 @@ mod tests {
         }];
         let parallel = prepare_added_text_prefix_parallel(&root, original_root, &candidates);
         let single = ingest(&mut sink, "replacement.md");
+        let prepared = sink.prepared_text_capture(
+            candidates[0],
+            PreparedTextContent {
+                text: "must not commit".to_owned(),
+                size: 15,
+                sha256: sha256_hex(b"must not commit"),
+            },
+        );
+        let batch = sink.commit_added_text_batch(vec![prepared]);
+        let policy_retire = sink.retire_policy_excluded("first.md");
 
         std::fs::remove_dir_all(&root).expect("remove replacement capture root");
         std::fs::rename(&moved_root, &root).expect("restore original capture root");
         drop(sink);
         supervisor.close(&db).expect("close actor");
-        assert!(matches!(parallel, PreparedTextPrefix::FallbackFirst));
+        assert!(matches!(
+            parallel,
+            PreparedTextPrefix::RootMismatch { attempted: 1 }
+        ));
         assert_eq!(single, Err(ESCAPES_ROOT));
+        assert_eq!(batch, BatchIngestResult::Uncertain { attempted: 1 });
+        assert_eq!(policy_retire, Err(ESCAPES_ROOT));
         assert_eq!(moment_count(&db, "replacement.md"), 0);
+        assert_eq!(
+            snapshot(&db, "first.md").expect("head retained").text,
+            "first"
+        );
+    }
+
+    #[test]
+    fn present_root_binding_failure_cannot_adopt_a_later_replacement() {
+        let store_scratch = ScratchDir::new().expect("store scratch");
+        let capture_scratch = ScratchDir::new().expect("capture scratch");
+        let root = capture_scratch.path().join("workspace");
+        let moved_root = capture_scratch.path().join("workspace-moved");
+        std::fs::create_dir(&root).expect("create capture root");
+        write_file(&root, "first.md", b"first");
+        let db = store_scratch.engine_db_path().expect("engine db path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        let mut seed =
+            StoreCaptureSink::new(actor.clone(), WORKSPACE_ID, VERSION_ID, &root, 10, None);
+        ingest(&mut seed, "first.md").expect("seed captured head");
+        drop(seed);
+
+        std::fs::rename(&root, &moved_root).expect("move original capture root");
+        std::fs::write(&root, b"not a directory").expect("install refused root");
+        let mut refused = StoreCaptureSink::new(actor, WORKSPACE_ID, VERSION_ID, &root, 20, None);
+        std::fs::remove_file(&root).expect("remove refused root");
+        std::fs::create_dir(&root).expect("install replacement directory");
+        let retire = refused.retire_policy_excluded("first.md");
+
+        std::fs::remove_dir_all(&root).expect("remove replacement capture root");
+        std::fs::rename(&moved_root, &root).expect("restore original capture root");
+        drop(refused);
+        supervisor.close(&db).expect("close actor");
+        assert_eq!(retire, Err(ESCAPES_ROOT));
+        assert_eq!(
+            snapshot(&db, "first.md").expect("head retained").text,
+            "first"
+        );
+    }
+
+    #[test]
+    fn initially_absent_root_can_bind_after_it_is_created() {
+        let store_scratch = ScratchDir::new().expect("store scratch");
+        let capture_scratch = ScratchDir::new().expect("capture scratch");
+        let root = capture_scratch.path().join("workspace");
+        let db = store_scratch.engine_db_path().expect("engine db path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        let mut sink = StoreCaptureSink::new(actor, WORKSPACE_ID, VERSION_ID, &root, 10, None);
+
+        std::fs::create_dir(&root).expect("create recovered root");
+        write_file(&root, "first.md", b"first");
+        let result = ingest(&mut sink, "first.md");
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        assert!(matches!(result, Ok(IngestOutcome::Captured { .. })));
+        assert_eq!(
+            snapshot(&db, "first.md").expect("captured head").text,
+            "first"
+        );
     }
 
     #[test]
@@ -4630,6 +4848,41 @@ mod tests {
         supervisor.close(&db).expect("close actor");
         assert_eq!(secret_tip_len(&db, ".env"), None, "tip retired");
         assert_eq!(moment_count(&db, ".env"), 0, "plaintext tables untouched");
+    }
+
+    #[test]
+    fn secret_key_is_not_minted_in_a_replacement_root_after_plaintext_read() {
+        let store_scratch = ScratchDir::new().expect("store scratch");
+        let capture_scratch = ScratchDir::new().expect("capture scratch");
+        let root = capture_scratch.path().to_path_buf();
+        let moved_root = root.with_file_name(format!(
+            "{}-moved",
+            root.file_name().expect("root name").to_string_lossy()
+        ));
+        let db = store_scratch.engine_db_path().expect("engine db path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        write_file(&root, ".env", b"TOKEN=original");
+        let mut sink = StoreCaptureSink::new(actor, WORKSPACE_ID, VERSION_ID, &root, 10, None);
+
+        let content = sink
+            .read_current_secret(".env")
+            .expect("read original plaintext");
+        std::fs::rename(&root, &moved_root).expect("move original capture root");
+        std::fs::create_dir(&root).expect("recreate capture root");
+        let result = sink.ingest_secret_content(".env", true, false, content);
+        let replacement_key_exists = root.join(".dohc/engine/secret.key").exists();
+
+        std::fs::remove_dir_all(&root).expect("remove replacement capture root");
+        std::fs::rename(&moved_root, &root).expect("restore original capture root");
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        assert_eq!(result, Err(ESCAPES_ROOT));
+        assert!(
+            !replacement_key_exists,
+            "replacement root must receive no key"
+        );
+        assert_eq!(secret_tip_len(&db, ".env"), None);
     }
 
     #[test]
