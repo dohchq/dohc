@@ -10,7 +10,7 @@ import {
   writeProfileArtifact,
 } from "./harness";
 
-test("profiles opening, typing in, and viewing source for the 250 KiB document", async () => {
+test("profiles opening, typing in, and saving the 250 KiB document", async () => {
   const context = await launchFixture("big-docs", "profile-bigdoc");
   try {
     const { page, desktop, manifest } = context;
@@ -70,7 +70,6 @@ test("profiles opening, typing in, and viewing source for the 250 KiB document",
         editEnabledAfterMs,
         typingDurationMs,
         typedCharacters: typedText.length,
-        sourceToggled: true,
         rendererMarks: { before: beforeMarks, after: afterMarks },
         ...captured,
         reactCommitCount: null,

@@ -106,6 +106,10 @@ describe("RecoveryCloseGuard", () => {
     const last = buttons[buttons.length - 1];
 
     expect(document.activeElement).toBe(dialog);
+    await user.keyboard("{Shift>}{Tab}{/Shift}");
+    expect(document.activeElement).toBe(last);
+
+    dialog.focus();
     await user.keyboard("{Tab}");
     expect(document.activeElement).toBe(first);
 

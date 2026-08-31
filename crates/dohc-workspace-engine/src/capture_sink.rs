@@ -206,6 +206,61 @@ impl dohc_engine_runtime::SelfWriteRecorder for SelfWriteSuppression {
     }
 }
 
+/// The physical directory selected for one reconcile generation.
+///
+/// A canonical pathname is not an identity: the original root can be renamed
+/// and a different directory created at the same pathname. The file id closes
+/// that gap. On Unix the open directory handle pins the inode so its number
+/// cannot be recycled while this binding is live; Windows file ids do not need
+/// that pin, and an open directory handle would prevent the replacement this
+/// guard must detect.
+struct CapturedRoot {
+    canonical_path: PathBuf,
+    identity: file_id::FileId,
+    #[cfg(unix)]
+    _pin: File,
+}
+
+impl CapturedRoot {
+    #[cfg(unix)]
+    fn bind(root: &Path) -> Result<Self, CaptureError> {
+        use std::os::unix::fs::MetadataExt;
+
+        let canonical_path = root.canonicalize().map_err(|_| ESCAPES_ROOT)?;
+        let pin = File::open(&canonical_path).map_err(|_| ESCAPES_ROOT)?;
+        let metadata = pin.metadata().map_err(|_| ESCAPES_ROOT)?;
+        if !metadata.is_dir() {
+            return Err(ESCAPES_ROOT);
+        }
+        Ok(CapturedRoot {
+            canonical_path,
+            identity: file_id::FileId::new_inode(metadata.dev(), metadata.ino()),
+            _pin: pin,
+        })
+    }
+
+    #[cfg(not(unix))]
+    fn bind(root: &Path) -> Result<Self, CaptureError> {
+        let canonical_path = root.canonicalize().map_err(|_| ESCAPES_ROOT)?;
+        if !canonical_path
+            .metadata()
+            .map_err(|_| ESCAPES_ROOT)?
+            .is_dir()
+        {
+            return Err(ESCAPES_ROOT);
+        }
+        let identity = file_id::get_file_id(&canonical_path).map_err(|_| ESCAPES_ROOT)?;
+        Ok(CapturedRoot {
+            canonical_path,
+            identity,
+        })
+    }
+
+    fn still_names(&self, root: &Path) -> bool {
+        file_id::get_file_id(root).is_ok_and(|current| current == self.identity)
+    }
+}
+
 /// Bridges a files-crate reconcile plan to the actor's domain capture writes.
 ///
 /// The adapter is intentionally not wired into workspace open/close yet. Its
@@ -218,12 +273,10 @@ pub struct StoreCaptureSink {
     workspace_id: String,
     version_id: String,
     shadow_root: PathBuf,
-    /// The root is stable for one reconcile generation. Resolving it lazily
-    /// avoids two filesystem resolutions per captured path while still
-    /// allowing tests and callers to construct the sink before the root
-    /// exists. Only successful resolutions are cached, so a transiently
-    /// absent root can recover without rebuilding the sink.
-    canonical_shadow_root: OnceLock<PathBuf>,
+    /// The root binding is stable for one reconcile generation. Resolving it
+    /// lazily lets an initially absent root recover without rebuilding the
+    /// sink. Every later read validates both its path and physical identity.
+    captured_root: OnceLock<CapturedRoot>,
     now_ms: i64,
     author_json: Option<String>,
     search_policy: Arc<SearchPolicySnapshot>,
@@ -314,7 +367,7 @@ impl StoreCaptureSink {
             workspace_id: workspace_id.into(),
             version_id: version_id.into(),
             shadow_root,
-            canonical_shadow_root: OnceLock::new(),
+            captured_root: OnceLock::new(),
             now_ms,
             author_json,
             search_policy: snapshot,
@@ -326,21 +379,36 @@ impl StoreCaptureSink {
         }
     }
 
-    fn canonical_shadow_root(&self) -> Result<&Path, CaptureError> {
-        if let Some(root) = self.canonical_shadow_root.get() {
-            return Ok(root.as_path());
+    fn captured_root(&self) -> Result<&CapturedRoot, CaptureError> {
+        if let Some(root) = self.captured_root.get() {
+            return root
+                .still_names(&self.shadow_root)
+                .then_some(root)
+                .ok_or(ESCAPES_ROOT);
         }
-        let root = self.shadow_root.canonicalize().map_err(|_| ESCAPES_ROOT)?;
-        // StoreCaptureSink is actor-owned. OnceLock also prevents any later
-        // read from changing this generation's chosen root location.
-        let _ = self.canonical_shadow_root.set(root);
-        self.canonical_shadow_root
+        let root = CapturedRoot::bind(&self.shadow_root)?;
+        // StoreCaptureSink is actor-owned. OnceLock prevents any later read
+        // from changing this generation's chosen physical directory.
+        let _ = self.captured_root.set(root);
+        self.captured_root
             .get()
-            .map(PathBuf::as_path)
+            .filter(|root| root.still_names(&self.shadow_root))
             .ok_or(ESCAPES_ROOT)
     }
 
+    fn canonical_shadow_root(&self) -> Result<&Path, CaptureError> {
+        self.captured_root()
+            .map(|root| root.canonical_path.as_path())
+    }
+
     fn path_containment(&self, rel_path: &str) -> Containment {
+        if self
+            .captured_root
+            .get()
+            .is_some_and(|root| !root.still_names(&self.shadow_root))
+        {
+            return Containment::Escaped;
+        }
         path_containment_with_root(&self.shadow_root, rel_path, || self.canonical_shadow_root())
     }
 
@@ -442,8 +510,17 @@ impl StoreCaptureSink {
             Containment::Absent => return Ok(CurrentContent::Absent),
             Containment::Escaped => return Err(ESCAPES_ROOT),
         }
-        let canonical_root = self.canonical_shadow_root()?;
-        read_contained_current(&self.shadow_root, canonical_root, path, media_type)
+        let captured_root = self.captured_root()?;
+        let content = read_contained_current(
+            &self.shadow_root,
+            &captured_root.canonical_path,
+            path,
+            media_type,
+        )?;
+        captured_root
+            .still_names(&self.shadow_root)
+            .then_some(content)
+            .ok_or(ESCAPES_ROOT)
     }
 
     // The blocking actor calls below carry no timeout; this adapter is dormant
@@ -599,39 +676,49 @@ impl StoreCaptureSink {
             Containment::Absent => return Ok(SecretContent::Untracked),
             Containment::Escaped => return Err(ESCAPES_ROOT),
         }
-        let canonical_root = self.canonical_shadow_root()?;
-        match std::fs::symlink_metadata(&absolute) {
-            Ok(metadata) if !metadata.file_type().is_file() => {
+        let captured_root = self.captured_root()?;
+        let content = (|| -> Result<SecretContent, CaptureError> {
+            match std::fs::symlink_metadata(&absolute) {
+                Ok(metadata) if !metadata.file_type().is_file() => {
+                    return Ok(SecretContent::Untracked);
+                }
+                Ok(_) => {}
+                Err(err) if absent_error(&err) => return Ok(SecretContent::Untracked),
+                Err(_) => return Err(READ_FAILED),
+            }
+            let file = match open_no_follow(&absolute) {
+                NoFollowOpen::Opened(file) => file,
+                NoFollowOpen::Refused | NoFollowOpen::Absent => {
+                    return Ok(SecretContent::Untracked);
+                }
+                NoFollowOpen::Failed => return Err(READ_FAILED),
+            };
+            verify_opened_containment(
+                &self.shadow_root,
+                &captured_root.canonical_path,
+                path,
+                &file,
+            )?;
+            let metadata = file.metadata().map_err(|_| READ_FAILED)?;
+            if !metadata.file_type().is_file() || metadata.len() > MAX_CAPTURE_TEXT_BYTES {
                 return Ok(SecretContent::Untracked);
             }
-            Ok(_) => {}
-            Err(err) if absent_error(&err) => return Ok(SecretContent::Untracked),
-            Err(_) => return Err(READ_FAILED),
-        }
-        let file = match open_no_follow(&absolute) {
-            NoFollowOpen::Opened(file) => file,
-            NoFollowOpen::Refused | NoFollowOpen::Absent => return Ok(SecretContent::Untracked),
-            NoFollowOpen::Failed => return Err(READ_FAILED),
-        };
-        verify_opened_containment(&self.shadow_root, canonical_root, path, &file)?;
-        let metadata = file.metadata().map_err(|_| READ_FAILED)?;
-        if !metadata.file_type().is_file() {
-            return Ok(SecretContent::Untracked);
-        }
-        if metadata.len() > MAX_CAPTURE_TEXT_BYTES {
-            return Ok(SecretContent::Untracked);
-        }
-        let mut bytes = Vec::with_capacity(metadata.len() as usize);
-        file.take(MAX_CAPTURE_TEXT_BYTES.saturating_add(1))
-            .read_to_end(&mut bytes)
-            .map_err(|_| READ_FAILED)?;
-        if bytes.len() as u64 > MAX_CAPTURE_TEXT_BYTES {
-            return Ok(SecretContent::Untracked);
-        }
-        match String::from_utf8(bytes) {
-            Ok(text) => Ok(SecretContent::Text(text)),
-            Err(_) => Ok(SecretContent::Untracked),
-        }
+            let mut bytes = Vec::with_capacity(metadata.len() as usize);
+            file.take(MAX_CAPTURE_TEXT_BYTES.saturating_add(1))
+                .read_to_end(&mut bytes)
+                .map_err(|_| READ_FAILED)?;
+            if bytes.len() as u64 > MAX_CAPTURE_TEXT_BYTES {
+                return Ok(SecretContent::Untracked);
+            }
+            match String::from_utf8(bytes) {
+                Ok(text) => Ok(SecretContent::Text(text)),
+                Err(_) => Ok(SecretContent::Untracked),
+            }
+        })()?;
+        captured_root
+            .still_names(&self.shadow_root)
+            .then_some(content)
+            .ok_or(ESCAPES_ROOT)
     }
 
     fn retire_secret(&self, path: &str) -> Result<(), CaptureError> {
@@ -744,7 +831,7 @@ enum PreparedTextPrefix {
 /// `workers * MAX_CAPTURE_TEXT_BYTES` when files grow after the scan.
 fn prepare_added_text_prefix_parallel(
     root: &Path,
-    canonical_root: &Path,
+    captured_root: &CapturedRoot,
     candidates: &[AddedTextCandidate<'_>],
 ) -> PreparedTextPrefix {
     let workers = std::thread::available_parallelism()
@@ -768,7 +855,7 @@ fn prepare_added_text_prefix_parallel(
                     let candidate = candidates[index];
                     let prepared = match read_current_with_canonical_root(
                         root,
-                        canonical_root,
+                        captured_root,
                         candidate.path,
                         candidate.media_type,
                     ) {
@@ -983,12 +1070,12 @@ impl CaptureSink for StoreCaptureSink {
             return Some(self.ingest_single_added_op(&ops[0]));
         }
 
-        let canonical_root = match self.canonical_shadow_root() {
-            Ok(root) => root.to_path_buf(),
+        let captured_root = match self.captured_root() {
+            Ok(root) => root,
             Err(_) => return Some(self.ingest_single_added_op(&ops[0])),
         };
         let prepared =
-            prepare_added_text_prefix_parallel(&self.shadow_root, &canonical_root, &candidates);
+            prepare_added_text_prefix_parallel(&self.shadow_root, captured_root, &candidates);
         let PreparedTextPrefix::Ready(prepared) = prepared else {
             return Some(self.ingest_single_added_op(&ops[0]));
         };
@@ -1254,12 +1341,22 @@ enum CurrentContent {
 /// `StoreCaptureSink`'s non-`Sync` policy state.
 fn read_current_with_canonical_root(
     root: &Path,
-    canonical_root: &Path,
+    captured_root: &CapturedRoot,
     path: &str,
     media_type: &str,
 ) -> Result<CurrentContent, CaptureError> {
-    match path_containment_with_root(root, path, || Ok(canonical_root)) {
-        Containment::Contained => read_contained_current(root, canonical_root, path, media_type),
+    if !captured_root.still_names(root) {
+        return Err(ESCAPES_ROOT);
+    }
+    match path_containment_with_root(root, path, || Ok(captured_root.canonical_path.as_path())) {
+        Containment::Contained => {
+            let content =
+                read_contained_current(root, &captured_root.canonical_path, path, media_type)?;
+            captured_root
+                .still_names(root)
+                .then_some(content)
+                .ok_or(ESCAPES_ROOT)
+        }
         Containment::Absent => Ok(CurrentContent::Absent),
         Containment::Escaped => Err(ESCAPES_ROOT),
     }
@@ -1548,7 +1645,7 @@ mod tests {
         write_file(scratch.path(), "b.md", b"bravo");
         write_file(scratch.path(), "c.png", b"binary route");
         write_file(scratch.path(), "d.md", b"discarded suffix");
-        let canonical_root = scratch.path().canonicalize().expect("canonical root");
+        let captured_root = CapturedRoot::bind(scratch.path()).expect("captured root");
         let candidates = [
             AddedTextCandidate {
                 path: "a.md",
@@ -1569,7 +1666,7 @@ mod tests {
         ];
 
         let PreparedTextPrefix::Ready(prepared) =
-            prepare_added_text_prefix_parallel(scratch.path(), &canonical_root, &candidates)
+            prepare_added_text_prefix_parallel(scratch.path(), &captured_root, &candidates)
         else {
             panic!("the leading text files should form a batch prefix");
         };
@@ -1580,7 +1677,7 @@ mod tests {
         assert_eq!(prepared[1].text, "bravo");
         assert_eq!(prepared[1].sha256, sha256_hex(b"bravo"));
         assert!(matches!(
-            prepare_added_text_prefix_parallel(scratch.path(), &canonical_root, &candidates[2..],),
+            prepare_added_text_prefix_parallel(scratch.path(), &captured_root, &candidates[2..],),
             PreparedTextPrefix::FallbackFirst
         ));
     }
@@ -4273,6 +4370,47 @@ mod tests {
         drop(sink);
         supervisor.close(&db).expect("close actor");
         assert_eq!(moment_count(&db, "second.md"), 0);
+    }
+
+    #[test]
+    fn captured_root_refuses_a_different_directory_at_the_same_path() {
+        // Keep the database outside the capture root so the root can move
+        // while its workspace actor remains open.
+        let store_scratch = ScratchDir::new().expect("store scratch");
+        let capture_scratch = ScratchDir::new().expect("capture scratch");
+        let root = capture_scratch.path().to_path_buf();
+        let moved_root = root.with_file_name(format!(
+            "{}-moved",
+            root.file_name().expect("root name").to_string_lossy()
+        ));
+        let db = store_scratch.engine_db_path().expect("engine db path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        write_file(&root, "first.md", b"first");
+        let mut sink = StoreCaptureSink::new(actor, WORKSPACE_ID, VERSION_ID, &root, 10, None);
+
+        // The first read binds this reconcile generation to the original
+        // directory object, not merely to its canonical pathname.
+        ingest(&mut sink, "first.md").expect("seed captured root");
+        let original_root = sink.captured_root().expect("original root binding");
+        std::fs::rename(&root, &moved_root).expect("move original capture root");
+        std::fs::create_dir(&root).expect("recreate capture root at the same path");
+        write_file(&root, "replacement.md", b"replacement workspace content");
+
+        let candidates = [AddedTextCandidate {
+            path: "replacement.md",
+            media_type: "text/markdown",
+        }];
+        let parallel = prepare_added_text_prefix_parallel(&root, original_root, &candidates);
+        let single = ingest(&mut sink, "replacement.md");
+
+        std::fs::remove_dir_all(&root).expect("remove replacement capture root");
+        std::fs::rename(&moved_root, &root).expect("restore original capture root");
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        assert!(matches!(parallel, PreparedTextPrefix::FallbackFirst));
+        assert_eq!(single, Err(ESCAPES_ROOT));
+        assert_eq!(moment_count(&db, "replacement.md"), 0);
     }
 
     #[test]

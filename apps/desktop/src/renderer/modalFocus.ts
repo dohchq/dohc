@@ -20,7 +20,7 @@ export function trapModalTabKey(
   const active = document.activeElement;
   const activeIsInside = active !== null && container.contains(active);
   if (event.shiftKey) {
-    if (!activeIsInside || active === first) {
+    if (!activeIsInside || active === container || active === first) {
       event.preventDefault();
       last.focus();
     }

@@ -27,6 +27,7 @@ thiserror = "2"
 fs4 = "1.1.0"
 getrandom = "0.4"
 sha2 = "0.11"
+file-id = "0.2"
 filetime = { version = "0.2", optional = true }
 tokio = { version = "1", features = [
   "io-std",
