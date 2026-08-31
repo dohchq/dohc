@@ -2544,6 +2544,41 @@ describe("RelayShareDialog", () => {
     ]);
   });
 
+  it("orders equal-timestamp comments by the relay message id across pages", async () => {
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("link-1", { shareId: "share-1" })],
+    });
+    bridgeMock.listRelayShareDiscussion
+      .mockResolvedValueOnce(
+        discussionPage([namedComment("a", "Lowercase a")], {
+          nextCursor: "cursor-1",
+        }),
+      )
+      .mockResolvedValueOnce(discussionPage([namedComment("Z", "Uppercase Z")]));
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await openOwnerComments(user, "share-1");
+
+    expect(await within(group).findByText("Lowercase a")).toBeTruthy();
+    await user.click(
+      within(group).getByRole("button", { name: "Show more comments" }),
+    );
+    expect(await within(group).findByText("Uppercase Z")).toBeTruthy();
+    expect(
+      Array.from(
+        group.querySelectorAll<HTMLElement>("[data-comment-message-id]"),
+        (node) => node.dataset.commentMessageId,
+      ),
+    ).toEqual(["Z", "a"]);
+  });
+
   it("retries one append intent, changes its key after an edit, and never adds early", async () => {
     const first = controllable<{ message: RelayShareDiscussionMessage }>();
     const third = controllable<{ message: RelayShareDiscussionMessage }>();

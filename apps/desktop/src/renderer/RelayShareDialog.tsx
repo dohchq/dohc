@@ -246,7 +246,11 @@ function mergeDiscussionMessages(
   return [...byId.values()].sort(
     (left, right) =>
       left.createdAtMs - right.createdAtMs ||
-      left.messageId.localeCompare(right.messageId),
+      (left.messageId < right.messageId
+        ? -1
+        : left.messageId > right.messageId
+          ? 1
+          : 0),
   );
 }
 
