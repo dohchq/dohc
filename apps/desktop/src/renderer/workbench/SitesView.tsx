@@ -66,13 +66,16 @@ export function SitesView(props: {
   filesSettledRevision: number;
   onOpenPath: (path: string) => void;
   onCreateFirstSite: () => Promise<void>;
+  // A received share workspace rejects folder creation in main, including
+  // for edit grants. Mounted shares inside a normal workspace do not set it.
+  receivedShareWorkspace?: boolean;
 }) {
   const state = useSites(props.workspaceId, props.filesSettledRevision);
   const sites = state.status === "ready" ? state.sites : [];
   const [creating, setCreating] = useState(false);
 
   const createFirstSite = async () => {
-    if (creating) return;
+    if (creating || props.receivedShareWorkspace) return;
     setCreating(true);
     try {
       await props.onCreateFirstSite();
@@ -104,16 +107,20 @@ export function SitesView(props: {
           <Globe2 size={18} aria-hidden className="text-subtle" />
           <span className="text-xs font-medium text-ink">No sites yet</span>
           <span className="max-w-52 text-xs leading-relaxed text-muted">
-            Start with one editable HTML file in your workspace.
+            {props.receivedShareWorkspace
+              ? "This shared view cannot create a site. Ask the workspace owner to add one."
+              : "Start with one editable HTML file in your workspace."}
           </span>
-          <PrimaryButton
-            data-testid="sites-create-first"
-            disabled={creating}
-            onClick={() => void createFirstSite()}
-            className="mt-1"
-          >
-            {creating ? "Creating site…" : "Create site"}
-          </PrimaryButton>
+          {!props.receivedShareWorkspace ? (
+            <PrimaryButton
+              data-testid="sites-create-first"
+              disabled={creating}
+              onClick={() => void createFirstSite()}
+              className="mt-1"
+            >
+              {creating ? "Creating site…" : "Create site"}
+            </PrimaryButton>
+          ) : null}
         </div>
       ) : (
         <ul className="m-0 flex min-h-0 flex-1 list-none flex-col gap-2 overflow-y-auto p-2">

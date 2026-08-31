@@ -1155,6 +1155,7 @@ async fn fresh_import_opens_early_fences_partial_reads_and_preserves_foreign_hea
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     write_file(scratch.path(), "same.md", b"same bytes");
     write_file(scratch.path(), "different.md", b"disk bytes");
+    write_file(scratch.path(), ".env", b"TOKEN=baseline");
     write_file(
         scratch.path(),
         "tasks/collection.yaml",
@@ -1225,6 +1226,30 @@ async fn fresh_import_opens_early_fences_partial_reads_and_preserves_foreign_hea
         assert_eq!(error.code, ErrorCode::Overloaded, "{method}");
         assert_eq!(error.message, "Workspace is still updating. Try again.");
     }
+
+    let secret_delete = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                55,
+                "secrets.delete",
+                Some(handle.clone()),
+                json!({
+                    "workspaceId": WORKSPACE_ID,
+                    "versionId": "main",
+                    "path": ".env",
+                    "origin": "api",
+                    "momentId": "secret-delete-during-import"
+                }),
+            ),
+        )
+        .await
+        .expect_err("a secret delete must not race the pending baseline");
+    assert_eq!(secret_delete.code, ErrorCode::Overloaded);
+    assert_eq!(
+        secret_delete.message,
+        "Workspace is still updating. Try again."
+    );
 
     let existing_ydoc = transport
         .call(
@@ -1317,10 +1342,60 @@ async fn fresh_import_opens_early_fences_partial_reads_and_preserves_foreign_hea
         .expect("collections become readable after the import");
     assert_eq!(collections.result["collections"][0]["path"], json!("tasks"));
 
+    let captured_secrets = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                34,
+                "secrets.list",
+                Some(handle.clone()),
+                json!({ "versionId": "main" }),
+            ),
+        )
+        .await
+        .expect("baseline secret becomes readable after the import");
+    assert_eq!(captured_secrets.result["secrets"][0]["path"], json!(".env"));
+
+    let deleted = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                35,
+                "secrets.delete",
+                Some(handle.clone()),
+                json!({
+                    "workspaceId": WORKSPACE_ID,
+                    "versionId": "main",
+                    "path": ".env",
+                    "origin": "api",
+                    "momentId": "secret-delete-after-import"
+                }),
+            ),
+        )
+        .await
+        .expect("secret delete succeeds after the import");
+    assert_eq!(
+        deleted.result["moment"]["id"],
+        json!("secret-delete-after-import")
+    );
+    let secrets_after_delete = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                36,
+                "secrets.list",
+                Some(handle.clone()),
+                json!({ "versionId": "main" }),
+            ),
+        )
+        .await
+        .expect("secrets remain readable after deletion");
+    assert_eq!(secrets_after_delete.result["secrets"], json!([]));
+
     transport
         .call(
             RequestContext::unbounded(),
-            request(33, "workspace.close", Some(handle), json!({})),
+            request(37, "workspace.close", Some(handle), json!({})),
         )
         .await
         .expect("close");

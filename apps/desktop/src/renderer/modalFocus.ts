@@ -1,12 +1,14 @@
 const FOCUSABLE_SELECTOR =
-  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [contenteditable]:not([contenteditable="false"]), [tabindex]:not([tabindex="-1"])';
 
 export function trapModalTabKey(
   event: KeyboardEvent,
   container: HTMLElement | null,
 ): void {
   if (event.key !== "Tab" || !container) return;
-  const focusable = [...container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)];
+  const focusable = [
+    ...container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
+  ].filter((element) => element.closest('[aria-hidden="true"]') === null);
   const first = focusable[0];
   const last = focusable[focusable.length - 1];
   if (!first || !last) {

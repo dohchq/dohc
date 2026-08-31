@@ -11,6 +11,7 @@ import {
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppErrorBoundary } from "./ErrorBoundary";
+import { Overlay } from "./Overlay";
 import {
   RecoveryCloseGuard,
   requestGuardedUpdateInstall,
@@ -114,6 +115,34 @@ describe("RecoveryCloseGuard", () => {
 
     await user.click(screen.getByTestId("recovery-close-goback"));
     expect(document.activeElement).toBe(opener);
+  });
+
+  it("keeps an underlying overlay from competing for Tab focus", async () => {
+    const user = userEvent.setup();
+    const underlyingFocus = vi.fn();
+    captureOrphanedDraft("ws-1", "a.md", "Kept!");
+    render(
+      <RecoveryCloseGuard>
+        <Overlay onClose={() => undefined}>
+          <div role="dialog" aria-modal="true">
+            <button type="button" onFocus={underlyingFocus}>
+              Underlying action
+            </button>
+          </div>
+        </Overlay>
+      </RecoveryCloseGuard>,
+    );
+
+    act(() => {
+      window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
+    });
+    const dialog = await screen.findByTestId("recovery-close-warning");
+    underlyingFocus.mockClear();
+
+    await user.keyboard("{Tab}");
+
+    expect(document.activeElement).toBe(within(dialog).getAllByRole("button")[0]);
+    expect(underlyingFocus).not.toHaveBeenCalled();
   });
 
   it("warns before closing while set-aside edits exist, offers the list, and closes on 'Close anyway'", async () => {

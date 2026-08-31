@@ -8,6 +8,7 @@ import {
 import { useCommitOnRelease } from "./useCommitOnRelease";
 
 const KEYBOARD_RESIZE_STEP = 16;
+const KEYBOARD_RESIZE_PAGE_STEP = KEYBOARD_RESIZE_STEP * 8;
 
 // The workbench's collapsible, resizable side panel. The host unmounts it
 // entirely when hidden (windowChrome pins file-tree toHaveCount(0) on
@@ -51,11 +52,23 @@ export function SidePanel(props: {
         aria-valuemax={SIDEBAR_MAX_WIDTH}
         aria-valuenow={width}
         onKeyDown={(event) => {
-          const direction =
-            event.key === "ArrowLeft" ? -1 : event.key === "ArrowRight" ? 1 : 0;
-          if (direction === 0) return;
+          const nextWidth =
+            event.key === "Home"
+              ? SIDEBAR_MIN_WIDTH
+              : event.key === "End"
+                ? SIDEBAR_MAX_WIDTH
+                : event.key === "PageUp"
+                  ? clampSidebarWidth(width + KEYBOARD_RESIZE_PAGE_STEP)
+                  : event.key === "PageDown"
+                    ? clampSidebarWidth(width - KEYBOARD_RESIZE_PAGE_STEP)
+                    : event.key === "ArrowLeft"
+                      ? clampSidebarWidth(width - KEYBOARD_RESIZE_STEP)
+                      : event.key === "ArrowRight"
+                        ? clampSidebarWidth(width + KEYBOARD_RESIZE_STEP)
+                        : null;
+          if (nextWidth === null) return;
           event.preventDefault();
-          props.onWidthChange(clampSidebarWidth(width + direction * KEYBOARD_RESIZE_STEP));
+          props.onWidthChange(nextWidth);
         }}
         onPointerDown={(event) => {
           // Left button only — a right/middle press must never start a resize.

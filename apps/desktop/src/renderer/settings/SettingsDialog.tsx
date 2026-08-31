@@ -33,6 +33,7 @@ import {
   type WorkspaceSettingsResult,
 } from "../../workspaces/workspaceSettings";
 import { bridge } from "../bridge";
+import { trapModalTabKey } from "../modalFocus";
 import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
 import { applyAppearanceSettings } from "../theme";
 import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
@@ -172,43 +173,13 @@ export function SettingsDialog(props: {
   }, []);
 
   useEffect(() => {
-    const focusableSelector = [
-      "a[href]",
-      "button:not([disabled])",
-      "input:not([disabled])",
-      "select:not([disabled])",
-      "textarea:not([disabled])",
-      "[tabindex]:not([tabindex='-1'])",
-    ].join(",");
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
         props.onClose();
         return;
       }
-      if (event.key !== "Tab") return;
-      const dialog = dialogRef.current;
-      if (!dialog) return;
-      const focusable = Array.from(
-        dialog.querySelectorAll<HTMLElement>(focusableSelector),
-      ).filter((element) => element.getAttribute("aria-hidden") !== "true");
-      if (focusable.length === 0) {
-        event.preventDefault();
-        dialog.focus();
-        return;
-      }
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (!dialog.contains(document.activeElement)) {
-        event.preventDefault();
-        first?.focus();
-      } else if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last?.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first?.focus();
-      }
+      trapModalTabKey(event, dialogRef.current);
     };
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);

@@ -1300,6 +1300,7 @@ const CHATS_PANEL_TAB_LABELS: Record<ChatsPanelTab, string> = {
   file: "This file",
 };
 const CHATS_KEYBOARD_RESIZE_STEP = 16;
+const CHATS_KEYBOARD_RESIZE_PAGE_STEP = CHATS_KEYBOARD_RESIZE_STEP * 8;
 // Every workspace this machine owns offers both. A shared view offers the
 // file tab only: it has no workspace-wide chat listing, by design (#646).
 
@@ -1338,13 +1339,23 @@ function ChatsPanel(props: {
         aria-valuemax={CHATS_MAX_WIDTH}
         aria-valuenow={width}
         onKeyDown={(event) => {
-          const direction =
-            event.key === "ArrowLeft" ? 1 : event.key === "ArrowRight" ? -1 : 0;
-          if (direction === 0) return;
+          const nextWidth =
+            event.key === "Home"
+              ? CHATS_MIN_WIDTH
+              : event.key === "End"
+                ? CHATS_MAX_WIDTH
+                : event.key === "PageUp"
+                  ? clampChatsWidth(width + CHATS_KEYBOARD_RESIZE_PAGE_STEP)
+                  : event.key === "PageDown"
+                    ? clampChatsWidth(width - CHATS_KEYBOARD_RESIZE_PAGE_STEP)
+                    : event.key === "ArrowLeft"
+                      ? clampChatsWidth(width + CHATS_KEYBOARD_RESIZE_STEP)
+                      : event.key === "ArrowRight"
+                        ? clampChatsWidth(width - CHATS_KEYBOARD_RESIZE_STEP)
+                        : null;
+          if (nextWidth === null) return;
           event.preventDefault();
-          props.onWidthChange(
-            clampChatsWidth(width + direction * CHATS_KEYBOARD_RESIZE_STEP),
-          );
+          props.onWidthChange(nextWidth);
         }}
         onPointerDown={(event) => {
           // Left button only — a right/middle press must never start a resize.
@@ -6128,6 +6139,7 @@ export function DesktopWorkspaceShell(props: {
                   filesSettledRevision={listingsSettled}
                   onOpenPath={openPathWithHeading}
                   onCreateFirstSite={createFirstSite}
+                  receivedShareWorkspace={shareView !== null}
                 />
               </Suspense>
             ) : wb.activeView === "history" ? (

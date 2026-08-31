@@ -96,4 +96,23 @@ describe("Overlay", () => {
     fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
     expect(document.activeElement).toBe(last);
   });
+
+  it("includes editable regions and skips aria-hidden controls in its Tab order", () => {
+    render(
+      <Overlay onClose={() => undefined}>
+        <button type="button" aria-hidden="true">
+          Hidden action
+        </button>
+        <div contentEditable data-testid="editable-region" />
+        <button type="button">Last</button>
+      </Overlay>,
+    );
+    const editor = screen.getByTestId("editable-region");
+    const last = screen.getByRole("button", { name: "Last" });
+
+    last.focus();
+    fireEvent.keyDown(document, { key: "Tab" });
+
+    expect(document.activeElement).toBe(editor);
+  });
 });

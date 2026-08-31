@@ -217,6 +217,29 @@ describe("SitesView", () => {
     expect(onCreateFirstSite).toHaveBeenCalledTimes(1);
   });
 
+  it("does not offer file creation in an empty received share workspace", async () => {
+    bridgeMock.listSites.mockResolvedValueOnce({ sites: [] });
+    const onCreateFirstSite = vi.fn(async () => undefined);
+    render(
+      <SitesView
+        workspaceId="ws-received-share"
+        filesSettledRevision={0}
+        onOpenPath={vi.fn()}
+        onCreateFirstSite={onCreateFirstSite}
+        receivedShareWorkspace
+      />,
+    );
+
+    expect(
+      await screen.findByText(
+        "This shared view cannot create a site. Ask the workspace owner to add one.",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Create site" })).toBeNull();
+    expect(screen.queryByTestId("sites-create-first")).toBeNull();
+    expect(onCreateFirstSite).not.toHaveBeenCalled();
+  });
+
   it("labels sites opened from a mounted share", async () => {
     bridgeMock.listSites.mockResolvedValueOnce({
       sites: [

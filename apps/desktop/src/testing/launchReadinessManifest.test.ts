@@ -22,7 +22,11 @@ describe("launch readiness tour manifest", () => {
     for (const tour of launchReadinessTours) {
       expect(tour.workflow.trim()).not.toBe("");
       expect(tour.expectedResult.trim()).not.toBe("");
-      expect(tour.performanceMark.trim()).not.toBe("");
+      expect(tour.performanceMarks.length).toBeGreaterThan(0);
+      for (const mark of tour.performanceMarks) {
+        expect(mark.trim()).not.toBe("");
+        expect(mark).not.toContain(" and ");
+      }
       if (tour.automatedBy) {
         expect(existsSync(resolve(desktopRoot, tour.automatedBy)), tour.id).toBe(true);
       }

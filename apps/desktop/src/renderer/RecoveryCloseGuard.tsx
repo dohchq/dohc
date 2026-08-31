@@ -8,7 +8,7 @@ import {
 } from "react";
 import type { UpdateActionResult } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
-import { useGuestBlockingUiWhile } from "./guestBlockingUi";
+import { isTopOverlay, pushOverlay, removeOverlay } from "./guestBlockingUi";
 import { trapModalTabKey } from "./modalFocus";
 import { atRiskOrphanedDraftIds, useAllOrphanedDrafts } from "./orphanedDrafts";
 import { RecoveryList } from "./RecoveryList";
@@ -183,7 +183,9 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
   );
   const liveCount = liveDrafts.length;
   const warningOpen = closeWarning !== null;
+  const warningVisible = warningOpen && liveCount > 0;
   const warningRef = useRef<HTMLDivElement | null>(null);
+  const warningLayerId = useRef(Symbol("recovery-close-warning"));
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const showCloseWarning = (warning: {
     kind: UnloadKind;
@@ -202,12 +204,23 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
     if (warningOpen && liveCount === 0) setCloseWarning(null);
   }, [warningOpen, liveCount]);
   useLayoutEffect(() => {
-    if (warningOpen) warningRef.current?.focus();
-  }, [warningOpen]);
+    if (warningVisible) warningRef.current?.focus();
+  }, [warningVisible]);
+  // This warning paints above every ordinary Overlay. Register it in the
+  // same modal stack so an underlying Overlay's document listener stands
+  // down instead of briefly moving focus behind this dialog on every Tab.
+  // Registration also hides an open plugin guest while the warning is up.
   useEffect(() => {
-    if (!warningOpen) return;
+    if (!warningVisible) return;
+    const id = warningLayerId.current;
+    pushOverlay(id);
+    return () => removeOverlay(id);
+  }, [warningVisible]);
+  useEffect(() => {
+    if (!warningVisible) return;
 
     const onKeyDown = (event: KeyboardEvent) => {
+      if (!isTopOverlay(warningLayerId.current)) return;
       trapModalTabKey(event, warningRef.current);
     };
 
@@ -218,13 +231,7 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
       if (returnTarget?.isConnected) returnTarget.focus();
       returnFocusRef.current = null;
     };
-  }, [warningOpen]);
-  // An open plugin web app's guest composites above this renderer, so the
-  // dialog below paints inside it and the guest takes the clicks that answer
-  // it — the user cannot answer the warning blocking their own exit. The guest
-  // hides while the dialog is up. Blocker only: this dialog takes no part in
-  // Escape handling, so it never steals a keystroke from an open overlay.
-  useGuestBlockingUiWhile(warningOpen && liveCount > 0);
+  }, [warningVisible]);
   const bypassRearmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The drafts the warning LISTED when the user confirmed. An approval covers
   // exactly those (#579 review, r13 + r14) — never a draft a queued reopen

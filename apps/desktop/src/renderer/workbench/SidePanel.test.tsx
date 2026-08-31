@@ -33,16 +33,24 @@ afterEach(() => {
 describe("sidebar resize guards", () => {
   it("supports keyboard resizing and reports its current value", () => {
     const onWidthChange = vi.fn();
-    const handle = renderPanel(onWidthChange, 240);
+    const handle = renderPanel(onWidthChange, 400);
 
     expect(handle.getAttribute("tabindex")).toBe("0");
-    expect(handle.getAttribute("aria-valuenow")).toBe("240");
+    expect(handle.getAttribute("aria-valuenow")).toBe("400");
     fireEvent.keyDown(handle, { key: "ArrowRight" });
-    expect(onWidthChange).toHaveBeenCalledWith(256);
+    expect(onWidthChange).toHaveBeenCalledWith(416);
     fireEvent.keyDown(handle, { key: "ArrowLeft" });
-    expect(onWidthChange).toHaveBeenCalledWith(224);
+    expect(onWidthChange).toHaveBeenCalledWith(384);
+    fireEvent.keyDown(handle, { key: "PageUp" });
+    expect(onWidthChange).toHaveBeenCalledWith(528);
+    fireEvent.keyDown(handle, { key: "PageDown" });
+    expect(onWidthChange).toHaveBeenCalledWith(272);
+    fireEvent.keyDown(handle, { key: "Home" });
+    expect(onWidthChange).toHaveBeenCalledWith(160);
+    fireEvent.keyDown(handle, { key: "End" });
+    expect(onWidthChange).toHaveBeenCalledWith(2400);
     fireEvent.keyDown(handle, { key: "Enter" });
-    expect(onWidthChange).toHaveBeenCalledTimes(2);
+    expect(onWidthChange).toHaveBeenCalledTimes(6);
   });
 
   it("previews every move locally and commits one clamped width on release", () => {

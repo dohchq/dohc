@@ -12979,6 +12979,7 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
                 | "history.page"
                 | "secrets.list"
                 | "secrets.stateExists"
+                | "secrets.delete"
         )
 }
 
@@ -13323,6 +13324,7 @@ mod tests {
             "collections.query",
             "collections.getRecord",
             "collections.listPendingAdoptions",
+            "secrets.delete",
         ] {
             assert!(method_requires_initial_capture_ready(method), "{method}");
         }

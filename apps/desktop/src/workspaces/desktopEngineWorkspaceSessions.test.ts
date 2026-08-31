@@ -67,4 +67,30 @@ describe("desktop engine workspace sessions", () => {
 
     await sessions.closeAll();
   });
+
+  it("does not retain a session when workspace open fails", async () => {
+    const rootPath = await createTestScratch("dohc-desktop-engine-sessions-");
+    scratch.push(rootPath);
+    const requests: string[] = [];
+    const client: EngineDaemonClient = {
+      close() {},
+      async sendRequest(request) {
+        requests.push(request.method);
+        if (request.method === "workspace.open") {
+          throw new Error("engine unavailable");
+        }
+        throw new Error(`Unexpected request: ${request.method}`);
+      },
+    };
+    const sessions = createDesktopEngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+
+    await expect(
+      sessions.run({ workspaceId: "failed-open", rootPath }, async () => {}),
+    ).rejects.toThrow("engine unavailable");
+    await expect(sessions.closeAll()).resolves.toBeUndefined();
+    expect(requests.length).toBeGreaterThan(0);
+    expect(new Set(requests)).toEqual(new Set(["workspace.open"]));
+  });
 });

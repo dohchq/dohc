@@ -211,6 +211,9 @@ describe("DesktopSettings", () => {
     await user.type(screen.getByTestId("settings-search"), "theme");
     expect(screen.getByTestId("settings-section-appearance")).toBeTruthy();
     await user.clear(screen.getByTestId("settings-search"));
+    await user.type(screen.getByTestId("settings-search"), "launch");
+    expect(screen.getByTestId("settings-empty-search")).toBeTruthy();
+    await user.clear(screen.getByTestId("settings-search"));
     await user.type(screen.getByTestId("settings-search"), "nothing-here");
     expect(screen.getByTestId("settings-empty-search")).toBeTruthy();
   });

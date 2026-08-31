@@ -7989,6 +7989,25 @@ describe("share unmount projection", () => {
   });
 });
 describe("shared view banner", () => {
+  it("does not offer site creation in a received share workspace", async () => {
+    const user = userEvent.setup();
+    const bridge = Object.assign(makeShareBridge(), {
+      listSites: vi.fn(async () => ({ sites: [] })),
+    });
+    renderShell(bridge, SHARE_VIEW);
+
+    await user.click(await screen.findByTestId("activity-sites"));
+
+    expect(
+      await screen.findByText(
+        "This shared view cannot create a site. Ask the workspace owner to add one.",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Create site" })).toBeNull();
+    expect(bridge.createWorkspaceFolder).not.toHaveBeenCalled();
+    expect(bridge.createWorkspaceFile).not.toHaveBeenCalled();
+  });
+
   it("tells a view recipient the view is read-only", async () => {
     const bridge = makeShareBridge();
     renderShell(bridge, {
@@ -14661,6 +14680,15 @@ describe("chats panel (right side)", () => {
 
     fireEvent.keyDown(handle, { key: "ArrowRight" });
     await waitFor(() => expect(panel.style.width).toBe("360px"));
+
+    fireEvent.keyDown(handle, { key: "PageUp" });
+    await waitFor(() => expect(panel.style.width).toBe("488px"));
+    fireEvent.keyDown(handle, { key: "PageDown" });
+    await waitFor(() => expect(panel.style.width).toBe("360px"));
+    fireEvent.keyDown(handle, { key: "Home" });
+    await waitFor(() => expect(panel.style.width).toBe("240px"));
+    fireEvent.keyDown(handle, { key: "End" });
+    await waitFor(() => expect(panel.style.width).toBe("2400px"));
   });
 
   it("the 'This file' tab shows the active file's chats surface", async () => {

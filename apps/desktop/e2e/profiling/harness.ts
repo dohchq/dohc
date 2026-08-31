@@ -1,5 +1,5 @@
 import type { Page } from "@playwright/test";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { MarksSnapshot, SwitchTimelineEntry } from "../../src/performance/desktopMarks";
 import { launchDesktopApp, type LaunchedDesktopApp } from "../helpers/desktopApp";
@@ -70,6 +70,7 @@ export async function prepareFixture(
   workspaceId: string,
 ): Promise<{ rootPath: string; manifest: SeedManifest }> {
   const rootPath = fixtureDirectory(name);
+  await rm(join(rootPath, ".dohc", "engine"), { recursive: true, force: true });
   await seedWorkspaceManifest({ rootPath }, workspaceId);
   await seedWorkspaceSettings(
     { rootPath },
