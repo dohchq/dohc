@@ -85,12 +85,13 @@ export const PLUGIN_WEB_APP_TAB_PREFIX = "dohc://plugin-web/";
 export const PLUGIN_DETAILS_TAB_PREFIX = "dohc://plugin-details/";
 export const VERSION_COMPARE_TAB_PREFIX = "dohc://versions/compare/";
 // Engine moment diff (PR 0M-5): flagged workspaces open history diffs by
-// MOMENT id, not legacy change-set id.
+// MOMENT id, not legacy change-set id. The id alone is the tab identity: it
+// is contract-bounded, while a percent-encoded valid workspace path can
+// exceed the UI-state path bound. The moment record supplies its display path.
 export const MOMENT_DIFF_TAB_PREFIX = "dohc://moment-diff/";
 
-export function momentDiffTabPath(momentId: string, filePath?: string): string {
-  const path = `${MOMENT_DIFF_TAB_PREFIX}${encodeURIComponent(momentId)}`;
-  return filePath ? `${path}?file=${encodeURIComponent(filePath)}` : path;
+export function momentDiffTabPath(momentId: string): string {
+  return `${MOMENT_DIFF_TAB_PREFIX}${encodeURIComponent(momentId)}`;
 }
 
 export function isMomentDiffTabPath(path: string | null): boolean {
@@ -100,21 +101,8 @@ export function isMomentDiffTabPath(path: string | null): boolean {
 export function parseMomentDiffTabPath(path: string | null): string | null {
   if (typeof path !== "string" || !isMomentDiffTabPath(path)) return null;
   try {
-    const encoded = path.slice(MOMENT_DIFF_TAB_PREFIX.length).split("?", 1)[0] ?? "";
-    const momentId = decodeURIComponent(encoded);
+    const momentId = decodeURIComponent(path.slice(MOMENT_DIFF_TAB_PREFIX.length));
     return momentId.length > 0 ? momentId : null;
-  } catch {
-    return null;
-  }
-}
-
-export function parseMomentDiffTabFilePath(path: string | null): string | null {
-  if (typeof path !== "string" || !isMomentDiffTabPath(path)) return null;
-  const queryIndex = path.indexOf("?");
-  if (queryIndex < 0) return null;
-  try {
-    const filePath = new URLSearchParams(path.slice(queryIndex + 1)).get("file");
-    return filePath && filePath.length > 0 ? filePath : null;
   } catch {
     return null;
   }

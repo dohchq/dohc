@@ -13,7 +13,10 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
-import { ENGINE_STORE_BACKUP_DIR } from "../ipc/bridgeContract";
+import {
+  ENGINE_STORE_BACKUP_DIR,
+  SetWorkspaceUiStatePayload,
+} from "../ipc/bridgeContract";
 
 // These drive userEvent through async UI settles — 67 findBy* awaits across 47
 // tests — so the wall-clock profile is the file, not one test (#372).
@@ -9990,6 +9993,36 @@ describe("history page", () => {
     };
   }
 
+  it("persists a moment diff opened for a valid multibyte file path", async () => {
+    const filePath = `目录/${"界".repeat(500)}.md`;
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(async () =>
+      historyPage([{ ...historyMoment("m-1", "Wrote the file"), path: filePath }]),
+    );
+    const validStates: WorkspaceUiState[] = [];
+    bridge.setWorkspaceUiState.mockImplementation(async (payload) => {
+      validStates.push(SetWorkspaceUiStatePayload.parse(payload).state);
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await settleEngineOnRead(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    await user.click(await screen.findByTestId("engine-moment-open"));
+    const tabPath = momentDiffTabPath("m-1");
+    await screen.findByTestId(`tab-${tabPath}`);
+    fireEvent(window, new Event("beforeunload"));
+
+    await waitFor(() =>
+      expect(
+        validStates.some((state) =>
+          storedTabs(state).includes(tabPath),
+        ),
+      ).toBe(true),
+    );
+    expect(filePath.length).toBeLessThanOrEqual(4096);
+  });
+
   it("retries an updating history inline until it is ready without a global error", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
@@ -10121,11 +10154,14 @@ describe("history page", () => {
       await save.promise;
     });
 
-    const momentPath = momentDiffTabPath("m-1", "notes/plan.md");
+    const momentPath = momentDiffTabPath("m-1");
     await waitFor(() =>
       expect(within(left).getByTestId(`tab-${momentPath}`).dataset.active).toBe(
         "true",
       ),
+    );
+    expect(within(left).getByRole("tab", { name: "Diff: plan.md" }).title).toBe(
+      "History diff: notes/plan.md",
     );
     expect(left.dataset.active).toBe("true");
     expect(within(left).queryByTestId("tab-race-a.txt")).toBeNull();
@@ -10175,7 +10211,7 @@ describe("history page", () => {
     );
     expect(
       within(group).queryByTestId(
-        `tab-${momentDiffTabPath("m-1", "notes/plan.md")}`,
+        `tab-${momentDiffTabPath("m-1")}`,
       ),
     ).toBeNull();
   });
@@ -13955,6 +13991,18 @@ describe("shared view moment-diff tab", () => {
     const bridge = makeEngineBridge(
       Promise.resolve(storedStateWithTabs([MOMENT_TAB], MOMENT_TAB)),
     );
+    bridge.readEngineMoment = vi.fn(async (): Promise<ReadEngineMomentResult> => ({
+      moment: {
+        id: "m-1",
+        versionId: "main",
+        path: "notes/plan.md",
+        recordedAtMs: 100,
+        operation: "write",
+        origin: "local-file",
+        beforeText: "old plan\n",
+        afterText: "new plan\n",
+      },
+    }));
     renderShell(bridge);
 
     await waitFor(() =>
@@ -13963,6 +14011,8 @@ describe("shared view moment-diff tab", () => {
         momentId: "m-1",
       }),
     );
+    const tab = await screen.findByRole("tab", { name: "Diff: plan.md" });
+    expect(tab.title).toBe("History diff: notes/plan.md");
     expect(screen.queryByTestId("moment-diff-share-view")).toBeNull();
     expect(screen.queryByTestId("moment-diff-off")).toBeNull();
   });

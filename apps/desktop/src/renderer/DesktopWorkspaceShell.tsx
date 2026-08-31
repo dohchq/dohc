@@ -861,6 +861,7 @@ export function EngineMomentDiffPage({
   tabPath,
   onBeforeRestore,
   onOpenFile,
+  onPathResolved,
   registerActiveUndo,
   onRestored,
 }: {
@@ -868,6 +869,7 @@ export function EngineMomentDiffPage({
   tabPath: string;
   onBeforeRestore: () => Promise<void>;
   onOpenFile: (path: string) => void;
+  onPathResolved: (momentId: string, path: string) => void;
   registerActiveUndo: (handler: ActiveUndoHandler | null) => void;
   onRestored: () => void;
 }) {
@@ -904,6 +906,7 @@ export function EngineMomentDiffPage({
       .readEngineMoment({ workspaceId, momentId })
       .then((result) => {
         if (token !== liveToken.current) return;
+        if (result.moment) onPathResolved(momentId, result.moment.path);
         setState({ status: "ready", moment: result.moment });
       })
       .catch(() => {
@@ -913,7 +916,7 @@ export function EngineMomentDiffPage({
     return () => {
       liveToken.current += 1;
     };
-  }, [momentId, workspaceId]);
+  }, [momentId, onPathResolved, workspaceId]);
   useEffect(() => {
     setRestoreState({ status: "idle" });
     setConfirmRestoreOpen(false);
@@ -2099,20 +2102,17 @@ export function DesktopWorkspaceShell(props: {
       ),
     [dirtyRevision, openTabs],
   );
-  // A plugin tab is labelled with the name its manifest declares — the plugin's
-  // own display name on its details tab, a web app's title on its app tab. The
-  // tab path carries only ids and the manifests live in main, but each page
-  // already holds the name it heads itself with, so the label costs no extra
-  // call. Reading the manifests from here instead failed the desktop e2e in 4
-  // of 6 runs: that request lands while the plugin host is still starting on
-  // demand, and the web app's own start then loses the race.
-  const [pluginTabTitles, setPluginTabTitles] = useState<{
+  // Display labels that do not belong in tab identity. Plugin pages report
+  // their manifest titles after mount; moment pages report the durable path
+  // returned with their record. Reading plugin manifests from here instead
+  // failed the desktop e2e in 4 of 6 runs because that request races startup.
+  const [knownTabTitles, setKnownTabTitles] = useState<{
     workspaceId: string;
     titles: ReadonlyMap<string, string>;
   }>({ workspaceId: "", titles: EMPTY_TAB_LABELS });
-  const rememberPluginTabTitle = useCallback(
+  const rememberTabTitle = useCallback(
     (tabPath: string, title: string) => {
-      setPluginTabTitles((previous) => {
+      setKnownTabTitles((previous) => {
         // A title learned for another workspace never labels this one's tabs.
         const known =
           previous.workspaceId === workspaceId ? previous.titles : EMPTY_TAB_LABELS;
@@ -2129,20 +2129,25 @@ export function DesktopWorkspaceShell(props: {
       instanceKey: string | null,
       title: string,
     ) =>
-      rememberPluginTabTitle(
+      rememberTabTitle(
         pluginWebAppTabPath(pluginId, webAppId, instanceKey),
         title,
       ),
-    [rememberPluginTabTitle],
+    [rememberTabTitle],
   );
   const rememberPluginDetailsTitle = useCallback(
     (pluginId: string, directoryName: string, title: string) =>
-      rememberPluginTabTitle(pluginDetailsTabPath(pluginId, directoryName), title),
-    [rememberPluginTabTitle],
+      rememberTabTitle(pluginDetailsTabPath(pluginId, directoryName), title),
+    [rememberTabTitle],
+  );
+  const rememberMomentDiffPath = useCallback(
+    (momentId: string, filePath: string) =>
+      rememberTabTitle(momentDiffTabPath(momentId), filePath),
+    [rememberTabTitle],
   );
   const tabLabels =
-    pluginTabTitles.workspaceId === workspaceId
-      ? pluginTabTitles.titles
+    knownTabTitles.workspaceId === workspaceId
+      ? knownTabTitles.titles
       : EMPTY_TAB_LABELS;
   const anyTabDirty = dirtyPaths.size > 0;
   const activeDocumentPath = isVirtualTabPath(focusedTabPath)
@@ -3881,8 +3886,9 @@ export function DesktopWorkspaceShell(props: {
           if (!current.editorGroups.some((group) => group.id === targetGroupId)) {
             return;
           }
+          rememberMomentDiffPath(momentId, filePath);
           mutateWb((state) =>
-            openTab(state, momentDiffTabPath(momentId, filePath), targetGroupId),
+            openTab(state, momentDiffTabPath(momentId), targetGroupId),
           );
         })
         .catch((error) => {
@@ -3894,6 +3900,7 @@ export function DesktopWorkspaceShell(props: {
       flushActiveDraft,
       invalidateDeferredFileOpen,
       mutateWb,
+      rememberMomentDiffPath,
       reportShellError,
       workspaceId,
     ],
@@ -6369,6 +6376,7 @@ export function DesktopWorkspaceShell(props: {
                   tabPath={tabPath ?? ""}
                   onBeforeRestore={flushActiveDraft}
                   onOpenFile={openFile}
+                  onPathResolved={rememberMomentDiffPath}
                   registerActiveUndo={editorCallbacks?.registerActiveUndo ?? (() => undefined)}
                   onRestored={refreshAfterHistoryRestore}
                 />

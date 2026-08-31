@@ -17,6 +17,7 @@ vi.mock("./unifiedDiff", async (importOriginal) => {
 const { EngineMomentDiffPage } = await import("../DesktopWorkspaceShell");
 const { VersionComparePage } = await import("./WorkspaceVersions");
 const { momentDiffTabPath } = await import("./workbenchState");
+const noop = () => {};
 
 // 250,000 lines a side, over 10 MiB: newline-heavy, far past the cell ceiling.
 function hugeBody(marker: string): string {
@@ -65,6 +66,7 @@ describe("history diff page", () => {
       tabPath: momentDiffTabPath(moment.id),
       onBeforeRestore: async () => {},
       onOpenFile: () => {},
+      onPathResolved: noop,
       registerActiveUndo: () => {},
       onRestored: () => {},
     };
@@ -85,6 +87,7 @@ describe("history diff page", () => {
         tabPath={momentDiffTabPath("m-1")}
         onBeforeRestore={async () => {}}
         onOpenFile={() => {}}
+        onPathResolved={noop}
         registerActiveUndo={() => {}}
         onRestored={() => {}}
       />,

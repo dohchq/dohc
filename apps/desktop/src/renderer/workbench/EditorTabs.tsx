@@ -13,7 +13,6 @@ import {
   isSingletonEditorTabPath,
   isVersionCompareTabPath,
   parseHistoryDiffTabPath,
-  parseMomentDiffTabFilePath,
   parsePluginDetailsTabPath,
   parsePluginPanelTabPath,
   parsePluginWebAppTabPath,
@@ -47,8 +46,7 @@ function fileName(path: string, label?: string): string {
     return `Diff: ${name}`;
   }
   if (isMomentDiffTabPath(path)) {
-    const filePath = parseMomentDiffTabFilePath(path);
-    const name = filePath?.split("/").pop();
+    const name = label?.split("/").pop();
     return name ? `Diff: ${name}` : "History change";
   }
   if (isVersionCompareTabPath(path)) return "Compare with Main";
@@ -79,8 +77,7 @@ function tabTitle(path: string, label?: string): string {
     return parsed ? `History diff: ${parsed.filePath}` : "History diff";
   }
   if (isMomentDiffTabPath(path)) {
-    const filePath = parseMomentDiffTabFilePath(path);
-    return filePath ? `History diff: ${filePath}` : "History change";
+    return label ? `History diff: ${label}` : "History change";
   }
   if (isVersionCompareTabPath(path)) return "Compare this Version with Main";
   return path;
@@ -369,9 +366,8 @@ export const EditorTabs = memo(function EditorTabs(props: {
   tabs: Array<{ path: string }>;
   activeTab: string | null;
   activeTabDirty: boolean;
-  /** Display names the tab path cannot supply, keyed by path: what a plugin
-   * and its web apps call themselves in their manifest, reported by the pages
-   * that read it. */
+  /** Display names the tab path cannot supply, keyed by path: plugin titles
+   * from manifests and moment paths from history records. */
   tabLabels?: ReadonlyMap<string, string>;
   // Paths with a set-aside draft (#567). Unlike `activeTabDirty`, this is
   // knowable for EVERY tab — the store outlives the keyed inspectors — so an

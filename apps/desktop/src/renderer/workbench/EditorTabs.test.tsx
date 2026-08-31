@@ -47,7 +47,7 @@ function renderTabs(activeTab: string) {
 
 describe("EditorTabs strip scrolling", () => {
   it("names current history changes after their file, never the internal moment id", () => {
-    const path = momentDiffTabPath("moment-ydoc-internal-hash", "notes/plan.md");
+    const path = momentDiffTabPath("moment-ydoc-internal-hash");
     render(
       <EditorTabs
         groupId="left"
@@ -55,6 +55,7 @@ describe("EditorTabs strip scrolling", () => {
         tabs={[{ path }]}
         activeTab={path}
         activeTabDirty={false}
+        tabLabels={new Map([[path, "notes/plan.md"]])}
         recoveryPaths={new Set<string>()}
         onActivate={noop}
         onClose={noop}
@@ -70,7 +71,7 @@ describe("EditorTabs strip scrolling", () => {
     expect(tab.textContent).not.toContain("moment-ydoc");
   });
 
-  it("gives restored legacy moment tabs a neutral label instead of a raw id", () => {
+  it("gives an unresolved moment tab a neutral label instead of a raw id", () => {
     const path = momentDiffTabPath("moment-ydoc-internal-hash");
     render(
       <EditorTabs

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { SetWorkspaceUiStatePayload } from "../../ipc/bridgeContract";
 import { MAX_PLUGIN_WEB_APP_INSTANCE_KEY_CHARS } from "../../plugins/pluginWebAppInstances";
 import {
   activateTab,
@@ -25,7 +26,6 @@ import {
   isMomentDiffTabPath,
   momentDiffTabPath,
   parseMomentDiffTabPath,
-  parseMomentDiffTabFilePath,
   isVersionCompareTabPath,
   parseVersionCompareTabPath,
   versionCompareTabPath,
@@ -575,22 +575,33 @@ describe("tabs", () => {
     expect(parseHistoryDiffTabPath("notes/today.md")).toBeNull();
   });
 
-  it("recognizes engine moment diffs with durable file labels", () => {
-    const path = momentDiffTabPath(
-      "moment id/with strange chars",
-      "notes/today plan.md",
-    );
+  it("recognizes engine moment diffs by their encoded moment id", () => {
+    const path = momentDiffTabPath("moment id/with strange chars");
     expect(isMomentDiffTabPath(path)).toBe(true);
     expect(isVirtualTabPath(path)).toBe(true);
     expect(parseMomentDiffTabPath(path)).toBe("moment id/with strange chars");
-    expect(parseMomentDiffTabFilePath(path)).toBe("notes/today plan.md");
-    expect(
-      parseMomentDiffTabFilePath(momentDiffTabPath("legacy-moment")),
-    ).toBeNull();
     expect(parseMomentDiffTabPath("dohc://moment-diff/")).toBeNull();
     expect(parseMomentDiffTabPath("dohc://moment-diff/%ZZ")).toBeNull();
     expect(parseMomentDiffTabPath("notes/today.md")).toBeNull();
     expect(parseMomentDiffTabPath(null)).toBeNull();
+  });
+
+  it("persists and restores the largest multibyte moment identity", () => {
+    const tabPath = momentDiffTabPath("界".repeat(200));
+    const state = openTab(defaultWorkbenchState(), tabPath);
+
+    // Exercise the same strict payload parser the main-process persistence
+    // handler uses. The moment-id contract permits 200 characters, including
+    // characters whose percent encoding takes nine identity characters each.
+    const persisted = SetWorkspaceUiStatePayload.parse({
+      workspaceId: "workspace",
+      state: serializeUiState(state),
+    }).state;
+    const restored = parseUiState(persisted);
+
+    expect(allTabs(restored).map((tab) => tab.path)).toEqual([tabPath]);
+    expect(activeTabPath(restored)).toBe(tabPath);
+    expect(tabPath.length).toBeLessThanOrEqual(4096);
   });
 
   it("recognizes version compare pages as virtual tabs with encoded version ids", () => {
