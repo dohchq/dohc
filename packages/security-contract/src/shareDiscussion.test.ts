@@ -3,7 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
   SHARE_DISCUSSION_BODY_CODE_POINT_LIMIT,
   SHARE_DISCUSSION_BODY_INPUT_BYTE_LIMIT,
+  SHARE_DISCUSSION_NAME_BYTE_LIMIT,
+  SHARE_DISCUSSION_NAME_CODE_POINT_LIMIT,
   normalizeShareDiscussionBody,
+  normalizeShareDiscussionDisplayName,
 } from "./shareDiscussion";
 
 const exactRawByteBoundary = `${"\u1100\u1161\u11a8".repeat(888)}abcdefgh`;
@@ -52,5 +55,67 @@ describe("share discussion bodies", () => {
     expect(Array.from(exactRawByteBoundary.normalize("NFC"))).toHaveLength(896);
     expect(Buffer.byteLength(overRawByteBoundary, "utf8")).toBe(8_001);
     expect(Array.from(overRawByteBoundary.normalize("NFC"))).toHaveLength(889);
+  });
+});
+
+describe("share discussion display names", () => {
+  it("pins the durable limits", () => {
+    expect(SHARE_DISCUSSION_NAME_CODE_POINT_LIMIT).toBe(40);
+    expect(SHARE_DISCUSSION_NAME_BYTE_LIMIT).toBe(160);
+  });
+
+  it.each([
+    {
+      label: "NFC composition",
+      input: "Jose\u0301",
+      expected: { ok: true, value: "José" },
+    },
+    {
+      label: "leading, trailing, and repeated whitespace",
+      input: "  Ada\t\n  Lovelace  ",
+      expected: { ok: true, value: "Ada Lovelace" },
+    },
+    {
+      label: "control removal",
+      input: "A\u0000\u001fda",
+      expected: { ok: true, value: "Ada" },
+    },
+    {
+      label: "bidi-control removal",
+      input: "A\u061c\u200e\u200f\u202a\u202e\u2066\u2069da",
+      expected: { ok: true, value: "Ada" },
+    },
+    {
+      label: "exactly 40 astral code points and 160 UTF-8 bytes",
+      input: "😀".repeat(40),
+      expected: { ok: true, value: "😀".repeat(40) },
+    },
+    {
+      label: "41 astral code points",
+      input: "😀".repeat(41),
+      expected: { ok: false, reason: "too-long" },
+    },
+    {
+      label: "a non-empty value that normalizes to empty",
+      input: "\u0000\u202e",
+      expected: { ok: false, reason: "empty" },
+    },
+    {
+      label: "an exactly empty value",
+      input: "",
+      expected: { ok: false, reason: "empty" },
+    },
+    {
+      label: "a non-string value",
+      input: 40,
+      expected: { ok: false, reason: "empty" },
+    },
+  ])("normalizes or rejects $label", ({ input, expected }) => {
+    expect(normalizeShareDiscussionDisplayName(input)).toEqual(expected);
+  });
+
+  it("pins the exact UTF-8 byte boundary", () => {
+    expect(Buffer.byteLength("😀".repeat(40), "utf8")).toBe(160);
+    expect(Buffer.byteLength("😀".repeat(41), "utf8")).toBe(164);
   });
 });

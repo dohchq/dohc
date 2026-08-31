@@ -1,5 +1,14 @@
 export const SHARE_DISCUSSION_BODY_CODE_POINT_LIMIT = 2_000;
 export const SHARE_DISCUSSION_BODY_INPUT_BYTE_LIMIT = 8_000;
+export const SHARE_DISCUSSION_NAME_CODE_POINT_LIMIT = 40;
+export const SHARE_DISCUSSION_NAME_BYTE_LIMIT = 160;
+
+export type ShareDiscussionDisplayNameNormalization =
+  | { ok: true; value: string }
+  | { ok: false; reason: "too-long" | "empty" };
+
+const SHARE_DISCUSSION_NAME_REMOVALS =
+  /[\p{Cc}\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu;
 
 function exceedsUtf8Bytes(value: string, limit: number): boolean {
   if (value.length > limit) return true;
@@ -63,4 +72,24 @@ export function normalizeShareDiscussionBody(value: unknown): string | null {
     return null;
   }
   return normalized;
+}
+
+export function normalizeShareDiscussionDisplayName(
+  value: unknown,
+): ShareDiscussionDisplayNameNormalization {
+  if (typeof value !== "string") return { ok: false, reason: "empty" };
+
+  const normalized = value
+    .normalize("NFC")
+    .replace(SHARE_DISCUSSION_NAME_REMOVALS, "")
+    .trim()
+    .replace(/\s+/gu, " ");
+  if (normalized.length === 0) return { ok: false, reason: "empty" };
+  if (
+    exceedsCodePoints(normalized, SHARE_DISCUSSION_NAME_CODE_POINT_LIMIT) ||
+    exceedsUtf8Bytes(normalized, SHARE_DISCUSSION_NAME_BYTE_LIMIT)
+  ) {
+    return { ok: false, reason: "too-long" };
+  }
+  return { ok: true, value: normalized };
 }

@@ -6,8 +6,11 @@ import { AGENT_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import {
   normalizeShareDiscussionBody,
+  normalizeShareDiscussionDisplayName,
   SHARE_DISCUSSION_BODY_CODE_POINT_LIMIT,
   SHARE_DISCUSSION_BODY_INPUT_BYTE_LIMIT,
+  SHARE_DISCUSSION_NAME_BYTE_LIMIT,
+  SHARE_DISCUSSION_NAME_CODE_POINT_LIMIT,
 } from "@dohc/security-contract/share-discussion";
 import { shareAccessRank } from "@dohc/security-contract/share-selector";
 import { validateUserWritePath } from "@dohc/workspace-core";
@@ -835,8 +838,9 @@ export const LINK_DISCUSSION_BODY_CODE_POINT_LIMIT =
   SHARE_DISCUSSION_BODY_CODE_POINT_LIMIT;
 export const LINK_DISCUSSION_BODY_INPUT_BYTE_LIMIT =
   SHARE_DISCUSSION_BODY_INPUT_BYTE_LIMIT;
-export const LINK_DISCUSSION_NAME_CODE_POINT_LIMIT = 40;
-export const LINK_DISCUSSION_NAME_BYTE_LIMIT = 160;
+export const LINK_DISCUSSION_NAME_CODE_POINT_LIMIT =
+  SHARE_DISCUSSION_NAME_CODE_POINT_LIMIT;
+export const LINK_DISCUSSION_NAME_BYTE_LIMIT = SHARE_DISCUSSION_NAME_BYTE_LIMIT;
 export const LINK_DISCUSSION_IDEMPOTENCY_KEY_LIMIT = 64;
 export const LINK_DISCUSSION_PRINCIPAL_LIMIT = 100;
 export const DISCUSSION_MESSAGE_RATE_LIMIT = 10;
@@ -2269,28 +2273,9 @@ const OBJECT_PATH_UPSERT_SQL = `
     SET path = excluded.path, relay_seq = excluded.relay_seq
     WHERE excluded.relay_seq > sync_relay_object_paths.relay_seq`;
 
-const LINK_DISCUSSION_NAME_REMOVALS =
-  /[\p{Cc}\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu;
-
-function codePointLength(value: string): number {
-  return Array.from(value).length;
-}
-
 export function normalizeDiscussionDisplayName(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const normalized = value
-    .normalize("NFC")
-    .replace(LINK_DISCUSSION_NAME_REMOVALS, "")
-    .trim()
-    .replace(/\s+/gu, " ");
-  if (
-    normalized.length === 0 ||
-    codePointLength(normalized) > LINK_DISCUSSION_NAME_CODE_POINT_LIMIT ||
-    Buffer.byteLength(normalized, "utf8") > LINK_DISCUSSION_NAME_BYTE_LIMIT
-  ) {
-    return null;
-  }
-  return normalized;
+  const result = normalizeShareDiscussionDisplayName(value);
+  return result.ok ? result.value : null;
 }
 
 function validLinkDiscussionIdempotencyKey(value: unknown): value is string {

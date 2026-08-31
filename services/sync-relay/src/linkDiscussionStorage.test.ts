@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Worker } from "node:worker_threads";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { normalizeShareDiscussionDisplayName } from "@dohc/security-contract/share-discussion";
 import {
   LINK_DISCUSSION_BODY_CODE_POINT_LIMIT,
   LINK_DISCUSSION_BODY_INPUT_BYTE_LIMIT,
@@ -1292,6 +1293,44 @@ describe("durable link discussion storage", () => {
     ]) {
       expect(storage.findLinkSessionByCapabilityHash(hash)?.principalId ?? null).toBeNull();
     }
+  });
+
+  it("stores the exact shared normalized display name", async () => {
+    const { storage } = await openStorage();
+    const seeded = seedShare(storage, { suffix: "shared-name" });
+    const rawName = "  A\u0000\u202eme\u0301   User  ";
+    const normalizedName = normalizeShareDiscussionDisplayName(rawName);
+    expect(normalizedName).toEqual({ ok: true, value: "Amé User" });
+    if (!normalizedName.ok) return;
+
+    expect(
+      append(storage, seeded, {
+        claimedName: rawName,
+        idempotencyKey: "shared-normalized-name",
+      }),
+    ).toMatchObject({
+      ok: true,
+      principal: { displayName: normalizedName.value },
+      message: { displayNameSnapshot: normalizedName.value },
+    });
+  });
+
+  it.each([
+    { label: "empty after normalization", claimedName: "\u0000\u202e" },
+    { label: "over the shared limit", claimedName: "😀".repeat(41) },
+  ])("rejects a supplied name that is $label without a durable write", async ({ claimedName }) => {
+    const { storage, dbPath } = await openStorage();
+    const seeded = seedShare(storage, { suffix: `invalid-name-${claimedName.length}` });
+
+    expect(
+      append(storage, seeded, {
+        claimedName,
+        idempotencyKey: "invalid-shared-name",
+      }),
+    ).toMatchObject({ ok: false, reason: "invalid-input" });
+    expect(countRows(dbPath, "sync_relay_link_principals")).toBe(0);
+    expect(countRows(dbPath, "sync_relay_share_discussion_messages")).toBe(0);
+    expect(storage.findLinkSessionByCapabilityHash(seeded.capabilityHash)?.principalId).toBeNull();
   });
 
   it("enforces each durable budget and validates normalized names, bodies, and keys", async () => {
