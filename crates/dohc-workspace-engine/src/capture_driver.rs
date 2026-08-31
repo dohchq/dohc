@@ -3271,12 +3271,8 @@ async fn apply_run_with_handle(
                 apply_self_writes,
                 apply_provenance,
             );
-            let result = apply_reconcile_plan_cancellable(
-                &apply_plan,
-                &mut sink,
-                &NoFaults,
-                &apply_cancel,
-            );
+            let result =
+                apply_reconcile_plan_cancellable(&apply_plan, &mut sink, &NoFaults, &apply_cancel);
             let collections =
                 if result.failed_applies.is_empty() && !result.degraded && result.completed() {
                     let reconcile = if collection_reconcile_requested {
