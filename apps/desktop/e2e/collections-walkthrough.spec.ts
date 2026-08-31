@@ -25,11 +25,13 @@ const PROJECTS_TAB = "tab-dohc://collection/projects";
 const CLIENTS_TAB = "tab-dohc://collection/clients";
 
 // Calendar month view opens on today, so the walkthrough's dates must land
-// in the current month.
+// in the current month. One clock read: deriving both dates from separate
+// reads could straddle a month boundary at midnight.
+const NOW = new Date();
+
 function currentMonthDay(day: number): string {
-  const now = new Date();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  return `${now.getFullYear()}-${month}-${String(day).padStart(2, "0")}`;
+  const month = String(NOW.getMonth() + 1).padStart(2, "0");
+  return `${NOW.getFullYear()}-${month}-${String(day).padStart(2, "0")}`;
 }
 
 // The application menu's New Collection… item sends this exact command over

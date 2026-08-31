@@ -3451,48 +3451,28 @@ async function engineSearchIndexFor(
   workspace: EngineWorkspace,
 ): Promise<{ versionId: string; files: { objectId: string; path: string }[];
 } | null> {
-  const sessions = rustEngineWorkspaceSessions;
-  if (!sessions) return null;
-  const read = async (engineWorkspace: EngineWorkspace) => await sessions.run(
-    engineWorkspace,
-    async (binding) => {
-      const adapter = new VersionedLiveAdapter(binding.client, binding.workspace, {
-        workspaceId: workspace.workspaceId,
-      });
-      const active = await adapter.getActiveVersion({
-        workspaceId: workspace.workspaceId,
-      });
-      if (!active) return null;
-      const files = await adapter.listTextFileMetadata({
-        workspaceId: workspace.workspaceId,
-        versionId: active.id,
-      });
-      return {
-        versionId: active.id,
-        files: files.map((file) => ({ objectId: file.objectId, path: file.path })),
-      };
-    },
-  );
-  const registered = findWorkspace(workspace.workspaceId);
-  if (!registered) return await read(workspace);
-  if (
-    workspace.attachmentId === undefined &&
-    registered.rootPath !== workspace.rootPath
-  ) {
-    throw new Error(
-      "The engine workspace belongs to a replaced physical attachment.",
-    );
-  }
-  return await withWorkspaceAttachmentAsync(workspace, async (lease) =>
-    await read(engineWorkspaceForAuthority(lease)),
-  );
+  return await withEngineAdapter(workspace, async (adapter) => {
+    const active = await adapter.getActiveVersion({
+      workspaceId: workspace.workspaceId,
+    });
+    if (!active) return null;
+    const files = await adapter.listTextFileMetadata({
+      workspaceId: workspace.workspaceId,
+      versionId: active.id,
+    });
+    return {
+      versionId: active.id,
+      files: files.map((file) => ({ objectId: file.objectId, path: file.path })),
+    };
+  });
 }
 
-// Collections (Phase 2 views): one daemon round-trip per read, through the
-// same authority sandwich engineSearchIndexFor uses. Returns null when the
-// daemon has no workspace sessions (engine unavailable), so list can answer
-// "no collections" while get/query raise a visible error.
-async function withCollectionsAdapter<T>(
+// One daemon round-trip per read, through the workspace-attachment authority
+// sandwich. Returns null when the daemon has no workspace sessions (engine
+// unavailable), so callers can answer with an empty result — collections.list
+// says "no collections" — while surfaces that must not guess raise a visible
+// error.
+async function withEngineAdapter<T>(
   workspace: EngineWorkspace,
   work: (adapter: VersionedLiveAdapter) => Promise<T>,
 ): Promise<T | null> {
@@ -6483,7 +6463,7 @@ function registerIpcHandlers(
       input.workspaceId,
       "Collection listing stopped because this window changed workspaces.",
       async (operation) => {
-        const result = await withCollectionsAdapter(
+        const result = await withEngineAdapter(
           receivedShareEngine.workspaceForRegistered(operation.workspace),
           async (adapter) => await adapter.listCollections(),
         );
@@ -6500,7 +6480,7 @@ function registerIpcHandlers(
       input.workspaceId,
       "Collection read stopped because this window changed workspaces.",
       async (operation) => {
-        const result = await withCollectionsAdapter(
+        const result = await withEngineAdapter(
           receivedShareEngine.workspaceForRegistered(operation.workspace),
           async (adapter) =>
             await adapter.getCollection({ collectionPath: input.collectionPath }),
@@ -6520,7 +6500,7 @@ function registerIpcHandlers(
       input.workspaceId,
       "Collection query stopped because this window changed workspaces.",
       async (operation) => {
-        const result = await withCollectionsAdapter(
+        const result = await withEngineAdapter(
           receivedShareEngine.workspaceForRegistered(operation.workspace),
           async (adapter) => await adapter.queryCollectionRecords(params),
         );

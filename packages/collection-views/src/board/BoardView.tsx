@@ -8,7 +8,8 @@ import type {
   FieldDefinition,
 } from "@dohc/workspace-contracts";
 import { deriveColumns } from "../columns";
-import { FieldCell, fieldDisplayText, fieldValueText } from "../table/cells";
+import { recordLabel } from "../recordLabel";
+import { asText, FieldCell, fieldDisplayText } from "../table/cells";
 import type { CollectionCellChange } from "../table/TableView";
 
 export interface BoardViewProps {
@@ -32,7 +33,6 @@ export interface BoardViewProps {
   onOpenRecord?: (record: CollectionRecord) => void;
   /** Maps a person field's user id to a display name. Falls back to the id. */
   personLabel?: (userId: string) => string | null;
-  className?: string;
 }
 
 type PersonLabel = (userId: string) => string | null;
@@ -43,7 +43,7 @@ function groupLabel(
   personLabel?: PersonLabel,
 ): string {
   if (group.value === null) return "No value";
-  if (!groupField) return fieldValueText(group.value);
+  if (!groupField) return asText(group.value);
   return fieldDisplayText(
     groupField,
     {
@@ -70,9 +70,10 @@ interface BoardCardProps {
 function BoardCard({ record, fields, onOpen, personLabel }: BoardCardProps) {
   const { ref, isDragging } = useDraggable({ id: record.id });
   // Click opens the record. Enter belongs to the keyboard drag sensor (it
-  // lifts the card), so it must not also open; keyboard users open records
-  // from the table view. The ref swallows the click that can trail a pointer
-  // drag: every pointer press resets it, a drag sets it before any click.
+  // lifts the card), so it must not also open; keyboard users open through
+  // the card's Open button. The ref swallows the click that can trail a
+  // pointer drag: every pointer press resets it, a drag sets it before any
+  // click.
   const dragged = useRef(false);
   if (isDragging) dragged.current = true;
   const [titleField, ...stripFields] = fields;
@@ -93,7 +94,7 @@ function BoardCard({ record, fields, onOpen, personLabel }: BoardCardProps) {
       role="listitem"
       tabIndex={0}
       aria-label={title || record.id}
-      className={`rounded-lg border border-line bg-panel p-2 ${isDragging ? "opacity-50" : ""}`}
+      className={`group rounded-lg border border-line bg-panel p-2 ${isDragging ? "opacity-50" : ""}`}
       onPointerDown={
         onOpen
           ? () => {
@@ -119,6 +120,20 @@ function BoardCard({ record, fields, onOpen, personLabel }: BoardCardProps) {
           />
         ) : null}
         <span className="truncate text-[13px] text-ink">{title}</span>
+        {onOpen ? (
+          <button
+            type="button"
+            aria-label={`Open ${recordLabel(record)}`}
+            className="ml-auto shrink-0 rounded border border-line bg-panel px-1.5 text-[11px] text-muted opacity-0 transition-opacity duration-75 hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
+            onClick={(event) => {
+              // The card's own click handler also opens; do not open twice.
+              event.stopPropagation();
+              onOpen(record);
+            }}
+          >
+            Open
+          </button>
+        ) : null}
       </div>
       {strip.length > 0 ? (
         <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-muted">
@@ -182,7 +197,6 @@ export function BoardView({
   onCellChange,
   onOpenRecord,
   personLabel,
-  className,
 }: BoardViewProps) {
   const fields = useMemo(() => deriveColumns(schema, visibleFields), [schema, visibleFields]);
   const groupField = useMemo(
@@ -219,7 +233,7 @@ export function BoardView({
 
   return (
     <DragDropProvider onDragEnd={handleDragEnd}>
-      <div className={`flex h-full items-start gap-3 overflow-x-auto ${className ?? ""}`}>
+      <div className="flex h-full items-start gap-3 overflow-x-auto">
         {groups.map((group, index) => (
           <BoardColumn
             key={index}

@@ -23,6 +23,8 @@ import {
   GetCollectionResult,
   QueryCollectionRecordsPayload,
   QueryCollectionRecordsResult,
+  CollectionRecordSchema,
+  COLLECTION_VALUE_MAX_DEPTH,
   DesktopMarksResult,
   CreateWorkspaceFilePayload,
   CreateFileChatPayload,
@@ -1099,6 +1101,41 @@ describe("collection IPC contracts (Phase 2 views)", () => {
         recordCount: 0,
       }),
     ).toThrow();
+  });
+
+  it("rejects thousands-deep nested values with a validation error, not a stack overflow", () => {
+    const base = { workspaceId: "workspace-1", collectionPath: "tasks" };
+    const nested = (depth: number): unknown => {
+      let value: unknown = "leaf";
+      for (let level = 0; level < depth; level += 1) value = [value];
+      return value;
+    };
+    const query = (value: unknown) => ({
+      ...base,
+      filter: { field: "status", operator: "equals", value },
+    });
+    const record = (value: unknown) => ({
+      id: "rec-1",
+      path: "tasks/one.md",
+      conflicted: false,
+      values: [
+        {
+          field: "status",
+          value,
+          validation: { status: "valid" },
+          resolvedRelations: [],
+        },
+      ],
+    });
+
+    for (const deep of [nested(COLLECTION_VALUE_MAX_DEPTH + 1), nested(5_000)]) {
+      expect(QueryCollectionRecordsPayload.safeParse(query(deep)).success).toBe(false);
+      expect(CollectionRecordSchema.safeParse(record(deep)).success).toBe(false);
+    }
+
+    const atCap = nested(COLLECTION_VALUE_MAX_DEPTH);
+    expect(QueryCollectionRecordsPayload.safeParse(query(atCap)).success).toBe(true);
+    expect(CollectionRecordSchema.safeParse(record(atCap)).success).toBe(true);
   });
 });
 

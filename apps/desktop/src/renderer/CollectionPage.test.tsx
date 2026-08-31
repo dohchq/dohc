@@ -473,11 +473,65 @@ describe("collection authoring", () => {
       lastWrittenSchema(bridge).schema.views.map((view) => view.name),
     ).toEqual(["My board"]);
 
-    fireEvent.click(await screen.findByLabelText("Delete view My board"));
+    // Deleting a view drops its configuration, so one click only arms the
+    // button; the confirming click runs the rewrite.
+    const deleteButton = await screen.findByLabelText("Delete view My board");
+    fireEvent.click(deleteButton);
+    expect(deleteButton.textContent).toBe("Confirm delete");
+    expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2);
+    fireEvent.click(deleteButton);
     await waitFor(() =>
       expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(3),
     );
     expect(lastWrittenSchema(bridge).schema.views).toEqual([]);
+  });
+});
+
+const CHECKBOX_SCHEMA: CollectionSchema = {
+  name: "Tasks",
+  description: null,
+  fields: [
+    { name: "title", type: "text" },
+    { name: "done", type: "checkbox" },
+  ],
+  views: [],
+};
+
+describe("cell write queue", () => {
+  it("surfaces a failed write, keeps processing, and clears the error on the next attempt", async () => {
+    // The session settles without a doc (conflict, deletion, engine off):
+    // the head write fails with no detail.
+    docMock.current = engineDocState({ available: false });
+    const base = record("rec-1", "Plan");
+    const checkboxRecord: CollectionRecord = {
+      ...base,
+      values: [
+        ...base.values,
+        {
+          field: "done",
+          value: false,
+          validation: { status: "valid" },
+          resolvedRelations: [],
+        },
+      ],
+    };
+    const bridge = makeBridge([checkboxRecord], CHECKBOX_SCHEMA);
+    renderPage(bridge);
+    await screen.findByText("Plan");
+
+    fireEvent.click(screen.getByRole("checkbox"));
+    const error = await screen.findByTestId("collection-write-error");
+    expect(error.textContent).toBe("dohc could not save this change.");
+
+    // The failed write released its queue slot: the next change enqueues,
+    // clears the stale message, and reaches its record's doc.
+    const doc = new Y.Doc();
+    docMock.current = engineDocState({ available: true, doc });
+    fireEvent.click(screen.getByRole("checkbox"));
+    await waitFor(() =>
+      expect(doc.getMap("frontmatter").get("done")).toBe(true),
+    );
+    expect(screen.queryByTestId("collection-write-error")).toBeNull();
   });
 });
 
@@ -569,6 +623,95 @@ describe("record click-through", () => {
 
     fireEvent.click(await screen.findByText("Plan"));
     expect(onOpenRecord).toHaveBeenCalledExactlyOnceWith("tasks/Plan.md");
+  });
+});
+
+describe("pagination", () => {
+  // Serves the engine's paged shape: each page but the last carries a
+  // cursor, and a request with `cursor` serves the page after it.
+  function servePages(
+    bridge: ReturnType<typeof makeBridge>,
+    pages: { records: CollectionRecord[]; groups: CollectionRecordGroup[] | null }[],
+  ) {
+    const cursorFor = (page: number) => ({
+      sortValues: [{ present: true, value: String(page) }],
+      recordPath: `tasks/page-${page}.md`,
+      recordId: `page-${page}`,
+    });
+    bridge.queryCollectionRecords.mockImplementation(async (params) => {
+      const { cursor } = params as { cursor?: { recordId: string } };
+      const index = cursor
+        ? Number(cursor.recordId.slice("page-".length)) + 1
+        : 0;
+      const page = pages[index];
+      if (!page) throw new Error(`no page ${index}`);
+      return {
+        collection: { path: "tasks", status: "valid", reasons: [] },
+        records: page.records,
+        groups: page.groups,
+        nextCursor: index + 1 < pages.length ? cursorFor(index) : null,
+      };
+    });
+  }
+
+  function statusRecord(id: string, title: string): CollectionRecord {
+    return {
+      ...record(id, title),
+      values: [
+        ...record(id, title).values,
+        {
+          field: "status",
+          value: "Todo",
+          validation: { status: "valid" },
+          resolvedRelations: [],
+        },
+      ],
+    };
+  }
+
+  it("drains every page so a board view places all cards", async () => {
+    const bridge = makeBridge([], BOARD_SCHEMA);
+    const pageOne = statusRecord("rec-1", "Plan");
+    const pageTwo = statusRecord("rec-2", "Ship");
+    servePages(bridge, [
+      { records: [pageOne], groups: [{ value: "Todo", records: [pageOne] }] },
+      { records: [pageTwo], groups: [{ value: "Todo", records: [pageTwo] }] },
+    ]);
+    renderPage(bridge);
+
+    expect(await screen.findByText("Plan")).toBeDefined();
+    expect(await screen.findByText("Ship")).toBeDefined();
+    expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(2);
+    expect(bridge.queryCollectionRecords).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cursor: expect.objectContaining({ recordId: "page-0" }),
+      }),
+    );
+  });
+
+  it("drains every page so a calendar view places all events", async () => {
+    const dated = (id: string, title: string): CollectionRecord => ({
+      ...record(id, title),
+      values: [
+        ...record(id, title).values,
+        {
+          field: "due",
+          value: localToday(),
+          validation: { status: "valid" },
+          resolvedRelations: [],
+        },
+      ],
+    });
+    const bridge = makeBridge([], CALENDAR_SCHEMA);
+    servePages(bridge, [
+      { records: [dated("rec-1", "Plan")], groups: null },
+      { records: [dated("rec-2", "Ship")], groups: null },
+    ]);
+    renderPage(bridge);
+
+    expect(await screen.findByText("Plan")).toBeDefined();
+    expect(await screen.findByText("Ship")).toBeDefined();
+    expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(2);
   });
 });
 

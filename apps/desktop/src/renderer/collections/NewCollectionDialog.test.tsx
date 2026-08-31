@@ -98,4 +98,27 @@ describe("NewCollectionDialog", () => {
     ).toBeDefined();
     expect(bridgeMock.createWorkspaceFile).not.toHaveBeenCalled();
   });
+
+  it("refuses a relation without a target and a select without options", async () => {
+    renderDialog();
+    fireEvent.change(screen.getByLabelText("Collection name"), {
+      target: { value: "tasks" },
+    });
+    fireEvent.click(screen.getByText("Add field"));
+    const names = screen.getAllByLabelText("Field name");
+    fireEvent.change(names[1] as Element, { target: { value: "Owner" } });
+    const types = screen.getAllByLabelText("Field type");
+    fireEvent.change(types[1] as Element, { target: { value: "relation" } });
+    fireEvent.click(screen.getByTestId("new-collection-create"));
+    expect(
+      await screen.findByText("Choose a collection to relate to."),
+    ).toBeDefined();
+
+    fireEvent.change(types[1] as Element, { target: { value: "select" } });
+    fireEvent.click(screen.getByTestId("new-collection-create"));
+    expect(
+      await screen.findByText("Give the field at least one option."),
+    ).toBeDefined();
+    expect(bridgeMock.createWorkspaceFile).not.toHaveBeenCalled();
+  });
 });

@@ -29,11 +29,7 @@ export interface FieldCellProps {
 }
 
 /** Plain text for a raw collection value: board group labels, fallbacks. */
-export function fieldValueText(value: CollectionValue): string {
-  return asText(value);
-}
-
-function asText(value: CollectionValue): string {
+export function asText(value: CollectionValue): string {
   if (value === null) return "";
   if (Array.isArray(value)) return value.map(asText).join(", ");
   if (typeof value === "object") {

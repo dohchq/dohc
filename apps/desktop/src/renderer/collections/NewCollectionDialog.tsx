@@ -37,7 +37,6 @@ export function NewCollectionDialog(props: {
   const [relationTargets, setRelationTargets] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
-  const pendingRef = useRef(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -63,7 +62,7 @@ export function NewCollectionDialog(props: {
 
   async function create() {
     const folder = name.trim().replace(/\/+$/, "");
-    if (!folder || pendingRef.current) return;
+    if (!folder || pending) return;
     const fieldNames: string[] = [];
     for (const draft of drafts) {
       const problem = fieldDraftError(draft, fieldNames);
@@ -73,7 +72,6 @@ export function NewCollectionDialog(props: {
       }
       fieldNames.push(draft.name.trim());
     }
-    pendingRef.current = true;
     setPending(true);
     setError(null);
     const schema: CollectionSchema = {
@@ -94,7 +92,6 @@ export function NewCollectionDialog(props: {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      pendingRef.current = false;
       setPending(false);
     }
   }

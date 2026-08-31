@@ -142,7 +142,7 @@ import { SidePanel } from "./workbench/SidePanel";
 import { StatusBar } from "./workbench/StatusBar";
 import { AgentPermissionRequests } from "./workbench/AgentPermissionRequests";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
-import { COLLECTION_SCHEMA_FILENAME } from "@dohc/workspace-contracts/collection";
+import { createActivityCoalescer } from "./workspaceActivityCoalescer";
 import { useAgentNotifications } from "./workbench/useAgentNotifications";
 import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";
 import {
@@ -690,20 +690,10 @@ const MARKDOWN_PRELOAD_IDLE_DELAY_MS = 150;
 // neither is urgent, and both cost a relay round trip per workspace.
 const SHARE_RELAY_POLL_MS = 5 * 60 * 1000;
 
-// Trailing-edge window that coalesces a burst of workspace-activity events
-// into one files+history refresh. Short enough that a lone save still feels
-// immediate; long enough to cover main's per-batch event cadence.
 // Stable empty set: the Explorer is memoized, so the "no collections"
 // default must not be a fresh identity per render.
 const EMPTY_COLLECTION_FOLDERS: ReadonlySet<string> = new Set();
 
-export const WORKSPACE_ACTIVITY_REFRESH_DELAY_MS = 200;
-
-// Cap on how long the trailing edge may keep sliding: a sustained burst
-// whose events land inside the window (a long import, an agent writing
-// continuously) would otherwise starve every refresh until it ends. During
-// such a burst one refresh still fires per cap window.
-export const WORKSPACE_ACTIVITY_REFRESH_MAX_WAIT_MS = 1_000;
 export const WORKBENCH_PERSIST_DELAY_MS = 500;
 
 function scheduleMarkdownEditorPreload(): () => void {
@@ -2745,52 +2735,13 @@ export function DesktopWorkspaceShell(props: {
   }, [workspaceId]);
   useEffect(() => {
     if (!workspaceIsReady || !engineEnabled || isShareView) return;
+    // First load; afterwards the list rides the files+history activity
+    // coalescer below. listCollections is one cheap index read, so no path
+    // filter: a new collection appears through collection.yaml writes, a
+    // rename or delete arrives as ordinary path activity, and a scope-free
+    // event (no paths) must refresh too.
     void refreshCollections();
-    // Trailing-edge coalescing on the shell's activity cadence: a new
-    // collection appears through collection.yaml writes, and a rename or
-    // delete arrives as ordinary path activity — a scope-free event (no
-    // paths) must refresh too.
-    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
-    let refreshDeadline: number | null = null;
-    const runRefresh = () => {
-      refreshTimer = null;
-      refreshDeadline = null;
-      void refreshCollections();
-    };
-    const unsubscribe = bridge().onWorkspaceActivity(
-      (event: WorkspaceActivityEvent) => {
-        const paths =
-          event.workspaceId === workspaceId ? event.paths : undefined;
-        if (
-          paths?.length &&
-          !paths.some(
-            (path) =>
-              path.endsWith(`/${COLLECTION_SCHEMA_FILENAME}`) ||
-              path === COLLECTION_SCHEMA_FILENAME ||
-              collectionsRef.current.has(path) ||
-              [...collectionsRef.current].some((collection) =>
-                path.startsWith(`${collection}/`),
-              ),
-          )
-        ) {
-          return;
-        }
-        const now = Date.now();
-        refreshDeadline ??= now + WORKSPACE_ACTIVITY_REFRESH_MAX_WAIT_MS;
-        if (refreshTimer !== null) clearTimeout(refreshTimer);
-        refreshTimer = setTimeout(
-          runRefresh,
-          Math.min(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS, refreshDeadline - now),
-        );
-      },
-    );
-    return () => {
-      if (refreshTimer !== null) clearTimeout(refreshTimer);
-      unsubscribe();
-    };
-  }, [workspaceIsReady, engineEnabled, isShareView, workspaceId, refreshCollections]);
-  const collectionsRef = useRef(collectionFolders);
-  collectionsRef.current = collectionFolders;
+  }, [workspaceIsReady, engineEnabled, isShareView, refreshCollections]);
   // Engine history page state (flagged workspaces): newest-first moments,
   // the keyset cursor for older pages, and the monotonic latest order used
   // as the open-file refresh key.
@@ -4865,16 +4816,11 @@ export function DesktopWorkspaceShell(props: {
     // History always refreshes: capture outcomes and deletes/retirements are
     // not distinguishable from path strings alone.
     //
-    // The max-wait deadline keeps a burst that never quiets honest: the
-    // trailing edge slides only until the deadline, then the refresh fires
-    // and the next event starts a fresh window.
-    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
-    let refreshDeadline: number | null = null;
+    // The collections list rides the same cadence: one cheap index read per
+    // quieted burst, latest-wins inside refreshCollections.
     let filesRefreshMode: "skip" | "cached" | "full" = "skip";
-    const runActivityRefresh = () => {
+    const coalescer = createActivityCoalescer(() => {
       const mode = filesRefreshMode;
-      refreshTimer = null;
-      refreshDeadline = null;
       filesRefreshMode = "skip";
       if (mode !== "skip" || committedFilesRequest.current === 0) {
         void refreshFiles(mode === "full" ? {} : { allowCached: true }).catch(
@@ -4885,7 +4831,8 @@ export function DesktopWorkspaceShell(props: {
       void refreshHistory().catch((error) =>
         reportShellError("Could not refresh history.", error),
       );
-    };
+      if (engineEnabled && !isShareView) void refreshCollections();
+    });
     const unsubscribe = bridge().onWorkspaceActivity(
       (event: WorkspaceActivityEvent) => {
         const paths =
@@ -4898,17 +4845,11 @@ export function DesktopWorkspaceShell(props: {
         ) {
           filesRefreshMode = "cached";
         }
-        const now = Date.now();
-        refreshDeadline ??= now + WORKSPACE_ACTIVITY_REFRESH_MAX_WAIT_MS;
-        if (refreshTimer !== null) clearTimeout(refreshTimer);
-        refreshTimer = setTimeout(
-          runActivityRefresh,
-          Math.min(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS, refreshDeadline - now),
-        );
+        coalescer.schedule();
       },
     );
     return () => {
-      if (refreshTimer !== null) clearTimeout(refreshTimer);
+      coalescer.cancel();
       unsubscribe();
     };
   }, [
@@ -4917,6 +4858,9 @@ export function DesktopWorkspaceShell(props: {
     refreshFiles,
     refreshHistory,
     reportShellError,
+    engineEnabled,
+    isShareView,
+    refreshCollections,
   ]);
 
   useEffect(() => {
@@ -5032,11 +4976,20 @@ export function DesktopWorkspaceShell(props: {
         label: "New folder",
         run: () => requestExplorerCreate("folder"),
       },
-      {
-        id: "new-collection",
-        label: "New collection",
-        run: () => setNewCollectionFolder(""),
-      },
+      // Creating a collection writes collection.yaml through
+      // createWorkspaceFile, and assertWritableWorkspace refuses that on the
+      // share's presence alone — the same rule that hides plugin commands
+      // (round-8 finding 2), so a shared view is not offered a dead click
+      // at any access level.
+      ...(props.workspace.shareView
+        ? []
+        : [
+            {
+              id: "new-collection",
+              label: "New collection",
+              run: () => setNewCollectionFolder(""),
+            },
+          ]),
       {
         id: "quick-open",
         label: "Go to file",
@@ -5226,6 +5179,7 @@ export function DesktopWorkspaceShell(props: {
       openSettings,
       reportShellError,
       workspaceId,
+      props.workspace.shareView,
     ],
   );
 

@@ -1,6 +1,5 @@
 import type {
   CollectionQueryCursor,
-  CollectionQueryFilter,
   CollectionQueryParams,
   CollectionQueryResult,
   CollectionQuerySort,
@@ -20,11 +19,9 @@ export type CollectionQueryExecutor = (
 ) => Promise<CollectionQueryResult>;
 
 export interface CollectionQueryInput {
-  filter?: CollectionQueryFilter;
   sort?: CollectionQuerySort[];
   groupBy?: string;
   resolveRelations?: boolean;
-  limit?: number;
 }
 
 export type CollectionStoreStatus = "idle" | "loading" | "ready" | "error";
@@ -46,14 +43,17 @@ export interface CollectionStore {
   refresh(): Promise<void>;
   /** Merges `input` into the query, drops the cursor, and re-runs. */
   setQuery(input: Partial<CollectionQueryInput>): Promise<void>;
-  /** Fetches the next page and appends it. No-op without a cursor. */
+  /**
+   * Fetches the next page and appends it. No-op without a cursor or while a
+   * previous loadMore is still in flight, so hosts may call it eagerly
+   * (scroll handlers, drain loops) without double-fetching a page.
+   */
   loadMore(): Promise<void>;
 }
 
 export interface CollectionStoreOptions {
   collectionPath: string;
   executor: CollectionQueryExecutor;
-  initialQuery?: CollectionQueryInput;
 }
 
 function groupKey(value: CollectionValue): string {
@@ -90,6 +90,7 @@ export function createCollectionStore(
   // latest request may write state, so a slow response can never clobber a
   // newer one.
   let requestToken = 0;
+  let loadingMore = false;
 
   let state: CollectionStoreState = {
     status: "idle",
@@ -98,7 +99,7 @@ export function createCollectionStore(
     groups: null,
     nextCursor: null,
     error: null,
-    query: options.initialQuery ?? {},
+    query: {},
   };
 
   function setState(next: Partial<CollectionStoreState>): void {
@@ -141,8 +142,13 @@ export function createCollectionStore(
     refresh: () => run(state.query, null),
     setQuery: (input) => run({ ...state.query, ...input }, null),
     loadMore() {
-      if (!state.nextCursor || state.status !== "ready") return Promise.resolve();
-      return run(state.query, state.nextCursor);
+      if (loadingMore || !state.nextCursor || state.status !== "ready") {
+        return Promise.resolve();
+      }
+      loadingMore = true;
+      return run(state.query, state.nextCursor).finally(() => {
+        loadingMore = false;
+      });
     },
   };
 }

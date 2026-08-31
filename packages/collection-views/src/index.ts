@@ -17,7 +17,6 @@ export {
 export {
   FieldCell,
   fieldDisplayText,
-  fieldValueText,
   type FieldCellProps,
 } from "./table/cells";
 export {

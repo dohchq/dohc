@@ -164,6 +164,38 @@ describe("RelationPicker", () => {
     ).toBeDefined();
   });
 
+  it("clears the prior collection's records while the next query is in flight", async () => {
+    const gate = deferred<CollectionQueryResult>();
+    const executor = vi.fn((query: { collectionPath: string }) =>
+      query.collectionPath === "tasks"
+        ? Promise.resolve(makeQueryResult(TARGETS))
+        : gate.promise,
+    );
+    const emit = vi.fn();
+    const view = (field: RelationFieldDefinition) => (
+      <RelationPicker
+        field={field}
+        value={null}
+        executor={executor}
+        emit={emit}
+        close={vi.fn()}
+      />
+    );
+    const { rerender } = render(view(SINGLE));
+    await screen.findByRole("option", { name: "Design" });
+
+    rerender(view({ ...SINGLE, collection: "projects" }));
+    // No stale tasks id is selectable for the projects field.
+    expect(screen.queryByRole("option")).toBeNull();
+    expect(screen.getByText("Loading records...")).toBeDefined();
+    expect(emit).not.toHaveBeenCalled();
+
+    gate.resolve(
+      makeQueryResult([makeRecord("proj-1", [indexedValue("title", "Roadmap")])]),
+    );
+    expect(await screen.findByRole("option", { name: "Roadmap" })).toBeDefined();
+  });
+
   it("surfaces a failed query", async () => {
     const executor = vi.fn(async (): Promise<CollectionQueryResult> => {
       throw new Error("engine offline");

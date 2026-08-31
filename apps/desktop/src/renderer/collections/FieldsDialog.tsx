@@ -8,6 +8,8 @@ import {
   fieldDraftError,
   FieldDraftRow,
   FIELD_TYPE_LABELS,
+  inputClass,
+  NO_OPTIONS_PROBLEM,
   parseOptionsText,
   type FieldDraft,
 } from "./FieldForm";
@@ -24,24 +26,14 @@ export type SchemaApply = (
   mutate: (schema: CollectionSchema) => CollectionSchema,
 ) => Promise<string | null>;
 
-const inputClass =
-  "w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink disabled:opacity-50";
-
-export function FieldsDialog(props: {
-  schema: CollectionSchema;
-  /** Collection folder paths a relation field can target. */
-  relationTargets: readonly string[];
-  apply: SchemaApply;
-  onClose: () => void;
-}) {
-  const [editing, setEditing] = useState<string | null>(null);
-  const [editOptions, setEditOptions] = useState("");
-  const [draft, setDraft] = useState<FieldDraft>(emptyFieldDraft());
-  const [error, setError] = useState<string | null>(null);
+/**
+ * The dialogs' shared rewrite machinery: one pending flag, the current
+ * user-facing error, and `run`, which surfaces `problem` without applying,
+ * else applies one rewrite and calls `onSuccess` only when it landed.
+ */
+export function useSchemaRun(apply: SchemaApply) {
   const [pending, setPending] = useState(false);
-
-  const fieldNames = props.schema.fields.map((field) => field.name);
-
+  const [error, setError] = useState<string | null>(null);
   async function run(
     problem: string | null,
     mutate: (schema: CollectionSchema) => CollectionSchema,
@@ -54,7 +46,7 @@ export function FieldsDialog(props: {
     }
     setPending(true);
     setError(null);
-    const failure = await props.apply(mutate);
+    const failure = await apply(mutate);
     setPending(false);
     if (failure !== null) {
       setError(failure);
@@ -62,6 +54,22 @@ export function FieldsDialog(props: {
     }
     onSuccess();
   }
+  return { pending, error, setError, run };
+}
+
+export function FieldsDialog(props: {
+  schema: CollectionSchema;
+  /** Collection folder paths a relation field can target. */
+  relationTargets: readonly string[];
+  apply: SchemaApply;
+  onClose: () => void;
+}) {
+  const [editing, setEditing] = useState<string | null>(null);
+  const [editOptions, setEditOptions] = useState("");
+  const [draft, setDraft] = useState<FieldDraft>(emptyFieldDraft());
+  const { pending, error, setError, run } = useSchemaRun(props.apply);
+
+  const fieldNames = props.schema.fields.map((field) => field.name);
 
   function beginEdit(name: string) {
     const field = props.schema.fields.find((entry) => entry.name === name);
@@ -74,9 +82,10 @@ export function FieldsDialog(props: {
   }
 
   async function saveEdit(name: string) {
+    const options = parseOptionsText(editOptions);
     await run(
-      null,
-      (schema) => setFieldOptions(schema, name, parseOptionsText(editOptions)),
+      options.length === 0 ? NO_OPTIONS_PROBLEM : null,
+      (schema) => setFieldOptions(schema, name, options),
       () => setEditing(null),
     );
   }

@@ -369,17 +369,53 @@ export type ListWorkspaceFilesResult = z.infer<typeof ListWorkspaceFilesResult>;
 // every other result. Values are JSON-shaped plus bigint, which Electron's
 // structured clone carries across IPC intact.
 
-export const CollectionValueSchema: z.ZodType<CollectionValue> = z.lazy(() =>
+// The engine rejects values deeper than MAX_COLLECTION_FIELD_VALUE_DEPTH (24,
+// crates/dohc-engine-domain); 32 adds transport headroom and matches
+// SDK_PARAMS_MAX_DEPTH and PRESENCE_STATE_MAX_DEPTH.
+export const COLLECTION_VALUE_MAX_DEPTH = 32;
+
+// Zod's recursive z.lazy union does not bound depth, so an iterative pre-check
+// (mirroring sdkParamsIssue and presenceStateWithinCap) rejects a
+// thousands-deep payload before the recursive parse can overflow the stack.
+// A cycle keeps incrementing depth on every revisit, so the cap terminates it.
+function collectionValueWithinDepth(root: unknown): boolean {
+  const stack: { value: unknown; depth: number }[] = [{ value: root, depth: 0 }];
+  while (stack.length > 0) {
+    const { value, depth } = stack.pop()!;
+    if (depth > COLLECTION_VALUE_MAX_DEPTH) return false;
+    if (typeof value !== "object" || value === null) continue;
+    const children = Array.isArray(value)
+      ? value
+      : Object.values(value as Record<string, unknown>);
+    for (const child of children) {
+      stack.push({ value: child, depth: depth + 1 });
+    }
+  }
+  return true;
+}
+
+const CollectionValueNodeSchema: z.ZodType<CollectionValue> = z.lazy(() =>
   z.union([
     z.null(),
     z.boolean(),
     z.number(),
     z.bigint(),
     z.string().max(100_000),
-    z.array(CollectionValueSchema).max(1_000),
-    z.record(z.string().max(500), CollectionValueSchema),
+    z.array(CollectionValueNodeSchema).max(1_000),
+    z.record(z.string().max(500), CollectionValueNodeSchema),
   ]),
 );
+
+export const CollectionValueSchema: z.ZodType<CollectionValue> = z
+  .unknown()
+  .superRefine((value, ctx) => {
+    if (collectionValueWithinDepth(value)) return;
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `collection value nesting exceeds ${COLLECTION_VALUE_MAX_DEPTH} levels`,
+    });
+  })
+  .pipe(CollectionValueNodeSchema);
 
 const CollectionSchemaReason = z.object({
   code: z.enum(COLLECTION_SCHEMA_REASON_CODES),

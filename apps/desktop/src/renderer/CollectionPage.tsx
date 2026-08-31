@@ -23,6 +23,7 @@ import type {
 } from "@dohc/workspace-contracts";
 import type { WorkspaceActivityEvent } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
+import { createActivityCoalescer } from "./workspaceActivityCoalescer";
 import { useEngineDoc } from "./collab/useEngineDoc";
 import { SecondaryButton } from "./ui/controls";
 import { FieldsDialog } from "./collections/FieldsDialog";
@@ -35,11 +36,6 @@ import { rewriteCollectionSchema } from "./collections/schemaWrite";
 // bridge. Reads come from the engine's index; writes ride the record's live
 // document frontmatter map — the SAME path agents and the PropertiesPanel
 // take, so attribution and history stay parallel.
-
-// The shell's activity coalescing cadence (WORKSPACE_ACTIVITY_REFRESH_*),
-// restated locally so this lazy chunk does not import the shell module.
-const ACTIVITY_REFRESH_DELAY_MS = 200;
-const ACTIVITY_REFRESH_MAX_WAIT_MS = 1_000;
 
 // The live document field PropertiesPanel writes; one name for one thing.
 const FRONTMATTER_FIELD = "frontmatter";
@@ -232,14 +228,10 @@ export function CollectionPage({
   // folder (or arrives without path detail), on the shell's trailing-edge
   // coalescing cadence. The store's token makes the refresh latest-wins.
   useEffect(() => {
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    let deadline: number | null = null;
-    const run = () => {
-      timer = null;
-      deadline = null;
+    const coalescer = createActivityCoalescer(() => {
       void store.refresh();
       void refreshDetails();
-    };
+    });
     const prefix = `${collectionPath}/`;
     const unsubscribe = bridge().onWorkspaceActivity(
       (event: WorkspaceActivityEvent) => {
@@ -253,20 +245,32 @@ export function CollectionPage({
         ) {
           return;
         }
-        const now = Date.now();
-        deadline ??= now + ACTIVITY_REFRESH_MAX_WAIT_MS;
-        if (timer !== null) clearTimeout(timer);
-        timer = setTimeout(
-          run,
-          Math.min(ACTIVITY_REFRESH_DELAY_MS, deadline - now),
-        );
+        coalescer.schedule();
       },
     );
     return () => {
-      if (timer !== null) clearTimeout(timer);
+      coalescer.cancel();
       unsubscribe();
     };
   }, [store, refreshDetails, workspaceId, collectionPath]);
+
+  // Board and calendar place every record, so they cannot stop at the
+  // engine's first page: once a page settles with a cursor, ask for the
+  // next until the cursor runs out. One call per settled page — the effect
+  // re-runs when the cursor changes, nothing fires after unmount, and the
+  // store ignores overlapping loadMore calls.
+  const drainAllPages =
+    activeView?.kind === "board" || activeView?.kind === "calendar";
+  useEffect(() => {
+    if (!drainAllPages || state.status !== "ready" || state.nextCursor === null) {
+      return;
+    }
+    void store.loadMore();
+  }, [drainAllPages, state.status, state.nextCursor, store]);
+
+  // The table pages on demand instead: TableView reports when the viewport
+  // nears the end of the loaded rows.
+  const loadNextPage = useCallback(() => void store.loadMore(), [store]);
 
   // Cell edits queue one at a time through the live document write path.
   const nextWriteId = useRef(0);
@@ -276,6 +280,9 @@ export function CollectionPage({
   const [writeError, setWriteError] = useState<string | null>(null);
   const enqueueCellChange = useCallback((change: CollectionCellChange) => {
     const id = ++nextWriteId.current;
+    // A new write is a new attempt: clear the stale failure; failWrite
+    // repaints it if this one fails too.
+    setWriteError(null);
     setWrites((queue) => [...queue, { id, change }]);
   }, []);
   const completeWrite = useCallback(() => {
@@ -525,6 +532,7 @@ export function CollectionPage({
             onCreateOption={createOption}
             onOpenRecord={openRecord}
             relationExecutor={executor}
+            onNearEnd={loadNextPage}
           />
         )}
       </div>

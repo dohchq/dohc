@@ -4,6 +4,12 @@ import {
   type FieldDefinition,
 } from "@dohc/workspace-contracts/collection";
 
+// The one text-input and select look across the collection dialogs.
+export const inputClass =
+  "w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink disabled:opacity-50";
+export const selectClass =
+  "w-full rounded-md border border-line bg-bg px-2 py-1.5 text-[13px] text-ink focus:border-ink disabled:opacity-50";
+
 // The one field form: a draft the user edits in collection vocabulary
 // (name, type, options, related collection) that maps onto a schema
 // FieldDefinition. The new-collection dialog and the fields dialog both
@@ -39,19 +45,6 @@ export function emptyFieldDraft(name = "", type: CollectionFieldType = "text"): 
   return { name, type, optionsText: "", relationTarget: "", relationMany: false };
 }
 
-export function draftFromField(field: FieldDefinition): FieldDraft {
-  return {
-    name: field.name,
-    type: field.type,
-    optionsText:
-      field.type === "select" || field.type === "multi-select"
-        ? field.options.join(", ")
-        : "",
-    relationTarget: field.type === "relation" ? field.collection : "",
-    relationMany: field.type === "relation" ? field.many : false,
-  };
-}
-
 export function parseOptionsText(text: string): string[] {
   const options: string[] = [];
   for (const raw of text.split(",")) {
@@ -60,6 +53,13 @@ export function parseOptionsText(text: string): string[] {
   }
   return options;
 }
+
+/**
+ * The refusal for a select or multi-select field with no options: a board
+ * grouped on such a field would produce no groups. Shared with the fields
+ * dialog's option-edit path so the two surfaces say the same sentence.
+ */
+export const NO_OPTIONS_PROBLEM = "Give the field at least one option.";
 
 /**
  * The first problem with a draft as a user-facing sentence, or null when the
@@ -80,6 +80,12 @@ export function fieldDraftError(
   }
   if (draft.type === "relation" && draft.relationTarget === "") {
     return "Choose a collection to relate to.";
+  }
+  if (
+    (draft.type === "select" || draft.type === "multi-select") &&
+    parseOptionsText(draft.optionsText).length === 0
+  ) {
+    return NO_OPTIONS_PROBLEM;
   }
   return null;
 }
@@ -102,9 +108,6 @@ export function draftToField(draft: FieldDraft): FieldDefinition {
       return { name, type: draft.type };
   }
 }
-
-const inputClass =
-  "w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink disabled:opacity-50";
 
 export function FieldDraftRow({
   draft,
@@ -168,7 +171,7 @@ export function FieldDraftRow({
             onChange={(event) =>
               onChange({ ...draft, relationTarget: event.target.value })
             }
-            className="w-full rounded-md border border-line bg-bg px-2 py-1.5 text-[13px] text-ink focus:border-ink disabled:opacity-50"
+            className={selectClass}
           >
             <option value="">Choose a collection</option>
             {relationTargets.map((target) => (

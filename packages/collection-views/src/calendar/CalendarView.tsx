@@ -39,7 +39,6 @@ export interface CalendarViewProps {
   personLabel?: (userId: string) => string | null;
   /** The date whose month opens first. Defaults to today. */
   defaultDate?: Date;
-  className?: string;
 }
 
 export interface CalendarRecordEvent {
@@ -70,7 +69,6 @@ export function CalendarView({
   onOpenRecord,
   personLabel,
   defaultDate,
-  className,
 }: CalendarViewProps) {
   const fields = useMemo(() => deriveColumns(schema, visibleFields), [schema, visibleFields]);
   const titleField = fields[0] ?? null;
@@ -114,7 +112,7 @@ export function CalendarView({
   }
 
   return (
-    <div className={`dohc-collection-calendar h-full ${className ?? ""}`}>
+    <div className="dohc-collection-calendar h-full">
       <DnDCalendar
         localizer={localizer}
         events={events}

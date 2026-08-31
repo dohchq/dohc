@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 // @dnd-kit/dom references ResizeObserver while its module evaluates and
@@ -87,6 +87,19 @@ function makeGroups() {
   ];
 }
 
+/** Horizontal distance between adjacent column origins in layOutBoard. */
+const COLUMN_PITCH = 300;
+/**
+ * How far one shifted arrow press moves a lifted card: the keyboard
+ * sensor's 10px offset times its 5x shift factor.
+ */
+const SHIFTED_ARROW_PX = 50;
+/**
+ * Presses that cross one COLUMN_PITCH, plus one so the card lands well
+ * inside the neighbor column instead of on its boundary.
+ */
+const ARROWS_TO_NEXT_COLUMN = Math.ceil(COLUMN_PITCH / SHIFTED_ARROW_PX) + 1;
+
 /** Lays out the rendered columns side by side and the cards inside them. */
 function layOutBoard(): void {
   const columns = screen.getAllByRole("list");
@@ -100,21 +113,21 @@ function layOutBoard(): void {
     ancestor = ancestor.parentElement;
   }
   columns.forEach((column, index) => {
-    setRect(column, index * 300 + 10, 30, 240, 360);
+    setRect(column, index * COLUMN_PITCH + 10, 30, 240, 360);
     const columnElement = column.closest("section");
-    if (columnElement) setRect(columnElement, index * 300, 0, 260, 400);
+    if (columnElement) setRect(columnElement, index * COLUMN_PITCH, 0, 260, 400);
     within(column)
       .queryAllByRole("listitem")
       .forEach((card, cardIndex) => {
-        setRect(card, index * 300 + 20, 40 + cardIndex * 90, 220, 80);
+        setRect(card, index * COLUMN_PITCH + 20, 40 + cardIndex * 90, 220, 80);
       });
   });
 }
 
-/** Lets the drag manager's frame-scheduled work (lift, collisions) run. */
-async function settle() {
-  await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 25));
+/** The lift's observable effect: isDragging renders the opacity-50 class. */
+async function waitForLift(card: HTMLElement, lifted: boolean) {
+  await waitFor(() => {
+    expect(card.className.includes("opacity-50")).toBe(lifted);
   });
 }
 
@@ -122,13 +135,17 @@ async function settle() {
 async function keyboardDrag(card: HTMLElement, arrows: { key: string; code: string }[]) {
   card.focus();
   fireEvent.keyDown(card, { key: "Enter", code: "Enter" });
-  await settle();
+  await waitForLift(card, true);
   for (const arrow of arrows) {
+    // The drag feedback writes each move to the card's translate style.
+    const before = card.style.getPropertyValue("--dnd-translate");
     fireEvent.keyDown(card.ownerDocument, { ...arrow, shiftKey: true });
-    await settle();
+    await waitFor(() => {
+      expect(card.style.getPropertyValue("--dnd-translate")).not.toBe(before);
+    });
   }
   fireEvent.keyDown(card.ownerDocument, { key: "Enter", code: "Enter" });
-  await settle();
+  await waitForLift(card, false);
 }
 
 describe("BoardView", () => {
@@ -190,8 +207,13 @@ describe("BoardView", () => {
     );
     layOutBoard();
     const card = screen.getByRole("listitem", { name: "Write the spec" });
-    // Seven shifted right arrows carry the card from column todo into doing.
-    await keyboardDrag(card, Array.from({ length: 7 }, () => ({ key: "ArrowRight", code: "ArrowRight" })));
+    await keyboardDrag(
+      card,
+      Array.from({ length: ARROWS_TO_NEXT_COLUMN }, () => ({
+        key: "ArrowRight",
+        code: "ArrowRight",
+      })),
+    );
     expect(onCellChange).toHaveBeenCalledExactlyOnceWith({
       recordId: "rec-a",
       recordPath: "tasks/rec-a.md",
@@ -213,7 +235,13 @@ describe("BoardView", () => {
     );
     layOutBoard();
     const card = screen.getByRole("listitem", { name: "Ship the board" });
-    await keyboardDrag(card, Array.from({ length: 7 }, () => ({ key: "ArrowLeft", code: "ArrowLeft" })));
+    await keyboardDrag(
+      card,
+      Array.from({ length: ARROWS_TO_NEXT_COLUMN }, () => ({
+        key: "ArrowLeft",
+        code: "ArrowLeft",
+      })),
+    );
     expect(onCellChange).toHaveBeenCalledExactlyOnceWith({
       recordId: "rec-b",
       recordPath: "tasks/rec-b.md",
@@ -238,8 +266,9 @@ describe("BoardView", () => {
     // Escape cancels the lifted card.
     card.focus();
     fireEvent.keyDown(card, { key: "Enter", code: "Enter" });
+    await waitForLift(card, true);
     fireEvent.keyDown(card.ownerDocument, { key: "Escape", code: "Escape" });
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await waitForLift(card, false);
 
     // A drop without leaving the column keeps the field as it is.
     await keyboardDrag(card, []);
@@ -274,5 +303,24 @@ describe("BoardView", () => {
     onOpenRecord.mockClear();
     await keyboardDrag(card, []);
     expect(onOpenRecord).not.toHaveBeenCalled();
+  });
+
+  it("opens the record from the card's focusable Open button", () => {
+    const onOpenRecord = vi.fn();
+    render(
+      <BoardView
+        schema={makeSchema()}
+        groups={makeGroups()}
+        groupBy="status"
+        onOpenRecord={onOpenRecord}
+      />,
+    );
+    const open = screen.getByRole("button", { name: "Open Write the spec" });
+    open.focus();
+    expect(document.activeElement).toBe(open);
+    fireEvent.click(open);
+    expect(onOpenRecord).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ id: "rec-a", path: "tasks/rec-a.md" }),
+    );
   });
 });

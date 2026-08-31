@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { createWorkspaceEngineCapture } from "../src/workspaces/workspaceEngineCapture";
 import { waitForPathMoments } from "../src/workspaces/waitForPathMoments";
 import { openLiveDaemonWorkspace } from "./helpers/daemonSeed";
@@ -141,23 +142,19 @@ test("a drag's field write on one device moves the card on the other device's op
       "Status: Todo",
     );
 
-    // Open the collection: clicking the folder row opens its views once the
-    // engine lists the folder as a collection (the routing arrives on the
-    // same activity cadence as the files, so re-click until it lands).
-    await expect
-      .poll(
-        async () => {
-          const collectionPage = page.getByTestId("collection-page");
-          if (await collectionPage.isVisible()) return true;
-          await page
-            .locator('[data-testid="tree-row"][data-path="tasks"]')
-            .click()
-            .catch(() => undefined);
-          return await collectionPage.isVisible();
-        },
-        { timeout: 60_000, intervals: [1000] },
-      )
-      .toBe(true);
+    // Open the collection in three separately-named layers: the tree row
+    // exposes data-collection once the engine lists the folder as a
+    // collection (the state arrives on the same activity cadence as the
+    // files), then ONE click routes to the views. A failure names whether
+    // the collection state, the click, or the routing broke.
+    const tasksRow = page.locator('[data-testid="tree-row"][data-path="tasks"]');
+    await expect(tasksRow).toHaveAttribute("data-collection", "true", {
+      timeout: 60_000,
+    });
+    await tasksRow.click();
+    await expect(page.getByTestId("collection-page")).toBeVisible({
+      timeout: 30_000,
+    });
 
     // The schema's only view is the board, so the open collection IS the
     // open board: Apollo under Todo, Zephyr under Doing.
@@ -216,29 +213,26 @@ test("a drag's field write on one device moves the card on the other device's op
           await page.evaluate(async (id) => {
             const api = (
               window as unknown as {
-                dohcDesktop: {
-                  queryCollectionRecords(params: {
-                    workspaceId: string;
-                    collectionPath: string;
-                  }): Promise<{
-                    records: Array<{
-                      path: string;
-                      values: Array<{ field: string; value: unknown }>;
-                    }>;
-                  }>;
-                };
+                dohcDesktop: Pick<DohcDesktopBridge, "queryCollectionRecords">;
               }
             ).dohcDesktop;
-            const result = await api
-              .queryCollectionRecords({ workspaceId: id, collectionPath: "tasks" })
-              .catch(() => null);
-            const apollo = result?.records.find(
-              (record) => record.path === "tasks/apollo.md",
-            );
-            return (
-              apollo?.values.find((entry) => entry.field === "Status")?.value ??
-              null
-            );
+            try {
+              const result = await api.queryCollectionRecords({
+                workspaceId: id,
+                collectionPath: "tasks",
+              });
+              const apollo = result.records.find(
+                (record) => record.path === "tasks/apollo.md",
+              );
+              return (
+                apollo?.values.find((entry) => entry.field === "Status")
+                  ?.value ?? null
+              );
+            } catch (error) {
+              // Surface the query failure in the poll's report instead of
+              // timing out on a silent null.
+              return `queryCollectionRecords failed: ${String(error)}`;
+            }
           }, workspaceId),
         { timeout: 30_000, intervals: [1000] },
       )

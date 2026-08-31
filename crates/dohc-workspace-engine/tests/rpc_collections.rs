@@ -2198,3 +2198,146 @@ async fn remote_moment_append_updates_the_collection_index_at_apply_time() {
     assert_eq!(query["records"][0]["id"], json!(RECORD_ID));
     assert_eq!(status_of(&query), json!("remote"));
 }
+
+/// A replicated write that REMOVES parseable frontmatter must clear the
+/// record's indexed values in the same apply. The materialized disk write is a
+/// suppressed self-write, so no capture pass or reconciliation runs later —
+/// without an apply-time clear the old field values stay queryable forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_moment_append_without_frontmatter_clears_the_collection_index() {
+    let markdown = format!("---\nid: {RECORD_ID}\nstatus: open\n---\n\nAlpha\n");
+    let edited = "Alpha without frontmatter\n".to_owned();
+
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    seed_schema(
+        &scratch,
+        "name: Tasks\nfields:\n  status:\n    type: text\n",
+    );
+    let db = scratch.engine_db_path().expect("engine db path");
+    let mut store = EngineStore::open(&db, 1).expect("open store");
+    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    seed_text(&mut store, "tasks/alpha.md", &markdown, 3);
+    store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, "main")?;
+            set_collection_adoption_state_in_tx(
+                tx,
+                WORKSPACE_ID,
+                "main",
+                "tasks/alpha.md",
+                RECORD_ID,
+                "adopted",
+            )
+        })
+        .expect("bind adopted collection record");
+    drop(store);
+    let connection = rusqlite::Connection::open(&db).expect("open seed connection");
+    let (object_id, head_moment_id) = connection
+        .query_row(
+            "SELECT object_id,latest_moment_id FROM snapshots \
+             WHERE workspace_id=?1 AND version_id='main' AND path='tasks/alpha.md'",
+            rusqlite::params![WORKSPACE_ID],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .expect("seeded record head");
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+            rusqlite::params![hex_sha256(edited.as_bytes()), edited.len() as i64, edited],
+        )
+        .expect("hydrate edited text blob");
+    drop(connection);
+    std::fs::write(scratch.path().join("tasks/alpha.md"), &markdown).expect("record file");
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+    let baseline = call(
+        &transport,
+        &handle,
+        2,
+        "collections.query",
+        json!({ "collectionPath": "tasks" }),
+    )
+    .await;
+    assert!(
+        baseline["records"][0]["values"]
+            .as_array()
+            .expect("baseline indexed values")
+            .iter()
+            .any(|value| value["field"] == "status" && value["value"] == "open"),
+        "the seeded record must start with an indexed status: {baseline}"
+    );
+
+    let envelope = ReplicationEnvelope {
+        workspace_id: WORKSPACE_ID.to_owned(),
+        origin_id: "remote-moment-editor".to_owned(),
+        origin_seq: 0,
+        relay_seq: Some(1),
+        op_kind: "moment.append".to_owned(),
+        payload: json!({
+            "momentId": "remote-frontmatter-removal",
+            "versionId": "main",
+            "objectId": object_id,
+            "objectCreatedAtMs": 1,
+            "path": "tasks/alpha.md",
+            "recordedAtMs": 2_000,
+            "operation": "write",
+            "payloadBeforeBlobSha256": hex_sha256(markdown.as_bytes()),
+            "payloadBeforePath": "tasks/alpha.md",
+            "payloadAfterBlobSha256": hex_sha256(edited.as_bytes()),
+            "payloadAfterPath": "tasks/alpha.md",
+            "metadata": {"origin": "sync", "summary": "peer"},
+            "beforePresent": "present",
+            "beforeObjectId": object_id,
+            "beforeVersionId": "main",
+            "beforePath": "tasks/alpha.md",
+            "beforeBlobSha256": hex_sha256(markdown.as_bytes()),
+            "beforeUpdatedAtMs": 3,
+            "beforeLatestMomentId": head_moment_id,
+            "beforeMetadata": {"origin": "api"}
+        }),
+        recorded_at_ms: 2_000,
+    };
+    let mut store = EngineStore::open(&db, 2).expect("open replication store");
+    let applied = apply_replication_envelope(&mut store, &envelope, &NoFaults, &NoLiveLeases)
+        .expect("apply remote moment");
+    assert!(
+        matches!(applied, ApplyOutcome::Applied(_)),
+        "the remote moment must fast-forward the seeded head: {applied:?}"
+    );
+    drop(store);
+
+    // No capture flush, watcher event, or reconciliation pass runs between the
+    // apply and this query: the stale field values must already be gone.
+    let query = call(
+        &transport,
+        &handle,
+        3,
+        "collections.query",
+        json!({ "collectionPath": "tasks" }),
+    )
+    .await;
+    assert_eq!(query["records"][0]["id"], json!(RECORD_ID));
+    assert_eq!(
+        query["records"][0]["values"],
+        json!([]),
+        "a write that removed the frontmatter must clear the indexed values: {query}"
+    );
+}

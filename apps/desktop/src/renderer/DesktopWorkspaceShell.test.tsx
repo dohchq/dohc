@@ -37,6 +37,7 @@ import type {
   ListMyShareChangesResult,
   ListShareProposalsResult,
   GetCollectionResult,
+  ListCollectionsPayload,
   ListCollectionsResult,
   ListWorkspaceFilesPayload,
   ListWorkspaceFilesResult,
@@ -101,10 +102,12 @@ import {
   shareUnmountProjection,
   versionCompareOffCopy,
   WORKBENCH_PERSIST_DELAY_MS,
-  WORKSPACE_ACTIVITY_REFRESH_DELAY_MS,
-  WORKSPACE_ACTIVITY_REFRESH_MAX_WAIT_MS,
   type Workspace,
 } from "./DesktopWorkspaceShell";
+import {
+  WORKSPACE_ACTIVITY_REFRESH_DELAY_MS,
+  WORKSPACE_ACTIVITY_REFRESH_MAX_WAIT_MS,
+} from "./workspaceActivityCoalescer";
 import type { ChatsNav } from "./workbench/ChatsView";
 import {
   CHATS_TAB_PATH,
@@ -698,7 +701,9 @@ function makeEngineBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     // ready and on activity. Typed to the contract; the collection tests
     // swap in real rows.
     listCollections: vi.fn(
-      async (): Promise<ListCollectionsResult> => ({ collections: [] }),
+      async (_payload: ListCollectionsPayload): Promise<ListCollectionsResult> => ({
+        collections: [],
+      }),
     ),
     getCollection: vi.fn(async (): Promise<GetCollectionResult> => ({
       path: "tasks",
@@ -2045,16 +2050,20 @@ describe("collection folders", () => {
     renderShell(bridge);
     const user = userEvent.setup();
 
-    // The row routes to the collection only once the engine's list landed;
-    // flush the commit before clicking so the click cannot race it.
-    await waitFor(() => expect(bridge.listCollections).toHaveBeenCalled());
-    await act(async () => {
-      await Promise.resolve();
+    // The list must carry the shell's workspace scope, and the row routes to
+    // the collection only once that list COMMITTED — the row's rendered
+    // data-collection affordance is the observable proof, so the click
+    // cannot race the commit.
+    const row = await waitFor(() => {
+      const candidate = screen
+        .getAllByTestId("tree-row")
+        .find((entry) => entry.dataset.path === "tasks");
+      expect(candidate?.dataset.collection).toBe("true");
+      return candidate as HTMLElement;
     });
-
-    const row = (await screen.findAllByTestId("tree-row")).find(
-      (candidate) => candidate.dataset.path === "tasks",
-    )!;
+    expect(bridge.listCollections).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE.workspaceId,
+    });
     await user.click(row);
 
     expect(await screen.findByTestId("tab-dohc://collection/tasks")).toBeTruthy();
@@ -2066,10 +2075,40 @@ describe("collection folders", () => {
         timeout: 15_000,
       }),
     ).toBeTruthy();
+    // The settled empty state is that line PLUS the New record action.
+    // Activation is CollectionPage's own boundary, pinned in its tests.
+    expect(screen.getByRole("button", { name: "New record" })).toBeTruthy();
     expect(bridge.getCollection).toHaveBeenCalledWith({
       workspaceId: WORKSPACE.workspaceId,
       collectionPath: "tasks",
     });
+  });
+
+  it("offers New collection from the palette for a writable workspace", async () => {
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    const palette = await screen.findByTestId("command-palette");
+    expect(await within(palette).findByText("New collection")).toBeTruthy();
+  });
+
+  // assertWritableWorkspace refuses createWorkspaceFile on the share's
+  // presence alone, so New collection from a shared view is a dead click —
+  // the palette must not offer what it can never do, exactly as it already
+  // withholds plugin commands there.
+  it("does not offer New collection from a read-only shared view", async () => {
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    const user = userEvent.setup();
+    renderShell(bridge, SHARE_VIEW);
+
+    await user.keyboard("{Control>}k{/Control}");
+    const palette = await screen.findByTestId("command-palette");
+    // The palette renders and lists something, so the miss below is the
+    // gate working, not the palette failing to open.
+    await within(palette).findByText("New editor group right");
+    expect(within(palette).queryByText("New collection")).toBeNull();
   });
 });
 

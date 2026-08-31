@@ -635,10 +635,12 @@ fn apply_moment_append(
             // the sender journaled no ydoc.update. The materialized disk
             // write is a suppressed self-write, so no capture apply indexes
             // it later: a bound record's index must ride this transaction.
-            if let Some(text) = after_text.as_deref()
-                && let Some(frontmatter) =
-                    dohc_engine_domain::collections::markdown_frontmatter_json(text)
-            {
+            if let Some(text) = after_text.as_deref() {
+                // A write without parseable frontmatter must still clear the
+                // index. Mirror the ydoc lane: `Ydoc::frontmatter_json`
+                // projects an absent frontmatter map as an empty object.
+                let frontmatter = dohc_engine_domain::collections::markdown_frontmatter_json(text)
+                    .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
                 dohc_engine_domain::synchronize_collection_frontmatter_index_in_tx(
                     tx,
                     &envelope.workspace_id,

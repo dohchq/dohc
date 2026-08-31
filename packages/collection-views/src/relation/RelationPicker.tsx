@@ -48,6 +48,10 @@ export function RelationPicker({
   const [search, setSearch] = useState("");
 
   useEffect(() => {
+    // A new related collection must not offer the prior collection's
+    // records: a stale id picked here would be written to the new field.
+    setRecords(null);
+    setError(null);
     let stale = false;
     executor({
       collectionPath: field.collection,

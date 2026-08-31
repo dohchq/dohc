@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createColumnHelper, tableFeatures, useTable } from "@tanstack/react-table";
 import { defaultRangeExtractor, useVirtualizer } from "@tanstack/react-virtual";
 import type { Range } from "@tanstack/react-virtual";
@@ -57,13 +57,21 @@ export interface TableViewProps {
   relationExecutor?: CollectionQueryExecutor;
   /** Maps a person field's user id to a display name. Falls back to the id. */
   personLabel?: (userId: string) => string | null;
-  rowHeight?: number;
-  className?: string;
+  /**
+   * Called when the virtualizer renders within NEAR_END_ROWS of the last
+   * loaded record. Hosts respond by loading the next page; extra calls are
+   * safe — the collection store no-ops without a cursor or while a page is
+   * already in flight.
+   */
+  onNearEnd?: () => void;
 }
 
 const TABLE_FEATURES = tableFeatures({});
 const COLUMN_WIDTH = 180;
 const OPEN_COLUMN_WIDTH = 56;
+const ROW_HEIGHT = 28;
+/** How close to the end of the loaded rows `onNearEnd` starts firing. */
+const NEAR_END_ROWS = 20;
 const helper = createColumnHelper<typeof TABLE_FEATURES, CollectionRecord>();
 
 /**
@@ -88,8 +96,7 @@ export function TableView({
   onOpenRecord,
   relationExecutor,
   personLabel,
-  rowHeight = 28,
-  className,
+  onNearEnd,
 }: TableViewProps) {
   const fields = useMemo(
     () => deriveColumns(schema, visibleFields),
@@ -175,11 +182,21 @@ export function TableView({
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => rowHeight,
+    estimateSize: () => ROW_HEIGHT,
     getItemKey: (index) => rows[index]?.id ?? index,
     overscan: 5,
     rangeExtractor,
   });
+  const virtualItems = virtualizer.getVirtualItems();
+
+  // Paging: nearing the end of the loaded rows asks the host for the next
+  // page. Driven by the last rendered index, so it also fires when a short
+  // first page cannot fill the viewport.
+  const lastRenderedIndex = virtualItems.at(-1)?.index ?? -1;
+  useEffect(() => {
+    if (!onNearEnd || lastRenderedIndex < 0) return;
+    if (lastRenderedIndex >= records.length - NEAR_END_ROWS) onNearEnd();
+  }, [onNearEnd, lastRenderedIndex, records.length]);
 
   const primarySort = sort?.[0];
   const toggleSort = (fieldName: string) => {
@@ -194,7 +211,7 @@ export function TableView({
   };
 
   return (
-    <div role="grid" aria-rowcount={records.length + 1} className={`flex h-full flex-col ${className ?? ""}`}>
+    <div role="grid" aria-rowcount={records.length + 1} className="flex h-full flex-col">
       <div role="row" className="flex shrink-0 border-b border-line bg-panel">
         {onOpenRecord ? (
           <div role="columnheader" style={{ width: OPEN_COLUMN_WIDTH }} />
@@ -229,7 +246,7 @@ export function TableView({
       ) : (
         <div ref={scrollRef} className="flex-1 overflow-auto">
           <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
-            {virtualizer.getVirtualItems().map((item) => {
+            {virtualItems.map((item) => {
               const row = rows[item.index];
               if (!row) return null;
               return (
@@ -238,7 +255,7 @@ export function TableView({
                   role="row"
                   data-index={item.index}
                   className="group absolute left-0 top-0 flex w-full border-b border-line"
-                  style={{ height: rowHeight, transform: `translateY(${item.start}px)` }}
+                  style={{ height: ROW_HEIGHT, transform: `translateY(${item.start}px)` }}
                 >
                   {onOpenRecord ? (
                     <div
@@ -282,12 +299,12 @@ export function TableView({
                 data-cell-editor=""
                 className="absolute z-10 rounded border border-line bg-panel p-1 shadow-md"
                 style={{
-                  top: editingRowIndex * rowHeight,
+                  top: editingRowIndex * ROW_HEIGHT,
                   left:
                     (onOpenRecord ? OPEN_COLUMN_WIDTH : 0) +
                     fields.indexOf(editingField) * COLUMN_WIDTH,
                   width: COLUMN_WIDTH,
-                  minHeight: rowHeight,
+                  minHeight: ROW_HEIGHT,
                 }}
               >
                 <CellEditor

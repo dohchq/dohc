@@ -7,7 +7,8 @@ import type {
 import { Overlay } from "../Overlay";
 import { PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
 import { addView, deleteView, renameView } from "./schemaAuthoring";
-import type { SchemaApply } from "./FieldsDialog";
+import { useSchemaRun, type SchemaApply } from "./FieldsDialog";
+import { inputClass, selectClass } from "./FieldForm";
 
 // View management for an open collection: create, rename, and delete the
 // named views under the schema's `views:`. Every change is one schema
@@ -21,11 +22,6 @@ const VIEW_KIND_LABELS: Record<ViewKind, string> = {
   calendar: "Calendar",
 };
 
-const inputClass =
-  "w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink disabled:opacity-50";
-const selectClass =
-  "w-full rounded-md border border-line bg-bg px-2 py-1.5 text-[13px] text-ink focus:border-ink disabled:opacity-50";
-
 export function ViewsDialog(props: {
   schema: CollectionSchema;
   apply: SchemaApply;
@@ -35,39 +31,21 @@ export function ViewsDialog(props: {
 }) {
   const [editing, setEditing] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
+  // Deleting a view drops its configuration with no reverse path, so the
+  // button arms on the first click and deletes on the second. Arming one
+  // row disarms any other; closing the dialog unmounts the armed state.
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
   const [newKind, setNewKind] = useState<ViewKind>("table");
   const [newGroupBy, setNewGroupBy] = useState("");
   const [newDateField, setNewDateField] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [pending, setPending] = useState(false);
+  const { pending, error, setError, run } = useSchemaRun(props.apply);
 
   const viewNames = props.schema.views.map((view) => view.name);
   const fieldNames = props.schema.fields.map((field) => field.name);
   const dateFieldNames = props.schema.fields
     .filter((field) => field.type === "date")
     .map((field) => field.name);
-
-  async function run(
-    problem: string | null,
-    mutate: (schema: CollectionSchema) => CollectionSchema,
-    onSuccess: () => void,
-  ) {
-    if (pending) return;
-    if (problem !== null) {
-      setError(problem);
-      return;
-    }
-    setPending(true);
-    setError(null);
-    const failure = await props.apply(mutate);
-    setPending(false);
-    if (failure !== null) {
-      setError(failure);
-      return;
-    }
-    onSuccess();
-  }
 
   function nameProblem(name: string, taken: readonly string[]): string | null {
     if (name === "") return "Give the view a name.";
@@ -97,7 +75,10 @@ export function ViewsDialog(props: {
     await run(
       null,
       (schema) => deleteView(schema, name),
-      () => props.onDeleted(name),
+      () => {
+        setConfirmDelete(null);
+        props.onDeleted(name);
+      },
     );
   }
 
@@ -197,9 +178,15 @@ export function ViewsDialog(props: {
                   aria-label={`Delete view ${view.name}`}
                   className="text-danger hover:text-danger"
                   disabled={pending}
-                  onClick={() => void remove(view.name)}
+                  onClick={() => {
+                    if (confirmDelete !== view.name) {
+                      setConfirmDelete(view.name);
+                      return;
+                    }
+                    void remove(view.name);
+                  }}
                 >
-                  Delete
+                  {confirmDelete === view.name ? "Confirm delete" : "Delete"}
                 </SecondaryButton>
               </div>
             ),

@@ -274,6 +274,10 @@ function viewportOpenEditorsCap(): number {
 // re-renders the rows whose state changed, not the whole tree.
 const TreeRow = memo(function TreeRow(props: {
   row: VisibleRow;
+  // The engine lists this folder as a collection, so a row click opens its
+  // views. Exposed as data-collection so tests can gate on the state before
+  // clicking.
+  collection: boolean;
   selected: boolean;
   active: boolean;
   focused: boolean;
@@ -307,6 +311,7 @@ const TreeRow = memo(function TreeRow(props: {
         data-testid="tree-row"
         data-path={row.fullPath}
         data-kind={row.isFolder ? "folder" : "file"}
+        data-collection={props.collection ? "true" : undefined}
         data-drop-state={props.dropPreview?.kind}
         aria-level={row.depth + 1}
         aria-selected={props.selected}
@@ -1302,6 +1307,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       <TreeRow
         key={row.fullPath}
         row={row}
+        collection={row.isFolder && props.collectionFolders.has(row.fullPath)}
         selected={selection.has(row.fullPath)}
         active={activeTab === row.fullPath}
         focused={focusedPath === row.fullPath}
