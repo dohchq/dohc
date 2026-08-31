@@ -79,6 +79,27 @@ describe("Explorer collection folders", () => {
     expect(props.onOpenCollection).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["Enter", "Enter"],
+    ["Space", " "],
+  ])(
+    "opens the collection with %s instead of toggling the folder",
+    (_label, key) => {
+      const props = explorerProps();
+      render(<Explorer {...props} />);
+      const row = treeRow("tasks");
+
+      // The click gives the row the tree's internal focus; clear its open so
+      // the assertions below measure keyboard activation only.
+      fireEvent.click(row);
+      vi.mocked(props.onOpenCollection).mockClear();
+      fireEvent.keyDown(row, { key });
+
+      expect(props.onOpenCollection).toHaveBeenCalledExactlyOnceWith("tasks");
+      expect(props.onToggleFolder).not.toHaveBeenCalled();
+    },
+  );
+
   it("keeps plain folders toggling on a row click", () => {
     const props = explorerProps();
     render(<Explorer {...props} />);

@@ -863,7 +863,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         onOpenFile(path);
       } else if (collectionFoldersRef.current.has(path)) {
         // A collection folder opens its views (docs/plans/collections.md
-        // Phase 2). The chevron and keyboard nav still expand it in place.
+        // Phase 2). The chevron and arrow keys still expand it in place.
         onOpenCollection(path);
       } else {
         onToggleFolder(path);
@@ -1178,7 +1178,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           onSetFolderExpanded(action.path, false);
           break;
         case "toggle":
-          onToggleFolder(action.path);
+          if (collectionFoldersRef.current.has(action.path)) {
+            onOpenCollection(action.path);
+          } else {
+            onToggleFolder(action.path);
+          }
           break;
         case "open":
           selectSingle(action.path);
@@ -1196,6 +1200,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       focusRow,
       onSetFolderExpanded,
       onToggleFolder,
+      onOpenCollection,
       selectSingle,
       onOpenFile,
     ],

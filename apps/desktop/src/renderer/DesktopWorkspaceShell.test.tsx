@@ -2084,14 +2084,32 @@ describe("collection folders", () => {
     });
   });
 
-  it("offers New collection from the palette for a writable workspace", async () => {
-    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+  it("offers New collection from the palette for an engine-enabled writable workspace", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
     const user = userEvent.setup();
     renderShell(bridge);
 
     await user.keyboard("{Control>}k{/Control}");
     const palette = await screen.findByTestId("command-palette");
     expect(await within(palette).findByText("New collection")).toBeTruthy();
+  });
+
+  it("does not offer New collection when the workspace engine is disabled", async () => {
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.getWorkspaceSettings).toHaveBeenCalled());
+    await act(async () => {});
+
+    await user.keyboard("{Control>}k{/Control}");
+    const palette = await screen.findByTestId("command-palette");
+    await within(palette).findByText("New editor group right");
+    expect(within(palette).queryByText("New collection")).toBeNull();
+
+    // The application menu feeds the same registry. A command that is not
+    // present must not reach the dialog even if main emits its closed id.
+    act(() => bridge.emitMenuCommand("new-collection"));
+    expect(screen.queryByLabelText("Collection name")).toBeNull();
   });
 
   // assertWritableWorkspace refuses createWorkspaceFile on the share's

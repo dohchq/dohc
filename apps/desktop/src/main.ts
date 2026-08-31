@@ -608,6 +608,7 @@ import {
   type EngineFeature,
   engineOffRefusal,
   releaseAndRefuseWithoutCapture,
+  workspaceEngineEnabled,
 } from "./workspaces/engineCaptureGate";
 import {
   AgentIntegrationState,
@@ -6656,10 +6657,13 @@ function registerIpcHandlers(
       event.sender,
       workspaceReference,
       inactiveMessage,
-      (operation) => {
+      async (operation) => {
         const registryEntry = operation.workspace;
         const shareView = sharedViewOf(registryEntry.workspaceId);
         const isSharedView = shareView !== null;
+        const engineEnabled = isSharedView
+          ? false
+          : await workspaceEngineEnabled(registryEntry.rootPath);
         const isMountPath =
           !isSharedView && !!input.path && isSharedWithMePath(input.path);
         const mountForPath = isMountPath
@@ -6676,6 +6680,7 @@ function registerIpcHandlers(
           shareView,
           isMountPath,
           hasMountRecord: mountForPath !== undefined,
+          engineEnabled,
           canShare:
             !isSharedView &&
             !isMountPath &&
@@ -6723,6 +6728,7 @@ function registerIpcHandlers(
         // someone else's files are not this account's to grant, and a share
         // needs a relay-side workspace to grant from.
         canShare: menuContext.canShare,
+        engineEnabled: menuContext.engineEnabled,
         shareView: menuContext.shareView,
       }).map((entry) =>
         entry.kind === "separator" ? { type: "separator" as const } : item(entry.label, entry.id),

@@ -118,18 +118,26 @@ export function CollectionRecordFieldWrite({
 
   useEffect(() => {
     if (!applied.current) return;
-    if (docState.saveState === "saving") {
-      sawSaving.current = true;
-      return;
+    switch (docState.saveState) {
+      case "saving":
+        sawSaving.current = true;
+        return;
+      case "saved":
+        // Only a "saved" AFTER our own edit was staged counts: the session
+        // opens in "saved", and releasing on that one would race the flush.
+        if (sawSaving.current) onDone();
+        return;
+      case "file-locked":
+        // Main keeps retrying this transient refusal until the lock releases.
+        return;
+      case "error":
+      case "read-only":
+      case "changed-on-disk":
+      case "deleted":
+        onError(docState.saveError);
+        onDone();
+        return;
     }
-    if (docState.saveState === "error") {
-      onError(docState.saveError);
-      onDone();
-      return;
-    }
-    // Only a "saved" AFTER our own edit was staged counts: the session opens
-    // in "saved", and releasing on that one would race the staged flush.
-    if (docState.saveState === "saved" && sawSaving.current) onDone();
   }, [docState.saveState, docState.saveError, onDone, onError]);
 
   return null;
@@ -208,7 +216,12 @@ export function CollectionPage({
   // One query per (schema arrival, view change): columns need the schema
   // anyway, so nothing is gained by querying before it loads.
   const activeViewKey = activeView
-    ? `${activeView.name}\0${activeView.kind}\0${activeView.groupBy ?? ""}`
+    ? JSON.stringify([
+        activeView.name,
+        activeView.kind,
+        activeView.groupBy,
+        activeView.sort,
+      ])
     : "";
   const detailsLoaded = details !== null;
   const activeViewRef = useRef(activeView);
@@ -476,9 +489,14 @@ export function CollectionPage({
         ) : null}
         <span className="flex-1" />
         {state.status === "error" ? (
-          <span className="truncate text-[11px] text-danger">
-            dohc could not read this collection's records. {state.error}
-          </span>
+          <>
+            <span className="truncate text-[11px] text-danger">
+              dohc could not read this collection's records. {state.error}
+            </span>
+            <SecondaryButton onClick={() => void store.refresh()}>
+              Retry
+            </SecondaryButton>
+          </>
         ) : writeError ? (
           <span data-testid="collection-write-error" className="truncate text-[11px] text-danger">
             {writeError}

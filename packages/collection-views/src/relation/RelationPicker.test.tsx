@@ -62,6 +62,45 @@ describe("RelationPicker", () => {
     });
   });
 
+  it("drains every page and lets the user select a later record", async () => {
+    const cursor = {
+      sortValues: [{ present: true, value: "Design" }],
+      recordPath: "tasks/rec-a.md",
+      recordId: "rec-a",
+    };
+    const executor = vi
+      .fn()
+      .mockResolvedValueOnce(
+        makeQueryResult([TARGETS[0]!], { nextCursor: cursor }),
+      )
+      .mockResolvedValueOnce(makeQueryResult([TARGETS[1]!]));
+    const emit = vi.fn();
+    const close = vi.fn();
+
+    render(
+      <RelationPicker
+        field={SINGLE}
+        value={null}
+        executor={executor}
+        emit={emit}
+        close={close}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("option", { name: "Build" }));
+    expect(executor).toHaveBeenNthCalledWith(1, {
+      collectionPath: "tasks",
+      limit: 100,
+    });
+    expect(executor).toHaveBeenNthCalledWith(2, {
+      collectionPath: "tasks",
+      limit: 100,
+      cursor,
+    });
+    expect(emit).toHaveBeenCalledExactlyOnceWith("rec-b");
+    expect(close).toHaveBeenCalledOnce();
+  });
+
   it("single: picking a record emits its id and closes", async () => {
     const emit = vi.fn();
     const close = vi.fn();

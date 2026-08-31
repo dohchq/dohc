@@ -45,14 +45,18 @@ vi.hoisted(() => {
 // with a mocked session whose mirror doc is a REAL Y.Doc, so "the change
 // reached the frontmatter map" is asserted on actual CRDT state.
 const docMock = vi.hoisted(() => ({
-  current: null as unknown,
+  current: null as
+    | UseEngineDoc
+    | ((input: unknown) => UseEngineDoc)
+    | null,
   inputs: [] as unknown[],
 }));
 vi.mock("./collab/useEngineDoc", () => ({
   useEngineDoc: (input: unknown): unknown => {
     docMock.inputs.push(input);
-    if (docMock.current === null) throw new Error("docMock.current unset");
-    return docMock.current;
+    const current = docMock.current;
+    if (current === null) throw new Error("docMock.current unset");
+    return typeof current === "function" ? current(input) : current;
   },
 }));
 
@@ -280,6 +284,70 @@ describe("CollectionPage", () => {
     expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(2);
     // Schema edits arrive the same way, so the details re-read rides along.
     expect(bridge.getCollection.mock.calls.length).toBe(detailReads + 1);
+  });
+
+  it("re-queries when activity refreshes the active view's sort", async () => {
+    const view = {
+      name: "Table",
+      kind: "table" as const,
+      groupBy: null,
+      sort: [],
+      visibleFields: null,
+      dateField: null,
+    };
+    const bridge = makeBridge([record("rec-1", "Plan")], {
+      ...SCHEMA,
+      views: [view],
+    });
+    renderPage(bridge);
+    await waitFor(() =>
+      expect(bridge.queryCollectionRecords).toHaveBeenCalledOnce(),
+    );
+
+    await bridge.writeWorkspaceText({
+      text: serializeCollectionSchema({
+        ...SCHEMA,
+        views: [
+          {
+            ...view,
+            sort: [{ field: "title", direction: "desc" }],
+          },
+        ],
+      }),
+      expectedContentHash: hashFor(0),
+    });
+    vi.useFakeTimers();
+    bridge.emitWorkspaceActivity({
+      workspaceId: "ws-1",
+      paths: ["tasks/collection.yaml"],
+    });
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(3);
+    expect(bridge.queryCollectionRecords).toHaveBeenLastCalledWith({
+      workspaceId: "ws-1",
+      collectionPath: "tasks",
+      sort: [{ field: "title", direction: "desc" }],
+      resolveRelations: true,
+    });
+  });
+
+  it("retries a failed record query", async () => {
+    const bridge = makeBridge([record("rec-1", "Plan")]);
+    bridge.queryCollectionRecords.mockRejectedValueOnce(
+      new Error("temporary failure"),
+    );
+    renderPage(bridge);
+
+    expect(
+      await screen.findByText(
+        "dohc could not read this collection's records. temporary failure",
+      ),
+    ).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+    expect(await screen.findByText("Plan")).toBeDefined();
+    expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -533,6 +601,62 @@ describe("cell write queue", () => {
     );
     expect(screen.queryByTestId("collection-write-error")).toBeNull();
   });
+
+  it("surfaces a read-only failure and advances to the next queued write", async () => {
+    const firstDoc = new Y.Doc();
+    docMock.current = engineDocState({ available: true, doc: firstDoc });
+    const base = record("rec-1", "Plan");
+    const checkboxRecord: CollectionRecord = {
+      ...base,
+      values: [
+        ...base.values,
+        {
+          field: "done",
+          value: false,
+          validation: { status: "valid" },
+          resolvedRelations: [],
+        },
+      ],
+    };
+    const bridge = makeBridge([checkboxRecord], CHECKBOX_SCHEMA);
+    const page = renderPage(bridge);
+    await screen.findByText("Plan");
+
+    const checkbox = screen.getByRole("checkbox");
+    fireEvent.click(checkbox);
+    fireEvent.click(checkbox);
+    expect(firstDoc.getMap("frontmatter").has("done")).toBe(true);
+
+    const nextDoc = new Y.Doc();
+    let writerRender = 0;
+    docMock.current = () => {
+      writerRender += 1;
+      return writerRender === 1
+        ? engineDocState({
+            available: true,
+            doc: firstDoc,
+            saveState: "read-only",
+            saveError: "This workspace is read-only.",
+          })
+        : engineDocState({ available: true, doc: nextDoc });
+    };
+    page.rerender(
+      <CollectionPage
+        workspaceId="ws-1"
+        collectionPath="tasks"
+        onNewRecord={() => undefined}
+        onOpenRecord={() => undefined}
+      />,
+    );
+
+    const error = await screen.findByTestId("collection-write-error");
+    expect(error.textContent).toBe(
+      "dohc could not save this change. This workspace is read-only.",
+    );
+    await waitFor(() =>
+      expect(nextDoc.getMap("frontmatter").has("done")).toBe(true),
+    );
+  });
 });
 
 const BOARD_SCHEMA: CollectionSchema = {
@@ -690,13 +814,14 @@ describe("pagination", () => {
   });
 
   it("drains every page so a calendar view places all events", async () => {
+    const today = localToday();
     const dated = (id: string, title: string): CollectionRecord => ({
       ...record(id, title),
       values: [
         ...record(id, title).values,
         {
           field: "due",
-          value: localToday(),
+          value: today,
           validation: { status: "valid" },
           resolvedRelations: [],
         },

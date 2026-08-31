@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type {
+  CollectionQueryCursor,
   CollectionRecord,
   CollectionValue,
   RelationFieldDefinition,
@@ -7,8 +8,6 @@ import type {
 import type { CollectionQueryExecutor } from "../store";
 import { recordLabel } from "../recordLabel";
 
-// One page of the related collection is enough for this slice; the search
-// input filters within it client-side.
 const RELATION_PICKER_LIMIT = 100;
 
 export interface RelationPickerProps {
@@ -53,19 +52,30 @@ export function RelationPicker({
     setRecords(null);
     setError(null);
     let stale = false;
-    executor({
-      collectionPath: field.collection,
-      limit: RELATION_PICKER_LIMIT,
-    })
-      .then((result) => {
+
+    void (async () => {
+      try {
+        const collected: CollectionRecord[] = [];
+        let cursor: CollectionQueryCursor | undefined;
+        do {
+          const result = await executor({
+            collectionPath: field.collection,
+            limit: RELATION_PICKER_LIMIT,
+            ...(cursor === undefined ? {} : { cursor }),
+          });
+          if (stale) return;
+          collected.push(...result.records);
+          cursor = result.nextCursor ?? undefined;
+        } while (cursor !== undefined);
+
         if (stale) return;
-        setRecords(result.records);
-        setError(null);
-      })
-      .catch((failure: unknown) => {
+        setRecords(collected);
+      } catch (failure: unknown) {
         if (stale) return;
         setError(failure instanceof Error ? failure.message : String(failure));
-      });
+      }
+    })();
+
     return () => {
       stale = true;
     };

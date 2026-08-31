@@ -12,6 +12,7 @@ import {
   COLLECTION_SCHEMA_REASON_CODES,
   FIELD_VALUE_REASON_CODES,
 } from "@dohc/workspace-contracts/collection";
+import { MAX_SCHEMA_COLLECTION_ITEMS } from "@dohc/workspace-contracts/collection-values";
 import type {
   CollectionGetResult as CollectionGetResultContract,
   CollectionListResult as CollectionListResultContract,
@@ -427,7 +428,7 @@ const CollectionSchemaReason = z.object({
 const collectionSummaryShape = {
   path: PATH_STRING,
   status: z.enum(["valid", "degraded"]),
-  reasons: z.array(CollectionSchemaReason).max(1_000),
+  reasons: z.array(CollectionSchemaReason).max(MAX_SCHEMA_COLLECTION_ITEMS),
 } as const;
 
 export const CollectionSummarySchema: z.ZodType<CollectionSummaryContract> =
@@ -442,7 +443,7 @@ const ScalarFieldDefinitionSchema = z.object({
 const SelectFieldDefinitionSchema = z.object({
   name: COLLECTION_NAME,
   type: z.enum(["select", "multi-select"]),
-  options: z.array(z.string().max(500)).max(500),
+  options: z.array(z.string().max(500)).max(MAX_SCHEMA_COLLECTION_ITEMS),
 });
 const RelationFieldDefinitionSchema = z.object({
   name: COLLECTION_NAME,
@@ -467,7 +468,7 @@ const CollectionViewDefinitionSchema: z.ZodType<ViewDefinition> = z.object({
   kind: z.enum(["table", "board", "calendar"]),
   groupBy: COLLECTION_NAME.nullable(),
   sort: z.array(CollectionQuerySortSchema).max(20),
-  visibleFields: z.array(COLLECTION_NAME).max(500).nullable(),
+  visibleFields: z.array(COLLECTION_NAME).max(MAX_SCHEMA_COLLECTION_ITEMS).nullable(),
   dateField: COLLECTION_NAME.nullable(),
 });
 
@@ -475,8 +476,8 @@ export const CollectionSchemaSchema: z.ZodType<CollectionSchemaContract> =
   z.object({
     name: z.string().max(500).nullable(),
     description: z.string().max(5_000).nullable(),
-    fields: z.array(CollectionFieldDefinitionSchema).max(500),
-    views: z.array(CollectionViewDefinitionSchema).max(100),
+    fields: z.array(CollectionFieldDefinitionSchema).max(MAX_SCHEMA_COLLECTION_ITEMS),
+    views: z.array(CollectionViewDefinitionSchema).max(MAX_SCHEMA_COLLECTION_ITEMS),
   });
 
 const CollectionFieldValueReason = z.object({

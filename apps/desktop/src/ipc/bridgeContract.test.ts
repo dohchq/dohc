@@ -1075,6 +1075,48 @@ describe("collection IPC contracts (Phase 2 views)", () => {
     expect(details.schema.views[0]?.kind).toBe("board");
   });
 
+  it("accepts a collection schema with more than 500 fields", () => {
+    const fields = Array.from({ length: 501 }, (_, index) => ({
+      name: `field-${index}`,
+      type: "text" as const,
+    }));
+
+    const details = GetCollectionResult.parse({
+      path: "tasks",
+      status: "valid",
+      reasons: [],
+      schema: {
+        name: "Tasks",
+        description: null,
+        fields,
+        views: [],
+      },
+      recordCount: 0,
+    });
+
+    expect(details.schema.fields).toHaveLength(501);
+  });
+
+  it("accepts more than 1,000 canonical schema reasons", () => {
+    const details = GetCollectionResult.parse({
+      path: "tasks",
+      status: "degraded",
+      reasons: Array.from({ length: 1_001 }, (_, index) => ({
+        code: "unknown-property",
+        path: `/property-${index}`,
+      })),
+      schema: {
+        name: "Tasks",
+        description: null,
+        fields: [],
+        views: [],
+      },
+      recordCount: 0,
+    });
+
+    expect(details.reasons).toHaveLength(1_001);
+  });
+
   it("rejects a query payload outside the contract's bounds", () => {
     const base = { workspaceId: "workspace-1", collectionPath: "tasks" };
     expect(QueryCollectionRecordsPayload.parse(base)).toEqual(base);

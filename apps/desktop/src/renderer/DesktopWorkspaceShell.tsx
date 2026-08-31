@@ -4976,12 +4976,11 @@ export function DesktopWorkspaceShell(props: {
         label: "New folder",
         run: () => requestExplorerCreate("folder"),
       },
-      // Creating a collection writes collection.yaml through
-      // createWorkspaceFile, and assertWritableWorkspace refuses that on the
-      // share's presence alone — the same rule that hides plugin commands
-      // (round-8 finding 2), so a shared view is not offered a dead click
-      // at any access level.
-      ...(props.workspace.shareView
+      // Creating a collection writes collection.yaml and immediately opens
+      // an engine-backed surface. Shared views and engine-disabled
+      // workspaces therefore get neither the application-menu action nor the
+      // palette entry.
+      ...(!engineEnabled || props.workspace.shareView
         ? []
         : [
             {
@@ -5179,6 +5178,7 @@ export function DesktopWorkspaceShell(props: {
       openSettings,
       reportShellError,
       workspaceId,
+      engineEnabled,
       props.workspace.shareView,
     ],
   );
@@ -6884,7 +6884,7 @@ export function DesktopWorkspaceShell(props: {
           }}
         />
       ) : null}
-      {newCollectionFolder !== null ? (
+      {newCollectionFolder !== null && engineEnabled && !isShareView ? (
         <NewCollectionDialog
           workspaceId={props.workspace.workspaceId}
           {...(newCollectionFolder !== ""
