@@ -428,7 +428,7 @@ describe("LinkedChatsPanel share level", () => {
     await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
     expect(screen.queryByTestId("linked-chat-composer")).toBeNull();
     expect(screen.getByTestId("linked-chat-readonly-note").textContent).toBe(
-      "This shared file is read-only for you.",
+      "Chats are read-only in this shared view.",
     );
   });
 
@@ -438,7 +438,7 @@ describe("LinkedChatsPanel share level", () => {
     await waitFor(() => expect(screen.getByTestId("linked-chats-panel")).toBeTruthy());
     expect(screen.queryByTestId("linked-chat-new")).toBeNull();
     expect(screen.getByTestId("linked-chat-readonly-note").textContent).toBe(
-      "This shared file is read-only for you.",
+      "Chats are read-only in this shared view.",
     );
     expect(bridgeMock.createFileChat).not.toHaveBeenCalled();
   });
@@ -470,7 +470,7 @@ describe("LinkedChatsPanel share level", () => {
       "MUTATION: a share whose grant cannot be read must not offer a composer",
     ).toBeNull();
     expect(screen.getByTestId("linked-chat-readonly-note").textContent).toBe(
-      "This shared file is read-only for you.",
+      "Chats are read-only in this shared view.",
     );
   });
 

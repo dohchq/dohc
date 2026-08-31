@@ -1040,9 +1040,10 @@ describe("EngineRelayClient", () => {
     const refresh = source.slice(refreshStart, refreshEnd);
     expect(refresh).toContain("fetchShareViewInfo(");
     expect(refresh).toContain("genericChatWritable: info.genericChatWritable");
-    expect(refresh.indexOf("genericChatWritable: info.genericChatWritable")).toBeLessThan(
-      refresh.indexOf("pushShareViewChat("),
-    );
+    expect(refresh).toContain("recordShareViewIdentity(refreshedWorkspace)");
+    expect(refresh).not.toContain("pushShareViewChat(");
+    expect(refresh).not.toContain(".pushShareView({");
+    expect(source).not.toContain('"share.view.push"');
   });
 
   it("registers the registry row and its exact authority as one operation", async () => {

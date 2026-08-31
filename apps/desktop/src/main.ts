@@ -443,7 +443,6 @@ import {
   assertSyncEnrollmentCredentials,
   joinedChannelMatchesCredentials,
   resolveChatRelayIdentity,
-  resolveShareViewRelayAuthorId,
   resolveWorkspaceRelayAuthorId,
   workspaceRemoteMatchesCredentials,
   type ChatRelayIdentityTarget,
@@ -516,7 +515,6 @@ import {
 import {
   assertShareChangesJournalable,
   SharePinInvalidError,
-  recordedShareSelector,
   shareViewIdentitySelector,
 } from "./workspaces/shareViewRecords";
 import { assertShareChatWritable } from "./workspaces/shareChatGate";
@@ -9757,16 +9755,11 @@ function registerIpcHandlers(
             "This shared view's record is damaged, so it can't refresh safely. Remove it, then open the share code again.",
           );
         }
-        // #646 PR2: the backstop this share's chat push docstring claims. A push
-        // that failed — offline, a rotated session, a relay blip — is retried
-        // here, before the pull, so a refresh drains the backlog instead of
-        // leaving it until the recipient happens to write again.
-        // Before the push, because the push needs the identity this writes. A
-        // share view opened before #646 PR3-1 has none, and this is where it gains
-        // one.
+        // Refresh the relay-derived chat fact for the banner's next step. It
+        // does not grant desktop generic-chat writes. Keep the share identity
+        // current for the separate Edit proposal lane.
         if (!workspace.shareView.ended) {
           let refreshedWorkspace = workspace;
-          let shareUnavailableBeforePull = false;
           await warmCredentialCache().catch(() => undefined);
           const credentials = cachedCredentials;
           if (
@@ -9790,9 +9783,7 @@ function registerIpcHandlers(
               setWorkspaceShareView(workspace.workspaceId, nextShareView);
               refreshedWorkspace = { ...workspace, shareView: nextShareView };
             } catch (error) {
-              if (error instanceof ShareUnavailableError) {
-                shareUnavailableBeforePull = true;
-              } else {
+              if (!(error instanceof ShareUnavailableError)) {
                 throw error;
               }
             }
@@ -9800,14 +9791,6 @@ function registerIpcHandlers(
           await recordShareViewIdentity(refreshedWorkspace).catch((error) => {
             console.error("[desktop] share view enrolment:", error);
           });
-          if (!shareUnavailableBeforePull) {
-            await pushShareViewChat(refreshedWorkspace).catch((error) => {
-              console.error(
-                "[desktop] share view chat push (refresh backstop):",
-                error,
-              );
-            });
-          }
         }
         let outcome;
         try {
@@ -10153,11 +10136,6 @@ function registerIpcHandlers(
         // `readableShareLevel` rather than trusted from the record's type.
         access: ShareAccess | null;
         genericChatWritable: boolean;
-        // The account this recipient writes chat under. Absent when signed
-        // out, or signed into a relay that is not this share's — see
-        // `assertChatWritable`, which refuses rather than writing a comment
-        // that can never leave the machine.
-        authorUserId: string | undefined;
         // The granter ended this share. The local copy stays readable and
         // stops taking writes, exactly as an ended chat-channel grant does.
         ended: boolean;
@@ -10184,8 +10162,6 @@ function registerIpcHandlers(
       // workspace's daemon session is live before any store call reaches it.
       await openWorkspaceActivity(workspace);
       lease.assertCurrent();
-      await warmCredentialCache();
-      lease.assertCurrent();
       const binding = lease.binding;
       const engineWorkspace = receivedShareEngine.workspaceFor({
         engineWorkspaceId: workspace.workspaceId,
@@ -10206,41 +10182,21 @@ function registerIpcHandlers(
         access: readableShareLevel(workspace.shareView?.grantedSelector),
         genericChatWritable: workspace.shareView?.genericChatWritable === true,
         ended: workspace.shareView?.ended === true,
-        authorUserId: resolveShareViewRelayAuthorId(
-          workspace.shareView ?? {},
-          cachedCredentials,
-        ),
       };
     });
   }
 
-  // The chat write gate, run BEFORE any durable row. A view share reads the
-  // discussion about its files and adds nothing to it; comment and edit both
-  // write. The relay refuses the push again with the same words, so the
-  // renderer disabling its composer is honesty, not authorization.
-  // A local workspace is writable by definition; a share view answers to the
-  // shared rule, which the tests drive directly rather than re-implementing.
+  // The chat write gate runs before every durable row. A local workspace is
+  // writable by definition. Every received file share stays read-only for
+  // generic desktop chat in Phase 3, whatever its cached relay capability.
   function assertChatWritable(scope: ChatScope): void {
     if (scope.kind !== "share") return;
     assertShareChatWritable(scope);
   }
 
-  // #646 PR2: this recipient's own chat, back to the granter — the file-share
-  // mirror of `syncSharedChannelsForChatTarget`. Fire-and-forget from a write
-  // handler, with the share's refresh cadence as the backstop, and skipped
-  // whenever a refresh would be skipped: an ended share, a signed-out user, or
-  // a session on a relay that is not this share's origin.
-  // #646 PR3-1: give this share view the sync identity its share lane needs,
-  // before the first pull or push. Without it the share view journals no local
-  // write and every push refuses before the relay is contacted.
-  //
-  // Run at open and again at every refresh. The engine writes the row once, so
-  // a refresh costs one call and changes nothing.
-  //
-  // Skipped — never thrown — for the same reasons a refresh is skipped: a
-  // damaged pin, an ended share, no credentials, or a session on a relay that
-  // is not this share's origin. A `view` share is skipped as well: it may push
-  // nothing, so it needs no identity and must not be given one.
+  // Give a received share the sync identity used by its Edit proposal lane.
+  // Run at open and on refresh so an older received share gains the identity
+  // before it submits document changes.
   async function recordShareViewIdentity(
     workspace: RegistryEntry & { attachmentId: symbol },
   ): Promise<void> {
@@ -10260,51 +10216,11 @@ function registerIpcHandlers(
     }).recordShareViewIdentity({ grantedSelector });
   }
 
-  async function pushShareViewChat(
-    workspace: RegistryEntry & { attachmentId: symbol },
-  ): Promise<void> {
-    const shareView = workspace.shareView;
-    if (!shareView || shareView.ended) return;
-    if (shareView.genericChatWritable !== true) return;
-    // The pinned grant, read back through the rule the pull uses. A grant this
-    // process cannot read completely is not one to push through: the engine
-    // scopes the push by it, and the relay judges the batch against the stored
-    // selector either way. Skipped, not failed — a write that reached this far
-    // was already refused if the level was unreadable.
-    const grantedSelector = recordedShareSelector(shareView.grantedSelector);
-    if (!grantedSelector) return;
-    // Positive recognition of a level that may write, before anything reaches
-    // the engine. A `view` share pushes nothing, and letting it try produced a
-    // refusal in the log that read like a defect and was not one.
-    if (grantedSelector.access !== "comment" && grantedSelector.access !== "edit") {
-      return;
-    }
-    await warmCredentialCache();
-    const credentials = cachedCredentials;
-    if (!credentials?.relayUrl) return;
-    if (shareView.relayUrl && !relayUrlsMatch(credentials.relayUrl, shareView.relayUrl)) {
-      return;
-    }
-    await receivedShareEngine.relayFor({
-      engineWorkspaceId: workspace.workspaceId,
-      rootPath: workspace.rootPath,
-      attachmentId: workspace.attachmentId,
-      relay: { baseUrl: credentials.relayUrl, token: credentials.token },
-    }).pushShareView({ shareId: shareView.shareId, grantedSelector });
-  }
-
-  // Every chat write reaches the granter the same way, whichever scope it was
-  // written in: a local workspace nudges its own cloud sync and any joined
-  // shared channel, a share view pushes its own chat lane.
+  // Only a workspace this machine owns can reach this after a successful
+  // generic chat write. The share branch is unreachable because the gate
+  // above refuses every received share before the store.
   function syncChatWriteFor(scope: ChatScope, target: { threadId: string }): void {
-    if (scope.kind === "share") {
-      void scope
-        .withAuthority(() => pushShareViewChat(scope.workspace))
-        .catch((error) => {
-          console.error("[desktop] share view chat push:", error);
-        });
-      return;
-    }
+    if (scope.kind === "share") return;
     void syncSharedChannelsForChatTarget(scope.workspace.workspaceId, target);
     activity.queueCloudSync(scope.workspace.workspaceId);
   }
@@ -11088,9 +11004,8 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.createFileChat, async (event, payload) => {
     assertTrustedSender(event);
     const input = CreateFileChatPayload.parse(payload);
-    // #646 PR2: reachable from a share view at comment and edit. The level is
-    // the server-side decision main owns; the relay refuses the push again
-    // with the same words if this one is ever skipped.
+    // Reads are reachable from every received share. This mutation resolves
+    // the same scope, then the gate refuses it before persistence.
     const scope = await requireChatScope(input.workspaceId);
     assertChatWritable(scope);
     const { workspace, store } = scope;
@@ -11140,10 +11055,8 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.sendChatMessage, async (event, payload) => {
     assertTrustedSender(event);
     const input = SendChatMessagePayload.parse(payload);
-    // #646 PR2: a share view resolves a scope instead of a capture, and its
-    // LEVEL is the write gate. A local workspace still resolves a capture and
-    // is writable by definition — `assertWritableWorkspace` refused exactly
-    // the share views this scope now admits at comment and edit.
+    // A share view resolves a scope instead of a capture so reads still work.
+    // The write gate refuses every received share before persistence.
     const scope = await requireChatScope(input.workspaceId);
     assertChatWritable(scope);
     const { workspace, store } = scope;
@@ -11199,9 +11112,8 @@ function registerIpcHandlers(
         console.error("[desktop] local chat dispatch scan:", error);
       });
     }
-    // MU-C4: if this thread lives in a joined shared channel, push it out
-    // promptly (fire-and-forget; the sync cadence is the backstop). A share
-    // view pushes its own chat lane instead (#646 PR2).
+    // If this thread lives in a joined shared channel, push it promptly. A
+    // received share never reaches this point.
     syncChatWriteFor(scope, { threadId: input.threadId });
     return SendChatMessageResult.parse({ message: chatMessageForIpc(message) });
   });
@@ -11233,7 +11145,7 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.resolveChatDecision, async (event, payload) => {
     assertTrustedSender(event);
     const input = ResolveChatDecisionPayload.parse(payload);
-    // #646 PR2: reachable from a share view at comment and edit.
+    // Reads are reachable from a share view; this mutation is not.
     const scope = await requireChatScope(input.workspaceId);
     assertChatWritable(scope);
     const { workspace, store } = scope;
@@ -11829,7 +11741,7 @@ function registerIpcHandlers(
     createSetChatReactionIpcHandler({
       assertTrustedSender,
       parsePayload: (payload) => SetChatReactionPayload.parse(payload),
-      // #646 PR2: reachable from a share view at comment and edit.
+      // Reads are reachable from a share view; this mutation is not.
       requireContext: requireChatScope,
       assertWritable: assertChatWritable,
       run: async (scope, input) => {
@@ -11863,9 +11775,8 @@ function registerIpcHandlers(
           setReaction: (mutation) => store.setReaction(mutation),
           state: input.state,
         });
-        // #646 PR2: a reaction is a pushable share kind, so a share scope
-        // pushes its own lane here. The joined-channel and cloud-sync nudges
-        // below are inert without an engine capture.
+        // A received share is refused before this callback. Owned workspaces
+        // still push joined channels and queue cloud sync below.
         syncChatWriteFor(scope, { threadId: input.threadId });
         return SetChatReactionResult.parse({
           reaction: { ...chatReactionForIpc(reaction), state: reaction.state },

@@ -559,10 +559,10 @@ function translateRelayError(method: string, error: unknown): never {
   }
   // #646: the same relay refusal, one noun over. The relay answers ONE code
   // for both — that is the anti-fingerprinting property — so the METHOD, not
-  // the code, decides which noun the reader sees. Chat (PR2) and changes
-  // (PR3) are both the file share, so both read as the file.
+  // the code, decides which noun the reader sees. Proposal submission is a
+  // file-share operation, so this reads as the file.
   if (
-    (method === "share.view.push" || method === "share.proposal.submit") &&
+    method === "share.proposal.submit" &&
     error.wireCode === "INVALID_PARAMS" &&
     error.message === "share-read-only"
   ) {
@@ -623,26 +623,14 @@ export interface EngineRelayWorkspaceClient {
     // debt for every applied page, even if fetching a later page fails.
     recordChangedPaths?: (paths: readonly string[]) => Promise<void>;
   }): Promise<PullShareViewResult>;
-  // #646 PR2: this replica's own chat about the shared files, back to the
-  // granter. Takes the SAME pinned selector the pull takes, for the same
-  // reason: the grant decides which of this replica's ops belong to the
-  // share, and a caller that cannot state it must not push through it.
-  pushShareView(input: {
-    shareId: string;
-    grantedSelector: {
-      paths: readonly string[];
-      versionId: string | null;
-      access: ShareAccess;
-    };
-  }): Promise<PushSharedChannelResult>;
-  // #646 PR3-1: give this share view the sync identity its share lane needs,
-  // before the first pull or push. Run at open and at every refresh — the
-  // engine writes the row once and later calls answer "already-recorded".
+  // Give an Edit share view the sync identity its proposal lane needs. Run at
+  // open and on refresh. The engine writes the row once and later calls answer
+  // "already-recorded".
   //
   // Takes the pinned selector and no share id. `sync_identity` is per
   // WORKSPACE and a share view mirrors exactly one share, so the id it would
-  // carry decides nothing; the LEVEL does, because a `view` share may push
-  // nothing and so never records one.
+  // carry decides nothing. The selector admits only Edit because only that
+  // level can submit a document proposal.
   //
   // The identity components are minted by the ENGINE, the same way sync.claim
   // mints its own. The origin is a REPLICA id — the relay namespaces this
@@ -1053,23 +1041,6 @@ export class EngineRelayClient {
         );
         return {
           pushed: numberField(result, "pushed", "share.channel.push"),
-        };
-      },
-      pushShareView: async ({ shareId, grantedSelector }) => {
-        const result = resultRecord(
-          await request("share.view.push", {
-            workspaceId: workspace.workspaceId,
-            shareId,
-            grantedSelector: {
-              paths: [...grantedSelector.paths],
-              versionId: grantedSelector.versionId,
-              access: grantedSelector.access,
-            },
-          }),
-          "share.view.push",
-        );
-        return {
-          pushed: numberField(result, "pushed", "share.view.push"),
         };
       },
       recordShareViewIdentity: async ({ grantedSelector }) => {

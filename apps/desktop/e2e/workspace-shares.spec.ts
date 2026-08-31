@@ -5,6 +5,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { RelayFilePeer } from "../src/testing/relayFilePeer";
+import { withEngineDb } from "./helpers/engineDb";
 import { claimRelayWorkspace, relayJson } from "./helpers/relayPeer";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
@@ -45,6 +46,33 @@ const RECIPIENT_TOKEN = "test:e2e-recipient";
 const RECIPIENT_EMAIL = "e2e-recipient@dohc.test";
 
 type RawRelayResponse = { status: number; body: string };
+
+function receivedShareGenericChatRows(rootPath: string): {
+  storedRows: number;
+  replicationRows: number;
+} | null {
+  return withEngineDb(rootPath, (db) => {
+    const storedRows = [
+      "chat_threads",
+      "chat_messages",
+      "chat_attachments",
+      "chat_decisions",
+      "chat_reactions",
+    ].reduce((total, table) => {
+      const row = db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as
+        | { n: number }
+        | undefined;
+      return total + Number(row?.n ?? 0);
+    }, 0);
+    const replication = db
+      .prepare("SELECT COUNT(*) AS n FROM replication_log WHERE op_kind LIKE 'chat.%'")
+      .get() as { n: number } | undefined;
+    return {
+      storedRows,
+      replicationRows: Number(replication?.n ?? 0),
+    };
+  });
+}
 
 async function publicRelayRequest(
   baseUrl: string,
@@ -1187,7 +1215,8 @@ test("Comment handoff opens files without creating a second generic chat", async
           "getWorkspaceRegistry" | "createFileChat" | "listFileChats"
         >;
       }).dohcDesktop;
-      const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
+      const workspace = (await api.getWorkspaceRegistry()).workspaces[0]!;
+      const workspaceId = workspace.workspaceId;
       let refusal = "answered";
       try {
         await api.createFileChat({
@@ -1199,10 +1228,17 @@ test("Comment handoff opens files without creating a second generic chat", async
         refusal = error instanceof Error ? error.message : String(error);
       }
       const threads = await api.listFileChats({ workspaceId, path: "docs/shared.md" });
-      return { refusal, threadCount: threads.threads.length };
+      return {
+        refusal,
+        threadCount: threads.threads.length,
+        rootPath: workspace.rootPath,
+      };
     });
     expect(generic.refusal).toContain("read-only");
     expect(generic.threadCount).toBe(0);
+    await expect
+      .poll(() => receivedShareGenericChatRows(generic.rootPath))
+      .toEqual({ storedRows: 0, replicationRows: 0 });
 
     const granterLog = await relayJson(
       relay.baseUrl,
@@ -1225,16 +1261,11 @@ test("Comment handoff opens files without creating a second generic chat", async
   }
 });
 
-test("comment side: a recipient chats about a shared file and the message reaches the granter's log", async () => {
-  // #646 PR2 — the whole loop for a COMMENT share, through the real app: the
-  // relay serves the granter's files, the recipient opens the share, writes a
-  // thread and a message on a shared file through the IPC boundary, and the
-  // message lands in the GRANTER's own log under this share's origin.
-  //
-  // The last step is what makes this an end-to-end test rather than a local
-  // one: the recipient's chat is only chat once it reaches the person who
-  // shared the file. It is read back over HTTP as the granter, because a
-  // second Electron app would collide with this one on the user-data dir.
+test("direct named Comment keeps desktop generic chat read-only", async () => {
+  // A direct named Comment share carries independent relay append authority.
+  // Phase 3 keeps generic desktop chat read-only because the local store has
+  // no durable per-row relay receipt. The IPC attempt must leave no local row
+  // and no chat operation in the granter's relay log.
   test.setTimeout(240_000);
   const temp = await createTempWorkspace();
   const workspaceId = "share-comment-e2e";
@@ -1288,41 +1319,47 @@ test("comment side: a recipient chats about a shared file and the message reache
     await page.getByTestId("open-share-start").click();
     await expect(page.getByTestId("workspace-shell")).toBeVisible();
 
-    // The banner states the right the share actually grants.
+    // The banner preserves the distinction from dependent Comment without
+    // promising a desktop write.
     const banner = page.getByTestId("shared-view-banner");
     await expect(banner).toBeVisible();
-    await expect(banner).toContainText("You can chat about these files, not edit them.");
+    await expect(banner).toContainText(
+      "Files and Chats are read-only here. Ask e2e-granter@dohc.test where to continue the conversation.",
+    );
 
-    // The chat, written through the IPC boundary main owns. The renderer's
-    // affordances are honesty; this is the authorization surface.
+    await revealExplorerPath(page, "docs/shared.md");
+    await explorerRow(page, "docs/shared.md").click();
+    if ((await page.getByTestId("chats-panel").count()) === 0) {
+      await page.getByTestId("titlebar-chats-sidebar").click();
+    }
+    await expect(page.getByTestId("linked-chat-readonly-note")).toBeVisible();
+    await expect(page.getByTestId("linked-chat-composer")).toHaveCount(0);
+
+    // Call the authorization surface directly. Renderer affordances are not
+    // part of this refusal proof.
     const chat = await page.evaluate(async () => {
       const api = (window as unknown as {
         dohcDesktop: Pick<
           DohcDesktopBridge,
           | "getWorkspaceRegistry"
           | "createFileChat"
-          | "sendChatMessage"
           | "listFileChats"
-          | "listChatMessages"
           | "listChatChannels"
         >;
       }).dohcDesktop;
-      const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
-      const created = await api.createFileChat({
-        workspaceId,
-        path: "docs/shared.md",
-        title: "About the comet tail",
-      });
-      await api.sendChatMessage({
-        workspaceId,
-        threadId: created.thread.id,
-        body: "Which comet is this?",
-      });
+      const workspace = (await api.getWorkspaceRegistry()).workspaces[0]!;
+      const workspaceId = workspace.workspaceId;
+      let refusal = "answered";
+      try {
+        await api.createFileChat({
+          workspaceId,
+          path: "docs/shared.md",
+          title: "Must not commit",
+        });
+      } catch (error) {
+        refusal = error instanceof Error ? error.message : String(error);
+      }
       const threads = await api.listFileChats({ workspaceId, path: "docs/shared.md" });
-      const messages = await api.listChatMessages({
-        workspaceId,
-        threadId: created.thread.id,
-      });
       // The workspace-wide listing is NOT routed to a share view: a share
       // view gets per-file chat only, and #627 is the reason the whole
       // surface is refused rather than filtered.
@@ -1334,76 +1371,31 @@ test("comment side: a recipient chats about a shared file and the message reache
         channels = error instanceof Error ? error.message : String(error);
       }
       return {
-        threadId: created.thread.id,
-        threadTitles: threads.threads.map((thread) => thread.title),
-        bodies: messages.messages.map((message) => message.body),
+        refusal,
+        threadCount: threads.threads.length,
+        rootPath: workspace.rootPath,
         channels,
       };
     });
-    expect(chat.threadTitles).toContain("About the comet tail");
-    expect(chat.bodies).toContain("Which comet is this?");
+    expect(chat.refusal).toContain("read-only");
+    expect(chat.threadCount).toBe(0);
     expect(chat.channels).not.toBe("answered");
-
-    // The proof: the message is in the GRANTER's own log, under this share's
-    // namespaced origin, carrying the recipient's server-derived identity and
-    // the file named by PATH (the recipient's object ids mean nothing here).
     await expect
-      .poll(
-        async () => {
-          const page = await relayJson(
-            relay!.baseUrl,
-            GRANTER_TOKEN,
-            `/sync/${workspaceId}/log?since=0&limit=500`,
-          );
-          if (page.status !== 200) return `status ${page.status}`;
-          const all = (
-            JSON.parse(page.body) as {
-              ops: Array<{ originId: string; opKind: string; payload: Record<string, unknown> }>;
-            }
-          ).ops;
-          // The GRANTER's own object id for the shared file, read from the
-          // granter's own log. This is what the recipient's binding has to
-          // resolve to, and it is knowable here rather than assumed.
-          const granterObjectId = all
-            .filter(
-              (op) =>
-                op.opKind === "moment.append" &&
-                !op.originId.startsWith(`share:${shareId}:`) &&
-                (op.payload.payloadAfterPath === "docs/shared.md" ||
-                  op.payload.path === "docs/shared.md"),
-            )
-            .map((op) => op.payload.objectId)
-            .at(-1);
-          const ops = all.filter((op) => op.originId.startsWith(`share:${shareId}:`));
-          const create = ops.find((op) => op.opKind === "chat.thread.create");
-          const message = ops.find((op) => op.opKind === "chat.message.append");
-          if (!create || !message) return `kinds: ${ops.map((op) => op.opKind).join(",")}`;
-          if (typeof granterObjectId !== "string") return "no granter object for docs/shared.md";
-          return {
-            // The relay's accept door CONVERTS the binding before it stores
-            // it, so the stored op names the granter's own object and no
-            // path — the SAME object the granter's own moments name.
-            carriesPath: create.payload.linkedPath !== undefined,
-            boundToGranterObject: create.payload.linkedObjectId === granterObjectId,
-            body: message.payload.body,
-            authorUserId: message.payload.authorUserId,
-          };
-        },
-        { timeout: 60_000, intervals: [1_000] },
-      )
-      .toEqual({
-        // A recipient names its file by PATH on the wire, because its own
-        // object ids mean nothing in the granter's workspace. The relay then
-        // resolves that path to the granter's object and persists THAT —
-        // which is what makes the thread follow the file through a rename
-        // inside the share. `services/sync-relay/src/fileChatShares.test.ts`
-        // pins the conversion; this is the same fact end to end, against the
-        // granter's real object id rather than against the shape of one.
-        carriesPath: false,
-        boundToGranterObject: true,
-        body: "Which comet is this?",
-        authorUserId: "e2e-recipient",
-      });
+      .poll(() => receivedShareGenericChatRows(chat.rootPath))
+      .toEqual({ storedRows: 0, replicationRows: 0 });
+
+    const granterLog = await relayJson(
+      relay.baseUrl,
+      GRANTER_TOKEN,
+      `/sync/${workspaceId}/log?since=0&limit=500`,
+    );
+    expect(granterLog.status).toBe(200);
+    const pushedGenericRows = (
+      JSON.parse(granterLog.body) as { ops: Array<{ opKind?: unknown }> }
+    ).ops.filter(
+      (op) => typeof op.opKind === "string" && op.opKind.startsWith("chat."),
+    );
+    expect(pushedGenericRows).toEqual([]);
   } finally {
     await relay?.stop();
     if (desktop) await cleanupDesktopWorkspace(desktop, temp);
