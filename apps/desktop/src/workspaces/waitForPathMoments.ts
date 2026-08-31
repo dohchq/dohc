@@ -1,4 +1,5 @@
 import { setTimeout as delay } from "node:timers/promises";
+import { isHistoryUpdatingRefusal } from "@dohc/workspace-engine-client";
 import type {
   WorkspaceEngineCapture,
   WorkspaceEngineMomentSummary,
@@ -20,12 +21,7 @@ export async function waitForPathMoments(
     try {
       page = await capture.listMoments({ limit: 100 });
     } catch (error) {
-      if (
-        !(error instanceof Error) ||
-        error.message !== "History is still updating. Try again."
-      ) {
-        throw error;
-      }
+      if (!isHistoryUpdatingRefusal(error)) throw error;
       await delay(25);
       continue;
     }

@@ -4305,30 +4305,25 @@ impl EngineService {
         // Clone the sender OUT of the lock and await OUTSIDE it: a flush can
         // legitimately take many reconcile cycles, and the workspace table
         // must not be blocked for its duration.
-        let (sender, initial_phase, initial_snapshot) = lock(&open.capture)
-            .as_ref()
-            .map(|driver| {
-                let snapshot = driver.status().snapshot();
-                (driver.flush_sender(), snapshot.phase, Some(snapshot))
-            })
-            .map(|(sender, phase, snapshot)| (Some(sender), Some(phase), snapshot))
-            .unwrap_or((None, None, None));
+        let capture = lock(&open.capture).as_ref().map(|driver| {
+            let snapshot = driver.status().snapshot();
+            (driver.flush_sender(), snapshot)
+        });
         let unavailable = capture_driver::FlushOutcome {
             settled: false,
             running: false,
             degraded: true,
         };
-        if initial_phase.is_some_and(|phase| phase != capture_driver::CapturePhase::Ready) {
-            let snapshot = initial_snapshot.expect("capture phase has one status snapshot");
-            return Ok(capture_driver::FlushOutcome {
-                settled: false,
-                running: snapshot.running,
-                degraded: snapshot.degraded,
-            });
-        }
-        let Some(sender) = sender else {
+        let Some((sender, initial_snapshot)) = capture else {
             return Ok(unavailable);
         };
+        if initial_snapshot.phase != capture_driver::CapturePhase::Ready {
+            return Ok(capture_driver::FlushOutcome {
+                settled: false,
+                running: initial_snapshot.running,
+                degraded: initial_snapshot.degraded,
+            });
+        }
         // A flush can drive up to MAX_FLUSH_CYCLES reconciles or sit behind
         // a full flush queue — a cancelled/deadlined caller must get its
         // answer NOW, like every other workspace RPC. The driver still

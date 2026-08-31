@@ -117,33 +117,9 @@ pub fn upsert_file_search_index(
     text: &str,
 ) -> Result<(), SearchError> {
     let policy = read_engine_search_policy(root_dir);
-    upsert_file_search_index_with_policy(
-        conn,
-        &policy,
-        workspace_id,
-        version_id,
-        object_id,
-        path,
-        text,
-    )
-}
-
-/// Upsert a single text file using the policy snapshot owned by the caller's
-/// reconcile pass. This keeps one capture generation internally consistent:
-/// a policy edit that lands mid-pass takes effect on the next generation, not
-/// on an arbitrary suffix of the current one.
-pub fn upsert_file_search_index_with_policy(
-    conn: &Connection,
-    policy: &SearchPolicySnapshot,
-    workspace_id: &str,
-    version_id: &str,
-    object_id: &str,
-    path: &str,
-    text: &str,
-) -> Result<(), SearchError> {
     maintain_file_search_index_with_policy(
         conn,
-        policy,
+        &policy,
         workspace_id,
         version_id,
         object_id,
@@ -697,7 +673,6 @@ mod tests {
     #[test]
     fn public_file_upsert_remains_conservative_delete_first() {
         let scratch = dohc_engine_testkit::ScratchDir::new().expect("scratch");
-        let policy = read_engine_search_policy(scratch.path());
         let conn = Connection::open_in_memory().expect("open memory database");
         conn.execute_batch(
             "CREATE VIRTUAL TABLE engine_search_files_fts USING fts5(\
@@ -719,9 +694,9 @@ mod tests {
         }))
         .expect("install delete guard");
 
-        let error = upsert_file_search_index_with_policy(
+        let error = upsert_file_search_index(
             &conn,
-            &policy,
+            scratch.path(),
             "workspace",
             "main",
             "object",

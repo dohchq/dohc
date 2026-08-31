@@ -134,9 +134,10 @@ function refusalMessageOf(
 // the typed refusal still exists; Electron does not preserve this prototype
 // on a rejected invoke.
 export function isHistoryUpdatingRefusal(error: unknown): boolean {
+  const message = refusalMessageOf(error, "OVERLOADED");
   return (
-    refusalMessageOf(error, "OVERLOADED") ===
-    "History is still updating. Try again."
+    message === "History is still updating. Try again." ||
+    message === "Workspace is still updating. Try again."
   );
 }
 

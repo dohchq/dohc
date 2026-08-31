@@ -2573,24 +2573,18 @@ where
             None => next_moment_order(tx)?,
         },
     };
-    let moment_id = match batch {
-        Some(batch) => derive_capture_moment_id(
-            batch.producer_id(tx)?,
-            &input.workspace_id,
-            &resolved.object_id,
-            next_order,
-            "write",
-            &mutation_identity,
-        ),
-        None => derive_capture_moment_id(
-            &capture_producer_id(tx, &input.workspace_id)?,
-            &input.workspace_id,
-            &resolved.object_id,
-            next_order,
-            "write",
-            &mutation_identity,
-        ),
+    let producer_id = match batch {
+        Some(batch) => Cow::Borrowed(batch.producer_id(tx)?),
+        None => Cow::Owned(capture_producer_id(tx, &input.workspace_id)?),
     };
+    let moment_id = derive_capture_moment_id(
+        producer_id.as_ref(),
+        &input.workspace_id,
+        &resolved.object_id,
+        next_order,
+        "write",
+        &mutation_identity,
+    );
     let write = normalized_write_input(ProjectedWriteText {
         workspace_id: &input.workspace_id,
         version_id: &input.version_id,
@@ -3621,7 +3615,7 @@ fn write_normalized_text_in_tx_with_journal(
     // A reused content-addressed row may be corrupt. Preserve the hydration
     // check that the prepared fast path replaces unless this write inserted
     // the blob and therefore established its text and recorded byte length.
-    let read_back = !blob_inserted || known_object.is_none() || before.is_some();
+    let read_back = !blob_inserted || known_object.is_none();
     #[cfg(test)]
     if capture_prepared {
         note_capture_prepared_write(read_back);

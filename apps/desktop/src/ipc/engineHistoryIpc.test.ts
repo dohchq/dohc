@@ -27,11 +27,14 @@ const TEXT_SHA = "a".repeat(64);
 const BINARY_SHA = "b".repeat(64);
 
 describe("listEngineMomentsForIpc", () => {
-  it("preserves the expected updating refusal as a structured IPC result", async () => {
+  it.each([
+    "History is still updating. Try again.",
+    "Workspace is still updating. Try again.",
+  ])("preserves the %s refusal as a structured IPC result", async (message) => {
     const updating = new DaemonRefusalError(
       {
         code: "OVERLOADED",
-        message: "History is still updating. Try again.",
+        message,
         retry: "afterBackoff",
       },
       null,

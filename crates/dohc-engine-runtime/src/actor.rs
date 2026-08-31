@@ -2537,23 +2537,6 @@ impl ActorHandle {
         self.capture_ingest_blocking_with_indexing(input, CaptureIndexing::Skip, leases, faults)
     }
 
-    /// Capture and index a text file when the owning workspace session can
-    /// supply its authoritative root.
-    pub fn capture_ingest_indexed_blocking(
-        &self,
-        input: CaptureIngest,
-        root_dir: PathBuf,
-        leases: LeaseRegistry,
-        faults: Arc<dyn FaultInjector>,
-    ) -> Result<WriteResult, RuntimeError> {
-        self.capture_ingest_blocking_with_indexing(
-            input,
-            CaptureIndexing::ReadRoot(root_dir),
-            leases,
-            faults,
-        )
-    }
-
     /// Capture and index text against one reconcile-owned policy snapshot.
     pub fn capture_ingest_with_search_policy_blocking(
         &self,
@@ -12358,7 +12341,8 @@ fn journal_moment_outbound_in_tx(
     moment_id: &str,
     deduped: bool,
 ) -> Result<(), DomainError> {
-    journal_moment_outbound_with_batch_in_tx(tx, workspace_id, moment_id, deduped, None)
+    let mut eligibility = None;
+    journal_moment_outbound_with_batch_in_tx(tx, workspace_id, moment_id, deduped, &mut eligibility)
 }
 
 fn journal_moment_outbound_with_batch_in_tx(
@@ -12366,24 +12350,20 @@ fn journal_moment_outbound_with_batch_in_tx(
     workspace_id: &str,
     moment_id: &str,
     deduped: bool,
-    batch_eligibility: Option<&mut Option<bool>>,
+    eligibility: &mut Option<bool>,
 ) -> Result<(), DomainError> {
     if deduped {
         return Ok(());
     }
-    let journals_file_moments = match batch_eligibility {
-        Some(cached) => match *cached {
-            Some(eligible) => eligible,
-            None => {
-                let eligible =
-                    dohc_engine_sync::workspace_journals_file_moments_in_tx(tx, workspace_id)
-                        .map_err(outbound_domain)?;
-                *cached = Some(eligible);
-                eligible
-            }
-        },
-        None => dohc_engine_sync::workspace_journals_file_moments_in_tx(tx, workspace_id)
-            .map_err(outbound_domain)?,
+    let journals_file_moments = match *eligibility {
+        Some(eligible) => eligible,
+        None => {
+            let eligible =
+                dohc_engine_sync::workspace_journals_file_moments_in_tx(tx, workspace_id)
+                    .map_err(outbound_domain)?;
+            *eligibility = Some(eligible);
+            eligible
+        }
     };
     if !journals_file_moments {
         return Ok(());
@@ -14531,7 +14511,7 @@ fn capture_ingest_in_tx(
             &input.workspace_id,
             &result.moment.moment_id,
             result.deduped,
-            Some(&mut batch.journals_file_moments),
+            &mut batch.journals_file_moments,
         ),
         None => journal_moment_outbound_in_tx(
             tx,
