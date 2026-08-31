@@ -33,14 +33,9 @@ const ACCESS_OPTIONS: ReadonlyArray<{
     helper: "They can read what you selected.",
   },
   {
-    value: "comment",
-    label: "Comment",
-    helper: "They can read what you selected and chat about it.",
-  },
-  {
     value: "edit",
     label: "Edit",
-    helper: "They can read, chat, and send you changes to accept.",
+    helper: "They can read what you selected and send you changes to accept.",
   },
 ];
 

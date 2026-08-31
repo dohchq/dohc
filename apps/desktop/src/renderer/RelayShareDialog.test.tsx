@@ -450,7 +450,7 @@ describe("RelayShareDialog", () => {
     });
   });
 
-  it("offers all three levels, states each one, and sends the level it showed", async () => {
+  it("offers View and Edit for email without promising a discussion", async () => {
     const user = userEvent.setup();
     render(
       <RelayShareDialog
@@ -460,27 +460,17 @@ describe("RelayShareDialog", () => {
       />,
     );
 
+    const emailAccess = screen.getByRole("radiogroup", { name: "Access" });
+    expect(within(emailAccess).getByRole("radio", { name: "View" })).toBeTruthy();
+    expect(within(emailAccess).getByRole("radio", { name: "Edit" })).toBeTruthy();
+    expect(within(emailAccess).queryByRole("radio", { name: "Comment" })).toBeNull();
     expect(screen.getByTestId("share-access-view").getAttribute("aria-checked")).toBe(
       "true",
     );
-    for (const level of ["view", "comment", "edit"] as const) {
-      expect(
-        screen.getByTestId(`share-access-${level}`).hasAttribute("disabled"),
-        `MUTATION: ${level} disabled would refuse a level the relay now grants`,
-      ).toBe(false);
-    }
     expect(screen.getByTestId("share-access-helper").textContent).toBe(
       "They can read what you selected.",
     );
     expect(screen.queryByTestId("share-access-pending")).toBeNull();
-
-    await user.click(screen.getByTestId("share-access-comment"));
-    expect(screen.getByTestId("share-access-comment").getAttribute("aria-checked")).toBe(
-      "true",
-    );
-    expect(screen.getByTestId("share-access-helper").textContent).toBe(
-      "They can read what you selected and chat about it.",
-    );
 
     await user.click(screen.getByTestId("share-access-edit"));
     expect(screen.getByTestId("share-access-edit").getAttribute("aria-checked")).toBe(
@@ -489,7 +479,7 @@ describe("RelayShareDialog", () => {
     expect(
       screen.getByTestId("share-access-helper").textContent,
       "MUTATION: promising 'edit what you selected' would name a right Edit does not grant",
-    ).toBe("They can read, chat, and send you changes to accept.");
+    ).toBe("They can read what you selected and send you changes to accept.");
 
     await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
     await user.click(screen.getByTestId("share-create"));
