@@ -771,8 +771,8 @@ impl StoreCaptureSink {
     }
 
     fn retire_secret(&self, path: &str) -> Result<(), CaptureError> {
-        self.require_captured_root()?;
-        match self.actor.capture_secret_retire_blocking(
+        let root_guard = self.root_guard()?;
+        match self.actor.capture_secret_retire_blocking_guarded(
             CaptureSecretRetire {
                 workspace_id: self.workspace_id.clone(),
                 version_id: self.version_id.clone(),
@@ -782,7 +782,9 @@ impl StoreCaptureSink {
                 now_ms: self.now_ms,
                 only_if_own_origin: true,
             },
+            self.shadow_root.clone(),
             Arc::new(NoFaults),
+            root_guard,
         ) {
             Ok(_) => Ok(()),
             Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => Ok(()),

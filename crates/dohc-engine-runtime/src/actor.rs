@@ -1419,6 +1419,8 @@ enum Command {
     },
     CaptureSecretRetire {
         input: CaptureSecretRetire,
+        root_dir: Option<PathBuf>,
+        root_guard: Option<Arc<dyn WorkspaceRootGuard>>,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<Option<SecretMomentRecord>, RuntimeError>>,
@@ -2779,11 +2781,36 @@ impl ActorHandle {
         input: CaptureSecretRetire,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
+        self.capture_secret_retire_blocking_with_guard(input, faults, None)
+    }
+
+    pub fn capture_secret_retire_blocking_guarded(
+        &self,
+        input: CaptureSecretRetire,
+        root_dir: PathBuf,
+        faults: Arc<dyn FaultInjector>,
+        root_guard: Arc<dyn WorkspaceRootGuard>,
+    ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
+        self.capture_secret_retire_blocking_with_guard(input, faults, Some((root_dir, root_guard)))
+    }
+
+    fn capture_secret_retire_blocking_with_guard(
+        &self,
+        input: CaptureSecretRetire,
+        faults: Arc<dyn FaultInjector>,
+        guarded_root: Option<(PathBuf, Arc<dyn WorkspaceRootGuard>)>,
+    ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
         debug_assert_sync_context();
         let (reply, reply_rx) = oneshot::channel();
+        let (root_dir, root_guard) = match guarded_root {
+            Some((root_dir, root_guard)) => (Some(root_dir), Some(root_guard)),
+            None => (None, None),
+        };
         self.tx
             .blocking_send(Command::CaptureSecretRetire {
                 input,
+                root_dir,
+                root_guard,
                 faults,
                 token: CancellationToken::new(),
                 reply,
@@ -4091,6 +4118,8 @@ impl ActorHandle {
         self.tx
             .send(Command::CaptureSecretRetire {
                 input,
+                root_dir: None,
+                root_guard: None,
                 faults,
                 token,
                 reply,
@@ -8219,12 +8248,20 @@ fn worker_main(
             }
             Command::CaptureSecretRetire {
                 input,
+                root_dir,
+                root_guard,
                 faults,
                 token,
                 reply,
             } => {
-                let outcome =
-                    capture_secret_retire_on_store(&mut store, &input, faults.as_ref(), &token);
+                let outcome = capture_secret_retire_on_store(
+                    &mut store,
+                    &input,
+                    root_dir.as_deref(),
+                    root_guard.as_deref(),
+                    faults.as_ref(),
+                    &token,
+                );
                 let _ = reply.send(outcome);
             }
             Command::SecretStateExists {
@@ -14847,11 +14884,16 @@ fn capture_secret_on_store(
 fn capture_secret_retire_on_store(
     store: &mut EngineStore,
     input: &CaptureSecretRetire,
+    root_dir: Option<&std::path::Path>,
+    root_guard: Option<&dyn WorkspaceRootGuard>,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
+    }
+    if let Some(root_dir) = root_dir {
+        validate_workspace_root(root_dir, root_guard)?;
     }
     ensure_mutation_version_on_store(
         store,
@@ -15897,5 +15939,224 @@ mod share_view_identity_tests {
                 "MUTATION: every refresh calls this; a second row would split the log",
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod capture_secret_root_guard_tests {
+    use super::*;
+    use crate::WorkspaceSupervisor;
+    use dohc_engine_testkit::ScratchDir;
+    use std::sync::Condvar;
+    use std::time::Duration;
+
+    const WORKSPACE_ID: &str = "workspace";
+    const VERSION_ID: &str = "main";
+    const SECRET_PATH: &str = ".env";
+
+    struct BoundRootGuard {
+        identity: file_id::FileId,
+    }
+
+    impl BoundRootGuard {
+        fn bind(root: &std::path::Path) -> Self {
+            Self {
+                identity: file_id::get_file_id(root).expect("bind workspace root identity"),
+            }
+        }
+    }
+
+    impl WorkspaceRootGuard for BoundRootGuard {
+        fn validate(&self, root_dir: &std::path::Path) -> Result<(), RuntimeError> {
+            (file_id::get_file_id(root_dir).ok() == Some(self.identity))
+                .then_some(())
+                .ok_or(RuntimeError::Identity {
+                    reason: "workspace root changed during capture",
+                    source: None,
+                })
+        }
+    }
+
+    struct PausedRootGuard {
+        bound: BoundRootGuard,
+        reached: (Mutex<bool>, Condvar),
+        released: (Mutex<bool>, Condvar),
+    }
+
+    impl PausedRootGuard {
+        fn bind(root: &std::path::Path) -> Arc<Self> {
+            Arc::new(Self {
+                bound: BoundRootGuard::bind(root),
+                reached: (Mutex::new(false), Condvar::new()),
+                released: (Mutex::new(false), Condvar::new()),
+            })
+        }
+
+        fn wait_until_reached(&self) {
+            let reached = self.reached.0.lock().expect("lock reached state");
+            let (reached, timeout) = self
+                .reached
+                .1
+                .wait_timeout_while(reached, Duration::from_secs(10), |reached| !*reached)
+                .expect("wait for actor blocker");
+            assert!(*reached, "actor did not reach the blocking command");
+            assert!(!timeout.timed_out(), "actor blocker timed out");
+        }
+
+        fn release(&self) {
+            let mut released = self.released.0.lock().expect("lock release state");
+            *released = true;
+            self.released.1.notify_all();
+        }
+    }
+
+    impl WorkspaceRootGuard for PausedRootGuard {
+        fn validate(&self, root_dir: &std::path::Path) -> Result<(), RuntimeError> {
+            {
+                let mut reached = self.reached.0.lock().expect("lock reached state");
+                *reached = true;
+                self.reached.1.notify_all();
+            }
+            let released = self.released.0.lock().expect("lock release state");
+            let (released, timeout) = self
+                .released
+                .1
+                .wait_timeout_while(released, Duration::from_secs(10), |released| !*released)
+                .expect("wait for root replacement");
+            if timeout.timed_out() || !*released {
+                return Err(RuntimeError::Identity {
+                    reason: "test root guard release timed out",
+                    source: None,
+                });
+            }
+            self.bound.validate(root_dir)
+        }
+    }
+
+    #[test]
+    fn queued_capture_secret_retire_refuses_a_replacement_workspace_root() {
+        let store_scratch = ScratchDir::new().expect("store scratch");
+        let root_scratch = ScratchDir::new().expect("workspace root scratch");
+        let root = root_scratch.path().to_path_buf();
+        let moved_root = root.with_file_name(format!(
+            "{}-moved",
+            root.file_name().expect("root name").to_string_lossy()
+        ));
+        let db = store_scratch.engine_db_path().expect("engine db path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        std::fs::write(root.join(SECRET_PATH), b"TOKEN=original").expect("write original secret");
+        actor
+            .capture_secret_blocking(
+                CaptureSecret {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    version_id: VERSION_ID.to_owned(),
+                    path: SECRET_PATH.to_owned(),
+                    text: "TOKEN=original".to_owned(),
+                    metadata_origin: "local-file".to_owned(),
+                    metadata_correlation_id: None,
+                    now_ms: 2,
+                    claim_foreign_head: true,
+                },
+                SecretDataKey::from_bytes(&[0x41; 32]).expect("secret key"),
+                Arc::new(NoFaults),
+            )
+            .expect("seed captured secret");
+        std::fs::remove_file(root.join(SECRET_PATH)).expect("observe original secret removal");
+
+        // Hold the worker on a command already ahead of the secret retire.
+        // Sending the retire below therefore proves it entered the real actor
+        // queue before the pathname is rebound to a replacement directory.
+        let blocker = PausedRootGuard::bind(&root);
+        let blocker_guard: Arc<dyn WorkspaceRootGuard> = blocker.clone();
+        let (blocker_reply, blocker_reply_rx) = oneshot::channel();
+        actor
+            .tx
+            .blocking_send(Command::CaptureRetire {
+                input: CaptureRetire {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    version_id: VERSION_ID.to_owned(),
+                    path: "missing.md".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    now_ms: 3,
+                    request_id: None,
+                    only_if_text_head: false,
+                    only_if_capture_origin: true,
+                    allow_ydoc_origin: true,
+                },
+                root_dir: Some(root.clone()),
+                root_guard: Some(blocker_guard),
+                self_writes: None,
+                leases: LeaseRegistry::new(),
+                faults: Arc::new(NoFaults),
+                token: CancellationToken::new(),
+                reply: blocker_reply,
+            })
+            .expect("queue actor blocker");
+        blocker.wait_until_reached();
+
+        let captured_guard: Arc<dyn WorkspaceRootGuard> = Arc::new(BoundRootGuard::bind(&root));
+        let (retire_reply, retire_reply_rx) = oneshot::channel();
+        actor
+            .tx
+            .blocking_send(Command::CaptureSecretRetire {
+                input: CaptureSecretRetire {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    version_id: VERSION_ID.to_owned(),
+                    path: SECRET_PATH.to_owned(),
+                    metadata_origin: "local-file".to_owned(),
+                    metadata_correlation_id: None,
+                    now_ms: 4,
+                    only_if_own_origin: true,
+                },
+                root_dir: Some(root.clone()),
+                root_guard: Some(captured_guard),
+                faults: Arc::new(NoFaults),
+                token: CancellationToken::new(),
+                reply: retire_reply,
+            })
+            .expect("queue secret retire behind blocker");
+
+        std::fs::rename(&root, &moved_root).expect("move original workspace root");
+        std::fs::create_dir(&root).expect("create replacement workspace root");
+        std::fs::write(root.join(SECRET_PATH), b"TOKEN=replacement")
+            .expect("write replacement secret");
+        let replacement_before =
+            std::fs::read(root.join(SECRET_PATH)).expect("read replacement secret");
+        blocker.release();
+        let blocker_result = blocker_reply_rx
+            .blocking_recv()
+            .expect("receive blocker result");
+        let retire_result = retire_reply_rx
+            .blocking_recv()
+            .expect("receive secret retire result");
+        let replacement_after =
+            std::fs::read(root.join(SECRET_PATH)).expect("reread replacement secret");
+
+        std::fs::remove_dir_all(&root).expect("remove replacement workspace root");
+        std::fs::rename(&moved_root, &root).expect("restore original workspace root");
+        drop(actor);
+        supervisor.close(&db).expect("close actor");
+        let store = EngineStore::open(&db, 5).expect("reopen store");
+        let retained = secret_file_len_keyless(&store, WORKSPACE_ID, VERSION_ID, SECRET_PATH)
+            .expect("read retained secret tip");
+
+        assert!(matches!(
+            blocker_result,
+            Err(RuntimeError::Identity {
+                reason: "workspace root changed during capture",
+                ..
+            })
+        ));
+        assert_eq!(retained, Some(14), "the current encrypted tip must survive");
+        assert_eq!(replacement_after, replacement_before);
+        assert!(matches!(
+            retire_result,
+            Err(RuntimeError::Identity {
+                reason: "workspace root changed during capture",
+                ..
+            })
+        ));
     }
 }
