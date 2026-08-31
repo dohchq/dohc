@@ -19,6 +19,11 @@ export function NewFileDialog(props: {
     inputRef.current?.focus();
   }, []);
 
+  function close() {
+    if (pendingRef.current) return;
+    props.onClose();
+  }
+
   async function create() {
     const relativePath = withMarkdownDefault(name.trim());
     if (!relativePath || pendingRef.current) return;
@@ -42,7 +47,7 @@ export function NewFileDialog(props: {
 
   return (
     <Overlay
-      onClose={props.onClose}
+      onClose={close}
       panelProps={{
         role: "dialog",
         "aria-modal": true,
@@ -79,7 +84,9 @@ export function NewFileDialog(props: {
         />
         {error ? <p className="m-0 text-xs text-danger">{error}</p> : null}
         <div className="mt-1 flex justify-end gap-2">
-          <SecondaryButton onClick={props.onClose}>Cancel</SecondaryButton>
+          <SecondaryButton onClick={close} disabled={pending}>
+            Cancel
+          </SecondaryButton>
           <PrimaryButton type="submit" disabled={!name.trim() || pending}>
             {pending ? "Creating…" : "Create file"}
           </PrimaryButton>

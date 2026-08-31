@@ -97,6 +97,47 @@ describe("NewFileDialog", () => {
     });
   });
 
+  it.each(["Cancel", "Escape", "backdrop"] as const)(
+    "stays open during a pending create after %s dismissal",
+    async (dismissal) => {
+      const create = deferred<{ path: string }>();
+      bridgeMock.createWorkspaceFile.mockImplementationOnce(() => create.promise);
+      const onClose = vi.fn();
+      const onCreated = vi.fn();
+      const user = userEvent.setup();
+      render(
+        <NewFileDialog
+          workspaceId="ws-1"
+          onClose={onClose}
+          onCreated={onCreated}
+        />,
+      );
+
+      await user.type(screen.getByLabelText("File name"), "notes/new.md");
+      await user.click(screen.getByRole("button", { name: "Create file" }));
+
+      const cancel = screen.getByRole("button", { name: "Cancel" });
+      if (dismissal === "Cancel") {
+        await user.click(cancel);
+      } else if (dismissal === "Escape") {
+        await user.keyboard("{Escape}");
+      } else {
+        const backdrop = screen.getByRole("dialog", { name: "New file" })
+          .parentElement;
+        expect(backdrop).not.toBeNull();
+        await user.click(backdrop!);
+      }
+
+      expect(onClose).not.toHaveBeenCalled();
+      expect((cancel as HTMLButtonElement).disabled).toBe(true);
+
+      await act(async () => {
+        create.resolve({ path: "notes/new.md" });
+      });
+      expect(onCreated).toHaveBeenCalledWith("notes/new.md");
+    },
+  );
+
   it("defaults a name typed without an extension to markdown", async () => {
     bridgeMock.createWorkspaceFile.mockResolvedValueOnce({
       path: "plans/roadmap.md",
