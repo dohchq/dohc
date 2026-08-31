@@ -9,6 +9,10 @@ import { Explorer } from "../../desktop/src/renderer/workbench/Explorer";
 import { GraphView } from "../../desktop/src/renderer/workbench/GraphView";
 import { SearchView } from "../../desktop/src/renderer/workbench/SearchView";
 import { SidePanel } from "../../desktop/src/renderer/workbench/SidePanel";
+
+// The demo has no engine, so no folder is a collection.
+const emptyCollectionFolders: ReadonlySet<string> = new Set();
+const noopOpenCollection = () => {};
 import { useWorkspaceSearch } from "../../desktop/src/renderer/workbench/useWorkspaceSearch";
 import type { ViewId } from "../../desktop/src/renderer/workbench/workbenchState";
 import {
@@ -141,6 +145,8 @@ export function DemoSidebar(props: {
           shareView={null}
           files={files}
           folders={folders}
+          collectionFolders={emptyCollectionFolders}
+          onOpenCollection={noopOpenCollection}
           editorGroups={[
             {
               id: DEMO_EDITOR_GROUP_ID,
