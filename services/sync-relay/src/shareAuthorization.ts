@@ -162,6 +162,9 @@ function authorizeShareGrantAction(
     case "withdraw-proposal":
       return { ok: true, share, grant, effectiveSelector };
     case "append":
+      if (grant.parentGrantId !== null) {
+        return { ok: false, reason: "denied" };
+      }
       if (
         isChatChannelSelector(effectiveSelector)
           ? effectiveSelector.access === "read-write"

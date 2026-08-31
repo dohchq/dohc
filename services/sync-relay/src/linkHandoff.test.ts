@@ -710,6 +710,148 @@ describe("single-use authenticated link handoff", () => {
     });
   });
 
+  it("keeps Comment handoff dependents in discussion without granting share-log append authority", async () => {
+    const state = await setup({}, "comment");
+    const redeemed = await json(
+      await state.h(redeemRequest(RECIPIENT, (await mint(state)).code)),
+    );
+    expect(redeemed).toMatchObject({ ok: true, access: "comment" });
+
+    const discussion = await state.h(
+      request(
+        RECIPIENT,
+        `/sync/shares/${SHARE_ID}/discussion`,
+        jsonBody({
+          body: "A named handoff comment",
+          idempotencyKey: "handoff-comment-1",
+        }),
+      ),
+    );
+    expect(discussion.status, await discussion.clone().text()).toBe(200);
+    expect(await json(discussion)).toMatchObject({
+      ok: true,
+      message: {
+        body: "A named handoff comment",
+        author: { kind: "named" },
+      },
+    });
+
+    const seeded = await state.h(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/log`,
+        jsonBody({
+          originId: "owner-origin",
+          ops: [
+            {
+              originSeq: 0,
+              opKind: "moment.append",
+              recordedAtMs: 11_000,
+              payload: {
+                momentId: "moment-handoff-file",
+                versionId: "main",
+                objectId: "object-handoff-file",
+                path: "docs/handoff.md",
+                recordedAtMs: 11_000,
+                operation: "write",
+                payloadBeforeBlobSha256: null,
+                payloadBeforePath: null,
+                payloadAfterBlobSha256: null,
+                payloadAfterPath: "docs/handoff.md",
+                metadata: { origin: "user" },
+                beforePresent: "null",
+              },
+            },
+          ],
+        }),
+      ),
+    );
+    expect(seeded.status, await seeded.clone().text()).toBe(200);
+
+    const batch = {
+      originId: "recipient-origin",
+      ops: [
+        {
+          originSeq: 0,
+          opKind: "chat.thread.create",
+          recordedAtMs: 12_000,
+          payload: {
+            threadId: "thread-handoff",
+            title: "Handoff question",
+            createdAtMs: 12_000,
+            linkedAtMs: 12_000,
+            linkedPath: "docs/handoff.md",
+          },
+        },
+        {
+          originSeq: 1,
+          opKind: "chat.message.append",
+          recordedAtMs: 12_001,
+          payload: {
+            messageId: "message-handoff",
+            threadId: "thread-handoff",
+            authorKind: "human",
+            authorDisplayName: "Recipient",
+            authorUserId: RECIPIENT,
+            body: "Does this need a change?",
+            createdAtMs: 12_001,
+          },
+        },
+      ],
+    };
+    const database = inspect(state.dbPath);
+    const durableRecipientRows = (): number =>
+      Number(
+        database
+          .prepare(
+            "SELECT COUNT(*) AS count FROM sync_relay_log WHERE workspace_id = ? AND origin_id = ?",
+          )
+          .get(WORKSPACE, `share:${SHARE_ID}:${batch.originId}`)?.count ?? 0,
+      );
+
+    const refused = await state.h(
+      request(
+        RECIPIENT,
+        `/sync/shares/${SHARE_ID}/log`,
+        jsonBody(batch),
+      ),
+    );
+    expect(await serialized(refused)).toEqual({
+      status: 403,
+      body: '{"ok":false,"error":"this share does not accept appends","code":"share_read_only"}',
+    });
+    expect(durableRecipientRows()).toBe(0);
+
+    database
+      .prepare(
+        `INSERT INTO sync_relay_share_grants (
+           grant_id, share_id, principal_kind, principal_user_id, principal_email,
+           access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id
+         ) VALUES (?, ?, 'user', ?, NULL, 'comment', 1, 'active', ?, NULL, NULL)`,
+      )
+      .run("owner-issued-recipient-comment", SHARE_ID, RECIPIENT, 10_000);
+    expect(
+      state.storage
+        .listActiveShareGrantsForRecipient(SHARE_ID, RECIPIENT)
+        .map((grant) => grant.grantId),
+    ).toEqual([redeemed.grantId, "owner-issued-recipient-comment"]);
+
+    const accepted = await state.h(
+      request(
+        RECIPIENT,
+        `/sync/shares/${SHARE_ID}/log`,
+        jsonBody(batch),
+      ),
+    );
+    expect(accepted.status, await accepted.clone().text()).toBe(200);
+    expect(await json(accepted)).toMatchObject({
+      ok: true,
+      accepted: 2,
+      inserted: 2,
+    });
+    expect(durableRecipientRows()).toBe(2);
+  });
+
   it.each(["retune", "revoke"] as const)(
     "resolves a Comment handoff after %s wins before the storage commit",
     async (transition) => {

@@ -132,6 +132,37 @@ describe("share authorization", () => {
     expect(authorize("propose", storage)).toEqual({ ok: false, reason: "denied" });
   });
 
+  it("refuses only append authority inherited from a parent link", () => {
+    const parent: SyncRelayShareGrantRow = {
+      ...grant,
+      grantId: "parent-link",
+      principalKind: "link",
+      principalUserId: null,
+      access: "edit",
+    };
+    const dependent: SyncRelayShareGrantRow = {
+      ...grant,
+      grantId: "dependent-grant",
+      parentGrantId: parent.grantId,
+    };
+    const base = storageFixture({ grant: dependent });
+    const storage: AuthorizationStorage = {
+      ...base,
+      getShareGrant: (grantId) => {
+        if (grantId === dependent.grantId) return dependent;
+        if (grantId === parent.grantId) return parent;
+        return null;
+      },
+    };
+
+    expect(authorize("read", storage)).toMatchObject({ ok: true });
+    expect(authorize("append", storage)).toEqual({
+      ok: false,
+      reason: "denied",
+    });
+    expect(authorize("propose", storage)).toMatchObject({ ok: true });
+  });
+
   it("refuses revoked grants, wrong actors, and lost granter ownership", () => {
     expect(
       authorize(
