@@ -395,6 +395,53 @@ describe("CommentsPanel monotonic composer", () => {
     expect(container.textContent).not.toContain("The comment didn't post. Try again.");
   });
 
+  it("keeps a newer blocked refusal after an older activity body arrives", async () => {
+    const heldActivity = heldJsonResponse(200);
+    const heldRefusal = heldJsonResponse(403);
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (init?.method === "POST") return heldRefusal.response;
+      if (path === "/api/view/discussion?direction=newest-first") return page();
+      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        return heldActivity.response;
+      }
+      return await new Promise<Response>(() => undefined);
+    }));
+
+    await render();
+    await settle(heldActivity.bodyStarted);
+    setControlValue(bodyInput(), "Blocked draft");
+    click("Post comment");
+    await settle(heldRefusal.bodyStarted);
+    heldRefusal.release({ ok: false, state: "blocked", activityRevision: 8 });
+    await settle(() => container.textContent?.includes(
+      "The owner turned off comments for this browser.",
+    ) === true);
+
+    expect(bodyInput().value).toBe("Blocked draft");
+    expect(bodyInput().disabled).toBe(true);
+
+    await act(async () => {
+      heldActivity.release({
+        ok: true,
+        access: "comment",
+        latestRevision: 7,
+        cursorRevision: 7,
+        hasMore: false,
+        messages: [],
+        composerState: "available",
+        profileName: null,
+      });
+      await Promise.resolve();
+    });
+
+    expect(bodyInput().value).toBe("Blocked draft");
+    expect(bodyInput().disabled).toBe(true);
+    expect(container.textContent).toContain(
+      "The owner turned off comments for this browser.",
+    );
+  });
+
   it("recovers from a terminal follower only after a newest page and valid activity", async () => {
     const terminal = heldJsonResponse(200);
     const recoveryPage = heldJsonResponse(200);

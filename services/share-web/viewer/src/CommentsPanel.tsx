@@ -329,13 +329,15 @@ export function CommentsPanel(props: {
     onAccessChangeRef.current?.(session, activity.access);
     messagesRef.current = merged;
     setMessages(merged);
+    const priorComposerRevision = composerRevisionRef.current;
     composerRevisionRef.current = Math.max(
-      composerRevisionRef.current,
+      priorComposerRevision,
       activity.latestRevision,
     );
     adoptProfileName(activity.profileName);
     setComposerState((current) => {
       if (current === "limit-reached") return current;
+      if (activity.latestRevision < priorComposerRevision) return current;
       return activity.composerState;
     });
     if (recovering) enterFollowerPhase("live");
