@@ -2470,8 +2470,7 @@ where
             .map_err(E::from);
     }
 
-    let existing_alias =
-        alias_object_id(tx, &input.workspace_id, &input.version_id, &input.path)?;
+    let existing_alias = alias_object_id(tx, &input.workspace_id, &input.version_id, &input.path)?;
     let target_object_id = existing_alias.clone().unwrap_or_else(|| {
         derive_capture_object_id(&input.workspace_id, &input.version_id, &input.path)
     });
@@ -2900,9 +2899,9 @@ where
     }
 
     let existing_alias = alias_object_id(tx, &input.workspace_id, &input.version_id, &path)?;
-    let target_object_id = existing_alias.clone().unwrap_or_else(|| {
-        derive_capture_object_id(&input.workspace_id, &input.version_id, &path)
-    });
+    let target_object_id = existing_alias
+        .clone()
+        .unwrap_or_else(|| derive_capture_object_id(&input.workspace_id, &input.version_id, &path));
     admit(&input.workspace_id, &input.version_id, &target_object_id)?;
 
     let ResolvedCaptureObject {

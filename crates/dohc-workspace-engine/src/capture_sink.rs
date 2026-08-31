@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// The encrypted store validates origins against the TS `WRITE_ORIGINS` set,
@@ -59,6 +60,10 @@ const POLICY_UNAVAILABLE: CaptureError = CaptureError {
 const SECRET_KEY_UNAVAILABLE: CaptureError = CaptureError {
     reason: "workspace secret key unavailable",
 };
+/// Secure file preparation is I/O-bound on Windows. Eight readers saturate
+/// that syscall path on the launch profile without competing with the actor's
+/// serialized database writer.
+const MAX_ADDED_TEXT_PREPARE_WORKERS: usize = 8;
 
 /// Per-run moment provenance, mirroring the TS capture metadata: a reconcile
 /// pass stamps ONE summary + correlation id across every moment it records
@@ -452,85 +457,13 @@ impl StoreCaptureSink {
     /// privilege; identity-by-handle needs APIs std does not expose) —
     /// candidate hardening for the composition driver.
     fn read_current(&self, path: &str, media_type: &str) -> Result<CurrentContent, CaptureError> {
-        let absolute = self.shadow_root.join(path);
         match self.path_containment(path) {
             Containment::Contained => {}
             Containment::Absent => return Ok(CurrentContent::Absent),
             Containment::Escaped => return Err(ESCAPES_ROOT),
         }
         let canonical_root = self.canonical_shadow_root()?;
-        // Advisory lstat mirror of the TS refusal (symlink leaf and non-file
-        // entries are not engine-ownable); the no-follow open below is what
-        // actually closes the check-then-open race.
-        match std::fs::symlink_metadata(&absolute) {
-            Ok(metadata) if !metadata.file_type().is_file() => {
-                return Ok(CurrentContent::NonOwnable);
-            }
-            Ok(_) => {}
-            Err(err) if absent_error(&err) => return Ok(CurrentContent::Absent),
-            Err(_) => return Err(READ_FAILED),
-        }
-        let file = match open_no_follow(&absolute) {
-            NoFollowOpen::Opened(file) => file,
-            NoFollowOpen::Refused => return Ok(CurrentContent::NonOwnable),
-            NoFollowOpen::Absent => return Ok(CurrentContent::Absent),
-            NoFollowOpen::Failed => return Err(READ_FAILED),
-        };
-        verify_opened_containment(&self.shadow_root, canonical_root, path, &file)?;
-        let metadata = file.metadata().map_err(|_| READ_FAILED)?;
-        if !metadata.file_type().is_file() {
-            return Ok(CurrentContent::NonOwnable);
-        }
-        // Between the capture cap and the SCAN cap (64 MiB) the scanner still
-        // lists the file, so a grow-past-capture-cap lands here and retires.
-        // PAST the scan cap the plan classifies it `retained_over_cap` and the
-        // sink is never called — deliberately NOT a retire: the ratified CAL-3
-        // delta (BEHAVIOR_DELTA.md §7.1) keeps last-known-good rather than
-        // false-deleting live user data behind an operational scan bound.
-        // Collection schemas are a reserved engine control file. The generic
-        // scanner deliberately classifies unknown extensions as binary, but
-        // collection discovery reads this YAML from the plaintext store.
-        let text_media = path.rsplit('/').next() == Some(COLLECTION_SCHEMA_FILENAME)
-            || is_text_media_type(media_type, path);
-        let content_cap = if text_media {
-            MAX_CAPTURE_TEXT_BYTES
-        } else {
-            MAX_CAPTURE_BINARY_BYTES
-        };
-        if metadata.len() > content_cap {
-            return Ok(CurrentContent::NonOwnable);
-        }
-        let mut bytes = Vec::with_capacity(metadata.len() as usize);
-        file.take(content_cap.saturating_add(1))
-            .read_to_end(&mut bytes)
-            .map_err(|_| READ_FAILED)?;
-        if bytes.len() as u64 > content_cap {
-            return Ok(CurrentContent::NonOwnable);
-        }
-        if !text_media {
-            // Non-text media is engine-ownable BINARY content: the TS oracle
-            // routes it to the binary store before any UTF-8 sniffing, so a
-            // UTF-8-clean `.png` must never land in the plaintext store.
-            return Ok(CurrentContent::Binary(bytes));
-        }
-        match String::from_utf8(bytes) {
-            Ok(text) if text.len() as u64 > MAX_CAPTURE_TEXT_BYTES => {
-                // Genuine text over the text cap stays untracked (established
-                // TS behavior), even though binary of the same size would be
-                // ownable.
-                Ok(CurrentContent::NonOwnable)
-            }
-            Ok(text) => Ok(CurrentContent::Text(text)),
-            // A text-suffixed path can be binary in disguise (invalid UTF-8);
-            // the store accepts that as binary up to the binary cap.
-            Err(err)
-                if path.to_ascii_lowercase().ends_with(".excalidraw")
-                    || err.as_bytes().len() as u64 > MAX_CAPTURE_BINARY_BYTES =>
-            {
-                Ok(CurrentContent::NonOwnable)
-            }
-            Err(err) => Ok(CurrentContent::Binary(err.into_bytes())),
-        }
+        read_contained_current(&self.shadow_root, canonical_root, path, media_type)
     }
 
     // The blocking actor calls below carry no timeout; this adapter is dormant
@@ -806,26 +739,147 @@ struct PreparedTextCapture {
     sha256: String,
 }
 
+#[derive(Clone, Copy)]
+struct AddedTextCandidate<'a> {
+    path: &'a str,
+    media_type: &'static str,
+}
+
+struct PreparedTextContent {
+    text: String,
+    size: u64,
+    sha256: String,
+}
+
+enum PreparedTextPrefix {
+    Ready(Vec<PreparedTextContent>),
+    FallbackFirst,
+}
+
+/// Securely prepare an ordered batch prefix with a fixed reader ceiling.
+///
+/// Workers only reopen and hash files. The actor/database write remains on
+/// the caller's thread and preserves plan order. At most one worker window is
+/// retained beyond the 4 MiB actor batch, bounding speculative content to
+/// `workers * MAX_CAPTURE_TEXT_BYTES` when files grow after the scan.
+fn prepare_added_text_prefix_parallel(
+    root: &Path,
+    canonical_root: &Path,
+    candidates: &[AddedTextCandidate<'_>],
+) -> PreparedTextPrefix {
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(MAX_ADDED_TEXT_PREPARE_WORKERS)
+        .min(candidates.len());
+    let mut pending = Vec::with_capacity(candidates.len());
+    let mut pending_bytes = 0usize;
+
+    std::thread::scope(|scope| {
+        let (result_tx, result_rx) =
+            mpsc::sync_channel::<(usize, Option<PreparedTextContent>)>(workers);
+        let mut task_txs = Vec::with_capacity(workers);
+
+        for _ in 0..workers {
+            let (task_tx, task_rx) = mpsc::sync_channel::<usize>(1);
+            task_txs.push(task_tx);
+            let result_tx = result_tx.clone();
+            scope.spawn(move || {
+                while let Ok(index) = task_rx.recv() {
+                    let candidate = candidates[index];
+                    let prepared = match read_current_with_canonical_root(
+                        root,
+                        canonical_root,
+                        candidate.path,
+                        candidate.media_type,
+                    ) {
+                        Ok(CurrentContent::Text(text)) => {
+                            let size = text.len() as u64;
+                            let sha256 = sha256_hex(text.as_bytes());
+                            Some(PreparedTextContent { text, size, sha256 })
+                        }
+                        Ok(
+                            CurrentContent::Binary(_)
+                            | CurrentContent::Absent
+                            | CurrentContent::NonOwnable,
+                        )
+                        | Err(_) => None,
+                    };
+                    if result_tx.send((index, prepared)).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+        drop(result_tx);
+
+        'windows: for window_start in (0..candidates.len()).step_by(workers) {
+            let window_end = (window_start + workers).min(candidates.len());
+            for (task_tx, index) in task_txs.iter().zip(window_start..window_end) {
+                if task_tx.send(index).is_err() {
+                    return if pending.is_empty() {
+                        PreparedTextPrefix::FallbackFirst
+                    } else {
+                        PreparedTextPrefix::Ready(pending)
+                    };
+                }
+            }
+
+            let mut window = (window_start..window_end)
+                .map(|_| None)
+                .collect::<Vec<Option<PreparedTextContent>>>();
+            for _ in window_start..window_end {
+                let Ok((index, prepared)) = result_rx.recv() else {
+                    return if pending.is_empty() {
+                        PreparedTextPrefix::FallbackFirst
+                    } else {
+                        PreparedTextPrefix::Ready(pending)
+                    };
+                };
+                window[index - window_start] = prepared;
+            }
+
+            for prepared in window {
+                let Some(prepared) = prepared else {
+                    if pending.is_empty() {
+                        return PreparedTextPrefix::FallbackFirst;
+                    }
+                    break 'windows;
+                };
+                let text_bytes = prepared.text.len();
+                if text_bytes > MAX_CAPTURE_INGEST_BATCH_BYTES {
+                    if pending.is_empty() {
+                        return PreparedTextPrefix::FallbackFirst;
+                    }
+                    break 'windows;
+                }
+                if !pending.is_empty()
+                    && (pending.len() >= MAX_CAPTURE_INGEST_BATCH_OPS
+                        || pending_bytes.saturating_add(text_bytes)
+                            > MAX_CAPTURE_INGEST_BATCH_BYTES)
+                {
+                    break 'windows;
+                }
+                pending_bytes = pending_bytes.saturating_add(text_bytes);
+                pending.push(prepared);
+            }
+        }
+        drop(task_txs);
+        PreparedTextPrefix::Ready(pending)
+    })
+}
+
 impl StoreCaptureSink {
-    fn prepare_added_text(&self, path: &str, media_type: &str) -> Option<PreparedTextCapture> {
-        match classify_engine_file_path_normalized(path) {
-            (PathClassification::Tracked, Some(normalized)) if normalized == path => {}
-            _ => return None,
-        }
-        if !self.policy_tracks(path).ok()? {
-            return None;
-        }
-        let CurrentContent::Text(text) = self.read_current(path, media_type).ok()? else {
-            return None;
-        };
-        let size = text.len() as u64;
-        let sha256 = sha256_hex(text.as_bytes());
-        Some(PreparedTextCapture {
+    fn prepared_text_capture(
+        &self,
+        candidate: AddedTextCandidate<'_>,
+        prepared: PreparedTextContent,
+    ) -> PreparedTextCapture {
+        PreparedTextCapture {
             input: CaptureIngest {
                 workspace_id: self.workspace_id.clone(),
                 version_id: self.version_id.clone(),
-                path: path.to_owned(),
-                text,
+                path: candidate.path.to_owned(),
+                text: prepared.text,
                 metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
                 metadata_summary: self.provenance.summary.clone(),
                 metadata_correlation_id: self.provenance.correlation_id.clone(),
@@ -834,9 +888,27 @@ impl StoreCaptureSink {
                 request_id: None,
                 claim_foreign_head: false,
             },
+            size: prepared.size,
+            sha256: prepared.sha256,
+        }
+    }
+
+    fn ingest_single_added_op(&mut self, op: &CaptureOp) -> BatchIngestResult {
+        let CaptureOp::Ingest {
+            path,
             size,
             sha256,
-        })
+            media_type,
+            reason,
+            ..
+        } = op
+        else {
+            unreachable!("the batch path only receives Added ingests");
+        };
+        match self.ingest(path, *size, sha256, media_type, *reason) {
+            Ok(outcome) => BatchIngestResult::Committed(vec![Ok(outcome)]),
+            Err(_) => BatchIngestResult::Uncertain { attempted: 1 },
+        }
     }
 
     fn commit_added_text_batch(&self, batch: Vec<PreparedTextCapture>) -> BatchIngestResult {
@@ -910,52 +982,42 @@ impl CaptureSink for StoreCaptureSink {
             return None;
         }
 
-        let mut pending = Vec::with_capacity(MAX_CAPTURE_INGEST_BATCH_OPS);
-        let mut pending_bytes = 0usize;
-        for op in ops {
+        let mut candidates = Vec::with_capacity(MAX_CAPTURE_INGEST_BATCH_OPS);
+        for op in ops.iter().take(MAX_CAPTURE_INGEST_BATCH_OPS) {
             let CaptureOp::Ingest {
-                path,
-                size,
-                sha256,
-                media_type,
-                reason,
-                ..
+                path, media_type, ..
             } = op
             else {
                 unreachable!("all operations were checked as Added ingests");
             };
-            let Some(prepared) = self.prepare_added_text(path, media_type) else {
-                if pending.is_empty() {
-                    return Some(
-                        match self.ingest(path, *size, sha256, media_type, *reason) {
-                            Ok(outcome) => BatchIngestResult::Committed(vec![Ok(outcome)]),
-                            Err(_) => BatchIngestResult::Uncertain { attempted: 1 },
-                        },
-                    );
-                }
-                break;
-            };
-            let text_bytes = prepared.input.text.len();
-            if text_bytes > MAX_CAPTURE_INGEST_BATCH_BYTES {
-                if pending.is_empty() {
-                    return Some(
-                        match self.ingest(path, *size, sha256, media_type, *reason) {
-                            Ok(outcome) => BatchIngestResult::Committed(vec![Ok(outcome)]),
-                            Err(_) => BatchIngestResult::Uncertain { attempted: 1 },
-                        },
-                    );
-                }
-                break;
-            }
-            if !pending.is_empty()
-                && (pending.len() >= MAX_CAPTURE_INGEST_BATCH_OPS
-                    || pending_bytes.saturating_add(text_bytes) > MAX_CAPTURE_INGEST_BATCH_BYTES)
+            if !matches!(
+                classify_engine_file_path_normalized(path),
+                (PathClassification::Tracked, Some(normalized)) if normalized == path.as_str()
+            ) || !self.policy_tracks(path).unwrap_or(false)
             {
                 break;
             }
-            pending_bytes = pending_bytes.saturating_add(text_bytes);
-            pending.push(prepared);
+            candidates.push(AddedTextCandidate { path, media_type });
         }
+        if candidates.is_empty() {
+            return Some(self.ingest_single_added_op(&ops[0]));
+        }
+
+        let canonical_root = match self.canonical_shadow_root() {
+            Ok(root) => root.to_path_buf(),
+            Err(_) => return Some(self.ingest_single_added_op(&ops[0])),
+        };
+        let prepared =
+            prepare_added_text_prefix_parallel(&self.shadow_root, &canonical_root, &candidates);
+        let PreparedTextPrefix::Ready(prepared) = prepared else {
+            return Some(self.ingest_single_added_op(&ops[0]));
+        };
+        debug_assert!(!prepared.is_empty());
+        let pending = candidates
+            .into_iter()
+            .zip(prepared)
+            .map(|(candidate, prepared)| self.prepared_text_capture(candidate, prepared))
+            .collect();
         Some(self.commit_added_text_batch(pending))
     }
 
@@ -1207,6 +1269,114 @@ enum CurrentContent {
     NonOwnable,
 }
 
+/// Parallel preparation already owns the generation's canonical root, so it
+/// repeats the same strict parent check without touching `StoreCaptureSink`'s
+/// non-`Sync` policy state.
+fn read_current_with_canonical_root(
+    root: &Path,
+    canonical_root: &Path,
+    path: &str,
+    media_type: &str,
+) -> Result<CurrentContent, CaptureError> {
+    let absolute = root.join(path);
+    let Some(parent) = absolute.parent() else {
+        return Err(ESCAPES_ROOT);
+    };
+    let canonical_parent = match parent.canonicalize() {
+        Ok(real) => real,
+        Err(err) if absent_error(&err) => return Ok(CurrentContent::Absent),
+        Err(_) => return Err(ESCAPES_ROOT),
+    };
+    match contained_parent(canonical_root, path, &canonical_parent) {
+        Containment::Contained => read_contained_current(root, canonical_root, path, media_type),
+        Containment::Absent => Ok(CurrentContent::Absent),
+        Containment::Escaped => Err(ESCAPES_ROOT),
+    }
+}
+
+/// Read a path whose parent has already passed the generation's containment
+/// check. Both the ordinary sink path and the bounded parallel preparation
+/// path use this exact reopen, post-open containment, type, and size logic.
+fn read_contained_current(
+    root: &Path,
+    canonical_root: &Path,
+    path: &str,
+    media_type: &str,
+) -> Result<CurrentContent, CaptureError> {
+    let absolute = root.join(path);
+    // Advisory lstat mirror of the TS refusal (symlink leaf and non-file
+    // entries are not engine-ownable); the no-follow open below is what
+    // actually closes the check-then-open race.
+    match std::fs::symlink_metadata(&absolute) {
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            return Ok(CurrentContent::NonOwnable);
+        }
+        Ok(_) => {}
+        Err(err) if absent_error(&err) => return Ok(CurrentContent::Absent),
+        Err(_) => return Err(READ_FAILED),
+    }
+    let file = match open_no_follow(&absolute) {
+        NoFollowOpen::Opened(file) => file,
+        NoFollowOpen::Refused => return Ok(CurrentContent::NonOwnable),
+        NoFollowOpen::Absent => return Ok(CurrentContent::Absent),
+        NoFollowOpen::Failed => return Err(READ_FAILED),
+    };
+    verify_opened_containment(root, canonical_root, path, &file)?;
+    let metadata = file.metadata().map_err(|_| READ_FAILED)?;
+    if !metadata.file_type().is_file() {
+        return Ok(CurrentContent::NonOwnable);
+    }
+    // Between the capture cap and the SCAN cap (64 MiB) the scanner still
+    // lists the file, so a grow-past-capture-cap lands here and retires.
+    // PAST the scan cap the plan classifies it `retained_over_cap` and the
+    // sink is never called — deliberately NOT a retire: the ratified CAL-3
+    // delta (BEHAVIOR_DELTA.md §7.1) keeps last-known-good rather than
+    // false-deleting live user data behind an operational scan bound.
+    // Collection schemas are a reserved engine control file. The generic
+    // scanner deliberately classifies unknown extensions as binary, but
+    // collection discovery reads this YAML from the plaintext store.
+    let text_media = path.rsplit('/').next() == Some(COLLECTION_SCHEMA_FILENAME)
+        || is_text_media_type(media_type, path);
+    let content_cap = if text_media {
+        MAX_CAPTURE_TEXT_BYTES
+    } else {
+        MAX_CAPTURE_BINARY_BYTES
+    };
+    if metadata.len() > content_cap {
+        return Ok(CurrentContent::NonOwnable);
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(content_cap.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|_| READ_FAILED)?;
+    if bytes.len() as u64 > content_cap {
+        return Ok(CurrentContent::NonOwnable);
+    }
+    if !text_media {
+        // Non-text media is engine-ownable BINARY content: the TS oracle
+        // routes it to the binary store before any UTF-8 sniffing, so a
+        // UTF-8-clean `.png` must never land in the plaintext store.
+        return Ok(CurrentContent::Binary(bytes));
+    }
+    match String::from_utf8(bytes) {
+        Ok(text) if text.len() as u64 > MAX_CAPTURE_TEXT_BYTES => {
+            // Genuine text over the text cap stays untracked (established TS
+            // behavior), even though binary of the same size would be ownable.
+            Ok(CurrentContent::NonOwnable)
+        }
+        Ok(text) => Ok(CurrentContent::Text(text)),
+        // A text-suffixed path can be binary in disguise (invalid UTF-8); the
+        // store accepts that as binary up to the binary cap.
+        Err(err)
+            if path.to_ascii_lowercase().ends_with(".excalidraw")
+                || err.as_bytes().len() as u64 > MAX_CAPTURE_BINARY_BYTES =>
+        {
+            Ok(CurrentContent::NonOwnable)
+        }
+        Err(err) => Ok(CurrentContent::Binary(err.into_bytes())),
+    }
+}
+
 fn absent_error(err: &std::io::Error) -> bool {
     matches!(err.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory)
 }
@@ -1370,6 +1540,50 @@ mod tests {
             std::fs::create_dir_all(parent).expect("create file parent");
         }
         std::fs::write(absolute, bytes).expect("write fixture");
+    }
+
+    #[test]
+    fn parallel_added_text_preparation_preserves_the_ordered_text_prefix() {
+        let scratch = ScratchDir::new().expect("scratch");
+        write_file(scratch.path(), "a.md", b"alpha");
+        write_file(scratch.path(), "b.md", b"bravo");
+        write_file(scratch.path(), "c.png", b"binary route");
+        write_file(scratch.path(), "d.md", b"discarded suffix");
+        let canonical_root = scratch.path().canonicalize().expect("canonical root");
+        let candidates = [
+            AddedTextCandidate {
+                path: "a.md",
+                media_type: "text/markdown",
+            },
+            AddedTextCandidate {
+                path: "b.md",
+                media_type: "text/markdown",
+            },
+            AddedTextCandidate {
+                path: "c.png",
+                media_type: "image/png",
+            },
+            AddedTextCandidate {
+                path: "d.md",
+                media_type: "text/markdown",
+            },
+        ];
+
+        let PreparedTextPrefix::Ready(prepared) =
+            prepare_added_text_prefix_parallel(scratch.path(), &canonical_root, &candidates)
+        else {
+            panic!("the leading text files should form a batch prefix");
+        };
+
+        assert_eq!(prepared.len(), 2);
+        assert_eq!(prepared[0].text, "alpha");
+        assert_eq!(prepared[0].sha256, sha256_hex(b"alpha"));
+        assert_eq!(prepared[1].text, "bravo");
+        assert_eq!(prepared[1].sha256, sha256_hex(b"bravo"));
+        assert!(matches!(
+            prepare_added_text_prefix_parallel(scratch.path(), &canonical_root, &candidates[2..],),
+            PreparedTextPrefix::FallbackFirst
+        ));
     }
 
     fn ingest(sink: &mut StoreCaptureSink, path: &str) -> Result<IngestOutcome, CaptureError> {
