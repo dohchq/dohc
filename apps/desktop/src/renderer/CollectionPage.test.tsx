@@ -6,6 +6,7 @@ import * as Y from "yjs";
 import {
   parseCollectionSchema,
   type CollectionRecord,
+  type CollectionRecordGroup,
   type CollectionSchema,
 } from "@dohc/workspace-contracts";
 import { serializeCollectionSchema } from "./collections/schemaAuthoring";
@@ -124,7 +125,16 @@ function record(id: string, title: string): CollectionRecord {
 // SHA-256, but the renderer only round-trips the value.
 const hashFor = (writes: number) => String(writes).padStart(64, "0");
 
-function makeBridge(records: CollectionRecord[], schema: CollectionSchema = SCHEMA) {
+function makeBridge(
+  records: CollectionRecord[],
+  schema: CollectionSchema = SCHEMA,
+  extra?: {
+    /** The grouped result a board view's query serves. */
+    groups?: CollectionRecordGroup[];
+    /** Records served for queries against other collection paths. */
+    related?: Record<string, CollectionRecord[]>;
+  },
+) {
   const activityCallbacks = new Set<(event: WorkspaceActivityEvent) => void>();
   // The schema round-trips through the stub the way it does through the
   // engine: reads serve the last written text's parse, writes conflict on a
@@ -165,12 +175,25 @@ function makeBridge(records: CollectionRecord[], schema: CollectionSchema = SCHE
       },
     ),
     queryCollectionRecords: vi.fn(
-      async (): Promise<QueryCollectionRecordsResult> => ({
-        collection: { path: "tasks", status: "valid", reasons: [] },
-        records,
-        groups: null,
-        nextCursor: null,
-      }),
+      async (params: {
+        collectionPath: string;
+      }): Promise<QueryCollectionRecordsResult> => {
+        const related = extra?.related?.[params.collectionPath];
+        if (related) {
+          return {
+            collection: { path: params.collectionPath, status: "valid", reasons: [] },
+            records: related,
+            groups: null,
+            nextCursor: null,
+          };
+        }
+        return {
+          collection: { path: "tasks", status: "valid", reasons: [] },
+          records,
+          groups: extra?.groups ?? null,
+          nextCursor: null,
+        };
+      },
     ),
     onWorkspaceActivity: vi.fn(
       (callback: (event: WorkspaceActivityEvent) => void) => {
@@ -186,6 +209,7 @@ function makeBridge(records: CollectionRecord[], schema: CollectionSchema = SCHE
 function renderPage(
   bridge: ReturnType<typeof makeBridge>,
   onNewRecord: (collectionPath: string) => void = () => undefined,
+  onOpenRecord: (recordPath: string) => void = () => undefined,
 ) {
   vi.stubGlobal("dohcDesktop", bridge);
   return render(
@@ -193,6 +217,7 @@ function renderPage(
       workspaceId="ws-1"
       collectionPath="tasks"
       onNewRecord={onNewRecord}
+      onOpenRecord={onOpenRecord}
     />,
   );
 }
@@ -451,6 +476,166 @@ describe("collection authoring", () => {
       expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(3),
     );
     expect(lastWrittenSchema(bridge).schema.views).toEqual([]);
+  });
+});
+
+const BOARD_SCHEMA: CollectionSchema = {
+  ...SELECT_SCHEMA,
+  views: [
+    {
+      name: "Board",
+      kind: "board",
+      groupBy: "status",
+      sort: [],
+      visibleFields: null,
+      dateField: null,
+    },
+  ],
+};
+
+const CALENDAR_SCHEMA: CollectionSchema = {
+  name: "Tasks",
+  description: null,
+  fields: [
+    { name: "title", type: "text" },
+    { name: "due", type: "date" },
+  ],
+  views: [
+    {
+      name: "Calendar",
+      kind: "calendar",
+      groupBy: null,
+      sort: [],
+      visibleFields: null,
+      dateField: "due",
+    },
+  ],
+};
+
+/** Today as a date field value, so the event lands in the opened month. */
+function localToday(): string {
+  const now = new Date();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${now.getFullYear()}-${month}-${day}`;
+}
+
+describe("record click-through", () => {
+  it("opens the record's file from a table row", async () => {
+    const bridge = makeBridge([record("rec-1", "Plan")]);
+    const onOpenRecord = vi.fn();
+    renderPage(bridge, undefined, onOpenRecord);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open Plan" }));
+    expect(onOpenRecord).toHaveBeenCalledExactlyOnceWith("tasks/Plan.md");
+  });
+
+  it("opens the record's file from a board card", async () => {
+    const bridge = makeBridge([selectRecord()], BOARD_SCHEMA, {
+      groups: [{ value: "Todo", records: [selectRecord()] }],
+    });
+    const onOpenRecord = vi.fn();
+    renderPage(bridge, undefined, onOpenRecord);
+
+    fireEvent.click(await screen.findByRole("listitem", { name: "Plan" }));
+    expect(onOpenRecord).toHaveBeenCalledExactlyOnceWith("tasks/Plan.md");
+  });
+
+  it("opens the record's file from a calendar event", async () => {
+    const dated: CollectionRecord = {
+      id: "rec-1",
+      path: "tasks/Plan.md",
+      conflicted: false,
+      values: [
+        {
+          field: "title",
+          value: "Plan",
+          validation: { status: "valid" },
+          resolvedRelations: [],
+        },
+        {
+          field: "due",
+          value: localToday(),
+          validation: { status: "valid" },
+          resolvedRelations: [],
+        },
+      ],
+    };
+    const bridge = makeBridge([dated], CALENDAR_SCHEMA);
+    const onOpenRecord = vi.fn();
+    renderPage(bridge, undefined, onOpenRecord);
+
+    fireEvent.click(await screen.findByText("Plan"));
+    expect(onOpenRecord).toHaveBeenCalledExactlyOnceWith("tasks/Plan.md");
+  });
+});
+
+const RELATION_SCHEMA: CollectionSchema = {
+  name: "Tasks",
+  description: null,
+  fields: [
+    { name: "title", type: "text" },
+    { name: "owner", type: "relation", collection: "people", many: false },
+  ],
+  views: [],
+};
+
+function person(id: string, name: string): CollectionRecord {
+  return {
+    id,
+    path: `people/${name}.md`,
+    conflicted: false,
+    values: [
+      {
+        field: "name",
+        value: name,
+        validation: { status: "valid" },
+        resolvedRelations: [],
+      },
+    ],
+  };
+}
+
+describe("relation picking", () => {
+  it("queries the related collection and writes the picked id through the record's doc", async () => {
+    const doc = new Y.Doc();
+    docMock.current = engineDocState({ available: true, doc });
+    const relationRecord: CollectionRecord = {
+      id: "rec-1",
+      path: "tasks/Plan.md",
+      conflicted: false,
+      values: [
+        {
+          field: "title",
+          value: "Plan",
+          validation: { status: "valid" },
+          resolvedRelations: [],
+        },
+        {
+          field: "owner",
+          value: "rec-p1",
+          validation: { status: "valid" },
+          resolvedRelations: [{ recordId: "rec-p1", label: "Ada" }],
+        },
+      ],
+    };
+    const bridge = makeBridge([relationRecord], RELATION_SCHEMA, {
+      related: { people: [person("rec-p1", "Ada"), person("rec-p2", "Grace")] },
+    });
+    renderPage(bridge);
+    await screen.findByText("Plan");
+
+    fireEvent.click(screen.getByRole("button", { name: "Ada" }));
+    fireEvent.click(await screen.findByRole("option", { name: "Grace" }));
+
+    expect(bridge.queryCollectionRecords).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      collectionPath: "people",
+      limit: 100,
+    });
+    await waitFor(() =>
+      expect(doc.getMap("frontmatter").get("owner")).toBe("rec-p2"),
+    );
   });
 });
 

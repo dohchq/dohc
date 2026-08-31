@@ -33,6 +33,8 @@ export interface CalendarViewProps {
    * applies it through its own write path; the package never writes.
    */
   onCellChange?: (change: CollectionCellChange) => void;
+  /** Receives the event's record when the event is clicked, not dragged. */
+  onOpenRecord?: (record: CollectionRecord) => void;
   /** Maps a person field's user id to a display name. Falls back to the id. */
   personLabel?: (userId: string) => string | null;
   /** The date whose month opens first. Defaults to today. */
@@ -65,6 +67,7 @@ export function CalendarView({
   dateField,
   visibleFields,
   onCellChange,
+  onOpenRecord,
   personLabel,
   defaultDate,
   className,
@@ -120,6 +123,9 @@ export function CalendarView({
         views={["month"]}
         resizable={false}
         onEventDrop={handleEventDrop}
+        onSelectEvent={
+          onOpenRecord ? (event) => onOpenRecord(event.record) : undefined
+        }
       />
     </div>
   );

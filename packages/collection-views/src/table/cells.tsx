@@ -5,6 +5,8 @@ import type {
   CollectionValue,
   FieldDefinition,
 } from "@dohc/workspace-contracts";
+import type { CollectionQueryExecutor } from "../store";
+import { RelationPicker } from "../relation/RelationPicker";
 
 export interface FieldCellProps {
   field: FieldDefinition;
@@ -24,6 +26,11 @@ export interface FieldCellProps {
    * Absent means cells only pick existing options.
    */
   onCreateOption?: (option: string, nextValue: CollectionValue) => void;
+  /**
+   * Runs the relation picker's queries against a relation field's related
+   * collection. Absent means relation cells stay read-only.
+   */
+  relationExecutor?: CollectionQueryExecutor;
 }
 
 /** Plain text for a raw collection value: board group labels, fallbacks. */
@@ -151,9 +158,17 @@ interface EditorProps {
   emit: (value: CollectionValue) => void;
   close: () => void;
   onCreateOption?: (option: string, nextValue: CollectionValue) => void;
+  relationExecutor?: CollectionQueryExecutor;
 }
 
-function CellEditor({ field, indexed, emit, close, onCreateOption }: EditorProps) {
+function CellEditor({
+  field,
+  indexed,
+  emit,
+  close,
+  onCreateOption,
+  relationExecutor,
+}: EditorProps) {
   const value = indexed?.value ?? null;
   const commitAndClose = (next: CollectionValue) => {
     emit(next);
@@ -278,8 +293,34 @@ function CellEditor({ field, indexed, emit, close, onCreateOption }: EditorProps
         </span>
       );
     }
-    // text, url, person: a plain text value. A person cell may display a
-    // resolved name, but edits work on the raw id.
+    case "relation": {
+      // Guarded by the caller: editing only starts with an executor.
+      if (!relationExecutor) return null;
+      return (
+        <RelationPicker
+          field={field}
+          value={value}
+          executor={relationExecutor}
+          emit={emit}
+          close={close}
+        />
+      );
+    }
+    // A person value is a user id. The renderer has no workspace people
+    // source yet, so edits work on the raw id; the trim keeps a
+    // whitespace-only entry from indexing as a flagged empty id.
+    case "person":
+      return (
+        <CellInput
+          defaultValue={asText(value)}
+          commit={(raw) => {
+            const id = raw.trim();
+            commitAndClose(id === "" ? null : id);
+          }}
+          cancel={close}
+        />
+      );
+    // text, url: a plain text value.
     default:
       return (
         <CellInput
@@ -297,6 +338,7 @@ export function FieldCell({
   personLabel,
   onChange,
   onCreateOption,
+  relationExecutor,
 }: FieldCellProps) {
   const [editing, setEditing] = useState(false);
   const flagged = indexed !== undefined && indexed.validation.status === "flagged";
@@ -315,9 +357,11 @@ export function FieldCell({
     );
   }
 
-  // Relation editing needs a record picker with query access; the desktop
-  // lane owns that surface. Relation cells stay read-only here.
-  const editable = onChange !== undefined && field.type !== "relation";
+  // Relation editing needs query access to the related collection; without
+  // an executor the cell stays read-only.
+  const editable =
+    onChange !== undefined &&
+    (field.type !== "relation" || relationExecutor !== undefined);
 
   if (editing && onChange && editable) {
     return wrapFlagged(
@@ -328,6 +372,7 @@ export function FieldCell({
         emit={onChange}
         close={() => setEditing(false)}
         onCreateOption={onCreateOption}
+        relationExecutor={relationExecutor}
       />,
     );
   }

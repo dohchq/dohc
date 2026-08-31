@@ -252,4 +252,27 @@ describe("BoardView", () => {
     );
     expect(screen.getByText("No records in this collection yet.")).toBeDefined();
   });
+
+  it("emits the card's record on click, not from a keyboard drag's Enter", async () => {
+    const onOpenRecord = vi.fn();
+    render(
+      <BoardView
+        schema={makeSchema()}
+        groups={makeGroups()}
+        groupBy="status"
+        onOpenRecord={onOpenRecord}
+      />,
+    );
+    layOutBoard();
+    const card = screen.getByRole("listitem", { name: "Write the spec" });
+    fireEvent.click(card);
+    expect(onOpenRecord).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ id: "rec-a", path: "tasks/rec-a.md" }),
+    );
+
+    // Enter lifts the card for the keyboard drag sensor; it must not open.
+    onOpenRecord.mockClear();
+    await keyboardDrag(card, []);
+    expect(onOpenRecord).not.toHaveBeenCalled();
+  });
 });

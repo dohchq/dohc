@@ -6553,6 +6553,7 @@ export function DesktopWorkspaceShell(props: {
                     workspaceId={workspaceId}
                     collectionPath={groupCollectionPath}
                     onNewRecord={createCollectionRecord}
+                    onOpenRecord={openFile}
                   />
                 </Suspense>
               ) : (

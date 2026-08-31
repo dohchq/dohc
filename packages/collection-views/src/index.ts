@@ -9,6 +9,11 @@ export {
 } from "./store";
 export { useCollectionStore } from "./useCollectionStore";
 export { deriveColumns } from "./columns";
+export { recordLabel } from "./recordLabel";
+export {
+  RelationPicker,
+  type RelationPickerProps,
+} from "./relation/RelationPicker";
 export {
   FieldCell,
   fieldDisplayText,

@@ -1,0 +1,177 @@
+import { useEffect, useMemo, useState } from "react";
+import type {
+  CollectionRecord,
+  CollectionValue,
+  RelationFieldDefinition,
+} from "@dohc/workspace-contracts";
+import type { CollectionQueryExecutor } from "../store";
+import { recordLabel } from "../recordLabel";
+
+// One page of the related collection is enough for this slice; the search
+// input filters within it client-side.
+const RELATION_PICKER_LIMIT = 100;
+
+export interface RelationPickerProps {
+  field: RelationFieldDefinition;
+  /** The record's current value for the field: record ids, per the contract. */
+  value: CollectionValue;
+  /**
+   * Runs the picker's query against the related collection. Hosts bind this
+   * to their transport; the picker never writes.
+   */
+  executor: CollectionQueryExecutor;
+  /**
+   * Receives the standard cell value: one record id or null when the field
+   * is single, the full id array when it is many.
+   */
+  emit: (value: CollectionValue) => void;
+  close: () => void;
+}
+
+function selectedIds(value: CollectionValue): string[] {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) {
+    return value.filter((entry): entry is string => typeof entry === "string");
+  }
+  return [];
+}
+
+export function RelationPicker({
+  field,
+  value,
+  executor,
+  emit,
+  close,
+}: RelationPickerProps) {
+  const [records, setRecords] = useState<CollectionRecord[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+
+  useEffect(() => {
+    let stale = false;
+    executor({
+      collectionPath: field.collection,
+      limit: RELATION_PICKER_LIMIT,
+    })
+      .then((result) => {
+        if (stale) return;
+        setRecords(result.records);
+        setError(null);
+      })
+      .catch((failure: unknown) => {
+        if (stale) return;
+        setError(failure instanceof Error ? failure.message : String(failure));
+      });
+    return () => {
+      stale = true;
+    };
+  }, [executor, field.collection]);
+
+  const selected = useMemo(() => selectedIds(value), [value]);
+  const shown = useMemo(() => {
+    if (records === null) return [];
+    const needle = search.trim().toLowerCase();
+    if (needle === "") return records;
+    return records.filter((record) =>
+      recordLabel(record).toLowerCase().includes(needle),
+    );
+  }, [records, search]);
+
+  return (
+    <span
+      className="flex w-full flex-col gap-0.5"
+      onKeyDown={(event) => {
+        if (event.key === "Escape") close();
+      }}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) close();
+      }}
+    >
+      <input
+        autoFocus
+        type="text"
+        aria-label="Search records"
+        placeholder="Search records"
+        value={search}
+        onChange={(event) => setSearch(event.currentTarget.value)}
+        className="w-full rounded border border-line bg-bg px-1 text-[13px] placeholder:text-subtle"
+      />
+      {error !== null ? (
+        <span className="text-[11px] text-danger">
+          dohc could not read the related collection's records. {error}
+        </span>
+      ) : records === null ? (
+        <span className="text-[11px] text-subtle">Loading records...</span>
+      ) : shown.length === 0 ? (
+        <span className="text-[11px] text-muted">
+          {search.trim() === ""
+            ? "No records in the related collection yet."
+            : `No records match "${search.trim()}".`}
+        </span>
+      ) : field.many ? (
+        <span
+          role="listbox"
+          aria-multiselectable="true"
+          aria-label={`Records in ${field.collection}`}
+          className="flex max-h-48 flex-col gap-0.5 overflow-y-auto"
+        >
+          {shown.map((record) => (
+            <label
+              key={record.id}
+              className="flex items-center gap-1.5 text-[13px]"
+            >
+              <input
+                type="checkbox"
+                checked={selected.includes(record.id)}
+                onChange={() =>
+                  emit(
+                    selected.includes(record.id)
+                      ? selected.filter((id) => id !== record.id)
+                      : [...selected, record.id],
+                  )
+                }
+              />
+              {recordLabel(record)}
+            </label>
+          ))}
+        </span>
+      ) : (
+        <span
+          role="listbox"
+          aria-label={`Records in ${field.collection}`}
+          className="flex max-h-48 flex-col gap-0.5 overflow-y-auto"
+        >
+          {shown.map((record) => (
+            <button
+              key={record.id}
+              type="button"
+              role="option"
+              aria-selected={selected.includes(record.id)}
+              className={`rounded px-1 text-left text-[13px] transition-colors duration-75 hover:bg-panel-2 ${
+                selected.includes(record.id) ? "bg-line/60 text-ink" : "text-muted"
+              }`}
+              onClick={() => {
+                emit(record.id);
+                close();
+              }}
+            >
+              {recordLabel(record)}
+            </button>
+          ))}
+        </span>
+      )}
+      {!field.many && error === null && records !== null && selected.length > 0 ? (
+        <button
+          type="button"
+          className="rounded px-1 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-panel-2 hover:text-ink"
+          onClick={() => {
+            emit(null);
+            close();
+          }}
+        >
+          Clear
+        </button>
+      ) : null}
+    </span>
+  );
+}

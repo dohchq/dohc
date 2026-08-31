@@ -127,4 +127,21 @@ describe("CalendarView", () => {
     render(<CalendarView schema={makeSchema()} records={[]} dateField="due" />);
     expect(screen.getByText("No records in this collection yet.")).toBeDefined();
   });
+
+  it("emits the event's record when the event is selected", () => {
+    const onOpenRecord = vi.fn();
+    render(
+      <CalendarView
+        schema={makeSchema()}
+        records={makeRecords()}
+        dateField="due"
+        defaultDate={AUGUST}
+        onOpenRecord={onOpenRecord}
+      />,
+    );
+    fireEvent.click(screen.getByText("Book flights"));
+    expect(onOpenRecord).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ id: "rec-dated", path: "tasks/rec-dated.md" }),
+    );
+  });
 });

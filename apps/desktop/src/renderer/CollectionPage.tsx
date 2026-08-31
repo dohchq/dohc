@@ -16,6 +16,7 @@ import {
 } from "@dohc/collection-views";
 import type {
   CollectionQueryParams,
+  CollectionRecord,
   CollectionSchema,
   CollectionValue,
   ViewDefinition,
@@ -49,6 +50,9 @@ export interface CollectionPageProps {
   // The shell creates the record file (untitled naming needs the file
   // listing, which the shell owns) and opens it; adoption mints the id.
   onNewRecord: (collectionPath: string) => void;
+  // The md file IS the record: opening one goes through the shell's normal
+  // file tab machinery, which composes PropertiesPanel and the live editor.
+  onOpenRecord: (recordPath: string) => void;
 }
 
 /**
@@ -152,6 +156,7 @@ export function CollectionPage({
   workspaceId,
   collectionPath,
   onNewRecord,
+  onOpenRecord,
 }: CollectionPageProps) {
   const [details, setDetails] = useState<{ schema: CollectionSchema } | null>(
     null,
@@ -291,6 +296,10 @@ export function CollectionPage({
   const newRecord = useCallback(
     () => onNewRecord(collectionPath),
     [onNewRecord, collectionPath],
+  );
+  const openRecord = useCallback(
+    (record: CollectionRecord) => onOpenRecord(record.path),
+    [onOpenRecord],
   );
 
   // Schema authoring: fields and views change by rewriting the schema
@@ -488,6 +497,7 @@ export function CollectionPage({
             groupBy={activeView?.groupBy ?? ""}
             visibleFields={activeView?.visibleFields ?? null}
             onCellChange={enqueueCellChange}
+            onOpenRecord={openRecord}
           />
         ) : calendarReady ? (
           <CalendarView
@@ -496,6 +506,7 @@ export function CollectionPage({
             dateField={activeView?.dateField ?? ""}
             visibleFields={activeView?.visibleFields ?? null}
             onCellChange={enqueueCellChange}
+            onOpenRecord={openRecord}
           />
         ) : (
           <TableView
@@ -506,6 +517,8 @@ export function CollectionPage({
             onSortChange={(sort) => void store.setQuery({ sort })}
             onCellChange={enqueueCellChange}
             onCreateOption={createOption}
+            onOpenRecord={openRecord}
+            relationExecutor={executor}
           />
         )}
       </div>

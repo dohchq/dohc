@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useRef } from "react";
 import { DragDropProvider, useDraggable, useDroppable } from "@dnd-kit/react";
 import type { DragEndEvent } from "@dnd-kit/react";
 import type {
@@ -28,6 +28,8 @@ export interface BoardViewProps {
    * writes.
    */
   onCellChange?: (change: CollectionCellChange) => void;
+  /** Receives the card's record when the card is clicked, not dragged. */
+  onOpenRecord?: (record: CollectionRecord) => void;
   /** Maps a person field's user id to a display name. Falls back to the id. */
   personLabel?: (userId: string) => string | null;
   className?: string;
@@ -61,11 +63,18 @@ function isFlagged(record: CollectionRecord): boolean {
 interface BoardCardProps {
   record: CollectionRecord;
   fields: FieldDefinition[];
+  onOpen?: (record: CollectionRecord) => void;
   personLabel?: PersonLabel;
 }
 
-function BoardCard({ record, fields, personLabel }: BoardCardProps) {
+function BoardCard({ record, fields, onOpen, personLabel }: BoardCardProps) {
   const { ref, isDragging } = useDraggable({ id: record.id });
+  // Click opens the record. Enter belongs to the keyboard drag sensor (it
+  // lifts the card), so it must not also open; keyboard users open records
+  // from the table view. The ref swallows the click that can trail a pointer
+  // drag: every pointer press resets it, a drag sets it before any click.
+  const dragged = useRef(false);
+  if (isDragging) dragged.current = true;
   const [titleField, ...stripFields] = fields;
   const title = titleField
     ? fieldDisplayText(
@@ -85,6 +94,20 @@ function BoardCard({ record, fields, personLabel }: BoardCardProps) {
       tabIndex={0}
       aria-label={title || record.id}
       className={`rounded-lg border border-line bg-panel p-2 ${isDragging ? "opacity-50" : ""}`}
+      onPointerDown={
+        onOpen
+          ? () => {
+              dragged.current = false;
+            }
+          : undefined
+      }
+      onClick={
+        onOpen
+          ? () => {
+              if (!dragged.current) onOpen(record);
+            }
+          : undefined
+      }
     >
       <div className="flex items-center gap-1.5">
         {isFlagged(record) ? (
@@ -118,10 +141,11 @@ interface BoardColumnProps {
   index: number;
   label: string;
   fields: FieldDefinition[];
+  onOpen?: (record: CollectionRecord) => void;
   personLabel?: PersonLabel;
 }
 
-function BoardColumn({ group, index, label, fields, personLabel }: BoardColumnProps) {
+function BoardColumn({ group, index, label, fields, onOpen, personLabel }: BoardColumnProps) {
   const { ref, isDropTarget } = useDroppable({ id: index });
   return (
     <section
@@ -137,7 +161,13 @@ function BoardColumn({ group, index, label, fields, personLabel }: BoardColumnPr
       </div>
       <div role="list" aria-label={label} className="flex min-h-8 flex-col gap-2">
         {group.records.map((record) => (
-          <BoardCard key={record.id} record={record} fields={fields} personLabel={personLabel} />
+          <BoardCard
+            key={record.id}
+            record={record}
+            fields={fields}
+            onOpen={onOpen}
+            personLabel={personLabel}
+          />
         ))}
       </div>
     </section>
@@ -150,6 +180,7 @@ export function BoardView({
   groupBy,
   visibleFields,
   onCellChange,
+  onOpenRecord,
   personLabel,
   className,
 }: BoardViewProps) {
@@ -196,6 +227,7 @@ export function BoardView({
             index={index}
             label={groupLabel(group, groupField, personLabel)}
             fields={fields}
+            onOpen={onOpenRecord}
             personLabel={personLabel}
           />
         ))}

@@ -8,6 +8,8 @@ import type {
   CollectionValue,
 } from "@dohc/workspace-contracts";
 import { deriveColumns } from "../columns";
+import { recordLabel } from "../recordLabel";
+import type { CollectionQueryExecutor } from "../store";
 import { FieldCell } from "./cells";
 
 /**
@@ -45,6 +47,13 @@ export interface TableViewProps {
   onSortChange?: (sort: CollectionQuerySort[]) => void;
   onCellChange?: (change: CollectionCellChange) => void;
   onCreateOption?: (create: CollectionOptionCreate) => void;
+  /** Receives the row's record when its Open control is clicked. */
+  onOpenRecord?: (record: CollectionRecord) => void;
+  /**
+   * Runs the relation picker's queries against a relation field's related
+   * collection. Absent means relation cells stay read-only.
+   */
+  relationExecutor?: CollectionQueryExecutor;
   /** Maps a person field's user id to a display name. Falls back to the id. */
   personLabel?: (userId: string) => string | null;
   rowHeight?: number;
@@ -53,6 +62,7 @@ export interface TableViewProps {
 
 const TABLE_FEATURES = tableFeatures({});
 const COLUMN_WIDTH = 180;
+const OPEN_COLUMN_WIDTH = 56;
 const helper = createColumnHelper<typeof TABLE_FEATURES, CollectionRecord>();
 
 export function TableView({
@@ -63,6 +73,8 @@ export function TableView({
   onSortChange,
   onCellChange,
   onCreateOption,
+  onOpenRecord,
+  relationExecutor,
   personLabel,
   rowHeight = 28,
   className,
@@ -108,13 +120,14 @@ export function TableView({
                           })
                       : undefined
                   }
+                  relationExecutor={relationExecutor}
                 />
               ),
             },
           ),
         ),
       ),
-    [fields, onCellChange, onCreateOption, personLabel],
+    [fields, onCellChange, onCreateOption, personLabel, relationExecutor],
   );
 
   const table = useTable({
@@ -149,6 +162,9 @@ export function TableView({
   return (
     <div role="grid" aria-rowcount={records.length + 1} className={`flex h-full flex-col ${className ?? ""}`}>
       <div role="row" className="flex shrink-0 border-b border-line bg-panel">
+        {onOpenRecord ? (
+          <div role="columnheader" style={{ width: OPEN_COLUMN_WIDTH }} />
+        ) : null}
         {fields.map((field) => {
           const sorted = primarySort?.field === field.name ? primarySort.direction : null;
           return (
@@ -187,9 +203,25 @@ export function TableView({
                   key={row.id}
                   role="row"
                   data-index={item.index}
-                  className="absolute left-0 top-0 flex w-full border-b border-line"
+                  className="group absolute left-0 top-0 flex w-full border-b border-line"
                   style={{ height: rowHeight, transform: `translateY(${item.start}px)` }}
                 >
+                  {onOpenRecord ? (
+                    <div
+                      role="gridcell"
+                      className="flex items-center justify-center"
+                      style={{ width: OPEN_COLUMN_WIDTH }}
+                    >
+                      <button
+                        type="button"
+                        aria-label={`Open ${recordLabel(row.original)}`}
+                        className="rounded border border-line bg-panel px-1.5 text-[11px] text-muted opacity-0 transition-opacity duration-75 hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
+                        onClick={() => onOpenRecord(row.original)}
+                      >
+                        Open
+                      </button>
+                    </div>
+                  ) : null}
                   {row.getAllCells().map((cell) => (
                     <div
                       key={cell.id}

@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FieldDefinition } from "@dohc/workspace-contracts";
 import { FieldCell } from "./cells";
-import { V1_FIELDS, indexedValue } from "../testSupport";
+import { V1_FIELDS, indexedValue, makeQueryResult, makeRecord } from "../testSupport";
 
 afterEach(cleanup);
 
@@ -295,11 +295,59 @@ describe("FieldCell editing", () => {
     expect(onChange).toHaveBeenLastCalledWith([]);
   });
 
-  it("keeps relation cells read-only even with onChange", () => {
+  it("keeps relation cells read-only without a relation executor", () => {
     const onChange = vi.fn();
     render(
       <FieldCell field={field("blocks")} indexed={indexedValue("blocks", ["rec-a"])} onChange={onChange} />,
     );
     expect(screen.queryByRole("button")).toBeNull();
+  });
+
+  it("opens the relation picker against the related collection and emits ids", async () => {
+    const onChange = vi.fn();
+    const executor = vi.fn(async () =>
+      makeQueryResult([
+        makeRecord("rec-a", [indexedValue("title", "Design")]),
+        makeRecord("rec-b", [indexedValue("title", "Build")]),
+      ]),
+    );
+    render(
+      <FieldCell
+        field={field("blocks")}
+        indexed={indexedValue("blocks", ["rec-a"])}
+        onChange={onChange}
+        relationExecutor={executor}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button"));
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Build" }));
+    expect(executor).toHaveBeenCalledExactlyOnceWith({
+      collectionPath: "tasks",
+      limit: 100,
+    });
+    expect(onChange).toHaveBeenCalledExactlyOnceWith(["rec-a", "rec-b"]);
+  });
+
+  it("trims a person edit and commits a whitespace-only one as null", () => {
+    const onChange = vi.fn();
+    const { unmount } = render(
+      <FieldCell field={field("owner")} indexed={indexedValue("owner", "user-7")} onChange={onChange} />,
+    );
+    fireEvent.click(screen.getByRole("button"));
+    const input = screen.getByDisplayValue<HTMLInputElement>("user-7");
+    fireEvent.change(input, { target: { value: "  user-9  " } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onChange).toHaveBeenCalledExactlyOnceWith("user-9");
+    unmount();
+
+    onChange.mockClear();
+    render(
+      <FieldCell field={field("owner")} indexed={indexedValue("owner", "user-7")} onChange={onChange} />,
+    );
+    fireEvent.click(screen.getByRole("button"));
+    const second = screen.getByDisplayValue<HTMLInputElement>("user-7");
+    fireEvent.change(second, { target: { value: "   " } });
+    fireEvent.keyDown(second, { key: "Enter" });
+    expect(onChange).toHaveBeenCalledExactlyOnceWith(null);
   });
 });

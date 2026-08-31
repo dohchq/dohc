@@ -174,4 +174,20 @@ describe("TableView", () => {
     render(<TableView schema={makeSchema()} records={[]} />);
     expect(screen.getByText("No records in this collection yet.")).toBeDefined();
   });
+
+  it("emits the row's record from its Open control", () => {
+    const onOpenRecord = vi.fn();
+    render(
+      <TableView schema={makeSchema()} records={makeRecords(2)} onOpenRecord={onOpenRecord} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Open Task 1" }));
+    expect(onOpenRecord).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ id: "rec-1", path: "tasks/rec-1.md" }),
+    );
+  });
+
+  it("offers no Open control without onOpenRecord", () => {
+    render(<TableView schema={makeSchema()} records={makeRecords(1)} />);
+    expect(screen.queryByRole("button", { name: /^Open / })).toBeNull();
+  });
 });
