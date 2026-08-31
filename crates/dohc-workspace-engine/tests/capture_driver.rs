@@ -1251,6 +1251,49 @@ async fn fresh_import_opens_early_fences_partial_reads_and_preserves_foreign_hea
         "Workspace is still updating. Try again."
     );
 
+    let secret_materialize = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                56,
+                "secrets.materialize",
+                Some(handle.clone()),
+                json!({ "versionId": "main", "path": ".env" }),
+            ),
+        )
+        .await
+        .expect_err("secret materialization must not read a partial baseline");
+    assert_eq!(secret_materialize.code, ErrorCode::Overloaded);
+    assert_eq!(
+        secret_materialize.message,
+        "Workspace is still updating. Try again."
+    );
+
+    let secret_write = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                57,
+                "secrets.write",
+                Some(handle.clone()),
+                json!({
+                    "workspaceId": WORKSPACE_ID,
+                    "versionId": "main",
+                    "path": ".env",
+                    "text": "TOKEN=rpc",
+                    "origin": "api",
+                    "momentId": "secret-write-during-import"
+                }),
+            ),
+        )
+        .await
+        .expect("a secret write may establish a foreign head during import");
+    assert_eq!(secret_write.result["changed"], json!(true));
+    assert_eq!(
+        secret_write.result["moment"]["id"],
+        json!("secret-write-during-import")
+    );
+
     let existing_ydoc = transport
         .call(
             RequestContext::unbounded(),
@@ -1355,6 +1398,25 @@ async fn fresh_import_opens_early_fences_partial_reads_and_preserves_foreign_hea
         .await
         .expect("baseline secret becomes readable after the import");
     assert_eq!(captured_secrets.result["secrets"][0]["path"], json!(".env"));
+    assert_eq!(
+        captured_secrets.result["secrets"][0]["latestMomentId"],
+        json!("secret-write-during-import"),
+        "the baseline capture must not overwrite the RPC head"
+    );
+
+    let materialized_secret = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                33,
+                "secrets.materialize",
+                Some(handle.clone()),
+                json!({ "versionId": "main", "path": ".env" }),
+            ),
+        )
+        .await
+        .expect("the authoritative secret materializes after the import");
+    assert_eq!(materialized_secret.result["text"], json!("TOKEN=rpc"));
 
     let deleted = transport
         .call(

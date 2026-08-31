@@ -12957,6 +12957,7 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
         || method.starts_with("collections.")
         || (method.starts_with("versions.") && method != "versions.ensureMain")
         || method.starts_with("conflicts.")
+        || (method.starts_with("secrets.") && method != "secrets.write")
         || matches!(
             method,
             "capture.reconcile"
@@ -12973,9 +12974,6 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
                 | "moments.list"
                 | "moments.get"
                 | "history.page"
-                | "secrets.list"
-                | "secrets.stateExists"
-                | "secrets.delete"
         )
 }
 
@@ -13320,7 +13318,25 @@ mod tests {
             "collections.query",
             "collections.getRecord",
             "collections.listPendingAdoptions",
+        ] {
+            assert!(method_requires_initial_capture_ready(method), "{method}");
+        }
+    }
+
+    #[test]
+    fn only_secret_write_bypasses_the_initial_capture_fence() {
+        assert!(!method_requires_initial_capture_ready("secrets.write"));
+        for method in [
+            "secrets.list",
+            "secrets.stateExists",
             "secrets.delete",
+            "secrets.fork",
+            "secrets.moments.list",
+            "secrets.moments.get",
+            "secrets.compare",
+            "secrets.apply",
+            "secrets.restore",
+            "secrets.materialize",
         ] {
             assert!(method_requires_initial_capture_ready(method), "{method}");
         }
