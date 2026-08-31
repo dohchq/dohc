@@ -15,7 +15,7 @@ import type {
   WorkspaceVersionConflict,
 } from "./bridgeContract";
 import { ListEngineMomentsResponse as ListEngineMomentsResponseSchema } from "./bridgeContract";
-import { isHistoryUpdatingRefusal } from "@dohc/workspace-engine-client";
+import { isWorkspaceUpdatingRefusal } from "@dohc/workspace-engine-client";
 
 // PR 0N-1: main supplies the SAME display-name rule the chat rail uses
 // (onBehalfOf "local" -> the cloud email or "You"; anything else is already
@@ -40,7 +40,7 @@ export async function listEngineMomentsForIpc(
       protectedTruncated: page.protectedTruncated,
     });
   } catch (error) {
-    if (isHistoryUpdatingRefusal(error)) {
+    if (isWorkspaceUpdatingRefusal(error)) {
       return ListEngineMomentsResponseSchema.parse({ status: "updating" });
     }
     throw error;

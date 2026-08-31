@@ -1,5 +1,5 @@
 import { setTimeout as delay } from "node:timers/promises";
-import { isHistoryUpdatingRefusal } from "@dohc/workspace-engine-client";
+import { isWorkspaceUpdatingRefusal } from "@dohc/workspace-engine-client";
 import type {
   WorkspaceEngineCapture,
   WorkspaceEngineMomentSummary,
@@ -21,7 +21,7 @@ export async function waitForPathMoments(
     try {
       page = await capture.listMoments({ limit: 100 });
     } catch (error) {
-      if (!isHistoryUpdatingRefusal(error)) throw error;
+      if (!isWorkspaceUpdatingRefusal(error)) throw error;
       await delay(25);
       continue;
     }

@@ -245,11 +245,11 @@ describe("DesktopSettings", () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
-  it("leaves keyboard handling to a recovery warning above settings", async () => {
+  it("leaves Tab and Escape to a higher overlay", async () => {
     const onClose = vi.fn();
     render(
       <>
-        <button type="button" data-testid="recovery-warning-action">
+        <button type="button" data-testid="higher-overlay-action">
           Go back
         </button>
         <Overlay onClose={onClose}>
@@ -259,18 +259,24 @@ describe("DesktopSettings", () => {
     );
 
     await screen.findByTestId("settings-dialog");
-    const recoveryAction = screen.getByTestId("recovery-warning-action");
-    recoveryAction.focus();
-    const recoveryLayer = Symbol("recovery-warning-test");
-    pushOverlay(recoveryLayer);
+    const higherOverlayAction = screen.getByTestId("higher-overlay-action");
+    higherOverlayAction.focus();
+    const higherOverlay = Symbol("higher-overlay-test");
+    pushOverlay(higherOverlay);
     try {
-      fireEvent.keyDown(document, { key: "Tab" });
-      expect(document.activeElement).toBe(recoveryAction);
+      const tab = new KeyboardEvent("keydown", {
+        key: "Tab",
+        bubbles: true,
+        cancelable: true,
+      });
+      document.dispatchEvent(tab);
+      expect(tab.defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(higherOverlayAction);
 
       fireEvent.keyDown(document, { key: "Escape" });
       expect(onClose).not.toHaveBeenCalled();
     } finally {
-      removeOverlay(recoveryLayer);
+      removeOverlay(higherOverlay);
     }
   });
 

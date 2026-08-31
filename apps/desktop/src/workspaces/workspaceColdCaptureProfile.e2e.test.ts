@@ -11,7 +11,7 @@ import {
   type EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import {
-  isHistoryUpdatingRefusal,
+  isWorkspaceUpdatingRefusal,
   VersionedLiveAdapter,
 } from "@dohc/workspace-engine-client";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
@@ -110,7 +110,7 @@ async function waitForDurableMoments(
       return await countDurableMoments(sessions, workspace, onFirstPage);
     } catch (error) {
       if (
-        !isHistoryUpdatingRefusal(error) ||
+        !isWorkspaceUpdatingRefusal(error) ||
         performance.now() >= deadline
       ) {
         throw error;

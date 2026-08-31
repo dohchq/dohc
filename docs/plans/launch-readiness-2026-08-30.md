@@ -191,13 +191,14 @@ Raw evidence stays out of Git. The manifest, checks, findings, and decisions sta
 - Graph performance: bounded to 240 interactive nodes and rows; three release
   runs reached ready in 1.494-1.673 seconds with a 66-78 ms longest task.
 - Fresh capture: the original 15,000-file release profile needed 77.226 seconds
-  for History. Final cold runs open in 11.702-12.131 seconds and reach `Ready`
-  in 24.650-25.171 seconds, with exact 15,000-entry restart checks passed.
+  for History. Final cold runs open in 10.743-12.503 seconds, accept the first
+  History page in 21.032-24.655 seconds, and verify all entries in
+  22.344-26.011 seconds. Both restart checks recovered all 15,000 entries.
 - Release configuration: set both managed Cloud origins for a managed-service
   build. Missing or invalid configuration is now an honest, recoverable state.
-- Final gates: the canonical Rust gate passed 2,090 workspace tests and the
-  183-test crash tier; the desktop gate passed 7,662 tests across 389 files;
-  all 21 typecheck projects and the production desktop build passed.
+- Final gates: the canonical Rust gate passed 2,255 workspace tests and the
+  195-test crash tier; the desktop gate passed 7,687 tests; all 21 typecheck
+  projects and the production desktop build passed.
 - Final Windows tour: the packaged Cloud dialog clearly separated an
   unconfigured managed build from self-hosting, used neutral HTTPS examples,
   and focused the first field after a specific blank-submit error.

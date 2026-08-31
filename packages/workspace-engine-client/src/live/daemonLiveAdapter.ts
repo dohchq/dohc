@@ -128,12 +128,11 @@ function refusalMessageOf(
   return typeof wireError.message === "string" ? wireError.message : null;
 }
 
-// `history.page` flushes capture before it reads. When that bounded flush has
-// not settled yet, OVERLOADED is a progress answer rather than a broken
-// history store. Keep the exact discriminator at the daemon boundary, while
-// the typed refusal still exists; Electron does not preserve this prototype
-// on a rejected invoke.
-export function isHistoryUpdatingRefusal(error: unknown): boolean {
+// Initial capture can temporarily refuse a History read or a workspace-backed
+// open. Keep the exact discriminator at the daemon boundary while the typed
+// refusal still exists; Electron does not preserve this prototype on a
+// rejected invoke.
+export function isWorkspaceUpdatingRefusal(error: unknown): boolean {
   const message = refusalMessageOf(error, "OVERLOADED");
   return (
     message === "History is still updating. Try again." ||
