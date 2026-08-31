@@ -15,14 +15,14 @@ use dohc_engine_runtime::search::{
 use dohc_engine_runtime::{
     ActorHandle, CaptureIngest, CaptureIngestBinary, CaptureRetire, CaptureSecret,
     CaptureSecretRetire, MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS, NoFaults,
-    RuntimeError,
+    RuntimeError, WorkspaceRootGuard,
 };
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 /// The encrypted store validates origins against the TS `WRITE_ORIGINS` set,
 /// which has no "capture" entry; the TS capture path writes secrets with
@@ -221,6 +221,17 @@ struct CapturedRoot {
     _pin: File,
 }
 
+impl WorkspaceRootGuard for CapturedRoot {
+    fn validate(&self, root_dir: &Path) -> Result<(), RuntimeError> {
+        self.still_names(root_dir)
+            .then_some(())
+            .ok_or(RuntimeError::Identity {
+                reason: "workspace root changed during capture",
+                source: None,
+            })
+    }
+}
+
 impl CapturedRoot {
     #[cfg(unix)]
     fn bind(root: &Path) -> Result<Self, CaptureError> {
@@ -273,11 +284,10 @@ pub struct StoreCaptureSink {
     workspace_id: String,
     version_id: String,
     shadow_root: PathBuf,
-    /// The root binding is stable for one reconcile generation. Resolving it
-    /// eagerly fixes every present root before policy is read. A truly absent
-    /// root may bind later; every other binding refusal is sticky.
-    captured_root: OnceLock<CapturedRoot>,
-    root_binding_refused: std::cell::Cell<bool>,
+    /// The root binding is stable for one reconcile generation. Every bind
+    /// failure rejects this generation; a later rescan builds a fresh sink and
+    /// takes its policy snapshot from the directory it actually binds.
+    captured_root: Result<Arc<CapturedRoot>, CaptureError>,
     now_ms: i64,
     author_json: Option<String>,
     search_policy: Arc<SearchPolicySnapshot>,
@@ -348,20 +358,10 @@ impl StoreCaptureSink {
         provenance: CaptureProvenance,
     ) -> Self {
         let shadow_root = shadow_root.into();
-        // Bind before reading any root-scoped policy. A present workspace is
-        // therefore fixed to one physical directory from sink construction,
-        // including runs whose first operation is a policy-driven retire. If
-        // the root is initially absent, leave the cell empty: the first later
-        // operation can still bind it after the directory recovers.
-        let captured_root = OnceLock::new();
-        let root_binding_refused = match CapturedRoot::bind(&shadow_root) {
-            Ok(root) => {
-                let _ = captured_root.set(root);
-                false
-            }
-            Err(_) => !std::fs::symlink_metadata(&shadow_root)
-                .is_err_and(|error| error.kind() == ErrorKind::NotFound),
-        };
+        // Bind before reading any root-scoped policy. A failed bind rejects
+        // this generation instead of letting a later directory inherit the
+        // absent root's default policy snapshot.
+        let captured_root = CapturedRoot::bind(&shadow_root).map(Arc::new);
         // `.dohc/files.toml` can only NARROW engine ownership below the hard
         // floor. See [`PolicyState`] for the absent/malformed/unreadable
         // split: only a file that exists but cannot be READ makes ownership
@@ -383,7 +383,6 @@ impl StoreCaptureSink {
             version_id: version_id.into(),
             shadow_root,
             captured_root,
-            root_binding_refused: std::cell::Cell::new(root_binding_refused),
             now_ms,
             author_json,
             search_policy: snapshot,
@@ -396,28 +395,9 @@ impl StoreCaptureSink {
     }
 
     fn captured_root(&self) -> Result<&CapturedRoot, CaptureError> {
-        if self.root_binding_refused.get() {
-            return Err(ESCAPES_ROOT);
-        }
-        if let Some(root) = self.captured_root.get() {
-            return root
-                .still_names(&self.shadow_root)
-                .then_some(root)
-                .ok_or(ESCAPES_ROOT);
-        }
-        let root = CapturedRoot::bind(&self.shadow_root).inspect_err(|_| {
-            if !std::fs::symlink_metadata(&self.shadow_root)
-                .is_err_and(|metadata_error| metadata_error.kind() == ErrorKind::NotFound)
-            {
-                self.root_binding_refused.set(true);
-            }
-        })?;
-        // StoreCaptureSink is actor-owned. OnceLock prevents any later read
-        // from changing this generation's chosen physical directory.
-        let _ = self.captured_root.set(root);
-        self.captured_root
-            .get()
-            .filter(|root| root.still_names(&self.shadow_root))
+        let root = self.captured_root.as_deref().map_err(|error| *error)?;
+        root.still_names(&self.shadow_root)
+            .then_some(root)
             .ok_or(ESCAPES_ROOT)
     }
 
@@ -430,11 +410,22 @@ impl StoreCaptureSink {
         self.captured_root().map(|_| ())
     }
 
+    fn root_guard(&self) -> Result<Arc<dyn WorkspaceRootGuard>, CaptureError> {
+        match &self.captured_root {
+            Ok(root) if root.still_names(&self.shadow_root) => {
+                let root = Arc::clone(root);
+                Ok(root)
+            }
+            Ok(_) => Err(ESCAPES_ROOT),
+            Err(error) => Err(*error),
+        }
+    }
+
     fn path_containment(&self, rel_path: &str) -> Containment {
         if self
             .captured_root
-            .get()
-            .is_some_and(|root| !root.still_names(&self.shadow_root))
+            .as_ref()
+            .is_ok_and(|root| !root.still_names(&self.shadow_root))
         {
             return Containment::Escaped;
         }
@@ -487,7 +478,11 @@ impl StoreCaptureSink {
     /// pass. Adoption uses the runtime's ordinary Y.Doc update + settle path,
     /// including durable replication journaling and self-write suppression.
     pub(crate) fn reconcile_collections(&self) -> Result<Vec<String>, RuntimeError> {
-        self.actor.reconcile_collections_blocking(
+        let root_guard = self.root_guard().map_err(|_| RuntimeError::Identity {
+            reason: "workspace root changed during capture",
+            source: None,
+        })?;
+        self.actor.reconcile_collections_blocking_guarded(
             self.workspace_id.clone(),
             self.version_id.clone(),
             self.shadow_root.clone(),
@@ -495,6 +490,7 @@ impl StoreCaptureSink {
             Arc::new(self.self_writes.clone()),
             self.now_ms,
             Arc::new(NoFaults),
+            root_guard,
         )
     }
 
@@ -817,8 +813,8 @@ impl StoreCaptureSink {
         summary: Option<String>,
         allow_ydoc_origin: bool,
     ) -> Result<(), CaptureError> {
-        self.require_captured_root()?;
-        match self.actor.capture_retire_materialized_blocking(
+        let root_guard = self.root_guard()?;
+        match self.actor.capture_retire_materialized_blocking_guarded(
             CaptureRetire {
                 workspace_id: self.workspace_id.clone(),
                 version_id: self.version_id.clone(),
@@ -835,6 +831,7 @@ impl StoreCaptureSink {
             Arc::new(self.self_writes.clone()),
             self.leases.clone(),
             Arc::new(NoFaults),
+            root_guard,
         ) {
             Ok(_) => Ok(()),
             // A name the store refuses to address can never hold a head;
@@ -896,14 +893,24 @@ fn prepare_added_text_prefix_parallel(
     captured_root: &CapturedRoot,
     candidates: &[AddedTextCandidate<'_>],
 ) -> PreparedTextPrefix {
-    prepare_added_text_prefix_parallel_with(candidates, |candidate| {
-        read_current_with_canonical_root(root, captured_root, candidate.path, candidate.media_type)
-    })
+    prepare_added_text_prefix_parallel_with(
+        candidates,
+        |candidate| {
+            read_current_with_canonical_root(
+                root,
+                captured_root,
+                candidate.path,
+                candidate.media_type,
+            )
+        },
+        || captured_root.still_names(root),
+    )
 }
 
 fn prepare_added_text_prefix_parallel_with(
     candidates: &[AddedTextCandidate<'_>],
     read_candidate: impl Fn(AddedTextCandidate<'_>) -> Result<CurrentContent, CaptureError> + Sync,
+    root_still_names: impl Fn() -> bool + Sync,
 ) -> PreparedTextPrefix {
     let workers = std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
@@ -921,6 +928,7 @@ fn prepare_added_text_prefix_parallel_with(
             task_txs.push(task_tx);
             let result_tx = result_tx.clone();
             let read_candidate = &read_candidate;
+            let root_still_names = &root_still_names;
             scope.spawn(move || {
                 while let Ok(index) = task_rx.recv() {
                     let candidate = candidates[index];
@@ -935,7 +943,9 @@ fn prepare_added_text_prefix_parallel_with(
                             | CurrentContent::Absent
                             | CurrentContent::NonOwnable,
                         ) => PreparedCandidate::Fallback,
-                        Err(error) if error == ESCAPES_ROOT => PreparedCandidate::RootMismatch,
+                        Err(error) if error == ESCAPES_ROOT && !root_still_names() => {
+                            PreparedCandidate::RootMismatch
+                        }
                         Err(_) => PreparedCandidate::Fallback,
                     };
                     if result_tx.send((index, prepared)).is_err() {
@@ -1701,6 +1711,8 @@ mod tests {
     use dohc_engine_testkit::ScratchDir;
     use proptest::prelude::*;
     use rusqlite::{Connection, OptionalExtension};
+    use std::sync::Condvar;
+    use std::time::Duration;
 
     const WORKSPACE_ID: &str = "ws-capture-sink";
     const VERSION_ID: &str = "main";
@@ -1723,6 +1735,109 @@ mod tests {
             std::fs::create_dir_all(parent).expect("create file parent");
         }
         std::fs::write(absolute, bytes).expect("write fixture");
+    }
+
+    fn durable_row_counts(db: &Path) -> Vec<(&'static str, i64)> {
+        const TABLES: &[&str] = &[
+            "documents",
+            "replication_journal",
+            "file_objects",
+            "blobs",
+            "path_aliases",
+            "snapshots",
+            "moments",
+            "materialization_jobs",
+            "ydoc_docs",
+            "ydoc_updates",
+            "collections",
+            "collection_records",
+            "collection_record_fields",
+            "collection_field_history",
+            "collection_relation_edges",
+        ];
+        let conn = Connection::open(db).expect("open durable state database");
+        TABLES
+            .iter()
+            .map(|table| {
+                let count = conn
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                        row.get(0)
+                    })
+                    .expect("count durable rows");
+                (*table, count)
+            })
+            .collect()
+    }
+
+    struct PausedRootGuard {
+        root: CapturedRoot,
+        pause_on_validation: usize,
+        validations: std::sync::atomic::AtomicUsize,
+        reached: (Mutex<bool>, Condvar),
+        released: (Mutex<bool>, Condvar),
+    }
+
+    impl PausedRootGuard {
+        fn new(root: &Path) -> Arc<Self> {
+            Self::pausing_on(root, 1)
+        }
+
+        fn pausing_on(root: &Path, pause_on_validation: usize) -> Arc<Self> {
+            Arc::new(Self {
+                root: CapturedRoot::bind(root).expect("bind paused root guard"),
+                pause_on_validation,
+                validations: std::sync::atomic::AtomicUsize::new(0),
+                reached: (Mutex::new(false), Condvar::new()),
+                released: (Mutex::new(false), Condvar::new()),
+            })
+        }
+
+        fn wait_until_reached(&self) {
+            let reached = self.reached.0.lock().expect("lock reached state");
+            let (reached, timeout) = self
+                .reached
+                .1
+                .wait_timeout_while(reached, Duration::from_secs(10), |reached| !*reached)
+                .expect("wait for actor root validation");
+            assert!(*reached, "actor did not validate the queued root guard");
+            assert!(!timeout.timed_out(), "actor root validation timed out");
+        }
+
+        fn release(&self) {
+            let mut released = self.released.0.lock().expect("lock release state");
+            *released = true;
+            self.released.1.notify_all();
+        }
+    }
+
+    impl WorkspaceRootGuard for PausedRootGuard {
+        fn validate(&self, root_dir: &Path) -> Result<(), RuntimeError> {
+            let validation = self
+                .validations
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+                + 1;
+            if validation != self.pause_on_validation {
+                return self.root.validate(root_dir);
+            }
+            {
+                let mut reached = self.reached.0.lock().expect("lock reached state");
+                *reached = true;
+                self.reached.1.notify_all();
+            }
+            let released = self.released.0.lock().expect("lock release state");
+            let (released, timeout) = self
+                .released
+                .1
+                .wait_timeout_while(released, Duration::from_secs(10), |released| !*released)
+                .expect("wait for root replacement");
+            if timeout.timed_out() || !*released {
+                return Err(RuntimeError::Identity {
+                    reason: "test root guard release timed out",
+                    source: None,
+                });
+            }
+            self.root.validate(root_dir)
+        }
     }
 
     #[test]
@@ -1795,26 +1910,30 @@ mod tests {
         let first_prepared = AtomicBool::new(false);
         let swapped = AtomicBool::new(false);
 
-        let prepared = prepare_added_text_prefix_parallel_with(&candidates, |candidate| {
-            if candidate.path == "a.md" {
-                first_prepared.store(true, Ordering::Release);
-                return Ok(CurrentContent::Text("alpha".to_owned()));
-            }
-            while !first_prepared.load(Ordering::Acquire) {
-                std::thread::yield_now();
-            }
-            if !swapped.swap(true, Ordering::AcqRel) {
-                std::fs::rename(&root, &moved_root).expect("move original capture root");
-                std::fs::create_dir(&root).expect("recreate capture root");
-                write_file(&root, "b.md", b"replacement workspace content");
-            }
-            read_current_with_canonical_root(
-                &root,
-                &captured_root,
-                candidate.path,
-                candidate.media_type,
-            )
-        });
+        let prepared = prepare_added_text_prefix_parallel_with(
+            &candidates,
+            |candidate| {
+                if candidate.path == "a.md" {
+                    first_prepared.store(true, Ordering::Release);
+                    return Ok(CurrentContent::Text("alpha".to_owned()));
+                }
+                while !first_prepared.load(Ordering::Acquire) {
+                    std::thread::yield_now();
+                }
+                if !swapped.swap(true, Ordering::AcqRel) {
+                    std::fs::rename(&root, &moved_root).expect("move original capture root");
+                    std::fs::create_dir(&root).expect("recreate capture root");
+                    write_file(&root, "b.md", b"replacement workspace content");
+                }
+                read_current_with_canonical_root(
+                    &root,
+                    &captured_root,
+                    candidate.path,
+                    candidate.media_type,
+                )
+            },
+            || captured_root.still_names(&root),
+        );
 
         std::fs::remove_dir_all(&root).expect("remove replacement capture root");
         std::fs::rename(&moved_root, &root).expect("restore original capture root");
@@ -1822,6 +1941,47 @@ mod tests {
             prepared,
             PreparedTextPrefix::RootMismatch { attempted: 2 }
         ));
+    }
+
+    #[test]
+    fn parallel_path_escape_falls_back_without_poisoning_sibling_progress() {
+        let candidates = [
+            AddedTextCandidate {
+                path: "a.md",
+                media_type: "text/markdown",
+            },
+            AddedTextCandidate {
+                path: "linked/b.md",
+                media_type: "text/markdown",
+            },
+            AddedTextCandidate {
+                path: "c.md",
+                media_type: "text/markdown",
+            },
+        ];
+        let read = |candidate: AddedTextCandidate<'_>| match candidate.path {
+            "linked/b.md" => Err(ESCAPES_ROOT),
+            path => Ok(CurrentContent::Text(path.to_owned())),
+        };
+
+        let first = prepare_added_text_prefix_parallel_with(&candidates, read, || true);
+        let PreparedTextPrefix::Ready(first) = first else {
+            panic!("the good prefix must remain committable");
+        };
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].text, "a.md");
+
+        assert!(matches!(
+            prepare_added_text_prefix_parallel_with(&candidates[1..], read, || true),
+            PreparedTextPrefix::FallbackFirst
+        ));
+        let PreparedTextPrefix::Ready(last) =
+            prepare_added_text_prefix_parallel_with(&candidates[2..], read, || true)
+        else {
+            panic!("the good suffix must progress after the refused path");
+        };
+        assert_eq!(last.len(), 1);
+        assert_eq!(last[0].text, "c.md");
     }
 
     fn ingest(sink: &mut StoreCaptureSink, path: &str) -> Result<IngestOutcome, CaptureError> {
@@ -4575,6 +4735,280 @@ mod tests {
     }
 
     #[test]
+    fn collection_reconcile_refuses_replacement_root_before_dispatch() {
+        let store_scratch = ScratchDir::new().expect("store scratch");
+        let capture_scratch = ScratchDir::new().expect("capture scratch");
+        let root = capture_scratch.path().to_path_buf();
+        let moved_root = root.with_file_name(format!(
+            "{}-moved",
+            root.file_name().expect("root name").to_string_lossy()
+        ));
+        let db = store_scratch.engine_db_path().expect("engine db path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        write_file(&root, "tasks/collection.yaml", b"name: Tasks\n");
+        write_file(&root, "tasks/alpha.md", b"original task\n");
+        let mut sink = StoreCaptureSink::new(actor, WORKSPACE_ID, VERSION_ID, &root, 10, None);
+        ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
+        ingest(&mut sink, "tasks/alpha.md").expect("capture record");
+        seed_captured_richdoc_lineage(&sink, "tasks/alpha.md");
+        assert!(collection_record(&db, "tasks/alpha.md").is_none());
+
+        std::fs::rename(&root, &moved_root).expect("move original capture root");
+        std::fs::create_dir(&root).expect("create replacement root");
+        write_file(&root, "tasks/collection.yaml", b"name: Replacement\n");
+        write_file(&root, "tasks/alpha.md", b"replacement task\n");
+        let replacement_before =
+            std::fs::read(root.join("tasks/alpha.md")).expect("read replacement record");
+        let result = sink.reconcile_collections();
+        let replacement_after =
+            std::fs::read(root.join("tasks/alpha.md")).expect("reread replacement record");
+        let binding_after = collection_record(&db, "tasks/alpha.md");
+
+        std::fs::remove_dir_all(&root).expect("remove replacement capture root");
+        std::fs::rename(&moved_root, &root).expect("restore original capture root");
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        assert!(matches!(
+            result,
+            Err(RuntimeError::Identity {
+                reason: "workspace root changed during capture",
+                ..
+            })
+        ));
+        assert_eq!(replacement_after, replacement_before);
+        assert!(binding_after.is_none(), "adoption must not reach the actor");
+    }
+
+    #[test]
+    fn queued_collection_reconcile_refuses_replacement_root_before_db_changes() {
+        let store_scratch = ScratchDir::new().expect("store scratch");
+        let capture_scratch = ScratchDir::new().expect("capture scratch");
+        let root = capture_scratch.path().to_path_buf();
+        let moved_root = root.with_file_name(format!(
+            "{}-moved",
+            root.file_name().expect("root name").to_string_lossy()
+        ));
+        let db = store_scratch.engine_db_path().expect("engine db path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        write_file(&root, "tasks/collection.yaml", b"name: Tasks\n");
+        write_file(&root, "tasks/alpha.md", b"original task\n");
+        let mut sink =
+            StoreCaptureSink::new(actor.clone(), WORKSPACE_ID, VERSION_ID, &root, 10, None);
+        ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
+        ingest(&mut sink, "tasks/alpha.md").expect("capture record");
+        seed_captured_richdoc_lineage(&sink, "tasks/alpha.md");
+        assert!(collection_record(&db, "tasks/alpha.md").is_none());
+        let durable_before = durable_row_counts(&db);
+
+        let guard = PausedRootGuard::new(&root);
+        let actor_guard: Arc<dyn WorkspaceRootGuard> = guard.clone();
+        let command_actor = actor.clone();
+        let command_leases = sink.leases.clone();
+        let command_self_writes: Arc<dyn dohc_engine_runtime::SelfWriteRecorder> =
+            Arc::new(sink.self_writes.clone());
+        let command_root = root.clone();
+        let command = std::thread::spawn(move || {
+            command_actor.reconcile_collections_blocking_guarded(
+                WORKSPACE_ID.to_owned(),
+                VERSION_ID.to_owned(),
+                command_root,
+                command_leases,
+                command_self_writes,
+                10,
+                Arc::new(NoFaults),
+                actor_guard,
+            )
+        });
+
+        guard.wait_until_reached();
+        std::fs::rename(&root, &moved_root).expect("move original capture root");
+        std::fs::create_dir(&root).expect("create replacement root");
+        write_file(&root, "tasks/collection.yaml", b"name: Replacement\n");
+        write_file(&root, "tasks/alpha.md", b"replacement task\n");
+        let replacement_before =
+            std::fs::read(root.join("tasks/alpha.md")).expect("read replacement record");
+        guard.release();
+        let result = command.join().expect("join reconcile command");
+        let replacement_after =
+            std::fs::read(root.join("tasks/alpha.md")).expect("reread replacement record");
+        let binding_after = collection_record(&db, "tasks/alpha.md");
+        let durable_after = durable_row_counts(&db);
+
+        std::fs::remove_dir_all(&root).expect("remove replacement capture root");
+        std::fs::rename(&moved_root, &root).expect("restore original capture root");
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        assert!(matches!(
+            result,
+            Err(RuntimeError::Identity {
+                reason: "workspace root changed during capture",
+                ..
+            })
+        ));
+        assert_eq!(replacement_after, replacement_before);
+        assert_eq!(durable_after, durable_before);
+        assert!(
+            binding_after.is_none(),
+            "queued reconciliation must not change collection bindings"
+        );
+    }
+
+    #[test]
+    fn post_commit_root_refusal_leaves_no_self_write_suppression() {
+        let store_scratch = ScratchDir::new().expect("store scratch");
+        let capture_scratch = ScratchDir::new().expect("capture scratch");
+        let root = capture_scratch.path().to_path_buf();
+        let moved_root = root.with_file_name(format!(
+            "{}-moved",
+            root.file_name().expect("root name").to_string_lossy()
+        ));
+        let db = store_scratch.engine_db_path().expect("engine db path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        write_file(&root, "tasks/collection.yaml", b"name: Tasks\n");
+        write_file(&root, "tasks/alpha.md", b"original task\n");
+        let mut sink =
+            StoreCaptureSink::new(actor.clone(), WORKSPACE_ID, VERSION_ID, &root, 10, None);
+        ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
+        ingest(&mut sink, "tasks/alpha.md").expect("capture record");
+        seed_captured_richdoc_lineage(&sink, "tasks/alpha.md");
+
+        // Reconciliation validates once at actor entry and once before the
+        // settlement. Pause the third check, after the settlement commit but
+        // before its materialization boundary.
+        let guard = PausedRootGuard::pausing_on(&root, 3);
+        let actor_guard: Arc<dyn WorkspaceRootGuard> = guard.clone();
+        let command_actor = actor.clone();
+        let command_leases = sink.leases.clone();
+        let command_self_writes: Arc<dyn dohc_engine_runtime::SelfWriteRecorder> =
+            Arc::new(sink.self_writes.clone());
+        let command_root = root.clone();
+        let command = std::thread::spawn(move || {
+            command_actor.reconcile_collections_blocking_guarded(
+                WORKSPACE_ID.to_owned(),
+                VERSION_ID.to_owned(),
+                command_root,
+                command_leases,
+                command_self_writes,
+                10,
+                Arc::new(NoFaults),
+                actor_guard,
+            )
+        });
+
+        guard.wait_until_reached();
+        std::fs::rename(&root, &moved_root).expect("move original capture root");
+        std::fs::create_dir(&root).expect("create replacement root");
+        write_file(&root, "tasks/alpha.md", b"replacement task\n");
+        let replacement_before =
+            std::fs::read(root.join("tasks/alpha.md")).expect("read replacement record");
+        guard.release();
+        let result = command.join().expect("join reconcile command");
+        let replacement_after =
+            std::fs::read(root.join("tasks/alpha.md")).expect("reread replacement record");
+        let committed =
+            snapshot(&db, "tasks/alpha.md").expect("settlement committed before refusal");
+        let suppression_pending =
+            sink.self_writes
+                .has_pending(WORKSPACE_ID, "tasks/alpha.md", &committed.blob_sha256);
+
+        std::fs::remove_dir_all(&root).expect("remove replacement capture root");
+        std::fs::rename(&moved_root, &root).expect("restore original capture root");
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        assert!(matches!(
+            result,
+            Err(RuntimeError::Identity {
+                reason: "workspace root changed during capture",
+                ..
+            })
+        ));
+        assert_eq!(replacement_after, replacement_before);
+        assert!(
+            !suppression_pending,
+            "a refused materialization must not suppress a later genuine capture"
+        );
+    }
+
+    #[test]
+    fn queued_materialized_retire_refuses_replacement_root_before_db_changes() {
+        let store_scratch = ScratchDir::new().expect("store scratch");
+        let capture_scratch = ScratchDir::new().expect("capture scratch");
+        let root = capture_scratch.path().to_path_buf();
+        let moved_root = root.with_file_name(format!(
+            "{}-moved",
+            root.file_name().expect("root name").to_string_lossy()
+        ));
+        let db = store_scratch.engine_db_path().expect("engine db path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        write_file(&root, "first.md", b"first");
+        let mut sink =
+            StoreCaptureSink::new(actor.clone(), WORKSPACE_ID, VERSION_ID, &root, 10, None);
+        ingest(&mut sink, "first.md").expect("capture first head");
+        let durable_before = durable_row_counts(&db);
+
+        let guard = PausedRootGuard::new(&root);
+        let actor_guard: Arc<dyn WorkspaceRootGuard> = guard.clone();
+        let command_actor = actor.clone();
+        let command_leases = sink.leases.clone();
+        let command_self_writes: Arc<dyn dohc_engine_runtime::SelfWriteRecorder> =
+            Arc::new(sink.self_writes.clone());
+        let command_root = root.clone();
+        let command = std::thread::spawn(move || {
+            command_actor.capture_retire_materialized_blocking_guarded(
+                CaptureRetire {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    version_id: VERSION_ID.to_owned(),
+                    path: "first.md".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    now_ms: 20,
+                    request_id: None,
+                    only_if_text_head: false,
+                    only_if_capture_origin: true,
+                    allow_ydoc_origin: true,
+                },
+                command_root,
+                command_self_writes,
+                command_leases,
+                Arc::new(NoFaults),
+                actor_guard,
+            )
+        });
+
+        guard.wait_until_reached();
+        std::fs::rename(&root, &moved_root).expect("move original capture root");
+        std::fs::create_dir(&root).expect("create replacement root");
+        write_file(&root, "first.md", b"replacement first");
+        let replacement_before =
+            std::fs::read(root.join("first.md")).expect("read replacement head");
+        guard.release();
+        let result = command.join().expect("join retire command");
+        let replacement_after =
+            std::fs::read(root.join("first.md")).expect("reread replacement head");
+        let retained = snapshot(&db, "first.md").expect("head retained");
+        let durable_after = durable_row_counts(&db);
+
+        std::fs::remove_dir_all(&root).expect("remove replacement capture root");
+        std::fs::rename(&moved_root, &root).expect("restore original capture root");
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        assert!(matches!(
+            result,
+            Err(RuntimeError::Identity {
+                reason: "workspace root changed during capture",
+                ..
+            })
+        ));
+        assert_eq!(retained.text, "first");
+        assert_eq!(durable_after, durable_before);
+        assert_eq!(replacement_after, replacement_before);
+    }
+
+    #[test]
     fn present_root_binding_failure_cannot_adopt_a_later_replacement() {
         let store_scratch = ScratchDir::new().expect("store scratch");
         let capture_scratch = ScratchDir::new().expect("capture scratch");
@@ -4609,25 +5043,45 @@ mod tests {
     }
 
     #[test]
-    fn initially_absent_root_can_bind_after_it_is_created() {
+    fn initially_absent_root_rejects_generation_and_fresh_sink_reads_policy() {
         let store_scratch = ScratchDir::new().expect("store scratch");
         let capture_scratch = ScratchDir::new().expect("capture scratch");
         let root = capture_scratch.path().join("workspace");
         let db = store_scratch.engine_db_path().expect("engine db path");
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
-        let mut sink = StoreCaptureSink::new(actor, WORKSPACE_ID, VERSION_ID, &root, 10, None);
+        let mut stale =
+            StoreCaptureSink::new(actor.clone(), WORKSPACE_ID, VERSION_ID, &root, 10, None);
 
         std::fs::create_dir(&root).expect("create recovered root");
-        write_file(&root, "first.md", b"first");
-        let result = ingest(&mut sink, "first.md");
+        write_file(
+            &root,
+            ".dohc/files.toml",
+            b"[[rule]]\npath = \"private/**\"\ntracked = false\n",
+        );
+        write_file(&root, "private/journal.md", b"personal");
+        write_file(&root, "public.md", b"shared");
+        assert_eq!(ingest(&mut stale, "private/journal.md"), Err(ESCAPES_ROOT));
+        drop(stale);
 
-        drop(sink);
-        supervisor.close(&db).expect("close actor");
-        assert!(matches!(result, Ok(IngestOutcome::Captured { .. })));
+        let mut fresh = StoreCaptureSink::new(actor, WORKSPACE_ID, VERSION_ID, &root, 20, None);
         assert_eq!(
-            snapshot(&db, "first.md").expect("captured head").text,
-            "first"
+            ingest(&mut fresh, "private/journal.md").expect("fresh policy snapshot"),
+            IngestOutcome::NotOwned
+        );
+        assert!(matches!(
+            ingest(&mut fresh, "public.md").expect("fresh public capture"),
+            IngestOutcome::Captured { .. }
+        ));
+
+        drop(fresh);
+        supervisor.close(&db).expect("close actor");
+        assert!(snapshot(&db, "private/journal.md").is_none());
+        assert_eq!(
+            snapshot(&db, "public.md")
+                .expect("captured public head")
+                .text,
+            "shared"
         );
     }
 

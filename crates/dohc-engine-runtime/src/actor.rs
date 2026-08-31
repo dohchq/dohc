@@ -1227,6 +1227,22 @@ pub trait SelfWriteRecorder: Send + Sync {
     fn retract(&self, workspace_id: &str, path: &str, sha256: &str);
 }
 
+/// Capture-owned proof that a filesystem pathname still names the workspace
+/// root selected before an actor command entered the queue.
+pub trait WorkspaceRootGuard: Send + Sync {
+    fn validate(&self, root_dir: &std::path::Path) -> Result<(), RuntimeError>;
+}
+
+fn validate_workspace_root(
+    root_dir: &std::path::Path,
+    root_guard: Option<&dyn WorkspaceRootGuard>,
+) -> Result<(), RuntimeError> {
+    if let Some(root_guard) = root_guard {
+        root_guard.validate(root_dir)?;
+    }
+    Ok(())
+}
+
 struct YdocCloseMaterialization {
     root_dir: PathBuf,
     self_writes: Arc<dyn SelfWriteRecorder>,
@@ -1356,6 +1372,7 @@ enum Command {
         workspace_id: String,
         version_id: String,
         root_dir: PathBuf,
+        root_guard: Option<Arc<dyn WorkspaceRootGuard>>,
         leases: LeaseRegistry,
         self_writes: Arc<dyn SelfWriteRecorder>,
         now_ms: i64,
@@ -1413,6 +1430,7 @@ enum Command {
     CaptureRetire {
         input: CaptureRetire,
         root_dir: Option<PathBuf>,
+        root_guard: Option<Arc<dyn WorkspaceRootGuard>>,
         self_writes: Option<Arc<dyn SelfWriteRecorder>>,
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
@@ -2661,6 +2679,54 @@ impl ActorHandle {
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<Vec<String>, RuntimeError> {
+        self.reconcile_collections_blocking_with_guard(
+            workspace_id,
+            version_id,
+            root_dir,
+            leases,
+            self_writes,
+            now_ms,
+            faults,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn reconcile_collections_blocking_guarded(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        root_dir: PathBuf,
+        leases: LeaseRegistry,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        root_guard: Arc<dyn WorkspaceRootGuard>,
+    ) -> Result<Vec<String>, RuntimeError> {
+        self.reconcile_collections_blocking_with_guard(
+            workspace_id,
+            version_id,
+            root_dir,
+            leases,
+            self_writes,
+            now_ms,
+            faults,
+            Some(root_guard),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reconcile_collections_blocking_with_guard(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        root_dir: PathBuf,
+        leases: LeaseRegistry,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        root_guard: Option<Arc<dyn WorkspaceRootGuard>>,
+    ) -> Result<Vec<String>, RuntimeError> {
         debug_assert_sync_context();
         let (reply, reply_rx) = oneshot::channel();
         self.tx
@@ -2668,6 +2734,7 @@ impl ActorHandle {
                 workspace_id,
                 version_id,
                 root_dir,
+                root_guard,
                 leases,
                 self_writes,
                 now_ms,
@@ -2773,6 +2840,7 @@ impl ActorHandle {
             .blocking_send(Command::CaptureRetire {
                 input,
                 root_dir: None,
+                root_guard: None,
                 self_writes: None,
                 leases,
                 faults,
@@ -2795,12 +2863,51 @@ impl ActorHandle {
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<CaptureRetireResult, RuntimeError> {
+        self.capture_retire_materialized_blocking_with_guard(
+            input,
+            root_dir,
+            self_writes,
+            leases,
+            faults,
+            None,
+        )
+    }
+
+    pub fn capture_retire_materialized_blocking_guarded(
+        &self,
+        input: CaptureRetire,
+        root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        leases: LeaseRegistry,
+        faults: Arc<dyn FaultInjector>,
+        root_guard: Arc<dyn WorkspaceRootGuard>,
+    ) -> Result<CaptureRetireResult, RuntimeError> {
+        self.capture_retire_materialized_blocking_with_guard(
+            input,
+            root_dir,
+            self_writes,
+            leases,
+            faults,
+            Some(root_guard),
+        )
+    }
+
+    fn capture_retire_materialized_blocking_with_guard(
+        &self,
+        input: CaptureRetire,
+        root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        leases: LeaseRegistry,
+        faults: Arc<dyn FaultInjector>,
+        root_guard: Option<Arc<dyn WorkspaceRootGuard>>,
+    ) -> Result<CaptureRetireResult, RuntimeError> {
         debug_assert_sync_context();
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .blocking_send(Command::CaptureRetire {
                 input,
                 root_dir: Some(root_dir),
+                root_guard,
                 self_writes: Some(self_writes),
                 leases,
                 faults,
@@ -3152,6 +3259,7 @@ impl ActorHandle {
                 workspace_id,
                 version_id,
                 root_dir,
+                root_guard: None,
                 leases,
                 self_writes,
                 now_ms,
@@ -4005,6 +4113,7 @@ impl ActorHandle {
             .send(Command::CaptureRetire {
                 input,
                 root_dir: None,
+                root_guard: None,
                 self_writes: None,
                 leases,
                 faults,
@@ -8002,6 +8111,7 @@ fn worker_main(
                 workspace_id,
                 version_id,
                 root_dir,
+                root_guard,
                 leases,
                 self_writes,
                 now_ms,
@@ -8015,6 +8125,7 @@ fn worker_main(
                     &workspace_id,
                     &version_id,
                     &root_dir,
+                    root_guard.as_deref(),
                     &leases,
                     self_writes.as_ref(),
                     now_ms,
@@ -8688,6 +8799,7 @@ fn worker_main(
             Command::CaptureRetire {
                 input,
                 root_dir,
+                root_guard,
                 self_writes,
                 leases,
                 faults,
@@ -8699,6 +8811,7 @@ fn worker_main(
                         &mut store,
                         &input,
                         root_dir.as_deref(),
+                        root_guard.as_deref(),
                         self_writes.as_deref(),
                         &leases,
                         faults.as_ref(),
@@ -8883,6 +8996,7 @@ fn worker_main(
                     now_ms,
                     faults.as_ref(),
                     &token,
+                    None,
                 );
                 let _ = reply.send(outcome);
             }
@@ -11275,6 +11389,7 @@ fn ydoc_settle_on_store(
     now_ms: i64,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
+    root_guard: Option<&dyn WorkspaceRootGuard>,
 ) -> Result<YdocSettlement, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
@@ -11445,6 +11560,7 @@ fn ydoc_settle_on_store(
         // the whole settle pre-commit on a transient read error), and a
         // conflicted one already ran its compensation.
         if let Some(job) = pending_job {
+            validate_workspace_root(root_dir, root_guard)?;
             // Suppression BEFORE the replace, exactly like the fresh path —
             // the watcher can observe the replayed bytes the instant they
             // land; retract on a conflicted job.
@@ -11701,21 +11817,24 @@ fn ydoc_settle_on_store(
     // could then prune the CRDT with the artifact never materialized or
     // suppressed. Once committed, the settle runs to completion.
     //
-    // The suppression identity registers BEFORE the file replace: the watcher
-    // can observe the materialized bytes the instant they land, and a
-    // record-after-replace left a window where capture queued an ingest that
-    // would claim the settle as an external edit.
-    self_writes.record(
-        &key.workspace_id,
-        &write.snapshot.path,
-        &write.snapshot.blob_sha256,
-    );
     let job_id = format!("ydoc-mat_{}", write.moment.moment_id);
     let job = store.load_materialization_job(&job_id)?.ok_or_else(|| {
         RuntimeError::Domain(dohc_engine_domain::DomainError::StateCorrupt {
             reason: "Y.Doc settle materialization job is missing",
         })
     })?;
+    validate_workspace_root(root_dir, root_guard)?;
+    // The suppression identity registers BEFORE the file replace: the watcher
+    // can observe the materialized bytes the instant they land, and a
+    // record-after-replace left a window where capture queued an ingest that
+    // would claim the settle as an external edit. Root validation comes first
+    // so a refused replacement cannot leave an identity for a write that never
+    // happened.
+    self_writes.record(
+        &key.workspace_id,
+        &write.snapshot.path,
+        &write.snapshot.blob_sha256,
+    );
     let job_outcome = materialize_one(
         store,
         root_dir,
@@ -12602,7 +12721,8 @@ fn versioned_text_delete_on_store(
                 &asset_jobs,
                 self_writes,
                 faults,
-            );
+                None,
+            )?;
             Ok(result)
         }
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
@@ -12881,6 +13001,7 @@ fn scene_asset_delete_jobs_in_tx(
     Ok(jobs)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn materialize_scene_asset_deletes(
     store: &EngineStore,
     root_dir: &std::path::Path,
@@ -12888,8 +13009,10 @@ fn materialize_scene_asset_deletes(
     jobs: &[(String, i64)],
     self_writes: &dyn SelfWriteRecorder,
     faults: &dyn FaultInjector,
-) {
+    root_guard: Option<&dyn WorkspaceRootGuard>,
+) -> Result<(), RuntimeError> {
     for (job_id, recorded_at_ms) in jobs {
+        validate_workspace_root(root_dir, root_guard)?;
         materialize_expected_job(
             store,
             root_dir,
@@ -12900,6 +13023,7 @@ fn materialize_scene_asset_deletes(
             faults,
         );
     }
+    Ok(())
 }
 
 fn materialize_expected_job(
@@ -13928,6 +14052,7 @@ fn adopt_collection_record_on_store(
     now_ms: i64,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
+    root_guard: Option<&dyn WorkspaceRootGuard>,
 ) -> Result<Option<CollectionAdoptionExecution>, RuntimeError> {
     let probe = ydoc_open_state_on_store(
         store,
@@ -14036,6 +14161,7 @@ fn adopt_collection_record_on_store(
     else {
         return Ok(Some(CollectionAdoptionExecution::DeclinedOversized));
     };
+    validate_workspace_root(root_dir, root_guard)?;
     let changed_path = Some(
         ydoc_settle_on_store(
             store,
@@ -14052,6 +14178,7 @@ fn adopt_collection_record_on_store(
             now_ms,
             faults,
             token,
+            root_guard,
         )?
         .path,
     );
@@ -14077,6 +14204,7 @@ fn cleanup_collection_relation_on_store(
     now_ms: i64,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
+    root_guard: Option<&dyn WorkspaceRootGuard>,
 ) -> Result<CollectionRelationCleanupExecution, RuntimeError> {
     let probe = ydoc_open_state_on_store(
         store,
@@ -14194,6 +14322,7 @@ fn cleanup_collection_relation_on_store(
         faults,
         token,
     )?;
+    validate_workspace_root(root_dir, root_guard)?;
     let settlement = ydoc_settle_on_store(
         store,
         doc_cache,
@@ -14212,6 +14341,7 @@ fn cleanup_collection_relation_on_store(
         now_ms,
         faults,
         token,
+        root_guard,
     )?;
     Ok(CollectionRelationCleanupExecution::Applied(settlement.path))
 }
@@ -14223,6 +14353,7 @@ fn reconcile_collections_on_store(
     workspace_id: &str,
     version_id: &str,
     root_dir: &std::path::Path,
+    root_guard: Option<&dyn WorkspaceRootGuard>,
     leases: &LeaseRegistry,
     self_writes: &dyn SelfWriteRecorder,
     now_ms: i64,
@@ -14232,6 +14363,7 @@ fn reconcile_collections_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
+    validate_workspace_root(root_dir, root_guard)?;
     let reconciliation = match store.write_with(faults, |tx| {
         reconcile_collections_in_tx(tx, workspace_id, version_id).map_err(RuntimeError::from)
     })? {
@@ -14258,6 +14390,7 @@ fn reconcile_collections_on_store(
             now_ms,
             faults,
             token,
+            root_guard,
         ) {
             Ok(Some(CollectionAdoptionExecution::Applied { changed_path })) => {
                 persist_collection_adoption_state(
@@ -14335,6 +14468,7 @@ fn reconcile_collections_on_store(
             now_ms,
             faults,
             token,
+            root_guard,
         ) {
             Ok(CollectionRelationCleanupExecution::Applied(path)) => {
                 if !changed_paths.contains(&path) {
@@ -14733,10 +14867,12 @@ fn capture_secret_retire_on_store(
         .map_err(RuntimeError::from)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn capture_retire_on_store(
     store: &mut EngineStore,
     input: &CaptureRetire,
     root_dir: Option<&std::path::Path>,
+    root_guard: Option<&dyn WorkspaceRootGuard>,
     self_writes: Option<&dyn SelfWriteRecorder>,
     leases: &LeaseRegistry,
     faults: &dyn FaultInjector,
@@ -14744,6 +14880,9 @@ fn capture_retire_on_store(
 ) -> Result<CaptureRetireResult, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
+    }
+    if let Some(root_dir) = root_dir {
+        validate_workspace_root(root_dir, root_guard)?;
     }
     ensure_mutation_version_on_store(
         store,
@@ -14813,6 +14952,7 @@ fn capture_retire_on_store(
     match outcome {
         TxnOutcome::Committed((result, asset_jobs)) => {
             if let (Some(root_dir), Some(self_writes)) = (root_dir, self_writes) {
+                validate_workspace_root(root_dir, root_guard)?;
                 materialize_scene_asset_deletes(
                     store,
                     root_dir,
@@ -14820,7 +14960,8 @@ fn capture_retire_on_store(
                     &asset_jobs,
                     self_writes,
                     faults,
-                );
+                    root_guard,
+                )?;
             }
             Ok(result)
         }
@@ -15156,6 +15297,7 @@ mod collection_relation_cleanup_tests {
             5,
             &NoFaults,
             &CancellationToken::new(),
+            None,
         )
         .expect("clean absent relation target");
         assert!(matches!(
