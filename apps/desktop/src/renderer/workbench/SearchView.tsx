@@ -448,7 +448,10 @@ export function SearchView(props: {
           </div>
         ) : null}
         {model.status !== "idle" ? (
-          <div className="flex items-center gap-1.5 px-0.5 text-[11px] text-subtle">
+          <div
+            role="status"
+            className="flex items-center gap-1.5 px-0.5 text-[11px] text-subtle"
+          >
             {model.status === "searching" || model.status === "updating" ? (
               <span data-testid="search-spinner" className="flex items-center gap-1.5">
                 <span

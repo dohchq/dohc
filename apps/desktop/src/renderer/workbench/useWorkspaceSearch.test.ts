@@ -220,4 +220,41 @@ describe("useWorkspaceSearch", () => {
       status: "idle",
     });
   });
+
+  it("drops a late batch after the workspace changes", () => {
+    const view = renderHook(
+      ({ workspaceId }: { workspaceId: string }) => useWorkspaceSearch(workspaceId),
+      { initialProps: { workspaceId: "workspace-1" } },
+    );
+
+    act(() => view.result.current.run(options));
+    const searchId = bridgeMock.searchWorkspace.mock.calls[0]?.[0].searchId;
+
+    view.rerender({ workspaceId: "workspace-2" });
+    expect(bridgeMock.cancelWorkspaceSearch).toHaveBeenCalledWith({ searchId });
+    act(() => {
+      searchResultsListener?.({
+        searchId,
+        entries: [
+          {
+            path: "old-workspace.md",
+            line: 1,
+            column: 1,
+            preview: "needle",
+            matchStart: 0,
+            matchEnd: 6,
+          },
+        ],
+        done: true,
+        limitHit: false,
+      });
+    });
+
+    expect(view.result.current.model).toMatchObject({
+      searchId: null,
+      status: "idle",
+      groups: [],
+      totalMatches: 0,
+    });
+  });
 });

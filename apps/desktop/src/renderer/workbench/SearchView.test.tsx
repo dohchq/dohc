@@ -32,6 +32,9 @@ describe("SearchView", () => {
     expect(screen.getByTestId("search-spinner").textContent).toContain(
       "Updating workspace…",
     );
+    expect(screen.getByRole("status").textContent).toContain(
+      "Updating workspace…",
+    );
     expect(screen.queryByTestId("search-empty-state")).toBeNull();
   });
 });

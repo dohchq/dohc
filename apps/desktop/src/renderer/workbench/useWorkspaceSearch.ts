@@ -82,6 +82,11 @@ export function useWorkspaceSearch(workspaceId: string): WorkspaceSearchApi {
   // Event-driven transitions read/write through the ref so a burst of IPC
   // batches between renders folds correctly (never against a stale snapshot).
   const modelRef = useRef(model);
+  // The listener outlives each render; this ref keeps its workspace guard current.
+  const workspaceIdRef = useRef(workspaceId);
+  workspaceIdRef.current = workspaceId;
+  // Separately tracks which workspace owns the model so replacement resets it.
+  const modelWorkspaceIdRef = useRef(workspaceId);
   const activeSearchRef = useRef<ActiveSearch | null>(null);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const commit = useCallback((next: SearchModel) => {
@@ -97,9 +102,17 @@ export function useWorkspaceSearch(workspaceId: string): WorkspaceSearchApi {
 
   useEffect(() => {
     return bridge().onSearchResults((batch) => {
+      const active = activeSearchRef.current;
+      if (
+        active === null ||
+        active.workspaceId !== workspaceIdRef.current ||
+        active.payload.searchId !== batch.searchId
+      ) {
+        return;
+      }
       const next = applyBatch(modelRef.current, batch);
       if (next === modelRef.current) return; // stale batch — dropped
-      if (batch.done && activeSearchRef.current?.payload.searchId === batch.searchId) {
+      if (batch.done) {
         activeSearchRef.current = null;
         clearRetryTimer();
       }
@@ -111,13 +124,23 @@ export function useWorkspaceSearch(workspaceId: string): WorkspaceSearchApi {
   // replacement and unmount both invalidate it before the timer can invoke
   // the old authority again.
   useEffect(() => {
+    if (modelWorkspaceIdRef.current !== workspaceId) {
+      modelWorkspaceIdRef.current = workspaceId;
+      activeSearchRef.current = null;
+      clearRetryTimer();
+      commit(idleSearchModel());
+      setCriteria(blankSearchCriteria());
+    }
     return () => {
-      if (activeSearchRef.current?.workspaceId === workspaceId) {
-        activeSearchRef.current = null;
-        clearRetryTimer();
-      }
+      const active = activeSearchRef.current;
+      if (active?.workspaceId !== workspaceId) return;
+      activeSearchRef.current = null;
+      clearRetryTimer();
+      void bridge()
+        .cancelWorkspaceSearch({ searchId: active.payload.searchId })
+        .catch(() => undefined);
     };
-  }, [clearRetryTimer, workspaceId]);
+  }, [clearRetryTimer, commit, workspaceId]);
 
   const issue = useCallback(
     function issue(active: ActiveSearch): void {
