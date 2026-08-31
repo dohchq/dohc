@@ -774,7 +774,9 @@ export function CommentsPanel(props: {
             value={body}
             disabled={disabled}
             aria-describedby={SUBMIT_STATUS_ID}
-            onChange={(event) => editDraft("body", event.currentTarget.value)}
+            onChange={(event) =>
+              editDraft("body", event.currentTarget.value.replaceAll("\u0000", ""))
+            }
           />
           <div className="comment-submit-row">
             <button

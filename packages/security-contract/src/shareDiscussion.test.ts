@@ -46,6 +46,8 @@ describe("share discussion bodies", () => {
       input: "e\u0301",
       expected: "é",
     },
+    { label: "a leading NUL", input: "\u0000hello", expected: null },
+    { label: "an interior NUL", input: "hello\u0000world", expected: null },
   ])("normalizes or rejects $label", ({ input, expected }) => {
     expect(normalizeShareDiscussionBody(input)).toBe(expected);
   });

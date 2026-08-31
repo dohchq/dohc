@@ -574,6 +574,49 @@ describe("CommentsPanel", () => {
     },
   );
 
+  it.each([
+    ["leading", "\u0000hello", "hello"],
+    ["interior", "hello\u0000world", "helloworld"],
+  ] as const)(
+    "removes a %s NUL before a public draft can post",
+    async (_case, draft, visible) => {
+      const posted: Array<Record<string, unknown>> = [];
+      vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+        const path = requestPath(input);
+        if (path.includes("/activity?")) {
+          if (path.includes("hold=0")) return availableActivityAt(7);
+          return await new Promise<Response>(() => undefined);
+        }
+        if (path !== "/api/view/discussion" || init?.method !== "POST") {
+          return discussionPage();
+        }
+        const intent = JSON.parse(String(init.body)) as Record<string, unknown>;
+        posted.push(intent);
+        return jsonResponse({
+          ok: true,
+          message: {
+            ...LINK_MESSAGE,
+            messageId: `nul-${_case}`,
+            createdAtMs: 4_000,
+            body: intent.body,
+          },
+        });
+      }));
+
+      await render("comment");
+      setControlValue(bodyInput(), draft);
+
+      expect(bodyInput().value).toBe(visible);
+      expect(container.querySelector(".comment-submit-status")?.textContent).toBe("");
+      expect(submitButton().disabled).toBe(false);
+      submit();
+      await settle(() => posted.length === 1 && bodyInput().value === "");
+
+      expect(posted[0]?.body).toBe(visible);
+      expect(String(posted[0]?.body)).not.toContain("\u0000");
+    },
+  );
+
   it("keeps one intent key through a generic failure and deliberate retry, then changes it on edit", async () => {
     let releaseFirst: (() => void) | undefined;
     const heldFirst = new Promise<void>((resolve) => {

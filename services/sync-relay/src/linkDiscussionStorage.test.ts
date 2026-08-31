@@ -1389,6 +1389,46 @@ describe("durable link discussion storage", () => {
     expect(storage.findLinkSessionByCapabilityHash(seeded.capabilityHash)?.principalId).toBeNull();
   });
 
+  it.each([
+    { label: "leading", body: "\u0000hello" },
+    { label: "interior", body: "hello\u0000world" },
+  ])(
+    "rejects a $label NUL before link and authenticated storage change",
+    async ({ label, body }) => {
+      const { storage, dbPath } = await openStorage();
+      const seeded = seedShare(storage, { suffix: `${label}-nul` });
+      const before = {
+        principals: countRows(dbPath, "sync_relay_link_principals"),
+        messages: countRows(dbPath, "sync_relay_share_discussion_messages"),
+        usage: discussionUsageBytes(dbPath),
+        revision: storage.getShareDiscussionRevision(seeded.shareId),
+      };
+
+      expect(
+        append(storage, seeded, {
+          body,
+          idempotencyKey: `${label}-link-nul`,
+        }),
+      ).toEqual({ ok: false, reason: "invalid-input" });
+      expect(
+        appendAuthenticated(storage, seeded, {
+          body,
+          idempotencyKey: `${label}-named-nul`,
+          createdAtMs: 2_001,
+        }),
+      ).toEqual({ ok: false, reason: "invalid-input" });
+      expect({
+        principals: countRows(dbPath, "sync_relay_link_principals"),
+        messages: countRows(dbPath, "sync_relay_share_discussion_messages"),
+        usage: discussionUsageBytes(dbPath),
+        revision: storage.getShareDiscussionRevision(seeded.shareId),
+      }).toEqual(before);
+      expect(
+        storage.findLinkSessionByCapabilityHash(seeded.capabilityHash)?.principalId,
+      ).toBeNull();
+    },
+  );
+
   it("enforces each durable budget and validates normalized names, bodies, and keys", async () => {
     expect({
       bodyCodePoints: LINK_DISCUSSION_BODY_CODE_POINT_LIMIT,
@@ -3389,6 +3429,12 @@ describe("durable link discussion storage", () => {
       stale: `length(body) BETWEEN 1 AND ${LINK_DISCUSSION_BODY_CODE_POINT_LIMIT - 1}`,
     },
     {
+      label: "message body NUL predicate",
+      table: "sync_relay_share_discussion_messages",
+      current: "instr(body, char(0)) = 0",
+      stale: "instr(body, char(0)) >= 0",
+    },
+    {
       label: "message author roles",
       table: "sync_relay_share_discussion_messages",
       current: "author_kind IN ('owner', 'named', 'link')",
@@ -3603,6 +3649,22 @@ describe("durable link discussion storage", () => {
           "😀".repeat(LINK_DISCUSSION_NAME_CODE_POINT_LIMIT + 1),
           "body",
           3_004,
+          100,
+        ),
+      ).toThrow(/CHECK constraint/u);
+      expect(() =>
+        insert.run(
+          "bad-body-nul",
+          seeded.shareId,
+          "bad-body-nul",
+          "request-hash",
+          "link",
+          null,
+          seeded.grantId,
+          accepted.principal.principalId,
+          "Anonymous",
+          "body\u0000tail",
+          3_005,
           100,
         ),
       ).toThrow(/CHECK constraint/u);

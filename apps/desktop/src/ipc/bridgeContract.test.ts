@@ -641,6 +641,8 @@ describe("owner relay share discussion IPC contract", () => {
       }).success,
     ).toBe(false);
     for (const malformed of [
+      { ...exact, body: "\u0000hello" },
+      { ...exact, body: "hello\u0000world" },
       { ...exact, idempotencyKey: "" },
       { ...exact, idempotencyKey: "x".repeat(65) },
       { ...exact, idempotencyKey: "line\nbreak" },

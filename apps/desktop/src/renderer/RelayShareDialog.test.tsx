@@ -2768,6 +2768,50 @@ describe("RelayShareDialog", () => {
     expect(bridgeMock.appendRelayShareDiscussion).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["leading", "\u0000hello", "hello"],
+    ["interior", "hello\u0000world", "helloworld"],
+  ] as const)(
+    "removes a %s NUL before an owner draft can post",
+    async (_case, draft, visible) => {
+      bridgeMock.listRelayShareLinks.mockResolvedValue({
+        links: [readableLink("link-1", { shareId: "share-1" })],
+      });
+      const user = userEvent.setup();
+      render(
+        <RelayShareDialog
+          workspaceId="ws-1"
+          target={{ kind: "paths", paths: ["docs/plan.md"] }}
+          onClose={() => {}}
+        />,
+      );
+      await showLinkPane(user);
+      const group = await openOwnerComments(user, "share-1");
+      const field = within(group).getByRole("textbox", { name: "Add a comment" });
+
+      fireEvent.change(field, { target: { value: draft } });
+
+      expect((field as HTMLTextAreaElement).value).toBe(visible);
+      expect(
+        within(group).queryByText(
+          "This comment is too long. Shorten it before posting.",
+        ),
+      ).toBeNull();
+      const post = within(group).getByRole("button", { name: "Post" });
+      expect(post.hasAttribute("disabled")).toBe(false);
+      await user.click(post);
+
+      expect(bridgeMock.appendRelayShareDiscussion).toHaveBeenCalledTimes(1);
+      const payload = bridgeMock.appendRelayShareDiscussion.mock.calls[0]?.[0];
+      expect(payload).toMatchObject({
+        workspaceId: "ws-1",
+        shareId: "share-1",
+        body: visible,
+      });
+      expect(payload?.body).not.toContain("\u0000");
+    },
+  );
+
   it("posts an owner draft at the exact body boundary", async () => {
     const body = "😀".repeat(2_000);
     bridgeMock.listRelayShareLinks.mockResolvedValue({

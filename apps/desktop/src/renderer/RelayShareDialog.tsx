@@ -2169,7 +2169,10 @@ export function RelayShareDialog(props: {
                                 }
                                 rows={3}
                                 onChange={(event) => {
-                                  const draft = event.currentTarget.value;
+                                  const draft = event.currentTarget.value.replaceAll(
+                                    "\u0000",
+                                    "",
+                                  );
                                   updateOwnerDiscussion(group.shareId, (current) => ({
                                     ...current,
                                     draft,

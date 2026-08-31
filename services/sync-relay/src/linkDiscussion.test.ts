@@ -2689,6 +2689,56 @@ describe("share discussion HTTP boundary", () => {
     expect(count(test.dbPath, "sync_relay_share_discussion_messages")).toBe(0);
   });
 
+  it.each([
+    ["leading", "\u0000hello"],
+    ["interior", "hello\u0000world"],
+  ] as const)(
+    "returns bad_request for a %s NUL on link and authenticated append",
+    async (label, nulBody) => {
+      const test = await fixture();
+      const before = {
+        principals: count(test.dbPath, "sync_relay_link_principals"),
+        messages: count(test.dbPath, "sync_relay_share_discussion_messages"),
+        usage: discussionUsage(test.dbPath),
+        revision: test.storage.getShareDiscussionRevision(SHARE),
+      };
+
+      const responses = [
+        await test.handler(
+          trustedAppend(test.comment, {
+            body: nulBody,
+            idempotencyKey: `${label}-link-nul`,
+          }),
+        ),
+        await test.handler(
+          request(
+            COMMENTER,
+            `/sync/shares/${SHARE}/discussion`,
+            jsonRequest({
+              body: nulBody,
+              idempotencyKey: `${label}-named-nul`,
+            }),
+          ),
+        ),
+      ];
+      for (const response of responses) {
+        expect(response.status).toBe(400);
+        expectPrivate(response);
+        expect(await body(response)).toEqual({
+          ok: false,
+          error: "discussion message is invalid",
+          code: "bad_request",
+        });
+      }
+      expect({
+        principals: count(test.dbPath, "sync_relay_link_principals"),
+        messages: count(test.dbPath, "sync_relay_share_discussion_messages"),
+        usage: discussionUsage(test.dbPath),
+        revision: test.storage.getShareDiscussionRevision(SHARE),
+      }).toEqual(before);
+    },
+  );
+
   it("derives owner and named authors from current auth and Better Auth names", async () => {
     const test = await fixture();
     for (const [actor, field] of [

@@ -59,6 +59,7 @@ function exceedsCodePoints(value: string, limit: number): boolean {
 export function normalizeShareDiscussionBody(value: unknown): string | null {
   if (
     typeof value !== "string" ||
+    value.includes("\u0000") ||
     exceedsUtf8Bytes(value, SHARE_DISCUSSION_BODY_INPUT_BYTE_LIMIT)
   ) {
     return null;

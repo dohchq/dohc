@@ -1038,6 +1038,7 @@ const NORMALIZED_SHARE_SCHEMA_SQL = `
       body IS NULL OR (
         length(body) BETWEEN 1 AND ${LINK_DISCUSSION_BODY_CODE_POINT_LIMIT}
         AND length(CAST(body AS BLOB)) <= ${LINK_DISCUSSION_BODY_INPUT_BYTE_LIMIT}
+        AND instr(body, char(0)) = 0
       )
     ),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
@@ -1462,6 +1463,9 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       ) ||
       !discussionSchemaSql.includes(
         `length(CAST(body AS BLOB)) <= ${LINK_DISCUSSION_BODY_INPUT_BYTE_LIMIT}`,
+      ) ||
+      !discussionSchemaSql.includes(
+        "instr(body, char(0)) = 0",
       )
     ) {
       normalizedShareSchemaReplaced = true;
