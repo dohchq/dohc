@@ -131,6 +131,18 @@ function discussionPageAt(
   });
 }
 
+function availableActivityAt(activityRevision: number): Response {
+  return jsonResponse({
+    ok: true,
+    access: "comment",
+    latestRevision: activityRevision,
+    cursorRevision: activityRevision,
+    hasMore: false,
+    messages: [],
+    composerState: "available",
+  });
+}
+
 function requestPath(input: RequestInfo | URL): string {
   if (typeof input === "string") return input;
   if (input instanceof URL) return `${input.pathname}${input.search}`;
@@ -267,6 +279,7 @@ describe("CommentsPanel", () => {
       attempts += 1;
       if (attempts === 1) return new Response(null, { status: 503 });
       if (attempts === 2) return discussionPage([NAMED_MESSAGE]);
+      if (attempts === 3) return availableActivityAt(7);
       return await new Promise<Response>(() => undefined);
     }));
 
@@ -275,9 +288,12 @@ describe("CommentsPanel", () => {
     });
     await settle(() => container.textContent?.includes("Comments didn't load.") === true);
     clickButton("Try again");
-    await settle(() => container.textContent?.includes("Named body") === true);
+    await settle(() =>
+      container.textContent?.includes("Named body") === true &&
+      bodyInput().disabled === false
+    );
 
-    expect(attempts).toBe(3);
+    expect(attempts).toBe(4);
     expect(container.textContent).not.toContain("Comments didn't load.");
     expect(container.textContent).not.toContain("Loading comments…");
     expect(bodyInput().disabled).toBe(false);
@@ -431,11 +447,17 @@ describe("CommentsPanel", () => {
           profileName: session === THIRD_SESSION ? null : committedName,
         });
       }
+      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        return availableActivityAt(7);
+      }
       return await new Promise<Response>(() => undefined);
     }));
 
     await render("comment", FIRST_SESSION);
-    await settle(() => container.querySelector('input[name="claimedName"]') !== null);
+    await settle(() =>
+      container.querySelector('input[name="claimedName"]') !== null &&
+      nameInput().disabled === false
+    );
     expect(nameInput().value).toBe("");
     expect(nameInput().disabled).toBe(false);
 
@@ -501,6 +523,7 @@ describe("CommentsPanel", () => {
       vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
         const path = requestPath(input);
         if (path.includes("/activity?")) {
+          if (path.includes("hold=0")) return availableActivityAt(7);
           return await new Promise<Response>(() => undefined);
         }
         if (path !== "/api/view/discussion" || init?.method !== "POST") {
@@ -561,6 +584,7 @@ describe("CommentsPanel", () => {
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
       const path = requestPath(input);
       if (path.includes("/activity?")) {
+        if (path.includes("hold=0")) return availableActivityAt(7);
         return await new Promise<Response>(() => undefined);
       }
       if (path !== "/api/view/discussion" || init?.method !== "POST") {
@@ -621,6 +645,7 @@ describe("CommentsPanel", () => {
       vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
         const path = requestPath(input);
         if (path.includes("/activity?")) {
+          if (path.includes("hold=0")) return availableActivityAt(7);
           return await new Promise<Response>(() => undefined);
         }
         if (path !== "/api/view/discussion" || init?.method !== "POST") {
@@ -681,6 +706,7 @@ describe("CommentsPanel", () => {
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
       const path = requestPath(input);
       if (path.includes("/activity?")) {
+        if (path.includes("hold=0")) return availableActivityAt(7);
         return await new Promise<Response>(() => undefined);
       }
       if (path !== "/api/view/discussion" || init?.method !== "POST") {
@@ -858,7 +884,9 @@ describe("CommentsPanel", () => {
   ] as const)("learns %s only from POST and keeps the timeline", async (state, copy) => {
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
       if (init?.method === "POST") return jsonResponse({ ok: false, state }, 403);
-      if (requestPath(input).includes("/activity?")) {
+      const path = requestPath(input);
+      if (path.includes("/activity?")) {
+        if (path.includes("hold=0")) return availableActivityAt(7);
         return await new Promise<Response>(() => undefined);
       }
       return discussionPage([NAMED_MESSAGE]);
@@ -897,6 +925,9 @@ describe("CommentsPanel", () => {
           return discussionPageAt(7, [NAMED_MESSAGE]);
         }
         if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+          return availableActivityAt(7);
+        }
+        if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
           return heldActivity.response;
         }
         if (path === "/api/view/discussion/activity?since=8&hold=30000&limit=100") {
@@ -972,6 +1003,12 @@ describe("CommentsPanel", () => {
         session === FIRST_SESSION &&
         path === "/api/view/discussion/activity?since=7&hold=0&limit=100"
       ) {
+        return availableActivityAt(7);
+      }
+      if (
+        session === FIRST_SESSION &&
+        path === "/api/view/discussion/activity?since=7&hold=30000&limit=100"
+      ) {
         oldActivitySignal = init?.signal ?? undefined;
         return heldOldActivity.response;
       }
@@ -1036,9 +1073,12 @@ describe("CommentsPanel", () => {
       let posts = 0;
       vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
         if (init?.method !== "POST") {
-          return requestPath(input).includes("/activity?")
-            ? await new Promise<Response>(() => undefined)
-            : discussionPage([NAMED_MESSAGE]);
+          const path = requestPath(input);
+          if (path.includes("/activity?")) {
+            if (path.includes("hold=0")) return availableActivityAt(7);
+            return await new Promise<Response>(() => undefined);
+          }
+          return discussionPage([NAMED_MESSAGE]);
         }
         posts += 1;
         return jsonResponse({ ok: false, state }, status);
@@ -1308,6 +1348,9 @@ describe("CommentsPanel", () => {
         return discussionPageAt(7, [initial]);
       }
       if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        return availableActivityAt(7);
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
         return await new Promise<Response>(() => undefined);
       }
       throw new Error(`unexpected request: ${path}`);
@@ -1700,6 +1743,194 @@ describe("CommentsPanel", () => {
     expect(bodyInput().disabled).toBe(true);
   });
 
+  it.each([
+    ["available", ""],
+    ["paused", "The owner paused comments. You can still read everything."],
+    ["blocked", "The owner turned off comments for this browser."],
+  ] as const)(
+    "keeps the composer gated until the first %s activity state arrives",
+    async (composerState, expectedCopy) => {
+      const firstActivity = heldJsonResponse(200);
+      let parkedSignal: AbortSignal | undefined;
+      vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+        const path = requestPath(input);
+        if (path === "/api/view/discussion?direction=newest-first") {
+          return discussionPageAt(7);
+        }
+        if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+          return firstActivity.response;
+        }
+        if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
+          parkedSignal = init?.signal ?? undefined;
+          return await new Promise<Response>(() => undefined);
+        }
+        throw new Error(`unexpected request: ${path}`);
+      }));
+
+      await render("comment");
+      await settle(firstActivity.bodyStarted);
+
+      expect(nameInput().disabled).toBe(true);
+      expect(bodyInput().disabled).toBe(true);
+      expect(submitButton().disabled).toBe(true);
+
+      firstActivity.release({
+        ok: true,
+        access: "comment",
+        latestRevision: 7,
+        cursorRevision: 7,
+        hasMore: false,
+        messages: [],
+        composerState,
+      });
+      await settle(() => parkedSignal !== undefined);
+
+      if (composerState === "available") {
+        expect(nameInput().disabled).toBe(false);
+        expect(bodyInput().disabled).toBe(false);
+        setControlValue(bodyInput(), "Ready after activity");
+        expect(submitButton().disabled).toBe(false);
+      } else {
+        expect(nameInput().disabled).toBe(true);
+        expect(bodyInput().disabled).toBe(true);
+        expect(submitButton().disabled).toBe(true);
+        expect(container.textContent).toContain(expectedCopy);
+      }
+    },
+  );
+
+  it("gates a replacement session until its first activity state arrives", async () => {
+    const replacementActivity = heldJsonResponse(200);
+    let firstParkSignal: AbortSignal | undefined;
+    let replacementParkSignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      const session = requestSession(init);
+      if (path === "/api/view/discussion?direction=newest-first") {
+        return session === FIRST_SESSION
+          ? discussionPageAt(7)
+          : discussionPageAt(20, [{ ...NAMED_MESSAGE, body: "Replacement timeline" }]);
+      }
+      if (
+        session === FIRST_SESSION &&
+        path === "/api/view/discussion/activity?since=7&hold=0&limit=100"
+      ) {
+        return jsonResponse({
+          ok: true,
+          access: "comment",
+          latestRevision: 7,
+          cursorRevision: 7,
+          hasMore: false,
+          messages: [],
+          composerState: "available",
+        });
+      }
+      if (
+        session === FIRST_SESSION &&
+        path === "/api/view/discussion/activity?since=7&hold=30000&limit=100"
+      ) {
+        firstParkSignal = init?.signal ?? undefined;
+        return await new Promise<Response>(() => undefined);
+      }
+      if (
+        session === SECOND_SESSION &&
+        path === "/api/view/discussion/activity?since=20&hold=0&limit=100"
+      ) {
+        return replacementActivity.response;
+      }
+      if (
+        session === SECOND_SESSION &&
+        path === "/api/view/discussion/activity?since=20&hold=30000&limit=100"
+      ) {
+        replacementParkSignal = init?.signal ?? undefined;
+        return await new Promise<Response>(() => undefined);
+      }
+      throw new Error(`unexpected request: ${session} ${path}`);
+    }));
+
+    await render("comment");
+    await settle(() => firstParkSignal !== undefined && bodyInput().disabled === false);
+    await act(async () => {
+      root.render(<CommentsPanel access="comment" session={SECOND_SESSION} />);
+    });
+    await settle(() =>
+      replacementActivity.bodyStarted() &&
+      container.textContent?.includes("Replacement timeline") === true
+    );
+
+    expect(firstParkSignal?.aborted).toBe(true);
+    expect(nameInput().disabled).toBe(true);
+    expect(bodyInput().disabled).toBe(true);
+    expect(submitButton().disabled).toBe(true);
+
+    replacementActivity.release({
+      ok: true,
+      access: "comment",
+      latestRevision: 20,
+      cursorRevision: 20,
+      hasMore: false,
+      messages: [],
+      composerState: "available",
+    });
+    await settle(() => replacementParkSignal !== undefined && bodyInput().disabled === false);
+  });
+
+  it("keeps the composer gated through retryable first-activity failures", async () => {
+    vi.useFakeTimers();
+    const availableActivity = heldJsonResponse(200);
+    let activityAttempts = 0;
+    let parkedSignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/view/discussion?direction=newest-first") {
+        return discussionPageAt(7);
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        activityAttempts += 1;
+        if (activityAttempts === 1) return new Response(null, { status: 429 });
+        if (activityAttempts === 2) return new Response(null, { status: 503 });
+        if (activityAttempts === 3) throw new Error("transport failed");
+        return availableActivity.response;
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
+        parkedSignal = init?.signal ?? undefined;
+        return await new Promise<Response>(() => undefined);
+      }
+      throw new Error(`unexpected request: ${path}`);
+    }));
+
+    await render("comment");
+    await settle(() => activityAttempts === 1);
+    expect(bodyInput().disabled).toBe(true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(activityAttempts).toBe(2);
+    expect(bodyInput().disabled).toBe(true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(activityAttempts).toBe(3);
+    expect(bodyInput().disabled).toBe(true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4_000);
+    });
+    await settle(availableActivity.bodyStarted);
+    expect(activityAttempts).toBe(4);
+    expect(bodyInput().disabled).toBe(true);
+
+    availableActivity.release({
+      ok: true,
+      access: "comment",
+      latestRevision: 7,
+      cursorRevision: 7,
+      hasMore: false,
+      messages: [],
+      composerState: "available",
+    });
+    await settle(() => parkedSignal !== undefined && bodyInput().disabled === false);
+  });
+
   it("reports the exact current link access from fresh activity", async () => {
     const onAccessChange = vi.fn();
     let parkedSignal: AbortSignal | undefined;
@@ -2060,12 +2291,27 @@ describe("CommentsPanel", () => {
           ? discussionPageAt(7, [NAMED_MESSAGE])
           : discussionPageAt(20, [{ ...NAMED_MESSAGE, body: "Replacement timeline" }]);
       }
-      if (session === FIRST_SESSION) {
+      if (
+        session === FIRST_SESSION &&
+        path === "/api/view/discussion/activity?since=7&hold=0&limit=100"
+      ) {
         oldActivitySignal = init?.signal ?? undefined;
         return heldOldActivity.response;
       }
-      replacementParkSignal = init?.signal ?? undefined;
-      return await new Promise<Response>(() => undefined);
+      if (
+        session === SECOND_SESSION &&
+        path === "/api/view/discussion/activity?since=20&hold=0&limit=100"
+      ) {
+        return availableActivityAt(20);
+      }
+      if (
+        session === SECOND_SESSION &&
+        path === "/api/view/discussion/activity?since=20&hold=30000&limit=100"
+      ) {
+        replacementParkSignal = init?.signal ?? undefined;
+        return await new Promise<Response>(() => undefined);
+      }
+      throw new Error(`unexpected request: ${session} ${path}`);
     }));
 
     await render("comment");
@@ -2150,6 +2396,7 @@ describe("CommentsPanel", () => {
           return heldOld;
         }
         if (requestPath(input).includes("/activity?")) {
+          if (requestPath(input).includes("hold=0")) return availableActivityAt(7);
           return await new Promise<Response>(() => undefined);
         }
         return requestSession(init) === FIRST_SESSION
@@ -2158,12 +2405,14 @@ describe("CommentsPanel", () => {
       }));
 
       await render("comment");
+      await settle(() => bodyInput().disabled === false);
       setControlValue(bodyInput(), "Old draft");
       submit();
       await act(async () => {
         root.render(<CommentsPanel access="comment" session={SECOND_SESSION} />);
       });
       await settle(() => container.textContent?.includes("Replacement timeline") === true);
+      await settle(() => bodyInput().disabled === false);
       setControlValue(bodyInput(), "Replacement draft");
       resolveOld?.(outcome === "success"
         ? jsonResponse({
@@ -2197,6 +2446,7 @@ describe("CommentsPanel", () => {
           return held.response;
         }
         if (requestPath(input).includes("/activity?")) {
+          if (requestPath(input).includes("hold=0")) return availableActivityAt(7);
           return await new Promise<Response>(() => undefined);
         }
         return requestSession(init) === FIRST_SESSION
@@ -2205,6 +2455,7 @@ describe("CommentsPanel", () => {
       }));
 
       await render("comment");
+      await settle(() => bodyInput().disabled === false);
       setControlValue(bodyInput(), "Old draft");
       submit();
       await settle(held.bodyStarted);
@@ -2212,6 +2463,7 @@ describe("CommentsPanel", () => {
         root.render(<CommentsPanel access="comment" session={SECOND_SESSION} />);
       });
       await settle(() => container.textContent?.includes("Replacement timeline") === true);
+      await settle(() => bodyInput().disabled === false);
       setControlValue(bodyInput(), "Replacement draft");
       held.release(outcome === "success"
         ? {

@@ -32,7 +32,7 @@ const DISCUSSION_ACTIVITY_LIMIT = 100;
 const SUBMIT_STATUS_ID = "comment-submit-status";
 const NAME_HELP_ID = "comment-name-help";
 
-type ComposerState = "available" | "blocked" | "paused" | "limit-reached";
+type ComposerState = "syncing" | "available" | "blocked" | "paused" | "limit-reached";
 type InitialLoadState = "loading" | "failed" | "ready";
 type FollowerPhase = "live" | "stopped" | "recovering";
 type ActivityFollowerResult = "cancelled" | "stopped";
@@ -255,7 +255,7 @@ export function CommentsPanel(props: {
   const [claimedName, setClaimedName] = useState("");
   const [nameLocked, setNameLocked] = useState(false);
   const [pending, setPending] = useState(false);
-  const [composerState, setComposerState] = useState<ComposerState>("available");
+  const [composerState, setComposerState] = useState<ComposerState>("syncing");
   const [submitError, setSubmitError] = useState(false);
   const [followerPhase, setFollowerPhase] = useState<FollowerPhase>("live");
   const sessionRef = useRef(props.session);
@@ -390,7 +390,7 @@ export function CommentsPanel(props: {
     setClaimedName("");
     setNameLocked(false);
     setPending(false);
-    setComposerState("available");
+    setComposerState("syncing");
     setSubmitError(false);
     setFollowerPhase("live");
     const isCurrent = () =>
