@@ -3806,6 +3806,7 @@ mod collection_reconcile_scheduling_tests {
             collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes),
             &files.handle(),
             ReconcileRun::Converged,
+            &CancellationToken::new(),
         )
         .await;
         assert!(!first_clean, "the held lease makes this pass retryable");
@@ -3824,6 +3825,7 @@ mod collection_reconcile_scheduling_tests {
             collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes),
             &files.handle(),
             ReconcileRun::Converged,
+            &CancellationToken::new(),
         )
         .await;
         assert!(second_clean, "the scheduled retry adopts after release");
@@ -3897,6 +3899,7 @@ mod collection_reconcile_scheduling_tests {
             collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes),
             &files.handle(),
             ReconcileRun::Converged,
+            &CancellationToken::new(),
         )
         .await;
         assert!(!first_clean, "the held lease keeps its retry scheduled");
@@ -3932,6 +3935,7 @@ mod collection_reconcile_scheduling_tests {
             collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes),
             &files.handle(),
             ReconcileRun::Converged,
+            &CancellationToken::new(),
         )
         .await;
         assert!(second_clean, "the scheduled retry adopts after release");
@@ -4085,7 +4089,7 @@ mod collection_reconcile_scheduling_tests {
                     captured,
                     not_owned_paths: Vec::new(),
                     failed_applies: Vec::new(),
-                    crashed_after_apply: None,
+                    crashed_after_durable_boundary: None,
                     degraded: false,
                 },
             )
@@ -4127,6 +4131,7 @@ mod collection_reconcile_scheduling_tests {
                 },
                 &handle,
                 ReconcileRun::Completed(changed_plan),
+                &CancellationToken::new(),
             )
             .await,
             "the changed record capture settles cleanly"
@@ -4260,7 +4265,7 @@ mod collection_reconcile_scheduling_tests {
                     captured,
                     not_owned_paths: Vec::new(),
                     failed_applies: Vec::new(),
-                    crashed_after_apply: None,
+                    crashed_after_durable_boundary: None,
                     degraded: false,
                 },
             )
@@ -4302,6 +4307,7 @@ mod collection_reconcile_scheduling_tests {
                 },
                 &handle,
                 ReconcileRun::Completed(changed_plan),
+                &CancellationToken::new(),
             )
             .await,
             "the repaired collection record capture settles cleanly"
@@ -4347,6 +4353,7 @@ mod collection_reconcile_scheduling_tests {
                 },
                 &handle,
                 ReconcileRun::Converged,
+                &CancellationToken::new(),
             )
             .await,
             "the imported repaired record adopts cleanly"
@@ -4469,6 +4476,7 @@ mod collection_reconcile_scheduling_tests {
             },
             &files.handle(),
             ReconcileRun::Converged,
+            &CancellationToken::new(),
         )
         .await;
         assert!(clean, "an idle converged pass stays healthy");
