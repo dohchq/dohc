@@ -32,7 +32,12 @@ async function testStorage(): Promise<SyncRelayStorage> {
 
 // Mirrors the relay's test-auth seam: user identity from the bearer token,
 // emails resolvable as "<userId>@dohc.test".
-function handler(storage: SyncRelayStorage): SyncRelayHandler {
+function handler(
+  storage: SyncRelayStorage,
+  lookupUserEmail: (
+    userId: string,
+  ) => Promise<string | null> | string | null = (userId) => `${userId}@dohc.test`,
+): SyncRelayHandler {
   const resolveActor: ResolveActor = (request, workspaceId) => {
     const auth = request.headers.get("authorization") ?? "";
     if (!auth.startsWith("Bearer user:")) throw new UnauthorizedError();
@@ -45,7 +50,7 @@ function handler(storage: SyncRelayStorage): SyncRelayHandler {
     nowMs: () => 5555,
     resolveUserIdByEmail: (email) =>
       email.endsWith("@dohc.test") ? email.slice(0, -"@dohc.test".length) : null,
-    lookupUserEmail: (userId) => `${userId}@dohc.test`,
+    lookupUserEmail,
     newShareId: () => `share-${nextShare++}`,
   });
 }
@@ -324,6 +329,41 @@ describe("share grants", () => {
       genericChatWritable: false,
     });
     expect(counted.scansForShare("share-counted-exact")).toBe(2);
+  });
+
+  it("rechecks exact-share authority after the granter email lookup", async () => {
+    const storage = await testStorage();
+    claimStorageWorkspace(storage);
+    storage.createShare(directShareInput("share-post-await"));
+    const counted = countActiveRecipientGrantScans(storage);
+    let markLookupStarted!: () => void;
+    const lookupStarted = new Promise<void>((resolve) => {
+      markLookupStarted = resolve;
+    });
+    let releaseLookup!: () => void;
+    const lookupGate = new Promise<void>((resolve) => {
+      releaseLookup = resolve;
+    });
+    let granterLookups = 0;
+    const h = handler(counted.storage, async (userId) => {
+      if (userId !== GRANTER) return `${userId}@dohc.test`;
+      granterLookups += 1;
+      markLookupStarted();
+      await lookupGate;
+      return `${userId}@dohc.test`;
+    });
+
+    const pending = h(request(RECIPIENT, "/sync/shares/share-post-await"));
+    await lookupStarted;
+    expect(granterLookups).toBe(1);
+    expect(storage.revokeShare("share-post-await", 2_000)).toBe(true);
+    releaseLookup();
+
+    const missing = await denialBytes(
+      await h(request(RECIPIENT, "/sync/shares/share-missing")),
+    );
+    expect(await denialBytes(await pending)).toBe(missing);
+    expect(counted.scansForShare("share-post-await")).toBe(2);
   });
 
   it("creates a share by recipient email and lists it on both sides", async () => {
