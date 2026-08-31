@@ -565,6 +565,101 @@ describe("CommentsPanel monotonic composer", () => {
     expect(container.textContent).not.toContain("The owner turned off comments");
   });
 
+  it.each(["success", "failure"] as const)(
+    "ignores a live-started earlier %s settlement after the follower stops",
+    async (settlement) => {
+      const heldEarlier = heldJsonResponse(200);
+      const terminal = heldJsonResponse(200);
+      const earlierRequests: string[] = [];
+      const staleEarlier = {
+        messageId: "message-stale-earlier",
+        createdAtMs: 500,
+        deleted: false as const,
+        body: "Stale earlier timeline",
+        author: { kind: "named" as const, displayName: "Owner" },
+      };
+      const recoveredEarlier = {
+        messageId: "message-recovered-earlier",
+        createdAtMs: 1_500,
+        deleted: false as const,
+        body: "Recovered earlier timeline",
+        author: { kind: "named" as const, displayName: "Owner" },
+      };
+      let newestLoads = 0;
+      vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
+        const path = requestPath(input);
+        if (path === "/api/view/discussion?direction=newest-first") {
+          newestLoads += 1;
+          return newestLoads === 1
+            ? page({ messages: [OLD_MESSAGE], nextCursor: "old_cursor" })
+            : page({
+                activityRevision: 12,
+                messages: [NEW_MESSAGE],
+                nextCursor: "new_cursor",
+              });
+        }
+        if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+          return terminal.response;
+        }
+        if (path === "/api/view/discussion/activity?since=12&hold=0&limit=100") {
+          return activity({ cursorRevision: 12 });
+        }
+        if (path.includes("/api/view/discussion?direction=newest-first&cursor=")) {
+          earlierRequests.push(path);
+          if (path.endsWith("cursor=old_cursor")) return heldEarlier.response;
+          if (path.endsWith("cursor=new_cursor")) {
+            return page({ messages: [recoveredEarlier] });
+          }
+        }
+        return await new Promise<Response>(() => undefined);
+      }));
+
+      await render();
+      await settle(terminal.bodyStarted);
+      click("Load earlier comments");
+      await settle(heldEarlier.bodyStarted);
+      terminal.release({ ok: true, internal: true });
+      await settle(() => container.textContent?.includes(
+        "Comments stopped updating.",
+      ) === true);
+
+      await act(async () => {
+        heldEarlier.release(settlement === "success"
+          ? {
+              ok: true,
+              activityRevision: 7,
+              messages: [staleEarlier],
+              nextCursor: "held_cursor",
+              profileName: null,
+            }
+          : { ok: true, internal: true });
+        await Promise.resolve();
+      });
+
+      expect(container.textContent).toContain("Comments stopped updating.");
+      expect(container.textContent).toContain("Old timeline");
+      expect(container.textContent).not.toContain(staleEarlier.body);
+      expect(container.textContent).not.toContain("Earlier comments didn't load.");
+
+      if (settlement === "success") {
+        click("Try again");
+        await settle(() =>
+          container.textContent?.includes("Comments stopped updating.") === false &&
+          container.textContent?.includes("Recovered timeline") === true
+        );
+        click("Load earlier comments");
+        await settle(() => earlierRequests.length === 2);
+
+        expect(earlierRequests).toEqual([
+          "/api/view/discussion?direction=newest-first&cursor=old_cursor",
+          "/api/view/discussion?direction=newest-first&cursor=new_cursor",
+        ]);
+        await settle(() => container.textContent?.includes(recoveredEarlier.body) === true);
+        expect(container.textContent).not.toContain(staleEarlier.body);
+      }
+    },
+  );
+
   it("keeps earlier history behind recovery and adopts the recovery cursor", async () => {
     const terminal = heldJsonResponse(200);
     const recoveryPage = heldJsonResponse(200);

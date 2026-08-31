@@ -460,7 +460,13 @@ export function CommentsPanel(props: {
         controller.signal,
         isCurrent,
       );
-      if (!isCurrent() || !messagesRef.current) return;
+      if (
+        !isCurrent() ||
+        followerPhaseRef.current !== "live" ||
+        !messagesRef.current
+      ) {
+        return;
+      }
       if (
         page.nextCursor !== null &&
         seenEarlierCursorsRef.current.has(page.nextCursor)
@@ -487,7 +493,9 @@ export function CommentsPanel(props: {
       setMessages(merged);
       setEarlierCursor(page.nextCursor);
     } catch {
-      if (isCurrent()) setEarlierError(true);
+      if (isCurrent() && followerPhaseRef.current === "live") {
+        setEarlierError(true);
+      }
     } finally {
       if (isCurrent()) {
         earlierPendingRef.current = false;
