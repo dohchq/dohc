@@ -213,11 +213,14 @@ export type AppendLinkDiscussionMessageResult =
     }
   | {
       ok: false;
+      reason: "paused" | "blocked";
+      activityRevision: number;
+    }
+  | {
+      ok: false;
       reason:
         | "invalid-input"
         | "not-authorized"
-        | "paused"
-        | "blocked"
         | "name-already-set"
         | "idempotency-conflict"
         | "principal-limit"
@@ -3942,6 +3945,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
                   grant.access, grant.status, grant.revoked_at_ms,
                   share.workspace_id, share.granter_user_id,
                   share.link_writes_paused_at_ms,
+                  share.discussion_revision,
                   workspace.owner_user_id
            FROM sync_relay_link_sessions AS session
            JOIN sync_relay_share_grants AS grant ON grant.grant_id = session.grant_id
@@ -3966,6 +3970,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       const grantId = String(authority.grant_id);
       const shareId = String(authority.share_id);
       const workspaceId = String(authority.workspace_id);
+      const activityRevision = Number(authority.discussion_revision);
+      if (!Number.isSafeInteger(activityRevision) || activityRevision < 0) {
+        throw new Error("share discussion revision is invalid");
+      }
       const existingPrincipalRow = this.db
         .prepare(
           `SELECT principal_id, grant_id, mint_generation, profile_token_hash,
@@ -4017,10 +4025,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         return { ok: false, reason: "not-authorized" };
       }
       if (principal && principal.blockedAtMs !== null) {
-        return { ok: false, reason: "blocked" };
+        return { ok: false, reason: "blocked", activityRevision };
       }
       if (authority.link_writes_paused_at_ms !== null) {
-        return { ok: false, reason: "paused" };
+        return { ok: false, reason: "paused", activityRevision };
       }
       if (
         principal &&

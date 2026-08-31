@@ -448,19 +448,54 @@ function hasOnlySessionQuery(request: Request, discriminator: string): boolean {
 
 async function discussionState(
   relayResponse: Response,
-): Promise<"blocked" | "paused" | "limit-reached" | null> {
+): Promise<
+  | { state: "blocked" | "paused"; activityRevision: number }
+  | { state: "limit-reached" }
+  | null
+> {
   try {
     const body: unknown = await relayResponse.json();
     if (!body || typeof body !== "object" || Array.isArray(body)) return null;
-    const code = (body as Record<string, unknown>).code;
-    if (relayResponse.status === 403 && code === "link_discussion_blocked") {
-      return "blocked";
+    const record = body as Record<string, unknown>;
+    if (relayResponse.status === 403) {
+      if (
+        Object.keys(record).sort().join(",") !==
+          "activityRevision,code,error,ok" ||
+        record.ok !== false ||
+        typeof record.activityRevision !== "number" ||
+        !Number.isSafeInteger(record.activityRevision) ||
+        record.activityRevision < 0
+      ) {
+        return null;
+      }
+      if (
+        record.code === "link_discussion_blocked" &&
+        record.error === "link discussion writes are blocked"
+      ) {
+        return {
+          state: "blocked",
+          activityRevision: record.activityRevision,
+        };
+      }
+      if (
+        record.code === "link_discussion_paused" &&
+        record.error === "link discussion writes are paused"
+      ) {
+        return {
+          state: "paused",
+          activityRevision: record.activityRevision,
+        };
+      }
+      return null;
     }
-    if (relayResponse.status === 403 && code === "link_discussion_paused") {
-      return "paused";
-    }
-    if (relayResponse.status === 413 && code === "discussion_limit_reached") {
-      return "limit-reached";
+    if (
+      relayResponse.status === 413 &&
+      Object.keys(record).sort().join(",") === "code,error,ok" &&
+      record.ok === false &&
+      record.code === "discussion_limit_reached" &&
+      record.error === "discussion message limit reached"
+    ) {
+      return { state: "limit-reached" };
     }
     return null;
   } catch {
@@ -1161,12 +1196,13 @@ export function createShareWebHandler({
           (relayResponse.status === 403 || relayResponse.status === 413) &&
           !isActivity
         ) {
-          const state = await discussionState(relayResponse);
-          return state
+          const discussionRefusal = await discussionState(relayResponse);
+          return discussionRefusal
             ? jsonResponse(
-                { ok: false, state },
+                { ok: false, ...discussionRefusal },
                 {
-                  status: state === "limit-reached" ? 413 : 403,
+                  status:
+                    discussionRefusal.state === "limit-reached" ? 413 : 403,
                   headers: refreshedCookieHeaders,
                 },
               )

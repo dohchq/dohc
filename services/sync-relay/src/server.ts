@@ -900,10 +900,12 @@ export function createSyncRelayHandler({
     page: SyncRelayShareDiscussionActivityPage,
     access: "view" | "comment",
     composerState: "available" | "blocked" | "paused",
+    profileName: string | null,
   ): Record<string, unknown> => ({
     ...discussionActivityPage(page, "public"),
     access,
     composerState,
+    profileName,
   });
 
   function requireOwnedLinkGrant(
@@ -1551,19 +1553,25 @@ export function createSyncRelayHandler({
           return privateErrorResponse(badRequest("discussion message is invalid"));
         }
         if (result.reason === "paused") {
-          return privateErrorResponse(
-            relayHttpError(
-              RELAY_ERRORS.link_discussion_paused,
-              "link discussion writes are paused",
-            ),
+          return privateJsonResponse(
+            {
+              ok: false,
+              error: "link discussion writes are paused",
+              code: RELAY_ERRORS.link_discussion_paused.code,
+              activityRevision: result.activityRevision,
+            },
+            RELAY_ERRORS.link_discussion_paused.status,
           );
         }
         if (result.reason === "blocked") {
-          return privateErrorResponse(
-            relayHttpError(
-              RELAY_ERRORS.link_discussion_blocked,
-              "link discussion writes are blocked",
-            ),
+          return privateJsonResponse(
+            {
+              ok: false,
+              error: "link discussion writes are blocked",
+              code: RELAY_ERRORS.link_discussion_blocked.code,
+              activityRevision: result.activityRevision,
+            },
+            RELAY_ERRORS.link_discussion_blocked.status,
           );
         }
         if (
@@ -1676,7 +1684,12 @@ export function createSyncRelayHandler({
         linkJsonResponse(
           capability.shareId,
           capability.grantId,
-          publicDiscussionActivityPage(page, fresh.access, composerState),
+          publicDiscussionActivityPage(
+            page,
+            fresh.access,
+            composerState,
+            principal?.displayName ?? null,
+          ),
         ),
       );
     } catch (error) {

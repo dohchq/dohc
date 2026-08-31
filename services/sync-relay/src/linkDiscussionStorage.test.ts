@@ -890,6 +890,62 @@ describe("durable link discussion storage", () => {
     }).toEqual(snapshot);
   });
 
+  it("returns the current discussion revision with blocked and paused append refusals", async () => {
+    const { storage } = await openStorage();
+
+    const blocked = seedShare(storage, { suffix: "revision-blocked" });
+    const accepted = append(storage, blocked, {
+      claimedName: "Blocked profile",
+      idempotencyKey: "revision-blocked-seed",
+    });
+    expect(accepted.ok).toBe(true);
+    if (!accepted.ok) return;
+    expect(
+      storage.setLinkPrincipalBlocked({
+        shareId: blocked.shareId,
+        workspaceId: blocked.workspaceId,
+        principalId: accepted.principal.principalId,
+        actorUserId: OWNER,
+        blockedAtMs: 2_100,
+      }),
+    ).toBe(true);
+    const blockedRevision = storage.getShareDiscussionRevision(blocked.shareId);
+    expect(blockedRevision).toBe(2);
+    expect(
+      append(storage, blocked, {
+        idempotencyKey: "revision-blocked-refusal",
+        createdAtMs: 2_101,
+      }),
+    ).toEqual({
+      ok: false,
+      reason: "blocked",
+      activityRevision: blockedRevision,
+    });
+
+    const paused = seedShare(storage, { suffix: "revision-paused" });
+    expect(
+      storage.setShareLinkWritesPaused({
+        shareId: paused.shareId,
+        workspaceId: paused.workspaceId,
+        actorUserId: OWNER,
+        pausedAtMs: 2_200,
+      }),
+    ).toBe(true);
+    const pausedRevision = storage.getShareDiscussionRevision(paused.shareId);
+    expect(pausedRevision).toBe(1);
+    expect(
+      append(storage, paused, {
+        profile: "paused-profile",
+        idempotencyKey: "revision-paused-refusal",
+        createdAtMs: 2_201,
+      }),
+    ).toEqual({
+      ok: false,
+      reason: "paused",
+      activityRevision: pausedRevision,
+    });
+  });
+
   it("acknowledges a committed replay through pause and block but keeps authority ahead of replay", async () => {
     const { storage, dbPath } = await openStorage();
     const seeded = seedShare(storage);
@@ -937,7 +993,7 @@ describe("durable link discussion storage", () => {
         idempotencyKey: "new-through-pause",
         createdAtMs: 2_103,
       }),
-    ).toEqual({ ok: false, reason: "paused" });
+    ).toEqual({ ok: false, reason: "paused", activityRevision: 2 });
     expect({
       messages: countRows(dbPath, "sync_relay_share_discussion_messages"),
       principals: countRows(dbPath, "sync_relay_link_principals"),
@@ -992,7 +1048,7 @@ describe("durable link discussion storage", () => {
         idempotencyKey: "new-after-block",
         createdAtMs: 2_107,
       }),
-    ).toEqual({ ok: false, reason: "blocked" });
+    ).toEqual({ ok: false, reason: "blocked", activityRevision: 3 });
     expect({
       messages: countRows(dbPath, "sync_relay_share_discussion_messages"),
       principals: countRows(dbPath, "sync_relay_link_principals"),

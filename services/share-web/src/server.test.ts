@@ -1435,6 +1435,7 @@ describe("share-web protected discussion proxy", () => {
     hasMore: false,
     messages: [],
     composerState: "available",
+    profileName: null,
   };
 
   function sessionHeaders(discriminator: string, cookies: string): HeadersInit {
@@ -3351,7 +3352,8 @@ describe("share-web protected discussion proxy", () => {
           {
             ok: false,
             code: "link_discussion_blocked",
-            error: `blocked ${principal} ${PROFILE_ALPHA}`,
+            error: "link discussion writes are blocked",
+            activityRevision: 8,
           },
           { status: 403 },
         ),
@@ -3360,9 +3362,80 @@ describe("share-web protected discussion proxy", () => {
           {
             ok: false,
             code: "link_discussion_paused",
-            error: `paused ${grant} ${CAP_ALPHA_1}`,
+            error: "link discussion writes are paused",
+            activityRevision: 9,
           },
           { status: 403 },
+        ),
+      () =>
+        Response.json(
+          {
+            ok: false,
+            code: "link_discussion_blocked",
+            error: "link discussion writes are blocked",
+          },
+          { status: 403 },
+        ),
+      () =>
+        Response.json(
+          {
+            ok: false,
+            code: "link_discussion_blocked",
+            error: "link discussion writes are blocked",
+            activityRevision: -1,
+          },
+          { status: 403 },
+        ),
+      () =>
+        Response.json(
+          {
+            ok: false,
+            code: "link_discussion_paused",
+            error: "link discussion writes are paused",
+            activityRevision: 1.5,
+          },
+          { status: 403 },
+        ),
+      () =>
+        Response.json(
+          {
+            ok: false,
+            code: "link_discussion_paused",
+            error: "link discussion writes are paused",
+            activityRevision: Number.MAX_SAFE_INTEGER + 1,
+          },
+          { status: 403 },
+        ),
+      () =>
+        Response.json(
+          {
+            ok: false,
+            code: "link_discussion_blocked",
+            error: "link discussion writes are blocked",
+            activityRevision: 10,
+            principal,
+          },
+          { status: 403 },
+        ),
+      () =>
+        Response.json(
+          {
+            ok: false,
+            code: "link_discussion_blocked",
+            error: "link discussion writes are paused",
+            activityRevision: 11,
+          },
+          { status: 403 },
+        ),
+      () =>
+        Response.json(
+          {
+            ok: false,
+            code: "link_discussion_paused",
+            error: "link discussion writes are paused",
+            activityRevision: 12,
+          },
+          { status: 413 },
         ),
       () =>
         Response.json(
@@ -3420,13 +3493,27 @@ describe("share-web protected discussion proxy", () => {
 
     expect({ status: responses[0]!.status, body: await responses[0]!.json() }).toEqual({
       status: 403,
-      body: { ok: false, state: "blocked" },
+      body: { ok: false, state: "blocked", activityRevision: 8 },
     });
     expect({ status: responses[1]!.status, body: await responses[1]!.json() }).toEqual({
       status: 403,
-      body: { ok: false, state: "paused" },
+      body: { ok: false, state: "paused", activityRevision: 9 },
     });
-    const genericStatuses = [404, 404, 404, 429, 404, 503];
+    const genericStatuses = [
+      404,
+      404,
+      404,
+      404,
+      404,
+      404,
+      404,
+      404,
+      404,
+      404,
+      429,
+      404,
+      503,
+    ];
     for (const [index, status] of genericStatuses.entries()) {
       const response = responses[index + 2]!;
       expect({ status: response.status, body: await response.text() }).toEqual({
@@ -3466,10 +3553,19 @@ describe("share-web protected discussion proxy", () => {
           {
             ok: false,
             code: "discussion_limit_reached",
-            error: `${reason}-private-sentinel`,
+            error: "discussion message limit reached",
           },
           { status: 413 },
         )),
+      () => Response.json(
+        {
+          ok: false,
+          code: "discussion_limit_reached",
+          error: "discussion message limit reached",
+          activityRevision: 12,
+        },
+        { status: 413 },
+      ),
       () => Response.json(
         { ok: false, code: "discussion_limit_reached", error: "wrong-403-sentinel" },
         { status: 403 },

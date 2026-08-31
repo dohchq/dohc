@@ -565,6 +565,7 @@ async function discussionStateRefusal(
         ? "link discussion writes are blocked"
         : "link discussion writes are paused",
     code: `link_discussion_${state}`,
+    activityRevision: expect.any(Number),
   });
   return `${response.status}:${serialized}`;
 }
@@ -1611,6 +1612,128 @@ describe("share discussion HTTP boundary", () => {
       hasMore: false,
     });
     expect(messages(activity)).toEqual([second.message]);
+  });
+
+  it("returns only the current public requester's profile name on every activity page", async () => {
+    const test = await fixture({ lookupUserDisplayName: () => "Authenticated user" });
+    for (const [bodyText, idempotencyKey] of [
+      ["before profile one", "profile-activity-before-one"],
+      ["before profile two", "profile-activity-before-two"],
+    ] as const) {
+      expect(
+        (
+          await test.handler(
+            request(
+              OWNER,
+              `/sync/shares/${SHARE}/discussion`,
+              jsonRequest({ body: bodyText, idempotencyKey }),
+            ),
+          )
+        ).status,
+      ).toBe(200);
+    }
+    expect(
+      (
+        await test.handler(
+          trustedAppend(
+            test.comment,
+            {
+              body: "profile name revision",
+              claimedName: "Stable Name",
+              idempotencyKey: "profile-activity-name",
+            },
+            PROFILE_A,
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await test.handler(
+          request(
+            OWNER,
+            `/sync/shares/${SHARE}/discussion`,
+            jsonRequest({
+              body: "after profile",
+              idempotencyKey: "profile-activity-after",
+            }),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+
+    const activityPath =
+      "/sync/link/discussion/activity?since=0&hold=0&limit=1";
+    const namedProfile = await body(
+      await test.handler(
+        linkRequest(test.comment, activityPath, {}, { profileSecret: PROFILE_A }),
+      ),
+    );
+    expect(namedProfile).toMatchObject({
+      ok: true,
+      latestRevision: 4,
+      cursorRevision: 1,
+      hasMore: true,
+      profileName: "Stable Name",
+    });
+
+    const unnamedProfile = await body(
+      await test.handler(
+        linkRequest(
+          test.comment,
+          "/sync/link/discussion/activity?since=2&hold=0&limit=1",
+          {},
+          { profileSecret: PROFILE_B },
+        ),
+      ),
+    );
+    expect(unnamedProfile).toMatchObject({
+      ok: true,
+      latestRevision: 4,
+      cursorRevision: 3,
+      hasMore: true,
+      profileName: null,
+    });
+
+    const principalId = test.storage
+      .listShareDiscussionMessages({ shareId: SHARE, limit: 100 })
+      .messages.find((message) => message.body === "profile name revision")!
+      .linkPrincipalId!;
+    const principal = test.storage.getLinkPrincipal(principalId)!;
+    for (const publicPage of [namedProfile, unnamedProfile]) {
+      const serialized = JSON.stringify(publicPage);
+      for (const privateValue of [
+        principalId,
+        principal.profileTokenHash,
+        PROFILE_A,
+        PROFILE_B,
+        test.comment.grantId,
+        test.comment.capabilityToken,
+        "session-comment-sentinel",
+      ]) {
+        expect(serialized, privateValue).not.toContain(privateValue);
+      }
+      expect(publicPage).not.toHaveProperty("principals");
+    }
+
+    const ownerActivity = await body(
+      await test.handler(
+        request(
+          OWNER,
+          `/sync/shares/${SHARE}/discussion/activity?since=0&hold=0&limit=1`,
+        ),
+      ),
+    );
+    const namedActivity = await body(
+      await test.handler(
+        request(
+          COMMENTER,
+          `/sync/shares/${SHARE}/discussion/activity?since=0&hold=0&limit=1`,
+        ),
+      ),
+    );
+    expect(ownerActivity).not.toHaveProperty("profileName");
+    expect(namedActivity).not.toHaveProperty("profileName");
   });
 
   it("relays durable current-state activity across waits, lifecycle changes, restart, timeout, abort, and capacity", async () => {
@@ -4371,6 +4494,79 @@ describe("share discussion HTTP boundary", () => {
     expect(discussionUsage(test.dbPath)).toBe(beforeUsage);
   });
 
+  it("carries the refusal transaction revision through blocked and paused relay errors", async () => {
+    const test = await fixture();
+    expect(
+      (
+        await test.handler(
+          trustedAppend(
+            test.comment,
+            {
+              body: "revision seed",
+              claimedName: "Revision Profile",
+              idempotencyKey: "revision-relay-seed",
+            },
+            PROFILE_A,
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    const principalId = test.storage
+      .listShareDiscussionMessages({ shareId: SHARE, limit: 100 })
+      .messages[0]!.linkPrincipalId!;
+
+    expect(
+      (
+        await test.handler(
+          moderationRequest(OWNER, { action: "block", principalId }),
+        )
+      ).status,
+    ).toBe(200);
+    const blockedRevision = test.storage.getShareDiscussionRevision(SHARE);
+    expect(blockedRevision).toBe(2);
+    const blocked = await test.handler(
+      trustedAppend(
+        test.comment,
+        { body: "blocked refusal", idempotencyKey: "revision-relay-blocked" },
+        PROFILE_A,
+      ),
+    );
+    expect(blocked.status).toBe(403);
+    expect(await body(blocked)).toEqual({
+      ok: false,
+      error: "link discussion writes are blocked",
+      code: "link_discussion_blocked",
+      activityRevision: blockedRevision,
+    });
+
+    expect(
+      (
+        await test.handler(
+          moderationRequest(OWNER, { action: "unblock", principalId }),
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      (await test.handler(moderationRequest(OWNER, { action: "pause" }))).status,
+    ).toBe(200);
+    const pausedRevision = test.storage.getShareDiscussionRevision(SHARE);
+    expect(pausedRevision).toBe(4);
+    const paused = await test.handler(
+      trustedAppend(
+        test.comment,
+        { body: "paused refusal", idempotencyKey: "revision-relay-paused" },
+        PROFILE_A,
+      ),
+    );
+    expect(paused.status).toBe(403);
+    expect(await body(paused)).toEqual({
+      ok: false,
+      error: "link discussion writes are paused",
+      code: "link_discussion_paused",
+      activityRevision: pausedRevision,
+    });
+  });
+
   it("keeps a blocked protected profile durable while preserving reads and fresh-profile access", async () => {
     const test = await fixture();
     const seeded = await test.handler(
@@ -5599,6 +5795,7 @@ describe("share discussion HTTP boundary", () => {
       test.storage.appendLinkDiscussionMessage = () => ({
         ok: false,
         reason: state,
+        activityRevision: 0,
       });
       await discussionStateRefusal(
         await test.handler(
