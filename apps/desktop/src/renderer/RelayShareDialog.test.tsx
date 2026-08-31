@@ -2930,9 +2930,9 @@ describe("RelayShareDialog", () => {
         discussionPage([tombstone, link], { linkCommentsPaused: true }),
       )
       .mockResolvedValueOnce(discussionPage([tombstone, link]));
-    bridgeMock.pauseRelayShareDiscussion
-      .mockRejectedValueOnce(new Error("private failure"))
-      .mockResolvedValueOnce({ linkCommentsPaused: true });
+    bridgeMock.pauseRelayShareDiscussion.mockRejectedValueOnce(
+      new Error("private failure"),
+    );
     const user = userEvent.setup();
     render(
       <RelayShareDialog
@@ -2985,12 +2985,7 @@ describe("RelayShareDialog", () => {
     ).toBeTruthy();
 
     await user.click(within(group).getByRole("button", { name: "Pause link comments" }));
-    expect(await within(group).findByText("Couldn't complete that change.")).toBeTruthy();
-    expect(
-      within(group).getByRole("button", { name: "Pause link comments" }),
-    ).toBeTruthy();
-    await user.click(within(group).getByRole("button", { name: "Pause link comments" }));
-    expect(bridgeMock.pauseRelayShareDiscussion).toHaveBeenLastCalledWith({
+    expect(bridgeMock.pauseRelayShareDiscussion).toHaveBeenCalledWith({
       workspaceId: "ws-1",
       shareId: "share-1",
     });
@@ -3010,10 +3005,411 @@ describe("RelayShareDialog", () => {
     ).toBeTruthy();
   });
 
+  it("reconciles a lost delete response from the authoritative tombstone and refreshed activity revision", async () => {
+    const live = namedComment("message-1", "Delete after commit");
+    const tombstone: RelayShareDiscussionMessage = {
+      messageId: "message-1",
+      createdAtMs: CREATED_MS,
+      deleted: true,
+      author: { kind: "named", displayName: "Owner Name" },
+    };
+    const reconciliation = controllable<DiscussionPage>();
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("link-1", { shareId: "share-1" })],
+    });
+    bridgeMock.listRelayShareDiscussion
+      .mockResolvedValueOnce(discussionPage([live], { activityRevision: 11 }))
+      .mockReturnValueOnce(reconciliation.promise);
+    bridgeMock.deleteRelayShareDiscussionMessage.mockRejectedValueOnce(
+      new Error("response lost after commit"),
+    );
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await openOwnerComments(user, "share-1");
+    const row = await within(group).findByTestId("share-comment-message-1");
+    await vi.waitFor(() => {
+      expect(bridgeMock.pollRelayShareDiscussionActivity).toHaveBeenCalledTimes(1);
+    });
+    const oldPoll = bridgeMock.pollRelayShareDiscussionActivity.mock.calls[0]![0];
+
+    await user.click(within(row).getByRole("button", { name: "Delete comment" }));
+    await user.click(
+      within(within(group).getByTestId("owner-comments-confirmation")).getByRole(
+        "button",
+        { name: "Delete comment" },
+      ),
+    );
+
+    await vi.waitFor(() => {
+      expect(bridgeMock.listRelayShareDiscussion).toHaveBeenCalledTimes(2);
+    });
+    expect(within(group).queryByText("Couldn't complete that change.")).not.toBeNull();
+    expect(bridgeMock.listRelayShareDiscussion).toHaveBeenNthCalledWith(2, {
+      workspaceId: "ws-1",
+      shareId: "share-1",
+      direction: "newest-first",
+    });
+    expect(bridgeMock.cancelRelayShareDiscussionActivity).toHaveBeenCalledWith({
+      pollId: oldPoll.pollId,
+    });
+    expect(within(group).getByText("Delete after commit")).toBeTruthy();
+
+    await act(async () => {
+      reconciliation.resolve(
+        discussionPage([tombstone], { activityRevision: 27 }),
+      );
+    });
+    expect(
+      await within(group).findByText("Comment deleted by the owner"),
+    ).toBeTruthy();
+    expect(within(group).queryByText("Delete after commit")).toBeNull();
+    expect(within(group).queryByText("Couldn't complete that change.")).toBeNull();
+    await vi.waitFor(() => {
+      expect(bridgeMock.pollRelayShareDiscussionActivity).toHaveBeenCalledTimes(2);
+    });
+    expect(bridgeMock.pollRelayShareDiscussionActivity).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        workspaceId: "ws-1",
+        shareId: "share-1",
+        since: 27,
+      }),
+    );
+  });
+
+  it("reconciles lost block and unblock responses without reading either inventory", async () => {
+    const available = linkComment("message-1", "Moderate after commit");
+    const blocked = linkComment("message-1", "Moderate after commit", {
+      blocked: true,
+    });
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("link-1", { shareId: "share-1" })],
+    });
+    bridgeMock.listRelayShareDiscussion
+      .mockResolvedValueOnce(discussionPage([available], { activityRevision: 31 }))
+      .mockResolvedValueOnce(discussionPage([blocked], { activityRevision: 32 }))
+      .mockResolvedValueOnce(discussionPage([available], { activityRevision: 33 }));
+    bridgeMock.blockRelayShareDiscussionPrincipal.mockRejectedValueOnce(
+      new Error("block response lost after commit"),
+    );
+    bridgeMock.unblockRelayShareDiscussionPrincipal.mockRejectedValueOnce(
+      new Error("unblock response lost after commit"),
+    );
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await openOwnerComments(user, "share-1");
+    let row = await within(group).findByTestId("share-comment-message-1");
+    const linkInventoryCalls = bridgeMock.listRelayShareLinks.mock.calls.length;
+    const grantInventoryCalls = bridgeMock.listRelayShares.mock.calls.length;
+
+    await user.click(within(row).getByRole("button", { name: "Block" }));
+    await user.click(
+      within(within(group).getByTestId("owner-comments-confirmation")).getByRole(
+        "button",
+        { name: "Block" },
+      ),
+    );
+    await vi.waitFor(() => {
+      expect(bridgeMock.listRelayShareDiscussion).toHaveBeenCalledTimes(2);
+    });
+    row = await within(group).findByTestId("share-comment-message-1");
+    expect(await within(row).findByRole("button", { name: "Unblock" })).toBeTruthy();
+
+    await user.click(within(row).getByRole("button", { name: "Unblock" }));
+    row = await within(group).findByTestId("share-comment-message-1");
+    expect(await within(row).findByRole("button", { name: "Block" })).toBeTruthy();
+    expect(bridgeMock.listRelayShareDiscussion).toHaveBeenNthCalledWith(2, {
+      workspaceId: "ws-1",
+      shareId: "share-1",
+      direction: "newest-first",
+    });
+    expect(bridgeMock.listRelayShareDiscussion).toHaveBeenNthCalledWith(3, {
+      workspaceId: "ws-1",
+      shareId: "share-1",
+      direction: "newest-first",
+    });
+    expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(linkInventoryCalls);
+    expect(bridgeMock.listRelayShares).toHaveBeenCalledTimes(grantInventoryCalls);
+    await vi.waitFor(() => {
+      expect(bridgeMock.pollRelayShareDiscussionActivity).toHaveBeenCalledTimes(3);
+    });
+    expect(
+      bridgeMock.pollRelayShareDiscussionActivity.mock.calls.map(
+        ([payload]) => payload.since,
+      ),
+    ).toEqual([31, 32, 33]);
+  });
+
+  it("reconciles lost pause and resume responses without reading either inventory", async () => {
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("link-1", { shareId: "share-1" })],
+    });
+    bridgeMock.listRelayShareDiscussion
+      .mockResolvedValueOnce(discussionPage([], { activityRevision: 41 }))
+      .mockResolvedValueOnce(
+        discussionPage([], {
+          activityRevision: 42,
+          linkCommentsPaused: true,
+        }),
+      )
+      .mockResolvedValueOnce(discussionPage([], { activityRevision: 43 }));
+    bridgeMock.pauseRelayShareDiscussion.mockRejectedValueOnce(
+      new Error("pause response lost after commit"),
+    );
+    bridgeMock.resumeRelayShareDiscussion.mockRejectedValueOnce(
+      new Error("resume response lost after commit"),
+    );
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await openOwnerComments(user, "share-1");
+    expect(
+      await within(group).findByRole("button", { name: "Pause link comments" }),
+    ).toBeTruthy();
+    const linkInventoryCalls = bridgeMock.listRelayShareLinks.mock.calls.length;
+    const grantInventoryCalls = bridgeMock.listRelayShares.mock.calls.length;
+
+    await user.click(
+      within(group).getByRole("button", { name: "Pause link comments" }),
+    );
+    await vi.waitFor(() => {
+      expect(bridgeMock.listRelayShareDiscussion).toHaveBeenCalledTimes(2);
+    });
+    expect(
+      await within(group).findByText(
+        "Link comments are paused. People with links can still read everything.",
+      ),
+    ).toBeTruthy();
+    expect(
+      within(group).getByRole("button", { name: "Resume link comments" }),
+    ).toBeTruthy();
+
+    await user.click(
+      within(group).getByRole("button", { name: "Resume link comments" }),
+    );
+    expect(
+      await within(group).findByRole("button", { name: "Pause link comments" }),
+    ).toBeTruthy();
+    expect(
+      within(group).queryByText(
+        "Link comments are paused. People with links can still read everything.",
+      ),
+    ).toBeNull();
+    expect(bridgeMock.listRelayShareDiscussion).toHaveBeenNthCalledWith(2, {
+      workspaceId: "ws-1",
+      shareId: "share-1",
+      direction: "newest-first",
+    });
+    expect(bridgeMock.listRelayShareDiscussion).toHaveBeenNthCalledWith(3, {
+      workspaceId: "ws-1",
+      shareId: "share-1",
+      direction: "newest-first",
+    });
+    expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(linkInventoryCalls);
+    expect(bridgeMock.listRelayShares).toHaveBeenCalledTimes(grantInventoryCalls);
+    await vi.waitFor(() => {
+      expect(bridgeMock.pollRelayShareDiscussionActivity).toHaveBeenCalledTimes(3);
+    });
+    expect(
+      bridgeMock.pollRelayShareDiscussionActivity.mock.calls.map(
+        ([payload]) => payload.since,
+      ),
+    ).toEqual([41, 42, 43]);
+  });
+
+  it("keeps the loaded discussion and both errors until reconciliation retry succeeds", async () => {
+    const live = namedComment("message-1", "Still loaded after read failure");
+    const tombstone: RelayShareDiscussionMessage = {
+      messageId: "message-1",
+      createdAtMs: CREATED_MS,
+      deleted: true,
+      author: { kind: "named", displayName: "Owner Name" },
+    };
+    const retry = controllable<DiscussionPage>();
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("link-1", { shareId: "share-1" })],
+    });
+    bridgeMock.listRelayShareDiscussion
+      .mockResolvedValueOnce(discussionPage([live], { activityRevision: 51 }))
+      .mockRejectedValueOnce(new Error("reconciliation read failed"))
+      .mockReturnValueOnce(retry.promise);
+    bridgeMock.deleteRelayShareDiscussionMessage.mockRejectedValueOnce(
+      new Error("delete response lost after commit"),
+    );
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await openOwnerComments(user, "share-1");
+    const row = await within(group).findByTestId("share-comment-message-1");
+    await vi.waitFor(() => {
+      expect(bridgeMock.pollRelayShareDiscussionActivity).toHaveBeenCalledTimes(1);
+    });
+    const oldPoll = bridgeMock.pollRelayShareDiscussionActivity.mock.calls[0]![0];
+    await user.click(within(row).getByRole("button", { name: "Delete comment" }));
+    await user.click(
+      within(within(group).getByTestId("owner-comments-confirmation")).getByRole(
+        "button",
+        { name: "Delete comment" },
+      ),
+    );
+
+    await vi.waitFor(() => {
+      expect(bridgeMock.listRelayShareDiscussion).toHaveBeenCalledTimes(2);
+    });
+    expect(await within(group).findByText("Couldn't load comments.")).toBeTruthy();
+    expect(
+      within(group).queryByText("Couldn't complete that change."),
+    ).not.toBeNull();
+    expect(within(group).getByText("Still loaded after read failure")).toBeTruthy();
+    expect(bridgeMock.cancelRelayShareDiscussionActivity).toHaveBeenCalledWith({
+      pollId: oldPoll.pollId,
+    });
+    expect(bridgeMock.pollRelayShareDiscussionActivity).toHaveBeenCalledTimes(1);
+
+    await user.click(within(group).getByRole("button", { name: "Retry" }));
+    expect(
+      within(group).queryByText("Couldn't complete that change."),
+    ).not.toBeNull();
+    expect(within(group).getByText("Still loaded after read failure")).toBeTruthy();
+    expect(bridgeMock.listRelayShareDiscussion).toHaveBeenNthCalledWith(3, {
+      workspaceId: "ws-1",
+      shareId: "share-1",
+      direction: "newest-first",
+    });
+    await act(async () => {
+      retry.resolve(discussionPage([tombstone], { activityRevision: 52 }));
+    });
+
+    expect(
+      await within(group).findByText("Comment deleted by the owner"),
+    ).toBeTruthy();
+    expect(within(group).queryByText("Couldn't load comments.")).toBeNull();
+    expect(within(group).queryByText("Couldn't complete that change.")).toBeNull();
+    expect(within(group).queryByText("Still loaded after read failure")).toBeNull();
+    await vi.waitFor(() => {
+      expect(bridgeMock.pollRelayShareDiscussionActivity).toHaveBeenCalledTimes(2);
+    });
+    expect(bridgeMock.pollRelayShareDiscussionActivity).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        workspaceId: "ws-1",
+        shareId: "share-1",
+        since: 52,
+      }),
+    );
+  });
+
+  it("does not reconcile a rejected mutation from a replaced target", async () => {
+    const pause = controllable<{ linkCommentsPaused: true }>();
+    bridgeMock.listRelayShareLinks
+      .mockResolvedValueOnce({
+        links: [readableLink("link-a", { shareId: "share-shared" })],
+      })
+      .mockResolvedValueOnce({
+        links: [
+          readableLink("link-b", {
+            shareId: "share-shared",
+            selector: { paths: [], versionId: "version-b" },
+          }),
+        ],
+      });
+    bridgeMock.listRelayShareDiscussion
+      .mockResolvedValueOnce(
+        discussionPage([namedComment("message-a", "Old target state")], {
+          activityRevision: 61,
+        }),
+      )
+      .mockResolvedValueOnce(
+        discussionPage([namedComment("message-b", "Current target state")], {
+          activityRevision: 71,
+        }),
+      )
+      .mockResolvedValueOnce(
+        discussionPage([], {
+          activityRevision: 62,
+          linkCommentsPaused: true,
+        }),
+      );
+    bridgeMock.pauseRelayShareDiscussion.mockReturnValueOnce(pause.promise);
+    const user = userEvent.setup();
+    const view = render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const groupA = await openOwnerComments(user, "share-shared");
+    expect(await within(groupA).findByText("Old target state")).toBeTruthy();
+    await user.click(
+      within(groupA).getByRole("button", { name: "Pause link comments" }),
+    );
+
+    view.rerender(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "version", versionId: "version-b" }}
+        onClose={() => {}}
+      />,
+    );
+    const groupB = await openOwnerComments(user, "share-shared");
+    expect(await within(groupB).findByText("Current target state")).toBeTruthy();
+    const discussionCallsBeforeRejection =
+      bridgeMock.listRelayShareDiscussion.mock.calls.length;
+
+    await act(async () => {
+      pause.reject(new Error("old target response lost after commit"));
+    });
+
+    expect(bridgeMock.listRelayShareDiscussion).toHaveBeenCalledTimes(
+      discussionCallsBeforeRejection,
+    );
+    expect(bridgeMock.listRelayShareDiscussion).toHaveBeenNthCalledWith(2, {
+      workspaceId: "ws-1",
+      shareId: "share-shared",
+      direction: "newest-first",
+    });
+    expect(screen.queryByText("Old target state")).toBeNull();
+    expect(screen.queryByText("Couldn't complete that change.")).toBeNull();
+    expect(
+      screen.queryByText(
+        "Link comments are paused. People with links can still read everything.",
+      ),
+    ).toBeNull();
+    expect(within(groupB).getByText("Current target state")).toBeTruthy();
+  });
+
   it("keeps a confirmation-action error visible through its pending retry", async () => {
     const retry = controllable<{
       message: { messageId: string; createdAtMs: number; deleted: true };
     }>();
+    const reconciliation = controllable<DiscussionPage>();
     const live = namedComment("message-1", "Retry deletion");
     const tombstone: RelayShareDiscussionMessage = {
       messageId: "message-1",
@@ -3026,6 +3422,7 @@ describe("RelayShareDialog", () => {
     });
     bridgeMock.listRelayShareDiscussion
       .mockResolvedValueOnce(discussionPage([live]))
+      .mockReturnValueOnce(reconciliation.promise)
       .mockResolvedValueOnce(discussionPage([tombstone]));
     bridgeMock.deleteRelayShareDiscussionMessage
       .mockRejectedValueOnce(new Error("delete failed"))
@@ -3078,11 +3475,13 @@ describe("RelayShareDialog", () => {
 
   it("keeps a direct pause error visible through its pending retry", async () => {
     const retry = controllable<{ linkCommentsPaused: true }>();
+    const reconciliation = controllable<DiscussionPage>();
     bridgeMock.listRelayShareLinks.mockResolvedValue({
       links: [readableLink("link-1", { shareId: "share-1" })],
     });
     bridgeMock.listRelayShareDiscussion
       .mockResolvedValueOnce(discussionPage())
+      .mockReturnValueOnce(reconciliation.promise)
       .mockResolvedValueOnce(discussionPage([], { linkCommentsPaused: true }));
     bridgeMock.pauseRelayShareDiscussion
       .mockRejectedValueOnce(new Error("pause failed"))

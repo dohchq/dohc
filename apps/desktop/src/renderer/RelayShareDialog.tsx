@@ -1115,7 +1115,9 @@ export function RelayShareDialog(props: {
       }
       setOwnerConfirmation(null);
       setOwnerMutationError({ shareId, actionKey });
-      if (refresh === "inventories") {
+      if (refresh === "discussion") {
+        void refreshOwnerDiscussion(shareId, undefined, scopeGeneration);
+      } else {
         void refreshLinks(scopeGeneration);
         void refreshIndependentGrants(scopeGeneration, {
           preserveOwnerMutationError: true,
