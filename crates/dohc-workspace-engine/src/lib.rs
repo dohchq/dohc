@@ -1272,9 +1272,6 @@ impl EngineService {
             "share.view.pull" => {
                 Box::pin(self.share_view_pull(&ctx, request.workspace, request.params)).await?
             }
-            "share.view.push" => {
-                Box::pin(self.share_view_push(&ctx, request.workspace, request.params)).await?
-            }
             "share.view.recordIdentity" => {
                 Box::pin(self.share_view_record_identity(&ctx, request.workspace, request.params))
                     .await?
@@ -2775,46 +2772,15 @@ impl EngineService {
         Ok(result)
     }
 
-    /// Push this replica's own chat about a RECEIVED file share (#646 PR2).
-    ///
-    /// Takes the SAME pinned selector the pull takes, and refuses an
-    /// unreadable level the same way: the grant decides which of this
-    /// replica's ops belong to the share, so a caller that cannot state it
-    /// must not push through it.
-    async fn share_view_push(
-        &self,
-        ctx: &RequestContext,
-        handle: Option<WorkspaceHandle>,
-        params: Value,
-    ) -> Result<Value, WireError> {
-        let params: ShareViewParams = parse(params)?;
-        let granted = share_grant(params.granted_selector)?;
-        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
-        let outcome = self
-            .relay_execute(
-                ctx,
-                &open,
-                configuration,
-                RelayOperation::PushShareView {
-                    workspace_id: open.workspace_id.clone(),
-                    share_id: params.share_id,
-                    granted,
-                },
-                "share.view.push",
-            )
-            .await?;
-        relay_outcome_json(outcome)
-    }
-
     /// Record this share view's own replica identity (#646 PR3-1). Run at
     /// open and again at every refresh; the engine writes the row once and
     /// later calls answer `already-recorded`.
     ///
     /// Takes no `shareId`: `sync_identity` is per WORKSPACE, and a share view
     /// mirrors exactly one share. It takes the pinned selector because the
-    /// LEVEL decides — a `view` share may push nothing, so it records
-    /// nothing — and refuses an unreadable level the same way the pull and
-    /// the push do.
+    /// LEVEL decides — only an `edit` share can send file changes, so View
+    /// and Comment record nothing — and refuses an unreadable level the same
+    /// way the pull does.
     ///
     /// The three identity components are minted HERE, not by the caller, for
     /// the same reason `sync.claim` mints its own: the durable row is the
@@ -2858,10 +2824,10 @@ impl EngineService {
     /// Offer this replica's own edits of a RECEIVED file share to the granter
     /// (#646 PR3).
     ///
-    /// Takes the SAME pinned selector the pull and the chat push take, and
-    /// refuses an unreadable level the same way. The client refuses again
-    /// below `edit` — the caller states the level it pinned, and a level this
-    /// process cannot read is not a narrower grant.
+    /// Takes the same pinned selector the pull takes and refuses an unreadable
+    /// level the same way. The client refuses again below `edit` — the caller
+    /// states the level it pinned, and a level this process cannot read is not
+    /// a narrower grant.
     async fn share_proposal_submit(
         &self,
         ctx: &RequestContext,
@@ -12321,9 +12287,9 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
                 dohc_engine_runtime::ShareViewIdentityRecord::AlreadyRecorded => {
                     "already-recorded"
                 }
-                // A `view` share may push nothing, so it is given no identity
-                // — and saying "already recorded" would claim a row that does
-                // not exist.
+                // View and Comment send no workspace replication ops, so they
+                // are given no identity. Saying "already recorded" would
+                // claim a row that does not exist.
                 dohc_engine_runtime::ShareViewIdentityRecord::NotRequired => "not-required",
             },
         }),
@@ -13426,6 +13392,38 @@ mod tests {
             .expect("engine.ping must answer");
         assert_eq!(answer.response.id, 1);
         assert_eq!(answer.response.result, json!({ "ok": true }));
+    }
+
+    #[tokio::test]
+    async fn share_view_push_is_not_a_registered_method() {
+        let service = EngineService::new();
+        let error = service
+            .call(
+                RequestContext::unbounded(),
+                Request {
+                    id: 2,
+                    method: "share.view.push".to_owned(),
+                    workspace: None,
+                    deadline_ms: None,
+                    idempotency_key: None,
+                    params: json!({
+                        "workspaceId": "workspace",
+                        "shareId": "share",
+                        "grantedSelector": {
+                            "paths": ["shared.md"],
+                            "versionId": null,
+                            "access": "comment",
+                        },
+                    }),
+                },
+            )
+            .await
+            .expect_err("share.view.push must be removed from the daemon API");
+        assert_eq!(
+            error.code,
+            ErrorCode::MethodNotFound,
+            "MUTATION: restoring a dispatch arm makes the obsolete push API callable",
+        );
     }
 
     #[test]

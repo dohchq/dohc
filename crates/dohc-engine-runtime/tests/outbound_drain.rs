@@ -3280,13 +3280,9 @@ async fn never_synced_mutations_keep_only_the_diagnostic_journal() {
 // owner-lane answer.
 
 /// A share view that has pulled once: a share cursor, and no owner-lane
-/// position of any kind. `enrolled` writes the identity the way
-/// `share.view.enroll` does at comment or edit; without it this is a `view`
-/// share view.
-/// `recorded` is the LEVEL's consequence: `None` never records an
-/// identity (a `view` share), `Some(false)` records one without the file lane
-/// (a `comment` share), `Some(true)` records both (an `edit` share).
-fn initialize_share_view(db: &Path, workspace_id: &str, recorded: Option<bool>) {
+/// position of any kind. Edit records the identity and file lane together;
+/// View and Comment record neither.
+fn initialize_share_view(db: &Path, workspace_id: &str, editable: bool) {
     let mut store = EngineStore::open(db, 1).expect("open store");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(workspace_id, "main", 1, &NoFaults)
@@ -3302,7 +3298,7 @@ fn initialize_share_view(db: &Path, workspace_id: &str, recorded: Option<bool>) 
             Ok::<_, StorageError>(())
         })
         .expect("seed share cursor");
-    if let Some(drains_file_moments) = recorded {
+    if editable {
         match dohc_engine_sync::record_share_view_identity(
             &mut store,
             workspace_id,
@@ -3311,7 +3307,6 @@ fn initialize_share_view(db: &Path, workspace_id: &str, recorded: Option<bool>) 
                 replication_epoch: "epoch-share",
                 stream_identity: "stream-share",
             },
-            drains_file_moments,
             1,
             &NoFaults,
         )
@@ -3323,20 +3318,19 @@ fn initialize_share_view(db: &Path, workspace_id: &str, recorded: Option<bool>) 
     }
 }
 
-/// The PR3 proposal lane's precondition: an enrolled share view journals the
+/// The PR3 proposal lane's precondition: an Edit share view journals the
 /// file it writes, so the share has something to push back.
 ///
 /// It must journal the moment and NOTHING ELSE. Nothing drains a
-/// `ydoc.update` from a share view — the share push scope serves only what
-/// the share covers — so a `ydoc.update` here would sit in the recipient's
-/// database forever. That is why the owner-lane predicate was left alone and
-/// a narrower one was added.
+/// `ydoc.update` from a proposal lane, so a `ydoc.update` here would sit in
+/// the recipient's database forever. That is why the owner-lane predicate
+/// was left alone and a narrower one was added.
 #[tokio::test]
 async fn an_enrolled_share_view_journals_a_file_write_and_no_ydoc_update() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let workspace_id = "ws-share-view-enrolled";
-    initialize_share_view(&db, workspace_id, Some(true));
+    initialize_share_view(&db, workspace_id, true);
 
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 2).expect("open actor").actor;
@@ -3377,13 +3371,14 @@ async fn an_enrolled_share_view_journals_a_file_write_and_no_ydoc_update() {
 /// `journal_local_payload_json_in_tx` REFUSES without a sync identity, and
 /// that refusal rolls the user's edit back with it. So a predicate that
 /// answered true for a share view WITHOUT an identity would not journal the
-/// write — it would destroy it. A `view` share view is exactly that state.
+/// write — it would destroy it. View and Comment share views are exactly that
+/// state.
 #[tokio::test]
-async fn a_view_share_view_journals_nothing_and_its_write_still_commits() {
+async fn a_read_only_share_view_journals_nothing_and_its_write_still_commits() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let workspace_id = "ws-share-view-unenrolled";
-    initialize_share_view(&db, workspace_id, None);
+    initialize_share_view(&db, workspace_id, false);
 
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 2).expect("open actor").actor;
@@ -3395,7 +3390,7 @@ async fn a_view_share_view_journals_nothing_and_its_write_still_commits() {
             CancellationToken::new(),
         )
         .await
-        .expect("MUTATION: a view share view's write must still commit");
+        .expect("MUTATION: a read-only share view's write must still commit");
     supervisor.close(&db).expect("close actor");
 
     assert!(

@@ -1783,44 +1783,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         channel_wire_id: &str,
         faults: &dyn FaultInjector,
     ) -> Result<SharedChannelPushOutcome, RelayError> {
-        self.push_share_ops(
-            store,
-            workspace_id,
-            share_id,
-            &SharePushScope::Channel(channel_wire_id),
-            faults,
-        )
-    }
-
-    /// Push this replica's own chat about a RECEIVED file share back to the
-    /// granter (#646 PR2).
-    ///
-    /// The lane is MU-C4's, op for op: the same local scan, the same dense
-    /// per-share origin sequence, the same batched POST to the share log, the
-    /// same push state. Only the scope differs — a channel share scopes by
-    /// channel wire id, a file share by the pinned grant — and one payload is
-    /// rewritten on the way out, because a thread's link crosses a share
-    /// boundary as a PATH and this replica's object ids mean nothing to the
-    /// granter.
-    ///
-    /// The relay refuses the whole batch when the grant does not admit an op,
-    /// so eligibility here is not the authorization; it is what keeps this
-    /// replica from offering ops the grant was never going to accept.
-    pub fn push_share_view(
-        &self,
-        store: &mut EngineStore,
-        workspace_id: &str,
-        share_id: &str,
-        granted: &crate::ShareGrant,
-        faults: &dyn FaultInjector,
-    ) -> Result<SharedChannelPushOutcome, RelayError> {
-        self.push_share_ops(
-            store,
-            workspace_id,
-            share_id,
-            &SharePushScope::View(granted),
-            faults,
-        )
+        self.push_share_ops(store, workspace_id, share_id, channel_wire_id, faults)
     }
 
     fn push_share_ops(
@@ -1828,21 +1791,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         store: &mut EngineStore,
         workspace_id: &str,
         share_id: &str,
-        scope: &SharePushScope<'_>,
+        channel_wire_id: &str,
         faults: &dyn FaultInjector,
     ) -> Result<SharedChannelPushOutcome, RelayError> {
-        // Names the missing thing, because an agent reads this, not a user.
-        // A view-level share view never arrives here — `share_view_push_path`
-        // refuses first — so reaching this is a real bug in the caller.
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
-            .ok_or_else(|| {
-                RelayError::Local(
-                    "share view has no sync identity: one is written at open when the \
-                     share grants comment or edit"
-                        .to_owned(),
-                )
-            })?;
+            .ok_or(RelayError::InvalidResponse)?;
         let state = read_shared_push_state(store, workspace_id, share_id)?;
         let scanned = state.scanned_seq;
         let mut dense_seq = match state.dense_seq {
@@ -1852,7 +1806,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     store,
                     workspace_id,
                     &identity.origin_id,
-                    scope,
+                    channel_wire_id,
                     scanned,
                 )?;
                 write_shared_push_state(store, workspace_id, share_id, scanned, dense_seq, faults)?;
@@ -1889,8 +1843,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 break;
             };
             for op in page {
-                let served = scope.served_payload(store, workspace_id, &op)?;
-                if served.is_some() {
+                let eligible =
+                    shared_channel_op_allowed(store, workspace_id, channel_wire_id, &op)?;
+                if eligible {
                     dense_seq = dense_seq
                         .checked_add(1)
                         .ok_or(RelayError::InvalidResponse)?;
@@ -1899,14 +1854,14 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     continue;
                 }
                 last_scanned = op.origin_seq;
-                if let Some(payload) = served {
+                if eligible {
                     pending.push((
                         op.origin_seq,
                         ShareReplicationEnvelope {
                             origin_id: identity.origin_id.clone(),
                             origin_seq: dense_seq,
                             op_kind: op.op_kind,
-                            payload,
+                            payload: op.payload,
                             recorded_at_ms: op.recorded_at_ms,
                         },
                     ));
@@ -1977,10 +1932,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         submit_id: &str,
         faults: &dyn FaultInjector,
     ) -> Result<ShareProposalSubmitOutcome, RelayError> {
-        // The PINNED level, read here rather than trusted from the relay's own
-        // refusal — the defence in depth `share_view_push_path` states for
-        // chat. A recipient offers nothing it was not granted, so a view or
-        // comment share never contacts the relay at all.
+        // The PINNED level is read here rather than trusted from the relay's
+        // own refusal. A recipient offers nothing it was not granted, so a
+        // View or Comment share never contacts the relay at all.
         if granted.access != crate::ShareAccess::Edit {
             return Ok(ShareProposalSubmitOutcome::default());
         }
@@ -3682,170 +3636,11 @@ fn collect_share_proposal_changes(
     })
 }
 
-/// What a push is scoped to. The two share surfaces run the SAME outbound
-/// lane — one local scan, one dense per-share origin sequence, one batched
-/// POST — and differ only in which of this replica's ops belong to the share
-/// and what shape they take on the wire.
-enum SharePushScope<'a> {
-    /// MU-C4: the granted channel's own ops, pushed unchanged.
-    Channel(&'a str),
-    /// #646 PR2: this replica's chat about the files a received file share
-    /// covers, scoped by the pinned grant.
-    View(&'a crate::ShareGrant),
-}
-
-impl SharePushScope<'_> {
-    /// Whether `op` is this share's to push, without building its payload.
-    fn is_eligible(
-        &self,
-        store: &EngineStore,
-        workspace_id: &str,
-        op: &ReplicationEnvelope,
-    ) -> Result<bool, RelayError> {
-        match self {
-            Self::Channel(channel_wire_id) => {
-                shared_channel_op_allowed(store, workspace_id, channel_wire_id, op)
-            }
-            Self::View(granted) => {
-                Ok(share_view_push_path(store, workspace_id, granted, op)?.is_some())
-            }
-        }
-    }
-
-    /// The payload to push for `op`, or `None` when the op is not this
-    /// share's to push.
-    fn served_payload(
-        &self,
-        store: &EngineStore,
-        workspace_id: &str,
-        op: &ReplicationEnvelope,
-    ) -> Result<Option<serde_json::Value>, RelayError> {
-        match self {
-            Self::Channel(channel_wire_id) => {
-                Ok(
-                    shared_channel_op_allowed(store, workspace_id, channel_wire_id, op)?
-                        .then(|| op.payload.clone()),
-                )
-            }
-            Self::View(granted) => share_view_push_payload(store, workspace_id, granted, op),
-        }
-    }
-}
-
-/// The file-share half of the eligibility rule, and the one rewrite the
-/// outbound lane makes.
-///
-/// An op is this share's to push when it is one of the five file-chat kinds
-/// AND the file its thread is about sits inside the pinned grant right now.
-/// A `chat.thread.create` then leaves here naming that file by PATH: the
-/// granter mints its own object ids, so the local one this replica journaled
-/// would name nothing there, and the relay's own filter refuses a create that
-/// carries both shapes.
-/// The in-grant path this op's thread is about, or `None` when the op is not
-/// this share's to push. Answers eligibility WITHOUT building a payload, so
-/// the dense-sequence walk can ask the same question cheaply.
-fn share_view_push_path(
-    store: &EngineStore,
-    workspace_id: &str,
-    granted: &crate::ShareGrant,
-    op: &ReplicationEnvelope,
-) -> Result<Option<String>, RelayError> {
-    if !crate::share::is_share_view_chat_kind(&op.op_kind) {
-        return Ok(None);
-    }
-    // The PINNED level, read here rather than trusted from the relay's own
-    // refusal (#646 PR2). A `view` grant carries chat to read and nothing to
-    // write, so this replica offers none — the defence in depth the plan's
-    // enforcement table claims, and the one place the pinned level decides
-    // something by itself.
-    if granted.access == crate::ShareAccess::View {
-        return Ok(None);
-    }
-    let object_id = if op.op_kind == "chat.thread.create" {
-        match op
-            .payload
-            .get("linkedObjectId")
-            .and_then(serde_json::Value::as_str)
-        {
-            Some(object_id) => object_id.to_owned(),
-            // A channel thread, or a create already naming a path. Neither is
-            // this file share's to push.
-            None => return Ok(None),
-        }
-    } else {
-        let Some(thread_id) = op
-            .payload
-            .get("threadId")
-            .and_then(serde_json::Value::as_str)
-        else {
-            return Ok(None);
-        };
-        match read_thread_linked_object(store, workspace_id, thread_id)? {
-            Some(object_id) => object_id,
-            None => return Ok(None),
-        }
-    };
-    let Some(path) = read_object_path(store, workspace_id, &object_id)? else {
-        return Ok(None);
-    };
-    // Chat follows PATHS only, and the same containment rule the inbound
-    // boundary applies — so a version share pushes nothing either.
-    if !crate::share::selected_path_within_grant(&path, granted) {
-        return Ok(None);
-    }
-    Ok(Some(path))
-}
-
-fn share_view_push_payload(
-    store: &EngineStore,
-    workspace_id: &str,
-    granted: &crate::ShareGrant,
-    op: &ReplicationEnvelope,
-) -> Result<Option<serde_json::Value>, RelayError> {
-    let Some(path) = share_view_push_path(store, workspace_id, granted, op)? else {
-        return Ok(None);
-    };
-    if op.op_kind != "chat.thread.create" {
-        return Ok(Some(op.payload.clone()));
-    }
-    let mut payload = op.payload.clone();
-    let Some(record) = payload.as_object_mut() else {
-        return Ok(None);
-    };
-    record.remove("linkedObjectId");
-    // Display-only and captured once. The granter re-resolves the path it
-    // receives against its own store, so carrying a second, staler copy of the
-    // same idea across the boundary would only invite someone to read it.
-    record.remove("linkedPathHint");
-    record.insert("linkedPath".to_owned(), serde_json::Value::String(path));
-    Ok(Some(payload))
-}
-
-fn read_thread_linked_object(
-    store: &EngineStore,
-    workspace_id: &str,
-    thread_id: &str,
-) -> Result<Option<String>, RelayError> {
-    store
-        .read_with(|conn| crate::share::thread_linked_object(conn, workspace_id, thread_id))
-        .map_err(local)
-}
-
-fn read_object_path(
-    store: &EngineStore,
-    workspace_id: &str,
-    object_id: &str,
-) -> Result<Option<String>, RelayError> {
-    store
-        .read_with(|conn| crate::share::object_main_path(conn, workspace_id, object_id))
-        .map_err(local)
-}
-
 fn shared_dense_seq_through(
     store: &EngineStore,
     workspace_id: &str,
     origin_id: &str,
-    scope: &SharePushScope<'_>,
+    channel_wire_id: &str,
     scanned_seq: i64,
 ) -> Result<i64, RelayError> {
     let mut dense_seq = -1_i64;
@@ -3863,7 +3658,7 @@ fn shared_dense_seq_through(
             // Eligibility only — this walk never sends anything, and building
             // a served payload per op just to drop it clones the whole
             // payload for every op in the log on every push.
-            if scope.is_eligible(store, workspace_id, &op)? {
+            if shared_channel_op_allowed(store, workspace_id, channel_wire_id, &op)? {
                 dense_seq = dense_seq
                     .checked_add(1)
                     .ok_or(RelayError::InvalidResponse)?;
