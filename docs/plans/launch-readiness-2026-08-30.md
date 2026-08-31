@@ -14,13 +14,14 @@ History, graph, large-document, Explorer, and large-workspace paths now have
 durable or real-app evidence. One search observation was not reproducible after
 the test waited for a durable save.
 
-A first import is still visible work at large scale. In the packaged release
-build, a fresh 15,000-file workspace opens in a named `Importing` phase after
-14.746 seconds and reaches full History readiness after 77.226 seconds. The
-same workspace reopens `Ready` in 815 ms. Baseline-dependent operations fail
-fast with an updating response during import; file content, close, and reopen
-remain available and preserve the first and last fixture files. This is an
-explicit background-import boundary, not an unexplained wait or raw deadline.
+A first import is still visible work at large scale. The original packaged
+profile opened a fresh 15,000-file workspace in 14.746 seconds and reached full
+History readiness after 77.226 seconds. The final repeatable daemon profiles
+open in 11.702-12.131 seconds and reach `Ready` in 24.650-25.171 seconds.
+Baseline-dependent operations fail fast with an updating response during
+import. Both final runs recovered all 15,000 moments and paths after restart.
+This is an explicit background-import boundary, not an unexplained wait or raw
+deadline.
 Fresh plans below 1,000 files keep the simpler strict barrier and do not expose
 a partial-ready state for ordinary workspaces.
 
@@ -188,9 +189,9 @@ Raw evidence stays out of Git. The manifest, checks, findings, and decisions sta
   DOM nodes and one 64 ms long task.
 - Graph performance: bounded to 240 interactive nodes and rows; three release
   runs reached ready in 1.494-1.673 seconds with a 66-78 ms longest task.
-- Fresh capture: 5,000 files open at 6.864 seconds and reach `Ready` at 16.153
-  seconds; 15,000 files open at 14.746 seconds and reach `Ready` at 77.226
-  seconds. Reopens are 256 ms and 815 ms, with content integrity checks passed.
+- Fresh capture: the original 15,000-file release profile needed 77.226 seconds
+  for History. Final cold runs open in 11.702-12.131 seconds and reach `Ready`
+  in 24.650-25.171 seconds, with exact 15,000-entry restart checks passed.
 - Release configuration: set both managed Cloud origins for a managed-service
   build. Missing or invalid configuration is now an honest, recoverable state.
 - Final gates: the canonical Rust gate passed 2,090 workspace tests and the

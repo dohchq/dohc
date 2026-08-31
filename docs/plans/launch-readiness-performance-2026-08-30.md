@@ -9,12 +9,12 @@ fast in the 15,000-file fixture; Explorer, graph, large Markdown editing, and
 oversized Markdown reading now bound main-thread work; and fresh capture no
 longer holds `workspace.open` until the complete History baseline exists.
 
-Large first imports remain visible work. The release build opens a fresh
-15,000-file workspace in a named `Importing` phase after 14.746 seconds and
-reaches `Ready` after 77.226 seconds. The same workspace reopens ready in 815
-ms. Operations that require a complete baseline return an explicit updating
-response during import. This meets the run's named-work exception; it is not a
-claim that a 77-second first import is the final performance target.
+Large first imports remain visible work. The original release profile opened a
+fresh 15,000-file workspace in 14.746 seconds and needed 77.226 seconds to
+finish History. The final repeatable daemon profile opens in 11.702-12.131
+seconds and reaches `Ready` in 24.650-25.171 seconds. Both final runs recovered
+exactly 15,000 moments and paths after a daemon restart. Operations that require
+a complete baseline return an explicit updating response during import.
 Plans below 1,000 Added files retain the strict baseline barrier, so ordinary
 small workspaces do not pay the complexity of a partial-ready shell.
 
@@ -26,7 +26,10 @@ small workspaces do not pay the complexity of a partial-ready shell.
 | Open a fresh 5,000-file workspace, before the fix | 18,087.7 ms to the complete barrier | Exact gate-built binary; hardlinked fixture; capture enabled | Fail |
 | Open a fresh 5,000-file workspace after the capture changes | 6,864.4 ms to named `Importing`; 16,153.1 ms to `Ready` | Packaged release sidecar; first/last reads pass before and after close; 256.4 ms ready reopen | Pass for the named-work boundary |
 | Open a fresh 15,000-file workspace, before the fix | 181,888.9 ms to the complete barrier | Exact gate-built binary; hardlinked fixture; capture enabled | Fail |
-| Open a fresh 15,000-file workspace after the capture changes | 14,745.8 ms to named `Importing`; 77,226.4 ms to `Ready` | Packaged release sidecar; first/last reads pass before and after close; 814.8 ms ready reopen | Pass for the named-work boundary |
+| Open a fresh 15,000-file workspace after the first launch changes | 14,745.8 ms to named `Importing`; 77,226.4 ms to `Ready` | Packaged release sidecar; first/last reads pass before and after close; 814.8 ms ready reopen | Pass for the named-work boundary; too slow for the final target |
+| Repeat the complete 15,000-file capture before the final cold-path changes | 22,679.4 ms to named `Importing`; 46,176.8 ms to `Ready` | Repeatable real-daemon profiler; exact 15,000 moments and paths survive restart | Baseline for the final optimization |
+| Repeat the complete 15,000-file capture after the final cold-path changes | 11,702.0 ms to named `Importing`; 24,650.3 ms to `Ready` | Gate-built daemon; exact 15,000 moments and paths survive restart | Pass |
+| Confirm the final complete 15,000-file capture | 12,131.4 ms to named `Importing`; 25,170.7 ms to `Ready` | Independent cold fixture and daemon restart; 30,000 ms readiness ceiling | Pass |
 | Open the 15,000-file control with capture disabled | 202.7 ms | Separates file listing/open cost from initial History capture | Diagnostic control |
 | Expand a 5,000-file folder, before the fix | 2,407 ms to the complete tree | 5,004 mounted rows; seven long tasks; longest 732 ms | Fail |
 | Expand that folder after fixed-height virtualization | 80 ms to the first child; 40 ms to focus an initially unmounted End target | 37 mounted rows after expansion; one 53 ms long task; 178 interactions over 10 seconds | Pass for the measured boundary |
@@ -52,15 +55,16 @@ and remains an unsuccessful run.
 
 ## Remaining performance work
 
-1. Keep reducing first-import latency. The launch fix makes the work explicit
-   and nonblocking after a safe scan; it does not make 77 seconds desirable.
+1. Keep profiling growth beyond 15,000 files. A 25-second History import is
+   bounded and nonblocking after the safe scan, but it remains visible work.
 2. Reconnect the committed performance budget table to a candidate-build gate.
    The current profiles are diagnostic evidence, not the complete release gate.
 
-The first-import path now batches capture writes, keeps mtime fences in hash
-workers, indexes generation high-water reads, and avoids unnecessary FTS
-deletes for brand-new moments. The safety layer releases only a proven fresh,
-clean all-Added import of at least 1,000 files; smaller, existing, recovered,
-migrated, unreadable-policy, or otherwise uncertain stores keep the strict
-baseline barrier. Explorer, graph, and large Markdown no longer block launch
-in this run.
+The first-import path now batches capture writes, prepares secure file reads in
+bounded parallel windows, reuses fresh-capture state, keeps mtime fences in an
+eight-worker scan pool, indexes generation high-water reads, and avoids
+unnecessary FTS deletes for brand-new moments. The safety layer releases only a
+proven fresh, clean all-Added import of at least 1,000 files; smaller, existing,
+recovered, migrated, unreadable-policy, or otherwise uncertain stores keep the
+strict baseline barrier. Explorer, graph, large Markdown, and the measured
+15,000-file History import no longer block launch in this run.
