@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   authorizeShareAction,
+  resolveReceivedShareAuthority,
   type ShareAction,
 } from "./shareAuthorization";
 import type {
@@ -62,7 +63,190 @@ function authorize(
   });
 }
 
+function receivedAuthorityStorage(options: {
+  grants: SyncRelayShareGrantRow[];
+  otherGrants?: SyncRelayShareGrantRow[];
+  share?: SyncRelayShareRow;
+  ownerStanding?: boolean;
+  channelKind?: "channel" | "dm" | "agent" | null;
+  onScan?: () => void;
+}): AuthorizationStorage {
+  const storedShare = options.share ?? share;
+  const storedGrants = [...options.grants, ...(options.otherGrants ?? [])];
+  return {
+    getShare: (shareId) => (shareId === storedShare.shareId ? storedShare : null),
+    getShareGrant: (grantId) =>
+      storedGrants.find((candidate) => candidate.grantId === grantId) ?? null,
+    listActiveShareGrantsForRecipient: () => {
+      options.onScan?.();
+      return options.grants;
+    },
+    workspaceIsOwnedBy: () => options.ownerStanding ?? true,
+    findChannelCreateKind: () => options.channelKind ?? "channel",
+  };
+}
+
 describe("share authorization", () => {
+  it("derives received-share read selection and generic appendability from one grant pass", () => {
+    const parent: SyncRelayShareGrantRow = {
+      ...grant,
+      grantId: "parent-link",
+      principalKind: "link",
+      principalUserId: null,
+      access: "edit",
+    };
+    const dependentComment: SyncRelayShareGrantRow = {
+      ...grant,
+      grantId: "dependent-comment",
+      access: "comment",
+      parentGrantId: parent.grantId,
+    };
+    const dependentEdit: SyncRelayShareGrantRow = {
+      ...grant,
+      grantId: "dependent-edit",
+      parentGrantId: parent.grantId,
+    };
+    const directView = { ...grant, grantId: "direct-view", access: "view" };
+    const directComment = {
+      ...grant,
+      grantId: "direct-comment",
+      access: "comment",
+    };
+    const directEdit = { ...grant, grantId: "direct-edit" };
+    const revoked = {
+      ...directComment,
+      grantId: "revoked-comment",
+      status: "revoked" as const,
+      generation: 2,
+      revokedAtMs: 2_000,
+    };
+    const damagedShare = { ...share, selectorJson: "{damaged" };
+    const blockedShare: SyncRelayShareRow = {
+      ...share,
+      selectorJson: JSON.stringify({
+        kind: "chat-channel",
+        channelWireId: "wire-agent",
+      }),
+    };
+    const blockedGrant = {
+      ...grant,
+      grantId: "blocked-channel",
+      access: "read-write",
+    };
+    const cases: Array<{
+      name: string;
+      grants: SyncRelayShareGrantRow[];
+      otherGrants?: SyncRelayShareGrantRow[];
+      storedShare?: SyncRelayShareRow;
+      ownerStanding?: boolean;
+      channelKind?: "channel" | "dm" | "agent" | null;
+      selectedGrantId: string | null;
+      genericChatWritable: boolean;
+    }> = [
+      {
+        name: "dependent-only Comment",
+        grants: [dependentComment],
+        otherGrants: [parent],
+        selectedGrantId: dependentComment.grantId,
+        genericChatWritable: false,
+      },
+      {
+        name: "independent-only Comment",
+        grants: [directComment],
+        selectedGrantId: directComment.grantId,
+        genericChatWritable: true,
+      },
+      {
+        name: "mixed dependent Edit and independent Comment",
+        grants: [directComment, dependentEdit],
+        otherGrants: [parent],
+        selectedGrantId: dependentEdit.grantId,
+        genericChatWritable: true,
+      },
+      {
+        name: "direct View",
+        grants: [directView],
+        selectedGrantId: directView.grantId,
+        genericChatWritable: false,
+      },
+      {
+        name: "direct Comment",
+        grants: [directComment],
+        selectedGrantId: directComment.grantId,
+        genericChatWritable: true,
+      },
+      {
+        name: "direct Edit",
+        grants: [directEdit],
+        selectedGrantId: directEdit.grantId,
+        genericChatWritable: true,
+      },
+      {
+        name: "revoked",
+        grants: [revoked],
+        selectedGrantId: null,
+        genericChatWritable: false,
+      },
+      {
+        name: "lost owner",
+        grants: [directComment],
+        ownerStanding: false,
+        selectedGrantId: null,
+        genericChatWritable: false,
+      },
+      {
+        name: "damaged selector",
+        grants: [directComment],
+        storedShare: damagedShare,
+        selectedGrantId: null,
+        genericChatWritable: false,
+      },
+      {
+        name: "blocked channel",
+        grants: [blockedGrant],
+        storedShare: blockedShare,
+        channelKind: "agent",
+        selectedGrantId: null,
+        genericChatWritable: false,
+      },
+    ];
+
+    for (const testCase of cases) {
+      let scans = 0;
+      const result = resolveReceivedShareAuthority({
+        storage: receivedAuthorityStorage({
+          grants: testCase.grants,
+          otherGrants: testCase.otherGrants,
+          share: testCase.storedShare,
+          ownerStanding: testCase.ownerStanding,
+          channelKind: testCase.channelKind,
+          onScan: () => {
+            scans += 1;
+          },
+        }),
+        actorUserId: "recipient-1",
+        shareId: share.shareId,
+      });
+
+      expect(scans, testCase.name).toBe(1);
+      expect(result.genericChatWritable, testCase.name).toBe(
+        testCase.genericChatWritable,
+      );
+      if (testCase.selectedGrantId === null) {
+        expect(result, testCase.name).toEqual({
+          ok: false,
+          reason: "gauntlet",
+          genericChatWritable: false,
+        });
+      } else {
+        expect(result.ok, testCase.name).toBe(true);
+        if (result.ok) {
+          expect(result.grant.grantId, testCase.name).toBe(testCase.selectedGrantId);
+        }
+      }
+    }
+  });
+
   it("applies each file-share action to the grant access", () => {
     const cases: Array<{
       access: string;

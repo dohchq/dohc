@@ -50,6 +50,29 @@ function handler(storage: SyncRelayStorage): SyncRelayHandler {
   });
 }
 
+function countActiveRecipientGrantScans(storage: SyncRelayStorage): {
+  storage: SyncRelayStorage;
+  scansForShare: (shareId: string) => number;
+} {
+  const scans = new Map<string, number>();
+  const counted = new Proxy(storage, {
+    get(target, property) {
+      if (property === "listActiveShareGrantsForRecipient") {
+        return (shareId: string, recipientUserId: string) => {
+          scans.set(shareId, (scans.get(shareId) ?? 0) + 1);
+          return target.listActiveShareGrantsForRecipient(shareId, recipientUserId);
+        };
+      }
+      const value = Reflect.get(target, property);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return {
+    storage: counted,
+    scansForShare: (shareId) => scans.get(shareId) ?? 0,
+  };
+}
+
 function request(userId: string | null, path: string, init: RequestInit = {}): Request {
   const headers = new Headers(init.headers);
   if (userId) headers.set("authorization", `Bearer user:${userId}`);
@@ -248,6 +271,59 @@ describe("createShare storage boundary", () => {
 describe("share grants", () => {
   beforeEach(() => {
     opSeq = 0;
+  });
+
+  it("scans active recipient grants once for one received-list row", async () => {
+    const storage = await testStorage();
+    claimStorageWorkspace(storage);
+    storage.createShare(directShareInput("share-counted-list"));
+    const counted = countActiveRecipientGrantScans(storage);
+    const response = await json(
+      await handler(counted.storage)(request(RECIPIENT, "/sync/shares")),
+    );
+
+    expect(response.received).toEqual([
+      expect.objectContaining({
+        shareId: "share-counted-list",
+        genericChatWritable: false,
+      }),
+    ]);
+    expect(counted.scansForShare("share-counted-list")).toBe(1);
+  });
+
+  it("scans active recipient grants once per distinct received share", async () => {
+    const storage = await testStorage();
+    claimStorageWorkspace(storage);
+    for (const shareId of ["share-counted-a", "share-counted-b", "share-counted-c"]) {
+      storage.createShare(directShareInput(shareId));
+    }
+    const counted = countActiveRecipientGrantScans(storage);
+    const response = await json(
+      await handler(counted.storage)(request(RECIPIENT, "/sync/shares")),
+    );
+
+    expect(response.received).toHaveLength(3);
+    for (const shareId of ["share-counted-a", "share-counted-b", "share-counted-c"]) {
+      expect(counted.scansForShare(shareId), shareId).toBe(1);
+    }
+  });
+
+  it("uses an initial gate and one combined final scan for an exact received share", async () => {
+    const storage = await testStorage();
+    claimStorageWorkspace(storage);
+    storage.createShare(directShareInput("share-counted-exact"));
+    const counted = countActiveRecipientGrantScans(storage);
+    const response = await json(
+      await handler(counted.storage)(
+        request(RECIPIENT, "/sync/shares/share-counted-exact"),
+      ),
+    );
+
+    expect(response).toMatchObject({
+      shareId: "share-counted-exact",
+      genericChatWritable: false,
+    });
+    expect(counted.scansForShare("share-counted-exact")).toBe(2);
   });
 
   it("creates a share by recipient email and lists it on both sides", async () => {

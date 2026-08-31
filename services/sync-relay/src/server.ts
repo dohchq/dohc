@@ -89,6 +89,7 @@ import {
 import {
   authorizeShareAction,
   authorizeLinkShareAction,
+  resolveReceivedShareAuthority,
   selectorTargetsBlockedChannel,
   type AuthorizedShareAction,
   type ShareAction,
@@ -972,11 +973,7 @@ export function createSyncRelayHandler({
     };
   }
 
-  const shareSummary = async (
-    row: SyncRelayShareWithGrantRow,
-    side: "granted" | "received",
-    recipientUserId?: string,
-  ): Promise<Record<string, unknown>> => {
+  const shareSummaryBase = (row: SyncRelayShareWithGrantRow): Record<string, unknown> => {
     const { share, grant } = row;
     const storedSelector = parseStoredAnyShareSelectorJson(share.selectorJson);
     // This serialization boundary is the one authority that decides whether
@@ -989,7 +986,7 @@ export function createSyncRelayHandler({
         : isShareAccessValue(grant.access))
         ? storedSelector
         : null;
-    const base = {
+    return {
       shareId: share.shareId,
       // An unreadable row says so. It does NOT get a stand-in scope: empty
       // paths with no version would claim the entire live workspace, on a row
@@ -1011,38 +1008,42 @@ export function createSyncRelayHandler({
         : { damaged: true as const, ...storedSelectorKind(share.selectorJson) }),
       createdAtMs: share.createdAtMs,
     };
-    if (side === "granted") {
-      // A pending invite has no recipient user id yet; surface the addressed
-      // email the granter typed. A claimed/real share resolves the email from
-      // its recipient id for display.
-      const recipientEmail = grant.principalUserId
-        ? lookupUserEmail
-          ? await lookupUserEmail(grant.principalUserId)
-          : null
-        : grant.principalEmail;
-      return {
-        ...base,
-        workspaceId: share.workspaceId,
-        recipientUserId: grant.principalUserId,
-        recipientEmail,
-        revokedAtMs: grant.revokedAtMs,
-      };
-    }
+  };
+
+  const grantedShareSummary = async (
+    row: SyncRelayShareWithGrantRow,
+  ): Promise<Record<string, unknown>> => {
+    const { share, grant } = row;
+    // A pending invite has no recipient user id yet; surface the addressed
+    // email the granter typed. A claimed/real share resolves the email from
+    // its recipient id for display.
+    const recipientEmail = grant.principalUserId
+      ? lookupUserEmail
+        ? await lookupUserEmail(grant.principalUserId)
+        : null
+      : grant.principalEmail;
+    return {
+      ...shareSummaryBase(row),
+      workspaceId: share.workspaceId,
+      recipientUserId: grant.principalUserId,
+      recipientEmail,
+      revokedAtMs: grant.revokedAtMs,
+    };
+  };
+
+  const receivedShareSummary = (
+    row: SyncRelayShareWithGrantRow,
+    granterEmail: string | null,
+    genericChatWritable: boolean,
+  ): Record<string, unknown> => {
     // Received summaries deliberately omit the workspace id: the recipient's
     // access is share-scoped, and the granter's workspace identity is not
     // theirs to see.
     return {
-      ...base,
-      granterUserId: share.granterUserId,
-      granterEmail: lookupUserEmail ? await lookupUserEmail(share.granterUserId) : null,
-      genericChatWritable:
-        recipientUserId !== undefined &&
-        authorizeShareAction({
-          storage,
-          actorUserId: recipientUserId,
-          shareId: share.shareId,
-          action: "append",
-        }).ok,
+      ...shareSummaryBase(row),
+      granterUserId: row.share.granterUserId,
+      granterEmail,
+      genericChatWritable,
     };
   };
 
@@ -2589,7 +2590,7 @@ export function createSyncRelayHandler({
           storage
             .listSharesGrantedBy(actor.userId)
             .filter((row) => row.grant.principalKind !== "link")
-            .map((row) => shareSummary(row, "granted")),
+            .map((row) => grantedShareSummary(row)),
         );
         const receivedByShare = new Map<string, SyncRelayShareWithGrantRow[]>();
         for (const row of storage
@@ -2599,24 +2600,33 @@ export function createSyncRelayHandler({
           if (rows) rows.push(row);
           else receivedByShare.set(row.share.shareId, [row]);
         }
-        const receivedRows = await Promise.all(
+        const receivedLookups = await Promise.all(
           [...receivedByShare.values()].map(async (rows) => {
             const fallback = rows[0]!;
-            const effective = authorizeShareAction({
-              storage,
-              actorUserId: actor.userId,
-              shareId: fallback.share.shareId,
-              action: "read",
-            });
-            const row = effective.ok
-              ? { share: effective.share, grant: effective.grant }
-              : fallback;
-            return {
-              row,
-              summary: await shareSummary(row, "received", actor.userId),
-            };
+            const granterEmail = lookupUserEmail
+              ? await lookupUserEmail(fallback.share.granterUserId)
+              : null;
+            return { fallback, granterEmail };
           }),
         );
+        const receivedRows = receivedLookups.map(({ fallback, granterEmail }) => {
+          const effective = resolveReceivedShareAuthority({
+            storage,
+            actorUserId: actor.userId,
+            shareId: fallback.share.shareId,
+          });
+          const row = effective.ok
+            ? { share: effective.share, grant: effective.grant }
+            : fallback;
+          return {
+            row,
+            summary: receivedShareSummary(
+              row,
+              granterEmail,
+              effective.genericChatWritable,
+            ),
+          };
+        });
         // Re-evaluate AFTER the async display-name lookups, immediately before
         // serialization. A pre-provisioned wire that became an agent channel
         // during those awaits must not get one final recipient-list exposure.
@@ -2632,13 +2642,21 @@ export function createSyncRelayHandler({
 
       if (route.route === "share" && request.method === "GET") {
         await claimPendingShares(actor.userId);
-        const authorized = requireShareAction(route.shareId, actor.userId, "read");
-        const summary = await shareSummary(
+        const initial = requireShareAction(route.shareId, actor.userId, "read");
+        const granterEmail = lookupUserEmail
+          ? await lookupUserEmail(initial.share.granterUserId)
+          : null;
+        const authorized = resolveReceivedShareAuthority({
+          storage,
+          actorUserId: actor.userId,
+          shareId: route.shareId,
+        });
+        if (!authorized.ok) throw notFound();
+        const summary = receivedShareSummary(
           { share: authorized.share, grant: authorized.grant },
-          "received",
-          actor.userId,
+          granterEmail,
+          authorized.genericChatWritable,
         );
-        requireShareAction(route.shareId, actor.userId, "read");
         return jsonResponse({ ok: true, ...summary });
       }
       if (route.route === "share") throw methodNotAllowed();
