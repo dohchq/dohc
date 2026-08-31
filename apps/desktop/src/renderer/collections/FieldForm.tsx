@@ -2,7 +2,7 @@ import {
   RECORD_ID_FRONTMATTER_KEY,
   type CollectionFieldType,
   type FieldDefinition,
-} from "@dohc/workspace-contracts";
+} from "@dohc/workspace-contracts/collection";
 
 // The one field form: a draft the user edits in collection vocabulary
 // (name, type, options, related collection) that maps onto a schema

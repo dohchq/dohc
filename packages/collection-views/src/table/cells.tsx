@@ -1,4 +1,3 @@
-import { useState } from "react";
 import type { ReactNode } from "react";
 import type {
   CollectionIndexedValue,
@@ -15,22 +14,18 @@ export interface FieldCellProps {
   /** Maps a person field's user id to a display name. Falls back to the id. */
   personLabel?: (userId: string) => string | null;
   /**
-   * Receives the edited value. The host applies it through its own write
-   * path; this package never writes. Absent means the cell is read-only.
+   * Receives a checkbox toggle, the one edit a cell commits without an
+   * editor. The host applies it through its own write path; this package
+   * never writes. Absent means the checkbox is disabled.
    */
   onChange?: (value: CollectionValue) => void;
   /**
-   * Select and multi-select cells offer to add a typed value the field's
-   * options do not have yet. The host must add `option` to the schema FIRST
-   * and only then write `nextValue` to the cell; this package never writes.
-   * Absent means cells only pick existing options.
+   * Opens the cell's editor. The table owns which cell is editing and
+   * renders one CellEditor in an overlay above the rows, so a tall editor
+   * is never clipped by the fixed row height. Absent means the cell is
+   * read-only.
    */
-  onCreateOption?: (option: string, nextValue: CollectionValue) => void;
-  /**
-   * Runs the relation picker's queries against a relation field's related
-   * collection. Absent means relation cells stay read-only.
-   */
-  relationExecutor?: CollectionQueryExecutor;
+  onEditStart?: () => void;
 }
 
 /** Plain text for a raw collection value: board group labels, fallbacks. */
@@ -152,23 +147,37 @@ function AddOptionInput({
   );
 }
 
-interface EditorProps {
+export interface CellEditorProps {
   field: FieldDefinition;
   indexed: CollectionIndexedValue | undefined;
+  /**
+   * Receives the edited value. The host applies it through its own write
+   * path; this package never writes.
+   */
   emit: (value: CollectionValue) => void;
   close: () => void;
+  /**
+   * Select and multi-select editors offer to add a typed value the field's
+   * options do not have yet. The host must add `option` to the schema FIRST
+   * and only then write `nextValue` to the cell; this package never writes.
+   * Absent means editors only pick existing options.
+   */
   onCreateOption?: (option: string, nextValue: CollectionValue) => void;
+  /**
+   * Runs the relation picker's queries against a relation field's related
+   * collection. The table never opens a relation editor without one.
+   */
   relationExecutor?: CollectionQueryExecutor;
 }
 
-function CellEditor({
+export function CellEditor({
   field,
   indexed,
   emit,
   close,
   onCreateOption,
   relationExecutor,
-}: EditorProps) {
+}: CellEditorProps) {
   const value = indexed?.value ?? null;
   const commitAndClose = (next: CollectionValue) => {
     emit(next);
@@ -337,10 +346,8 @@ export function FieldCell({
   indexed,
   personLabel,
   onChange,
-  onCreateOption,
-  relationExecutor,
+  onEditStart,
 }: FieldCellProps) {
-  const [editing, setEditing] = useState(false);
   const flagged = indexed !== undefined && indexed.validation.status === "flagged";
   const value = indexed?.value ?? null;
 
@@ -357,36 +364,19 @@ export function FieldCell({
     );
   }
 
-  // Relation editing needs query access to the related collection; without
-  // an executor the cell stays read-only.
-  const editable =
-    onChange !== undefined &&
-    (field.type !== "relation" || relationExecutor !== undefined);
-
-  if (editing && onChange && editable) {
-    return wrapFlagged(
-      flagged,
-      <CellEditor
-        field={field}
-        indexed={indexed}
-        emit={onChange}
-        close={() => setEditing(false)}
-        onCreateOption={onCreateOption}
-        relationExecutor={relationExecutor}
-      />,
-    );
-  }
-
   const text = fieldDisplayText(field, indexed, personLabel);
-  if (!editable) {
+  if (!onEditStart) {
     return wrapFlagged(flagged, <span className="truncate text-[13px]">{text}</span>);
   }
   return wrapFlagged(
     flagged,
     <button
       type="button"
-      className="block w-full truncate text-left text-[13px]"
-      onClick={() => setEditing(true)}
+      // min-h keeps an EMPTY cell clickable: with no text the button's
+      // content box collapses to zero height and the cell cannot be edited
+      // by mouse at all.
+      className="block min-h-5 w-full truncate text-left text-[13px]"
+      onClick={onEditStart}
     >
       {text}
     </button>,

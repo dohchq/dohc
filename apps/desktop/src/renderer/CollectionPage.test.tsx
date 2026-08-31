@@ -460,7 +460,9 @@ describe("collection authoring", () => {
 
     // The dialog lists the view once the refreshed schema arrives.
     fireEvent.click(await screen.findByLabelText("Rename view Board"));
-    fireEvent.change(screen.getByDisplayValue("Board"), {
+    // The create form stays mounted through the refresh, so scope to the
+    // rename input rather than the ambiguous display value.
+    fireEvent.change(screen.getByLabelText("New view name"), {
       target: { value: "My board" },
     });
     fireEvent.click(screen.getByText("Save view"));

@@ -3,7 +3,7 @@ import { X } from "lucide-react";
 import {
   COLLECTION_SCHEMA_FILENAME,
   type CollectionSchema,
-} from "@dohc/workspace-contracts";
+} from "@dohc/workspace-contracts/collection";
 import { bridge } from "../bridge";
 import { Overlay } from "../Overlay";
 import { IconButton, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";

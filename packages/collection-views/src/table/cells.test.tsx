@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { FieldDefinition } from "@dohc/workspace-contracts";
-import { FieldCell } from "./cells";
+import type { CollectionValue, FieldDefinition } from "@dohc/workspace-contracts";
+import type { CollectionQueryExecutor } from "../store";
+import { CellEditor, FieldCell } from "./cells";
 import { V1_FIELDS, indexedValue, makeQueryResult, makeRecord } from "../testSupport";
 
 afterEach(cleanup);
@@ -113,64 +114,22 @@ describe("FieldCell display", () => {
 });
 
 describe("FieldCell editing", () => {
-  it("commits a text edit on Enter", () => {
-    const onChange = vi.fn();
+  it("opens editing from the display button", () => {
+    const onEditStart = vi.fn();
     render(
-      <FieldCell field={field("title")} indexed={indexedValue("title", "Old")} onChange={onChange} />,
+      <FieldCell
+        field={field("title")}
+        indexed={indexedValue("title", "Ship it")}
+        onEditStart={onEditStart}
+      />,
     );
-    fireEvent.click(screen.getByRole("button"));
-    const input = screen.getByDisplayValue<HTMLInputElement>("Old");
-    fireEvent.change(input, { target: { value: "New title" } });
-    fireEvent.keyDown(input, { key: "Enter" });
-    expect(onChange).toHaveBeenCalledExactlyOnceWith("New title");
+    fireEvent.click(screen.getByRole("button", { name: "Ship it" }));
+    expect(onEditStart).toHaveBeenCalledOnce();
   });
 
-  it("commits an emptied text edit as null", () => {
-    const onChange = vi.fn();
-    render(
-      <FieldCell field={field("title")} indexed={indexedValue("title", "Old")} onChange={onChange} />,
-    );
-    fireEvent.click(screen.getByRole("button"));
-    const input = screen.getByDisplayValue<HTMLInputElement>("Old");
-    fireEvent.change(input, { target: { value: "" } });
-    fireEvent.keyDown(input, { key: "Enter" });
-    expect(onChange).toHaveBeenCalledExactlyOnceWith(null);
-  });
-
-  it("cancels a text edit on Escape without an event", () => {
-    const onChange = vi.fn();
-    render(
-      <FieldCell field={field("title")} indexed={indexedValue("title", "Old")} onChange={onChange} />,
-    );
-    fireEvent.click(screen.getByRole("button"));
-    const input = screen.getByDisplayValue<HTMLInputElement>("Old");
-    fireEvent.change(input, { target: { value: "abandoned" } });
-    fireEvent.keyDown(input, { key: "Escape" });
-    expect(onChange).not.toHaveBeenCalled();
-    expect(screen.getByRole("button")).toBeDefined();
-  });
-
-  it("parses a number edit and drops an unparseable one", () => {
-    const onChange = vi.fn();
-    const { unmount } = render(
-      <FieldCell field={field("estimate")} indexed={indexedValue("estimate", 1)} onChange={onChange} />,
-    );
-    fireEvent.click(screen.getByRole("button"));
-    const input = screen.getByDisplayValue<HTMLInputElement>("1");
-    fireEvent.change(input, { target: { value: "42.5" } });
-    fireEvent.keyDown(input, { key: "Enter" });
-    expect(onChange).toHaveBeenCalledExactlyOnceWith(42.5);
-    unmount();
-
-    onChange.mockClear();
-    render(
-      <FieldCell field={field("estimate")} indexed={indexedValue("estimate", 1)} onChange={onChange} />,
-    );
-    fireEvent.click(screen.getByRole("button"));
-    const second = screen.getByDisplayValue<HTMLInputElement>("1");
-    fireEvent.change(second, { target: { value: "not a number" } });
-    fireEvent.keyDown(second, { key: "Enter" });
-    expect(onChange).not.toHaveBeenCalled();
+  it("renders no edit button without onEditStart", () => {
+    render(<FieldCell field={field("title")} indexed={indexedValue("title", "Ship it")} />);
+    expect(screen.queryByRole("button")).toBeNull();
   });
 
   it("toggles a checkbox directly", () => {
@@ -181,173 +140,188 @@ describe("FieldCell editing", () => {
     fireEvent.click(screen.getByRole("checkbox"));
     expect(onChange).toHaveBeenCalledExactlyOnceWith(true);
   });
+});
+
+interface EditorCase {
+  fieldName: string;
+  value: CollectionValue;
+  emit?: (value: CollectionValue) => void;
+  close?: () => void;
+  onCreateOption?: (option: string, nextValue: CollectionValue) => void;
+  relationExecutor?: CollectionQueryExecutor;
+}
+
+function renderEditor({ fieldName, value, emit, close, onCreateOption, relationExecutor }: EditorCase) {
+  return render(
+    <CellEditor
+      field={field(fieldName)}
+      indexed={indexedValue(fieldName, value)}
+      emit={emit ?? vi.fn()}
+      close={close ?? vi.fn()}
+      onCreateOption={onCreateOption}
+      relationExecutor={relationExecutor}
+    />,
+  );
+}
+
+describe("CellEditor", () => {
+  it("commits a text edit on Enter and closes", () => {
+    const emit = vi.fn();
+    const close = vi.fn();
+    renderEditor({ fieldName: "title", value: "Old", emit, close });
+    const input = screen.getByDisplayValue<HTMLInputElement>("Old");
+    fireEvent.change(input, { target: { value: "New title" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(emit).toHaveBeenCalledExactlyOnceWith("New title");
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("commits an emptied text edit as null", () => {
+    const emit = vi.fn();
+    renderEditor({ fieldName: "title", value: "Old", emit });
+    const input = screen.getByDisplayValue<HTMLInputElement>("Old");
+    fireEvent.change(input, { target: { value: "" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(emit).toHaveBeenCalledExactlyOnceWith(null);
+  });
+
+  it("cancels a text edit on Escape without an event", () => {
+    const emit = vi.fn();
+    const close = vi.fn();
+    renderEditor({ fieldName: "title", value: "Old", emit, close });
+    const input = screen.getByDisplayValue<HTMLInputElement>("Old");
+    fireEvent.change(input, { target: { value: "abandoned" } });
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(emit).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("parses a number edit and drops an unparseable one", () => {
+    const emit = vi.fn();
+    const { unmount } = renderEditor({ fieldName: "estimate", value: 1, emit });
+    const input = screen.getByDisplayValue<HTMLInputElement>("1");
+    fireEvent.change(input, { target: { value: "42.5" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(emit).toHaveBeenCalledExactlyOnceWith(42.5);
+    unmount();
+
+    emit.mockClear();
+    const close = vi.fn();
+    renderEditor({ fieldName: "estimate", value: 1, emit, close });
+    const second = screen.getByDisplayValue<HTMLInputElement>("1");
+    fireEvent.change(second, { target: { value: "not a number" } });
+    fireEvent.keyDown(second, { key: "Enter" });
+    expect(emit).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledOnce();
+  });
 
   it("commits a date edit", () => {
-    const onChange = vi.fn();
-    render(
-      <FieldCell field={field("due")} indexed={indexedValue("due", "2026-09-15")} onChange={onChange} />,
-    );
-    fireEvent.click(screen.getByRole("button"));
+    const emit = vi.fn();
+    renderEditor({ fieldName: "due", value: "2026-09-15", emit });
     const input = screen.getByDisplayValue<HTMLInputElement>("2026-09-15");
     fireEvent.change(input, { target: { value: "2026-10-01" } });
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(onChange).toHaveBeenCalledExactlyOnceWith("2026-10-01");
+    expect(emit).toHaveBeenCalledExactlyOnceWith("2026-10-01");
   });
 
-  it("hands a typed unknown select option to onCreateOption, not onChange", () => {
-    const onChange = vi.fn();
+  it("hands a typed unknown select option to onCreateOption, not emit", () => {
+    const emit = vi.fn();
+    const close = vi.fn();
     const onCreateOption = vi.fn();
-    render(
-      <FieldCell
-        field={field("status")}
-        indexed={indexedValue("status", "todo")}
-        onChange={onChange}
-        onCreateOption={onCreateOption}
-      />,
-    );
-    fireEvent.click(screen.getByRole("button"));
+    renderEditor({ fieldName: "status", value: "todo", emit, close, onCreateOption });
     const input = screen.getByLabelText<HTMLInputElement>("Add option");
     fireEvent.change(input, { target: { value: "later" } });
     fireEvent.keyDown(input, { key: "Enter" });
     expect(onCreateOption).toHaveBeenCalledExactlyOnceWith("later", "later");
-    expect(onChange).not.toHaveBeenCalled();
-    // The editor closed; the cell is back to its display button.
-    expect(screen.getByRole("button")).toBeDefined();
+    expect(emit).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledOnce();
   });
 
   it("picks an existing option typed into the add input instead of forking it", () => {
-    const onChange = vi.fn();
+    const emit = vi.fn();
     const onCreateOption = vi.fn();
-    render(
-      <FieldCell
-        field={field("status")}
-        indexed={indexedValue("status", "todo")}
-        onChange={onChange}
-        onCreateOption={onCreateOption}
-      />,
-    );
-    fireEvent.click(screen.getByRole("button"));
+    renderEditor({ fieldName: "status", value: "todo", emit, onCreateOption });
     const input = screen.getByLabelText<HTMLInputElement>("Add option");
     fireEvent.change(input, { target: { value: "shipped" } });
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(onChange).toHaveBeenCalledExactlyOnceWith("shipped");
+    expect(emit).toHaveBeenCalledExactlyOnceWith("shipped");
     expect(onCreateOption).not.toHaveBeenCalled();
   });
 
   it("hands a typed unknown multi-select option with the extended selection", () => {
-    const onChange = vi.fn();
+    const emit = vi.fn();
     const onCreateOption = vi.fn();
-    render(
-      <FieldCell
-        field={field("tags")}
-        indexed={indexedValue("tags", ["alpha"])}
-        onChange={onChange}
-        onCreateOption={onCreateOption}
-      />,
-    );
-    fireEvent.click(screen.getByRole("button"));
+    renderEditor({ fieldName: "tags", value: ["alpha"], emit, onCreateOption });
     const input = screen.getByLabelText<HTMLInputElement>("Add option");
     fireEvent.change(input, { target: { value: "delta" } });
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(onCreateOption).toHaveBeenCalledExactlyOnceWith("delta", [
-      "alpha",
-      "delta",
-    ]);
-    expect(onChange).not.toHaveBeenCalled();
+    expect(onCreateOption).toHaveBeenCalledExactlyOnceWith("delta", ["alpha", "delta"]);
+    expect(emit).not.toHaveBeenCalled();
   });
 
   it("offers no add input without onCreateOption", () => {
-    render(
-      <FieldCell
-        field={field("status")}
-        indexed={indexedValue("status", "todo")}
-        onChange={vi.fn()}
-      />,
-    );
-    fireEvent.click(screen.getByRole("button"));
+    renderEditor({ fieldName: "status", value: "todo" });
     expect(screen.queryByLabelText("Add option")).toBeNull();
   });
 
   it("commits a select choice, empty as null", () => {
-    const onChange = vi.fn();
-    render(
-      <FieldCell field={field("status")} indexed={indexedValue("status", "todo")} onChange={onChange} />,
-    );
-    fireEvent.click(screen.getByRole("button"));
+    const emit = vi.fn();
+    const { unmount } = renderEditor({ fieldName: "status", value: "todo", emit });
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "shipped" } });
-    expect(onChange).toHaveBeenCalledExactlyOnceWith("shipped");
+    expect(emit).toHaveBeenCalledExactlyOnceWith("shipped");
+    unmount();
 
-    onChange.mockClear();
-    fireEvent.click(screen.getByRole("button"));
+    emit.mockClear();
+    renderEditor({ fieldName: "status", value: "todo", emit });
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "" } });
-    expect(onChange).toHaveBeenCalledExactlyOnceWith(null);
+    expect(emit).toHaveBeenCalledExactlyOnceWith(null);
   });
 
   it("toggles multi-select options, adding and removing", () => {
-    const onChange = vi.fn();
-    render(
-      <FieldCell field={field("tags")} indexed={indexedValue("tags", ["alpha"])} onChange={onChange} />,
-    );
-    fireEvent.click(screen.getByRole("button"));
+    const emit = vi.fn();
+    renderEditor({ fieldName: "tags", value: ["alpha"], emit });
     fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
-    expect(onChange).toHaveBeenLastCalledWith(["alpha", "beta"]);
+    expect(emit).toHaveBeenLastCalledWith(["alpha", "beta"]);
     fireEvent.click(screen.getByRole("checkbox", { name: "alpha" }));
-    expect(onChange).toHaveBeenLastCalledWith([]);
-  });
-
-  it("keeps relation cells read-only without a relation executor", () => {
-    const onChange = vi.fn();
-    render(
-      <FieldCell field={field("blocks")} indexed={indexedValue("blocks", ["rec-a"])} onChange={onChange} />,
-    );
-    expect(screen.queryByRole("button")).toBeNull();
+    expect(emit).toHaveBeenLastCalledWith([]);
   });
 
   it("opens the relation picker against the related collection and emits ids", async () => {
-    const onChange = vi.fn();
+    const emit = vi.fn();
     const executor = vi.fn(async () =>
       makeQueryResult([
         makeRecord("rec-a", [indexedValue("title", "Design")]),
         makeRecord("rec-b", [indexedValue("title", "Build")]),
       ]),
     );
-    render(
-      <FieldCell
-        field={field("blocks")}
-        indexed={indexedValue("blocks", ["rec-a"])}
-        onChange={onChange}
-        relationExecutor={executor}
-      />,
-    );
-    fireEvent.click(screen.getByRole("button"));
+    renderEditor({
+      fieldName: "blocks",
+      value: ["rec-a"],
+      emit,
+      relationExecutor: executor,
+    });
     fireEvent.click(await screen.findByRole("checkbox", { name: "Build" }));
     expect(executor).toHaveBeenCalledExactlyOnceWith({
       collectionPath: "tasks",
       limit: 100,
     });
-    expect(onChange).toHaveBeenCalledExactlyOnceWith(["rec-a", "rec-b"]);
+    expect(emit).toHaveBeenCalledExactlyOnceWith(["rec-a", "rec-b"]);
   });
 
   it("trims a person edit and commits a whitespace-only one as null", () => {
-    const onChange = vi.fn();
-    const { unmount } = render(
-      <FieldCell field={field("owner")} indexed={indexedValue("owner", "user-7")} onChange={onChange} />,
-    );
-    fireEvent.click(screen.getByRole("button"));
+    const emit = vi.fn();
+    const { unmount } = renderEditor({ fieldName: "owner", value: "user-7", emit });
     const input = screen.getByDisplayValue<HTMLInputElement>("user-7");
     fireEvent.change(input, { target: { value: "  user-9  " } });
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(onChange).toHaveBeenCalledExactlyOnceWith("user-9");
+    expect(emit).toHaveBeenCalledExactlyOnceWith("user-9");
     unmount();
 
-    onChange.mockClear();
-    render(
-      <FieldCell field={field("owner")} indexed={indexedValue("owner", "user-7")} onChange={onChange} />,
-    );
-    fireEvent.click(screen.getByRole("button"));
+    emit.mockClear();
+    renderEditor({ fieldName: "owner", value: "user-7", emit });
     const second = screen.getByDisplayValue<HTMLInputElement>("user-7");
     fireEvent.change(second, { target: { value: "   " } });
     fireEvent.keyDown(second, { key: "Enter" });
-    expect(onChange).toHaveBeenCalledExactlyOnceWith(null);
+    expect(emit).toHaveBeenCalledExactlyOnceWith(null);
   });
 });

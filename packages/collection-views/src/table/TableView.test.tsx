@@ -190,4 +190,80 @@ describe("TableView", () => {
     render(<TableView schema={makeSchema()} records={makeRecords(1)} />);
     expect(screen.queryByRole("button", { name: /^Open / })).toBeNull();
   });
+
+  it("keeps relation cells read-only without a relation executor", () => {
+    const records = [makeRecord("rec-0", [indexedValue("blocks", ["rec-a"])])];
+    render(<TableView schema={makeSchema()} records={records} onCellChange={vi.fn()} />);
+    expect(screen.getByText("rec-a")).toBeDefined();
+    expect(screen.queryByRole("button", { name: "rec-a" })).toBeNull();
+  });
+
+  // jsdom has no hit-testing, so this asserts the structure that makes the
+  // options clickable in the app: the editor lives in the table's overlay
+  // above the rows, anchored to the first row's top edge, not inside the
+  // fixed-height row where the option list would be clipped and its
+  // geometry pushed under the column header.
+  it("opens a first-row multi-select editor in the overlay, options clickable", () => {
+    const onCellChange = vi.fn();
+    const records = [
+      makeRecord("rec-0", [indexedValue("title", "Task 0"), indexedValue("tags", ["alpha"])]),
+      makeRecord("rec-1", [indexedValue("title", "Task 1")]),
+    ];
+    const { container } = render(
+      <TableView schema={makeSchema()} records={records} onCellChange={onCellChange} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "alpha" }));
+
+    const overlay = container.querySelector<HTMLElement>("[data-cell-editor]");
+    expect(overlay).not.toBeNull();
+    expect(overlay?.closest("[role='row']")).toBeNull();
+    expect(overlay?.style.top).toBe("0px");
+    const listbox = screen.getByRole("listbox");
+    expect(overlay?.contains(listbox)).toBe(true);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
+    expect(onCellChange).toHaveBeenCalledExactlyOnceWith({
+      recordId: "rec-0",
+      recordPath: "tasks/rec-0.md",
+      field: "tags",
+      value: ["alpha", "gamma"],
+    });
+  });
+
+  it("keeps an open editor mounted with its state across a records refresh", () => {
+    const recordsBefore = [
+      makeRecord("rec-0", [indexedValue("title", "Task 0"), indexedValue("tags", ["alpha"])]),
+    ];
+    const { rerender } = render(
+      <TableView
+        schema={makeSchema()}
+        records={recordsBefore}
+        onCellChange={vi.fn()}
+        onCreateOption={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "alpha" }));
+    const listbox = screen.getByRole("listbox");
+    const addOption = screen.getByLabelText<HTMLInputElement>("Add option");
+    fireEvent.change(addOption, { target: { value: "half-typed" } });
+
+    // The host's store refresh: a brand-new records array (and callbacks)
+    // carrying the committed toggle. The editor must not unmount.
+    const recordsAfter = [
+      makeRecord("rec-0", [indexedValue("title", "Task 0"), indexedValue("tags", ["alpha", "beta"])]),
+    ];
+    rerender(
+      <TableView
+        schema={makeSchema()}
+        records={recordsAfter}
+        onCellChange={vi.fn()}
+        onCreateOption={vi.fn()}
+      />,
+    );
+    expect(listbox.isConnected).toBe(true);
+    expect(addOption.isConnected).toBe(true);
+    expect(addOption.value).toBe("half-typed");
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "beta" }).checked).toBe(true);
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "alpha" }).checked).toBe(true);
+  });
 });

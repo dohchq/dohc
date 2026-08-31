@@ -631,6 +631,23 @@ fn apply_moment_append(
                 resulting,
                 envelope.recorded_at_ms,
             )?;
+            // A frontmatter edit can replicate as a bare moment.append when
+            // the sender journaled no ydoc.update. The materialized disk
+            // write is a suppressed self-write, so no capture apply indexes
+            // it later: a bound record's index must ride this transaction.
+            if let Some(text) = after_text.as_deref()
+                && let Some(frontmatter) =
+                    dohc_engine_domain::collections::markdown_frontmatter_json(text)
+            {
+                dohc_engine_domain::synchronize_collection_frontmatter_index_in_tx(
+                    tx,
+                    &envelope.workspace_id,
+                    &payload.version_id,
+                    &payload.object_id,
+                    &frontmatter,
+                )
+                .map_err(crate::ydoc_apply::map_domain_hard_error)?;
+            }
         }
         upsert_search_row(
             tx,

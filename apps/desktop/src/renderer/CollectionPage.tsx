@@ -395,7 +395,13 @@ export function CollectionPage({
     );
   }
 
-  if (details === null || state.status === "loading" || state.status === "idle") {
+  // Only the first load shows a placeholder. A refresh keeps the current
+  // data on screen: unmounting the views would close open cell editors and
+  // flicker every view on every activity event.
+  const neverLoaded =
+    (state.status === "loading" || state.status === "idle") &&
+    state.collection === null;
+  if (details === null || neverLoaded) {
     return (
       <div className="flex min-h-0 flex-1 items-center justify-center px-4 text-xs text-subtle">
         Loading collection...
@@ -405,7 +411,7 @@ export function CollectionPage({
 
   const schema = details.schema;
   const empty =
-    state.status === "ready" &&
+    state.collection !== null &&
     state.records.length === 0 &&
     (state.groups === null ||
       state.groups.every((group) => group.records.length === 0));

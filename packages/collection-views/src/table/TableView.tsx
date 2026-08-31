@@ -1,6 +1,7 @@
-import { useMemo, useRef } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { createColumnHelper, tableFeatures, useTable } from "@tanstack/react-table";
-import { useVirtualizer } from "@tanstack/react-virtual";
+import { defaultRangeExtractor, useVirtualizer } from "@tanstack/react-virtual";
+import type { Range } from "@tanstack/react-virtual";
 import type {
   CollectionQuerySort,
   CollectionRecord,
@@ -10,7 +11,7 @@ import type {
 import { deriveColumns } from "../columns";
 import { recordLabel } from "../recordLabel";
 import type { CollectionQueryExecutor } from "../store";
-import { FieldCell } from "./cells";
+import { CellEditor, FieldCell } from "./cells";
 
 /**
  * One inline edit, surfaced for the host to apply through its own write path
@@ -65,6 +66,17 @@ const COLUMN_WIDTH = 180;
 const OPEN_COLUMN_WIDTH = 56;
 const helper = createColumnHelper<typeof TABLE_FEATURES, CollectionRecord>();
 
+/**
+ * The one cell whose editor is open, addressed by record id and field name
+ * so an active edit survives a store refresh (a new records array) and a
+ * sort-driven row move. Row index and record object identity are both
+ * unstable across refreshes; this pair is not.
+ */
+interface EditingCell {
+  recordId: string;
+  field: string;
+}
+
 export function TableView({
   schema,
   records,
@@ -84,11 +96,20 @@ export function TableView({
     [schema, visibleFields],
   );
 
+  const [editing, setEditing] = useState<EditingCell | null>(null);
+
   const columns = useMemo(
     () =>
       helper.columns(
-        fields.map((field) =>
-          helper.accessor(
+        fields.map((field) => {
+          // Relation editing needs query access to the related collection;
+          // without an executor the cell stays read-only. Checkboxes commit
+          // through onChange and never open an editor.
+          const editable =
+            onCellChange !== undefined &&
+            field.type !== "checkbox" &&
+            (field.type !== "relation" || relationExecutor !== undefined);
+          return helper.accessor(
             (record) => record.values.find((entry) => entry.field === field.name),
             {
               id: field.name,
@@ -108,26 +129,22 @@ export function TableView({
                           })
                       : undefined
                   }
-                  onCreateOption={
-                    onCreateOption
-                      ? (option, value) =>
-                          onCreateOption({
+                  onEditStart={
+                    editable
+                      ? () =>
+                          setEditing({
                             recordId: context.row.original.id,
-                            recordPath: context.row.original.path,
                             field: field.name,
-                            option,
-                            value,
                           })
                       : undefined
                   }
-                  relationExecutor={relationExecutor}
                 />
               ),
             },
-          ),
-        ),
+          );
+        }),
       ),
-    [fields, onCellChange, onCreateOption, personLabel, relationExecutor],
+    [fields, onCellChange, personLabel, relationExecutor],
   );
 
   const table = useTable({
@@ -138,13 +155,30 @@ export function TableView({
   });
   const rows = table.getRowModel().rows;
 
+  const editingRowIndex =
+    editing === null ? -1 : rows.findIndex((row) => row.id === editing.recordId);
+  const editingRow = editingRowIndex >= 0 ? rows[editingRowIndex] : undefined;
+  const editingField =
+    editing === null ? undefined : fields.find((field) => field.name === editing.field);
+
   const scrollRef = useRef<HTMLDivElement>(null);
+  // Keep the edited row mounted while it is scrolled out of the virtual
+  // window so its editor overlay never floats over an empty gap.
+  const rangeExtractor = useCallback(
+    (range: Range) => {
+      const indexes = defaultRangeExtractor(range);
+      if (editingRowIndex < 0 || indexes.includes(editingRowIndex)) return indexes;
+      return [...indexes, editingRowIndex].sort((a, b) => a - b);
+    },
+    [editingRowIndex],
+  );
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => rowHeight,
     getItemKey: (index) => rows[index]?.id ?? index,
     overscan: 5,
+    rangeExtractor,
   });
 
   const primarySort = sort?.[0];
@@ -235,6 +269,57 @@ export function TableView({
                 </div>
               );
             })}
+            {editing && editingRow && editingField && onCellChange ? (
+              <div
+                // One editor for every cell type, drawn in an overlay above
+                // the rows and anchored to the cell's top edge. Growing
+                // downward from there, a tall editor (a multi-select's
+                // option list) is never clipped by the fixed row height and
+                // never extends up under the column header, which would
+                // steal its clicks. Remounting on cell switch resets the
+                // editor's inputs to the next cell's value.
+                key={`${editing.recordId}:${editing.field}`}
+                data-cell-editor=""
+                className="absolute z-10 rounded border border-line bg-panel p-1 shadow-md"
+                style={{
+                  top: editingRowIndex * rowHeight,
+                  left:
+                    (onOpenRecord ? OPEN_COLUMN_WIDTH : 0) +
+                    fields.indexOf(editingField) * COLUMN_WIDTH,
+                  width: COLUMN_WIDTH,
+                  minHeight: rowHeight,
+                }}
+              >
+                <CellEditor
+                  field={editingField}
+                  indexed={editingRow.original.values.find(
+                    (entry) => entry.field === editingField.name,
+                  )}
+                  emit={(value) =>
+                    onCellChange({
+                      recordId: editingRow.original.id,
+                      recordPath: editingRow.original.path,
+                      field: editingField.name,
+                      value,
+                    })
+                  }
+                  close={() => setEditing(null)}
+                  onCreateOption={
+                    onCreateOption
+                      ? (option, value) =>
+                          onCreateOption({
+                            recordId: editingRow.original.id,
+                            recordPath: editingRow.original.path,
+                            field: editingField.name,
+                            option,
+                            value,
+                          })
+                      : undefined
+                  }
+                  relationExecutor={relationExecutor}
+                />
+              </div>
+            ) : null}
           </div>
         </div>
       )}

@@ -3176,7 +3176,7 @@ fn map_domain_payload_error(error: DomainError, reason: &'static str) -> SyncErr
     }
 }
 
-fn map_domain_hard_error(error: DomainError) -> SyncError {
+pub(crate) fn map_domain_hard_error(error: DomainError) -> SyncError {
     match error {
         DomainError::Storage(storage) => SyncError::Storage(storage),
         hard => SyncError::Storage(StorageError::corrupt_public(hard)),

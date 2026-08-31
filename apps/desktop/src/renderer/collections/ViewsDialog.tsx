@@ -154,7 +154,7 @@ export function ViewsDialog(props: {
               >
                 <input
                   type="text"
-                  aria-label="View name"
+                  aria-label="New view name"
                   disabled={pending}
                   value={editName}
                   onChange={(event) => setEditName(event.target.value)}
