@@ -657,6 +657,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     updateVirtualRange,
     filesExpanded,
     openEditorsExpanded,
+    openEditorsHeight,
     openEditorCount,
     props.pinned.length,
   ]);

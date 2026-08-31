@@ -449,13 +449,13 @@ export function SearchView(props: {
         ) : null}
         {model.status !== "idle" ? (
           <div className="flex items-center gap-1.5 px-0.5 text-[11px] text-subtle">
-            {model.status === "searching" ? (
+            {model.status === "searching" || model.status === "updating" ? (
               <span data-testid="search-spinner" className="flex items-center gap-1.5">
                 <span
                   aria-hidden
                   className="size-2 animate-pulse rounded-full bg-accent"
                 />
-                Searching…
+                {model.status === "updating" ? "Updating workspace…" : "Searching…"}
               </span>
             ) : (
               <span data-testid="search-summary">

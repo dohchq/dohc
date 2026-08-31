@@ -204,6 +204,96 @@ describe("Explorer render cost", () => {
     expect(screen.getAllByTestId("tree-row").length).toBeLessThanOrEqual(36);
   });
 
+  it("recomputes virtual rows while Open Editors is being resized", () => {
+    const originalInnerHeight = window.innerHeight;
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 1_000 });
+
+    try {
+      render(
+        <Explorer
+          {...explorerProps({
+            files: LARGE_FILE_PATHS.map((path) => ({ path, kind: "file" as const })),
+            editorGroups: [
+              {
+                id: "group-1",
+                tabs: LARGE_FILE_PATHS.slice(0, 40).map((path) => ({ path })),
+                activeTab: LARGE_FILE_PATHS[0] ?? null,
+                size: 1,
+              },
+            ],
+            openEditorsHeight: 56,
+          })}
+        />,
+      );
+
+      const container = screen.getByTestId("file-tree");
+      const list = screen.getByRole("tree", { name: "Workspace files" });
+      const openEditorsList = screen.getByTestId("open-editors-list");
+      Object.defineProperty(container, "clientHeight", { configurable: true, value: 280 });
+      Object.defineProperty(container, "scrollTop", {
+        configurable: true,
+        value: 2_800,
+        writable: true,
+      });
+      vi.spyOn(container, "getBoundingClientRect").mockReturnValue({
+        x: 0,
+        y: 0,
+        top: 0,
+        right: 280,
+        bottom: 280,
+        left: 0,
+        width: 280,
+        height: 280,
+        toJSON: () => ({}),
+      });
+      vi.spyOn(list, "getBoundingClientRect").mockImplementation(() => {
+        const openEditorsCap = Number.parseFloat(openEditorsList.style.maxHeight);
+        const top = -2_800 + openEditorsCap - 56;
+        return {
+          x: 0,
+          y: top,
+          top,
+          right: 280,
+          bottom: top + 14_000,
+          left: 0,
+          width: 280,
+          height: 14_000,
+          toJSON: () => ({}),
+        };
+      });
+      fireEvent.scroll(container);
+
+      expect(document.body.contains(rowButton("file-0100.md"))).toBe(true);
+      expect(
+        screen
+          .queryAllByTestId("tree-row")
+          .some((row) => row.dataset.path === "file-0080.md"),
+      ).toBe(false);
+
+      const handle = screen.getByTestId("open-editors-resize");
+      Object.defineProperty(handle, "setPointerCapture", { value: vi.fn() });
+      fireEvent.pointerDown(handle, {
+        button: 0,
+        buttons: 1,
+        clientY: 0,
+        pointerId: 1,
+      });
+      fireEvent.pointerMove(handle, {
+        buttons: 1,
+        clientY: 1_000,
+        pointerId: 1,
+      });
+
+      expect(openEditorsList.style.maxHeight).toBe("600px");
+      expect(document.body.contains(rowButton("file-0080.md"))).toBe(true);
+    } finally {
+      Object.defineProperty(window, "innerHeight", {
+        configurable: true,
+        value: originalInnerHeight,
+      });
+    }
+  });
+
   it("keeps a virtualized drag origin mounted until the gesture ends", async () => {
     render(
       <Explorer

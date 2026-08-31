@@ -41,6 +41,8 @@ const options: SearchRunOptions = {
 beforeEach(() => {
   vi.clearAllMocks();
   searchResultsListener = null;
+  bridgeMock.searchWorkspace.mockReset();
+  bridgeMock.searchWorkspace.mockResolvedValue(undefined);
   bridgeMock.cancelWorkspaceSearch.mockResolvedValue(undefined);
   bridgeMock.onSearchResults.mockImplementation((listener) => {
     searchResultsListener = listener;
@@ -53,6 +55,81 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe("useWorkspaceSearch", () => {
+  it("keeps an updating workspace search pending and retries it", async () => {
+    vi.useFakeTimers();
+    try {
+      bridgeMock.searchWorkspace
+        .mockRejectedValueOnce(
+          new Error(
+            "Error invoking remote method 'desktop:search-workspace': " +
+              "Error: Workspace is still updating. Try again.",
+          ),
+        )
+        .mockResolvedValueOnce(undefined);
+      const view = renderHook(() => useWorkspaceSearch("workspace-1"));
+
+      await act(async () => {
+        view.result.current.run(options);
+        await Promise.resolve();
+      });
+
+      const firstPayload = bridgeMock.searchWorkspace.mock.calls[0]?.[0];
+      expect(view.result.current.model).toMatchObject({
+        searchId: firstPayload.searchId,
+        status: "updating",
+        totalMatches: 0,
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100);
+      });
+
+      expect(bridgeMock.searchWorkspace).toHaveBeenCalledTimes(2);
+      expect(bridgeMock.searchWorkspace.mock.calls[1]?.[0]).toEqual(firstPayload);
+      expect(view.result.current.model.status).toBe("updating");
+
+      act(() => {
+        searchResultsListener?.({
+          searchId: firstPayload.searchId,
+          entries: [],
+          done: true,
+          limitHit: false,
+        });
+      });
+      expect(view.result.current.model.status).toBe("complete");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels a pending updating retry when the search is cleared", async () => {
+    vi.useFakeTimers();
+    try {
+      bridgeMock.searchWorkspace.mockRejectedValueOnce(
+        new Error("Workspace is still updating. Try again."),
+      );
+      const view = renderHook(() => useWorkspaceSearch("workspace-1"));
+
+      await act(async () => {
+        view.result.current.run(options);
+        await Promise.resolve();
+      });
+      const searchId = bridgeMock.searchWorkspace.mock.calls[0]?.[0].searchId;
+      expect(view.result.current.model.status).toBe("updating");
+
+      act(() => view.result.current.clear());
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+
+      expect(view.result.current.model.status).toBe("idle");
+      expect(bridgeMock.searchWorkspace).toHaveBeenCalledTimes(1);
+      expect(bridgeMock.cancelWorkspaceSearch).toHaveBeenCalledWith({ searchId });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("settles only a terminal batch with the current search id", () => {
     bridgeMock.searchWorkspace.mockResolvedValueOnce(undefined);
     const view = renderHook(() => useWorkspaceSearch("workspace-1"));
@@ -103,7 +180,12 @@ describe("useWorkspaceSearch", () => {
     });
 
     await act(async () => {
-      older.reject(new Error("Workspace search stopped"));
+      older.reject(
+        new Error(
+          "Error invoking remote method 'desktop:search-workspace': " +
+            "Error: Workspace is still updating. Try again.",
+        ),
+      );
       await Promise.resolve();
     });
     expect(view.result.current.model).toMatchObject({

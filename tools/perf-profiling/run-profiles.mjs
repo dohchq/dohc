@@ -103,6 +103,45 @@ async function capture(command, args, options = {}) {
   return stdout.trim();
 }
 
+export async function runProfilingScenarios({
+  output,
+  headed,
+  env,
+  scenarios = SCENARIOS,
+  execute = run,
+  desktopRootPath = desktopRoot,
+}) {
+  const failures = [];
+  for (const scenario of scenarios) {
+    const artifactPath = join(output, `${scenario.artifact}.json`);
+    await rm(artifactPath, { force: true });
+    const args = [
+      "scripts/run-playwright.mjs",
+      "--config",
+      "e2e/profiling/playwright.config.ts",
+      `e2e/profiling/${scenario.spec}`,
+      "--workers=1",
+      "--output",
+      join(output, "playwright", scenario.artifact),
+    ];
+    if (headed) args.push("--headed");
+    try {
+      await execute(process.execPath, args, { cwd: desktopRootPath, env });
+      if (!existsSync(artifactPath)) {
+        throw new Error(
+          `Playwright succeeded but did not produce the expected artifact ${artifactPath}.`,
+        );
+      }
+    } catch (error) {
+      failures.push({
+        scenario: scenario.artifact,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return failures;
+}
+
 async function sha256File(path) {
   return createHash("sha256").update(await readFile(path)).digest("hex");
 }
@@ -289,6 +328,17 @@ function summarizeArtifacts(artifacts) {
   };
 }
 
+export function createSummary(runEnvelope, failures, artifacts, scenarios = SCENARIOS) {
+  return {
+    ...runEnvelope,
+    complete:
+      failures.length === 0 &&
+      scenarios.every(({ artifact }) => Object.hasOwn(artifacts, artifact)),
+    failures,
+    scenarios: summarizeArtifacts(artifacts),
+  };
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   const fixtures = join(options.output, "fixtures");
@@ -356,40 +406,18 @@ async function main() {
     DOHC_PROFILE_SCALE: options.tiny ? "tiny" : "full",
     DOHC_PROFILE_SMOKE: options.tiny ? "1" : "0",
   };
-  const failures = [];
-  for (const scenario of SCENARIOS) {
-    await rm(join(options.output, `${scenario.artifact}.json`), { force: true });
-    const args = [
-      "scripts/run-playwright.mjs",
-      "--config",
-      "e2e/profiling/playwright.config.ts",
-      `e2e/profiling/${scenario.spec}`,
-      "--workers=1",
-      "--output",
-      join(options.output, "playwright", scenario.artifact),
-    ];
-    if (options.headed) args.push("--headed");
-    try {
-      await run(process.execPath, args, { cwd: desktopRoot, env });
-    } catch (error) {
-      failures.push({
-        scenario: scenario.artifact,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
+  const failures = await runProfilingScenarios({
+    output: options.output,
+    headed: options.headed,
+    env,
+  });
 
   const artifacts = {};
   for (const { artifact } of SCENARIOS) {
     const path = join(options.output, `${artifact}.json`);
     if (existsSync(path)) artifacts[artifact] = JSON.parse(await readFile(path, "utf8"));
   }
-  const summary = {
-    ...runEnvelope,
-    complete: failures.length === 0,
-    failures,
-    scenarios: summarizeArtifacts(artifacts),
-  };
+  const summary = createSummary(runEnvelope, failures, artifacts);
   await writeFile(join(options.output, "summary.json"), `${JSON.stringify(summary, null, 2)}\n`);
   console.log(`[perf-profiling] wrote ${join(options.output, "summary.json")}`);
   if (failures.length > 0) {
@@ -397,9 +425,11 @@ async function main() {
   }
 }
 
-try {
-  await main();
-} catch (error) {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    await main();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  }
 }

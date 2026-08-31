@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { WorkspaceSearchPayload } from "../../ipc/bridgeContract";
 import { rendererMarks } from "../../performance/rendererMarks";
 import { bridge } from "../bridge";
 import {
@@ -7,6 +8,31 @@ import {
   idleSearchModel,
   type SearchModel,
 } from "./search-model";
+
+const WORKSPACE_UPDATING_MESSAGE = "Workspace is still updating. Try again.";
+const UPDATING_RETRY_DELAYS_MS = [100, 250, 500, 1_000] as const;
+
+interface ActiveSearch {
+  readonly workspaceId: string;
+  readonly payload: WorkspaceSearchPayload;
+  retryCount: number;
+}
+
+// Electron serializes a rejected invoke into an ordinary renderer Error, so
+// the daemon refusal's typed prototype and wire code are no longer available
+// here. Match only the exact daemon message, optionally after Electron's
+// fixed channel prefix; every other rejection keeps the terminal behavior.
+function isWorkspaceUpdatingInvokeError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("message" in error)) {
+    return false;
+  }
+  const message = error.message;
+  return (
+    typeof message === "string" &&
+    (message === WORKSPACE_UPDATING_MESSAGE ||
+      message.endsWith(`: ${WORKSPACE_UPDATING_MESSAGE}`))
+  );
+}
 
 export interface SearchRunOptions {
   query: string;
@@ -56,21 +82,81 @@ export function useWorkspaceSearch(workspaceId: string): WorkspaceSearchApi {
   // Event-driven transitions read/write through the ref so a burst of IPC
   // batches between renders folds correctly (never against a stale snapshot).
   const modelRef = useRef(model);
+  const activeSearchRef = useRef<ActiveSearch | null>(null);
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const commit = useCallback((next: SearchModel) => {
     modelRef.current = next;
     setModel(next);
+  }, []);
+
+  const clearRetryTimer = useCallback(() => {
+    if (retryTimerRef.current === null) return;
+    clearTimeout(retryTimerRef.current);
+    retryTimerRef.current = null;
   }, []);
 
   useEffect(() => {
     return bridge().onSearchResults((batch) => {
       const next = applyBatch(modelRef.current, batch);
       if (next === modelRef.current) return; // stale batch — dropped
+      if (batch.done && activeSearchRef.current?.payload.searchId === batch.searchId) {
+        activeSearchRef.current = null;
+        clearRetryTimer();
+      }
       commit(next);
     });
-  }, [commit]);
+  }, [clearRetryTimer, commit]);
+
+  // An updating retry belongs to the workspace that issued it. Workspace
+  // replacement and unmount both invalidate it before the timer can invoke
+  // the old authority again.
+  useEffect(() => {
+    return () => {
+      if (activeSearchRef.current?.workspaceId === workspaceId) {
+        activeSearchRef.current = null;
+        clearRetryTimer();
+      }
+    };
+  }, [clearRetryTimer, workspaceId]);
+
+  const issue = useCallback(
+    function issue(active: ActiveSearch): void {
+      void bridge()
+        .searchWorkspace(active.payload)
+        .catch((error: unknown) => {
+          if (
+            activeSearchRef.current !== active ||
+            modelRef.current.searchId !== active.payload.searchId
+          ) {
+            return;
+          }
+          if (isWorkspaceUpdatingInvokeError(error)) {
+            commit({ ...modelRef.current, status: "updating" });
+            const delay =
+              UPDATING_RETRY_DELAYS_MS[
+                Math.min(active.retryCount, UPDATING_RETRY_DELAYS_MS.length - 1)
+              ];
+            active.retryCount += 1;
+            retryTimerRef.current = setTimeout(() => {
+              retryTimerRef.current = null;
+              if (activeSearchRef.current === active) issue(active);
+            }, delay);
+            return;
+          }
+
+          // The search never started (unknown workspace, vanished root): no
+          // done-batch will ever arrive, so settle the spinner here — but
+          // only if this search is still the current one.
+          activeSearchRef.current = null;
+          commit({ ...modelRef.current, status: "complete" });
+        });
+    },
+    [commit],
+  );
 
   const run = useCallback(
     (options: SearchRunOptions) => {
+      clearRetryTimer();
       // A renderer reload preserves its webContents sender id but creates a
       // new JavaScript realm. A realm-local sequence could therefore reuse an
       // old request id; a UUID keeps cancellation and late events exact across
@@ -81,8 +167,9 @@ export function useWorkspaceSearch(workspaceId: string): WorkspaceSearchApi {
       // The SearchView's post-commit effects record the measures.
       rendererMarks.mark("content-search-start");
       commit(beginSearch(searchId));
-      void bridge()
-        .searchWorkspace({
+      const active: ActiveSearch = {
+        workspaceId,
+        payload: {
           workspaceId,
           searchId,
           query: options.query,
@@ -91,29 +178,30 @@ export function useWorkspaceSearch(workspaceId: string): WorkspaceSearchApi {
           regex: options.regex,
           ...(options.includeGlob ? { includeGlob: options.includeGlob } : {}),
           ...(options.excludeGlob ? { excludeGlob: options.excludeGlob } : {}),
-        })
-        .catch(() => {
-          // The search never started (unknown workspace, vanished root): no
-          // done-batch will ever arrive, so settle the spinner here — but
-          // only if this search is still the current one.
-          if (modelRef.current.searchId === searchId) {
-            commit({ ...modelRef.current, status: "complete" });
-          }
-        });
+        },
+        retryCount: 0,
+      };
+      activeSearchRef.current = active;
+      issue(active);
     },
-    [workspaceId, commit],
+    [clearRetryTimer, workspaceId, commit, issue],
   );
 
   const clear = useCallback(() => {
+    activeSearchRef.current = null;
+    clearRetryTimer();
     const current = modelRef.current;
-    if (current.searchId !== null && current.status === "searching") {
+    if (
+      current.searchId !== null &&
+      (current.status === "searching" || current.status === "updating")
+    ) {
       // Explicit cancel kills the rg child by its tracked handle in main.
       void bridge()
         .cancelWorkspaceSearch({ searchId: current.searchId })
         .catch(() => undefined);
     }
     commit(idleSearchModel());
-  }, [commit]);
+  }, [clearRetryTimer, commit]);
 
   return { model, criteria, setCriteria, run, clear };
 }

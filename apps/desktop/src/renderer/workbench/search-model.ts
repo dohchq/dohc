@@ -17,7 +17,7 @@ export interface SearchModel {
   // The id of the search these results belong to; batches with any other id
   // are STALE (a superseded search's stragglers) and must be dropped.
   searchId: string | null;
-  status: "idle" | "searching" | "complete";
+  status: "idle" | "searching" | "updating" | "complete";
   limitHit: boolean;
   groups: SearchGroup[];
   totalMatches: number;
