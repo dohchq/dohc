@@ -58,6 +58,9 @@ importers:
       '@dohc/cli':
         specifier: workspace:*
         version: link:../../packages/cli
+      '@dohc/collection-views':
+        specifier: workspace:*
+        version: link:../../packages/collection-views
       '@dohc/sdk':
         specifier: workspace:*
         version: link:../../packages/sdk

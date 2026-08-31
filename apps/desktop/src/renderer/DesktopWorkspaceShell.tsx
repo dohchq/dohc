@@ -141,6 +141,7 @@ import { SidePanel } from "./workbench/SidePanel";
 import { StatusBar } from "./workbench/StatusBar";
 import { AgentPermissionRequests } from "./workbench/AgentPermissionRequests";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
+import { COLLECTION_SCHEMA_FILENAME } from "@dohc/workspace-contracts/collection";
 import { useAgentNotifications } from "./workbench/useAgentNotifications";
 import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";
 import {
@@ -189,6 +190,9 @@ import {
   isMomentDiffTabPath,
   momentDiffTabPath,
   parseMomentDiffTabPath,
+  collectionTabPath,
+  isCollectionTabPath,
+  parseCollectionTabPath,
   defaultWorkbenchState,
   CHATS_TAB_PATH,
   GRAPH_TAB_PATH,
@@ -688,6 +692,10 @@ const SHARE_RELAY_POLL_MS = 5 * 60 * 1000;
 // Trailing-edge window that coalesces a burst of workspace-activity events
 // into one files+history refresh. Short enough that a lone save still feels
 // immediate; long enough to cover main's per-batch event cadence.
+// Stable empty set: the Explorer is memoized, so the "no collections"
+// default must not be a fresh identity per render.
+const EMPTY_COLLECTION_FOLDERS: ReadonlySet<string> = new Set();
+
 export const WORKSPACE_ACTIVITY_REFRESH_DELAY_MS = 200;
 
 // Cap on how long the trailing edge may keep sliding: a sustained burst
@@ -750,6 +758,9 @@ const LazyLinkedChatsPanel = lazy(() =>
 );
 const LazyChatsView = lazy(() =>
   import("./workbench/ChatsView").then((mod) => ({ default: mod.ChatsView })),
+);
+const LazyCollectionPage = lazy(() =>
+  import("./CollectionPage").then((mod) => ({ default: mod.CollectionPage })),
 );
 
 // Every folder above a path — expanded when a create/open must REVEAL it.
@@ -2704,6 +2715,76 @@ export function DesktopWorkspaceShell(props: {
   // VERSIONS surface (#589) and CHATS (#615), for the same reason and from
   // the same fact.
   const isShareView = Boolean(props.workspace.shareView);
+  // Collection folders (Phase 2 views): the engine's collections.list result,
+  // cached as the set of folder paths so the Explorer can route a click on a
+  // collection folder to its views. Latest-wins request watermark, same as
+  // the file listing; a failure quietly keeps the last known set — the engine
+  // may simply not be running, and every activity batch retries.
+  const [collectionFolders, setCollectionFolders] = useState<
+    ReadonlySet<string>
+  >(EMPTY_COLLECTION_FOLDERS);
+  const collectionsRequest = useRef(0);
+  const refreshCollections = useCallback(async () => {
+    const request = ++collectionsRequest.current;
+    try {
+      const result = await bridge().listCollections({ workspaceId });
+      if (request !== collectionsRequest.current) return;
+      setCollectionFolders(
+        new Set(result.collections.map((collection) => collection.path)),
+      );
+    } catch {
+      // Collections are an engine capability; without it the explorer keeps
+      // plain folder behavior. Nothing to repaint, nothing to report.
+    }
+  }, [workspaceId]);
+  useEffect(() => {
+    if (!workspaceIsReady || !engineEnabled || isShareView) return;
+    void refreshCollections();
+    // Trailing-edge coalescing on the shell's activity cadence: a new
+    // collection appears through collection.yaml writes, and a rename or
+    // delete arrives as ordinary path activity — a scope-free event (no
+    // paths) must refresh too.
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+    let refreshDeadline: number | null = null;
+    const runRefresh = () => {
+      refreshTimer = null;
+      refreshDeadline = null;
+      void refreshCollections();
+    };
+    const unsubscribe = bridge().onWorkspaceActivity(
+      (event: WorkspaceActivityEvent) => {
+        const paths =
+          event.workspaceId === workspaceId ? event.paths : undefined;
+        if (
+          paths?.length &&
+          !paths.some(
+            (path) =>
+              path.endsWith(`/${COLLECTION_SCHEMA_FILENAME}`) ||
+              path === COLLECTION_SCHEMA_FILENAME ||
+              collectionsRef.current.has(path) ||
+              [...collectionsRef.current].some((collection) =>
+                path.startsWith(`${collection}/`),
+              ),
+          )
+        ) {
+          return;
+        }
+        const now = Date.now();
+        refreshDeadline ??= now + WORKSPACE_ACTIVITY_REFRESH_MAX_WAIT_MS;
+        if (refreshTimer !== null) clearTimeout(refreshTimer);
+        refreshTimer = setTimeout(
+          runRefresh,
+          Math.min(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS, refreshDeadline - now),
+        );
+      },
+    );
+    return () => {
+      if (refreshTimer !== null) clearTimeout(refreshTimer);
+      unsubscribe();
+    };
+  }, [workspaceIsReady, engineEnabled, isShareView, workspaceId, refreshCollections]);
+  const collectionsRef = useRef(collectionFolders);
+  collectionsRef.current = collectionFolders;
   // Engine history page state (flagged workspaces): newest-first moments,
   // the keyset cursor for older pages, and the monotonic latest order used
   // as the open-file refresh key.
@@ -3591,6 +3672,15 @@ export function DesktopWorkspaceShell(props: {
     },
     [openVirtualTab],
   );
+  // A collection folder opens as its views (Phase 2): one tab per collection,
+  // keyed by the folder path, through the same virtual-tab path as every
+  // other dohc surface — MAX_OPEN_TABS refusal included.
+  const openCollectionTab = useCallback(
+    (path: string) => {
+      openVirtualTab(collectionTabPath(path));
+    },
+    [openVirtualTab],
+  );
   const openGraphTab = useCallback(() => {
     openVirtualTab(GRAPH_TAB_PATH);
   }, [openVirtualTab]);
@@ -4348,6 +4438,33 @@ export function DesktopWorkspaceShell(props: {
       reportShellError("Could not create an untitled text file.", error);
     }
   }, [files, folders, openFile, refreshFiles, reportShellError, workspaceId]);
+  // New record (Phase 2 collections): an ordinary markdown file inside the
+  // collection folder, created through the same IPC every explorer create
+  // takes; the engine adopts it and mints the record id. The untitled name is
+  // unique within the collection folder, not the root.
+  const createCollectionRecord = useCallback(
+    async (collectionPath: string) => {
+      const prefix = `${collectionPath}/`;
+      const scopedFiles = files
+        .filter((file) => file.path.startsWith(prefix))
+        .map((file) => ({ ...file, path: file.path.slice(prefix.length) }));
+      const scopedFolders = folders
+        .filter((folder) => folder.startsWith(prefix))
+        .map((folder) => folder.slice(prefix.length));
+      try {
+        const result = await bridge().createWorkspaceFile({
+          workspaceId,
+          relativePath: `${collectionPath}/${uniqueUntitledPath(scopedFiles, scopedFolders, "md")}`,
+          initialText: "",
+        });
+        await refreshFiles();
+        openFile(result.path);
+      } catch (error) {
+        reportShellError("Could not create a record.", error);
+      }
+    },
+    [files, folders, openFile, refreshFiles, reportShellError, workspaceId],
+  );
   const createUntitledDrawing = useCallback(async () => {
     try {
       const result = await bridge().createWorkspaceFile({
@@ -5528,6 +5645,8 @@ export function DesktopWorkspaceShell(props: {
         onSetFolderExpanded={setExplorerFolderExpanded}
         onToggleFolder={toggleExplorerFolder}
         onTogglePin={toggleExplorerPin}
+        collectionFolders={collectionFolders}
+        onOpenCollection={openCollectionTab}
         onBeginChanges={beginDraftOperation}
         onPathsChanged={onExplorerPathsChanged}
         onImportFiles={importFiles}
@@ -6099,6 +6218,7 @@ export function DesktopWorkspaceShell(props: {
                 ? callbacksForEditor(editorGroup.id, tab)
                 : null;
               const groupSiteRoot = parseSiteTabPath(tabPath);
+              const groupCollectionPath = parseCollectionTabPath(tabPath);
               const groupPluginPanel = parsePluginPanelTabPath(tabPath);
               const groupPluginWebApp = parsePluginWebAppTabPath(tabPath);
               const groupPluginDetails = parsePluginDetailsTabPath(tabPath);
@@ -6412,6 +6532,34 @@ export function DesktopWorkspaceShell(props: {
                     if (tabPath) closeFileTab(editorGroup.id, tabPath);
                   }}
                 />
+              )
+            ) : isCollectionTabPath(tabPath) ? (
+              groupCollectionPath ? (
+                <Suspense fallback={<PanelLoading label="collection" />}>
+                  <LazyCollectionPage
+                    key={tabPath}
+                    workspaceId={workspaceId}
+                    collectionPath={groupCollectionPath}
+                    onNewRecord={createCollectionRecord}
+                  />
+                </Suspense>
+              ) : (
+                // A persisted tab whose path names no collection folder
+                // (hand-edited or truncated state). Closeable, never a crash.
+                <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
+                  <span className="text-sm text-ink">
+                    dohc could not open this collection
+                  </span>
+                  <button
+                    type="button"
+                    className="text-xs text-accent hover:underline"
+                    onClick={() => {
+                      if (tabPath) closeFileTab(editorGroup.id, tabPath);
+                    }}
+                  >
+                    Close tab
+                  </button>
+                </div>
               )
             ) : tabPath && tab && editorCallbacks ? (
               <FileInspector

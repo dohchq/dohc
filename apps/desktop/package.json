@@ -75,6 +75,7 @@
   },
   "dependencies": {
     "@dohc/cli": "workspace:*",
+    "@dohc/collection-views": "workspace:*",
     "@dohc/sdk": "workspace:*",
     "@dohc/security-contract": "workspace:*",
     "@dohc/sqlite-worker": "workspace:*",

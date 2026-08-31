@@ -127,6 +127,12 @@ import {
   LaunchMarksResult,
   PluginPanelInvalidatedEvent,
   PluginWebAppFailedEvent,
+  ListCollectionsPayload,
+  ListCollectionsResult,
+  GetCollectionPayload,
+  GetCollectionResult,
+  QueryCollectionRecordsPayload,
+  QueryCollectionRecordsResult,
   ListWorkspaceFilesPayload,
   ListWorkspaceFilesResult,
   WorkspaceIdPayload,
@@ -3482,6 +3488,39 @@ async function engineSearchIndexFor(
   );
 }
 
+// Collections (Phase 2 views): one daemon round-trip per read, through the
+// same authority sandwich engineSearchIndexFor uses. Returns null when the
+// daemon has no workspace sessions (engine unavailable), so list can answer
+// "no collections" while get/query raise a visible error.
+async function withCollectionsAdapter<T>(
+  workspace: EngineWorkspace,
+  work: (adapter: VersionedLiveAdapter) => Promise<T>,
+): Promise<T | null> {
+  const sessions = rustEngineWorkspaceSessions;
+  if (!sessions) return null;
+  const read = async (engineWorkspace: EngineWorkspace) =>
+    await sessions.run(engineWorkspace, async (binding) =>
+      await work(
+        new VersionedLiveAdapter(binding.client, binding.workspace, {
+          workspaceId: workspace.workspaceId,
+        }),
+      ),
+    );
+  const registered = findWorkspace(workspace.workspaceId);
+  if (!registered) return await read(workspace);
+  if (
+    workspace.attachmentId === undefined &&
+    registered.rootPath !== workspace.rootPath
+  ) {
+    throw new Error(
+      "The engine workspace belongs to a replaced physical attachment.",
+    );
+  }
+  return await withWorkspaceAttachmentAsync(workspace, async (lease) =>
+    await read(engineWorkspaceForAuthority(lease)),
+  );
+}
+
 async function activeEngineFileIndex(workspace: EngineWorkspace): Promise<{
   pathByObjectId: Map<string, string>;
   objectIdByPath: Map<string, string>;
@@ -6431,6 +6470,65 @@ function registerIpcHandlers(
   );
   ipcMain.handle(CHANNELS.moveWorkspacePath, workspaceFileMutations.movePath);
   ipcMain.handle(CHANNELS.deleteWorkspacePath, workspaceFileMutations.deletePath);
+
+  // Collections (Phase 2 views): read-only engine index queries. list answers
+  // "no collections" when the daemon has no sessions, so unflagged workspaces
+  // stay quiet; get/query name the missing capability instead, because their
+  // caller is an open collection tab that must show a cause.
+  ipcMain.handle(CHANNELS.listCollections, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListCollectionsPayload.parse(payload);
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Collection listing stopped because this window changed workspaces.",
+      async (operation) => {
+        const result = await withCollectionsAdapter(
+          receivedShareEngine.workspaceForRegistered(operation.workspace),
+          async (adapter) => await adapter.listCollections(),
+        );
+        return ListCollectionsResult.parse(result ?? { collections: [] });
+      },
+    );
+  });
+
+  ipcMain.handle(CHANNELS.getCollection, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = GetCollectionPayload.parse(payload);
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Collection read stopped because this window changed workspaces.",
+      async (operation) => {
+        const result = await withCollectionsAdapter(
+          receivedShareEngine.workspaceForRegistered(operation.workspace),
+          async (adapter) =>
+            await adapter.getCollection({ collectionPath: input.collectionPath }),
+        );
+        if (!result) throw new Error("The workspace engine is not running.");
+        return GetCollectionResult.parse(result);
+      },
+    );
+  });
+
+  ipcMain.handle(CHANNELS.queryCollectionRecords, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = QueryCollectionRecordsPayload.parse(payload);
+    const { workspaceId: _workspaceId, ...params } = input;
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Collection query stopped because this window changed workspaces.",
+      async (operation) => {
+        const result = await withCollectionsAdapter(
+          receivedShareEngine.workspaceForRegistered(operation.workspace),
+          async (adapter) => await adapter.queryCollectionRecords(params),
+        );
+        if (!result) throw new Error("The workspace engine is not running.");
+        return QueryCollectionRecordsResult.parse(result);
+      },
+    );
+  });
 
   ipcMain.handle(CHANNELS.exportWorkspaceZip, async (event, payload) => {
     assertTrustedSender(event);

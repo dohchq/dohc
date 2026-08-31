@@ -1,0 +1,430 @@
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import {
+  BoardView,
+  CalendarView,
+  createCollectionStore,
+  TableView,
+  useCollectionStore,
+  type CollectionCellChange,
+} from "@dohc/collection-views";
+import type {
+  CollectionQueryParams,
+  CollectionSchema,
+  CollectionValue,
+  ViewDefinition,
+} from "@dohc/workspace-contracts";
+import type { WorkspaceActivityEvent } from "../ipc/bridgeContract";
+import { bridge } from "./bridge";
+import { useEngineDoc } from "./collab/useEngineDoc";
+
+// The collection surface behind a dohc://collection/<path> tab: the shared
+// @dohc/collection-views components bound to the desktop's collections.*
+// bridge. Reads come from the engine's index; writes ride the record's live
+// document frontmatter map — the SAME path agents and the PropertiesPanel
+// take, so attribution and history stay parallel.
+
+// The shell's activity coalescing cadence (WORKSPACE_ACTIVITY_REFRESH_*),
+// restated locally so this lazy chunk does not import the shell module.
+const ACTIVITY_REFRESH_DELAY_MS = 200;
+const ACTIVITY_REFRESH_MAX_WAIT_MS = 1_000;
+
+// The live document field PropertiesPanel writes; one name for one thing.
+const FRONTMATTER_FIELD = "frontmatter";
+
+export interface CollectionPageProps {
+  workspaceId: string;
+  collectionPath: string;
+  // The shell creates the record file (untitled naming needs the file
+  // listing, which the shell owns) and opens it; adoption mints the id.
+  onNewRecord: (collectionPath: string) => void;
+}
+
+/**
+ * Frontmatter values are what js-yaml round-trips. The one indexed shape it
+ * cannot carry as-is is bigint (the engine's wire marker for big integers):
+ * write it back as a number when exact, else as its decimal text.
+ */
+export function frontmatterWriteValue(value: CollectionValue): unknown {
+  if (typeof value === "bigint") {
+    const max = BigInt(Number.MAX_SAFE_INTEGER);
+    return value <= max && value >= -max ? Number(value) : value.toString();
+  }
+  if (Array.isArray(value)) return value.map(frontmatterWriteValue);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [
+        key,
+        frontmatterWriteValue(entry),
+      ]),
+    );
+  }
+  return value;
+}
+
+/**
+ * Applies ONE cell change through the record's live document: open the
+ * engine doc session, set the field on the frontmatter map inside a
+ * transaction, then hold the lease until the engine reports the save
+ * settled (local updates are staged and flushed asynchronously, so
+ * releasing at transact time could drop the write). Renders nothing.
+ */
+export function CollectionRecordFieldWrite({
+  workspaceId,
+  change,
+  onDone,
+  onError,
+}: {
+  workspaceId: string;
+  change: CollectionCellChange;
+  onDone: () => void;
+  onError: (detail: string | null) => void;
+}) {
+  const docState = useEngineDoc({
+    workspaceId,
+    path: change.recordPath,
+    enabled: true,
+  });
+  const applied = useRef(false);
+  const sawSaving = useRef(false);
+
+  useEffect(() => {
+    if (applied.current || docState.opening) return;
+    if (!docState.available || !docState.doc) {
+      // The open settled without a session (conflict, deletion, engine off).
+      onError(null);
+      onDone();
+      return;
+    }
+    applied.current = true;
+    const doc = docState.doc;
+    doc.transact(() => {
+      doc
+        .getMap(FRONTMATTER_FIELD)
+        .set(change.field, frontmatterWriteValue(change.value));
+    });
+  }, [docState.opening, docState.available, docState.doc, change, onDone, onError]);
+
+  useEffect(() => {
+    if (!applied.current) return;
+    if (docState.saveState === "saving") {
+      sawSaving.current = true;
+      return;
+    }
+    if (docState.saveState === "error") {
+      onError(docState.saveError);
+      onDone();
+      return;
+    }
+    // Only a "saved" AFTER our own edit was staged counts: the session opens
+    // in "saved", and releasing on that one would race the staged flush.
+    if (docState.saveState === "saved" && sawSaving.current) onDone();
+  }, [docState.saveState, docState.saveError, onDone, onError]);
+
+  return null;
+}
+
+function NewRecordButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      data-testid="collection-new-record"
+      onClick={onClick}
+      className="rounded-lg border border-line bg-transparent px-3 py-1.5 text-xs text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+    >
+      New record
+    </button>
+  );
+}
+
+export function CollectionPage({
+  workspaceId,
+  collectionPath,
+  onNewRecord,
+}: CollectionPageProps) {
+  const [details, setDetails] = useState<{ schema: CollectionSchema } | null>(
+    null,
+  );
+  const [loadError, setLoadError] = useState<string | null>(null);
+  // Latest-wins token (engineRebuildToken idiom): only the newest read may
+  // write state, so a slow response can never repaint a newer one. The tab
+  // is keyed by its path and the shell remounts per workspace, so the pair
+  // (workspaceId, collectionPath) is fixed for this component's lifetime —
+  // the token guards out-of-order responses within it.
+  const detailsRequest = useRef(0);
+  const refreshDetails = useCallback(async () => {
+    const request = ++detailsRequest.current;
+    try {
+      const result = await bridge().getCollection({
+        workspaceId,
+        collectionPath,
+      });
+      if (request !== detailsRequest.current) return;
+      setDetails({ schema: result.schema });
+      setLoadError(null);
+    } catch (error) {
+      if (request !== detailsRequest.current) return;
+      setLoadError(error instanceof Error ? error.message : String(error));
+    }
+  }, [workspaceId, collectionPath]);
+  useEffect(() => {
+    void refreshDetails();
+    return () => {
+      // A response landing after unmount must not write state.
+      detailsRequest.current += 1;
+    };
+  }, [refreshDetails]);
+
+  // The store owns query state and guards its own async responses with a
+  // request token; the desktop binds its executor to the query bridge call.
+  const executor = useCallback(
+    async (params: CollectionQueryParams) =>
+      await bridge().queryCollectionRecords({ workspaceId, ...params }),
+    [workspaceId],
+  );
+  const store = useMemo(
+    () => createCollectionStore({ collectionPath, executor }),
+    [collectionPath, executor],
+  );
+  const state = useCollectionStore(store);
+
+  const views = details?.schema.views ?? [];
+  const [activeViewName, setActiveViewName] = useState<string | null>(null);
+  const activeView: ViewDefinition | null =
+    views.find((view) => view.name === activeViewName) ?? views[0] ?? null;
+
+  // One query per (schema arrival, view change): columns need the schema
+  // anyway, so nothing is gained by querying before it loads.
+  const activeViewKey = activeView
+    ? `${activeView.name}\0${activeView.kind}\0${activeView.groupBy ?? ""}`
+    : "";
+  const detailsLoaded = details !== null;
+  const activeViewRef = useRef(activeView);
+  activeViewRef.current = activeView;
+  useEffect(() => {
+    if (!detailsLoaded) return;
+    const view = activeViewRef.current;
+    void store.setQuery({
+      groupBy:
+        view?.kind === "board" && view.groupBy ? view.groupBy : undefined,
+      sort: view && view.sort.length > 0 ? view.sort : undefined,
+      resolveRelations: true,
+    });
+  }, [store, detailsLoaded, activeViewKey]);
+
+  // Invalidation: refresh when a settled batch touches this collection's
+  // folder (or arrives without path detail), on the shell's trailing-edge
+  // coalescing cadence. The store's token makes the refresh latest-wins.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let deadline: number | null = null;
+    const run = () => {
+      timer = null;
+      deadline = null;
+      void store.refresh();
+      void refreshDetails();
+    };
+    const prefix = `${collectionPath}/`;
+    const unsubscribe = bridge().onWorkspaceActivity(
+      (event: WorkspaceActivityEvent) => {
+        const paths =
+          event.workspaceId === workspaceId ? event.paths : undefined;
+        if (
+          paths?.length &&
+          !paths.some(
+            (path) => path === collectionPath || path.startsWith(prefix),
+          )
+        ) {
+          return;
+        }
+        const now = Date.now();
+        deadline ??= now + ACTIVITY_REFRESH_MAX_WAIT_MS;
+        if (timer !== null) clearTimeout(timer);
+        timer = setTimeout(
+          run,
+          Math.min(ACTIVITY_REFRESH_DELAY_MS, deadline - now),
+        );
+      },
+    );
+    return () => {
+      if (timer !== null) clearTimeout(timer);
+      unsubscribe();
+    };
+  }, [store, refreshDetails, workspaceId, collectionPath]);
+
+  // Cell edits queue one at a time through the live document write path.
+  const nextWriteId = useRef(0);
+  const [writes, setWrites] = useState<
+    { id: number; change: CollectionCellChange }[]
+  >([]);
+  const [writeError, setWriteError] = useState<string | null>(null);
+  const enqueueCellChange = useCallback((change: CollectionCellChange) => {
+    const id = ++nextWriteId.current;
+    setWrites((queue) => [...queue, { id, change }]);
+  }, []);
+  const completeWrite = useCallback(() => {
+    setWrites((queue) => queue.slice(1));
+    // The index updates when the engine applies the settled write; re-read
+    // now instead of waiting for the activity event.
+    void store.refresh();
+  }, [store]);
+  const failWrite = useCallback((detail: string | null) => {
+    setWriteError(
+      detail
+        ? `dohc could not save this change. ${detail}`
+        : "dohc could not save this change.",
+    );
+  }, []);
+  const headWrite = writes[0];
+
+  const newRecord = useCallback(
+    () => onNewRecord(collectionPath),
+    [onNewRecord, collectionPath],
+  );
+
+  if (loadError !== null && details === null) {
+    return (
+      <div
+        data-testid="collection-error"
+        className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-4 text-center"
+      >
+        <span className="text-sm text-muted">
+          dohc could not load this collection. {loadError}
+        </span>
+        <button
+          type="button"
+          onClick={() => {
+            void refreshDetails();
+            void store.refresh();
+          }}
+          className="rounded-lg border border-line bg-transparent px-3 py-1.5 text-xs text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  if (details === null || state.status === "loading" || state.status === "idle") {
+    return (
+      <div className="flex min-h-0 flex-1 items-center justify-center px-4 text-xs text-subtle">
+        Loading collection...
+      </div>
+    );
+  }
+
+  const schema = details.schema;
+  const empty =
+    state.status === "ready" &&
+    state.records.length === 0 &&
+    (state.groups === null ||
+      state.groups.every((group) => group.records.length === 0));
+
+  // Settled 2026-08-31: a collection with no records shows one line and the
+  // New record action, nothing else.
+  if (empty) {
+    return (
+      <div
+        data-testid="collection-empty"
+        className="flex min-h-0 flex-1 flex-col items-center justify-center gap-4 text-center"
+      >
+        <span className="text-sm text-muted">
+          No records in this collection yet.
+        </span>
+        <NewRecordButton onClick={newRecord} />
+      </div>
+    );
+  }
+
+  const kind = activeView?.kind ?? "table";
+  const boardReady =
+    kind === "board" && activeView?.groupBy && state.groups !== null;
+  const calendarReady = kind === "calendar" && activeView?.dateField;
+
+  return (
+    <div
+      data-testid="collection-page"
+      className="flex min-h-0 flex-1 flex-col bg-bg"
+    >
+      <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-1.5">
+        <span className="min-w-0 truncate text-sm font-semibold text-ink">
+          {schema.name ?? collectionPath.split("/").at(-1)}
+        </span>
+        {views.length > 1 ? (
+          <div
+            data-testid="collection-view-switcher"
+            className="flex rounded-lg border border-line bg-panel-2 p-0.5"
+          >
+            {views.map((view) => (
+              <button
+                key={view.name}
+                type="button"
+                onClick={() => setActiveViewName(view.name)}
+                className={`rounded-md px-2.5 py-1 text-xs transition-colors ${
+                  view.name === (activeView?.name ?? "")
+                    ? "bg-bg text-ink shadow-sm"
+                    : "text-muted hover:text-ink"
+                }`}
+              >
+                {view.name}
+              </button>
+            ))}
+          </div>
+        ) : null}
+        <span className="flex-1" />
+        {state.status === "error" ? (
+          <span className="truncate text-[11px] text-danger">
+            dohc could not read this collection's records. {state.error}
+          </span>
+        ) : writeError ? (
+          <span data-testid="collection-write-error" className="truncate text-[11px] text-danger">
+            {writeError}
+          </span>
+        ) : null}
+        <NewRecordButton onClick={newRecord} />
+      </div>
+      <div className="min-h-0 flex-1 overflow-auto">
+        {boardReady ? (
+          <BoardView
+            schema={schema}
+            groups={state.groups ?? []}
+            groupBy={activeView?.groupBy ?? ""}
+            visibleFields={activeView?.visibleFields ?? null}
+            onCellChange={enqueueCellChange}
+          />
+        ) : calendarReady ? (
+          <CalendarView
+            schema={schema}
+            records={state.records}
+            dateField={activeView?.dateField ?? ""}
+            visibleFields={activeView?.visibleFields ?? null}
+            onCellChange={enqueueCellChange}
+          />
+        ) : (
+          <TableView
+            schema={schema}
+            records={state.records}
+            sort={state.query.sort ?? []}
+            visibleFields={activeView?.visibleFields ?? null}
+            onSortChange={(sort) => void store.setQuery({ sort })}
+            onCellChange={enqueueCellChange}
+          />
+        )}
+      </div>
+      {headWrite ? (
+        <CollectionRecordFieldWrite
+          key={headWrite.id}
+          workspaceId={workspaceId}
+          change={headWrite.change}
+          onDone={completeWrite}
+          onError={failWrite}
+        />
+      ) : null}
+    </div>
+  );
+}

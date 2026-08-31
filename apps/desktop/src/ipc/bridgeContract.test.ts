@@ -20,6 +20,9 @@ import {
   DatabaseEditResult,
   DatabasePageResult,
   DatabaseSnapshotResult,
+  GetCollectionResult,
+  QueryCollectionRecordsPayload,
+  QueryCollectionRecordsResult,
   DesktopMarksResult,
   CreateWorkspaceFilePayload,
   CreateFileChatPayload,
@@ -1009,6 +1012,93 @@ describe("workspace graph IPC contract", () => {
         graph({ ...common, path: "a.md", threadId: "thread-on-file" }),
       ).success,
     ).toBe(false);
+  });
+});
+
+describe("collection IPC contracts (Phase 2 views)", () => {
+  it("round-trips a queried record with a bigint value and a flagged validation", () => {
+    const result = QueryCollectionRecordsResult.parse({
+      collection: { path: "tasks", status: "valid", reasons: [] },
+      records: [
+        {
+          id: "rec-1",
+          path: "tasks/one.md",
+          conflicted: false,
+          values: [
+            {
+              field: "estimate",
+              value: 9223372036854775807n,
+              validation: {
+                status: "flagged",
+                reason: { code: "expected-number", path: "estimate" },
+              },
+              resolvedRelations: [{ recordId: "rec-2", label: "Other" }],
+            },
+          ],
+        },
+      ],
+      groups: null,
+      nextCursor: null,
+    });
+    expect(result.records[0]?.values[0]?.value).toBe(9223372036854775807n);
+  });
+
+  it("keeps every field kind and view definition through the details result", () => {
+    const details = GetCollectionResult.parse({
+      path: "tasks",
+      status: "degraded",
+      reasons: [{ code: "unknown-field-type", path: "fields.mystery" }],
+      schema: {
+        name: "Tasks",
+        description: null,
+        fields: [
+          { name: "title", type: "text" },
+          { name: "status", type: "select", options: ["open", "done"] },
+          { name: "blocks", type: "relation", collection: "projects", many: true },
+        ],
+        views: [
+          {
+            name: "Board",
+            kind: "board",
+            groupBy: "status",
+            sort: [{ field: "title", direction: "asc" }],
+            visibleFields: ["title"],
+            dateField: null,
+          },
+        ],
+      },
+      recordCount: 3,
+    });
+    expect(details.schema.fields).toHaveLength(3);
+    expect(details.schema.views[0]?.kind).toBe("board");
+  });
+
+  it("rejects a query payload outside the contract's bounds", () => {
+    const base = { workspaceId: "workspace-1", collectionPath: "tasks" };
+    expect(QueryCollectionRecordsPayload.parse(base)).toEqual(base);
+    expect(() =>
+      QueryCollectionRecordsPayload.parse({ ...base, limit: 0 }),
+    ).toThrow();
+    expect(() =>
+      QueryCollectionRecordsPayload.parse({
+        ...base,
+        filter: { field: "status", operator: "matches", value: "x" },
+      }),
+    ).toThrow();
+    expect(() =>
+      GetCollectionResult.parse({
+        path: "tasks",
+        status: "valid",
+        reasons: [],
+        schema: {
+          name: null,
+          description: null,
+          fields: [{ name: "mystery", type: "unknown-kind" }],
+          views: [],
+        },
+        recordCount: 0,
+      }),
+    ).toThrow();
   });
 });
 

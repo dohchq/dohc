@@ -36,8 +36,11 @@ import type {
   ListFileChatsResult,
   ListMyShareChangesResult,
   ListShareProposalsResult,
+  GetCollectionResult,
+  ListCollectionsResult,
   ListWorkspaceFilesPayload,
   ListWorkspaceFilesResult,
+  QueryCollectionRecordsResult,
   ListWorkspaceVersionsResult,
   ReadShareProposalChangesResult,
   ReadShareProposalFileContentResult,
@@ -691,6 +694,27 @@ function makeEngineBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     source: "stored" as const,
   }));
   return Object.assign(bridge, {
+    // Collections (Phase 2 views): the flagged shell lists collections on
+    // ready and on activity. Typed to the contract; the collection tests
+    // swap in real rows.
+    listCollections: vi.fn(
+      async (): Promise<ListCollectionsResult> => ({ collections: [] }),
+    ),
+    getCollection: vi.fn(async (): Promise<GetCollectionResult> => ({
+      path: "tasks",
+      status: "valid",
+      reasons: [],
+      schema: { name: null, description: null, fields: [], views: [] },
+      recordCount: 0,
+    })),
+    queryCollectionRecords: vi.fn(
+      async (): Promise<QueryCollectionRecordsResult> => ({
+        collection: { path: "tasks", status: "valid", reasons: [] },
+        records: [],
+        groups: null,
+        nextCursor: null,
+      }),
+    ),
     // Typed to the contract, not to this empty default: a test that drives
     // real pages must be able to swap the implementation.
     listEngineMoments: vi.fn(
@@ -1988,6 +2012,64 @@ describe("global letter shortcut ownership", () => {
     expect(screen.queryByRole("textbox", { name: "File name" })).toBeNull();
     expect(screen.getByTestId("side-panel")).toBeTruthy();
     expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+  });
+});
+
+describe("collection folders", () => {
+  beforeEach(() => {
+    // The file's module-level ResizeObserver stub is removed by the global
+    // afterEach's unstubAllGlobals (plugin web app tabs precedent). The
+    // collection surface's lazy chunk evaluates @dnd-kit, which reads BOTH
+    // observers while its module loads, so they must exist before the click.
+    class ObserverStub {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+      takeRecords(): never[] {
+        return [];
+      }
+    }
+    vi.stubGlobal("ResizeObserver", ObserverStub);
+    vi.stubGlobal("IntersectionObserver", ObserverStub);
+  });
+
+  it("opens a collection folder as its views tab with the settled empty state", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: [{ path: "tasks/one.md", kind: "file" as const }],
+      folders: ["tasks"],
+    }));
+    bridge.listCollections = vi.fn(async () => ({
+      collections: [{ path: "tasks", status: "valid" as const, reasons: [] }],
+    }));
+    renderShell(bridge);
+    const user = userEvent.setup();
+
+    // The row routes to the collection only once the engine's list landed;
+    // flush the commit before clicking so the click cannot race it.
+    await waitFor(() => expect(bridge.listCollections).toHaveBeenCalled());
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const row = (await screen.findAllByTestId("tree-row")).find(
+      (candidate) => candidate.dataset.path === "tasks",
+    )!;
+    await user.click(row);
+
+    expect(await screen.findByTestId("tab-dohc://collection/tasks")).toBeTruthy();
+    // The surface is a lazy chunk (@dohc/collection-views pulls the table,
+    // board, and calendar libraries) plus two bridge round trips; under a
+    // loaded worker that outlasts findBy's default second.
+    expect(
+      await screen.findByText("No records in this collection yet.", undefined, {
+        timeout: 15_000,
+      }),
+    ).toBeTruthy();
+    expect(bridge.getCollection).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE.workspaceId,
+      collectionPath: "tasks",
+    });
   });
 });
 
