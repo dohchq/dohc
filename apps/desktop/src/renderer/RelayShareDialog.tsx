@@ -94,6 +94,7 @@ type OwnerDiscussionState = {
   loaded: boolean;
   loading: boolean;
   paging: boolean;
+  reconciliationPending: boolean;
   activityRevision: number | null;
   linkCommentsPaused: boolean;
   messages: RelayShareDiscussionMessage[];
@@ -219,6 +220,7 @@ function emptyOwnerDiscussion(): OwnerDiscussionState {
     loaded: false,
     loading: false,
     paging: false,
+    reconciliationPending: false,
     activityRevision: null,
     linkCommentsPaused: false,
     messages: [],
@@ -398,7 +400,8 @@ export function RelayShareDialog(props: {
   const latestMutationRequest = useRef(0);
   const latestNamedInventoryRequest = useRef(0);
   const latestDiscussionRequestByShareId = useRef(new Map<string, number>());
-  const activeFullDiscussionRequestByShareId = useRef(new Map<string, number>());
+  const activeFullDiscussionRequestByShareId = useRef(new Map<string, symbol>());
+  const pendingDiscussionReconciliationByShareId = useRef(new Set<string>());
   const latestActivityGenerationByShareId = useRef(new Map<string, number>());
   const ownerActivityByShareId = useRef(new Map<string, OwnerActivityControl>());
   const expandedOwnerShareIdsRef = useRef(new Set<string>());
@@ -500,6 +503,7 @@ export function RelayShareDialog(props: {
     latestMutationRequest.current += 1;
     latestNamedInventoryRequest.current += 1;
     latestDiscussionRequestByShareId.current.clear();
+    clearOwnerDiscussionPriority();
     latestOwnerAppendRequest.current += 1;
     latestOwnerMutationRequest.current += 1;
     activeOwnerAppendShareId.current = null;
@@ -536,6 +540,7 @@ export function RelayShareDialog(props: {
       latestMutationRequest.current += 1;
       latestNamedInventoryRequest.current += 1;
       latestDiscussionRequestByShareId.current.clear();
+      clearOwnerDiscussionPriority();
       latestOwnerAppendRequest.current += 1;
       latestOwnerMutationRequest.current += 1;
       activeOwnerAppendShareId.current = null;
@@ -560,6 +565,8 @@ export function RelayShareDialog(props: {
       ] of latestDiscussionRequestByShareId.current) {
         latestDiscussionRequestByShareId.current.set(shareId, requestId + 1);
       }
+      clearOwnerDiscussionPriority();
+      clearAllOwnerDiscussionPendingState();
       latestOwnerAppendRequest.current += 1;
       latestOwnerMutationRequest.current += 1;
       activeOwnerAppendShareId.current = null;
@@ -663,7 +670,29 @@ export function RelayShareDialog(props: {
     return requestId;
   }
 
+  function clearOwnerDiscussionPriority(shareId?: string) {
+    if (shareId === undefined) {
+      activeFullDiscussionRequestByShareId.current.clear();
+      pendingDiscussionReconciliationByShareId.current.clear();
+      return;
+    }
+    activeFullDiscussionRequestByShareId.current.delete(shareId);
+    pendingDiscussionReconciliationByShareId.current.delete(shareId);
+  }
+
+  function clearAllOwnerDiscussionPendingState() {
+    setOwnerDiscussionByShareId((current) =>
+      Object.fromEntries(
+        Object.entries(current).map(([shareId, state]) => [
+          shareId,
+          { ...state, reconciliationPending: false },
+        ]),
+      ),
+    );
+  }
+
   function invalidateDiscussionRequest(shareId: string) {
+    clearOwnerDiscussionPriority(shareId);
     latestDiscussionRequestByShareId.current.set(
       shareId,
       (latestDiscussionRequestByShareId.current.get(shareId) ?? 0) + 1,
@@ -880,21 +909,25 @@ export function RelayShareDialog(props: {
     }
     if (
       cursor !== undefined &&
-      activeFullDiscussionRequestByShareId.current.has(shareId)
+      (activeFullDiscussionRequestByShareId.current.has(shareId) ||
+        pendingDiscussionReconciliationByShareId.current.has(shareId))
     ) {
       return;
     }
     if (cursor === undefined) stopOwnerActivity(shareId);
     const requestId = nextDiscussionRequest(shareId);
-    if (cursor === undefined) {
-      activeFullDiscussionRequestByShareId.current.set(shareId, requestId);
+    const fullReadToken = cursor === undefined ? Symbol() : null;
+    if (fullReadToken !== null) {
+      activeFullDiscussionRequestByShareId.current.set(shareId, fullReadToken);
     }
+    const reconciliationPending =
+      pendingDiscussionReconciliationByShareId.current.has(shareId);
     updateOwnerDiscussion(shareId, (current) => ({
       ...current,
       loading: cursor === undefined,
       paging: cursor !== undefined,
-      loadError: false,
-      failedReadCursor: null,
+      loadError: reconciliationPending ? current.loadError : false,
+      failedReadCursor: reconciliationPending ? current.failedReadCursor : null,
     }));
 
     try {
@@ -927,6 +960,8 @@ export function RelayShareDialog(props: {
           loaded: true,
           loading: false,
           paging: false,
+          reconciliationPending:
+            cursor === undefined ? false : current.reconciliationPending,
           activityRevision:
             cursor === undefined ? result.activityRevision : current.activityRevision,
           linkCommentsPaused:
@@ -939,14 +974,15 @@ export function RelayShareDialog(props: {
           failedReadCursor: null,
         };
       });
-      setOwnerMutationError((current) =>
-        current?.shareId === shareId &&
-        isDiscussionMutationAction(current.actionKey)
-          ? null
-          : current,
-      );
       if (cursor === undefined) {
         startOwnerActivity(shareId, result.activityRevision, scopeGeneration);
+        pendingDiscussionReconciliationByShareId.current.delete(shareId);
+        setOwnerMutationError((current) =>
+          current?.shareId === shareId &&
+          isDiscussionMutationAction(current.actionKey)
+            ? null
+            : current,
+        );
       }
     } catch {
       if (!isCurrentDiscussionRequest(scopeGeneration, requestId, shareId)) {
@@ -961,8 +997,8 @@ export function RelayShareDialog(props: {
       }));
     } finally {
       if (
-        cursor === undefined &&
-        activeFullDiscussionRequestByShareId.current.get(shareId) === requestId
+        fullReadToken !== null &&
+        activeFullDiscussionRequestByShareId.current.get(shareId) === fullReadToken
       ) {
         activeFullDiscussionRequestByShareId.current.delete(shareId);
       }
@@ -995,6 +1031,7 @@ export function RelayShareDialog(props: {
         expanded: false,
         loading: false,
         paging: false,
+        reconciliationPending: false,
         appendIntent: null,
         appendError: false,
       }));
@@ -1132,6 +1169,11 @@ export function RelayShareDialog(props: {
       setOwnerConfirmation(null);
       setOwnerMutationError({ shareId, actionKey });
       if (refresh === "discussion") {
+        pendingDiscussionReconciliationByShareId.current.add(shareId);
+        updateOwnerDiscussion(shareId, (current) => ({
+          ...current,
+          reconciliationPending: true,
+        }));
         void refreshOwnerDiscussion(shareId, undefined, scopeGeneration);
       } else {
         void refreshLinks(scopeGeneration);
@@ -1508,6 +1550,8 @@ export function RelayShareDialog(props: {
     latestMutationRequest.current += 1;
     latestNamedInventoryRequest.current += 1;
     latestDiscussionRequestByShareId.current.clear();
+    clearOwnerDiscussionPriority();
+    clearAllOwnerDiscussionPendingState();
     latestOwnerAppendRequest.current += 1;
     latestOwnerMutationRequest.current += 1;
     activeOwnerAppendShareId.current = null;
@@ -2097,7 +2141,11 @@ export function RelayShareDialog(props: {
 
                           {ownerDiscussion.nextCursor !== null ? (
                             <SecondaryButton
-                              disabled={ownerDiscussion.loading || ownerDiscussion.paging}
+                              disabled={
+                                ownerDiscussion.loading ||
+                                ownerDiscussion.paging ||
+                                ownerDiscussion.reconciliationPending
+                              }
                               onClick={() =>
                                 void refreshOwnerDiscussion(
                                   group.shareId,

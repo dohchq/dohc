@@ -252,6 +252,24 @@ function controllable<T>() {
   return { promise, reject, resolve };
 }
 
+function reactClickHandler(element: HTMLElement): () => void {
+  const propsKey = Object.keys(element).find((key) =>
+    key.startsWith("__reactProps$"),
+  );
+  if (propsKey === undefined) throw new Error("React props not found");
+  const props = (
+    element as unknown as Record<string, { onClick?: () => void }>
+  )[propsKey];
+  if (typeof props?.onClick !== "function") {
+    throw new Error("React click handler not found");
+  }
+  return props.onClick;
+}
+
+function invokeReactClick(element: HTMLElement) {
+  reactClickHandler(element)();
+}
+
 const bridgeMock = {
   createRelayShare: vi.fn(),
   createRelayShareLink: vi.fn(),
@@ -3180,6 +3198,241 @@ describe("RelayShareDialog", () => {
         workspaceId: "ws-1",
         shareId: "share-1",
         since: 82,
+      }),
+    );
+  });
+
+  it("keeps reconciliation priority through a failed full read and retry", async () => {
+    const available = linkComment("message-1", "Moderate through retry");
+    const blocked = linkComment("message-1", "Moderate through retry", {
+      blocked: true,
+    });
+    const retry = controllable<DiscussionPage>();
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("link-1", { shareId: "share-1" })],
+    });
+    bridgeMock.listRelayShareDiscussion
+      .mockResolvedValueOnce(
+        discussionPage([available], {
+          activityRevision: 91,
+          nextCursor: "older-page",
+        }),
+      )
+      .mockRejectedValueOnce(new Error("reconciliation read failed"))
+      .mockImplementationOnce(({ cursor }: { cursor?: string }) =>
+        cursor === undefined
+          ? retry.promise
+          : Promise.resolve(
+              discussionPage([available], {
+                activityRevision: 91,
+                nextCursor: null,
+              }),
+            ),
+      );
+    bridgeMock.blockRelayShareDiscussionPrincipal.mockRejectedValueOnce(
+      new Error("block response lost after commit"),
+    );
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await openOwnerComments(user, "share-1");
+    const row = await within(group).findByTestId("share-comment-message-1");
+    await vi.waitFor(() => {
+      expect(bridgeMock.pollRelayShareDiscussionActivity).toHaveBeenCalledTimes(1);
+    });
+    const oldPoll = bridgeMock.pollRelayShareDiscussionActivity.mock.calls[0]![0];
+
+    await user.click(within(row).getByRole("button", { name: "Block" }));
+    await user.click(
+      within(within(group).getByTestId("owner-comments-confirmation")).getByRole(
+        "button",
+        { name: "Block" },
+      ),
+    );
+
+    expect(await within(group).findByText("Couldn't load comments.")).toBeTruthy();
+    expect(within(group).queryByText("Couldn't complete that change.")).not.toBeNull();
+    expect(bridgeMock.listRelayShareDiscussion).toHaveBeenCalledTimes(2);
+    const showMore = within(group).getByRole("button", {
+      name: "Show more comments",
+    });
+    expect(showMore.hasAttribute("disabled")).toBe(true);
+    await user.click(showMore);
+    act(() => invokeReactClick(showMore));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(within(group).queryByText("Couldn't complete that change.")).not.toBeNull();
+    expect(bridgeMock.listRelayShareDiscussion).toHaveBeenCalledTimes(2);
+
+    await user.click(within(group).getByRole("button", { name: "Retry" }));
+    expect(bridgeMock.listRelayShareDiscussion).toHaveBeenNthCalledWith(3, {
+      workspaceId: "ws-1",
+      shareId: "share-1",
+      direction: "newest-first",
+    });
+    expect(within(group).queryByText("Couldn't load comments.")).not.toBeNull();
+    expect(within(group).queryByText("Couldn't complete that change.")).not.toBeNull();
+    const retryShowMore = within(group).getByRole("button", {
+      name: "Show more comments",
+    });
+    act(() => invokeReactClick(retryShowMore));
+    expect(bridgeMock.listRelayShareDiscussion).toHaveBeenCalledTimes(3);
+
+    await act(async () => {
+      retry.resolve(
+        discussionPage([blocked], {
+          activityRevision: 92,
+          nextCursor: "older-page",
+        }),
+      );
+    });
+
+    const refreshedRow = within(group).getByTestId("share-comment-message-1");
+    expect(
+      within(refreshedRow).queryByRole("button", { name: "Unblock" }),
+    ).not.toBeNull();
+    expect(within(group).queryByText("Couldn't load comments.")).toBeNull();
+    expect(within(group).queryByText("Couldn't complete that change.")).toBeNull();
+    expect(bridgeMock.cancelRelayShareDiscussionActivity).toHaveBeenCalledWith({
+      pollId: oldPoll.pollId,
+    });
+    await vi.waitFor(() => {
+      expect(bridgeMock.pollRelayShareDiscussionActivity).toHaveBeenCalledTimes(2);
+    });
+    expect(bridgeMock.pollRelayShareDiscussionActivity).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        workspaceId: "ws-1",
+        shareId: "share-1",
+        since: 92,
+      }),
+    );
+  });
+
+  it("keeps a successor scope's full-read ownership after the old scope settles", async () => {
+    const scopeAFull = controllable<DiscussionPage>();
+    const scopeBFull = controllable<DiscussionPage>();
+    bridgeMock.listRelayShareLinks
+      .mockResolvedValueOnce({
+        links: [readableLink("link-a", { shareId: "share-shared" })],
+      })
+      .mockResolvedValueOnce({
+        links: [
+          readableLink("link-b", {
+            shareId: "share-shared",
+            selector: { paths: [], versionId: "version-b" },
+          }),
+        ],
+      });
+    bridgeMock.listRelayShareDiscussion
+      .mockResolvedValueOnce(
+        discussionPage([linkComment("message-a", "Scope A state")], {
+          activityRevision: 101,
+          nextCursor: "older-a",
+        }),
+      )
+      .mockReturnValueOnce(scopeAFull.promise)
+      .mockResolvedValueOnce(
+        discussionPage([namedComment("message-b-seed", "Scope B seed")], {
+          nextCursor: "older-b",
+        }),
+      )
+      .mockReturnValueOnce(scopeBFull.promise);
+    bridgeMock.blockRelayShareDiscussionPrincipal.mockRejectedValueOnce(
+      new Error("scope A response lost after commit"),
+    );
+    const user = userEvent.setup();
+    const view = render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const groupA = await openOwnerComments(user, "share-shared");
+    const rowA = await within(groupA).findByTestId("share-comment-message-a");
+    const scopeACursor = within(groupA).getByRole("button", {
+      name: "Show more comments",
+    });
+    const invokeScopeACursor = reactClickHandler(scopeACursor);
+    await user.click(within(rowA).getByRole("button", { name: "Block" }));
+    await user.click(
+      within(within(groupA).getByTestId("owner-comments-confirmation")).getByRole(
+        "button",
+        { name: "Block" },
+      ),
+    );
+    await vi.waitFor(() => {
+      expect(bridgeMock.listRelayShareDiscussion).toHaveBeenCalledTimes(2);
+    });
+
+    view.rerender(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "version", versionId: "version-b" }}
+        onClose={() => {}}
+      />,
+    );
+    await vi.waitFor(() => {
+      expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
+    });
+    const groupB = await screen.findByTestId("share-link-group-share-shared");
+
+    act(() => invokeScopeACursor());
+    expect(bridgeMock.listRelayShareDiscussion).toHaveBeenNthCalledWith(3, {
+      workspaceId: "ws-1",
+      shareId: "share-shared",
+      direction: "newest-first",
+      cursor: "older-a",
+    });
+    await user.click(within(groupB).getByRole("button", { name: "Comments" }));
+    await vi.waitFor(() => {
+      expect(bridgeMock.listRelayShareDiscussion).toHaveBeenCalledTimes(4);
+    });
+    const scopeBCursor = within(groupB).getByRole("button", {
+      name: "Show more comments",
+    });
+
+    await act(async () => {
+      scopeAFull.resolve(
+        discussionPage([namedComment("message-a-late", "Late Scope A state")], {
+          activityRevision: 102,
+        }),
+      );
+    });
+    act(() => invokeReactClick(scopeBCursor));
+    expect(bridgeMock.listRelayShareDiscussion).toHaveBeenCalledTimes(4);
+
+    await act(async () => {
+      scopeBFull.resolve(
+        discussionPage([linkComment("message-b", "Scope B authoritative", {
+          blocked: true,
+        })], {
+          activityRevision: 112,
+          nextCursor: "older-b",
+        }),
+      );
+    });
+    expect(within(groupB).queryByText("Late Scope A state")).toBeNull();
+    const rowB = within(groupB).getByTestId("share-comment-message-b");
+    expect(within(rowB).getByRole("button", { name: "Unblock" })).toBeTruthy();
+    await vi.waitFor(() => {
+      expect(bridgeMock.pollRelayShareDiscussionActivity).toHaveBeenCalledTimes(2);
+    });
+    expect(bridgeMock.pollRelayShareDiscussionActivity).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        workspaceId: "ws-1",
+        shareId: "share-shared",
+        since: 112,
       }),
     );
   });
