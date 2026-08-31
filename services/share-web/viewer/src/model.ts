@@ -273,7 +273,9 @@ export function parseDiscussionAppendResult(value: unknown): DiscussionAppendRes
   return { kind: "live", message: { ...message, author: message.author } };
 }
 
-export function parseDiscussionWriteState(value: unknown): "blocked" | "paused" | null {
+export function parseDiscussionWriteState(
+  value: unknown,
+): "blocked" | "paused" | "limit-reached" | null {
   const result = record(value);
   if (
     !result ||
@@ -282,9 +284,14 @@ export function parseDiscussionWriteState(value: unknown): "blocked" | "paused" 
   ) {
     return null;
   }
-  return result.state === "blocked" || result.state === "paused"
-    ? result.state
-    : null;
+  if (
+    result.state === "blocked" ||
+    result.state === "paused" ||
+    result.state === "limit-reached"
+  ) {
+    return result.state;
+  }
+  return null;
 }
 
 function sameDiscussionMessage(

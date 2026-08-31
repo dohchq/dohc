@@ -29,7 +29,7 @@ const DISCUSSION_ACTIVITY_LIMIT = 100;
 const SUBMIT_STATUS_ID = "comment-submit-status";
 const NAME_HELP_ID = "comment-name-help";
 
-type ComposerState = "available" | "blocked" | "paused";
+type ComposerState = "available" | "blocked" | "paused" | "limit-reached";
 type InitialLoadState = "loading" | "failed" | "ready";
 
 interface SubmitIntent {
@@ -352,7 +352,9 @@ export function CommentsPanel(props: {
             onAccessChangeRef.current?.(props.session, activity.access);
             messagesRef.current = merged;
             setMessages(merged);
-            setComposerState(activity.composerState);
+            setComposerState((current) =>
+              current === "limit-reached" ? current : activity.composerState
+            );
             return true;
           },
         );
@@ -487,11 +489,14 @@ export function CommentsPanel(props: {
         controller.signal,
       );
       if (!isCurrent()) return;
-      if (response.status === 403) {
+      if (response.status === 403 || response.status === 413) {
         const result = await response.json();
         if (!isCurrent()) return;
         const state = parseDiscussionWriteState(result);
-        if (state) {
+        const recognizedState =
+          (response.status === 403 && (state === "blocked" || state === "paused")) ||
+          (response.status === 413 && state === "limit-reached");
+        if (recognizedState) {
           intentRef.current = null;
           setSubmitError(false);
           setComposerState(state);
@@ -536,6 +541,8 @@ export function CommentsPanel(props: {
     ? "The owner turned off comments for this browser."
     : composerState === "paused"
       ? "The owner paused comments. You can still read everything."
+      : composerState === "limit-reached"
+        ? "You can't post more comments here. You can still read everything."
       : bodyInvalid
         ? "This comment is too long. Shorten it before posting."
         : submitError

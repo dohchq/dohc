@@ -440,13 +440,20 @@ function hasOnlySessionQuery(request: Request, discriminator: string): boolean {
 
 async function discussionState(
   relayResponse: Response,
-): Promise<"blocked" | "paused" | null> {
+): Promise<"blocked" | "paused" | "limit-reached" | null> {
   try {
     const body: unknown = await relayResponse.json();
     if (!body || typeof body !== "object" || Array.isArray(body)) return null;
     const code = (body as Record<string, unknown>).code;
-    if (code === "link_discussion_blocked") return "blocked";
-    if (code === "link_discussion_paused") return "paused";
+    if (relayResponse.status === 403 && code === "link_discussion_blocked") {
+      return "blocked";
+    }
+    if (relayResponse.status === 403 && code === "link_discussion_paused") {
+      return "paused";
+    }
+    if (relayResponse.status === 413 && code === "discussion_limit_reached") {
+      return "limit-reached";
+    }
     return null;
   } catch {
     return null;
@@ -1087,12 +1094,18 @@ export function createShareWebHandler({
             },
           });
         }
-        if (relayResponse.status === 403 && !isActivity) {
+        if (
+          (relayResponse.status === 403 || relayResponse.status === 413) &&
+          !isActivity
+        ) {
           const state = await discussionState(relayResponse);
           return state
             ? jsonResponse(
                 { ok: false, state },
-                { status: 403, headers: refreshedCookieHeaders },
+                {
+                  status: state === "limit-reached" ? 413 : 403,
+                  headers: refreshedCookieHeaders,
+                },
               )
             : refused(404, refreshedCookieHeaders);
         }

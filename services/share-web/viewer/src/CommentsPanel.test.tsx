@@ -831,6 +831,192 @@ describe("CommentsPanel", () => {
     expect(container.textContent).not.toContain("The comment didn't post. Try again.");
   });
 
+  it.each(["available", "paused", "blocked"] as const)(
+    "latches a durable comment limit through later %s activity",
+    async (laterState) => {
+      const heldActivity = heldJsonResponse(200);
+      const activityMessage = {
+        ...LINK_MESSAGE,
+        messageId: `message-after-limit-${laterState}`,
+        createdAtMs: 4_000,
+        body: `Readable after ${laterState}`,
+      };
+      let posts = 0;
+      let parkedSignal: AbortSignal | undefined;
+      vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+        const path = requestPath(input);
+        if (path === "/api/view/discussion" && init?.method === "POST") {
+          posts += 1;
+          return jsonResponse({ ok: false, state: "limit-reached" }, 413);
+        }
+        if (path === "/api/view/discussion?direction=newest-first") {
+          return discussionPageAt(7, [NAMED_MESSAGE]);
+        }
+        if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+          return heldActivity.response;
+        }
+        if (path === "/api/view/discussion/activity?since=8&hold=30000&limit=100") {
+          parkedSignal = init?.signal ?? undefined;
+          return await new Promise<Response>(() => undefined);
+        }
+        throw new Error(`unexpected request: ${path}`);
+      }));
+
+      await render("comment");
+      await settle(heldActivity.bodyStarted);
+      setControlValue(nameInput(), "Retained Name");
+      setControlValue(bodyInput(), "Retained draft");
+      submit();
+      await settle(() => container.textContent?.includes(
+        "You can't post more comments here. You can still read everything.",
+      ) === true);
+
+      expect(posts).toBe(1);
+      expect(container.textContent).toContain("Named body");
+      expect(nameInput().value).toBe("Retained Name");
+      expect(bodyInput().value).toBe("Retained draft");
+      expect(nameInput().disabled).toBe(true);
+      expect(bodyInput().disabled).toBe(true);
+      expect(submitButton().disabled).toBe(true);
+      expect(container.textContent).not.toContain("Try again");
+      submit();
+      expect(posts).toBe(1);
+
+      heldActivity.release({
+        ok: true,
+        access: "comment",
+        latestRevision: 8,
+        cursorRevision: 8,
+        hasMore: false,
+        messages: [activityMessage],
+        composerState: laterState,
+      });
+      await settle(() =>
+        container.textContent?.includes(activityMessage.body) === true &&
+        parkedSignal !== undefined
+      );
+
+      expect(container.textContent).toContain("Named body");
+      expect(container.textContent).toContain(activityMessage.body);
+      expect(bodyInput().value).toBe("Retained draft");
+      expect(bodyInput().disabled).toBe(true);
+      expect(submitButton().disabled).toBe(true);
+      expect(container.textContent).toContain(
+        "You can't post more comments here. You can still read everything.",
+      );
+      expect(container.textContent).not.toContain("Try again");
+      expect(posts).toBe(1);
+    },
+  );
+
+  it("resets a durable comment limit only for a replacement session", async () => {
+    const heldOldActivity = heldJsonResponse(200);
+    let oldActivitySignal: AbortSignal | undefined;
+    let replacementParkSignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      const session = requestSession(init);
+      if (path === "/api/view/discussion" && init?.method === "POST") {
+        return jsonResponse({ ok: false, state: "limit-reached" }, 413);
+      }
+      if (path === "/api/view/discussion?direction=newest-first") {
+        return session === FIRST_SESSION
+          ? discussionPageAt(7, [NAMED_MESSAGE])
+          : discussionPageAt(20, [{ ...NAMED_MESSAGE, body: "Replacement timeline" }]);
+      }
+      if (
+        session === FIRST_SESSION &&
+        path === "/api/view/discussion/activity?since=7&hold=0&limit=100"
+      ) {
+        oldActivitySignal = init?.signal ?? undefined;
+        return heldOldActivity.response;
+      }
+      if (
+        session === SECOND_SESSION &&
+        path === "/api/view/discussion/activity?since=20&hold=0&limit=100"
+      ) {
+        return jsonResponse({
+          ok: true,
+          access: "comment",
+          latestRevision: 20,
+          cursorRevision: 20,
+          hasMore: false,
+          messages: [],
+          composerState: "available",
+        });
+      }
+      if (
+        session === SECOND_SESSION &&
+        path === "/api/view/discussion/activity?since=20&hold=30000&limit=100"
+      ) {
+        replacementParkSignal = init?.signal ?? undefined;
+        return await new Promise<Response>(() => undefined);
+      }
+      throw new Error(`unexpected request: ${session} ${path}`);
+    }));
+
+    await render("comment");
+    await settle(heldOldActivity.bodyStarted);
+    setControlValue(bodyInput(), "Old limited draft");
+    submit();
+    await settle(() => bodyInput().disabled);
+    expect(container.textContent).toContain(
+      "You can't post more comments here. You can still read everything.",
+    );
+
+    await act(async () => {
+      root.render(<CommentsPanel access="comment" session={SECOND_SESSION} />);
+    });
+    await settle(() => replacementParkSignal !== undefined);
+
+    expect(oldActivitySignal?.aborted).toBe(true);
+    expect(container.textContent).toContain("Replacement timeline");
+    expect(container.textContent).not.toContain("Named body");
+    expect(container.textContent).not.toContain(
+      "You can't post more comments here. You can still read everything.",
+    );
+    expect(bodyInput().value).toBe("");
+    expect(bodyInput().disabled).toBe(false);
+    expect(submitButton().disabled).toBe(true);
+    setControlValue(bodyInput(), "Replacement draft");
+    expect(submitButton().disabled).toBe(false);
+  });
+
+  it.each([
+    [403, "limit-reached"],
+    [413, "blocked"],
+    [413, "paused"],
+  ] as const)(
+    "keeps the %i and %s write-state cross-pair retryable",
+    async (status, state) => {
+      let posts = 0;
+      vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (_input, init) => {
+        if (init?.method !== "POST") return discussionPage([NAMED_MESSAGE]);
+        posts += 1;
+        return jsonResponse({ ok: false, state }, status);
+      }));
+
+      await render("comment");
+      setControlValue(bodyInput(), "Retryable cross-pair draft");
+      submit();
+      await settle(() => container.textContent?.includes(
+        "The comment didn't post. Try again.",
+      ) === true);
+
+      expect(container.textContent).toContain("Named body");
+      expect(container.textContent).not.toContain(
+        "You can't post more comments here. You can still read everything.",
+      );
+      expect(bodyInput().value).toBe("Retryable cross-pair draft");
+      expect(bodyInput().disabled).toBe(false);
+      expect(submitButton().disabled).toBe(false);
+      submit();
+      await settle(() => posts === 2);
+      expect(bodyInput().disabled).toBe(false);
+      expect(submitButton().disabled).toBe(false);
+    },
+  );
+
   it("renders the newest page before activity and loads one earlier page on request", async () => {
     const initialActivity = heldJsonResponse(200);
     const paths: string[] = [];

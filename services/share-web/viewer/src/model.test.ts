@@ -8,6 +8,7 @@ import {
   parseDiscussionAppendResult,
   parseDiscussionActivity,
   parseDiscussionPage,
+  parseDiscussionWriteState,
   type RelayOp,
   type SharedFile,
 } from "./model";
@@ -655,6 +656,22 @@ describe("public discussion projection", () => {
       },
     ]) {
       expect(parseDiscussionActivity(value)).toBeNull();
+    }
+  });
+
+  it("parses only the exact durable discussion limit write state", () => {
+    expect(parseDiscussionWriteState({
+      ok: false,
+      state: "limit-reached",
+    })).toBe("limit-reached");
+
+    for (const value of [
+      { ok: false, state: "limit-reached", code: "discussion_limit_reached" },
+      { ok: false, state: "limit-reach" },
+      { ok: true, state: "limit-reached" },
+      { ok: false, state: "discussion-limit" },
+    ]) {
+      expect(parseDiscussionWriteState(value)).toBeNull();
     }
   });
 });

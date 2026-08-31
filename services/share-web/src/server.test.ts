@@ -2920,6 +2920,110 @@ describe("share-web protected discussion proxy", () => {
       expect(relayUrls.every((url) => !url.includes(sentinel))).toBe(true);
     }
   });
+
+  it("publishes only the exact durable discussion limit refusal", async () => {
+    const relayKey = "discussion-limit-error-key-sentinel";
+    const relayReasons = ["principal-limit", "lifetime-limit", "share-limit"];
+    const relayResponses = [
+      ...relayReasons.map((reason) => () =>
+        Response.json(
+          {
+            ok: false,
+            code: "discussion_limit_reached",
+            error: `${reason}-private-sentinel`,
+          },
+          { status: 413 },
+        )),
+      () => Response.json(
+        { ok: false, code: "discussion_limit_reached", error: "wrong-403-sentinel" },
+        { status: 403 },
+      ),
+      () => Response.json(
+        { ok: false, code: "link_discussion_paused", error: "wrong-paused-sentinel" },
+        { status: 413 },
+      ),
+      () => Response.json(
+        { ok: false, code: "unknown_limit", error: "unknown-code-sentinel" },
+        { status: 413 },
+      ),
+      () => new Response("{malformed-limit-sentinel", {
+        status: 413,
+        headers: { "content-type": "application/json" },
+      }),
+      () => new Response(null, { status: 413 }),
+    ];
+    let attempt = 0;
+    const logs = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      relayExchangeKey: relayKey,
+      publicHosts: new Set([HOST]),
+      nowMs: () => 1_000,
+      newSessionToken: () => Buffer.alloc(32, 56).toString("base64url"),
+      newProfileSecret: () => PROFILE_ALPHA,
+      fetchRelay: async (relayRequest) => {
+        if (new URL(relayRequest.url).pathname === "/sync/link-exchange") {
+          return Response.json({
+            ok: true,
+            grantId: "grant-limit-sentinel",
+            capabilityToken: CAP_ALPHA_1,
+            capabilityExpiresAtMs: 901_000,
+          });
+        }
+        return relayResponses[attempt++]!();
+      },
+    });
+    const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
+    const { session } = (await exchanged.clone().json()) as { session: string };
+    const cookies = cookieHeader(cookiePair(exchanged), profileCookiePair(exchanged));
+    const responses: Response[] = [];
+    for (let index = 0; index < relayResponses.length; index += 1) {
+      responses.push(await handler(request("/api/view/discussion", {
+        method: "POST",
+        headers: {
+          ...sessionHeaders(session, cookies),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ body: "limit", idempotencyKey: `limit-${index}` }),
+      })));
+    }
+
+    const publicLimitBytes: string[] = [];
+    for (const response of responses.slice(0, relayReasons.length)) {
+      publicLimitBytes.push(`${response.status}:${await response.text()}`);
+    }
+    expect(new Set(publicLimitBytes)).toEqual(new Set([
+      '413:{"ok":false,"state":"limit-reached"}',
+    ]));
+    for (const response of responses.slice(relayReasons.length)) {
+      expect({ status: response.status, body: await response.text() }).toEqual({
+        status: 404,
+        body: shareWebRefusalBody,
+      });
+    }
+    for (const response of responses) {
+      expectSecurityHeaders(response);
+      expect(response.headers.get("cache-control")).toBe("private, no-store");
+    }
+    const exposed = [
+      ...publicLimitBytes,
+      ...responses.map((response) => response.statusText),
+      ...[...logs.mock.calls, ...errors.mock.calls].flat().map(String),
+    ].join("\n");
+    for (const sentinel of [
+      relayKey,
+      "discussion_limit_reached",
+      "link_discussion_paused",
+      ...relayReasons.map((reason) => `${reason}-private-sentinel`),
+      "wrong-403-sentinel",
+      "wrong-paused-sentinel",
+      "unknown-code-sentinel",
+      "malformed-limit-sentinel",
+    ]) {
+      expect(exposed).not.toContain(sentinel);
+    }
+  });
 });
 
 describe("share-web handoff adapter", () => {

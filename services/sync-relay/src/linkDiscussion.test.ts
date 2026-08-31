@@ -5563,10 +5563,7 @@ describe("share discussion HTTP boundary", () => {
       "not-authorized",
       "name-already-set",
       "idempotency-conflict",
-      "principal-limit",
       "rate-limit",
-      "lifetime-limit",
-      "share-limit",
       "workspace-quota",
     ] as const;
     for (const reason of nonStateReasons) {
@@ -5614,6 +5611,50 @@ describe("share discussion HTTP boundary", () => {
       );
     }
     test.storage.appendLinkDiscussionMessage = original;
+  });
+
+  it("maps every durable accountless discussion limit to one private refusal", async () => {
+    const test = await fixture();
+    const invalidKey = await test.handler(
+      linkRequest(
+        test.comment,
+        "/sync/link/discussion",
+        jsonRequest({ body: "baseline", idempotencyKey: "limit-baseline" }),
+        { relayKey: "wrong-key", profileSecret: PROFILE_A },
+      ),
+    );
+    expectPrivate(invalidKey);
+    expect(invalidKey.status).toBe(404);
+    const invalidKeyBytes = `${invalidKey.status}:${await invalidKey.text()}`;
+
+    const original = test.storage.appendLinkDiscussionMessage.bind(test.storage);
+    const durableLimitBytes: string[] = [];
+    for (const reason of [
+      "principal-limit",
+      "lifetime-limit",
+      "share-limit",
+    ] as const) {
+      test.storage.appendLinkDiscussionMessage = () => ({ ok: false, reason });
+      const response = await test.handler(
+        trustedAppend(test.comment, {
+          body: `valid trusted ${reason}`,
+          idempotencyKey: `limit-${reason}`,
+        }),
+      );
+      expectPrivate(response);
+      expect(response.status, reason).toBe(413);
+      const serialized = await response.text();
+      expect(JSON.parse(serialized), reason).toEqual({
+        ok: false,
+        error: "discussion message limit reached",
+        code: "discussion_limit_reached",
+      });
+      durableLimitBytes.push(`${response.status}:${serialized}`);
+    }
+    test.storage.appendLinkDiscussionMessage = original;
+
+    expect(new Set(durableLimitBytes).size).toBe(1);
+    expect(durableLimitBytes[0]).not.toBe(invalidKeyBytes);
   });
 
   it("sets private no-store on every discussion success and refusal and keeps invalid accountless refusals byte-comparable", async () => {

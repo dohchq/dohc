@@ -1566,6 +1566,18 @@ export function createSyncRelayHandler({
             ),
           );
         }
+        if (
+          result.reason === "principal-limit" ||
+          result.reason === "lifetime-limit" ||
+          result.reason === "share-limit"
+        ) {
+          return privateErrorResponse(
+            relayHttpError(
+              RELAY_ERRORS.discussion_limit_reached,
+              "discussion message limit reached",
+            ),
+          );
+        }
         return refused();
       }
       if (!result.replayed) discussionActivity.wake(capability.shareId);
