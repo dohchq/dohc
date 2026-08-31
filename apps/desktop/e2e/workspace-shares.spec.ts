@@ -381,8 +381,13 @@ confidentialTest.describe("View link lifecycle", () => {
       const linkScope = dialog.getByRole("radio", { name: "Anyone with the link" });
       await linkScope.click();
       await expect(linkScope).toHaveAttribute("aria-checked", "true");
-      await expect(dialog.getByText("Links are view-only for now.")).toBeVisible();
-      await expect(dialog.getByText("View", { exact: true })).toBeVisible();
+      const linkAccess = dialog.getByRole("radiogroup", { name: "Link access" });
+      await expect(
+        linkAccess.getByRole("radio", { name: "Comment", exact: true }),
+      ).toBeVisible();
+      await expect(
+        linkAccess.getByRole("radio", { name: "View", exact: true }),
+      ).toBeVisible();
       await expect(dialog).toContainText(
         "If files are added to this selection later, the link includes them.",
       );
@@ -522,8 +527,12 @@ confidentialTest.describe("View link lifecycle", () => {
       const linkRowTestId = await linkRow.getAttribute("data-testid");
       expect(linkRowTestId === `share-link-row-${linkGrantId}`).toBe(true);
       await expect(linkRow).toContainText("Used as recently as");
-      await expect(dialog.getByText("Links are view-only for now.")).toBeVisible();
-      await expect(dialog.getByText("View", { exact: true })).toBeVisible();
+      await expect(
+        linkAccess.getByRole("radio", { name: "Comment", exact: true }),
+      ).toBeVisible();
+      await expect(
+        linkAccess.getByRole("radio", { name: "View", exact: true }),
+      ).toBeVisible();
       const reachableRetuneTargets = await dialog
         .getByRole("button", { name: /^(?:View|Comment|Edit)$/u })
         .allTextContents();
@@ -778,7 +787,7 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     // is refused there by the shared-file rule. Every other write handler
     // below still meets the workspace gate and its wording.
     expect(writeAttempt).toContain("SharedFileReadOnlyError");
-    expect(writeAttempt).toContain("This shared file is read-only for you.");
+    expect(writeAttempt).toContain("This shared view is read-only for you.");
 
     // The other three mutation side-doors are refused at the IPC boundary too:
     // a managed agent run, a code-executing site preview, and a write-capable
