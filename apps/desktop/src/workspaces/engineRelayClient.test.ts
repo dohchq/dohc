@@ -1029,6 +1029,20 @@ describe("EngineRelayClient", () => {
     expect(registrationAt).toBeGreaterThan(tryAt);
     expect(metadataAt).toBeGreaterThan(registrationAt);
     expect(catchAt).toBeGreaterThan(metadataAt);
+    expect(shareOperation).toContain(
+      "genericChatWritable: info.genericChatWritable",
+    );
+
+    const refreshStart = source.indexOf(
+      "ipcMain.handle(CHANNELS.refreshSharedView",
+    );
+    const refreshEnd = source.indexOf("// ---- Share mounts ----", refreshStart);
+    const refresh = source.slice(refreshStart, refreshEnd);
+    expect(refresh).toContain("fetchShareViewInfo(");
+    expect(refresh).toContain("genericChatWritable: info.genericChatWritable");
+    expect(refresh.indexOf("genericChatWritable: info.genericChatWritable")).toBeLessThan(
+      refresh.indexOf("pushShareViewChat("),
+    );
   });
 
   it("registers the registry row and its exact authority as one operation", async () => {

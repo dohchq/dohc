@@ -717,6 +717,20 @@ describe("single-use authenticated link handoff", () => {
     );
     expect(redeemed).toMatchObject({ ok: true, access: "comment" });
 
+    const dependentExact = await json(
+      await state.h(request(RECIPIENT, `/sync/shares/${SHARE_ID}`)),
+    );
+    const dependentList = await json(
+      await state.h(request(RECIPIENT, "/sync/shares")),
+    );
+    expect(dependentExact.genericChatWritable).toBe(false);
+    expect(dependentList.received).toEqual([
+      expect.objectContaining({
+        shareId: SHARE_ID,
+        genericChatWritable: false,
+      }),
+    ]);
+
     const discussion = await state.h(
       request(
         RECIPIENT,
@@ -809,6 +823,28 @@ describe("single-use authenticated link handoff", () => {
           .get(WORKSPACE, `share:${SHARE_ID}:${batch.originId}`)?.count ?? 0,
       );
 
+    database
+      .prepare(
+        `INSERT INTO sync_relay_share_grants (
+           grant_id, share_id, principal_kind, principal_user_id, principal_email,
+           access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id
+         ) VALUES (?, ?, 'user', ?, NULL, 'comment', 1, 'active', ?, NULL, NULL)`,
+      )
+      .run("owner-issued-other-comment", SHARE_ID, OTHER_ACCOUNT, 9_000);
+    const independentExact = await json(
+      await state.h(request(OTHER_ACCOUNT, `/sync/shares/${SHARE_ID}`)),
+    );
+    const independentList = await json(
+      await state.h(request(OTHER_ACCOUNT, "/sync/shares")),
+    );
+    expect(independentExact.genericChatWritable).toBe(true);
+    expect(independentList.received).toEqual([
+      expect.objectContaining({
+        shareId: SHARE_ID,
+        genericChatWritable: true,
+      }),
+    ]);
+
     const refused = await state.h(
       request(
         RECIPIENT,
@@ -835,6 +871,20 @@ describe("single-use authenticated link handoff", () => {
         .listActiveShareGrantsForRecipient(SHARE_ID, RECIPIENT)
         .map((grant) => grant.grantId),
     ).toEqual([redeemed.grantId, "owner-issued-recipient-comment"]);
+
+    const mixedExact = await json(
+      await state.h(request(RECIPIENT, `/sync/shares/${SHARE_ID}`)),
+    );
+    const mixedList = await json(
+      await state.h(request(RECIPIENT, "/sync/shares")),
+    );
+    expect(mixedExact.genericChatWritable).toBe(true);
+    expect(mixedList.received).toEqual([
+      expect.objectContaining({
+        shareId: SHARE_ID,
+        genericChatWritable: true,
+      }),
+    ]);
 
     const accepted = await state.h(
       request(

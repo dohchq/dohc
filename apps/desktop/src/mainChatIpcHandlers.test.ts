@@ -1426,6 +1426,7 @@ describe("chat scope write gate (#646 PR2)", () => {
       kind: "share",
       workspace: { workspaceId },
       access: "comment",
+      genericChatWritable: true,
       ended: false,
       authorUserId: "recipient",
       ...over,
@@ -1504,6 +1505,35 @@ describe("chat scope write gate (#646 PR2)", () => {
       run,
       "MUTATION: an ungated view share writes a durable row before anything refuses it",
     ).not.toHaveBeenCalled();
+  });
+
+  it("refuses generic chat before the store when effective append authority is false or missing", async () => {
+    for (const [label, scope] of [
+      ["dependent Comment", shareScope({ genericChatWritable: false })],
+      [
+        "missing capability",
+        {
+          ...shareScope({}),
+          genericChatWritable: undefined,
+        } as unknown as ChatScope,
+      ],
+    ] as const) {
+      const { ipc, run, deps } = harnessFor(scope);
+      ipc.handle(
+        CHANNELS.setChatReaction,
+        createSetChatReactionIpcHandler({
+          ...deps,
+          assertWritable: assertChatWritable,
+          syncJoinedChannels: () => undefined,
+          queueCloudSync: () => undefined,
+        }),
+      );
+      await expect(
+        ipc.invoke(CHANNELS.setChatReaction, { workspaceId }),
+        label,
+      ).rejects.toThrow("This shared file is read-only for you.");
+      expect(run, `MUTATION: ${label} committed before its authority gate`).not.toHaveBeenCalled();
+    }
   });
 
   it("runs the same mutation at comment and at edit", async () => {

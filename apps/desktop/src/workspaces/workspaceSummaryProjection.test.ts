@@ -22,9 +22,10 @@ const goodSelector = { paths: ["docs"], versionId: null, access: "view" };
 // A grant written before the level existed.
 const staleSelector = { paths: ["docs"], versionId: null };
 
-const shareView = (selector: unknown) => ({
+const shareView = (selector: unknown, genericChatWritable: unknown = false) => ({
   shareId: "share-1",
   granterEmail: "sam@dohc.test",
+  genericChatWritable,
   grantedSelector: selector,
 });
 
@@ -46,6 +47,35 @@ describe("workspace summary projection", () => {
     );
     expect(summary.shareView?.access).toBe("comment");
     expect(summary.shareMounts?.[0]?.access).toBe("edit");
+  });
+
+  it("carries generic chat authority without deriving it from the level", () => {
+    const writable = workspaceSummaryFor(
+      entry({
+        shareView: shareView({ ...goodSelector, access: "comment" }, true),
+      }),
+    );
+    const readOnly = workspaceSummaryFor(
+      entry({
+        shareView: shareView({ ...goodSelector, access: "comment" }, false),
+      }),
+    );
+    expect(writable.shareView?.genericChatWritable).toBe(true);
+    expect(readOnly.shareView?.genericChatWritable).toBe(false);
+  });
+
+  it("fails a missing or malformed generic chat authority closed", () => {
+    for (const genericChatWritable of [undefined, null, "yes", 1]) {
+      const raw = shareView({ ...goodSelector, access: "comment" });
+      if (genericChatWritable === undefined) {
+        delete (raw as { genericChatWritable?: unknown }).genericChatWritable;
+      } else {
+        raw.genericChatWritable = genericChatWritable;
+      }
+      const summary = workspaceSummaryFor(entry({ shareView: raw }));
+      expect(summary.shareView?.damaged).toBe(true);
+      expect(summary.shareView?.genericChatWritable).not.toBe(true);
+    }
   });
 
   // The defect CodeRabbit found: one unreadable share record threw out of the

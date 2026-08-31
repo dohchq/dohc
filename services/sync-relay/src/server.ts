@@ -975,6 +975,7 @@ export function createSyncRelayHandler({
   const shareSummary = async (
     row: SyncRelayShareWithGrantRow,
     side: "granted" | "received",
+    recipientUserId?: string,
   ): Promise<Record<string, unknown>> => {
     const { share, grant } = row;
     const storedSelector = parseStoredAnyShareSelectorJson(share.selectorJson);
@@ -1034,6 +1035,14 @@ export function createSyncRelayHandler({
       ...base,
       granterUserId: share.granterUserId,
       granterEmail: lookupUserEmail ? await lookupUserEmail(share.granterUserId) : null,
+      genericChatWritable:
+        recipientUserId !== undefined &&
+        authorizeShareAction({
+          storage,
+          actorUserId: recipientUserId,
+          shareId: share.shareId,
+          action: "append",
+        }).ok,
     };
   };
 
@@ -2604,7 +2613,7 @@ export function createSyncRelayHandler({
               : fallback;
             return {
               row,
-              summary: await shareSummary(row, "received"),
+              summary: await shareSummary(row, "received", actor.userId),
             };
           }),
         );
@@ -2627,6 +2636,7 @@ export function createSyncRelayHandler({
         const summary = await shareSummary(
           { share: authorized.share, grant: authorized.grant },
           "received",
+          actor.userId,
         );
         requireShareAction(route.shareId, actor.userId, "read");
         return jsonResponse({ ok: true, ...summary });

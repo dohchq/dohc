@@ -4399,10 +4399,21 @@ describe("ui-state merge-on-load", () => {
     );
   });
 
-  it("repaints changed files before an ended share becomes read-only", async () => {
-    const bridge = makeBridge(
+  it("repaints changed files and removes generic chat before an ended share becomes read-only", async () => {
+    const bridge = makeShareBridge(
       Promise.resolve(storedStateWithTabs(["b.md"], "b.md")),
     );
+    bridge.listFileChats.mockResolvedValue({
+      fileObjectId: "share-object-1",
+      threads: [
+        {
+          id: "thread-before-end",
+          title: "Before end",
+          createdAtMs: 1,
+          updatedAtMs: 1,
+        },
+      ],
+    });
     const outcomes = [
       {
         ok: true as const,
@@ -4434,10 +4445,13 @@ describe("ui-state merge-on-load", () => {
         shareId: "share-1",
         granterEmail: "granter@dohc.test",
         access: "edit",
+        genericChatWritable: true,
       },
     });
 
     await screen.findByTestId("tab-b.md");
+    await userEvent.click(await screen.findByTestId("linked-chat-open"));
+    expect(await screen.findByTestId("linked-chat-composer")).toBeTruthy();
     await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(bridge.readWorkspaceText).toHaveBeenCalled());
     await waitFor(() =>
@@ -4462,6 +4476,10 @@ describe("ui-state merge-on-load", () => {
     expect(
       screen.queryByTestId("share-changes-send"),
       "MUTATION: an ended share still offers changes it can no longer send",
+    ).toBeNull();
+    expect(
+      screen.queryByTestId("linked-chat-composer"),
+      "MUTATION: an ended share still offers generic chat it can no longer send",
     ).toBeNull();
   });
 
@@ -7951,6 +7969,7 @@ describe("shared view banner", () => {
         shareId: "share-1",
         granterEmail: "sam@dohc.test",
         access: "comment",
+        genericChatWritable: true,
       },
     });
 
@@ -7962,6 +7981,29 @@ describe("shared view banner", () => {
     // MUTATION: giving comment the edit sentence would promise a write-back
     // lane a comment grant does not carry.
     expect(banner.textContent).not.toContain("send your changes");
+  });
+
+  it("keeps dependent Comment generic chats read-only and sends comments back to the browser", async () => {
+    const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
+    renderShell(bridge, {
+      ...SHARE_VIEW,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "sam@dohc.test",
+        access: "comment",
+        genericChatWritable: false,
+      },
+    });
+
+    const banner = await screen.findByTestId("shared-view-banner");
+    expect(banner.textContent).toContain(
+      "Shared view from sam@dohc.test. Files are read-only here. Continue commenting in the browser where you opened the link.",
+    );
+    expect(banner.textContent).not.toContain("You can chat about these files");
+    expect((await screen.findByTestId("linked-chat-readonly-note")).textContent).toBe(
+      "This shared file is read-only for you.",
+    );
+    expect(screen.queryByTestId("linked-chat-composer")).toBeNull();
   });
 
   // Edit gets its own sentence (#646 PR3a). It states BOTH halves: the

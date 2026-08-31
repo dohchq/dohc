@@ -1072,6 +1072,159 @@ test("mount side: add a share into a workspace as shared-with-me/, follow edits,
   }
 });
 
+test("Comment handoff opens files without creating a second generic chat", async () => {
+  test.setTimeout(240_000);
+  const temp = await createTempWorkspace();
+  const workspaceId = "share-comment-handoff-e2e";
+  const linkKey = randomBytes(32).toString("base64url");
+  const relayExchangeKey = randomBytes(32).toString("base64url");
+  let relay: SyncRelayHandle | null = null;
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+
+  try {
+    relay = await spawnSyncRelay({
+      dbPath: join(temp.baseDir, "relay.sqlite"),
+      linkBoundary: {
+        linkKey,
+        relayExchangeKey,
+        publicViewerOrigin: "http://127.0.0.1:4173",
+      },
+    });
+    await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
+    const granter = new RelayFilePeer({
+      baseUrl: relay.baseUrl,
+      token: GRANTER_TOKEN,
+      workspaceId,
+    });
+    await granter.writeTextFiles([
+      { path: "docs/shared.md", text: "# Shared\n\nThe handoff draft.\n" },
+    ]);
+
+    const linkResponse = await relayJson(
+      relay.baseUrl,
+      GRANTER_TOKEN,
+      `/sync/${workspaceId}/shares/links`,
+      {
+        method: "POST",
+        body: JSON.stringify({ paths: ["docs"], access: "comment" }),
+      },
+    );
+    expect(linkResponse.status).toBe(200);
+    const link = JSON.parse(linkResponse.body) as {
+      shareId?: unknown;
+      url?: unknown;
+    };
+    if (typeof link.shareId !== "string" || typeof link.url !== "string") {
+      throw new Error("The relay returned an incomplete Comment link.");
+    }
+    const secret = new URL(link.url).hash.slice(1);
+    const exchanged = await exchangeViewLink(
+      relay.baseUrl,
+      relayExchangeKey,
+      secret,
+    );
+    expect(exchanged.status).toBe(200);
+    const capability = (JSON.parse(exchanged.body) as {
+      capabilityToken?: unknown;
+    }).capabilityToken;
+    if (typeof capability !== "string") {
+      throw new Error("The relay did not exchange the Comment link.");
+    }
+    const minted = await mintLinkHandoff(
+      relay.baseUrl,
+      relayExchangeKey,
+      capability,
+    );
+    expect(minted.status).toBe(200);
+    const code = (JSON.parse(minted.body) as { code?: unknown }).code;
+    if (typeof code !== "string") {
+      throw new Error("The relay did not mint a Comment handoff.");
+    }
+    const redeemed = await relayJson(
+      relay.baseUrl,
+      RECIPIENT_TOKEN,
+      "/sync/link-redeem",
+      { method: "POST", body: JSON.stringify({ code }) },
+    );
+    expect(redeemed.status).toBe(200);
+    expect(JSON.parse(redeemed.body)).toMatchObject({
+      shareId: link.shareId,
+      access: "comment",
+    });
+
+    await seedCloudCredentials(temp, {
+      serverUrl: relay.baseUrl,
+      relayUrl: relay.baseUrl,
+      email: RECIPIENT_EMAIL,
+      userId: "e2e-recipient",
+      token: RECIPIENT_TOKEN,
+    });
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+    await page.getByTestId("first-run-open-share").click();
+    await page.getByTestId("open-share-code").fill(
+      `dohc-share:${link.shareId}:${relay.baseUrl}`,
+    );
+    await page.getByTestId("open-share-choose-folder").click();
+    await page.getByTestId("open-share-start").click();
+    await expect(page.getByTestId("workspace-shell")).toBeVisible();
+
+    await expect(page.getByTestId("shared-view-banner")).toContainText(
+      "Files are read-only here. Continue commenting in the browser where you opened the link.",
+    );
+    await revealExplorerPath(page, "docs/shared.md");
+    await explorerRow(page, "docs/shared.md").click();
+    if ((await page.getByTestId("chats-panel").count()) === 0) {
+      await page.getByTestId("titlebar-chats-sidebar").click();
+    }
+    await expect(page.getByTestId("linked-chat-readonly-note")).toBeVisible();
+    await expect(page.getByTestId("linked-chat-composer")).toHaveCount(0);
+
+    const generic = await page.evaluate(async () => {
+      const api = (window as unknown as {
+        dohcDesktop: Pick<
+          DohcDesktopBridge,
+          "getWorkspaceRegistry" | "createFileChat" | "listFileChats"
+        >;
+      }).dohcDesktop;
+      const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
+      let refusal = "answered";
+      try {
+        await api.createFileChat({
+          workspaceId,
+          path: "docs/shared.md",
+          title: "Must not commit",
+        });
+      } catch (error) {
+        refusal = error instanceof Error ? error.message : String(error);
+      }
+      const threads = await api.listFileChats({ workspaceId, path: "docs/shared.md" });
+      return { refusal, threadCount: threads.threads.length };
+    });
+    expect(generic.refusal).toContain("read-only");
+    expect(generic.threadCount).toBe(0);
+
+    const granterLog = await relayJson(
+      relay.baseUrl,
+      GRANTER_TOKEN,
+      `/sync/${workspaceId}/log?since=0&limit=500`,
+    );
+    expect(granterLog.status).toBe(200);
+    const pushedGenericRows = (
+      JSON.parse(granterLog.body) as {
+        ops: Array<{ opKind?: unknown }>;
+      }
+    ).ops.filter((op) =>
+      typeof op.opKind === "string" && op.opKind.startsWith("chat."),
+    );
+    expect(pushedGenericRows).toEqual([]);
+  } finally {
+    await relay?.stop();
+    if (desktop) await cleanupDesktopWorkspace(desktop, temp);
+    else await temp.cleanup();
+  }
+});
+
 test("comment side: a recipient chats about a shared file and the message reaches the granter's log", async () => {
   // #646 PR2 — the whole loop for a COMMENT share, through the real app: the
   // relay serves the granter's files, the recipient opens the share, writes a

@@ -9639,6 +9639,7 @@ function registerIpcHandlers(
       setWorkspaceShareView(created.workspaceId, {
         shareId: parsed.shareId,
         granterEmail: info.granterEmail,
+        genericChatWritable: info.genericChatWritable,
         // Pin the selector the relay just stated, so later pulls enforce it
         // instead of trusting the relay's selection each time.
         grantedSelector: info.selector,
@@ -9764,15 +9765,49 @@ function registerIpcHandlers(
         // share view opened before #646 PR3-1 has none, and this is where it gains
         // one.
         if (!workspace.shareView.ended) {
-          await recordShareViewIdentity(workspace).catch((error) => {
+          let refreshedWorkspace = workspace;
+          let shareUnavailableBeforePull = false;
+          await warmCredentialCache().catch(() => undefined);
+          const credentials = cachedCredentials;
+          if (
+            credentials?.relayUrl &&
+            (!workspace.shareView.relayUrl ||
+              relayUrlsMatch(credentials.relayUrl, workspace.shareView.relayUrl))
+          ) {
+            try {
+              const info = await fetchShareViewInfo({
+                relay: {
+                  baseUrl: credentials.relayUrl,
+                  token: credentials.token,
+                },
+                shareId: workspace.shareView.shareId,
+              });
+              operation.assertCurrent();
+              const nextShareView = {
+                ...workspace.shareView,
+                genericChatWritable: info.genericChatWritable,
+              };
+              setWorkspaceShareView(workspace.workspaceId, nextShareView);
+              refreshedWorkspace = { ...workspace, shareView: nextShareView };
+            } catch (error) {
+              if (error instanceof ShareUnavailableError) {
+                shareUnavailableBeforePull = true;
+              } else {
+                throw error;
+              }
+            }
+          }
+          await recordShareViewIdentity(refreshedWorkspace).catch((error) => {
             console.error("[desktop] share view enrolment:", error);
           });
-          await pushShareViewChat(workspace).catch((error) => {
-            console.error(
-              "[desktop] share view chat push (refresh backstop):",
-              error,
-            );
-          });
+          if (!shareUnavailableBeforePull) {
+            await pushShareViewChat(refreshedWorkspace).catch((error) => {
+              console.error(
+                "[desktop] share view chat push (refresh backstop):",
+                error,
+              );
+            });
+          }
         }
         let outcome;
         try {
@@ -10117,6 +10152,7 @@ function registerIpcHandlers(
         // workspaceSummaryProjection.ts), so the level is read through
         // `readableShareLevel` rather than trusted from the record's type.
         access: ShareAccess | null;
+        genericChatWritable: boolean;
         // The account this recipient writes chat under. Absent when signed
         // out, or signed into a relay that is not this share's — see
         // `assertChatWritable`, which refuses rather than writing a comment
@@ -10168,6 +10204,7 @@ function registerIpcHandlers(
         // uses, so this gate and the pull cannot disagree about what a share
         // grants.
         access: readableShareLevel(workspace.shareView?.grantedSelector),
+        genericChatWritable: workspace.shareView?.genericChatWritable === true,
         ended: workspace.shareView?.ended === true,
         authorUserId: resolveShareViewRelayAuthorId(
           workspace.shareView ?? {},
@@ -10228,6 +10265,7 @@ function registerIpcHandlers(
   ): Promise<void> {
     const shareView = workspace.shareView;
     if (!shareView || shareView.ended) return;
+    if (shareView.genericChatWritable !== true) return;
     // The pinned grant, read back through the rule the pull uses. A grant this
     // process cannot read completely is not one to push through: the engine
     // scopes the push by it, and the relay judges the batch against the stored

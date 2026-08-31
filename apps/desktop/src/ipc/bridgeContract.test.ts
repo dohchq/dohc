@@ -966,6 +966,7 @@ describe("relay share listing IPC contract", () => {
           {
             shareId: "share-2",
             granterEmail: "owner@example.test",
+            genericChatWritable: true,
             selector,
             ...grant,
             createdAtMs: 1,
@@ -983,6 +984,7 @@ describe("relay share listing IPC contract", () => {
     const received = Array.from({ length: 1_000 }, (_, index) => ({
       shareId: `share-received-${index}`,
       granterEmail: "owner@example.test",
+      genericChatWritable: true,
       selector,
       ...grant,
       createdAtMs: 1,
@@ -1040,6 +1042,7 @@ describe("relay share listing IPC contract", () => {
           {
             shareId: "share-damaged-received",
             granterEmail: "owner@example.test",
+            genericChatWritable: false,
             selector: null,
             access: "read-write",
             grantId: "grant-damaged-received",
@@ -1073,6 +1076,7 @@ describe("relay share listing IPC contract", () => {
     const received = {
       shareId: "share-2",
       granterEmail: "owner@example.test",
+      genericChatWritable: false,
       selector,
       access: "read-write",
       grantId: "grant-2",
@@ -1133,6 +1137,7 @@ describe("exact received relay share IPC contract", () => {
   const received = {
     shareId: "share-exact",
     granterEmail: "owner@example.test",
+    genericChatWritable: true,
     grantId: "grant-exact",
     generation: 1,
     createdAtMs: 1,
@@ -1183,6 +1188,18 @@ describe("exact received relay share IPC contract", () => {
       GetRelayReceivedShareResult.safeParse({
         found: true,
         share: { ...received, shareCode: undefined },
+      }).success,
+    ).toBe(false);
+    expect(
+      GetRelayReceivedShareResult.safeParse({
+        found: true,
+        share: { ...received, genericChatWritable: undefined },
+      }).success,
+    ).toBe(false);
+    expect(
+      GetRelayReceivedShareResult.safeParse({
+        found: true,
+        share: { ...received, genericChatWritable: "yes" },
       }).success,
     ).toBe(false);
   });

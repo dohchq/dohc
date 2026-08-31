@@ -888,6 +888,9 @@ describe("main-process chat authorization", () => {
     expect(scope).not.toContain("grantedSelector.access");
     // Never from a renderer payload or a relay answer read at call time.
     expect(scope).not.toContain("input.access");
+    expect(scope).toContain(
+      "genericChatWritable: workspace.shareView?.genericChatWritable === true",
+    );
 
     // main DELEGATES the share rule, so what is pinned here is that it still
     // delegates — a re-implementation creeping back in is the drift this
@@ -910,6 +913,7 @@ describe("main-process chat authorization", () => {
     // stored grant can name a level this process cannot read, and the one
     // direction this must never fail is reading that as writable.
     expect(shareGate).toContain('scope.access !== "comment" && scope.access !== "edit"');
+    expect(shareGate).toContain("if (!scope.genericChatWritable)");
     expect(shareGate).toContain("throw new SharedFileReadOnlyError()");
     // An ENDED share is a read-only local copy. The push bails on `ended`
     // first thing, so a write admitted here would land durably and never be
@@ -966,6 +970,16 @@ describe("main-process chat authorization", () => {
     );
     expect(sync).toMatch(
       /void scope\s*\.withAuthority\(\(\) => pushShareViewChat\(scope\.workspace\)\)/,
+    );
+
+    const pushAt = mainSource.indexOf("async function pushShareViewChat(");
+    const push = mainSource.slice(
+      pushAt,
+      mainSource.indexOf("\n  // Every chat write reaches", pushAt),
+    );
+    expect(push).toContain("shareView.genericChatWritable !== true");
+    expect(push.indexOf("shareView.genericChatWritable !== true")).toBeLessThan(
+      push.indexOf("receivedShareEngine.relayFor("),
     );
   });
 

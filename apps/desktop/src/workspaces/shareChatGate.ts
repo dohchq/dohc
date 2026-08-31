@@ -10,6 +10,7 @@ import type { ShareAccess } from "@dohc/security-contract/share-selector";
 export interface ShareChatWriteScope {
   // The level the PINNED grant names, or null when the grant cannot be read.
   access: ShareAccess | null;
+  genericChatWritable: boolean;
   // The granter ended the share.
   ended: boolean;
   // The account this recipient writes chat under, when one resolves.
@@ -33,6 +34,7 @@ export interface ShareChatWriteScope {
  */
 export function assertShareChatWritable(scope: ShareChatWriteScope): void {
   if (scope.ended) throw new SharedFileReadOnlyError();
+  if (!scope.genericChatWritable) throw new SharedFileReadOnlyError();
   if (scope.access !== "comment" && scope.access !== "edit") {
     throw new SharedFileReadOnlyError();
   }

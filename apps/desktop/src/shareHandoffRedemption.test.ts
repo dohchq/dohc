@@ -133,6 +133,15 @@ function success(shareId = "share-redeemed"): Response {
   });
 }
 
+function commentSuccess(shareId = "share-comment"): Response {
+  return response(200, {
+    ok: true,
+    shareId,
+    grantId: "grant-comment",
+    access: "comment",
+  });
+}
+
 describe("share handoff redemption coordinator", () => {
   it("refuses a different issuer relay before acceptance without fetching", async () => {
     const fetchImpl = vi.fn<typeof fetch>();
@@ -182,6 +191,24 @@ describe("share handoff redemption coordinator", () => {
       email: "account-a@dohc.test",
     });
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("accepts a Comment handoff and settles the pending intent", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(commentSuccess());
+    const h = await harness({ credentials: CREDENTIALS_A, fetch: fetchImpl });
+
+    h.offer(CODE_A);
+    h.coordinator.accept("status-1");
+
+    await vi.waitFor(() => {
+      expect(h.coordinator.status()).toEqual({
+        status: "done",
+        statusId: "status-1",
+        shareId: "share-comment",
+      });
+    });
+    expect(h.intent.pending()).toBeNull();
+    expect(h.settledCodes).toEqual([CODE_A]);
   });
 
   it("keeps signed-out ingress waiting and requires acceptance after sign-in", async () => {

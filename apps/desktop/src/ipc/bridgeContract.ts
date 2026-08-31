@@ -243,6 +243,7 @@ export const WorkspaceSummary = z.object({
       // grant could not be read. The banner states the level; it never
       // decides anything with it.
       access: SHARE_ACCESS.optional(),
+      genericChatWritable: z.boolean().optional(),
       // The stored grant is unreadable. The marker still stands, because a
       // share view whose grant cannot be read must not present as an ordinary
       // workspace: the restrictive stance is what fails closed. The shell
@@ -3534,6 +3535,7 @@ export type RelayShareGrantedRow = z.infer<typeof RelayShareGrantedRow>;
 const RelayShareReceivedRowBase = z.object({
   shareId: SHARE_ID,
   granterEmail: EMAIL_STRING.nullable(),
+  genericChatWritable: z.boolean(),
   grantId: z.string().min(1).max(200),
   generation: z.number().int().min(1),
   createdAtMs: z.number().int().nonnegative(),
