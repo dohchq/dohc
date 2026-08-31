@@ -1424,12 +1424,28 @@ async fn existing_store_and_unreadable_policy_keep_the_strict_open_barrier() {
                 )
                 .await
                 .expect("bounded degraded startup must release safe reads");
-            assert_eq!(versions.result["versions"][0]["id"], json!("main"));
+            assert_eq!(versions.result["versions"], json!([]));
+            let main = transport
+                .call(
+                    RequestContext::unbounded(),
+                    request(6, "versions.ensureMain", Some(handle.clone()), json!({})),
+                )
+                .await
+                .expect("main version bootstrap remains available");
+            assert_eq!(main.result["id"], json!("main"));
+            let versions = transport
+                .call(
+                    RequestContext::unbounded(),
+                    request(7, "versions.list", Some(handle.clone()), json!({})),
+                )
+                .await
+                .expect("bootstrapped version must be readable");
+            assert_eq!(versions.result["versions"][0]["versionId"], json!("main"));
             let files = transport
                 .call(
                     RequestContext::unbounded(),
                     request(
-                        6,
+                        8,
                         "versionedText.list",
                         Some(handle.clone()),
                         json!({ "versionId": "main" }),
@@ -1437,12 +1453,12 @@ async fn existing_store_and_unreadable_policy_keep_the_strict_open_barrier() {
                 )
                 .await
                 .expect("bounded degraded startup must release file reads");
-            assert!(files.result["files"].is_array());
+            assert_eq!(files.result["files"], json!([]));
         }
         transport
             .call(
                 RequestContext::unbounded(),
-                request(7, "workspace.close", Some(handle), json!({})),
+                request(9, "workspace.close", Some(handle), json!({})),
             )
             .await
             .expect("close");
