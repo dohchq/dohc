@@ -109,16 +109,11 @@ export function DesktopFirstRun(props: {
         />
       ) : (
       <div className="dohc-elevated flex w-105 flex-col gap-3 rounded-xl border border-line bg-panel p-6">
-        <div className="flex flex-col gap-1">
-          <span className="text-xs font-medium uppercase tracking-wide text-subtle">
-            Workspace location
-          </span>
-          <div className="flex items-start justify-between gap-2">
-            {/* The whole point of this screen is where files live: never
-                truncate the path. */}
-            <code className="select-text cursor-text break-all font-mono text-[13px] leading-snug text-ink">
-              {root ?? "…"}
-            </code>
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-xs font-medium uppercase tracking-wide text-subtle">
+              Workspace location
+            </span>
             <button
               type="button"
               onClick={() => void chooseFolder()}
@@ -128,6 +123,11 @@ export function DesktopFirstRun(props: {
               Choose a different folder
             </button>
           </div>
+          {/* The whole point of this screen is where files live: give the
+              complete selectable path the full card width. */}
+          <code className="w-full select-text cursor-text break-all font-mono text-[13px] leading-snug text-ink">
+            {root ?? "…"}
+          </code>
         </div>
 
         <PrimaryButton

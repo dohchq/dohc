@@ -70,7 +70,13 @@ async function writeCaptureManifest(): Promise<void> {
   );
 }
 
-const RICH_DOC = `# Q3 product plan
+const RICH_DOC = `---
+status: In progress
+owner: Ice
+release: September launch
+---
+
+# Q3 product plan
 
 dohc turns messy work into an inspectable workspace. This quarter we focus on
 polish, collaboration, and making the editor feel effortless.
@@ -368,6 +374,8 @@ test("@ui-audit capture baseline screenshots", async () => {
     await page
       .getByTestId("properties-panel")
       .waitFor({ state: "visible", timeout: 5_000 });
+    await expect(page.getByTestId("property-key").first()).toHaveValue("status");
+    await expect(page.getByTestId("property-value").first()).toHaveValue("In progress");
     await page.waitForTimeout(500);
     await shot(page, "20-properties-panel-light");
     if (
