@@ -88,7 +88,6 @@ export function authorizeShareAction(input: ShareAuthorizationInput): ShareAutho
   let authorized: AuthorizedShareAction | null = null;
   let denied = false;
   for (const grant of grants) {
-    if (grant.shareId !== input.shareId) continue;
     const result = authorizeShareGrantAction({
       storage: input.storage,
       grantId: grant.grantId,
@@ -122,7 +121,6 @@ export function resolveReceivedShareAuthority(
   let genericChatWritable = false;
   let fallback: SyncRelayShareWithGrantRow | null = null;
   for (const grant of grants) {
-    if (grant.shareId !== input.shareId) continue;
     const current = resolveCurrentShareGrant({
       storage: input.storage,
       grantId: grant.grantId,
