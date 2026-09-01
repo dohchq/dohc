@@ -1783,17 +1783,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         channel_wire_id: &str,
         faults: &dyn FaultInjector,
     ) -> Result<SharedChannelPushOutcome, RelayError> {
-        self.push_share_ops(store, workspace_id, share_id, channel_wire_id, faults)
-    }
-
-    fn push_share_ops(
-        &self,
-        store: &mut EngineStore,
-        workspace_id: &str,
-        share_id: &str,
-        channel_wire_id: &str,
-        faults: &dyn FaultInjector,
-    ) -> Result<SharedChannelPushOutcome, RelayError> {
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
             .ok_or(RelayError::InvalidResponse)?;
