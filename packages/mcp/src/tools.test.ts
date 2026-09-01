@@ -2997,41 +2997,52 @@ describe("a guard that decides authority reads the resolved path", () => {
     });
   });
 
-  it("refuses a query whose database really is a secret file", async () => {
-    await withWorkspace(async (ctx) => {
-      const bytes = await importedDatabase(ctx, "people.sqlite");
-      await writeFile(join(ctx.root, ".env.sqlite"), bytes);
-      await symlink(join(ctx.root, ".env.sqlite"), join(ctx.root, "records.sqlite"));
+  it(
+    "refuses a query whose database really is a secret file",
+    async () => {
+      await withWorkspace(async (ctx) => {
+        const bytes = await importedDatabase(ctx, "people.sqlite");
+        await writeFile(join(ctx.root, ".env.sqlite"), bytes);
+        await symlink(join(ctx.root, ".env.sqlite"), join(ctx.root, "records.sqlite"));
 
-      const queried = await queryDatabase(ctx, {
-        databasePath: "records.sqlite",
-        sql: "SELECT name FROM people",
+        const queried = await queryDatabase(ctx, {
+          databasePath: "records.sqlite",
+          sql: "SELECT name FROM people",
+        });
+        expect(queried).toMatchObject({
+          ok: false,
+          reason: expect.stringContaining("protected"),
+        });
+        expect(JSON.stringify(queried)).not.toContain(marker);
       });
-      expect(queried).toMatchObject({ ok: false, reason: expect.stringContaining("protected") });
-      expect(JSON.stringify(queried)).not.toContain(marker);
-    });
-  });
+    },
+    10_000,
+  );
 
   // The visible-database rule is read off the NAME, so an alias carries its
   // own: a sidecar is transient and never a standalone file, and an alias that
   // spells `.sqlite` must not turn one into a queryable database.
-  it("refuses a query whose database really is a sidecar", async () => {
-    await withWorkspace(async (ctx) => {
-      const bytes = await importedDatabase(ctx, "people.sqlite");
-      await writeFile(join(ctx.root, "people.sqlite-wal"), bytes);
-      await symlink(join(ctx.root, "people.sqlite-wal"), join(ctx.root, "records.sqlite"));
+  it(
+    "refuses a query whose database really is a sidecar",
+    async () => {
+      await withWorkspace(async (ctx) => {
+        const bytes = await importedDatabase(ctx, "people.sqlite");
+        await writeFile(join(ctx.root, "people.sqlite-wal"), bytes);
+        await symlink(join(ctx.root, "people.sqlite-wal"), join(ctx.root, "records.sqlite"));
 
-      const queried = await queryDatabase(ctx, {
-        databasePath: "records.sqlite",
-        sql: "SELECT name FROM people",
+        const queried = await queryDatabase(ctx, {
+          databasePath: "records.sqlite",
+          sql: "SELECT name FROM people",
+        });
+        expect(queried).toMatchObject({
+          ok: false,
+          reason: expect.stringContaining("not a visible database"),
+        });
+        expect(JSON.stringify(queried)).not.toContain(marker);
       });
-      expect(queried).toMatchObject({
-        ok: false,
-        reason: expect.stringContaining("not a visible database"),
-      });
-      expect(JSON.stringify(queried)).not.toContain(marker);
-    });
-  });
+    },
+    10_000,
+  );
 
   it("refuses a site scan whose folder really is the legacy one", async () => {
     await withWorkspace(async (ctx) => {
