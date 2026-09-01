@@ -216,6 +216,7 @@ export function acknowledgeShareSkips(
 export interface ShareViewIdentity {
   shareId: string;
   granterEmail: string | null;
+  genericChatWritable: boolean;
   // The selector the relay stated for this share, pinned here when the record
   // is created so every later pull enforces it locally instead of trusting
   // the relay to send only what it granted. Empty `paths` with a `versionId`

@@ -18,7 +18,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { TextDecoder } from "node:util";
 import { isInside } from "../security/pathContainment";
 import {
@@ -642,7 +642,7 @@ export function createWorkspaceOperationScheduler() {
   const states = new Map<string, WorkspaceOperationState>();
   const activeLeases = new WeakMap<WorkspaceOperationLease, string>();
   const pathKey = (value: string) =>
-    process.platform === "win32" ? value.toLowerCase() : value;
+    process.platform === "win32" ? resolve(value).toLowerCase() : value;
 
   const drain = (key: string, state: WorkspaceOperationState): void => {
     if (state.activeExclusive) return;

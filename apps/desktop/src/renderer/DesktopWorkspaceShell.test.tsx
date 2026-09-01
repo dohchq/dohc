@@ -4399,10 +4399,21 @@ describe("ui-state merge-on-load", () => {
     );
   });
 
-  it("repaints changed files before an ended share becomes read-only", async () => {
-    const bridge = makeBridge(
+  it("repaints changed files and removes generic chat before an ended share becomes read-only", async () => {
+    const bridge = makeShareBridge(
       Promise.resolve(storedStateWithTabs(["b.md"], "b.md")),
     );
+    bridge.listFileChats.mockResolvedValue({
+      fileObjectId: "share-object-1",
+      threads: [
+        {
+          id: "thread-before-end",
+          title: "Before end",
+          createdAtMs: 1,
+          updatedAtMs: 1,
+        },
+      ],
+    });
     const outcomes = [
       {
         ok: true as const,
@@ -4434,10 +4445,14 @@ describe("ui-state merge-on-load", () => {
         shareId: "share-1",
         granterEmail: "granter@dohc.test",
         access: "edit",
+        genericChatWritable: true,
       },
     });
 
     await screen.findByTestId("tab-b.md");
+    await userEvent.click(await screen.findByTestId("linked-chat-open"));
+    expect(await screen.findByTestId("linked-chat-readonly-note")).toBeTruthy();
+    expect(screen.queryByTestId("linked-chat-composer")).toBeNull();
     await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(bridge.readWorkspaceText).toHaveBeenCalled());
     await waitFor(() =>
@@ -4462,6 +4477,10 @@ describe("ui-state merge-on-load", () => {
     expect(
       screen.queryByTestId("share-changes-send"),
       "MUTATION: an ended share still offers changes it can no longer send",
+    ).toBeNull();
+    expect(
+      screen.queryByTestId("linked-chat-composer"),
+      "MUTATION: an ended share still offers generic chat it can no longer send",
     ).toBeNull();
   });
 
@@ -7943,25 +7962,115 @@ describe("shared view banner", () => {
     expect(banner.textContent).not.toContain("You can chat about");
   });
 
-  it("tells a comment recipient they can chat about these files, not edit them", async () => {
-    const bridge = makeShareBridge();
+  it("tells an independent Comment recipient where to continue and renders no composer", async () => {
+    const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
+    bridge.listFileChats.mockResolvedValue({
+      fileObjectId: "share-object-1",
+      threads: [
+        {
+          id: "independent-thread",
+          title: "Independent discussion",
+          createdAtMs: 1,
+          updatedAtMs: 1,
+        },
+      ],
+    });
+    Object.assign(bridge, {
+      listChatMessages: vi.fn(async () => ({ messages: [] })),
+      listChatReactions: vi.fn(async () => ({
+        reactions: [],
+        viewerAuthorId: "recipient",
+      })),
+      markChatThreadRead: vi.fn(async () => ({
+        lastReadSequence: 0,
+        revision: 1,
+      })),
+    });
     renderShell(bridge, {
       ...SHARE_VIEW,
       shareView: {
         shareId: "share-1",
         granterEmail: "sam@dohc.test",
         access: "comment",
+        genericChatWritable: true,
       },
     });
 
     const banner = await screen.findByTestId("shared-view-banner");
     expect(banner.textContent).toContain(
-      "Shared view from sam@dohc.test. You can chat about these files, not edit them.",
+      "Shared view from sam@dohc.test. Files and Chats are read-only here. Ask sam@dohc.test where to continue the conversation.",
     );
-    expect(banner.textContent).not.toContain("read-only");
+    await userEvent.click(await screen.findByTestId("linked-chat-open"));
+    await screen.findByTestId("linked-chat-thread");
+    expect(
+      screen.queryByTestId("linked-chat-composer"),
+      "MUTATION: relay append authority restored a received-share composer",
+    ).toBeNull();
+    expect(screen.getByTestId("linked-chat-readonly-note").textContent).toBe(
+      "Chats are read-only in this shared view.",
+    );
     // MUTATION: giving comment the edit sentence would promise a write-back
     // lane a comment grant does not carry.
     expect(banner.textContent).not.toContain("send your changes");
+  });
+
+  it("keeps dependent Comment generic chats read-only and sends comments back to the browser", async () => {
+    const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
+    bridge.listFileChats.mockResolvedValue({
+      fileObjectId: "share-object-1",
+      threads: [
+        {
+          id: "existing-thread",
+          title: "Existing discussion",
+          createdAtMs: 1,
+          updatedAtMs: 1,
+        },
+      ],
+    });
+    Object.assign(bridge, {
+      listChatMessages: vi.fn(async () => ({
+        messages: [
+          {
+            id: "existing-message",
+            threadId: "existing-thread",
+            authorKind: "human" as const,
+            authorDisplayName: "Sam",
+            body: "This history stays readable.",
+            createdAtMs: 1,
+          },
+        ],
+      })),
+      listChatReactions: vi.fn(async () => ({
+        reactions: [],
+        viewerAuthorId: "recipient",
+      })),
+      markChatThreadRead: vi.fn(async () => ({
+        lastReadSequence: 1,
+        revision: 1,
+      })),
+    });
+    renderShell(bridge, {
+      ...SHARE_VIEW,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "sam@dohc.test",
+        access: "comment",
+        genericChatWritable: false,
+      },
+    });
+
+    const banner = await screen.findByTestId("shared-view-banner");
+    expect(banner.textContent).toContain(
+      "Shared view from sam@dohc.test. Files are read-only here. Continue commenting in the browser where you opened the link.",
+    );
+    expect(banner.textContent).not.toContain("You can chat about these files");
+    expect((await screen.findByTestId("linked-chat-readonly-note")).textContent).toBe(
+      "Chats are read-only in this shared view.",
+    );
+    expect(screen.queryByTestId("linked-chat-composer")).toBeNull();
+    await userEvent.click(await screen.findByTestId("linked-chat-open"));
+    expect(await screen.findByText("This history stays readable.")).toBeTruthy();
+    expect(screen.queryByTestId("linked-chat-composer")).toBeNull();
   });
 
   // Edit gets its own sentence (#646 PR3a). It states BOTH halves: the
@@ -8090,6 +8199,27 @@ describe("shared view editing", () => {
       }),
       "MUTATION: an unconditional shareView read-only keeps edit locked out",
     ).toBe(false);
+  });
+
+  it("keeps document editing available while an Edit share's Chats stay read-only", async () => {
+    const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
+    renderShell(bridge, {
+      ...SHARE_VIEW,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "sam@dohc.test",
+        access: "edit",
+        genericChatWritable: true,
+      },
+    });
+
+    const toggle = await screen.findByTestId("markdown-edit-toggle");
+    await waitFor(() => expect(screen.queryByTestId("markdown-open-state")).toBeNull());
+    expect(toggle.hasAttribute("disabled")).toBe(false);
+    expect((await screen.findByTestId("linked-chat-readonly-note")).textContent).toBe(
+      "Chats are read-only in this shared view.",
+    );
+    expect(screen.queryByTestId("linked-chat-composer")).toBeNull();
   });
 });
 
@@ -8604,7 +8734,7 @@ describe("shared view with an unreadable grant", () => {
     expect(
       (await screen.findByTestId("linked-chat-readonly-note")).textContent,
       "MUTATION: an unreadable level must not open the composer",
-    ).toBe("This shared file is read-only for you.");
+    ).toBe("Chats are read-only in this shared view.");
     expect(bridge.listChatChannels).not.toHaveBeenCalled();
   });
 
@@ -13388,10 +13518,10 @@ describe("shared view chats surface", () => {
         path: "b.md",
       }),
     );
-    // The level rides all the way to the composer: SHARE_VIEW is a `view`
-    // grant, and main refuses its chat writes with these words.
+    // Every received share replaces the composer with the same chat-specific
+    // refusal main returns before persistence.
     expect((await screen.findByTestId("linked-chat-readonly-note")).textContent).toBe(
-      "This shared file is read-only for you.",
+      "Chats are read-only in this shared view.",
     );
 
     expect(bridge.listChatChannels).not.toHaveBeenCalled();

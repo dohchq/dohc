@@ -24671,197 +24671,6 @@ fn share_view_chat_still_refuses_a_file_op_outside_the_grant() {
     ));
 }
 
-/// #646 PR2 — the recipient's chat, back to the granter. The lane is MU-C4's,
-/// and the one thing that differs on the wire is the thread's link: it leaves
-/// here as a PATH, because the granter mints its own object ids and the local
-/// one this replica journaled would name nothing there.
-#[test]
-fn share_view_push_rewrites_a_thread_link_to_a_path_and_scopes_by_the_grant() {
-    let (_scratch, _path, mut engine) = store();
-    seed_identity(&mut engine);
-    VersionedTextStore::new(&mut engine)
-        .ensure_main_version("ws", "main", 1_000, &NoFaults)
-        .expect("main version");
-    seed_text_head(&mut engine, "object-in", "shared/docs/in.md", "inside");
-    seed_text_head(&mut engine, "object-out", "private/out.md", "outside");
-    engine
-        .write_with(&NoFaults, |tx| {
-            for (thread_id, object_id) in [("thread-in", "object-in"), ("thread-out", "object-out")]
-            {
-                tx.execute(
-                    "INSERT INTO chat_threads \
-                     (workspace_id,thread_id,title,created_at_ms,updated_at_ms,linked_object_id,linked_path_hint,linked_at_ms,channel_id) \
-                     VALUES ('ws',?1,'Thread',1,1,?2,'stale/hint.md',1,NULL)",
-                    params![thread_id, object_id],
-                )
-                .map_err(SyncError::persist)?;
-            }
-            Ok::<_, SyncError>(())
-        })
-        .expect("thread fixture");
-
-    let granted = ShareGrant {
-        paths: vec!["shared/docs".to_owned()],
-        version_id: None,
-        access: crate::ShareAccess::Comment,
-    };
-
-    // Four local ops: a thread create and a message about the SHARED file, and
-    // the same pair about a file the share does not cover.
-    for (index, kind, payload) in [
-        (
-            1_001_i64,
-            "chat.thread.create",
-            json!({"threadId":"thread-in","title":"Q","createdAtMs":1,"linkedAtMs":1,"linkedObjectId":"object-in","linkedPathHint":"stale/hint.md"}),
-        ),
-        (
-            1_002,
-            "chat.message.append",
-            json!({"threadId":"thread-in","messageId":"m-in"}),
-        ),
-        (
-            1_003,
-            "chat.thread.create",
-            json!({"threadId":"thread-out","title":"Private","createdAtMs":1,"linkedAtMs":1,"linkedObjectId":"object-out"}),
-        ),
-        (
-            1_004,
-            "chat.message.append",
-            json!({"threadId":"thread-out","messageId":"m-out"}),
-        ),
-        // Never this replica's to push through a FILE share, at any level.
-        (
-            1_005,
-            "chat.follow.set",
-            json!({"threadId":"thread-in","ownerUserId":"u","targetKind":"thread","targetId":"thread-in","state":"following","atMs":1}),
-        ),
-    ] {
-        journal_local_replication_op(
-            &mut engine,
-            "ws",
-            "local",
-            "epoch-1",
-            "stream-1",
-            kind,
-            &payload,
-            index,
-            &NoFaults,
-        )
-        .expect("journal local op");
-    }
-
-    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
-    assert_eq!(
-        client
-            .push_share_view(&mut engine, "ws", "share", &granted, &NoFaults)
-            .expect("share view push")
-            .pushed,
-        2,
-        "MUTATION: only the two ops about the SHARED file belong to this share",
-    );
-
-    let pushes = client
-        .transport()
-        .shared_pushes
-        .lock()
-        .expect("shared push calls");
-    assert_eq!(pushes.len(), 1);
-    let ops = &pushes[0].ops;
-    assert_eq!(ops.len(), 2);
-    // Dense per share: the ineligible ops leave no gap in the sequence the
-    // relay's own origin space sees.
-    assert_eq!(ops[0].origin_seq, 0);
-    assert_eq!(ops[1].origin_seq, 1);
-
-    let create = &ops[0].payload;
-    assert_eq!(
-        create.get("linkedPath").and_then(|v| v.as_str()),
-        Some("shared/docs/in.md")
-    );
-    assert!(
-        create.get("linkedObjectId").is_none(),
-        "MUTATION: a local object id means nothing to the granter and the relay refuses a create carrying both shapes",
-    );
-    assert!(
-        create.get("linkedPathHint").is_none(),
-        "MUTATION: the hint is a stale second copy of the same idea",
-    );
-    // Nothing about the private file crosses.
-    let wire = pushes[0]
-        .ops
-        .iter()
-        .map(|op| op.payload.to_string())
-        .collect::<Vec<_>>()
-        .join(" ");
-    for absent in ["thread-out", "m-out", "private/out.md", "object-out"] {
-        assert!(
-            !wire.contains(absent),
-            "{absent} must not cross the boundary"
-        );
-    }
-}
-
-/// A file renamed out of the grant stops being this share's to push. The
-/// eligibility answer is present-tense on both sides, so the two ends of a
-/// share agree about which files it covers without exchanging anything extra.
-#[test]
-fn share_view_push_follows_the_file_out_of_the_grant() {
-    let (_scratch, _path, mut engine) = store();
-    seed_identity(&mut engine);
-    VersionedTextStore::new(&mut engine)
-        .ensure_main_version("ws", "main", 1_000, &NoFaults)
-        .expect("main version");
-    seed_text_head(&mut engine, "object-in", "shared/docs/in.md", "inside");
-    engine
-        .write_with(&NoFaults, |tx| {
-            tx.execute(
-                "INSERT INTO chat_threads \
-                 (workspace_id,thread_id,title,created_at_ms,updated_at_ms,linked_object_id,linked_path_hint,linked_at_ms,channel_id) \
-                 VALUES ('ws','thread-in','Thread',1,1,'object-in',NULL,1,NULL)",
-                [],
-            )
-            .map_err(SyncError::persist)?;
-            Ok::<_, SyncError>(())
-        })
-        .expect("thread fixture");
-    journal_local_replication_op(
-        &mut engine,
-        "ws",
-        "local",
-        "epoch-1",
-        "stream-1",
-        "chat.message.append",
-        &json!({"threadId":"thread-in","messageId":"m-in"}),
-        1_001,
-        &NoFaults,
-    )
-    .expect("journal");
-
-    // The same op, judged against a grant that no longer covers the file.
-    let elsewhere = ShareGrant {
-        paths: vec!["shared/other".to_owned()],
-        version_id: None,
-        access: crate::ShareAccess::Comment,
-    };
-    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
-    assert_eq!(
-        client
-            .push_share_view(&mut engine, "ws", "share", &elsewhere, &NoFaults)
-            .expect("share view push")
-            .pushed,
-        0
-    );
-    assert!(
-        client
-            .transport()
-            .shared_pushes
-            .lock()
-            .expect("shared push calls")
-            .is_empty(),
-        "MUTATION: an op outside the grant must not even be offered",
-    );
-}
-
 #[test]
 fn share_view_refuses_a_thread_create_that_names_no_file_at_all() {
     // A create with NO binding is not a file thread the relay could have
@@ -25013,68 +24822,6 @@ fn share_view_carries_no_chat_through_a_version_share() {
         "MUTATION: a version share must carry no conversation about any file",
     );
     assert_eq!(thread_row_path(&engine, "thread-in"), None);
-}
-
-/// P2 (review of bcdc31e0). The pinned level was carried and never read. A
-/// `view` grant carries chat to READ; this replica must offer none to push.
-#[test]
-fn share_view_push_offers_nothing_at_view_level() {
-    let (_scratch, _path, mut engine) = store();
-    seed_identity(&mut engine);
-    VersionedTextStore::new(&mut engine)
-        .ensure_main_version("ws", "main", 1_000, &NoFaults)
-        .expect("main version");
-    seed_text_head(&mut engine, "object-in", "shared/docs/in.md", "inside");
-    engine
-        .write_with(&NoFaults, |tx| {
-            tx.execute(
-                "INSERT INTO chat_threads \
-                 (workspace_id,thread_id,title,created_at_ms,updated_at_ms,linked_object_id,linked_path_hint,linked_at_ms,channel_id) \
-                 VALUES ('ws','thread-in','Thread',1,1,'object-in',NULL,1,NULL)",
-                [],
-            )
-            .map_err(SyncError::persist)?;
-            Ok::<(), SyncError>(())
-        })
-        .expect("thread fixture");
-    journal_local_replication_op(
-        &mut engine,
-        "ws",
-        "local",
-        "epoch-1",
-        "stream-1",
-        "chat.message.append",
-        &json!({"threadId":"thread-in","messageId":"m-in"}),
-        1_001,
-        &NoFaults,
-    )
-    .expect("journal");
-
-    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
-    for (access, expected) in [
-        (crate::ShareAccess::View, 0_usize),
-        (crate::ShareAccess::Comment, 1),
-    ] {
-        let granted = ShareGrant {
-            paths: vec!["shared/docs".to_owned()],
-            version_id: None,
-            access,
-        };
-        let pushed = client
-            .push_share_view(
-                &mut engine,
-                "ws",
-                &format!("share-{access:?}"),
-                &granted,
-                &NoFaults,
-            )
-            .expect("share view push")
-            .pushed;
-        assert_eq!(
-            pushed, expected,
-            "MUTATION: the pinned level must decide what this replica offers ({access:?})",
-        );
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -26648,73 +26395,13 @@ fn share_view_chat_composes_paths_with_a_version() {
     }
 }
 
-#[test]
-fn share_view_push_composes_paths_with_a_version() {
-    for (label, paths, version_id, expect_pushed) in [
-        ("paths only", vec!["shared/docs".to_owned()], None, 1_usize),
-        (
-            "paths AND a version",
-            vec!["shared/docs".to_owned()],
-            Some("v1"),
-            1,
-        ),
-        ("version only", Vec::new(), Some("v1"), 0),
-    ] {
-        let (_scratch, _path, mut engine) = store();
-        seed_identity(&mut engine);
-        VersionedTextStore::new(&mut engine)
-            .ensure_main_version("ws", "main", 1_000, &NoFaults)
-            .expect("main version");
-        seed_text_head(&mut engine, "object-in", "shared/docs/in.md", "inside");
-        engine
-            .write_with(&NoFaults, |tx| {
-                tx.execute(
-                    "INSERT INTO chat_threads \
-                     (workspace_id,thread_id,title,created_at_ms,updated_at_ms,linked_object_id,linked_path_hint,linked_at_ms,channel_id) \
-                     VALUES ('ws','thread-in','Thread',1,1,'object-in',NULL,1,NULL)",
-                    [],
-                )
-                .map_err(SyncError::persist)?;
-                Ok::<(), SyncError>(())
-            })
-            .expect("thread fixture");
-        journal_local_replication_op(
-            &mut engine,
-            "ws",
-            "local",
-            "epoch-1",
-            "stream-1",
-            "chat.message.append",
-            &json!({"threadId":"thread-in","messageId":"m-in"}),
-            1_001,
-            &NoFaults,
-        )
-        .expect("journal");
-
-        let granted = ShareGrant {
-            paths,
-            version_id: version_id.map(str::to_owned),
-            access: crate::ShareAccess::Comment,
-        };
-        let client = RelaySyncClient::new(PagedShareRelay::new([], []));
-        let pushed = client
-            .push_share_view(&mut engine, "ws", "share-compose", &granted, &NoFaults)
-            .expect("share view push")
-            .pushed;
-        assert_eq!(
-            pushed, expect_pushed,
-            "MUTATION: the push lane read the wrong dimension ({label})",
-        );
-    }
-}
-
 // #646 PR3-1 — a share view's own sync identity, and the narrow lane term
 // that lets its file writes journal.
 //
 // A share view replicates through a SHARE, so it holds `share_view_cursors`
 // and none of the owner-lane tables. Before this it had no identity at all:
-// its file writes never journalled and every push refused before the relay
-// was contacted.
+// its file writes never journalled and every proposal refused before the
+// relay was contacted.
 
 /// The share-lane state a real share view holds after its first pull: a
 /// cursor for the share, and no owner-lane position of any kind.
@@ -26746,11 +26433,7 @@ fn recorded_origin(engine: &EngineStore) -> Option<String> {
         .expect("read identity")
 }
 
-fn record(
-    engine: &mut EngineStore,
-    origin_id: &str,
-    drains_file_moments: bool,
-) -> ShareViewIdentityOutcome {
+fn record(engine: &mut EngineStore, origin_id: &str) -> ShareViewIdentityOutcome {
     match record_share_view_identity(
         engine,
         "ws",
@@ -26759,7 +26442,6 @@ fn record(
             replication_epoch: "epoch-share",
             stream_identity: "stream-share",
         },
-        drains_file_moments,
         1_000,
         &NoFaults,
     )
@@ -26768,21 +26450,6 @@ fn record(
         TxnOutcome::Committed(outcome) => outcome,
         TxnOutcome::Crashed { .. } => panic!("recording crashed"),
     }
-}
-
-/// Whether the FILE-LANE fact is recorded — the row that says this share
-/// view's grant can drain a file moment back to the granter.
-fn file_lane_recorded(engine: &EngineStore) -> bool {
-    engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM share_view_file_lane WHERE workspace_id='ws')",
-                [],
-                |row| row.get::<_, bool>(0),
-            )
-            .map_err(SyncError::corrupt)
-        })
-        .expect("read file lane")
 }
 
 /// Both predicates, read through the real functions inside one transaction.
@@ -26801,164 +26468,22 @@ fn lane_answers(engine: &mut EngineStore) -> (bool, bool) {
     }
 }
 
-/// The end-to-end claim, with NOTHING seeded: enrol, write chat through the
-/// real domain path, and the granter gets it. PR2's own suite seeded
-/// `sync_identity` for itself, so it never proved a share view could reach
-/// this state on its own.
-#[test]
-fn a_comment_share_view_enrols_and_its_chat_write_leaves() {
-    let (_scratch, _path, mut engine) = store();
-    VersionedTextStore::new(&mut engine)
-        .ensure_main_version("ws", "main", 1_000, &NoFaults)
-        .expect("main version");
-    seed_text_head(&mut engine, "object-in", "shared/docs/in.md", "inside");
-    seed_share_view_cursor(&mut engine, "share-comment");
-    assert_eq!(recorded_origin(&engine), None, "nothing is seeded");
-
-    assert_eq!(
-        record(&mut engine, "origin-share-view", false),
-        ShareViewIdentityOutcome::Recorded
-    );
-    assert_eq!(
-        recorded_origin(&engine).as_deref(),
-        Some("origin-share-view"),
-        "MUTATION: recording must write the identity the share lane pushes under",
-    );
-    assert!(
-        !file_lane_recorded(&engine),
-        "MUTATION: a comment share cannot send file changes, so it takes no file lane",
-    );
-
-    LinkedChatStore::new(&mut engine)
-        .create_thread(
-            &CreateFileThread {
-                workspace_id: "ws".to_owned(),
-                thread_id: "thread-in".to_owned(),
-                title: "About the shared file".to_owned(),
-                linked_object_id: "object-in".to_owned(),
-                linked_path_hint: None,
-                now_ms: 1_100,
-                request_id: "thread-in-request".to_owned(),
-            },
-            &NoFaults,
-        )
-        .expect("recipient thread");
-    LinkedChatStore::new(&mut engine)
-        .send_message(
-            &SendMessage {
-                workspace_id: "ws".to_owned(),
-                thread_id: "thread-in".to_owned(),
-                message_id: "m-recipient".to_owned(),
-                author_kind: ChatActorKind::Human,
-                author_display_name: "Recipient".to_owned(),
-                author_user_id: Some("recipient-user".to_owned()),
-                parent_message_id: None,
-                origin: None,
-                body: "A question about this file".to_owned(),
-                needs_decision: false,
-                attachments: Vec::new(),
-                now_ms: 1_200,
-                request_id: Some("m-recipient".to_owned()),
-            },
-            &NoFaults,
-        )
-        .expect("recipient message");
-
-    let logged = list_replication_ops(&engine, "ws", "origin-share-view", -1, MAX_PULL_OPS)
-        .expect("read journal");
-    assert!(
-        logged.iter().any(|op| op.op_kind == "chat.message.append"),
-        "MUTATION: the recipient's chat op must journal under the ENROLLED origin",
-    );
-
-    let granted = ShareGrant {
-        paths: vec!["shared/docs".to_owned()],
-        version_id: None,
-        access: crate::ShareAccess::Comment,
-    };
-    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
-    let pushed = client
-        .push_share_view(&mut engine, "ws", "share-comment", &granted, &NoFaults)
-        .expect("share view push")
-        .pushed;
-    assert!(
-        pushed >= 1,
-        "MUTATION: the enrolled share view must reach the relay",
-    );
-    let pushes = client
-        .transport()
-        .shared_pushes
-        .lock()
-        .expect("shared push calls");
-    assert!(
-        pushes
-            .iter()
-            .all(|push| push.origin_id == "origin-share-view"),
-        "MUTATION: the relay namespaces this recipient by the enrolled origin",
-    );
-    assert!(
-        pushes.iter().any(|push| push
-            .ops
-            .iter()
-            .any(|op| op.op_kind == "chat.message.append")),
-        "MUTATION: the chat op must be the thing that leaves",
-    );
-}
-
-/// The `RELAY_INVALID_RESPONSE` the desktop saw, with the relay never
-/// contacted. An unenrolled share view refuses its own push, and the refusal
-/// must name what is missing.
-#[test]
-fn an_unenrolled_share_view_push_names_the_missing_identity() {
-    let (_scratch, _path, mut engine) = store();
-    seed_share_view_cursor(&mut engine, "share-comment");
-    let granted = ShareGrant {
-        paths: vec!["shared/docs".to_owned()],
-        version_id: None,
-        access: crate::ShareAccess::Comment,
-    };
-    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
-    let error = client
-        .push_share_view(&mut engine, "ws", "share-comment", &granted, &NoFaults)
-        .expect_err("an unenrolled share view cannot push");
-    let RelayError::Local(reason) = &error else {
-        panic!("MUTATION: a missing identity is a LOCAL constraint, not a relay answer: {error:?}");
-    };
-    assert!(
-        reason.contains("sync identity") && reason.contains("comment"),
-        "MUTATION: the refusal must name the constraint and when it is satisfied: {reason}",
-    );
-
-    // Enrolment is the whole fix: the same push now succeeds with nothing to
-    // send, instead of failing before the first local write exists.
-    assert_eq!(
-        record(&mut engine, "origin-share-view", false),
-        ShareViewIdentityOutcome::Recorded
-    );
-    assert_eq!(
-        client
-            .push_share_view(&mut engine, "ws", "share-comment", &granted, &NoFaults)
-            .expect("an enrolled share view pushes an empty batch")
-            .pushed,
-        0,
-    );
-}
-
-/// A view share may push nothing, so it is never enrolled, and the identity
-/// half of the predicate is what keeps its writes local.
+/// A read-only share records no identity, and the identity half of the
+/// predicate is what keeps its writes local. This covers both View and
+/// Comment at the storage boundary; the runtime level test pins each answer.
 ///
 /// This is also the safety test for that conjunct.
 /// `journal_local_payload_json_in_tx` REFUSES without an identity, and the
 /// refusal rolls the user's edit back with it — so a predicate that answered
 /// true here would not journal a moment, it would destroy the write.
 #[test]
-fn a_view_share_view_enrols_nothing_and_its_writes_stay_local() {
+fn a_read_only_share_view_enrols_nothing_and_its_writes_stay_local() {
     let (_scratch, _path, mut engine) = store();
     seed_share_view_cursor(&mut engine, "share-view-only");
     assert_eq!(
         recorded_origin(&engine),
         None,
-        "MUTATION: a view share must never be given an identity",
+        "MUTATION: a read-only share must never be given an identity",
     );
     assert_eq!(
         lane_answers(&mut engine),
@@ -26972,11 +26497,11 @@ fn enrolling_twice_keeps_the_first_identity() {
     let (_scratch, _path, mut engine) = store();
     seed_share_view_cursor(&mut engine, "share-comment");
     assert_eq!(
-        record(&mut engine, "origin-first", true),
+        record(&mut engine, "origin-first"),
         ShareViewIdentityOutcome::Recorded
     );
     assert_eq!(
-        record(&mut engine, "origin-second", true),
+        record(&mut engine, "origin-second"),
         ShareViewIdentityOutcome::AlreadyRecorded,
         "MUTATION: a refresh must not re-mint an origin",
     );
@@ -26989,12 +26514,10 @@ fn enrolling_twice_keeps_the_first_identity() {
 
 /// Which lane makes a workspace journal, read through both real predicates.
 ///
-/// The driver is the recorded LEVEL, because that is the fact. An earlier
-/// revision keyed the share term on `EXISTS(sync_identity)`, and the
-/// `view`-with-a-chat-minted-identity row below is exactly the case that
-/// proxy got wrong: ordinary chat activity mints an identity unconditionally,
-/// so the row cannot tell a share view that may send file changes from one
-/// that may not.
+/// The driver is the recorded Edit lane, because that is the fact. An earlier
+/// revision keyed the share term on `EXISTS(sync_identity)`. The unrelated
+/// identity row below is the case that proxy got wrong: an identity alone
+/// cannot prove that a share view may send file changes.
 ///
 /// The OWNER-lane predicate — which the Y.Doc lanes, the conflict outbox and
 /// cursor advancement read — must stay false for every share view. Nothing
@@ -27007,61 +26530,54 @@ fn enrolling_twice_keeps_the_first_identity() {
 /// cloud sync.
 #[test]
 fn only_the_file_moment_journal_reads_the_share_lane() {
-    for (label, recorded, chat_identity, lane, expected) in [
-        ("nothing at all", None, false, None, (false, false)),
-        (
-            "a comment share view",
-            Some(false),
-            false,
-            Some("share_view_cursors"),
-            (false, false),
-        ),
+    for (label, recorded, unrelated_identity, lane, expected) in [
+        ("nothing at all", false, false, None, (false, false)),
         (
             "an edit share view",
-            Some(true),
+            true,
             false,
             Some("share_view_cursors"),
             (false, true),
         ),
         (
-            "a VIEW share view whose chat minted an identity",
-            None,
+            "a read-only share view with an unrelated identity",
+            false,
             true,
             Some("share_view_cursors"),
             (false, false),
         ),
         (
             "an owner push position",
-            None,
+            false,
             true,
             Some("sync_relay_push_state"),
             (true, true),
         ),
         (
             "a shared channel cursor",
-            None,
+            false,
             true,
             Some("shared_channel_cursors"),
             (false, false),
         ),
         (
             "a shared channel push position",
-            None,
+            false,
             true,
             Some("shared_channel_push_state"),
             (false, false),
         ),
     ] {
         let (_scratch, _path, mut engine) = store();
-        if let Some(drains_file_moments) = recorded {
+        if recorded {
             assert_eq!(
-                record(&mut engine, "origin-lane", drains_file_moments),
+                record(&mut engine, "origin-lane"),
                 ShareViewIdentityOutcome::Recorded
             );
         }
-        if chat_identity {
-            // What `local_replication_coordinate` does on any ordinary chat
-            // write. No level, no lane — just a row.
+        if unrelated_identity {
+            // No level and no lane: just a row that cannot authorize a file
+            // moment journal by itself.
             engine
                 .write_with(&NoFaults, |tx| {
                     tx.execute(

@@ -5119,16 +5119,15 @@ export function DesktopWorkspaceShell(props: {
   // grant to pull with, so the refresh is skipped rather than failed, and the
   // banner says so instead of showing a level nobody can read.
   const shareViewDamaged = !!shareView?.damaged;
-  // Whether this share grants chat WRITES (#646 PR2), as one answer the
-  // banner and the composer both read. Positive recognition only: `view`, an
-  // absent level (which is what `damaged` leaves behind), and anything else
-  // unreadable all mean no. The renderer decides nothing with this — main
-  // refuses the write either way — but a surface that guessed generously
-  // would invite a write it then has to take back.
-  const shareViewChatWritable =
-    !shareViewDamaged &&
-    (shareView?.access === "comment" || shareView?.access === "edit");
+  // The relay-derived generic chat fact selects the Comment banner's next
+  // step. It does not grant a desktop write: every received share's Chats are
+  // read-only in Phase 3 because the store cannot prove per-row delivery.
   const [shareViewEnded, setShareViewEnded] = useState(!!shareView?.ended);
+  const shareViewHasIndependentChat =
+    !shareViewDamaged &&
+    !shareViewEnded &&
+    shareView?.access === "comment" &&
+    shareView?.genericChatWritable === true;
   // Whether this share grants DOCUMENT writes (#646 PR3a), read the same way
   // and for the same reason: positive recognition only, so `view`, an absent
   // level, and a damaged grant all stay read-only. An ended share grants
@@ -5723,8 +5722,10 @@ export function DesktopWorkspaceShell(props: {
                     // right: the granter's files change only when the
                     // granter accepts.
                     `Shared view from ${shareGranterName}. Edit these files and send your changes for ${shareGranterName} to accept.`
-                  : shareViewChatWritable
-                    ? `Shared view from ${shareGranterName}. You can chat about these files, not edit them.`
+                  : shareViewHasIndependentChat
+                    ? `Shared view from ${shareGranterName}. Files and Chats are read-only here. Ask ${shareGranterName} where to continue the conversation.`
+                    : shareView.access === "comment"
+                      ? `Shared view from ${shareGranterName}. Files are read-only here. Continue commenting in the browser where you opened the link.`
                     : `Shared view from ${shareGranterName} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`}
           </span>
           {shareExcludedPaths.length > 0 ? (
@@ -6567,7 +6568,7 @@ export function DesktopWorkspaceShell(props: {
                   <LazyLinkedChatsPanel
                     workspaceId={workspaceId}
                     filePath={activeDocumentPath}
-                    {...(shareView ? { shareReadOnly: !shareViewChatWritable } : {})}
+                    {...(shareView ? { shareReadOnly: true } : {})}
                     initialThread={searchChatTarget?.thread ?? null}
                     initialFocusMessageId={searchChatTarget?.focusMessageId}
                     onInitialThreadConsumed={() => setSearchChatTarget(null)}

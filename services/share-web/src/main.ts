@@ -94,7 +94,11 @@ const server = createServer((incoming, outgoing) => {
           return;
         }
         outgoing.statusCode = webResponse.status;
-        for (const [key, value] of webResponse.headers) outgoing.setHeader(key, value);
+        for (const [key, value] of webResponse.headers) {
+          if (key !== "set-cookie") outgoing.setHeader(key, value);
+        }
+        const setCookies = webResponse.headers.getSetCookie();
+        if (setCookies.length > 0) outgoing.setHeader("set-cookie", setCookies);
         if (!webResponse.body) {
           outgoing.end();
           return;

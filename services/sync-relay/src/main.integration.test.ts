@@ -985,6 +985,7 @@ describe("sync relay main process", () => {
     expect((await postJson(relay.baseUrl, "/sync/workspaces", { workspaceId })).status).toBe(200);
     const response = await postJson(relay.baseUrl, `/sync/${workspaceId}/shares/links`, {
       paths: ["docs"],
+      access: "view",
     });
     expect(response.status).toBe(200);
     const body = (await response.json()) as Record<string, unknown>;

@@ -532,6 +532,69 @@ describe("LinkEgressRateLimiter", () => {
 });
 
 describe("relay capability reads", () => {
+  it("keeps simultaneous View and Comment grants bound to their own access", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const view = await seed(h, "view");
+    const shareId = storage.getShareGrant(view.grantId)!.shareId;
+    const commentResponse = await h(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/shares/${shareId}/links`,
+        jsonBody({ access: "comment" }),
+      ),
+    );
+    expect(commentResponse.status).toBe(200);
+    const commentLink = await json(commentResponse);
+    const commentExchangeResponse = await h(
+      request(
+        null,
+        "/sync/link-exchange",
+        jsonBody({ secret: linkSecret(commentLink.url) }),
+      ),
+    );
+    expect(commentExchangeResponse.status).toBe(200);
+    const commentExchange = await json(commentExchangeResponse);
+
+    expect(commentExchange).toMatchObject({
+      grantId: commentLink.grantId,
+      access: "comment",
+      generation: 1,
+      effectiveSelector: { access: "comment" },
+    });
+    expect(commentExchange.grantId).not.toBe(view.grantId);
+
+    for (const bound of [
+      { access: "view", capability: view.capability, grantId: view.grantId },
+      {
+        access: "comment",
+        capability: String(commentExchange.capabilityToken),
+        grantId: String(commentLink.grantId),
+      },
+    ] as const) {
+      const current = await h(linkRequest(bound.capability, "/sync/link/current"));
+      expect(current.status).toBe(200);
+      expect(await json(current)).toMatchObject({
+        access: bound.access,
+        effectiveSelector: { access: bound.access },
+      });
+
+      const refreshResponse = await h(
+        request(null, "/sync/link-refresh", {
+          method: "POST",
+          headers: { authorization: `LinkCapability ${bound.capability}` },
+        }),
+      );
+      expect(refreshResponse.status).toBe(200);
+      expect(await json(refreshResponse)).toMatchObject({
+        grantId: bound.grantId,
+        access: bound.access,
+        generation: 1,
+        effectiveSelector: { access: bound.access },
+      });
+    }
+  });
+
   it("projects only the selected current files from a fresh view capability", async () => {
     const storage = await newStorage();
     const h = handler(storage);
@@ -1565,6 +1628,78 @@ describe("relay capability reads", () => {
     );
   });
 
+  it.each([
+    ["metadata", "/sync/link/share", "fetchLogPageDescending"],
+    ["current state", "/sync/link/current", "readCurrentFileState"],
+  ] as const)(
+    "serializes the fresh access after a same-generation narrowing during the %s read",
+    async (_description, path, pauseAt) => {
+      const storage = await newStorage();
+      let narrowOnRead = false;
+      let shareId = "";
+      let grantId = "";
+      const narrow = (): void => {
+        if (!narrowOnRead) return;
+        narrowOnRead = false;
+        expect(
+          storage.retuneShareGrant({
+            shareId,
+            grantId,
+            access: "view",
+            changedAtMs: 2_001,
+            expectedDependentGrantIds: [],
+            guard: () => undefined,
+          }),
+        ).toMatchObject({
+          ok: true,
+          grant: { access: "view", generation: 1 },
+        });
+      };
+      const storageWithRace = new Proxy(storage, {
+        get(target, property, receiver) {
+          if (property === "fetchLogPageDescending") {
+            return (
+              input: Parameters<SyncRelayStorage["fetchLogPageDescending"]>[0],
+            ) => {
+              const rows = target.fetchLogPageDescending(input);
+              if (pauseAt === property) narrow();
+              return rows;
+            };
+          }
+          if (property === "readCurrentFileState") {
+            return (
+              input: Parameters<SyncRelayStorage["readCurrentFileState"]>[0],
+            ) => {
+              const snapshot = target.readCurrentFileState(input);
+              if (pauseAt === property) narrow();
+              return snapshot;
+            };
+          }
+          const value = Reflect.get(target, property, receiver) as unknown;
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      const h = handler(storageWithRace);
+      const seeded = await seed(h, "comment");
+      grantId = seeded.grantId;
+      shareId = storage.getShareGrant(grantId)!.shareId;
+      narrowOnRead = true;
+
+      const response = await h(linkRequest(seeded.capability, path));
+
+      expect(response.status).toBe(200);
+      expect(await json(response)).toMatchObject({
+        access: "view",
+        effectiveSelector: {
+          paths: ["docs"],
+          versionId: null,
+          access: "view",
+        },
+      });
+      expect(narrowOnRead).toBe(false);
+    },
+  );
+
   it("streams the accepted current fold once when reopening a pre-table database", async () => {
     const originalStorage = await newStorage();
     const originalHandler = handler(originalStorage);
@@ -2367,35 +2502,24 @@ describe("relay capability reads", () => {
         ),
     ],
     [
-      "retuning",
+      "widening",
       async (
         h: SyncRelayHandler,
         shareId: string,
         grantId: string,
-        storage: SyncRelayStorage,
-      ) => {
-        expect(
-          storage.retuneShareGrant({
-            shareId,
-            grantId,
-            access: "comment",
-            changedAtMs: 2_001,
-            expectedDependentGrantIds: [],
-            guard: () => undefined,
-            mintCredential: () => ({
-              credentialId: "storage-seeded-comment-stream-credential",
-              secretHash: "storage-seeded-comment-stream-hash",
-            }),
-          }),
-        ).toMatchObject({ ok: true, grant: { access: "comment" } });
-        return await h(
+        _storage: SyncRelayStorage,
+      ) =>
+        await h(
           request(
             OWNER,
             `/sync/shares/${shareId}/links/${grantId}/retune`,
-            jsonBody({ access: "view", expectedDependentGrantIds: [] }),
+            jsonBody({
+              workspaceId: WORKSPACE,
+              access: "comment",
+              expectedDependentGrantIds: [],
+            }),
           ),
-        );
-      },
+        ),
     ],
   ] as const)(
     "terminates an open link blob stream after %s without affecting another grant",
@@ -2456,6 +2580,88 @@ describe("relay capability reads", () => {
       expect(new TextDecoder().decode(untouchedBytes)).toBe(content);
     },
   );
+
+  it("preserves an open Comment link blob stream through View narrowing", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const content = `${"a".repeat(64 * 1024)}${"b".repeat(64 * 1024)}${"c".repeat(64 * 1024)}`;
+    expect(
+      (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
+    ).toBe(200);
+    const blobSha = await putBlob(h, content);
+    await appendMoments(h, [moment(0, "docs/large.bin", content, 1_100)]);
+    const target = await createLink(h, { paths: ["docs"], access: "comment" });
+    const untouched = await createLink(h, { paths: ["docs"], access: "view" });
+
+    const targetResponse = await h(
+      linkRequest(target.capability, `/sync/link/blobs/${blobSha}`),
+    );
+    const untouchedResponse = await h(
+      linkRequest(untouched.capability, `/sync/link/blobs/${blobSha}`),
+    );
+    expect(targetResponse.status).toBe(200);
+    expect(untouchedResponse.status).toBe(200);
+    const targetReader = targetResponse.body!.getReader();
+    const untouchedReader = untouchedResponse.body!.getReader();
+    const targetFirst = await targetReader.read();
+    const untouchedFirst = await untouchedReader.read();
+    expect(targetFirst.done).toBe(false);
+    expect(untouchedFirst.done).toBe(false);
+    if (targetFirst.done || untouchedFirst.done) return;
+    expect(targetFirst.value.byteLength).toBe(64 * 1024);
+    expect(untouchedFirst.value.byteLength).toBe(64 * 1024);
+
+    const capabilityHash = hashLinkBearer(target.capability, LINK_KEY);
+    const grantBefore = storage.getShareGrant(target.grantId)!;
+    const credentialBefore = storage.getCurrentLinkCredential(target.grantId);
+    const sessionBefore = storage.findLinkSessionByCapabilityHash(capabilityHash);
+    const narrowed = await h(
+      request(
+        OWNER,
+        `/sync/shares/${target.shareId}/links/${target.grantId}/retune`,
+        jsonBody({
+          workspaceId: WORKSPACE,
+          access: "view",
+          expectedDependentGrantIds: [],
+        }),
+      ),
+    );
+    expect(narrowed.status).toBe(200);
+    expect(storage.getShareGrant(target.grantId)).toMatchObject({
+      access: "view",
+      generation: grantBefore.generation,
+    });
+    expect(storage.getCurrentLinkCredential(target.grantId)).toEqual(credentialBefore);
+    expect(storage.findLinkSessionByCapabilityHash(capabilityHash)).toEqual(sessionBefore);
+
+    const targetOutcome = await readRemainingBytes(targetReader, targetFirst.value).then(
+      (bytes) => ({
+        kind: "delivered" as const,
+        byteLength: bytes.byteLength,
+        sha256: sha256(new TextDecoder().decode(bytes)),
+      }),
+      (error: unknown) => ({
+        kind: "terminated" as const,
+        message: error instanceof Error ? error.message : String(error),
+      }),
+    );
+    const untouchedBytes = await readRemainingBytes(
+      untouchedReader,
+      untouchedFirst.value,
+    );
+    expect(new TextDecoder().decode(untouchedBytes)).toBe(content);
+    expect(targetOutcome).toEqual({
+      kind: "delivered",
+      byteLength: Buffer.byteLength(content),
+      sha256: sha256(content),
+    });
+
+    const freshRead = await h(
+      linkRequest(target.capability, `/sync/link/blobs/${blobSha}`),
+    );
+    expect(freshRead.status).toBe(200);
+    expect(new TextDecoder().decode(await freshRead.arrayBuffer())).toBe(content);
+  });
 
   it.each(["rotate", "retune"] as const)(
     "refuses %s when owner standing changes before commit without writes or terminated reads",
@@ -2563,7 +2769,11 @@ describe("relay capability reads", () => {
         const body =
           operation === "rotate"
             ? { workspaceId: WORKSPACE, expectedDependentGrantIds: [] }
-            : { access: "view", expectedDependentGrantIds: [] };
+            : {
+                workspaceId: WORKSPACE,
+                access: "view",
+                expectedDependentGrantIds: [],
+              };
         const missing = await denialBytes(
           await h(request(OWNER, missingRoute, jsonBody(body))),
         );

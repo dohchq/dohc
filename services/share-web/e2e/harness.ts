@@ -37,11 +37,13 @@ export interface SeedFile {
 }
 
 export interface SeedShareOptions {
+  access?: "view" | "comment";
   files: readonly SeedFile[];
   ownerUserId?: string;
   paths?: readonly string[];
   recipientUserId?: string;
   relayUrl: string;
+  versionId?: string;
   workspaceId?: string;
 }
 
@@ -53,12 +55,14 @@ export interface SeededFile {
 }
 
 export interface SeededShare {
+  access: "view" | "comment";
   files: SeededFile[];
   grantId: string;
   ownerUserId: string;
   recipientUserId: string;
   secret: string;
   shareId: string;
+  versionId: string | null;
   workspaceId: string;
 }
 
@@ -403,6 +407,7 @@ export async function seedShare(options: SeedShareOptions): Promise<SeededShare>
   const recipientUserId = options.recipientUserId ?? randomId("recipient-browser");
   const workspacePath = `/sync/${encodedSegment(workspaceId)}`;
   const relayUrl = options.relayUrl.replace(/\/+$/u, "");
+  const shareAccess = options.access ?? "view";
 
   await expectHttpOk(
     await fetch(`${relayUrl}/sync/workspaces`, {
@@ -448,7 +453,7 @@ export async function seedShare(options: SeedShareOptions): Promise<SeededShare>
             recordedAtMs: recordedAtMs + index,
             payload: {
               momentId: seededFile.momentId,
-              versionId: "main",
+              versionId: options.versionId ?? "main",
               objectId: seededFile.objectId,
               path: seededFile.path,
               recordedAtMs: recordedAtMs + index,
@@ -476,8 +481,9 @@ export async function seedShare(options: SeedShareOptions): Promise<SeededShare>
       headers: ownerHeaders(ownerUserId, true),
       body: JSON.stringify({
         recipientUserId,
-        paths: [...(options.paths ?? ["docs"])],
-        access: "view",
+        paths: [...(options.paths ?? (options.versionId === undefined ? ["docs"] : []))],
+        ...(options.versionId === undefined ? {} : { versionId: options.versionId }),
+        access: shareAccess,
       }),
     }),
     "create path share",
@@ -487,7 +493,7 @@ export async function seedShare(options: SeedShareOptions): Promise<SeededShare>
     await fetch(`${relayUrl}${workspacePath}/shares/${encodedSegment(shareId)}/links`, {
       method: "POST",
       headers: ownerHeaders(ownerUserId, true),
-      body: JSON.stringify({ access: "view" }),
+      body: JSON.stringify({ access: shareAccess }),
     }),
     "create link grant",
   );
@@ -500,12 +506,14 @@ export async function seedShare(options: SeedShareOptions): Promise<SeededShare>
   }
 
   return {
+    access: shareAccess,
     files: seededFiles,
     grantId: requiredString(link.grantId, "grantId", "create link grant"),
     ownerUserId,
     recipientUserId,
     secret,
     shareId,
+    versionId: options.versionId ?? null,
     workspaceId,
   };
 }
@@ -513,6 +521,7 @@ export async function seedShare(options: SeedShareOptions): Promise<SeededShare>
 export async function createSeededLink(
   relayUrl: string,
   seeded: SeededShare,
+  access: "view" | "comment" = "view",
 ): Promise<SeededLink> {
   const link = await responseObject(
     await fetch(
@@ -520,7 +529,7 @@ export async function createSeededLink(
       {
         method: "POST",
         headers: ownerHeaders(seeded.ownerUserId, true),
-        body: JSON.stringify({ access: "view" }),
+        body: JSON.stringify({ access }),
       },
     ),
     "create another link grant",

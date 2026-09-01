@@ -158,6 +158,9 @@ let pool: Pool | undefined;
 const TEST_EMAIL_SUFFIX = "@dohc.test";
 let resolveUserIdByEmail: (email: string) => Promise<string | null> | string | null;
 let lookupUserEmail: (userId: string) => Promise<string | null> | string | null;
+let lookupUserDisplayName: (
+  userId: string,
+) => Promise<string | null> | string | null;
 const resolveActor: ResolveActor = testAuthSeam
   ? createTestActorResolver()
   : (() => {
@@ -194,6 +197,7 @@ if (testAuthSeam) {
       ? email.slice(0, -TEST_EMAIL_SUFFIX.length)
       : null;
   lookupUserEmail = (userId) => `${userId}${TEST_EMAIL_SUFFIX}`;
+  lookupUserDisplayName = (userId) => userId;
 } else {
   // Better Auth's canonical table/column names on the shared Postgres.
   resolveUserIdByEmail = async (email) => {
@@ -210,6 +214,13 @@ if (testAuthSeam) {
     );
     return result.rows[0]?.email ?? null;
   };
+  lookupUserDisplayName = async (userId) => {
+    const result = await pool!.query<{ name: string | null }>(
+      'SELECT name FROM "user" WHERE id = $1 LIMIT 1',
+      [userId],
+    );
+    return result.rows[0]?.name ?? null;
+  };
 }
 
 // One in-memory presence hub for the whole process: the ephemeral awareness
@@ -223,6 +234,7 @@ const relayHandler = createSyncRelayHandler({
   resolveActor,
   resolveUserIdByEmail: (email) => resolveUserIdByEmail(email),
   lookupUserEmail: (userId) => lookupUserEmail(userId),
+  lookupUserDisplayName: (userId) => lookupUserDisplayName(userId),
   presence,
   linkKey,
   shareWebOrigin,
