@@ -12,7 +12,7 @@ export function sha256Tree(directory) {
   const entries = [];
   function visit(path, relative) {
     const children = readdirSync(path, { withFileTypes: true }).sort((left, right) =>
-      left.name.localeCompare(right.name),
+      left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
     );
     for (const child of children) {
       const childPath = join(path, child.name);

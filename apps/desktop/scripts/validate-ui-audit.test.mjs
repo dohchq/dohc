@@ -14,6 +14,7 @@ import {
 import {
   currentUiAuditBundles,
   readUiAuditBuildProvenance,
+  sha256Tree,
   writeUiAuditBuildProvenance,
 } from "./ui-audit-build-provenance.mjs";
 import { pnpmInvocation } from "./pnpm-invocation.mjs";
@@ -72,6 +73,21 @@ test(
     assert.match(result.stdout.trim(), /^11\.20\.0$/);
   },
 );
+
+test("hashes build trees in locale-independent code-unit order", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-ui-audit-tree-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await Promise.all([
+    writeFile(join(directory, "Z.js"), "upper"),
+    writeFile(join(directory, "a.js"), "lower"),
+  ]);
+  const fileHash = (content) => createHash("sha256").update(content).digest("hex");
+  const expected = createHash("sha256")
+    .update([`Z.js\0${fileHash("upper")}`, `a.js\0${fileHash("lower")}`].join("\n"))
+    .digest("hex");
+
+  assert.equal(sha256Tree(directory), expected);
+});
 
 function pngHeader(width, height) {
   const bytes = Buffer.alloc(24);
