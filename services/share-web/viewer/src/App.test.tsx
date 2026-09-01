@@ -3560,6 +3560,17 @@ describe("App", () => {
         });
       }
       if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        return jsonResponse({
+          ok: true,
+          access: "comment",
+          latestRevision: 7,
+          cursorRevision: 7,
+          hasMore: false,
+          messages: [],
+          composerState: "available",
+        });
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
         const signal = init?.signal;
         if (!signal) throw new Error("Discussion activity request has no abort signal");
         activitySignal = signal;
@@ -3576,8 +3587,15 @@ describe("App", () => {
     }));
 
     await renderApp();
-    await settle(() => container.textContent?.includes("Readable timeline") === true);
-    await settle(() => activitySignal !== undefined);
+    await settle(() =>
+      container.querySelector("main.content")?.textContent?.includes(
+        "Readable file bytes",
+      ) === true &&
+      container.querySelector(".comments-panel")?.textContent?.includes(
+        "Readable timeline",
+      ) === true &&
+      activitySignal !== undefined
+    );
     const body = container.querySelector<HTMLTextAreaElement>('textarea[name="body"]');
     if (!body) throw new Error("comment body is missing");
     setControlValue(body, "Refused comment");
