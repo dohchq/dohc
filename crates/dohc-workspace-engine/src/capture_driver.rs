@@ -3426,18 +3426,40 @@ async fn apply_bound_run_with_handle(
             let adopted_paths = if status.take_collection_reconcile_request() {
                 let result = match actor.active_version_id(workspace_id.to_owned()).await {
                     Ok(version_id) => {
-                        actor
-                            .reconcile_collections(
-                                workspace_id.to_owned(),
-                                version_id,
-                                root.to_path_buf(),
-                                leases.clone(),
-                                Arc::new(self_writes.clone()),
-                                now_ms,
-                                Arc::new(NoFaults),
-                                CancellationToken::new(),
-                            )
-                            .await
+                        let collection_actor = actor.clone();
+                        let collection_workspace = workspace_id.to_owned();
+                        let collection_root = root.to_path_buf();
+                        let collection_leases = leases.clone();
+                        let collection_self_writes = self_writes.clone();
+                        let collection_author_json = author_json.clone();
+                        let collection_provenance = provenance.clone();
+                        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+                        let thread = std::thread::Builder::new()
+                            .name("dohc-capture-collection-reconcile".to_owned())
+                            .spawn(move || {
+                                let sink = StoreCaptureSink::new_with_bound_root(
+                                    collection_actor,
+                                    collection_workspace,
+                                    version_id,
+                                    collection_root,
+                                    captured_root,
+                                    now_ms,
+                                    collection_author_json,
+                                    collection_leases,
+                                    collection_self_writes,
+                                    collection_provenance,
+                                );
+                                let _ = done_tx.send(sink.reconcile_collections());
+                            });
+                        match thread {
+                            Ok(joiner) => {
+                                let outcome =
+                                    done_rx.await.unwrap_or(Err(RuntimeError::ActorUnavailable));
+                                let _ = tokio::task::spawn_blocking(move || joiner.join()).await;
+                                outcome
+                            }
+                            Err(_) => Err(RuntimeError::ActorUnavailable),
+                        }
                     }
                     Err(RuntimeError::Domain(
                         dohc_engine_domain::DomainError::WorkspaceNotFound,
@@ -3843,7 +3865,7 @@ mod root_bound_run_tests {
     const WORKSPACE_ID: &str = "ws-root-bound-run";
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn prepared_plan_refuses_a_replacement_workspace_root() {
+    async fn prepared_and_converged_runs_refuse_a_replacement_workspace_root() {
         let store_scratch = ScratchDir::new().expect("store scratch");
         let capture_scratch = ScratchDir::new().expect("capture scratch");
         let root = capture_scratch.path().join("workspace");
@@ -3862,6 +3884,7 @@ mod root_bound_run_tests {
             .expect("files actor");
         let files = FilesActorCloseGuard::new(files);
         let captured_root = Arc::new(CapturedRoot::bind(&root).expect("bind plan root"));
+        let converged_root = Arc::clone(&captured_root);
         let run = files
             .handle()
             .reconcile(CancellationToken::new())
@@ -3901,6 +3924,38 @@ mod root_bound_run_tests {
         assert!(
             files.handle().stats().await.expect("files stats").dirty,
             "the refused plan stays dirty for a fresh scan"
+        );
+
+        status.request_collection_reconcile();
+        let converged_clean = apply_bound_run_with_handle(
+            ApplyRunContext {
+                root: &root,
+                actor: &actor,
+                workspace_id: WORKSPACE_ID,
+                leases: &leases,
+                status: &status,
+                self_writes: &self_writes,
+                author_json: None,
+                provenance: CaptureProvenance::default(),
+                events: EngineEvents::default(),
+                #[cfg(feature = "harness")]
+                apply_probe: None,
+            },
+            &files.handle(),
+            RootBoundRun {
+                captured_root: converged_root,
+                run: ReconcileRun::Converged,
+            },
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            !converged_clean,
+            "pending collection work must carry the same root identity"
+        );
+        assert!(
+            status.collection_reconcile_pending(),
+            "a refused collection reconcile stays pending"
         );
 
         files.close().await;
