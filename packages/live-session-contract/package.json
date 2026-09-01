@@ -4,7 +4,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./limits": "./src/limits.ts"
+    "./limits": "./src/limits.ts",
+    "./settlement": "./src/settlement.ts"
   },
   "scripts": {
     "test": "vitest run",
