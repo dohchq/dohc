@@ -588,6 +588,7 @@ import {
 import type { WorkspaceEngineCapture } from "./workspaces/workspaceEngineCapture";
 import { probeEngineStoreRefusal } from "./workspaces/workspaceEngineCapture";
 import { createReceivedShareEngineAccess } from "./workspaces/receivedShareEngineAccess";
+import { waitForReceivedShareCaptureReady } from "./workspaces/receivedShareCaptureReady";
 import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLiveStore";
 import type { ActiveAgentRun } from "./workspaces/workspaceWatcher";
 import {
@@ -9762,15 +9763,37 @@ function registerIpcHandlers(
         // physical operation is already held before this wait begins.
         await engineDaemonStartup;
         operation.assertCurrent();
-        const workspace = operation.workspace;
-        if (!shareViewIsPresent(workspace.shareView)) {
-          throw new Error("This workspace is not a shared view.");
-        }
-        if (!workspace.shareView) {
-          throw new Error(
-            "This shared view's record is damaged, so it can't refresh safely. Remove it, then open the share code again.",
-          );
-        }
+        const currentShareViewWorkspace = () => {
+          operation.assertCurrent();
+          const current = operation.workspace;
+          const shareView = current.shareView;
+          if (!shareViewIsPresent(shareView)) {
+            throw new Error("This workspace is not a shared view.");
+          }
+          if (!shareView) {
+            throw new Error(
+              "This shared view's record is damaged, so it can't refresh safely. Remove it, then open the share code again.",
+            );
+          }
+          return { ...current, shareView };
+        };
+        let workspace = currentShareViewWorkspace();
+        // A proven large fresh import can publish its workspace handle before
+        // initial capture finishes. Every share.* RPC stays fenced until the
+        // phase reaches ready or degraded, including the Edit identity call
+        // below. Wait before relay work and before taking the workspace file
+        // scheduler so the shell remains usable and a workspace switch stops
+        // the background refresh promptly.
+        const shareStore = receivedShareEngine.storeFor({
+          engineWorkspaceId: workspace.workspaceId,
+          rootPath: workspace.rootPath,
+          attachmentId: workspace.attachmentId,
+        });
+        await waitForReceivedShareCaptureReady({
+          readStatus: shareStore.watcherStatus?.bind(shareStore),
+          assertCurrent: () => operation.assertCurrent(),
+        });
+        workspace = currentShareViewWorkspace();
         // Refresh the relay-derived chat fact for the banner's next step. It
         // does not grant desktop generic-chat writes. Keep the share identity
         // current for the separate Edit proposal lane.

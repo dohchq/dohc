@@ -28,6 +28,7 @@ import {
   type VersionedComparisonRecord,
   type VersionedTextListEntry,
   type VersionedTextReadValue,
+  type WatcherStatusResult,
 } from "@dohc/workspace-engine-client";
 import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
@@ -155,11 +156,7 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
   }>;
   flushCapture?(): Promise<void>;
   reconcileCapture?(): Promise<void>;
-  watcherStatus?(): Promise<{
-    running: boolean;
-    degraded: boolean;
-    terminal: boolean;
-  }>;
+  watcherStatus?(): Promise<WatcherStatusResult>;
   setCaptureAuthor?(author: MomentAuthor | null): Promise<void>;
 };
 
