@@ -3548,12 +3548,21 @@ describe("share-web protected discussion proxy", () => {
     const relayKey = "discussion-limit-error-key-sentinel";
     const relayReasons = ["principal-limit", "lifetime-limit", "share-limit"];
     const relayResponses = [
+      () => Response.json(
+        {
+          ok: false,
+          code: "discussion_limit_reached",
+          error: "discussion message limit reached",
+        },
+        { status: 413 },
+      ),
       ...relayReasons.map((reason) => () =>
         Response.json(
           {
             ok: false,
             code: "discussion_limit_reached",
             error: "discussion message limit reached",
+            reason: `${reason}-private-sentinel`,
           },
           { status: 413 },
         )),
@@ -3622,13 +3631,13 @@ describe("share-web protected discussion proxy", () => {
     }
 
     const publicLimitBytes: string[] = [];
-    for (const response of responses.slice(0, relayReasons.length)) {
+    for (const response of responses.slice(0, 1)) {
       publicLimitBytes.push(`${response.status}:${await response.text()}`);
     }
     expect(new Set(publicLimitBytes)).toEqual(new Set([
       '413:{"ok":false,"state":"limit-reached"}',
     ]));
-    for (const response of responses.slice(relayReasons.length)) {
+    for (const response of responses.slice(1)) {
       expect({ status: response.status, body: await response.text() }).toEqual({
         status: 404,
         body: shareWebRefusalBody,
