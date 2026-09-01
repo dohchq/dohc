@@ -8395,7 +8395,9 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: OwnerYDocOutboxAcknowledgeParams = parse(params)?;
         for receipt in &params.receipts {
-            if receipt.journal_cursor < 0
+            if receipt.accepting_host_epoch < 1
+                || receipt.accepting_host_epoch > dohc_engine_protocol::MAX_WIRE_INTEGER as i64
+                || receipt.journal_cursor < 1
                 || receipt.journal_cursor > dohc_engine_protocol::MAX_WIRE_INTEGER as i64
             {
                 return Err(wire(
@@ -10822,7 +10824,7 @@ struct OwnerYDocDeliveryReceiptParams {
     delivery_id: String,
     update_digest: String,
     journal_cursor: i64,
-    accepting_host_epoch: String,
+    accepting_host_epoch: i64,
 }
 
 #[derive(Deserialize)]
@@ -13928,6 +13930,68 @@ mod tests {
                 "maxPendingAgeMs": 1_000
             }
         })
+    }
+
+    #[tokio::test]
+    async fn owner_receipt_wire_bounds_precede_workspace_lookup() {
+        async fn refusal(service: &EngineService, epoch: Value, cursor: Value) -> WireError {
+            service
+                .owner_ydoc_outbox_acknowledge(
+                    None,
+                    json!({
+                        "outboxId": "missing-outbox",
+                        "receipts": [{
+                            "deliveryId": "delivery-1",
+                            "updateDigest": "0".repeat(64),
+                            "journalCursor": cursor,
+                            "acceptingHostEpoch": epoch
+                        }]
+                    }),
+                )
+                .await
+                .expect_err("missing workspace must refuse")
+        }
+
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+
+        for (epoch, cursor) in [
+            (json!("1"), json!(1)),
+            (json!(1), json!("1")),
+            (json!(1.5), json!(1)),
+            (json!(1), json!(1.5)),
+        ] {
+            let error = refusal(&service, epoch, cursor).await;
+            assert_eq!(error.code, ErrorCode::InvalidParams);
+            assert_eq!(error.message, "invalid parameters");
+        }
+
+        for value in [1_i64, 9_007_199_254_740_991_i64] {
+            let error = refusal(&service, json!(value), json!(value)).await;
+            assert_eq!(error.code, ErrorCode::WorkspaceUnavailable, "{value}");
+            assert_eq!(error.message, "workspace handle is unavailable", "{value}");
+        }
+
+        for value in [0_i64, -1_i64, 9_007_199_254_740_992_i64] {
+            let epoch_error = refusal(&service, json!(value), json!(1)).await;
+            assert_eq!(epoch_error.code, ErrorCode::InvalidParams, "epoch {value}");
+            assert_eq!(
+                epoch_error.message, "invalid-owner-outbox-receipt",
+                "epoch {value}"
+            );
+
+            let cursor_error = refusal(&service, json!(1), json!(value)).await;
+            assert_eq!(
+                cursor_error.code,
+                ErrorCode::InvalidParams,
+                "cursor {value}"
+            );
+            assert_eq!(
+                cursor_error.message, "invalid-owner-outbox-receipt",
+                "cursor {value}"
+            );
+        }
     }
 
     #[test]

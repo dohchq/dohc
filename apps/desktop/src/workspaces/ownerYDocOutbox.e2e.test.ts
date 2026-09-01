@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import * as Y from "yjs";
+import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import {
   OwnerYDocOutbox,
@@ -72,20 +73,23 @@ class FakeOwnerHost implements OwnerYDocDelivery {
   readonly authorship: { deliveryId: string; startCursor: number; endCursor: number }[] = [];
   readonly appliedDeliveryIds: string[] = [];
   readonly delivered: OwnerYDocDeliveryEnvelope[] = [];
+  readonly authorityEpochs: number[] = [];
   readonly doc = new Y.Doc();
   authorityCalls = 0;
-  private readonly receipts = new Map<string, OwnerYDocDeliveryReceipt>();
+  readonly receipts = new Map<string, OwnerYDocDeliveryReceipt>();
 
   async freshOwnerAuthority(): Promise<{
     kind: "authority";
     authority: FreshOwnerAuthority;
   }> {
     this.authorityCalls += 1;
+    const hostEpoch = parseHostEpoch(this.authorityCalls);
+    this.authorityEpochs.push(hostEpoch);
     return {
       kind: "authority",
       authority: {
         value: { owner: true },
-        hostEpoch: `host-epoch-${this.authorityCalls}`,
+        hostEpoch,
       },
     };
   }
@@ -262,9 +266,13 @@ it.skipIf(engine.missing)(
         expect(await secondDrainer.drainOnce()).toBe("acknowledged");
 
         expect(host.authorityCalls).toBe(2);
+        expect(host.authorityEpochs).toEqual([1, 2]);
         expect(host.delivered).toHaveLength(2);
         expect(host.delivered[1]?.deliveryId).toBe(host.delivered[0]?.deliveryId);
         expect(host.delivered[1]?.updateDigest).toBe(host.delivered[0]?.updateDigest);
+        expect(
+          host.receipts.get(host.delivered[0]!.deliveryId)?.acceptingHostEpoch,
+        ).toBe(1);
         expect(host.journal).toHaveLength(1);
         expect(host.authorship).toHaveLength(1);
         expect(host.appliedDeliveryIds).toHaveLength(1);

@@ -131,7 +131,7 @@ pub struct OwnerDeliveryReceipt {
     pub delivery_id: String,
     pub update_digest: String,
     pub journal_cursor: i64,
-    pub accepting_host_epoch: String,
+    pub accepting_host_epoch: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -449,13 +449,14 @@ pub fn acknowledge(
             "delivery id must be non-empty and bounded",
         )?;
         validate_digest(&receipt.update_digest)?;
-        validate_identifier(
-            &receipt.accepting_host_epoch,
-            "accepting host epoch must be non-empty and bounded",
-        )?;
-        if receipt.journal_cursor < 0 {
+        if !(1..=9_007_199_254_740_991).contains(&receipt.accepting_host_epoch) {
             return Err(OwnerOutboxError::InvalidInput(
-                "journal cursor must be non-negative",
+                "accepting host epoch must be a positive safe integer",
+            ));
+        }
+        if !(1..=9_007_199_254_740_991).contains(&receipt.journal_cursor) {
+            return Err(OwnerOutboxError::InvalidInput(
+                "journal cursor must be a positive safe integer",
             ));
         }
     }
@@ -796,8 +797,79 @@ mod tests {
             delivery_id: entry.delivery_id.clone(),
             update_digest: entry.update_digest.clone(),
             journal_cursor: entry.sequence,
-            accepting_host_epoch: "host-epoch-1".to_owned(),
+            accepting_host_epoch: 1,
         }
+    }
+
+    #[test]
+    fn owner_receipt_numeric_bounds_guard_acknowledgement() {
+        fn run_case(tag: &str, epoch: &str, cursor: &str, valid: bool) {
+            let (_dir, mut store) = store(tag);
+            let outbox_id = append(&mut store, "workspace-1", input("key-1", b"one", 10))
+                .expect("append")
+                .outbox_id;
+            let pending = read_pending(&store, "workspace-1", &outbox_id).expect("pending receipt");
+            let receipt = OwnerDeliveryReceipt {
+                delivery_id: pending.entries[0].delivery_id.clone(),
+                update_digest: pending.entries[0].update_digest.clone(),
+                journal_cursor: cursor.parse().expect("cursor fixture"),
+                accepting_host_epoch: epoch.parse().expect("epoch fixture"),
+            };
+            let result = acknowledge(&mut store, "workspace-1", &outbox_id, &[receipt]);
+
+            if valid {
+                assert_eq!(result.expect("valid receipt").acknowledged, 1, "{tag}");
+                assert!(
+                    read_pending(&store, "workspace-1", &outbox_id)
+                        .expect("acknowledged pending state")
+                        .entries
+                        .is_empty(),
+                    "{tag}"
+                );
+            } else {
+                assert!(
+                    matches!(result, Err(OwnerOutboxError::InvalidInput(_))),
+                    "{tag}: {result:?}"
+                );
+                let after =
+                    read_pending(&store, "workspace-1", &outbox_id).expect("refused pending state");
+                assert_eq!(after.entries, pending.entries, "{tag}");
+                assert_eq!(after.pending_bytes, pending.pending_bytes, "{tag}");
+            }
+        }
+
+        run_case("owner-receipt-min", "1", "1", true);
+        run_case(
+            "owner-receipt-max",
+            "9007199254740991",
+            "9007199254740991",
+            true,
+        );
+        for (tag, epoch) in [
+            ("owner-receipt-epoch-zero", "0"),
+            ("owner-receipt-epoch-negative", "-1"),
+            ("owner-receipt-epoch-overflow", "9007199254740992"),
+        ] {
+            run_case(tag, epoch, "1", false);
+        }
+        for (tag, cursor) in [
+            ("owner-receipt-cursor-zero", "0"),
+            ("owner-receipt-cursor-negative", "-1"),
+            ("owner-receipt-cursor-overflow", "9007199254740992"),
+        ] {
+            run_case(tag, "1", cursor, false);
+        }
+
+        let field_type = OwnerDeliveryReceipt {
+            delivery_id: "delivery-type".to_owned(),
+            update_digest: "0".repeat(64),
+            journal_cursor: "1".parse().expect("cursor fixture"),
+            accepting_host_epoch: "1".parse().expect("epoch fixture"),
+        };
+        assert_eq!(
+            std::any::type_name_of_val(&field_type.accepting_host_epoch),
+            "i64"
+        );
     }
 
     #[test]

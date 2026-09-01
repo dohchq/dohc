@@ -1,3 +1,5 @@
+import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
+import type { HostEpoch } from "@dohc/live-session-contract/host-control";
 import { parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import type { DaemonRequesterClient } from "../live/daemonLiveAdapter";
@@ -67,7 +69,7 @@ export interface OwnerYDocDeliveryReceipt {
   readonly deliveryId: string;
   readonly updateDigest: string;
   readonly journalCursor: number;
-  readonly acceptingHostEpoch: string;
+  readonly acceptingHostEpoch: HostEpoch;
 }
 
 export interface OwnerYDocOutboxQuarantineInput {
@@ -145,6 +147,25 @@ function nullableString(value: unknown, name: string): string | null {
   if (value === null) return null;
   if (typeof value !== "string") throw new TypeError(`${name} must be a string or null.`);
   return value;
+}
+
+function validatedReceipt(
+  receipt: OwnerYDocDeliveryReceipt,
+): OwnerYDocDeliveryReceipt {
+  let acceptingHostEpoch: HostEpoch;
+  try {
+    acceptingHostEpoch = parseHostEpoch(receipt.acceptingHostEpoch);
+  } catch {
+    throw new TypeError("acceptingHostEpoch must be a positive safe integer.");
+  }
+  if (!Number.isSafeInteger(receipt.journalCursor) || receipt.journalCursor < 1) {
+    throw new TypeError("journalCursor must be a positive safe integer.");
+  }
+  return {
+    ...receipt,
+    acceptingHostEpoch,
+    journalCursor: receipt.journalCursor,
+  };
 }
 
 export class OwnerYDocOutbox {
@@ -250,10 +271,11 @@ export class OwnerYDocOutbox {
   ): Promise<{ acknowledged: number; pendingBytes: number; oldestEntryAtMs: number | null }> {
     this.assertLive();
     if (receipts.length === 0) throw new TypeError("receipts must not be empty.");
+    const validatedReceipts = Array.from(receipts, validatedReceipt);
     const raw = record(
       await this.requester.request(
         OWNER_YDOC_OUTBOX_METHOD.acknowledge,
-        { outboxId, receipts } as unknown as JsonValue,
+        { outboxId, receipts: validatedReceipts } as unknown as JsonValue,
         { workspace: this.workspace },
       ),
       "owner outbox acknowledge result",

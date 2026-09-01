@@ -5,11 +5,12 @@ import type {
   OwnerYDocOutboxEntry,
   OwnerYDocOutboxLimits,
 } from "@dohc/workspace-engine-client";
+import type { HostEpoch } from "@dohc/live-session-contract/host-control";
 
 export interface FreshOwnerAuthority {
   /** Opaque, attempt-scoped authority. The outbox never persists it. */
   readonly value: unknown;
-  readonly hostEpoch: string;
+  readonly hostEpoch: HostEpoch;
 }
 
 export type OwnerAuthorityResult =
