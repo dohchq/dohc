@@ -1037,6 +1037,8 @@ describe("EngineRelayClient", () => {
       "ipcMain.handle(CHANNELS.refreshSharedView",
     );
     const refreshEnd = source.indexOf("// ---- Share mounts ----", refreshStart);
+    expect(refreshStart).toBeGreaterThanOrEqual(0);
+    expect(refreshEnd).toBeGreaterThan(refreshStart);
     const refresh = source.slice(refreshStart, refreshEnd);
     expect(refresh).toContain("fetchShareViewInfo(");
     expect(refresh).toContain("genericChatWritable: info.genericChatWritable");
