@@ -282,7 +282,6 @@ async function disposeRejectedDriverSession(
         0,
         PLUGIN_DRIVER_REJECTION_MESSAGE_MAX_CHARS,
       ),
-      stopSpawn: true,
     };
   } finally {
     if (timer) clearTimeout(timer);

@@ -101,7 +101,6 @@ export interface PluginDriverStartedSessionResult {
 export interface PluginDriverRejectedSessionResult {
   rejected: true;
   message: string;
-  stopSpawn: true;
 }
 
 export type PluginDriverStartSessionResult =

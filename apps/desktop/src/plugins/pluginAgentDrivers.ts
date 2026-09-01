@@ -222,7 +222,6 @@ const StartSessionResultSchema = z.object({
 const RejectedSessionResultSchema = z.object({
   rejected: z.literal(true),
   message: z.string().min(1).max(PLUGIN_DRIVER_REJECTION_MESSAGE_MAX_CHARS),
-  stopSpawn: z.literal(true),
 });
 
 function locations(values: string[] | undefined): string[] | undefined {
