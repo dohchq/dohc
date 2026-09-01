@@ -601,6 +601,7 @@ describe("public discussion projection", () => {
         hasMore: true,
         messages: [named, link],
         composerState: "available",
+        profileName: null,
         grantId: "internal",
       },
       {
@@ -611,6 +612,7 @@ describe("public discussion projection", () => {
         hasMore: true,
         messages: [],
         composerState: "available",
+        profileName: null,
       },
       {
         ok: true,
@@ -620,6 +622,7 @@ describe("public discussion projection", () => {
         hasMore: "yes",
         messages: [],
         composerState: "available",
+        profileName: null,
       },
       {
         ok: true,
@@ -629,6 +632,7 @@ describe("public discussion projection", () => {
         hasMore: false,
         messages: [link, named],
         composerState: "available",
+        profileName: null,
       },
       {
         ok: true,
@@ -638,6 +642,7 @@ describe("public discussion projection", () => {
         hasMore: false,
         messages: [],
         composerState: "disabled",
+        profileName: null,
       },
       {
         ok: true,
@@ -646,6 +651,7 @@ describe("public discussion projection", () => {
         hasMore: false,
         messages: [],
         composerState: "available",
+        profileName: null,
       },
       {
         ok: true,
@@ -655,6 +661,7 @@ describe("public discussion projection", () => {
         hasMore: false,
         messages: [],
         composerState: "available",
+        profileName: null,
       },
     ]) {
       expect(parseDiscussionActivity(value)).toBeNull();
