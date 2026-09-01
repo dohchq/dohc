@@ -9,29 +9,17 @@ import {
   type SearchModel,
 } from "./search-model";
 
-const WORKSPACE_UPDATING_MESSAGE = "Workspace is still updating. Try again.";
 const UPDATING_RETRY_DELAYS_MS = [100, 250, 500, 1_000] as const;
+// A fresh 15,000-file workspace stayed in initial capture for roughly another
+// 10–15s after it became interactive. Keep an early search alive across that
+// window, but never leave one polling the main process forever.
+const UPDATING_RETRY_DEADLINE_MS = 15_000;
 
 interface ActiveSearch {
   readonly workspaceId: string;
   readonly payload: WorkspaceSearchPayload;
   retryCount: number;
-}
-
-// Electron serializes a rejected invoke into an ordinary renderer Error, so
-// the daemon refusal's typed prototype and wire code are no longer available
-// here. Match only the exact daemon message, optionally after Electron's
-// fixed channel prefix; every other rejection keeps the terminal behavior.
-function isWorkspaceUpdatingInvokeError(error: unknown): boolean {
-  if (typeof error !== "object" || error === null || !("message" in error)) {
-    return false;
-  }
-  const message = error.message;
-  return (
-    typeof message === "string" &&
-    (message === WORKSPACE_UPDATING_MESSAGE ||
-      message.endsWith(`: ${WORKSPACE_UPDATING_MESSAGE}`))
-  );
+  updatingStartedAtMs: number | null;
 }
 
 export interface SearchRunOptions {
@@ -159,54 +147,70 @@ export function useWorkspaceSearch(
 
   const issue = useCallback(
     function issue(active: ActiveSearch): void {
-      void bridge()
-        .searchWorkspace(active.payload)
-        .catch((error: unknown) => {
+      const isCurrent = () =>
+        activeSearchRef.current === active &&
+        modelRef.current.searchId === active.payload.searchId;
+      const fail = (error: unknown) => {
+        if (!isCurrent()) return;
+        // The search never started (unknown workspace, vanished root), or its
+        // bounded updating window ended. No done-batch will arrive. Return to
+        // idle instead of presenting either as a successful zero-result run.
+        activeSearchRef.current = null;
+        failedSearchRef.current = active;
+        commit(idleSearchModel());
+        reportError(error, () => {
           if (
-            activeSearchRef.current !== active ||
-            modelRef.current.searchId !== active.payload.searchId
+            failedSearchRef.current !== active ||
+            committedWorkspaceIdRef.current !== active.workspaceId
           ) {
             return;
           }
-          if (isWorkspaceUpdatingInvokeError(error)) {
-            commit({ ...modelRef.current, status: "updating" });
-            const delay =
-              UPDATING_RETRY_DELAYS_MS[
-                Math.min(active.retryCount, UPDATING_RETRY_DELAYS_MS.length - 1)
-              ];
-            active.retryCount += 1;
-            retryTimerRef.current = setTimeout(() => {
-              retryTimerRef.current = null;
-              if (activeSearchRef.current === active) issue(active);
-            }, delay);
-            return;
-          }
-
-          // The search never started (unknown workspace, vanished root): no
-          // done-batch will ever arrive. Return to idle instead of presenting
-          // a failed invocation as a successful search with zero results.
-          activeSearchRef.current = null;
-          failedSearchRef.current = active;
-          commit(idleSearchModel());
-          reportError(error, () => {
-            if (
-              failedSearchRef.current !== active ||
-              committedWorkspaceIdRef.current !== active.workspaceId
-            ) {
-              return;
-            }
-            const retry: ActiveSearch = {
-              ...active,
-              payload: { ...active.payload, searchId: crypto.randomUUID() },
-              retryCount: 0,
-            };
-            failedSearchRef.current = null;
-            activeSearchRef.current = retry;
-            rendererMarks.mark("content-search-start");
-            commit(beginSearch(retry.payload.searchId));
-            issue(retry);
-          });
+          const retry: ActiveSearch = {
+            ...active,
+            payload: { ...active.payload, searchId: crypto.randomUUID() },
+            retryCount: 0,
+            updatingStartedAtMs: null,
+          };
+          failedSearchRef.current = null;
+          activeSearchRef.current = retry;
+          rendererMarks.mark("content-search-start");
+          commit(beginSearch(retry.payload.searchId));
+          issue(retry);
         });
+      };
+      void bridge()
+        .searchWorkspace(active.payload)
+        .then(
+          (result) => {
+            if (!isCurrent() || result.status === "accepted") return;
+            if (result.code === "workspace-updating") {
+              commit({ ...modelRef.current, status: "updating" });
+              const now = performance.now();
+              active.updatingStartedAtMs ??= now;
+              const remainingMs =
+                active.updatingStartedAtMs + UPDATING_RETRY_DEADLINE_MS - now;
+              if (remainingMs <= 0) {
+                fail(new Error("Workspace is still updating."));
+                return;
+              }
+              const delay = Math.min(
+                UPDATING_RETRY_DELAYS_MS[
+                  Math.min(
+                    active.retryCount,
+                    UPDATING_RETRY_DELAYS_MS.length - 1,
+                  )
+                ],
+                remainingMs,
+              );
+              active.retryCount += 1;
+              retryTimerRef.current = setTimeout(() => {
+                retryTimerRef.current = null;
+                if (activeSearchRef.current === active) issue(active);
+              }, delay);
+            }
+          },
+          (error: unknown) => fail(error),
+        );
     },
     [commit, reportError],
   );
@@ -239,6 +243,7 @@ export function useWorkspaceSearch(
           ...(options.excludeGlob ? { excludeGlob: options.excludeGlob } : {}),
         },
         retryCount: 0,
+        updatingStartedAtMs: null,
       };
       activeSearchRef.current = active;
       issue(active);

@@ -94,7 +94,7 @@ async function capture(command, args, options = {}) {
   child.stderr.on("data", (chunk) => {
     stderr += chunk;
   });
-  const [code, signal] = await once(child, "exit");
+  const [code, signal] = await once(child, "close");
   if (code !== 0) {
     throw new Error(
       `${command} exited ${code ?? `after signal ${signal ?? "unknown"}`}: ${stderr.trim()}`,
@@ -155,7 +155,7 @@ async function sha256Tree(root) {
   const files = entries
     .filter((entry) => entry.isFile())
     .map((entry) => join(entry.parentPath, entry.name))
-    .sort((left, right) => left.localeCompare(right));
+    .sort();
   const hash = createHash("sha256");
   for (const path of files) {
     hash.update(path.slice(root.length).replaceAll("\\", "/"));

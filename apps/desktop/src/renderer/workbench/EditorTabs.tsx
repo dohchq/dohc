@@ -18,6 +18,11 @@ import {
   parsePluginWebAppTabPath,
 } from "./workbenchState";
 
+export function momentDiffName(label?: string): string {
+  const name = label?.split("/").pop();
+  return name ? `Diff: ${name}` : "History change";
+}
+
 // A plugin's own names — its display name and its web apps' titles — live in
 // its manifest, which the tab path cannot carry and this strip cannot read.
 // `label` is that name once a mounted plugin page has reported it, and the id
@@ -46,8 +51,7 @@ function fileName(path: string, label?: string): string {
     return `Diff: ${name}`;
   }
   if (isMomentDiffTabPath(path)) {
-    const name = label?.split("/").pop();
-    return name ? `Diff: ${name}` : "History change";
+    return momentDiffName(label);
   }
   if (isVersionCompareTabPath(path)) return "Compare with Main";
   return path.split("/").pop() ?? path;

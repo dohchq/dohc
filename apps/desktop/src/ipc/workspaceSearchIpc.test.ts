@@ -33,6 +33,7 @@ function harness() {
   const authorizeCancel = vi.fn((_event: TestEvent) => {
     return rendererSessionCurrent;
   });
+  const onActivityError = vi.fn();
   registerWorkspaceSearchIpcHandlers<TestEvent, typeof workspace>({
     registerHandler: (channel, handler) => handlers.set(channel, handler),
     assertTrustedSender: (event) => {
@@ -58,7 +59,7 @@ function harness() {
     },
     authorizeCancel,
     owner,
-    onActivityError: vi.fn(),
+    onActivityError,
   });
   const event: TestEvent = {
     trusted: true,
@@ -73,6 +74,7 @@ function harness() {
     trace,
     owner,
     authorizeCancel,
+    onActivityError,
     event,
     setActiveWorkspaceId(workspaceId: string) {
       activeWorkspaceId = workspaceId;
@@ -103,7 +105,9 @@ describe("workspace search IPC registration", () => {
       query: "needle",
     };
 
-    await test.invoke(CHANNELS.searchWorkspace, payload);
+    await expect(test.invoke(CHANNELS.searchWorkspace, payload)).resolves.toEqual({
+      status: "accepted",
+    });
 
     expect(test.trace).toEqual(["trust", "workspace:workspace-1"]);
     expect(test.owner.start).toHaveBeenCalledWith(
@@ -182,6 +186,31 @@ describe("workspace search IPC registration", () => {
     ).rejects.toThrow(
       "Workspace search stopped because it is no longer current.",
     );
+  });
+
+  it("returns a stable refusal code while the workspace is updating", async () => {
+    const test = harness();
+    test.owner.start.mockRejectedValueOnce(
+      Object.assign(new Error("Workspace is still updating. Try again."), {
+        wireError: {
+          code: "OVERLOADED",
+          message: "Workspace is still updating. Try again.",
+          retry: "afterBackoff",
+        },
+      }),
+    );
+
+    await expect(
+      test.invoke(CHANNELS.searchWorkspace, {
+        workspaceId: "workspace-1",
+        searchId: "search-1",
+        query: "needle",
+      }),
+    ).resolves.toEqual({
+      status: "refused",
+      code: "workspace-updating",
+    });
+    expect(test.onActivityError).not.toHaveBeenCalled();
   });
 
   it("denies a fresh search as soon as reload retirement invalidates the lease", async () => {

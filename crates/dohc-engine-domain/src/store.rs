@@ -4829,7 +4829,9 @@ pub(crate) fn next_moment_order(conn: &Connection) -> Result<i64, DomainError> {
     let max: i64 = conn
         .query_row(NEXT_MOMENT_ORDER_SQL, [], |row| row.get(0))
         .map_err(DomainError::sql_corrupt)?;
-    Ok(max + 1)
+    max.checked_add(1).ok_or(DomainError::StateCorrupt {
+        reason: "moment order high water is exhausted",
+    })
 }
 
 fn latest_moment_order(
@@ -6440,6 +6442,20 @@ mod tests {
             81,
             "the global moment maximum must win when it exceeds every job generation"
         );
+    }
+
+    #[test]
+    fn next_moment_order_fails_closed_when_the_high_water_is_exhausted() {
+        let conn = moment_order_semantics_connection();
+        conn.execute("INSERT INTO moments (moment_order) VALUES (?1)", [i64::MAX])
+            .expect("seed exhausted moment order");
+
+        assert!(matches!(
+            next_moment_order(&conn),
+            Err(DomainError::StateCorrupt {
+                reason: "moment order high water is exhausted"
+            })
+        ));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CloudLogin } from "./CloudLogin";
 
@@ -104,11 +105,39 @@ describe("CloudLogin", () => {
     );
 
     fireEvent.click(screen.getByTestId("cloud-connect-start"));
-    expect(screen.getByTestId("cloud-connection-error").textContent).toBe(
+    const error = screen.getByRole("alert");
+    expect(error.textContent).toBe(
       "Enter the cloud server URL and sync relay URL.",
     );
-    expect(document.activeElement).toBe(screen.getByTestId("cloud-server-url"));
+    const serverUrl = screen.getByTestId("cloud-server-url");
+    const relayUrl = screen.getByTestId("cloud-relay-url");
+    expect(serverUrl.getAttribute("aria-invalid")).toBe("true");
+    expect(relayUrl.getAttribute("aria-invalid")).toBe("true");
+    expect(serverUrl.getAttribute("aria-describedby")).toBe(error.id);
+    expect(relayUrl.getAttribute("aria-describedby")).toBe(error.id);
+    expect(document.activeElement).toBe(serverUrl);
     expect(bridgeMock.cloudLoginStart).not.toHaveBeenCalled();
+  });
+
+  it("submits self-hosted origins with Enter", async () => {
+    const user = userEvent.setup();
+    render(<CloudLogin workspaceId="ws-1" />);
+
+    await user.type(
+      await screen.findByTestId("cloud-server-url"),
+      "https://cloud.example.test",
+    );
+    await user.type(
+      screen.getByTestId("cloud-relay-url"),
+      "https://relay.example.test{Enter}",
+    );
+
+    await waitFor(() =>
+      expect(bridgeMock.cloudLoginStart).toHaveBeenCalledWith({
+        serverUrl: "https://cloud.example.test",
+        relayUrl: "https://relay.example.test",
+      }),
+    );
   });
 
   it("reports an incomplete managed configuration without hiding self-hosting", async () => {
@@ -171,7 +200,41 @@ describe("CloudLogin", () => {
     expect(screen.getByTestId("cloud-connection-error").textContent).toBe(
       "Enter the cloud server URL as an HTTP or HTTPS origin.",
     );
-    expect(document.activeElement).toBe(screen.getByTestId("cloud-server-url"));
+    const serverUrl = screen.getByTestId("cloud-server-url");
+    const relayUrl = screen.getByTestId("cloud-relay-url");
+    expect(serverUrl.getAttribute("aria-invalid")).toBe("true");
+    expect(serverUrl.getAttribute("aria-describedby")).toBe(
+      "cloud-connection-error",
+    );
+    expect(relayUrl.getAttribute("aria-invalid")).toBe("false");
+    expect(relayUrl.getAttribute("aria-describedby")).toBeNull();
+    expect(document.activeElement).toBe(serverUrl);
+    expect(bridgeMock.cloudLoginStart).not.toHaveBeenCalled();
+  });
+
+  it("marks only an invalid self-hosted relay origin", async () => {
+    render(<CloudLogin workspaceId="ws-1" />);
+    await screen.findByTestId("cloud-server-url");
+    fireEvent.change(screen.getByTestId("cloud-server-url"), {
+      target: { value: "https://cloud.example.test" },
+    });
+    fireEvent.change(screen.getByTestId("cloud-relay-url"), {
+      target: { value: "https://relay.example.test/api" },
+    });
+    fireEvent.click(screen.getByTestId("cloud-connect-start"));
+
+    expect(screen.getByRole("alert").textContent).toBe(
+      "Enter the sync relay URL as an HTTP or HTTPS origin.",
+    );
+    const serverUrl = screen.getByTestId("cloud-server-url");
+    const relayUrl = screen.getByTestId("cloud-relay-url");
+    expect(serverUrl.getAttribute("aria-invalid")).toBe("false");
+    expect(serverUrl.getAttribute("aria-describedby")).toBeNull();
+    expect(relayUrl.getAttribute("aria-invalid")).toBe("true");
+    expect(relayUrl.getAttribute("aria-describedby")).toBe(
+      "cloud-connection-error",
+    );
+    expect(document.activeElement).toBe(relayUrl);
     expect(bridgeMock.cloudLoginStart).not.toHaveBeenCalled();
   });
 
@@ -357,7 +420,10 @@ describe("CloudLogin", () => {
       relayUrl: "http://localhost:1788",
     });
     const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.assign(navigator, { clipboard: { writeText } });
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
 
     render(<CloudLogin workspaceId="ws-1" />);
     const code = await screen.findByTestId("cloud-sync-code");

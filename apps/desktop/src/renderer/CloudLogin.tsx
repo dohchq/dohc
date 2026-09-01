@@ -10,6 +10,10 @@ type WorkspaceSecretState = "none" | "protected-key-present" | "protected-key-mi
 type PassphrasePurpose = "enable" | "protect" | "unlock";
 type ManagedCloudStatus = "unknown" | "ready" | "unconfigured" | "invalid";
 type ConnectionMode = "managed" | "self-host";
+type ConnectionError = {
+  message: string;
+  invalid: "both" | "server" | "relay";
+};
 const MIN_PASSPHRASE_LENGTH = 8;
 
 type Phase =
@@ -48,7 +52,7 @@ export function CloudLogin(props: {
     useState<ManagedCloudStatus>("unknown");
   const [statusAttempt, setStatusAttempt] = useState(0);
   const [connectionMode, setConnectionMode] = useState<ConnectionMode>("self-host");
-  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [connectionError, setConnectionError] = useState<ConnectionError | null>(null);
   const [serverUrl, setServerUrl] = useState("");
   const [relayUrl, setRelayUrl] = useState("");
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -92,7 +96,7 @@ export function CloudLogin(props: {
         setWorkspaceSynced(status.workspaceSynced ?? false);
         setWorkspaceSyncConnected(status.workspaceSyncConnected ?? false);
         setWorkspaceSecretState(status.workspaceSecretState ?? "none");
-        const configuredStatus = status.managedCloudStatus ?? "unconfigured";
+        const configuredStatus = status.managedCloudStatus;
         setManagedCloudStatus(configuredStatus);
         setConnectionMode(configuredStatus === "ready" ? "managed" : "self-host");
         if (status.serverUrl) setServerUrl(status.serverUrl);
@@ -211,22 +215,39 @@ export function CloudLogin(props: {
     if (connectionMode === "self-host") {
       const normalizedServerUrl = canonicalCloudOrigin(serverUrl);
       const normalizedRelayUrl = canonicalCloudOrigin(relayUrl);
-      if (!serverUrl.trim() || !relayUrl.trim()) {
-        setConnectionError("Enter the cloud server URL and sync relay URL.");
-        (serverUrl.trim() ? relayUrlInput : serverUrlInput).current?.focus();
+      const missingServer = !serverUrl.trim();
+      const missingRelay = !relayUrl.trim();
+      if (missingServer || missingRelay) {
+        setConnectionError({
+          message:
+            missingServer && missingRelay
+              ? "Enter the cloud server URL and sync relay URL."
+              : missingServer
+                ? "Enter the cloud server URL."
+                : "Enter the sync relay URL.",
+          invalid:
+            missingServer && missingRelay
+              ? "both"
+              : missingServer
+                ? "server"
+                : "relay",
+        });
+        (missingServer ? serverUrlInput : relayUrlInput).current?.focus();
         return;
       }
       if (!normalizedServerUrl) {
-        setConnectionError(
-          "Enter the cloud server URL as an HTTP or HTTPS origin.",
-        );
+        setConnectionError({
+          message: "Enter the cloud server URL as an HTTP or HTTPS origin.",
+          invalid: "server",
+        });
         serverUrlInput.current?.focus();
         return;
       }
       if (!normalizedRelayUrl) {
-        setConnectionError(
-          "Enter the sync relay URL as an HTTP or HTTPS origin.",
-        );
+        setConnectionError({
+          message: "Enter the sync relay URL as an HTTP or HTTPS origin.",
+          invalid: "relay",
+        });
         relayUrlInput.current?.focus();
         return;
       }
@@ -417,58 +438,88 @@ export function CloudLogin(props: {
                   Use dohc Cloud
                 </SecondaryButton>
               ) : null}
-              <p className="mb-0 mt-3 text-[11px] font-semibold text-ink">
-                Self-hosted server
-              </p>
-              <p className="mb-0 mt-1 text-[11px] leading-relaxed text-subtle">
-                Enter the server and sync relay origins from your administrator.
-                Origins cannot include paths, queries, fragments, or sign-in details.
-              </p>
-              <label className="mt-3 block text-[11px] font-medium text-subtle">
-                Cloud server URL
-                <input
-                  ref={serverUrlInput}
-                  spellCheck={false}
-                  data-testid="cloud-server-url"
-                  value={serverUrl}
-                  onChange={(event) => {
-                    setServerUrl(event.currentTarget.value);
-                    setConnectionError(null);
-                  }}
-                  placeholder="https://cloud.example.com"
-                  className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink placeholder:text-subtle focus:border-ink"
-                />
-              </label>
-              <label className="mt-2 block text-[11px] font-medium text-subtle">
-                Sync relay URL
-                <input
-                  ref={relayUrlInput}
-                  spellCheck={false}
-                  data-testid="cloud-relay-url"
-                  value={relayUrl}
-                  onChange={(event) => {
-                    setRelayUrl(event.currentTarget.value);
-                    setConnectionError(null);
-                  }}
-                  placeholder="https://relay.example.com"
-                  className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink placeholder:text-subtle focus:border-ink"
-                />
-              </label>
-              {connectionError ? (
-                <p
-                  data-testid="cloud-connection-error"
-                  className="mb-0 mt-2 text-xs text-danger"
-                >
-                  {connectionError}
-                </p>
-              ) : null}
-              <PrimaryButton
-                data-testid="cloud-connect-start"
-                onClick={() => void connect()}
-                className="mt-3"
+              <form
+                noValidate
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void connect();
+                }}
               >
-                Connect
-              </PrimaryButton>
+                <p className="mb-0 mt-3 text-[11px] font-semibold text-ink">
+                  Self-hosted server
+                </p>
+                <p className="mb-0 mt-1 text-[11px] leading-relaxed text-subtle">
+                  Enter the server and sync relay origins from your administrator.
+                  Origins cannot include paths, queries, fragments, or sign-in details.
+                </p>
+                <label className="mt-3 block text-[11px] font-medium text-subtle">
+                  Cloud server URL
+                  <input
+                    ref={serverUrlInput}
+                    spellCheck={false}
+                    aria-invalid={
+                      connectionError?.invalid === "both" ||
+                      connectionError?.invalid === "server"
+                    }
+                    aria-describedby={
+                      connectionError?.invalid === "both" ||
+                      connectionError?.invalid === "server"
+                        ? "cloud-connection-error"
+                        : undefined
+                    }
+                    data-testid="cloud-server-url"
+                    value={serverUrl}
+                    onChange={(event) => {
+                      setServerUrl(event.currentTarget.value);
+                      setConnectionError(null);
+                    }}
+                    placeholder="https://cloud.example.com"
+                    className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink placeholder:text-subtle focus:border-ink"
+                  />
+                </label>
+                <label className="mt-2 block text-[11px] font-medium text-subtle">
+                  Sync relay URL
+                  <input
+                    ref={relayUrlInput}
+                    spellCheck={false}
+                    aria-invalid={
+                      connectionError?.invalid === "both" ||
+                      connectionError?.invalid === "relay"
+                    }
+                    aria-describedby={
+                      connectionError?.invalid === "both" ||
+                      connectionError?.invalid === "relay"
+                        ? "cloud-connection-error"
+                        : undefined
+                    }
+                    data-testid="cloud-relay-url"
+                    value={relayUrl}
+                    onChange={(event) => {
+                      setRelayUrl(event.currentTarget.value);
+                      setConnectionError(null);
+                    }}
+                    placeholder="https://relay.example.com"
+                    className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink placeholder:text-subtle focus:border-ink"
+                  />
+                </label>
+                {connectionError ? (
+                  <p
+                    id="cloud-connection-error"
+                    data-testid="cloud-connection-error"
+                    role="alert"
+                    className="mb-0 mt-2 text-xs text-danger"
+                  >
+                    {connectionError.message}
+                  </p>
+                ) : null}
+                <PrimaryButton
+                  type="submit"
+                  data-testid="cloud-connect-start"
+                  className="mt-3"
+                >
+                  Connect
+                </PrimaryButton>
+              </form>
             </>
           )}
         </>

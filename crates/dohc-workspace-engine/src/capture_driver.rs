@@ -565,6 +565,10 @@ const STATUS_POLICY_HOLD: u8 = 1 << 3;
 const STATUS_COLLECTION_RECONCILE_PENDING: u8 = 1 << 4;
 const STATUS_PHASE_SHIFT: u8 = 5;
 const STATUS_PHASE_MASK: u8 = 0b11 << STATUS_PHASE_SHIFT;
+/// The early-import apply deadline elapsed while `start_layer` was still
+/// draining. Bare starts cannot claim running while this bit is set; the next
+/// healthy tick clears it while making that claim.
+const STATUS_INITIAL_APPLY_TIMED_OUT: u8 = 1 << 7;
 
 /// Truth about the one-time startup capture barrier. Once `Ready`, ordinary
 /// later watcher passes never take the workspace back behind this barrier.
@@ -685,9 +689,13 @@ impl DriverStatus {
     /// terminal supervision failure, and capture cannot claim to be running.
     fn mark_initial_apply_timed_out(&self) {
         self.update(|bits| {
-            (((bits & !STATUS_RUNNING) | STATUS_DEGRADED) & !STATUS_PHASE_MASK)
+            ((((bits & !STATUS_RUNNING) | STATUS_DEGRADED) | STATUS_INITIAL_APPLY_TIMED_OUT)
+                & !STATUS_PHASE_MASK)
                 | CapturePhase::Degraded.bits()
         });
+    }
+    fn initial_apply_timed_out(&self) -> bool {
+        self.bits.load(Ordering::Acquire) & STATUS_INITIAL_APPLY_TIMED_OUT != 0
     }
     /// A failure: not running, degraded, terminal iff the streak says so —
     /// ONE store, so no reader can see a half-applied transition.
@@ -705,7 +713,8 @@ impl DriverStatus {
     /// ONE store.
     fn record_healthy_transition(&self, clean: bool) {
         self.update(|bits| {
-            let mut bits = (bits | STATUS_RUNNING) & !STATUS_TERMINAL;
+            let mut bits =
+                ((bits | STATUS_RUNNING) & !STATUS_TERMINAL) & !STATUS_INITIAL_APPLY_TIMED_OUT;
             if clean {
                 bits &= !STATUS_DEGRADED;
                 if CapturePhase::from_bits(bits) != CapturePhase::Ready {
@@ -1342,6 +1351,33 @@ mod drive_loop_tests {
     /// Gaps between successive timestamps.
     fn gaps(stamps: &[std::time::Duration]) -> Vec<std::time::Duration> {
         stamps.windows(2).map(|w| w[1] - w[0]).collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_timed_out_initial_apply_waits_for_a_healthy_tick_to_claim_running() {
+        let (handle, cancel, journal, status, _flush_tx) = spawn_loop(vec![Script::Healthy]);
+        status.mark_initial_apply_timed_out();
+
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        let running_during_first_tick = journal
+            .lock()
+            .expect("journal")
+            .running_seen
+            .first()
+            .copied();
+
+        assert_eq!(
+            running_during_first_tick,
+            Some(false),
+            "the successful start must preserve the timeout's not-running claim"
+        );
+        assert!(
+            status.running(),
+            "the first healthy tick must recover the running claim"
+        );
+
+        cancel.cancel();
+        handle.await.expect("driver loop");
     }
 
     #[tokio::test(start_paused = true)]
@@ -2500,7 +2536,7 @@ async fn drive_loop<E: DriverEnv>(
                     // status read running=true && terminal=true for the probe
                     // window. The first healthy tick sets it instead.
                     // `degraded` likewise stays until a fully clean tick.
-                    if restart.failures() == 0 {
+                    if restart.failures() == 0 && !status.initial_apply_timed_out() {
                         status.set_running(true);
                     }
                     // Baseline for the NEW layer's watcher (a fresh watcher

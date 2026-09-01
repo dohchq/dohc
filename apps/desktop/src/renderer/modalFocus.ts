@@ -8,7 +8,11 @@ export function trapModalTabKey(
   if (event.key !== "Tab" || !container) return;
   const focusable = [
     ...container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
-  ].filter((element) => element.closest('[aria-hidden="true"]') === null);
+  ].filter(
+    (element) =>
+      element.closest('[aria-hidden="true"]') === null &&
+      !element.matches(":disabled"),
+  );
   const first = focusable[0];
   const last = focusable[focusable.length - 1];
   if (!first || !last) {

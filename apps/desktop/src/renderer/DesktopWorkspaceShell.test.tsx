@@ -664,7 +664,9 @@ function makeBridge(
         searchCallback = null;
       };
     }),
-    searchWorkspace: vi.fn(async (_payload: WorkspaceSearchPayload) => undefined),
+    searchWorkspace: vi.fn(async (_payload: WorkspaceSearchPayload) => ({
+      status: "accepted" as const,
+    })),
     cancelWorkspaceSearch: vi.fn(async () => undefined),
     startPluginPanel: vi.fn(async (): Promise<StartPluginPanelResult> => ({
       status: "ok" as const,
@@ -8886,7 +8888,7 @@ describe("content search", () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.searchWorkspace
       .mockRejectedValueOnce(new Error("Workspace root vanished."))
-      .mockResolvedValueOnce(undefined);
+      .mockResolvedValueOnce({ status: "accepted" });
     const user = userEvent.setup();
     renderShell(bridge);
 
@@ -8911,7 +8913,7 @@ describe("content search", () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.searchWorkspace
       .mockRejectedValueOnce(new Error("Workspace root vanished."))
-      .mockResolvedValueOnce(undefined);
+      .mockResolvedValueOnce({ status: "accepted" });
     const user = userEvent.setup();
     renderShell(bridge);
 
@@ -10374,6 +10376,11 @@ describe("history page", () => {
     expect(within(left).getByRole("tab", { name: "Diff: plan.md" }).title).toBe(
       "History diff: notes/plan.md",
     );
+    await user.click(screen.getByTestId("activity-explorer"));
+    const openMoment = screen
+      .getAllByTestId("open-editor-row")
+      .find((row) => row.dataset.path === momentPath);
+    expect(openMoment?.textContent).toContain("Diff: plan.md");
     expect(left.dataset.active).toBe("true");
     expect(within(left).queryByTestId("tab-race-a.txt")).toBeNull();
   });

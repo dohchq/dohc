@@ -2,7 +2,10 @@
 import { createElement, startTransition, Suspense } from "react";
 import { act, cleanup, render, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { WorkspaceSearchPayload } from "../../ipc/bridgeContract";
+import type {
+  WorkspaceSearchPayload,
+  WorkspaceSearchStartResult,
+} from "../../ipc/bridgeContract";
 import type { SearchResultsEvent } from "../../ipc/channels";
 import {
   useWorkspaceSearch,
@@ -12,7 +15,9 @@ import {
 
 let searchResultsListener: ((event: SearchResultsEvent) => void) | null = null;
 const bridgeMock = {
-  searchWorkspace: vi.fn<(payload: WorkspaceSearchPayload) => Promise<void>>(),
+  searchWorkspace: vi.fn<
+    (payload: WorkspaceSearchPayload) => Promise<WorkspaceSearchStartResult>
+  >(),
   cancelWorkspaceSearch: vi.fn(async () => undefined),
   onSearchResults: vi.fn((listener: (event: SearchResultsEvent) => void) => {
     searchResultsListener = listener;
@@ -51,7 +56,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   searchResultsListener = null;
   bridgeMock.searchWorkspace.mockReset();
-  bridgeMock.searchWorkspace.mockResolvedValue(undefined);
+  bridgeMock.searchWorkspace.mockResolvedValue({ status: "accepted" });
   bridgeMock.cancelWorkspaceSearch.mockResolvedValue(undefined);
   bridgeMock.onSearchResults.mockImplementation((listener) => {
     searchResultsListener = listener;
@@ -68,13 +73,11 @@ describe("useWorkspaceSearch", () => {
     vi.useFakeTimers();
     try {
       bridgeMock.searchWorkspace
-        .mockRejectedValueOnce(
-          new Error(
-            "Error invoking remote method 'desktop:search-workspace': " +
-              "Error: Workspace is still updating. Try again.",
-          ),
-        )
-        .mockResolvedValueOnce(undefined);
+        .mockResolvedValueOnce({
+          status: "refused",
+          code: "workspace-updating",
+        })
+        .mockResolvedValueOnce({ status: "accepted" });
       const view = renderHook(() =>
         useWorkspaceSearch("workspace-1", reportSearchError, clearSearchError),
       );
@@ -116,9 +119,10 @@ describe("useWorkspaceSearch", () => {
   it("cancels a pending updating retry when the search is cleared", async () => {
     vi.useFakeTimers();
     try {
-      bridgeMock.searchWorkspace.mockRejectedValueOnce(
-        new Error("Workspace is still updating. Try again."),
-      );
+      bridgeMock.searchWorkspace.mockResolvedValueOnce({
+        status: "refused",
+        code: "workspace-updating",
+      });
       const view = renderHook(() =>
         useWorkspaceSearch("workspace-1", reportSearchError, clearSearchError),
       );
@@ -143,8 +147,54 @@ describe("useWorkspaceSearch", () => {
     }
   });
 
+  it("stops an updating retry lane at its deadline and exposes a fresh retry", async () => {
+    vi.useFakeTimers();
+    try {
+      bridgeMock.searchWorkspace.mockResolvedValue({
+        status: "refused",
+        code: "workspace-updating",
+      });
+      const onError = vi.fn<
+        (error: unknown, retry: () => void) => void
+      >();
+      const view = renderHook(() =>
+        useWorkspaceSearch("workspace-1", onError, clearSearchError),
+      );
+
+      await act(async () => {
+        view.result.current.run(options);
+        await vi.advanceTimersByTimeAsync(15_000);
+      });
+
+      expect(view.result.current.model).toMatchObject({
+        searchId: null,
+        status: "idle",
+      });
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(onError.mock.calls[0]?.[0]).toEqual(
+        new Error("Workspace is still updating."),
+      );
+      const callsAtDeadline = bridgeMock.searchWorkspace.mock.calls.length;
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+      expect(bridgeMock.searchWorkspace).toHaveBeenCalledTimes(callsAtDeadline);
+
+      bridgeMock.searchWorkspace.mockResolvedValue({ status: "accepted" });
+      act(() => onError.mock.calls[0]?.[1]());
+
+      expect(view.result.current.model.status).toBe("searching");
+      expect(bridgeMock.searchWorkspace.mock.calls.at(-1)?.[0].searchId).not.toBe(
+        bridgeMock.searchWorkspace.mock.calls[0]?.[0].searchId,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("settles only a terminal batch with the current search id", () => {
-    bridgeMock.searchWorkspace.mockResolvedValueOnce(undefined);
+    bridgeMock.searchWorkspace.mockResolvedValueOnce({ status: "accepted" });
     const view = renderHook(() =>
       useWorkspaceSearch("workspace-1", reportSearchError, clearSearchError),
     );
@@ -176,8 +226,8 @@ describe("useWorkspaceSearch", () => {
   });
 
   it("reports only a rejected current invocation", async () => {
-    const older = deferred<void>();
-    const newer = deferred<void>();
+    const older = deferred<WorkspaceSearchStartResult>();
+    const newer = deferred<WorkspaceSearchStartResult>();
     bridgeMock.searchWorkspace
       .mockReturnValueOnce(older.promise)
       .mockReturnValueOnce(newer.promise);
@@ -227,7 +277,7 @@ describe("useWorkspaceSearch", () => {
     >();
     bridgeMock.searchWorkspace
       .mockRejectedValueOnce(new Error("Workspace search stopped"))
-      .mockResolvedValueOnce(undefined);
+      .mockResolvedValueOnce({ status: "accepted" });
     const view = renderHook(() =>
       useWorkspaceSearch("workspace-1", onError, clearSearchError),
     );
@@ -261,7 +311,7 @@ describe("useWorkspaceSearch", () => {
   });
 
   it("keeps an explicitly cleared search idle when its invocation rejects", async () => {
-    const pending = deferred<void>();
+    const pending = deferred<WorkspaceSearchStartResult>();
     bridgeMock.searchWorkspace.mockReturnValueOnce(pending.promise);
     const view = renderHook(() =>
       useWorkspaceSearch("workspace-1", reportSearchError, clearSearchError),

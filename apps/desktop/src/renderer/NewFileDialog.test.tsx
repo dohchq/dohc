@@ -71,6 +71,26 @@ describe("NewFileDialog", () => {
     expect(onCreated).toHaveBeenCalledWith("notes/today.md");
   });
 
+  it("announces a create failure", async () => {
+    bridgeMock.createWorkspaceFile.mockRejectedValueOnce(
+      new Error("dohc could not create this file."),
+    );
+    const user = userEvent.setup();
+    render(
+      <NewFileDialog
+        workspaceId="ws-1"
+        onClose={() => undefined}
+        onCreated={() => undefined}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("File name"), "notes/today{Enter}");
+
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "dohc could not create this file.",
+    );
+  });
+
   it("ignores duplicate create submits while a create is pending", async () => {
     const create = deferred<{ path: string }>();
     bridgeMock.createWorkspaceFile.mockImplementationOnce(() => create.promise);

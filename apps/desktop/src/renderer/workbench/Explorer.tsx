@@ -29,6 +29,7 @@ import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import type { DraftFlush } from "../FileInspector";
 import { Overlay } from "../Overlay";
+import { momentDiffName } from "./EditorTabs";
 import { planDrop, type DragSource } from "./file-tree-dnd";
 import { navigateTree, type FlatRow } from "./file-tree-nav";
 import { withMarkdownDefault } from "./new-file-name";
@@ -45,6 +46,7 @@ import {
   isGraphTabPath,
   isHistoryDiffTabPath,
   isHistoryTabPath,
+  isMomentDiffTabPath,
   isPluginDetailsTabPath,
   isPluginPanelTabPath,
   isPluginWebAppTabPath,
@@ -76,6 +78,8 @@ export interface ExplorerProps {
   // Paths with a set-aside draft (#567): marks Open Editors rows for every
   // tab, not only the active one (#579 review, r4).
   recoveryPaths: ReadonlySet<string>;
+  /** Display names for virtual paths that cannot carry a useful file name. */
+  tabLabels?: ReadonlyMap<string, string>;
   expandedFolders: string[];
   pinned: string[];
   // Max height of the Open Editors list (workbench state, persisted): the
@@ -190,12 +194,15 @@ function FileKindIcon({ kind }: { kind: WorkspaceFileEntry["kind"] }) {
   return <FileText size={13} aria-hidden className="shrink-0" />;
 }
 
-export function editorTitle(path: string): string {
+export function editorTitle(path: string, label?: string): string {
   if (isGraphTabPath(path)) return "Graph";
   if (isHistoryTabPath(path)) return "History";
   if (isHistoryDiffTabPath(path)) {
     const parsed = parseHistoryDiffTabPath(path);
     return `Diff: ${leafOf(parsed?.filePath ?? "file")}`;
+  }
+  if (isMomentDiffTabPath(path)) {
+    return momentDiffName(label);
   }
   if (isPluginPanelTabPath(path)) {
     return `Plugin: ${parsePluginPanelTabPath(path)?.panelId ?? "panel"}`;
@@ -1578,7 +1585,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                         const dirty =
                           props.dirtyPaths.has(tab.path) ||
                           props.recoveryPaths.has(tab.path);
-                        const title = editorTitle(tab.path);
+                        const title = editorTitle(
+                          tab.path,
+                          props.tabLabels?.get(tab.path),
+                        );
                         return (
                           <li
                             key={`${group.id}:${tab.path}`}

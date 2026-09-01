@@ -44,6 +44,7 @@ import {
   PluginUninstallPreflightResult,
   StartPluginPanelResult,
   StartPluginWebAppResult,
+  WorkspaceSearchStartResult,
   parseInvokePluginPanelSdkPayloadForIpc,
   parsePluginPanelInvalidatedEventForIpc,
   parsePluginPanelSdkEventForIpc,
@@ -683,8 +684,10 @@ const bridge: DohcDesktopBridge = {
   },
   // Content search (Phase E5.0): results stream main→renderer as bounded
   // batches; the searchId round-trips so stale batches drop renderer-side.
-  searchWorkspace: (payload) =>
-    ipcRenderer.invoke(CHANNELS.searchWorkspace, payload),
+  searchWorkspace: async (payload) =>
+    WorkspaceSearchStartResult.parse(
+      await ipcRenderer.invoke(CHANNELS.searchWorkspace, payload),
+    ),
   cancelWorkspaceSearch: (payload) =>
     ipcRenderer.invoke(CHANNELS.cancelWorkspaceSearch, payload),
   // Same boundary rule as onUpdateState: every batch is validated by the

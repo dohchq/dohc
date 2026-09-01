@@ -5720,6 +5720,7 @@ export function DesktopWorkspaceShell(props: {
         activeEditorGroup={wb.activeEditorGroup}
         dirtyPaths={dirtyPaths}
         recoveryPaths={recoveryPaths}
+        tabLabels={tabLabels}
         expandedFolders={wb.expandedFolders}
         pinned={wb.pinned}
         openEditorsHeight={wb.openEditorsHeight}

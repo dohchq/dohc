@@ -439,6 +439,7 @@ const demoBridge = {
       limitHit: false,
     };
     queueMicrotask(() => searchListeners.forEach((listener) => listener(batch)));
+    return { status: "accepted" as const };
   },
   async cancelWorkspaceSearch() {},
   async readWorkspaceGraph() {

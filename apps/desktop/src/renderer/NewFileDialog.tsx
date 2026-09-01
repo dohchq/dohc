@@ -82,7 +82,11 @@ export function NewFileDialog(props: {
           onChange={(event) => setName(event.target.value)}
           className="w-full rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink placeholder:text-subtle disabled:opacity-50"
         />
-        {error ? <p className="m-0 text-xs text-danger">{error}</p> : null}
+        {error ? (
+          <p role="alert" className="m-0 text-xs text-danger">
+            {error}
+          </p>
+        ) : null}
         <div className="mt-1 flex justify-end gap-2">
           <SecondaryButton onClick={close} disabled={pending}>
             Cancel

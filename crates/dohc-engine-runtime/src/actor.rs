@@ -1224,6 +1224,17 @@ pub trait WorkspaceRootGuard: Send + Sync {
     fn validate(&self, root_dir: &std::path::Path) -> Result<(), RuntimeError>;
 }
 
+type CommandWorkspaceRoot = (PathBuf, Option<Arc<dyn WorkspaceRootGuard>>);
+
+fn command_workspace_root_parts(
+    workspace_root: Option<&CommandWorkspaceRoot>,
+) -> (Option<&std::path::Path>, Option<&dyn WorkspaceRootGuard>) {
+    match workspace_root {
+        Some((root_dir, root_guard)) => (Some(root_dir.as_path()), root_guard.as_deref()),
+        None => (None, None),
+    }
+}
+
 fn validate_workspace_root(
     root_dir: &std::path::Path,
     root_guard: Option<&dyn WorkspaceRootGuard>,
@@ -1410,8 +1421,7 @@ enum Command {
     },
     CaptureSecretRetire {
         input: CaptureSecretRetire,
-        root_dir: Option<PathBuf>,
-        root_guard: Option<Arc<dyn WorkspaceRootGuard>>,
+        workspace_root: Option<CommandWorkspaceRoot>,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<Option<SecretMomentRecord>, RuntimeError>>,
@@ -1422,8 +1432,7 @@ enum Command {
     },
     CaptureRetire {
         input: CaptureRetire,
-        root_dir: Option<PathBuf>,
-        root_guard: Option<Arc<dyn WorkspaceRootGuard>>,
+        workspace_root: Option<CommandWorkspaceRoot>,
         self_writes: Option<Arc<dyn SelfWriteRecorder>>,
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
@@ -2793,15 +2802,12 @@ impl ActorHandle {
     ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
         debug_assert_sync_context();
         let (reply, reply_rx) = oneshot::channel();
-        let (root_dir, root_guard) = match guarded_root {
-            Some((root_dir, root_guard)) => (Some(root_dir), Some(root_guard)),
-            None => (None, None),
-        };
+        let workspace_root =
+            guarded_root.map(|(root_dir, root_guard)| (root_dir, Some(root_guard)));
         self.tx
             .blocking_send(Command::CaptureSecretRetire {
                 input,
-                root_dir,
-                root_guard,
+                workspace_root,
                 faults,
                 token: CancellationToken::new(),
                 reply,
@@ -2857,8 +2863,7 @@ impl ActorHandle {
         self.tx
             .blocking_send(Command::CaptureRetire {
                 input,
-                root_dir: None,
-                root_guard: None,
+                workspace_root: None,
                 self_writes: None,
                 leases,
                 faults,
@@ -2924,8 +2929,7 @@ impl ActorHandle {
         self.tx
             .blocking_send(Command::CaptureRetire {
                 input,
-                root_dir: Some(root_dir),
-                root_guard,
+                workspace_root: Some((root_dir, root_guard)),
                 self_writes: Some(self_writes),
                 leases,
                 faults,
@@ -4109,8 +4113,7 @@ impl ActorHandle {
         self.tx
             .send(Command::CaptureSecretRetire {
                 input,
-                root_dir: None,
-                root_guard: None,
+                workspace_root: None,
                 faults,
                 token,
                 reply,
@@ -4132,8 +4135,7 @@ impl ActorHandle {
         self.tx
             .send(Command::CaptureRetire {
                 input,
-                root_dir: None,
-                root_guard: None,
+                workspace_root: None,
                 self_writes: None,
                 leases,
                 faults,
@@ -8224,17 +8226,17 @@ fn worker_main(
             }
             Command::CaptureSecretRetire {
                 input,
-                root_dir,
-                root_guard,
+                workspace_root,
                 faults,
                 token,
                 reply,
             } => {
+                let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
                 let outcome = capture_secret_retire_on_store(
                     &mut store,
                     &input,
-                    root_dir.as_deref(),
-                    root_guard.as_deref(),
+                    root_dir,
+                    root_guard,
                     faults.as_ref(),
                     &token,
                 );
@@ -8811,20 +8813,20 @@ fn worker_main(
             }
             Command::CaptureRetire {
                 input,
-                root_dir,
-                root_guard,
+                workspace_root,
                 self_writes,
                 leases,
                 faults,
                 token,
                 reply,
             } => {
+                let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
                 let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
                     capture_retire_on_store(
                         &mut store,
                         &input,
-                        root_dir.as_deref(),
-                        root_guard.as_deref(),
+                        root_dir,
+                        root_guard,
                         self_writes.as_deref(),
                         &leases,
                         faults.as_ref(),
@@ -14875,6 +14877,128 @@ mod capture_batch_fast_path_tests {
             "a clean batch must use one rollback scope instead of one per item"
         );
     }
+
+    #[test]
+    fn fallback_batch_commits_siblings_and_rolls_back_the_leased_item() {
+        const WORKSPACE_ID: &str = "fallback-batch-workspace";
+        const VERSION_ID: &str = "main";
+        const FAILED_PATH: &str = "note-1.md";
+
+        let scratch = ScratchDir::new().expect("scratch");
+        let db = scratch.engine_db_path().expect("engine database path");
+        let mut store = EngineStore::open(&db, 1).expect("open store");
+        let inputs = (0..3)
+            .map(|index| CaptureIngest {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                version_id: VERSION_ID.to_owned(),
+                path: format!("note-{index}.md"),
+                text: format!("body {index}"),
+                metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
+                metadata_summary: Some("Reconciled offline edits".to_owned()),
+                metadata_correlation_id: Some("fallback-batch".to_owned()),
+                author_json: None,
+                now_ms: 2,
+                request_id: None,
+                claim_foreign_head: false,
+            })
+            .collect::<Vec<_>>();
+        let failed_object_id = derive_capture_object_id(WORKSPACE_ID, VERSION_ID, FAILED_PATH);
+        let leases = LeaseRegistry::new();
+        let failed_key =
+            DocKey::new(WORKSPACE_ID, VERSION_ID, &failed_object_id).expect("failed item key");
+        let _failed_lease = leases.acquire(&failed_key).expect("hold failed item lease");
+        let policy = Arc::new(read_engine_search_policy(scratch.path()));
+
+        let results = capture_ingest_batch_on_store(
+            &mut store,
+            &inputs,
+            &policy,
+            &leases,
+            &NoFaults,
+            &CancellationToken::new(),
+        )
+        .expect("capture fallback batch");
+
+        assert_eq!(results.len(), 3);
+        assert!(results[0].is_ok(), "the first sibling must commit");
+        assert!(matches!(
+            &results[1],
+            Err(RuntimeError::Sync(
+                dohc_engine_sync::SyncError::RetryableState {
+                    reason: "ydoc-session-live"
+                }
+            ))
+        ));
+        assert!(results[2].is_ok(), "the final sibling must commit");
+        let first_order = results[0]
+            .as_ref()
+            .expect("first sibling result")
+            .moment
+            .moment_order;
+        let final_order = results[2]
+            .as_ref()
+            .expect("final sibling result")
+            .moment
+            .moment_order;
+        assert_eq!(
+            final_order,
+            first_order + 1,
+            "the rolled-back item must not advance the shared moment cursor"
+        );
+
+        drop(store);
+        let mut reopened = EngineStore::open(&db, 1).expect("reopen store");
+        let versioned = VersionedTextStore::new(&mut reopened);
+        assert_eq!(
+            versioned
+                .read_text(WORKSPACE_ID, VERSION_ID, "note-0.md")
+                .expect("read first sibling")
+                .expect("first sibling head")
+                .text,
+            "body 0"
+        );
+        assert_eq!(
+            versioned
+                .read_text(WORKSPACE_ID, VERSION_ID, "note-2.md")
+                .expect("read final sibling")
+                .expect("final sibling head")
+                .text,
+            "body 2"
+        );
+        assert!(
+            versioned
+                .read_text(WORKSPACE_ID, VERSION_ID, FAILED_PATH)
+                .expect("read failed item")
+                .is_none(),
+            "the failed item must have no readable head"
+        );
+        let (snapshots, moments, search_rows): (i64, i64, i64) = reopened
+            .read_with(|conn| {
+                Ok::<_, rusqlite::Error>((
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM snapshots WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                        (WORKSPACE_ID, VERSION_ID, &failed_object_id),
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM moments WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                        (WORKSPACE_ID, VERSION_ID, &failed_object_id),
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM engine_search_files_fts WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                        (WORKSPACE_ID, VERSION_ID, &failed_object_id),
+                        |row| row.get(0),
+                    )?,
+                ))
+            })
+            .expect("read failed item durable rows");
+        assert_eq!(
+            (snapshots, moments, search_rows),
+            (0, 0, 0),
+            "the failed item must leave no snapshot, moment, or search row"
+        );
+    }
 }
 
 fn capture_ingest_binary_on_store(
@@ -16151,11 +16275,9 @@ mod capture_secret_root_guard_tests {
     fn queued_capture_secret_retire_refuses_a_replacement_workspace_root() {
         let store_scratch = ScratchDir::new().expect("store scratch");
         let root_scratch = ScratchDir::new().expect("workspace root scratch");
+        let moved_scratch = ScratchDir::new().expect("moved root scratch");
         let root = root_scratch.path().to_path_buf();
-        let moved_root = root.with_file_name(format!(
-            "{}-moved",
-            root.file_name().expect("root name").to_string_lossy()
-        ));
+        let moved_root = moved_scratch.path().join("original-root");
         let db = store_scratch.engine_db_path().expect("engine db path");
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
@@ -16199,8 +16321,7 @@ mod capture_secret_root_guard_tests {
                     only_if_capture_origin: true,
                     allow_ydoc_origin: true,
                 },
-                root_dir: Some(root.clone()),
-                root_guard: Some(blocker_guard),
+                workspace_root: Some((root.clone(), Some(blocker_guard))),
                 self_writes: None,
                 leases: LeaseRegistry::new(),
                 faults: Arc::new(NoFaults),
@@ -16224,8 +16345,7 @@ mod capture_secret_root_guard_tests {
                     now_ms: 4,
                     only_if_own_origin: true,
                 },
-                root_dir: Some(root.clone()),
-                root_guard: Some(captured_guard),
+                workspace_root: Some((root.clone(), Some(captured_guard))),
                 faults: Arc::new(NoFaults),
                 token: CancellationToken::new(),
                 reply: retire_reply,

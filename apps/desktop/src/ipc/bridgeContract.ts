@@ -5273,6 +5273,22 @@ export const WorkspaceSearchPayload = z.object({
 });
 export type WorkspaceSearchPayload = z.infer<typeof WorkspaceSearchPayload>;
 
+// Main classifies the daemon's typed refusal before Electron turns a rejected
+// invoke into a message-only Error. The renderer receives this closed result,
+// so retry behavior never depends on user-facing daemon copy.
+export const WorkspaceSearchStartResult = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("accepted") }).strict(),
+  z
+    .object({
+      status: z.literal("refused"),
+      code: z.literal("workspace-updating"),
+    })
+    .strict(),
+]);
+export type WorkspaceSearchStartResult = z.infer<
+  typeof WorkspaceSearchStartResult
+>;
+
 export const CancelWorkspaceSearchPayload = z.object({
   searchId: SEARCH_ID,
 });
@@ -5969,10 +5985,13 @@ export interface DohcDesktopBridge {
   }): Promise<void>;
   holdQuit(): Promise<void>;
   resumeQuit(): Promise<void>;
-  // Workspace content search (Phase E5.0). Resolves when the search has been
-  // ACCEPTED and the rg child spawned; results stream separately through
-  // onSearchResults. Issuing a new search cancels the previous one in main.
-  searchWorkspace(payload: WorkspaceSearchPayload): Promise<void>;
+  // Workspace content search (Phase E5.0). Answers accepted after the rg child
+  // spawns, or returns a typed updating refusal while initial capture runs;
+  // results stream separately through onSearchResults. A new search cancels
+  // the previous one in main.
+  searchWorkspace(
+    payload: WorkspaceSearchPayload,
+  ): Promise<WorkspaceSearchStartResult>;
   cancelWorkspaceSearch(payload: CancelWorkspaceSearchPayload): Promise<void>;
   // Streamed result batches, validated batch-by-batch in the preload via the
   // closed dependency-free parseSearchResultsEvent check. Returns an
