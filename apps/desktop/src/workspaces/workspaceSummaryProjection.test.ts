@@ -64,7 +64,7 @@ describe("workspace summary projection", () => {
     expect(readOnly.shareView?.genericChatWritable).toBe(false);
   });
 
-  it("fails a missing or malformed generic chat authority closed", () => {
+  it("defaults a missing or malformed stored chat capability without damaging the grant", () => {
     for (const genericChatWritable of [undefined, null, "yes", 1]) {
       const raw = shareView({ ...goodSelector, access: "comment" });
       if (genericChatWritable === undefined) {
@@ -73,8 +73,12 @@ describe("workspace summary projection", () => {
         raw.genericChatWritable = genericChatWritable;
       }
       const summary = workspaceSummaryFor(entry({ shareView: raw }));
-      expect(summary.shareView?.damaged).toBe(true);
-      expect(summary.shareView?.genericChatWritable).not.toBe(true);
+      expect(
+        summary.shareView?.damaged,
+        "MUTATION: display-only chat metadata must not damage the file grant",
+      ).toBeUndefined();
+      expect(summary.shareView?.access).toBe("comment");
+      expect(summary.shareView?.genericChatWritable).toBe(false);
     }
   });
 

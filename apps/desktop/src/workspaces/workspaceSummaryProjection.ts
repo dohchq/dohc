@@ -76,12 +76,8 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
     // a false statement, and it would suppress the refresh as well.
     const shareId = boundedString(raw.shareId, 1, 200);
     const level = readableShareLevel(raw.grantedSelector);
-    const genericChatWritable =
-      typeof raw.genericChatWritable === "boolean"
-        ? raw.genericChatWritable
-        : null;
-    const damaged =
-      shareId === null || level === null || genericChatWritable === null;
+    const genericChatWritable = raw.genericChatWritable === true;
+    const damaged = shareId === null || level === null;
     // Ancillary metadata normalizes FAIL-SOFT and independently: each field
     // is kept when the wire schema will carry it and dropped when it will
     // not. Dropping one costs a line of display; rejecting the record costs
