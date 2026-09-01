@@ -213,7 +213,8 @@ function exactIntent(
   const nextClaimedName = claimedName.length === 0 ? undefined : claimedName;
   if (
     previous &&
-    previous.body === body
+    previous.body === body &&
+    previous.claimedName === nextClaimedName
   ) {
     return previous;
   }

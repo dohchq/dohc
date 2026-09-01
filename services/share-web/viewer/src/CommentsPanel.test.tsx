@@ -680,6 +680,78 @@ describe("CommentsPanel", () => {
     expect(posted[2]?.idempotencyKey).not.toBe(posted[1]?.idempotencyKey);
   });
 
+  it("changes the retry intent when live activity adopts a committed profile name", async () => {
+    const adoptedActivity = heldJsonResponse(200);
+    const posted: Array<Record<string, unknown>> = [];
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/view/discussion?direction=newest-first") {
+        return discussionPage();
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        return availableActivityAt(8);
+      }
+      if (path === "/api/view/discussion/activity?since=8&hold=30000&limit=100") {
+        return adoptedActivity.response;
+      }
+      if (path === "/api/view/discussion/activity?since=9&hold=30000&limit=100") {
+        return await new Promise<Response>(() => undefined);
+      }
+      if (path === "/api/view/discussion" && init?.method === "POST") {
+        const intent = JSON.parse(String(init.body)) as Record<string, unknown>;
+        posted.push(intent);
+        if (posted.length === 1) return new Response(null, { status: 404 });
+        return jsonResponse({
+          ok: true,
+          message: {
+            ...LINK_MESSAGE,
+            messageId: "adopted-profile-retry",
+            createdAtMs: 4_000,
+            body: String(intent.body),
+            author: {
+              ...LINK_MESSAGE.author,
+              displayName: String(intent.claimedName),
+            },
+          },
+        });
+      }
+      throw new Error(`unexpected request: ${path}`);
+    }));
+
+    await render("comment");
+    await settle(() => {
+      const input = container.querySelector<HTMLTextAreaElement>(
+        'textarea[name="body"]',
+      );
+      return input?.disabled === false && adoptedActivity.bodyStarted();
+    });
+    setControlValue(nameInput(), "Draft Name");
+    setControlValue(bodyInput(), "Unchanged body");
+    submit();
+    await settle(() =>
+      container.textContent?.includes("The comment didn't post. Try again.") === true
+    );
+
+    adoptedActivity.release({
+      ok: true,
+      access: "comment",
+      latestRevision: 9,
+      cursorRevision: 9,
+      hasMore: false,
+      messages: [],
+      composerState: "available",
+      profileName: "Adopted Name",
+    });
+    await settle(() => nameInput().value === "Adopted Name" && nameInput().disabled);
+    expect(bodyInput().value).toBe("Unchanged body");
+
+    submit();
+    await settle(() => posted.length === 2);
+    expect(posted[0]?.claimedName).toBe("Draft Name");
+    expect(posted[1]?.claimedName).toBe("Adopted Name");
+    expect(posted[1]?.idempotencyKey).not.toBe(posted[0]?.idempotencyKey);
+  });
+
   it.each(["success", "blocked", "paused"] as const)(
     "keeps a generic failure visible through a held %s retry body",
     async (outcome) => {
