@@ -190,13 +190,18 @@ describe("CommentsPanel monotonic composer", () => {
           },
         });
       }
-      if (requestPath(input).includes("/activity?")) {
+      const path = requestPath(input);
+      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        return activity({ cursorRevision: 7 });
+      }
+      if (path.includes("/activity?")) {
         return await new Promise<Response>(() => undefined);
       }
       return page();
     }));
 
     await render();
+    await settle(() => bodyInput().disabled === false);
     setControlValue(bodyInput(), "Valid body");
     setControlValue(nameInput(), "a".repeat(41));
     expect(button("Post comment").disabled).toBe(true);
@@ -225,7 +230,11 @@ describe("CommentsPanel monotonic composer", () => {
     await act(async () => {
       root.render(<CommentsPanel access="comment" session={SECOND_SESSION} />);
     });
-    await settle(() => nameInput().value === "" && bodyInput().value === "");
+    await settle(() =>
+      nameInput().value === "" &&
+      bodyInput().value === "" &&
+      bodyInput().disabled === false
+    );
     setControlValue(bodyInput(), "No claimed name");
     click("Post comment");
     await settle(() => posted.length === 2);
@@ -320,13 +329,18 @@ describe("CommentsPanel monotonic composer", () => {
       }
       if (path === "/api/view/discussion?direction=newest-first") return page();
       if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
-        return heldActivity.response;
+        return activity({ cursorRevision: 7 });
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
+        return heldActivity.bodyStarted()
+          ? await new Promise<Response>(() => undefined)
+          : heldActivity.response;
       }
       return await new Promise<Response>(() => undefined);
     }));
 
     await render();
-    await settle(heldActivity.bodyStarted);
+    await settle(() => heldActivity.bodyStarted() && bodyInput().disabled === false);
     setControlValue(bodyInput(), "Held draft");
     click("Post comment");
     await settle(heldRefusal.bodyStarted);
@@ -362,13 +376,16 @@ describe("CommentsPanel monotonic composer", () => {
       if (init?.method === "POST") return heldRefusal.response;
       if (path === "/api/view/discussion?direction=newest-first") return page();
       if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        return activity({ cursorRevision: 7 });
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
         return heldActivity.response;
       }
       return await new Promise<Response>(() => undefined);
     }));
 
     await render();
-    await settle(heldActivity.bodyStarted);
+    await settle(() => heldActivity.bodyStarted() && bodyInput().disabled === false);
     setControlValue(bodyInput(), "Refused draft");
     click("Post comment");
     await settle(heldRefusal.bodyStarted);
@@ -403,13 +420,18 @@ describe("CommentsPanel monotonic composer", () => {
       if (init?.method === "POST") return heldRefusal.response;
       if (path === "/api/view/discussion?direction=newest-first") return page();
       if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
-        return heldActivity.response;
+        return activity({ cursorRevision: 7 });
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
+        return heldActivity.bodyStarted()
+          ? await new Promise<Response>(() => undefined)
+          : heldActivity.response;
       }
       return await new Promise<Response>(() => undefined);
     }));
 
     await render();
-    await settle(heldActivity.bodyStarted);
+    await settle(() => heldActivity.bodyStarted() && bodyInput().disabled === false);
     setControlValue(bodyInput(), "Blocked draft");
     click("Post comment");
     await settle(heldRefusal.bodyStarted);
@@ -508,6 +530,8 @@ describe("CommentsPanel monotonic composer", () => {
     click("Post comment");
     await settle(() => posted.length === 1 &&
       container.textContent?.includes("The comment didn't post. Try again.") === true);
+    expect(posted[0]?.body).toBe("Preserved draft");
+    expect(posted[0]?.claimedName).toBe("Typed Name");
 
     terminal.release({ ok: true, internal: true });
     await settle(() => container.textContent?.includes("Comments stopped updating.") === true);
@@ -558,7 +582,9 @@ describe("CommentsPanel monotonic composer", () => {
 
     click("Post comment");
     await settle(() => posted.length === 2);
-    expect(posted[1]?.idempotencyKey).toBe(posted[0]?.idempotencyKey);
+    expect(posted[1]?.body).toBe("Preserved draft");
+    expect(posted[1]?.claimedName).toBe("Stable Name");
+    expect(posted[1]?.idempotencyKey).not.toBe(posted[0]?.idempotencyKey);
     expect(bodyInput().value).toBe("Preserved draft");
     expect(bodyInput().disabled).toBe(false);
     expect(container.textContent).toContain("The comment didn't post. Try again.");
@@ -763,6 +789,9 @@ describe("CommentsPanel monotonic composer", () => {
         return page({ activityRevision: newestLoads === 1 ? 7 : 9 });
       }
       if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        return activity({ cursorRevision: 7 });
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
         return terminal.response;
       }
       if (path === "/api/view/discussion/activity?since=9&hold=0&limit=100") {
@@ -772,7 +801,7 @@ describe("CommentsPanel monotonic composer", () => {
     }));
 
     await render();
-    await settle(terminal.bodyStarted);
+    await settle(() => terminal.bodyStarted() && bodyInput().disabled === false);
     setControlValue(nameInput(), "Pending Name");
     setControlValue(bodyInput(), "Pending body");
     click("Post comment");
@@ -822,6 +851,9 @@ describe("CommentsPanel monotonic composer", () => {
         return page({ activityRevision: newestLoads === 1 ? 7 : 10 });
       }
       if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        return activity({ cursorRevision: 7 });
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
         return terminal.response;
       }
       if (path === "/api/view/discussion/activity?since=10&hold=0&limit=100") {
@@ -831,7 +863,7 @@ describe("CommentsPanel monotonic composer", () => {
     }));
 
     await render();
-    await settle(terminal.bodyStarted);
+    await settle(() => terminal.bodyStarted() && bodyInput().disabled === false);
     setControlValue(bodyInput(), "Limited body");
     click("Post comment");
     await settle(() => container.textContent?.includes("You can't post more comments here.") === true);
