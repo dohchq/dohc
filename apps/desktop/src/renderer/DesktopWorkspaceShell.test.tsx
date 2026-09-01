@@ -13273,16 +13273,26 @@ describe("history page", () => {
   it("does not mark opted-out history ready when both status lanes fail", async () => {
     const previousOrdinal = rendererMarks.readSwitchTimeline().at(-1)?.ordinal ?? 0;
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.getSyncStatus = vi.fn(async () => {
-      throw new Error("sync status failed");
-    });
-    bridge.getAgentRunStatus = vi.fn(async () => {
-      throw new Error("agent status failed");
-    });
+    const statusRead = deferred<SyncStatusResult>();
+    const agentRead = deferred<AgentRunStatusResult>();
+    bridge.getSyncStatus = vi.fn(() => statusRead.promise);
+    bridge.getAgentRunStatus = vi.fn(() => agentRead.promise);
     renderShell(bridge);
 
     await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(bridge.getAgentRunStatus).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      // refreshHistory registered its aggregate settlement before these reads
+      // left the synchronous call stack. Awaiting the same lane promises here
+      // is the exact completion fence for its all-settled continuation.
+      const refreshSettled = Promise.allSettled([
+        statusRead.promise,
+        agentRead.promise,
+      ]);
+      statusRead.reject(new Error("sync status failed"));
+      agentRead.reject(new Error("agent status failed"));
+      await refreshSettled;
+    });
     await screen.findByTestId("workspace-shell-error");
 
     const timeline = rendererMarks
