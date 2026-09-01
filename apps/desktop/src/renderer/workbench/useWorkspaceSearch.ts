@@ -69,6 +69,11 @@ export interface WorkspaceSearchApi {
   clear: () => void;
 }
 
+export type WorkspaceSearchErrorReporter = (
+  error: unknown,
+  retry: () => void,
+) => void;
+
 // Owns the streamed-search lifecycle for ONE workspace: mints search ids,
 // folds validated batches into the pure model, and drops stale batches by
 // identity (applyBatch returns the same reference for a superseded search).
@@ -76,18 +81,23 @@ export interface WorkspaceSearchApi {
 // count badge — survive switching views; the panel unmounts, the model stays.
 // The criteria live here too, beside the results they describe: a reopened
 // input that had forgotten its query sat above results it no longer named.
-export function useWorkspaceSearch(workspaceId: string): WorkspaceSearchApi {
+export function useWorkspaceSearch(
+  workspaceId: string,
+  reportError: WorkspaceSearchErrorReporter,
+  clearReportedError: () => void,
+): WorkspaceSearchApi {
   const [model, setModel] = useState<SearchModel>(idleSearchModel);
   const [criteria, setCriteria] = useState<SearchCriteria>(blankSearchCriteria);
   // Event-driven transitions read/write through the ref so a burst of IPC
   // batches between renders folds correctly (never against a stale snapshot).
   const modelRef = useRef(model);
-  // The listener outlives each render; this ref keeps its workspace guard current.
-  const workspaceIdRef = useRef(workspaceId);
-  workspaceIdRef.current = workspaceId;
+  // The listener outlives each render. Its authority follows the last commit,
+  // never a replacement render that React may abandon.
+  const committedWorkspaceIdRef = useRef(workspaceId);
   // Separately tracks which workspace owns the model so replacement resets it.
   const modelWorkspaceIdRef = useRef(workspaceId);
   const activeSearchRef = useRef<ActiveSearch | null>(null);
+  const failedSearchRef = useRef<ActiveSearch | null>(null);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const commit = useCallback((next: SearchModel) => {
     modelRef.current = next;
@@ -105,7 +115,7 @@ export function useWorkspaceSearch(workspaceId: string): WorkspaceSearchApi {
       const active = activeSearchRef.current;
       if (
         active === null ||
-        active.workspaceId !== workspaceIdRef.current ||
+        active.workspaceId !== committedWorkspaceIdRef.current ||
         active.payload.searchId !== batch.searchId
       ) {
         return;
@@ -124,21 +134,26 @@ export function useWorkspaceSearch(workspaceId: string): WorkspaceSearchApi {
   // replacement and unmount both invalidate it before the timer can invoke
   // the old authority again.
   useLayoutEffect(() => {
+    committedWorkspaceIdRef.current = workspaceId;
     if (modelWorkspaceIdRef.current !== workspaceId) {
       modelWorkspaceIdRef.current = workspaceId;
       activeSearchRef.current = null;
+      failedSearchRef.current = null;
       clearRetryTimer();
       commit(idleSearchModel());
       setCriteria(blankSearchCriteria());
     }
     return () => {
       const active = activeSearchRef.current;
-      if (active?.workspaceId !== workspaceId) return;
-      activeSearchRef.current = null;
-      clearRetryTimer();
-      void bridge()
-        .cancelWorkspaceSearch({ searchId: active.payload.searchId })
-        .catch(() => undefined);
+      const failed = failedSearchRef.current;
+      if (failed?.workspaceId === workspaceId) failedSearchRef.current = null;
+      if (active?.workspaceId === workspaceId) {
+        activeSearchRef.current = null;
+        clearRetryTimer();
+        void bridge()
+          .cancelWorkspaceSearch({ searchId: active.payload.searchId })
+          .catch(() => undefined);
+      }
     };
   }, [clearRetryTimer, commit, workspaceId]);
 
@@ -168,18 +183,39 @@ export function useWorkspaceSearch(workspaceId: string): WorkspaceSearchApi {
           }
 
           // The search never started (unknown workspace, vanished root): no
-          // done-batch will ever arrive, so settle the spinner here — but
-          // only if this search is still the current one.
+          // done-batch will ever arrive. Return to idle instead of presenting
+          // a failed invocation as a successful search with zero results.
           activeSearchRef.current = null;
-          commit({ ...modelRef.current, status: "complete" });
+          failedSearchRef.current = active;
+          commit(idleSearchModel());
+          reportError(error, () => {
+            if (
+              failedSearchRef.current !== active ||
+              committedWorkspaceIdRef.current !== active.workspaceId
+            ) {
+              return;
+            }
+            const retry: ActiveSearch = {
+              ...active,
+              payload: { ...active.payload, searchId: crypto.randomUUID() },
+              retryCount: 0,
+            };
+            failedSearchRef.current = null;
+            activeSearchRef.current = retry;
+            rendererMarks.mark("content-search-start");
+            commit(beginSearch(retry.payload.searchId));
+            issue(retry);
+          });
         });
     },
-    [commit],
+    [commit, reportError],
   );
 
   const run = useCallback(
     (options: SearchRunOptions) => {
       clearRetryTimer();
+      failedSearchRef.current = null;
+      clearReportedError();
       // A renderer reload preserves its webContents sender id but creates a
       // new JavaScript realm. A realm-local sequence could therefore reuse an
       // old request id; a UUID keeps cancellation and late events exact across
@@ -207,11 +243,13 @@ export function useWorkspaceSearch(workspaceId: string): WorkspaceSearchApi {
       activeSearchRef.current = active;
       issue(active);
     },
-    [clearRetryTimer, workspaceId, commit, issue],
+    [clearReportedError, clearRetryTimer, workspaceId, commit, issue],
   );
 
   const clear = useCallback(() => {
     activeSearchRef.current = null;
+    failedSearchRef.current = null;
+    clearReportedError();
     clearRetryTimer();
     const current = modelRef.current;
     if (
@@ -224,7 +262,7 @@ export function useWorkspaceSearch(workspaceId: string): WorkspaceSearchApi {
         .catch(() => undefined);
     }
     commit(idleSearchModel());
-  }, [clearRetryTimer, commit]);
+  }, [clearReportedError, clearRetryTimer, commit]);
 
   // A workspace replacement renders once before its layout effects run. Gate
   // that render by ownership too, so React never hands the new workspace the

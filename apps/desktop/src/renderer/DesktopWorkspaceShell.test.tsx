@@ -8882,6 +8882,63 @@ describe("content search", () => {
     expect(document.activeElement).toBe(input);
   });
 
+  it("shows an invocation failure with a retry instead of zero results", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.searchWorkspace
+      .mockRejectedValueOnce(new Error("Workspace root vanished."))
+      .mockResolvedValueOnce(undefined);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-search"));
+    await user.type(await screen.findByTestId("search-input"), "apples");
+
+    const error = await screen.findByTestId("workspace-shell-error");
+    expect(error.textContent).toContain(
+      "dohc could not search this workspace. Workspace root vanished.",
+    );
+    expect(screen.queryByTestId("search-summary")).toBeNull();
+    expect(screen.queryByTestId("search-empty-state")).toBeNull();
+
+    await user.click(screen.getByTestId("workspace-shell-error-retry"));
+
+    expect(bridge.searchWorkspace).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(screen.getByTestId("search-spinner")).toBeTruthy();
+  });
+
+  it("clears a failed search banner when a newer search succeeds", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.searchWorkspace
+      .mockRejectedValueOnce(new Error("Workspace root vanished."))
+      .mockResolvedValueOnce(undefined);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-search"));
+    const input = await screen.findByTestId("search-input");
+    await user.type(input, "apples");
+    await screen.findByTestId("workspace-shell-error");
+
+    fireEvent.change(input, { target: { value: "bananas" } });
+    await waitFor(() => expect(bridge.searchWorkspace).toHaveBeenCalledTimes(2));
+    const newer = bridge.searchWorkspace.mock.calls[1]![0];
+    expect(newer.query).toBe("bananas");
+    act(() => {
+      bridge.emitSearchResults({
+        searchId: newer.searchId,
+        entries: [],
+        done: true,
+        limitHit: false,
+      });
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("search-summary").textContent).toBe("No results"),
+    );
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
   it("clears the activity badge as soon as the query is cleared", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
@@ -13132,6 +13189,44 @@ describe("history page", () => {
     });
     expect(placeholder.textContent).toContain("History is unavailable");
     expect(placeholder.textContent).not.toContain("Settings");
+  });
+
+  it("commits opted-out sync status when the sibling agent read fails", async () => {
+    const syncingStatus = { ...SYNC_STATUS, state: "syncing" as const };
+    let failNextAgentRead = false;
+    let statusChanged = false;
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.getSyncStatus = vi.fn(async () =>
+      statusChanged ? syncingStatus : SYNC_STATUS,
+    );
+    bridge.getAgentRunStatus = vi.fn(async () => {
+      if (failNextAgentRead) {
+        failNextAgentRead = false;
+        throw new Error("agent status failed");
+      }
+      return {
+        mcpEnabled: false,
+        activeRun: null,
+        lastRun: null,
+      };
+    });
+    renderShell(bridge);
+
+    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalledTimes(1));
+    expect(screen.getByTestId("sync-status").dataset.state).toBe("synced");
+
+    statusChanged = true;
+    failNextAgentRead = true;
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("sync-status").dataset.state).toBe("syncing"),
+    );
+    const error = await screen.findByTestId("workspace-shell-error");
+    expect(error.textContent).toContain("dohc could not refresh agent runs.");
+    expect(error.textContent).not.toContain("Could not refresh history.");
   });
 
   it("does not report an older opted-out refresh after a newer one succeeds", async () => {

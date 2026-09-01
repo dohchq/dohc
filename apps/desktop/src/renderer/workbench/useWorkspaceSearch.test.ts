@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { createElement } from "react";
+import { createElement, startTransition, Suspense } from "react";
 import { act, cleanup, render, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceSearchPayload } from "../../ipc/bridgeContract";
@@ -42,6 +42,10 @@ const options: SearchRunOptions = {
   wholeWord: false,
   regex: false,
 };
+const reportSearchError = vi.fn<
+  (error: unknown, retry: () => void) => void
+>();
+const clearSearchError = vi.fn<() => void>();
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -71,7 +75,9 @@ describe("useWorkspaceSearch", () => {
           ),
         )
         .mockResolvedValueOnce(undefined);
-      const view = renderHook(() => useWorkspaceSearch("workspace-1"));
+      const view = renderHook(() =>
+        useWorkspaceSearch("workspace-1", reportSearchError, clearSearchError),
+      );
 
       await act(async () => {
         view.result.current.run(options);
@@ -113,7 +119,9 @@ describe("useWorkspaceSearch", () => {
       bridgeMock.searchWorkspace.mockRejectedValueOnce(
         new Error("Workspace is still updating. Try again."),
       );
-      const view = renderHook(() => useWorkspaceSearch("workspace-1"));
+      const view = renderHook(() =>
+        useWorkspaceSearch("workspace-1", reportSearchError, clearSearchError),
+      );
 
       await act(async () => {
         view.result.current.run(options);
@@ -137,7 +145,9 @@ describe("useWorkspaceSearch", () => {
 
   it("settles only a terminal batch with the current search id", () => {
     bridgeMock.searchWorkspace.mockResolvedValueOnce(undefined);
-    const view = renderHook(() => useWorkspaceSearch("workspace-1"));
+    const view = renderHook(() =>
+      useWorkspaceSearch("workspace-1", reportSearchError, clearSearchError),
+    );
 
     act(() => view.result.current.run(options));
     const searchId = bridgeMock.searchWorkspace.mock.calls[0]?.[0].searchId;
@@ -165,13 +175,15 @@ describe("useWorkspaceSearch", () => {
     });
   });
 
-  it("settles a rejected current invocation without letting an older rejection settle it", async () => {
+  it("reports only a rejected current invocation", async () => {
     const older = deferred<void>();
     const newer = deferred<void>();
     bridgeMock.searchWorkspace
       .mockReturnValueOnce(older.promise)
       .mockReturnValueOnce(newer.promise);
-    const view = renderHook(() => useWorkspaceSearch("workspace-1"));
+    const view = renderHook(() =>
+      useWorkspaceSearch("workspace-1", reportSearchError, clearSearchError),
+    );
 
     act(() => view.result.current.run(options));
     const olderSearchId = bridgeMock.searchWorkspace.mock.calls[0]?.[0].searchId;
@@ -203,15 +215,57 @@ describe("useWorkspaceSearch", () => {
       await Promise.resolve();
     });
     expect(view.result.current.model).toMatchObject({
-      searchId: newerSearchId,
-      status: "complete",
+      searchId: null,
+      status: "idle",
     });
+    expect(reportSearchError).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a current invocation failure with a retry that starts the search again", async () => {
+    const onError = vi.fn<
+      (error: unknown, retry: () => void) => void
+    >();
+    bridgeMock.searchWorkspace
+      .mockRejectedValueOnce(new Error("Workspace search stopped"))
+      .mockResolvedValueOnce(undefined);
+    const view = renderHook(() =>
+      useWorkspaceSearch("workspace-1", onError, clearSearchError),
+    );
+
+    await act(async () => {
+      view.result.current.run(options);
+      await Promise.resolve();
+    });
+
+    expect(view.result.current.model).toMatchObject({
+      searchId: null,
+      status: "idle",
+      totalMatches: 0,
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[0]).toEqual(
+      new Error("Workspace search stopped"),
+    );
+
+    act(() => onError.mock.calls[0]?.[1]());
+
+    expect(bridgeMock.searchWorkspace).toHaveBeenCalledTimes(2);
+    expect(bridgeMock.searchWorkspace.mock.calls[1]?.[0]).toMatchObject({
+      workspaceId: "workspace-1",
+      query: "needle",
+    });
+    expect(bridgeMock.searchWorkspace.mock.calls[1]?.[0].searchId).not.toBe(
+      bridgeMock.searchWorkspace.mock.calls[0]?.[0].searchId,
+    );
+    expect(view.result.current.model.status).toBe("searching");
   });
 
   it("keeps an explicitly cleared search idle when its invocation rejects", async () => {
     const pending = deferred<void>();
     bridgeMock.searchWorkspace.mockReturnValueOnce(pending.promise);
-    const view = renderHook(() => useWorkspaceSearch("workspace-1"));
+    const view = renderHook(() =>
+      useWorkspaceSearch("workspace-1", reportSearchError, clearSearchError),
+    );
 
     act(() => view.result.current.run(options));
     act(() => view.result.current.clear());
@@ -228,7 +282,8 @@ describe("useWorkspaceSearch", () => {
 
   it("drops a late batch after the workspace changes", () => {
     const view = renderHook(
-      ({ workspaceId }: { workspaceId: string }) => useWorkspaceSearch(workspaceId),
+      ({ workspaceId }: { workspaceId: string }) =>
+        useWorkspaceSearch(workspaceId, reportSearchError, clearSearchError),
       { initialProps: { workspaceId: "workspace-1" } },
     );
 
@@ -269,7 +324,11 @@ describe("useWorkspaceSearch", () => {
     > = [];
     let search!: WorkspaceSearchApi;
     function Probe({ workspaceId }: { workspaceId: string }) {
-      search = useWorkspaceSearch(workspaceId);
+      search = useWorkspaceSearch(
+        workspaceId,
+        reportSearchError,
+        clearSearchError,
+      );
       snapshots.push({ model: search.model, criteria: search.criteria });
       return null;
     }
@@ -308,5 +367,64 @@ describe("useWorkspaceSearch", () => {
       totalMatches: 0,
     });
     expect(snapshots[0]?.criteria.query).toBe("");
+  });
+
+  it("keeps accepting committed-workspace results when a replacement render is interrupted", () => {
+    const interrupted = new Promise<never>(() => undefined);
+    let search!: WorkspaceSearchApi;
+    function Probe({ workspaceId }: { workspaceId: string }) {
+      search = useWorkspaceSearch(
+        workspaceId,
+        reportSearchError,
+        clearSearchError,
+      );
+      if (workspaceId === "workspace-2") throw interrupted;
+      return createElement(
+        "output",
+        { "data-testid": "committed-search-count" },
+        search.model.totalMatches,
+      );
+    }
+    const view = render(
+      createElement(
+        Suspense,
+        { fallback: createElement("div", null, "Loading") },
+        createElement(Probe, { workspaceId: "workspace-1" }),
+      ),
+    );
+
+    act(() => search.run(options));
+    const searchId = bridgeMock.searchWorkspace.mock.calls[0]?.[0].searchId;
+    act(() => {
+      startTransition(() => {
+        view.rerender(
+          createElement(
+            Suspense,
+            { fallback: createElement("div", null, "Loading") },
+            createElement(Probe, { workspaceId: "workspace-2" }),
+          ),
+        );
+      });
+    });
+
+    act(() => {
+      searchResultsListener?.({
+        searchId,
+        entries: [
+          {
+            path: "committed-workspace.md",
+            line: 1,
+            column: 1,
+            preview: "needle",
+            matchStart: 0,
+            matchEnd: 6,
+          },
+        ],
+        done: true,
+        limitHit: false,
+      });
+    });
+
+    expect(view.getByTestId("committed-search-count").textContent).toBe("1");
   });
 });

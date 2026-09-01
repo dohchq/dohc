@@ -1605,7 +1605,7 @@ export function DesktopWorkspaceShell(props: {
   const [shellError, setShellError] = useState<{
     message: string;
     retry: (() => void) | null;
-    kind?: "singleton-tab-split" | "tab-limit";
+    kind?: "singleton-tab-split" | "tab-limit" | "workspace-search";
   } | null>(null);
   const showTabLimitError = useCallback(
     (
@@ -2082,10 +2082,6 @@ export function DesktopWorkspaceShell(props: {
     graphRefreshKey,
   } = useMemo(() => indexFileListing(files), [files]);
 
-  // Content search (Phase E5.0). The model lives HERE, not in the Search
-  // view, so results — and the activity-bar count badge — survive switching
-  // views while the panel unmounts.
-  const search = useWorkspaceSearch(workspaceId);
   const focusedGroup = activeGroup(wb);
   const focusedTabPath = activeTabPath(wb);
   // The plugins list marks the row whose details tab the user is looking at,
@@ -2634,7 +2630,12 @@ export function DesktopWorkspaceShell(props: {
   ]);
 
   const reportShellError = useCallback(
-    (fallback: string, error: unknown, retry: (() => void) | null = null) => {
+    (
+      fallback: string,
+      error: unknown,
+      retry: (() => void) | null = null,
+      kind?: "workspace-search",
+    ) => {
       const detail = error instanceof Error ? error.message.trim() : "";
       setShellError({
         message:
@@ -2642,9 +2643,33 @@ export function DesktopWorkspaceShell(props: {
             ? `${fallback} ${detail}`
             : detail || fallback,
         retry,
+        ...(kind ? { kind } : {}),
       });
     },
     [],
+  );
+  // Content search lives in the shell so its results survive panel switches.
+  // Invocation failures use the shell's persistent error and retry contract;
+  // they must not look like a successful search with no matches.
+  const reportSearchError = useCallback(
+    (error: unknown, retry: () => void) =>
+      reportShellError(
+        "dohc could not search this workspace.",
+        error,
+        retry,
+        "workspace-search",
+      ),
+    [reportShellError],
+  );
+  const clearSearchError = useCallback(() => {
+    setShellError((current) =>
+      current?.kind === "workspace-search" ? null : current,
+    );
+  }, []);
+  const search = useWorkspaceSearch(
+    workspaceId,
+    reportSearchError,
+    clearSearchError,
   );
   // Snapshot lanes share one banner. Keep the lane in the message so the user
   // can tell which value went stale, then show the cause and a retry control.
@@ -3137,19 +3162,28 @@ export function DesktopWorkspaceShell(props: {
     // settings panel and a second refresh also write, and an untimed write
     // ranked by arrival undid both — a run the user had just started, and a
     // newer status (#636).
-    let status: SyncStatusResult;
-    let agent: AgentRunStatusResult;
-    try {
-      [status, agent] = await Promise.all([
-        bridge().getSyncStatus({ workspaceId }),
-        readAgentStatusForHistory(),
-      ]);
-    } catch (error) {
-      if (token !== newestHistoryRefresh.current) return;
-      throw error;
-    }
-    syncStatusLane.commit(token, status);
-    agentActiveLane.commit(token, agent.activeRun !== null);
+    const statusRead = bridge().getSyncStatus({ workspaceId });
+    const agentRead = readAgentStatusForHistory();
+    const askAgain = () => {
+      void refreshHistory().catch((error) =>
+        reportShellError("Could not refresh history.", error),
+      );
+    };
+    syncStatusLane.settle(
+      token,
+      statusRead,
+      (status) => status,
+      (error) =>
+        reportLaneFailure("dohc could not refresh sync status.", error, askAgain),
+    );
+    agentActiveLane.settle(
+      token,
+      agentRead,
+      (agent) => agent.activeRun !== null,
+      (error) =>
+        reportLaneFailure("dohc could not refresh agent runs.", error, askAgain),
+    );
+    await Promise.allSettled([statusRead, agentRead]);
     markCurrentSwitchPhase("history-ready");
     return "ready" as const;
   }, [
