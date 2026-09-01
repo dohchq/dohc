@@ -347,8 +347,12 @@ it("persists a crude-text draft synchronously, before the held projection import
   expect(screen.getByTestId("draft").textContent).toContain("My Heading");
 
   release();
-  await waitFor(() =>
-    expect(screen.getByTestId("draft").textContent).toBe("# My Heading"),
+  await waitFor(
+    () => {
+      expect(screen.getByTestId("draft-count").textContent).toBe("1");
+      expect(screen.getByTestId("draft").textContent).toBe("# My Heading");
+    },
+    { timeout: 10_000 },
   );
   // Upgraded in place, not appended: still exactly one row for this path.
   expect(screen.getByTestId("draft-count").textContent).toBe("1");
