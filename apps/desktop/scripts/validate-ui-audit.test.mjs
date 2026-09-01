@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -10,12 +10,24 @@ import {
   uiAuditCaptureManifestName,
   validateUiAuditDirectory,
 } from "./validate-ui-audit.mjs";
+import {
+  currentUiAuditBundles,
+  readUiAuditBuildProvenance,
+  writeUiAuditBuildProvenance,
+} from "./ui-audit-build-provenance.mjs";
 
 const COMMIT = "a".repeat(40);
 const BUNDLES = {
-  mainSha256: "1".repeat(64),
-  rendererTreeSha256: "2".repeat(64),
-  engineSha256: "3".repeat(64),
+  mainTreeSha256: "1".repeat(64),
+  preloadTreeSha256: "2".repeat(64),
+  rendererTreeSha256: "3".repeat(64),
+  engineSha256: "4".repeat(64),
+};
+const BUILD = {
+  schemaVersion: 1,
+  commit: COMMIT,
+  builtAt: "2026-08-30T03:59:00.000Z",
+  bundles: BUNDLES,
 };
 
 function pngHeader(width, height) {
@@ -42,6 +54,7 @@ async function writeCaptureManifest(
     completedAt = new Date(Date.now() + 1_000),
     state = "complete",
     bundles = BUNDLES,
+    build = BUILD,
   } = {},
 ) {
   const sha256 = createHash("sha256").update(image).digest("hex");
@@ -53,6 +66,7 @@ async function writeCaptureManifest(
       commit,
       startedAt: startedAt.toISOString(),
       completedAt: state === "complete" ? completedAt.toISOString() : null,
+      build,
       bundles,
       shots: expectedUiAuditShots.map((name) => ({ name, sha256 })),
     })}\n`,
@@ -187,8 +201,63 @@ test("rejects screenshots from a different desktop build", async (t) => {
     () =>
       validateUiAuditDirectory(directory, COMMIT, {
         ...BUNDLES,
-        rendererTreeSha256: "4".repeat(64),
+        preloadTreeSha256: "5".repeat(64),
       }),
-    /rendererTreeSha256 does not match the current desktop build/,
+    /preloadTreeSha256 does not match the current desktop build/,
+  );
+});
+
+test("rejects screenshots whose build stamp names a different commit", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-ui-audit-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const image = Buffer.alloc(10_001);
+  pngHeader(1920, 1200).copy(image);
+  await writeAuditShots(directory, image);
+  await writeCaptureManifest(directory, image, {
+    build: { ...BUILD, commit: "b".repeat(40) },
+  });
+
+  assert.throws(
+    () => validateUiAuditDirectory(directory, COMMIT, BUNDLES, BUILD),
+    /does not match the verified desktop build/,
+  );
+});
+
+test("binds every main and preload artifact to the build stamp", async (t) => {
+  const desktopRoot = await mkdtemp(join(tmpdir(), "dohc-ui-audit-build-"));
+  t.after(() => rm(desktopRoot, { recursive: true, force: true }));
+  await Promise.all([
+    mkdir(join(desktopRoot, "dist/main"), { recursive: true }),
+    mkdir(join(desktopRoot, "dist/preload"), { recursive: true }),
+    mkdir(join(desktopRoot, "dist/renderer"), { recursive: true }),
+    mkdir(join(desktopRoot, "target/debug"), { recursive: true }),
+  ]);
+  await Promise.all([
+    writeFile(join(desktopRoot, "dist/main/main.js"), "main"),
+    writeFile(join(desktopRoot, "dist/preload/preload.cjs"), "preload"),
+    writeFile(join(desktopRoot, "dist/renderer/index.js"), "renderer"),
+    writeFile(join(desktopRoot, "target/debug/dohc-workspace-engine"), "engine"),
+  ]);
+  const bundles = currentUiAuditBundles(desktopRoot, "linux");
+  writeUiAuditBuildProvenance(
+    desktopRoot,
+    COMMIT,
+    bundles,
+    "2026-08-30T03:59:00.000Z",
+  );
+  assert.deepEqual(
+    readUiAuditBuildProvenance(desktopRoot, COMMIT, bundles).bundles,
+    bundles,
+  );
+
+  await writeFile(join(desktopRoot, "dist/main/lazy-chunk.js"), "new main chunk");
+  assert.throws(
+    () =>
+      readUiAuditBuildProvenance(
+        desktopRoot,
+        COMMIT,
+        currentUiAuditBundles(desktopRoot, "linux"),
+      ),
+    /mainTreeSha256 does not match the current desktop build/,
   );
 });

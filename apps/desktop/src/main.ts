@@ -1013,6 +1013,10 @@ function createPluginWorkspaceRuntimeParts(
         }
         return pluginHostRef.requestDriver(pluginId, spawnId, method, params);
       },
+      stopDriverSpawn: (pluginId, spawnId) => {
+        if (!pluginHostRef) return Promise.resolve();
+        return pluginHostRef.stopDriverSpawn(pluginId, spawnId);
+      },
     },
     reservedDriverIds: BUILT_IN_AGENT_DRIVER_IDS,
   });

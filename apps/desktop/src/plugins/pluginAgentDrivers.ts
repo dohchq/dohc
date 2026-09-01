@@ -10,6 +10,7 @@ import type {
 } from "../agents/AgentDriver";
 import {
   PLUGIN_DRIVER_SESSION_ID_MAX_CHARS,
+  PLUGIN_DRIVER_REJECTION_MESSAGE_MAX_CHARS,
   PLUGIN_DRIVER_PROBE_TIMEOUT_MS,
   PLUGIN_HOST_METHODS,
   type PluginDriverAnswerPermissionParams,
@@ -20,7 +21,6 @@ import {
   type PluginDriverSessionParams,
   type PluginDriverSetModelParams,
   type PluginDriverStartSessionParams,
-  type PluginDriverStartSessionResult,
 } from "./pluginHostProtocol";
 import { errorMessage, raceWithTimeout } from "./pluginShared";
 
@@ -219,6 +219,12 @@ const StartSessionResultSchema = z.object({
   }),
 });
 
+const RejectedSessionResultSchema = z.object({
+  rejected: z.literal(true),
+  message: z.string().min(1).max(PLUGIN_DRIVER_REJECTION_MESSAGE_MAX_CHARS),
+  stopSpawn: z.literal(true),
+});
+
 function locations(values: string[] | undefined): string[] | undefined {
   if (values === undefined) return undefined;
   return values
@@ -357,6 +363,7 @@ export interface PluginDriverRequestHost {
     method: string,
     params: unknown,
   ): Promise<T>;
+  stopDriverSpawn(pluginId: string, spawnId: string): Promise<void>;
 }
 
 export interface PluginAgentDriversOptions {
@@ -575,6 +582,18 @@ export function createPluginAgentDrivers(options: PluginAgentDriversOptions) {
           );
           const started = StartSessionResultSchema.safeParse(result);
           if (!started.success) {
+            const rejected = RejectedSessionResultSchema.safeParse(result);
+            if (rejected.success) {
+              try {
+                await options.host.stopDriverSpawn(pluginId, spawnId);
+              } catch (stopError) {
+                throw new AggregateError(
+                  [new Error(rejected.data.message), stopError],
+                  `${rejected.data.message} Plugin teardown also failed: ${errorMessage(stopError)}`,
+                );
+              }
+              throw new Error(rejected.data.message);
+            }
             throw new Error(
               `Driver "${declared.id}" returned a session dohc cannot use: it must report a session id of 1 to ${PLUGIN_DRIVER_SESSION_ID_MAX_CHARS} characters, a JSON resume cursor, and which optional members it supports.`,
             );

@@ -92,6 +92,10 @@ async function startClaudePlugin(
         if (!host) throw new Error("The plugin host is not running.");
         return host.requestDriver(pluginId, spawnId, method, params);
       },
+      stopDriverSpawn: (pluginId, spawnId) => {
+        if (!host) return Promise.resolve();
+        return host.stopDriverSpawn(pluginId, spawnId);
+      },
     },
     reservedDriverIds: BUILT_IN_AGENT_DRIVER_IDS,
   });

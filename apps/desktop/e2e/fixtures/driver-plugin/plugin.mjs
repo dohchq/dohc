@@ -53,6 +53,9 @@ function createDriver(ctx, options = {}) {
         args,
         cwd: { workspaceRoot: true },
       });
+      if (options.recordPidOnStart && disposedPath) {
+        await writeFile(disposedPath, String(harness.pid), "utf8");
+      }
 
       let buffered = "";
       await harness.onOutput((output) => {
@@ -158,6 +161,12 @@ function createDriver(ctx, options = {}) {
           await harness.terminate();
         },
         async dispose() {
+          if (options.disposeBehavior === "hang") {
+            await new Promise(() => {});
+          }
+          if (options.disposeBehavior === "reject") {
+            throw new Error("fixture session cleanup failed");
+          }
           await harness.terminate();
           if (disposedPath) await writeFile(disposedPath, "disposed", "utf8");
         },
@@ -209,6 +218,34 @@ switch (mode) {
         ctx.drivers.register(
           "fixture-harness",
           createDriver(ctx, { badCursor: true }),
+        );
+      },
+    };
+    break;
+  case "invalid-session-cleanup-hangs":
+    handler = {
+      activate(ctx) {
+        ctx.drivers.register(
+          "fixture-harness",
+          createDriver(ctx, {
+            badCursor: true,
+            disposeBehavior: "hang",
+            recordPidOnStart: true,
+          }),
+        );
+      },
+    };
+    break;
+  case "invalid-session-cleanup-rejects":
+    handler = {
+      activate(ctx) {
+        ctx.drivers.register(
+          "fixture-harness",
+          createDriver(ctx, {
+            badCursor: true,
+            disposeBehavior: "reject",
+            recordPidOnStart: true,
+          }),
         );
       },
     };

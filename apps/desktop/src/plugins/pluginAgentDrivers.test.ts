@@ -106,6 +106,10 @@ async function startDriverPlugin(
         if (!host) throw new Error("The plugin host is not running.");
         return host.requestDriver(pluginId, spawnId, method, params);
       },
+      stopDriverSpawn: (pluginId, spawnId) => {
+        if (!host) return Promise.resolve();
+        return host.stopDriverSpawn(pluginId, spawnId);
+      },
     },
     reservedDriverIds: BUILT_IN_DRIVER_IDS,
     onWarning: (message) => warnings.push(message),
@@ -417,6 +421,31 @@ describe("plugin agent drivers, through the real plugin process", () => {
     30_000,
   );
 
+  it.each([
+    "invalid-session-cleanup-hangs",
+    "invalid-session-cleanup-rejects",
+  ])(
+    "stops the plugin process tree when %s",
+    async (mode) => {
+      const fixture = await startDriverPlugin(mode);
+
+      await expect(startSession(fixture)).rejects.toThrow(
+        /resumeCursor must be JSON data.*Session cleanup also failed/,
+      );
+      const harnessPid = Number.parseInt(
+        await readFile(fixture.disposedPath, "utf8"),
+        10,
+      );
+      expect(Number.isSafeInteger(harnessPid)).toBe(true);
+      await until(
+        () => (isAlive(harnessPid) ? undefined : true),
+        "the rejected session's harness to stop",
+      );
+      expect(fixture.drivers.list()).toEqual([]);
+    },
+    30_000,
+  );
+
   it(
     "takes the harness's whole process tree down when dohc stops the plugin",
     async () => {
@@ -567,6 +596,7 @@ describe("the plugin driver registry", () => {
           calls.push({ method, params });
           return {} as T;
         },
+        stopDriverSpawn: async () => {},
       },
       reservedDriverIds: BUILT_IN_DRIVER_IDS,
       onWarning: (message) => warnings.push(message),

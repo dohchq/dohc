@@ -13,6 +13,8 @@ import {
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
+  PLUGIN_DRIVER_REJECTED_SESSION_CLEANUP_TIMEOUT_MS,
+  PLUGIN_DRIVER_REJECTION_MESSAGE_MAX_CHARS,
   PLUGIN_DRIVER_SESSION_ID_MAX_CHARS,
   PLUGIN_HOST_METHODS,
   type PluginActivateParams,
@@ -27,6 +29,7 @@ import {
   type PluginDriverSetModelParams,
   type PluginDriverStartSessionParams,
   type PluginDriverStartSessionResult,
+  type PluginDriverStartedSessionResult,
   type PluginInvokeCommandParams,
   type PluginStartWebAppParams,
   type PluginStartWebAppResult,
@@ -223,7 +226,7 @@ function jsonValueForWire(
 
 function acceptedDriverSessionResult(
   session: PluginAgentSession,
-): PluginDriverStartSessionResult {
+): PluginDriverStartedSessionResult {
   const sessionId = session.sessionId;
   if (
     typeof sessionId !== "string" ||
@@ -248,6 +251,43 @@ function acceptedDriverSessionResult(
       answerUserInput: typeof session.answerUserInput === "function",
     },
   };
+}
+
+async function disposeRejectedDriverSession(
+  session: PluginAgentSession,
+  validationError: unknown,
+): Promise<PluginDriverStartSessionResult> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new Error(
+            `session cleanup exceeded ${PLUGIN_DRIVER_REJECTED_SESSION_CLEANUP_TIMEOUT_MS} ms`,
+          ),
+        ),
+      PLUGIN_DRIVER_REJECTED_SESSION_CLEANUP_TIMEOUT_MS,
+    );
+    timer.unref?.();
+  });
+  try {
+    await Promise.race([
+      Promise.resolve().then(() => session.dispose()),
+      timeout,
+    ]);
+  } catch (disposeError) {
+    return {
+      rejected: true,
+      message: `${errorMessage(validationError)} Session cleanup also failed: ${errorMessage(disposeError)}`.slice(
+        0,
+        PLUGIN_DRIVER_REJECTION_MESSAGE_MAX_CHARS,
+      ),
+      stopSpawn: true,
+    };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+  throw validationError;
 }
 
 transport.onRequest(PLUGIN_HOST_METHODS.driverProbe, async (rawParams) => {
@@ -280,15 +320,7 @@ transport.onRequest(PLUGIN_HOST_METHODS.driverStartSession, async (rawParams) =>
   try {
     result = acceptedDriverSessionResult(session);
   } catch (error) {
-    try {
-      await session.dispose();
-    } catch (disposeError) {
-      throw new AggregateError(
-        [error, disposeError],
-        `${errorMessage(error)} Session cleanup also failed: ${errorMessage(disposeError)}`,
-      );
-    }
-    throw error;
+    return await disposeRejectedDriverSession(session, error);
   }
   driverSessions.set(sessionKey, session);
   return result;

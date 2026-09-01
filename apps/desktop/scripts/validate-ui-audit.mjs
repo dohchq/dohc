@@ -2,9 +2,14 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  currentUiAuditBundles,
+  readUiAuditBuildProvenance,
+  validateUiAuditBundles,
+} from "./ui-audit-build-provenance.mjs";
 
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 const MIN_SCREENSHOT_BYTES = 10_000;
@@ -47,7 +52,7 @@ export function readPngDimensions(bytes) {
   return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
 }
 
-function readCaptureManifest(directory, expectedCommit) {
+function readCaptureManifest(directory, expectedCommit, expectedBuild) {
   const manifestPath = join(directory, uiAuditCaptureManifestName);
   let manifest;
   try {
@@ -62,6 +67,8 @@ function readCaptureManifest(directory, expectedCommit) {
     typeof manifest.commit !== "string" ||
     typeof manifest.startedAt !== "string" ||
     typeof manifest.completedAt !== "string" ||
+    typeof manifest.build !== "object" ||
+    manifest.build === null ||
     !Array.isArray(manifest.shots)
   ) {
     throw new Error(`${uiAuditCaptureManifestName} has an invalid shape`);
@@ -71,6 +78,26 @@ function readCaptureManifest(directory, expectedCommit) {
       `screenshots were captured from ${manifest.commit}; expected ${expectedCommit}`,
     );
   }
+  if (
+    manifest.build.schemaVersion !== 1 ||
+    typeof manifest.build.commit !== "string" ||
+    typeof manifest.build.builtAt !== "string" ||
+    !Number.isFinite(Date.parse(manifest.build.builtAt))
+  ) {
+    throw new Error(`${uiAuditCaptureManifestName} has invalid build provenance`);
+  }
+  if (
+    manifest.build.commit !== expectedBuild.commit ||
+    (expectedBuild.builtAt !== null &&
+      manifest.build.builtAt !== expectedBuild.builtAt)
+  ) {
+    throw new Error(`${uiAuditCaptureManifestName} does not match the verified desktop build`);
+  }
+  validateUiAuditBundles(
+    manifest.build.bundles,
+    expectedBuild.bundles,
+    `${uiAuditCaptureManifestName} build provenance`,
+  );
   const startedAtMs = Date.parse(manifest.startedAt);
   const completedAtMs = Date.parse(manifest.completedAt);
   if (
@@ -104,21 +131,19 @@ function readCaptureManifest(directory, expectedCommit) {
 }
 
 function validateBundleHashes(actual, expected) {
-  for (const key of ["mainSha256", "rendererTreeSha256", "engineSha256"]) {
-    if (typeof actual?.[key] !== "string" || !/^[0-9a-f]{64}$/.test(actual[key])) {
-      throw new Error(`${uiAuditCaptureManifestName} has invalid bundle provenance`);
-    }
-    if (actual[key] !== expected?.[key]) {
-      throw new Error(`captured ${key} does not match the current desktop build`);
-    }
-  }
+  validateUiAuditBundles(actual, expected, `captured ${uiAuditCaptureManifestName}`);
 }
 
-export function validateUiAuditDirectory(directory, expectedCommit, expectedBundles) {
+export function validateUiAuditDirectory(
+  directory,
+  expectedCommit,
+  expectedBundles,
+  expectedBuild = { commit: expectedCommit, builtAt: null, bundles: expectedBundles },
+) {
   if (typeof expectedCommit !== "string" || !/^[0-9a-f]{40}$/.test(expectedCommit)) {
     throw new Error("expectedCommit must be a full Git commit id");
   }
-  const capture = readCaptureManifest(directory, expectedCommit);
+  const capture = readCaptureManifest(directory, expectedCommit, expectedBuild);
   validateBundleHashes(capture.manifest.bundles, expectedBundles);
   const shots = expectedUiAuditShots.map((name) => {
     const path = join(directory, name);
@@ -153,6 +178,7 @@ export function validateUiAuditDirectory(directory, expectedCommit, expectedBund
       commit: capture.manifest.commit,
       startedAt: capture.manifest.startedAt,
       completedAt: capture.manifest.completedAt,
+      build: capture.manifest.build,
       bundles: capture.manifest.bundles,
     },
     shots,
@@ -179,40 +205,9 @@ function worktreeDirty() {
   );
 }
 
-function sha256File(path) {
-  return createHash("sha256").update(readFileSync(path)).digest("hex");
-}
-
-function sha256Tree(directory) {
-  const entries = [];
-  function visit(path, relative) {
-    const children = readdirSync(path, { withFileTypes: true }).sort((left, right) =>
-      left.name.localeCompare(right.name),
-    );
-    for (const child of children) {
-      const childPath = join(path, child.name);
-      const childRelative = relative ? `${relative}/${child.name}` : child.name;
-      if (child.isDirectory()) visit(childPath, childRelative);
-      else if (child.isFile()) entries.push(`${childRelative}\0${sha256File(childPath)}`);
-    }
-  }
-  visit(directory, "");
-  return createHash("sha256").update(entries.join("\n")).digest("hex");
-}
-
 function currentBundleHashes() {
   const desktopRoot = resolve(repoRoot(), "apps/desktop");
-  return {
-    mainSha256: sha256File(join(desktopRoot, "dist/main/main.js")),
-    rendererTreeSha256: sha256Tree(join(desktopRoot, "dist/renderer")),
-    engineSha256: sha256File(
-      join(
-        desktopRoot,
-        "target/debug",
-        `dohc-workspace-engine${process.platform === "win32" ? ".exe" : ""}`,
-      ),
-    ),
-  };
+  return currentUiAuditBundles(desktopRoot);
 }
 
 function runCli(args) {
@@ -223,11 +218,14 @@ function runCli(args) {
   if (worktreeDirty()) {
     throw new Error("commit the worktree before validating UI audit evidence");
   }
+  const desktopRoot = resolve(repoRoot(), "apps/desktop");
+  const bundles = currentBundleHashes();
+  const build = readUiAuditBuildProvenance(desktopRoot, commit, bundles);
   const result = {
     validatedCommit: commit,
     worktreeDirty: false,
     validatedAt: new Date().toISOString(),
-    ...validateUiAuditDirectory(args[0], commit, currentBundleHashes()),
+    ...validateUiAuditDirectory(args[0], commit, bundles, build),
   };
   const json = `${JSON.stringify(result, null, 2)}\n`;
   if (args[1]) writeFileSync(args[1], json, "utf8");

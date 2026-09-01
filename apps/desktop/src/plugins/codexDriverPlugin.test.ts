@@ -93,6 +93,10 @@ async function startCodexPlugin(
         if (!host) throw new Error("The plugin host is not running.");
         return host.requestDriver(pluginId, spawnId, method, params);
       },
+      stopDriverSpawn: (pluginId, spawnId) => {
+        if (!host) return Promise.resolve();
+        return host.stopDriverSpawn(pluginId, spawnId);
+      },
     },
     // The real list. A driver id dohc still ships is one this plugin could
     // not take, so the plugin's registration is only proof while this is

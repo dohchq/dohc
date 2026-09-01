@@ -73,8 +73,9 @@ use dohc_engine_domain::{
     decline_oversized_collection_adoption_in_tx, decode_binary_rollback_job_identity,
     delete_collection_adoption_binding_in_tx, delete_secret_file_keyless_with,
     derive_capture_object_id, enqueue_binary_delete, enqueue_binary_rename, enqueue_write,
-    fork_version_keyless_with, get_collection, get_collection_record, get_secret_moment_keyless,
-    has_secret_state, insert_text_conflict_if_absent, is_collection_record_bound_in_tx,
+    ensure_main_version_in_tx, fork_version_keyless_with, get_collection, get_collection_record,
+    get_secret_moment_keyless, has_secret_state, insert_text_conflict_if_absent,
+    is_collection_record_bound_in_tx,
     list_collections, list_pending_collection_adoptions, list_secret_files_keyless,
     list_secret_files_keyless_page, list_secret_moments_in_time_window_keyless,
     list_secret_moments_page_keyless, query_collection_records, reconcile_collections_in_tx,
@@ -14719,19 +14720,28 @@ fn capture_ingest_batch_on_store(
         .into());
     }
     validate_workspace_root(root_dir, Some(root_guard))?;
-    ensure_mutation_version_on_store(
-        store,
-        &first.workspace_id,
-        &first.version_id,
-        first.now_ms,
-        faults,
-    )?;
-    if token.is_cancelled() {
-        return Err(RuntimeError::Cancelled);
-    }
-    validate_workspace_root(root_dir, Some(root_guard))?;
+    let bootstrap_main = {
+        let versions = VersionedTextStore::new(store);
+        let missing_main = versions.get_main_version(&first.workspace_id)?.is_none();
+        if missing_main && first.version_id != "main" {
+            return Err(DomainError::VersionNotFound.into());
+        }
+        missing_main
+    };
 
     let outcome = store.write_with(faults, |tx| {
+        if bootstrap_main {
+            ensure_main_version_in_tx(
+                tx,
+                &first.workspace_id,
+                &first.version_id,
+                first.now_ms,
+            )?;
+        }
+        if token.is_cancelled() {
+            return Err(RuntimeError::Cancelled);
+        }
+        validate_workspace_root(root_dir, Some(root_guard))?;
         let indexing = CaptureIndexing::UseSnapshot(Arc::clone(search_policy));
 
         // Most startup batches are clean. Keep their database and FTS work in
@@ -16214,6 +16224,7 @@ mod capture_secret_root_guard_tests {
     use super::*;
     use crate::WorkspaceSupervisor;
     use dohc_engine_testkit::ScratchDir;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::Condvar;
     use std::time::Duration;
 
@@ -16298,6 +16309,91 @@ mod capture_secret_root_guard_tests {
             }
             self.bound.validate(root_dir)
         }
+    }
+
+    struct RejectSecondValidation {
+        calls: AtomicUsize,
+    }
+
+    impl WorkspaceRootGuard for RejectSecondValidation {
+        fn validate(&self, _root_dir: &std::path::Path) -> Result<(), RuntimeError> {
+            if self.calls.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+                Ok(())
+            } else {
+                Err(RuntimeError::Identity {
+                    reason: "workspace root changed during capture",
+                    source: None,
+                })
+            }
+        }
+    }
+
+    #[test]
+    fn capture_batch_rolls_back_version_bootstrap_when_final_root_fence_rejects() {
+        const PATH: &str = "notes/fenced.md";
+
+        let store_scratch = ScratchDir::new().expect("store scratch");
+        let root_scratch = ScratchDir::new().expect("workspace root scratch");
+        let root = root_scratch.path();
+        let db = store_scratch.engine_db_path().expect("engine db path");
+        let mut store = EngineStore::open(&db, 1).expect("open store");
+        let guard = RejectSecondValidation {
+            calls: AtomicUsize::new(0),
+        };
+        let result = capture_ingest_batch_on_store(
+            &mut store,
+            &[CaptureIngest {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                version_id: VERSION_ID.to_owned(),
+                path: PATH.to_owned(),
+                text: "fenced body".to_owned(),
+                metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
+                metadata_summary: Some("Reconciled offline edits".to_owned()),
+                metadata_correlation_id: Some("second-root-fence".to_owned()),
+                author_json: None,
+                now_ms: 2,
+                request_id: None,
+                claim_foreign_head: false,
+            }],
+            &Arc::new(read_engine_search_policy(root)),
+            &LeaseRegistry::new(),
+            &NoFaults,
+            &CancellationToken::new(),
+            (root, &guard),
+        );
+
+        assert!(matches!(
+            result,
+            Err(RuntimeError::Identity {
+                reason: "workspace root changed during capture",
+                ..
+            })
+        ));
+        assert_eq!(guard.calls.load(AtomicOrdering::SeqCst), 2);
+        assert!(
+            VersionedTextStore::new(&mut store)
+                .get_main_version(WORKSPACE_ID)
+                .expect("read rolled-back version")
+                .is_none(),
+            "the rejected transaction must roll back its version bootstrap"
+        );
+        let durable_rows = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT \
+                       (SELECT COUNT(*) FROM versions WHERE workspace_id=?1) + \
+                       (SELECT COUNT(*) FROM path_aliases WHERE workspace_id=?1) + \
+                       (SELECT COUNT(*) FROM snapshots WHERE workspace_id=?1) + \
+                       (SELECT COUNT(*) FROM moments WHERE workspace_id=?1) + \
+                       (SELECT COUNT(*) FROM file_objects WHERE workspace_id=?1) + \
+                       (SELECT COUNT(*) FROM replication_log WHERE workspace_id=?1) + \
+                       (SELECT COUNT(*) FROM engine_search_files_fts WHERE workspace_id=?1)",
+                    [WORKSPACE_ID],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .expect("count rolled-back rows");
+        assert_eq!(durable_rows, 0);
     }
 
     #[test]

@@ -1,11 +1,16 @@
 import { expect, test } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Page } from "@playwright/test";
 import { launchDesktopApp } from "./helpers/desktopApp";
+import {
+  currentUiAuditBundles,
+  readUiAuditBuildProvenance,
+} from "../scripts/ui-audit-build-provenance.mjs";
+import { expectedUiAuditShots } from "../scripts/validate-ui-audit.mjs";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
@@ -27,17 +32,26 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const DESKTOP_ROOT = resolve(REPO_ROOT, "apps/desktop");
 const CAPTURE_MANIFEST = "ui-audit-capture.json";
 
+type UiAuditBundles = {
+  mainTreeSha256: string;
+  preloadTreeSha256: string;
+  rendererTreeSha256: string;
+  engineSha256: string;
+};
+
 type CaptureManifest = {
   schemaVersion: 1;
   state: "in-progress" | "complete";
   commit: string;
   startedAt: string;
   completedAt: string | null;
-  bundles: {
-    mainSha256: string;
-    rendererTreeSha256: string;
-    engineSha256: string;
+  build: {
+    schemaVersion: 1;
+    commit: string;
+    builtAt: string;
+    bundles: UiAuditBundles;
   };
+  bundles: UiAuditBundles;
   shots: Array<{ name: string; sha256: string }>;
 };
 
@@ -45,26 +59,6 @@ let activeCapture: CaptureManifest | null = null;
 
 function git(args: string[]): string {
   return execFileSync("git", args, { cwd: REPO_ROOT, encoding: "utf8" }).trim();
-}
-
-async function sha256File(path: string): Promise<string> {
-  return createHash("sha256").update(await readFile(path)).digest("hex");
-}
-
-async function sha256Tree(directory: string): Promise<string> {
-  const entries: string[] = [];
-  async function visit(path: string, relative: string): Promise<void> {
-    const children = await readdir(path, { withFileTypes: true });
-    children.sort((left, right) => left.name.localeCompare(right.name));
-    for (const child of children) {
-      const childPath = join(path, child.name);
-      const childRelative = relative ? `${relative}/${child.name}` : child.name;
-      if (child.isDirectory()) await visit(childPath, childRelative);
-      else if (child.isFile()) entries.push(`${childRelative}\0${await sha256File(childPath)}`);
-    }
-  }
-  await visit(directory, "");
-  return createHash("sha256").update(entries.join("\n")).digest("hex");
 }
 
 async function writeCaptureManifest(): Promise<void> {
@@ -193,23 +187,20 @@ test("@ui-audit capture baseline screenshots", async () => {
   if ((await readdir(SHOT_DIR)).length !== 0) {
     throw new Error("UI_AUDIT_SHOT_DIR must be empty before capture");
   }
+  const bundles = currentUiAuditBundles(DESKTOP_ROOT);
+  const build = readUiAuditBuildProvenance(
+    DESKTOP_ROOT,
+    captureCommit,
+    bundles,
+  );
   activeCapture = {
     schemaVersion: 1,
     state: "in-progress",
     commit: captureCommit,
     startedAt: new Date().toISOString(),
     completedAt: null,
-    bundles: {
-      mainSha256: await sha256File(join(DESKTOP_ROOT, "dist/main/main.js")),
-      rendererTreeSha256: await sha256Tree(join(DESKTOP_ROOT, "dist/renderer")),
-      engineSha256: await sha256File(
-        join(
-          DESKTOP_ROOT,
-          "target/debug",
-          `dohc-workspace-engine${process.platform === "win32" ? ".exe" : ""}`,
-        ),
-      ),
-    },
+    build,
+    bundles,
     shots: [],
   };
   await writeCaptureManifest();
@@ -235,16 +226,11 @@ test("@ui-audit capture baseline screenshots", async () => {
     const openFolder = page.getByRole("button", {
       name: /open an existing folder as a workspace/i,
     });
-    const sawFirstRun = await openFolder
-      .waitFor({ state: "visible", timeout: 8_000 })
-      .then(() => true)
-      .catch(() => false);
-    if (sawFirstRun) {
-      await shot(page, "01-first-run-light");
-      await setTheme(page, "dark");
-      await shot(page, "01-first-run-dark");
-      await setTheme(page, "light");
-    }
+    await openFolder.waitFor({ state: "visible", timeout: 8_000 });
+    await shot(page, "01-first-run-light");
+    await setTheme(page, "dark");
+    await shot(page, "01-first-run-dark");
+    await setTheme(page, "light");
     await openWorkspaceFromFirstRun(page, temp);
 
     // 02 — shell + explorer (workspace open, nothing focused)
@@ -363,15 +349,10 @@ test("@ui-audit capture baseline screenshots", async () => {
     await page.getByTestId("activity-settings").click();
     await page.waitForTimeout(500);
     const appearanceNav = page.getByRole("button", { name: /appearance/i }).first();
-    const hasAppearance = await appearanceNav
-      .waitFor({ state: "visible", timeout: 3_000 })
-      .then(() => true)
-      .catch(() => false);
-    if (hasAppearance) {
-      await appearanceNav.click();
-      await page.waitForTimeout(400);
-      await shot(page, "19-settings-appearance-light");
-    }
+    await appearanceNav.waitFor({ state: "visible", timeout: 3_000 });
+    await appearanceNav.click();
+    await page.waitForTimeout(400);
+    await shot(page, "19-settings-appearance-light");
     await page.keyboard.press("Escape");
 
     // 20 — inline properties under the title. They render in the document
@@ -384,21 +365,24 @@ test("@ui-audit capture baseline screenshots", async () => {
     await expect(page.getByTestId("markdown-editor")).toBeVisible({
       timeout: 20_000,
     });
-    if (
-      await page
-        .getByTestId("properties-panel")
-        .waitFor({ state: "visible", timeout: 5_000 })
-        .then(() => true)
-        .catch(() => false)
-    ) {
-      await page.waitForTimeout(500);
-      await shot(page, "20-properties-panel-light");
-    }
+    await page
+      .getByTestId("properties-panel")
+      .waitFor({ state: "visible", timeout: 5_000 });
+    await page.waitForTimeout(500);
+    await shot(page, "20-properties-panel-light");
     if (
       git(["rev-parse", "HEAD"]) !== captureCommit ||
       git(["status", "--porcelain"]) !== ""
     ) {
       throw new Error("the worktree changed during the UI audit capture");
+    }
+    const capturedShots = activeCapture.shots.map((entry) => entry.name).sort();
+    const expectedShots = [...expectedUiAuditShots].sort();
+    if (
+      capturedShots.length !== expectedShots.length ||
+      capturedShots.some((name, index) => name !== expectedShots[index])
+    ) {
+      throw new Error("the UI audit capture did not produce every required screenshot");
     }
     activeCapture.state = "complete";
     activeCapture.completedAt = new Date().toISOString();

@@ -98,27 +98,7 @@ impl<'a> VersionedTextStore<'a> {
         let ws = workspace_id.to_owned();
         let ver = main_version_id.to_owned();
         let outcome = self.store.write_with(faults, |tx| {
-            tx.execute(
-                "INSERT INTO versioned_workspaces (workspace_id, main_version_id) VALUES (?1, ?2)",
-                params![ws, ver],
-            )
-            .map_err(DomainError::sql_persist)?;
-            tx.execute(
-                "INSERT INTO versions \
-                 (workspace_id, version_id, kind, name, created_at_ms, fork_version_id, fork_moment_id) \
-                 VALUES (?1, ?2, 'main', 'Main', ?3, NULL, NULL)",
-                params![ws, ver, now_ms],
-            )
-            .map_err(DomainError::sql_persist)?;
-            Ok::<_, DomainError>(VersionRecord {
-                workspace_id: ws.clone(),
-                version_id: ver.clone(),
-                kind: VersionKind::Main,
-                name: "Main".to_owned(),
-                created_at_ms: now_ms,
-                fork_version_id: None,
-                fork_moment_id: None,
-            })
+            ensure_main_version_in_tx(tx, &ws, &ver, now_ms)
         })?;
         committed(outcome)
     }
@@ -2038,6 +2018,47 @@ impl<'a> VersionedTextStore<'a> {
             .read_with(|conn| get_version(conn, workspace_id, version_id))?
             .ok_or(DomainError::VersionNotFound)
     }
+}
+
+/// Ensure the workspace's main version inside the caller's transaction.
+///
+/// Capture uses this seam so root-identity validation, first-version
+/// bootstrap, and the captured file commit share one rollback boundary.
+pub fn ensure_main_version_in_tx(
+    tx: &Connection,
+    workspace_id: &str,
+    main_version_id: &str,
+    now_ms: i64,
+) -> Result<VersionRecord, DomainError> {
+    validate_identifier(workspace_id, "workspace_id")?;
+    validate_identifier(main_version_id, "version_id")?;
+
+    if let Some(existing_main) = workspace_main_version_id(tx, workspace_id)? {
+        return get_version(tx, workspace_id, &existing_main)?
+            .ok_or(DomainError::VersionNotFound);
+    }
+
+    tx.execute(
+        "INSERT INTO versioned_workspaces (workspace_id, main_version_id) VALUES (?1, ?2)",
+        params![workspace_id, main_version_id],
+    )
+    .map_err(DomainError::sql_persist)?;
+    tx.execute(
+        "INSERT INTO versions \
+         (workspace_id, version_id, kind, name, created_at_ms, fork_version_id, fork_moment_id) \
+         VALUES (?1, ?2, 'main', 'Main', ?3, NULL, NULL)",
+        params![workspace_id, main_version_id, now_ms],
+    )
+    .map_err(DomainError::sql_persist)?;
+    Ok(VersionRecord {
+        workspace_id: workspace_id.to_owned(),
+        version_id: main_version_id.to_owned(),
+        kind: VersionKind::Main,
+        name: "Main".to_owned(),
+        created_at_ms: now_ms,
+        fork_version_id: None,
+        fork_moment_id: None,
+    })
 }
 
 struct RollbackPrep {
