@@ -2277,6 +2277,65 @@ describe("CommentsPanel", () => {
       .some((button) => button.textContent === "Try again")).toBe(true);
   });
 
+  it("cancels recovery and fences its late page after unmount", async () => {
+    let newestLoads = 0;
+    let recoverySignal: AbortSignal | undefined;
+    let recoveryActivityRequests = 0;
+    let resolveRecoveryPage: ((response: Response) => void) | undefined;
+    const heldRecoveryPage = new Promise<Response>((resolve) => {
+      resolveRecoveryPage = resolve;
+    });
+    const lateRecoveryPage = discussionPageAt(9);
+    const lateRecoveryBody = lateRecoveryPage.body;
+    if (!lateRecoveryBody) throw new Error("recovery page body is missing");
+    const cancelLateRecoveryBody = vi.spyOn(lateRecoveryBody, "cancel");
+    const onAccessChange = vi.fn();
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/view/discussion?direction=newest-first") {
+        newestLoads += 1;
+        if (newestLoads === 1) return discussionPageAt(7, [NAMED_MESSAGE]);
+        recoverySignal = init?.signal ?? undefined;
+        return await heldRecoveryPage;
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        return new Response(null, { status: 404 });
+      }
+      if (path === "/api/view/discussion/activity?since=9&hold=0&limit=100") {
+        recoveryActivityRequests += 1;
+        return availableActivityAt(9);
+      }
+      if (path === "/api/view/discussion/activity?since=9&hold=30000&limit=100") {
+        return await new Promise<Response>(() => undefined);
+      }
+      throw new Error(`unexpected request: ${path}`);
+    }));
+
+    await act(async () => {
+      root.render(
+        <CommentsPanel
+          access="comment"
+          session={FIRST_SESSION}
+          onAccessChange={onAccessChange}
+        />,
+      );
+    });
+    await settle(() => container.textContent?.includes("Comments stopped updating.") === true);
+    clickButton("Try again");
+    await settle(() => recoverySignal !== undefined);
+
+    act(() => root.unmount());
+    resolveRecoveryPage?.(lateRecoveryPage);
+    await settle(() =>
+      cancelLateRecoveryBody.mock.calls.length > 0 || onAccessChange.mock.calls.length > 0
+    );
+
+    expect(recoverySignal?.aborted).toBe(true);
+    expect(recoveryActivityRequests).toBe(0);
+    expect(onAccessChange).not.toHaveBeenCalled();
+    root = createRoot(container);
+  });
+
   it("cancels a pending body retry across session replacement and unmount", async () => {
     vi.useFakeTimers();
     let oldActivityAttempts = 0;

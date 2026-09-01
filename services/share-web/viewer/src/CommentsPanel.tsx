@@ -422,9 +422,9 @@ export function CommentsPanel(props: {
         if (isCurrent() && !controller.signal.aborted) setLoadState("failed");
       });
     return () => {
-      if (pageTokenRef.current === token) pageTokenRef.current = null;
-      controller.abort();
-      if (pageControllerRef.current === controller) pageControllerRef.current = null;
+      pageTokenRef.current = null;
+      pageControllerRef.current?.abort();
+      pageControllerRef.current = null;
       earlierPendingRef.current = false;
       submitTokenRef.current = null;
       submitControllerRef.current?.abort();
