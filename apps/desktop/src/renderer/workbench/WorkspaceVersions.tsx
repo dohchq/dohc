@@ -61,6 +61,17 @@ function versionName(
 
 const MENU_ITEM_CLASS =
   "flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] text-muted hover:bg-line/50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50";
+const WORKSPACE_UPDATING_MESSAGE = "Workspace is still updating. Try again.";
+const VERSION_LOAD_RETRY_MS = 1_000;
+const VERSION_LOAD_FAILURE_ATTEMPTS = 5;
+
+// Electron strips the daemon refusal's typed wire shape. Keep the retry
+// discriminator exact: an initial import may legitimately outlive any fixed
+// renderer deadline, while every other error still gets a bounded retry and
+// then the existing visible failure.
+function isWorkspaceUpdatingInvokeError(error: unknown): boolean {
+  return ipcErrorMessage(error, "") === WORKSPACE_UPDATING_MESSAGE;
+}
 
 // Compact version selector for the editor chrome: shows the active version,
 // switches on click, creates inline, and opens compare / merge.
@@ -133,17 +144,26 @@ export function VersionMenu(props: {
 
   useEffect(() => {
     let cancelled = false;
-    // The first load can race the workspace open; retry briefly instead of
-    // leaving the selector missing for the session.
+    // The first load can race the workspace open. A large fresh import has an
+    // engine-owned bound but may take much longer than a renderer retry
+    // ladder, so keep waiting for that exact refusal. Other failures retain a
+    // small bounded retry before the shell reports them.
     void (async () => {
       let lastError: unknown = null;
-      for (let attempt = 0; attempt < 5 && !cancelled; attempt += 1) {
+      let failureAttempts = 0;
+      while (!cancelled) {
         try {
           await refresh();
           return;
         } catch (error) {
           lastError = error;
-          await new Promise((resolveDelay) => setTimeout(resolveDelay, 1000));
+          if (!isWorkspaceUpdatingInvokeError(error)) {
+            failureAttempts += 1;
+            if (failureAttempts >= VERSION_LOAD_FAILURE_ATTEMPTS) break;
+          }
+          await new Promise((resolveDelay) =>
+            setTimeout(resolveDelay, VERSION_LOAD_RETRY_MS),
+          );
         }
       }
       // Every attempt failed: say so instead of silently dropping the whole

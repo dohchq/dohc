@@ -4260,7 +4260,11 @@ impl EngineService {
         let Some((sender, initial_snapshot)) = capture else {
             return Ok(unavailable);
         };
-        if initial_snapshot.phase != capture_driver::CapturePhase::Ready {
+        // `Degraded` is a settled startup DECISION, not a settled flush. Let
+        // it reach the driver so a clean recovery tick can make the stronger
+        // quiescence promise. Persistent failures still answer false through
+        // the ordinary driver outcome; only Starting/Importing stay fenced.
+        if initial_capture_phase_requires_fence(initial_snapshot.phase) {
             return Ok(capture_driver::FlushOutcome {
                 settled: false,
                 running: initial_snapshot.running,

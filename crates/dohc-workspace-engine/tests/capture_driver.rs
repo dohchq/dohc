@@ -1713,11 +1713,44 @@ async fn existing_store_and_unreadable_policy_keep_the_strict_open_barrier() {
                 .await
                 .expect("bounded degraded startup must release file reads");
             assert_eq!(files.result["files"], json!([]));
+
+            // Restore a readable policy, then make the admitted Degraded
+            // handle drive its own recovery. The renderer's fileObjectId
+            // path is flush-dependent; returning `settled: false` directly
+            // from the RPC gate until the background cadence happens to run
+            // makes an already-open workspace unusable for Linked Chats.
+            std::fs::remove_dir(scratch.path().join(".dohc/files.toml"))
+                .expect("restore readable policy");
+            let mut settled = false;
+            for id in 80..84 {
+                let flush = transport
+                    .call(
+                        RequestContext::unbounded(),
+                        request(id, "capture.flush", Some(handle.clone()), json!({})),
+                    )
+                    .await
+                    .expect("degraded capture flush");
+                settled = flush.result["settled"] == json!(true);
+                if settled {
+                    break;
+                }
+            }
+            assert!(
+                settled,
+                "an admitted degraded handle must let flush drive a clean recovery"
+            );
+            assert_eq!(
+                read_text(&transport, &handle, 84, "seed.md")
+                    .await
+                    .as_deref(),
+                Some("baseline bytes"),
+                "the settling flush must install the baseline before dependent reads"
+            );
         }
         transport
             .call(
                 RequestContext::unbounded(),
-                request(9, "workspace.close", Some(handle), json!({})),
+                request(90, "workspace.close", Some(handle), json!({})),
             )
             .await
             .expect("close");

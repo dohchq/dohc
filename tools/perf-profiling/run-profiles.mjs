@@ -112,34 +112,38 @@ export async function runProfilingScenarios({
   desktopRootPath = desktopRoot,
 }) {
   const failures = [];
-  for (const scenario of scenarios) {
-    const artifactPath = join(output, `${scenario.artifact}.json`);
-    await rm(artifactPath, { force: true });
-    const args = [
-      "scripts/run-playwright.mjs",
-      "--config",
-      "e2e/profiling/playwright.config.ts",
-      `e2e/profiling/${scenario.spec}`,
-      "--workers=1",
-      "--output",
-      join(output, "playwright", scenario.artifact),
-    ];
-    if (headed) args.push("--headed");
-    try {
-      await execute(process.execPath, args, { cwd: desktopRootPath, env });
-      if (!existsSync(artifactPath)) {
-        throw new Error(
-          `Playwright succeeded but did not produce the expected artifact ${artifactPath}.`,
-        );
+  try {
+    for (const scenario of scenarios) {
+      const artifactPath = join(output, `${scenario.artifact}.json`);
+      await rm(artifactPath, { force: true });
+      const args = [
+        "scripts/run-playwright.mjs",
+        "--config",
+        "e2e/profiling/playwright.config.ts",
+        `e2e/profiling/${scenario.spec}`,
+        "--workers=1",
+        "--output",
+        join(output, "playwright", scenario.artifact),
+      ];
+      if (headed) args.push("--headed");
+      try {
+        await execute(process.execPath, args, { cwd: desktopRootPath, env });
+        if (!existsSync(artifactPath)) {
+          throw new Error(
+            `Playwright succeeded but did not produce the expected artifact ${artifactPath}.`,
+          );
+        }
+      } catch (error) {
+        failures.push({
+          scenario: scenario.artifact,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
-    } catch (error) {
-      failures.push({
-        scenario: scenario.artifact,
-        error: error instanceof Error ? error.message : String(error),
-      });
     }
+    return failures;
+  } finally {
+    await rm(join(output, "workspaces"), { recursive: true, force: true });
   }
-  return failures;
 }
 
 async function sha256File(path) {

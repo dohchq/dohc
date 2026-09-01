@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TryInVersionRunState } from "../../ipc/bridgeContract";
@@ -76,6 +76,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
@@ -359,6 +360,50 @@ describe("TryInVersionReviewCard", () => {
 });
 
 describe("VersionMenu refreshKey (regression: external version switches)", () => {
+  it("keeps waiting while a large workspace is still importing", async () => {
+    vi.useFakeTimers();
+    let attempts = 0;
+    bridgeMock.listWorkspaceVersions.mockImplementation(async () => {
+      attempts += 1;
+      if (attempts <= 7) {
+        throw new Error(
+          "Error invoking remote method 'desktop:list-workspace-versions': Error: Workspace is still updating. Try again.",
+        );
+      }
+      return {
+        versions: [
+          {
+            id: "main",
+            name: "Main",
+            kind: "main" as const,
+            createdAtMs: 0,
+            canMergeIntoMain: false,
+          },
+        ],
+        activeVersionId: "main",
+      };
+    });
+    const onError = vi.fn();
+    render(
+      <VersionMenu
+        workspaceId="ws-importing"
+        activeTabDirty={false}
+        flushActiveDraft={async () => {}}
+        onOpenCompare={() => {}}
+        onWorkspaceStateChanged={() => {}}
+        onError={onError}
+      />,
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(7_000);
+    });
+
+    expect(attempts).toBe(8);
+    expect(screen.getByTestId("version-menu-active").textContent).toBe("Main");
+    expect(onError).not.toHaveBeenCalled();
+  });
+
   it("re-reads the active version when the shell bumps refreshKey", async () => {
     function menu(refreshKey: number) {
       return (

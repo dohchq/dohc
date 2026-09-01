@@ -241,7 +241,7 @@ function stopGraphMotion(
 
 function visibleEdges(
   graph: WorkspaceGraphResult,
-  nodes: ForceNode[],
+  nodes: readonly Pick<WorkspaceGraphNode, "path">[],
   variant: GraphVariant,
 ): VisibleGraphEdge[] {
   const paths = new Set(nodes.map((node) => node.path));
@@ -499,10 +499,19 @@ function useForceGraph(
   };
 }
 
-function graphStatus(graph: WorkspaceGraphResult, shownNodeCount: number): string | null {
+function graphStatus(
+  graph: WorkspaceGraphResult,
+  shownNodeCount: number,
+  shownEdgeCount: number,
+): string | null {
   const notices: string[] = [];
   if (shownNodeCount < graph.nodes.length) {
-    notices.push(`${shownNodeCount} of ${graph.nodes.length} shown`);
+    notices.push(`${shownNodeCount} of ${graph.nodes.length} docs shown`);
+  }
+  if (shownEdgeCount < graph.edges.length) {
+    notices.push(
+      `${shownEdgeCount} of ${graph.edges.length} link${graph.edges.length === 1 ? "" : "s"} shown`,
+    );
   }
   if (graph.unresolvedLinks > 0) {
     notices.push(`${graph.unresolvedLinks} unresolved`);
@@ -854,7 +863,11 @@ export function GraphView(props: {
     () => visibleGraphNodes(graph, props.activePath, variant),
     [graph, props.activePath, variant],
   );
-  const notice = graphStatus(graph, rows.length);
+  const shownEdgeCount = useMemo(
+    () => visibleEdges(graph, rows, variant).length,
+    [graph, rows, variant],
+  );
+  const notice = graphStatus(graph, rows.length, shownEdgeCount);
 
   return (
     <div
