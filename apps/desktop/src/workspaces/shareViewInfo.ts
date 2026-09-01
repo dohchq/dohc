@@ -22,6 +22,7 @@ export interface ShareViewInfo {
   shareId: string;
   granterUserId: string;
   granterEmail: string | null;
+  genericChatWritable: boolean;
   /**
    * The effective selector composed from the relay's stored scope and grant
    * access, or null when the share grants a chat channel and has no file
@@ -134,10 +135,14 @@ export async function fetchShareViewInfo(input: {
     `/sync/shares/${encodeURIComponent(input.shareId)}`,
   );
   const body = (await response.json()) as Record<string, unknown>;
+  if (typeof body.genericChatWritable !== "boolean") {
+    throw new ShareSelectorInvalidError(input.shareId);
+  }
   return {
     shareId: String(body.shareId ?? input.shareId),
     granterUserId: String(body.granterUserId ?? ""),
     granterEmail: typeof body.granterEmail === "string" ? body.granterEmail : null,
+    genericChatWritable: body.genericChatWritable,
     selector: parseSelector(body.selector, body.access, input.shareId),
     createdAtMs: Number(body.createdAtMs ?? 0),
   };

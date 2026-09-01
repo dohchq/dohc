@@ -640,6 +640,7 @@ describe("registry store", () => {
     store.setShareView(personal.workspaceId, {
       shareId: "share-1",
       granterEmail: "granter@dohc.test",
+      genericChatWritable: false,
       grantedSelector: { paths: ["docs"], versionId: null, access: "view" },
       skippedOps: mergeShareSkippedOps(undefined, [
         {
@@ -840,26 +841,31 @@ describe("registry store", () => {
     store.setShareView("ws-1", {
       shareId: "share-1",
       granterEmail: "granter@dohc.test",
+      genericChatWritable: false,
       grantedSelector: { paths: ["docs"], versionId: null, access: "view" },
     });
     expect(store.find("ws-1")?.shareView).toEqual({
       shareId: "share-1",
       granterEmail: "granter@dohc.test",
+      genericChatWritable: false,
       grantedSelector: { paths: ["docs"], versionId: null, access: "view" },
     });
     // Marking ended survives a fresh read of the same file.
     store.setShareView("ws-1", {
       shareId: "share-1",
       granterEmail: "granter@dohc.test",
+      genericChatWritable: true,
       grantedSelector: { paths: ["docs"], versionId: null, access: "view" },
       ended: true,
     });
     const reread = createRegistryStore(registryPath);
     expect(reread.find("ws-1")?.shareView?.ended).toBe(true);
+    expect(reread.find("ws-1")?.shareView?.genericChatWritable).toBe(true);
     expect(() =>
       store.setShareView("ws-unknown", {
         shareId: "s",
         granterEmail: null,
+        genericChatWritable: false,
         grantedSelector: { paths: ["docs"], versionId: null, access: "view" },
       }),
     ).toThrow(/Unknown workspace/);
@@ -869,6 +875,7 @@ describe("registry store", () => {
     const original = {
       shareId: "share-original",
       granterEmail: "granter@dohc.test",
+      genericChatWritable: false,
       grantedSelector: {
         paths: ["docs"],
         versionId: null,
@@ -1120,6 +1127,7 @@ describe("registry store", () => {
     store.setShareView("ws-1", {
       shareId: "share-1",
       granterEmail: "granter@dohc.test",
+      genericChatWritable: false,
       grantedSelector: { paths: ["docs"], versionId: null, access: "view" },
       relayUrl: "https://relay.origin.example",
     });

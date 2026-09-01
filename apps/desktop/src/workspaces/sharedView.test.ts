@@ -6719,11 +6719,11 @@ describe("shared view refresh", () => {
 
 // #646 PR3-1 — which share views ask for a sync identity.
 //
-// The main process runs this before every pull and push. It must fail closed
-// on every tri-state: skip, never throw, and never enrol a share that may not
-// push.
+// The main process runs this before an Edit share submits document changes.
+// It must fail closed on every tri-state: skip, never throw, and never enrol a
+// share outside that proposal lane.
 describe("shareViewIdentitySelector", () => {
-  const COMMENT = { paths: ["docs"], versionId: null, access: "comment" };
+  const EDIT = { paths: ["docs"], versionId: null, access: "edit" };
   const match = (left: string, right: string): boolean => left === right;
 
   function decide(
@@ -6737,24 +6737,24 @@ describe("shareViewIdentitySelector", () => {
     });
   }
 
-  it("enrols a comment or edit share view against its pinned grant", () => {
-    for (const access of ["comment", "edit"] as const) {
-      expect(
-        decide({
-          grantedSelector: { ...COMMENT, access },
-          relayUrl: "https://relay.example",
-        }),
-      ).toEqual({ paths: ["docs"], versionId: null, access });
-    }
-  });
-
-  it("never enrols a view share, which may push nothing", () => {
+  it("enrols an Edit share view against its pinned grant", () => {
     expect(
       decide({
-        grantedSelector: { ...COMMENT, access: "view" },
+        grantedSelector: EDIT,
         relayUrl: "https://relay.example",
       }),
-    ).toBeNull();
+    ).toEqual({ paths: ["docs"], versionId: null, access: "edit" });
+  });
+
+  it("never enrols a View or Comment share outside the proposal lane", () => {
+    for (const access of ["view", "comment"] as const) {
+      expect(
+        decide({
+          grantedSelector: { ...EDIT, access },
+          relayUrl: "https://relay.example",
+        }),
+      ).toBeNull();
+    }
   });
 
   it("skips a share view whose pinned grant is damaged", () => {
@@ -6764,13 +6764,13 @@ describe("shareViewIdentitySelector", () => {
     for (const grantedSelector of [
       undefined,
       null,
-      { ...COMMENT, access: "owner" },
-      { ...COMMENT, access: undefined },
-      { ...COMMENT, paths: "docs" },
-      { ...COMMENT, paths: ["../escape"] },
-      { ...COMMENT, paths: ["docs/"] },
+      { ...EDIT, access: "owner" },
+      { ...EDIT, access: undefined },
+      { ...EDIT, paths: "docs" },
+      { ...EDIT, paths: ["../escape"] },
+      { ...EDIT, paths: ["docs/"] },
       { paths: [], versionId: null, access: "comment" },
-      { ...COMMENT, versionId: " v1" },
+      { ...EDIT, versionId: " v1" },
     ]) {
       expect(
         decide({ grantedSelector, relayUrl: "https://relay.example" }),
@@ -6781,7 +6781,7 @@ describe("shareViewIdentitySelector", () => {
   it("skips a share that has ended", () => {
     expect(
       decide({
-        grantedSelector: COMMENT,
+        grantedSelector: EDIT,
         ended: true,
         relayUrl: "https://relay.example",
       }),
@@ -6797,7 +6797,7 @@ describe("shareViewIdentitySelector", () => {
     for (const relayUrl of [null, ""]) {
       expect(
         decide(
-          { grantedSelector: COMMENT, relayUrl: "https://relay.example" },
+          { grantedSelector: EDIT, relayUrl: "https://relay.example" },
           relayUrl,
         ),
       ).toBeNull();
@@ -6807,16 +6807,16 @@ describe("shareViewIdentitySelector", () => {
   it("skips a session signed into a relay that is not this share's origin", () => {
     expect(
       decide(
-        { grantedSelector: COMMENT, relayUrl: "https://origin.example" },
+        { grantedSelector: EDIT, relayUrl: "https://origin.example" },
         "https://other.example",
       ),
     ).toBeNull();
     // A record with no origin relay predates that field; the session's relay
     // is all there is, and it enrols.
-    expect(decide({ grantedSelector: COMMENT })).toEqual({
+    expect(decide({ grantedSelector: EDIT })).toEqual({
       paths: ["docs"],
       versionId: null,
-      access: "comment",
+      access: "edit",
     });
   });
 });

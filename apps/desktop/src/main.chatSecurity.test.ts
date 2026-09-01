@@ -94,12 +94,10 @@ describe("main-process chat authorization", () => {
     );
   });
 
-  // #646 PR2. A file share carries the chat about the files it shares, so
-  // these four handlers stopped being "is this workspace writable?" and became
-  // "what does this share grant?". The gate has to be the FIRST thing after
-  // the scope resolves, and before any store call — the renderer disabling its
-  // composer is honesty, not authorization.
-  it("gates every share-reachable chat mutation on the share's level, before any store call", () => {
+  // A received file share can read the chat about its files, but Phase 3 has
+  // no durable per-row relay receipt. Every generic mutation is therefore
+  // refused before its first store call, whatever the grant says.
+  it("gates every received-share chat mutation before any store call", () => {
     const levelGated = [
       "createFileChat",
       "sendChatMessage",
@@ -111,7 +109,7 @@ describe("main-process chat authorization", () => {
       const scopeAt = handler.indexOf("await requireChatScope(");
       const gateAt = handler.indexOf("assertChatWritable(scope);");
       expect(scopeAt, channel).toBeGreaterThan(-1);
-      expect(gateAt, `${channel}: MUTATION: an ungated mutation writes at view level`)
+      expect(gateAt, `${channel}: MUTATION: an ungated received-share mutation`)
         .toBeGreaterThan(scopeAt);
       const storeAt = handler.search(/\bstore\./u);
       expect(storeAt, channel).toBeGreaterThan(-1);
@@ -865,10 +863,9 @@ describe("main-process chat authorization", () => {
     }
   });
 
-  // The scope's own shape, pinned where it is defined: a share view resolves
-  // the level it was granted, and a local workspace still resolves a real
-  // capture through the unchanged gate.
-  it("resolves a share view's level from the pinned grant, and a local workspace's capture unchanged", () => {
+  // The scope keeps the relay-derived fact for the banner's next step, but
+  // main never treats that cached fact as mutation authority.
+  it("keeps received-share chat metadata without using it as write authority", () => {
     const scopeAt = mainSource.indexOf("async function requireChatScope(");
     const scope = mainSource.slice(scopeAt, mainSource.indexOf("\n  }", scopeAt));
     expect(scope).toContain('requireEngineCapture(workspaceId, "Chats")');
@@ -888,6 +885,9 @@ describe("main-process chat authorization", () => {
     expect(scope).not.toContain("grantedSelector.access");
     // Never from a renderer payload or a relay answer read at call time.
     expect(scope).not.toContain("input.access");
+    expect(scope).toContain(
+      "genericChatWritable: workspace.shareView?.genericChatWritable === true",
+    );
 
     // main DELEGATES the share rule, so what is pinned here is that it still
     // delegates — a re-implementation creeping back in is the drift this
@@ -906,23 +906,18 @@ describe("main-process chat authorization", () => {
       new URL("./workspaces/shareChatGate.ts", import.meta.url),
       "utf8",
     );
-    // Positive recognition, not `!== "view"`: the registry file is DATA, so a
-    // stored grant can name a level this process cannot read, and the one
-    // direction this must never fail is reading that as writable.
-    expect(shareGate).toContain('scope.access !== "comment" && scope.access !== "edit"');
-    expect(shareGate).toContain("throw new SharedFileReadOnlyError()");
-    // An ENDED share is a read-only local copy. The push bails on `ended`
-    // first thing, so a write admitted here would land durably and never be
-    // sent to anyone — the same rule the joined-channel sibling applies.
+    expect(shareGate).not.toContain("if (!scope.genericChatWritable)");
+    expect(shareGate).not.toContain('scope.access !== "comment"');
+    expect(shareGate).toContain(
+      'throw new SharedFileReadOnlyError("Chats are read-only in this shared view.")',
+    );
     expect(
       shareGate,
-      "MUTATION: an ended share writes a durable row nothing will ever send",
-    ).toContain("if (scope.ended)");
-    // The second half of the same gate: a chat op replicates only when its
-    // author carries a user id, so a share view with no resolvable relay
-    // identity must be refused, not written locally and called sent.
-    expect(shareGate).toContain("if (!scope.authorUserId)");
-    expect(scope).toContain("resolveShareViewRelayAuthorId(");
+      "MUTATION: cached generic chat authority reopened received-share writes",
+    ).toMatch(
+      /assertShareChatWritable[\s\S]*?throw new SharedFileReadOnlyError\("Chats are read-only in this shared view\."\);/u,
+    );
+    expect(scope).not.toContain("resolveShareViewRelayAuthorId(");
   });
 
   it("keeps share chat stores and file-index reads on one exact engine attachment", () => {
@@ -959,14 +954,8 @@ describe("main-process chat authorization", () => {
     expect(index).toContain("withWorkspaceAttachmentAsync(workspace");
     expect(index).toContain("engineWorkspaceForAuthority(lease)");
 
-    const syncAt = mainSource.indexOf("function syncChatWriteFor(");
-    const sync = mainSource.slice(
-      syncAt,
-      mainSource.indexOf("\n  async function chatFileObjectId(", syncAt),
-    );
-    expect(sync).toMatch(
-      /void scope\s*\.withAuthority\(\(\) => pushShareViewChat\(scope\.workspace\)\)/,
-    );
+    expect(mainSource).not.toContain("async function pushShareViewChat(");
+    expect(mainSource).not.toContain(".pushShareView({");
   });
 
   it("holds the new shared view authority through identity recording", () => {

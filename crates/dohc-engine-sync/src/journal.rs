@@ -136,30 +136,26 @@ pub fn workspace_replicates_with_relay_in_tx(
 }
 
 /// Whether `workspace_id` journals FILE MOMENTS for replication: the owner
-/// relay lane, or a share view's own share lane.
+/// relay lane, or an Edit share view's proposal lane.
 ///
 /// Deliberately narrower than [`workspace_replicates_with_relay_in_tx`]. A
-/// share view can carry file moments through its share and nothing else
-/// (#646), so the Y.Doc lanes, the conflict outbox and cursor advancement
-/// keep the owner-lane answer. Journaling anything a share cannot carry would
-/// leave rows in the recipient's database that nothing ever drains: the share
-/// push scope serves only the ops the share covers, so a `ydoc.update` there
-/// would accumulate forever.
+/// Edit can carry file moments through proposals and nothing else (#646), so
+/// the Y.Doc lanes, the conflict outbox and cursor advancement keep the
+/// owner-lane answer. Journaling anything a proposal cannot carry would leave
+/// rows in the recipient's database that nothing ever drains: a
+/// `ydoc.update` there would accumulate forever.
 ///
 /// The share-lane term is `share_view_file_lane`, and it is a FACT rather
 /// than a proxy: [`record_share_view_identity`] writes that row only for an
-/// `edit` grant, which is the only level whose file changes a share can
-/// drain. A `comment` share refuses file writes at the desktop's write gate
-/// and journals its chat through the chat path, so it records an identity and
-/// no lane row; a `view` share records neither.
+/// Edit grant, which is the only level whose file changes a share can drain.
+/// View and Comment record neither an identity nor a lane row.
 ///
 /// `EXISTS(sync_identity)` must NEVER stand in for that. The doc on
 /// [`workspace_replicates_with_relay_in_tx`] above says why, and it predicted
-/// this exact mistake: ordinary chat activity mints an identity
-/// unconditionally, so the row cannot tell a share view that may send file
-/// changes from one that may not. An earlier revision of this function read
-/// it and would have journaled file moments in a `view` share that had ever
-/// been chatted in.
+/// this exact mistake: an identity row alone cannot tell a share view that
+/// may send file changes from one that may not. An earlier revision of this
+/// function read it and would have journaled file moments for a read-only
+/// share carrying an unrelated identity.
 ///
 /// The identity a journal append needs still exists whenever this answers
 /// true, because the lane row and the identity are written in ONE
@@ -471,8 +467,7 @@ pub fn adopt_join_identity(
     })
 }
 
-/// Record a share view's own replica identity, and whether its share can
-/// drain a file moment.
+/// Record an editable share view's own replica identity and file-moment lane.
 ///
 /// A share view replicates through a SHARE, not the owner lane, so it holds
 /// `share_view_cursors` long before it holds an identity — which is exactly
@@ -481,17 +476,15 @@ pub fn adopt_join_identity(
 /// neither pristine nor adopting anyone's coordinate. This is a different
 /// thing, so it is a different function.
 ///
-/// The origin is a REPLICA id, local to this machine, and it is what
-/// `push_share_ops` sends: the relay namespaces this recipient's ops as
-/// `share:<share_id>:<origin_id>`. The epoch and stream are owner-lane fields
-/// a share view never sends; they are stored because the row requires them.
+/// The origin is a REPLICA id local to this machine. The proposal lane uses
+/// it to identify this replica's file moments. The epoch and stream are
+/// owner-lane fields a share view never sends; they are stored because the
+/// row requires them.
 ///
-/// `drains_file_moments` is the LEVEL's consequence, decided by the caller
-/// and stored as its own fact. True for `edit` and nothing else: that is the
-/// only grant whose file changes a share can carry back. Passing it as a
-/// parameter rather than inferring it here is the point — nothing in this
-/// store can tell an `edit` share view from a `comment` one, and guessing
-/// from a row that chat also writes is the mistake this replaced.
+/// The caller has already applied the level gate: only Edit reaches this
+/// function. Recording the identity and file lane together makes it
+/// impossible to create the stale Comment-only identity shape this function
+/// once supported for the removed received-chat push lane.
 ///
 /// Idempotent by design — the caller runs it on every open and every refresh.
 /// An existing identity wins, so a later call cannot re-mint an origin and
@@ -500,7 +493,6 @@ pub fn record_share_view_identity(
     store: &mut EngineStore,
     workspace_id: &str,
     identity: ShareViewIdentity<'_>,
-    drains_file_moments: bool,
     created_at_ms: i64,
     faults: &dyn FaultInjector,
 ) -> Result<TxnOutcome<ShareViewIdentityOutcome>, SyncError> {
@@ -550,17 +542,15 @@ pub fn record_share_view_identity(
         // what lets `workspace_journals_file_moments_in_tx` read this row
         // alone and still know an identity is there for the append.
         //
-        // `INSERT OR IGNORE`, not a second existence probe: a share whose
-        // level was raised to edit after its identity was already recorded
-        // must still gain the lane, and one recorded twice must not fail.
-        if drains_file_moments {
-            tx.execute(
-                "INSERT OR IGNORE INTO share_view_file_lane \
-                 (workspace_id, recorded_at_ms) VALUES (?1, ?2)",
-                params![workspace_id, created_at_ms],
-            )
-            .map_err(SyncError::persist)?;
-        }
+        // `INSERT OR IGNORE`, not a second existence probe: repeated refresh
+        // must not fail, and an identity left by an interrupted older build
+        // still gains the lane when Edit opens it.
+        tx.execute(
+            "INSERT OR IGNORE INTO share_view_file_lane \
+             (workspace_id, recorded_at_ms) VALUES (?1, ?2)",
+            params![workspace_id, created_at_ms],
+        )
+        .map_err(SyncError::persist)?;
         Ok(if recorded {
             ShareViewIdentityOutcome::AlreadyRecorded
         } else {

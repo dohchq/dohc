@@ -19,6 +19,7 @@ const MAX_REQUEST_BODY_BYTES = 16 * 1024;
 const MAX_EXCHANGE_BODY_BYTES = 8 * 1024;
 const EXCHANGE_SECRET = Buffer.alloc(32, 11).toString("base64url");
 const CAPABILITY_TOKEN = Buffer.alloc(32, 12).toString("base64url");
+const RELAY_EXCHANGE_KEY = "share-web-discussion-integration-key";
 const BLOB_SHA = "a".repeat(64);
 const TEST_SHUTDOWN_GRACE_PERIOD_MS = 250;
 const WITHIN_SHUTDOWN_GRACE_MS = 100;
@@ -50,7 +51,15 @@ interface RunningShareWeb {
 
 interface LinkSession {
   cookie: string;
+  profileCookie: string;
   discriminator: string;
+}
+
+interface CapturedDiscussionRequest {
+  authorization: string | undefined;
+  body: Buffer;
+  exchangeKey: string | undefined;
+  profileSecret: string | undefined;
 }
 
 interface PendingBlobRequest {
@@ -362,6 +371,83 @@ describe("share-web Node request adapter", () => {
     expect(receivedExchangeBodies[0]?.toString("utf8")).toBe(expectedRelayBody);
   });
 
+  it("preserves both protected cookies and enforces the discussion transport cap", async () => {
+    const discussions: CapturedDiscussionRequest[] = [];
+    const relayUrl = await startDiscussionRelay(discussions);
+    const server = await startShareWeb({
+      relayExchangeKey: RELAY_EXCHANGE_KEY,
+      relayUrl,
+    });
+    const session = await exchangeSession(server.port);
+    const maximumBody = "🙂".repeat(2_000);
+    const maximumText = JSON.stringify({
+      body: maximumBody,
+      claimedName: "🙂".repeat(40),
+      idempotencyKey: '"'.repeat(64),
+    });
+    expect(Buffer.byteLength(maximumBody)).toBe(8_000);
+    expect(Buffer.byteLength(maximumText)).toBeGreaterThan(8_000);
+    const headers = {
+      host: PUBLIC_HOST,
+      cookie: `${session.cookie}; ${session.profileCookie}`,
+      "x-dohc-link-session": session.discriminator,
+      "content-type": "application/json",
+    };
+
+    const accepted = await sendHttpRequest(server.port, "/api/view/discussion", {
+      method: "POST",
+      headers: {
+        ...headers,
+        "content-length": Buffer.byteLength(maximumText),
+      },
+      body: maximumText,
+    });
+    expect(accepted.statusCode).toBe(200);
+    await readResponse(accepted);
+    expect(discussions).toHaveLength(1);
+    expect(discussions[0]).toMatchObject({
+      authorization: `LinkCapability ${CAPABILITY_TOKEN}`,
+      body: Buffer.from(maximumText),
+      exchangeKey: RELAY_EXCHANGE_KEY,
+      profileSecret: session.profileCookie.split("=", 2)[1],
+    });
+
+    const oversizedBody = JSON.stringify({
+      body: "x".repeat(MAX_REQUEST_BODY_BYTES),
+      idempotencyKey: "adapter-oversized-transport",
+    });
+    expect(Buffer.byteLength(oversizedBody)).toBeGreaterThan(MAX_REQUEST_BODY_BYTES);
+    const refused = await sendHttpRequest(server.port, "/api/view/discussion", {
+      method: "POST",
+      headers: {
+        ...headers,
+        "content-length": Buffer.byteLength(oversizedBody),
+      },
+      body: oversizedBody,
+    });
+    expect(refused.statusCode).toBe(404);
+    expect(await readResponse(refused)).toBe(shareWebRefusalBody);
+    expect(refused.headers["cache-control"]).toBe("private, no-store");
+    expect(refused.headers["x-robots-tag"]).toBe("noindex, nofollow, noarchive");
+    expect(discussions).toHaveLength(1);
+
+    const followUpBody = JSON.stringify({
+      body: "after refusal",
+      idempotencyKey: "adapter-follow-up",
+    });
+    const followUp = await sendHttpRequest(server.port, "/api/view/discussion", {
+      method: "POST",
+      headers: {
+        ...headers,
+        "content-length": Buffer.byteLength(followUpBody),
+      },
+      body: followUpBody,
+    });
+    expect(followUp.statusCode).toBe(200);
+    await readResponse(followUp);
+    expect(discussions).toHaveLength(2);
+  });
+
   it("keeps serving after a request with an invalid Host authority", async () => {
     const server = await startShareWeb();
 
@@ -589,6 +675,7 @@ describe("share-web Node request adapter", () => {
 async function startShareWeb(
   options: {
     devMode?: boolean;
+    relayExchangeKey?: string;
     relayUrl?: string;
     responseErrorDuringPipe?: boolean;
     shutdownGracePeriodMs?: number;
@@ -608,6 +695,7 @@ async function startShareWeb(
   delete env.DOHC_SHARE_WEB_TEST_SHUTDOWN_GRACE_PERIOD_MS;
   delete env.DOHC_SHARE_WEB_TEST_VIEWER_ASSETS_DIR;
   delete env.DOHC_SHARE_WEB_TRUSTED_PROXIES;
+  delete env.DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY;
   if (options.devMode !== false) env.DOHC_SHARE_WEB_DEV = "1";
   if (options.responseErrorDuringPipe === true) {
     env.DOHC_SHARE_WEB_TEST_RESPONSE_ERROR_DURING_PIPE = "1";
@@ -619,6 +707,9 @@ async function startShareWeb(
   }
   if (options.trustedProxies !== undefined) {
     env.DOHC_SHARE_WEB_TRUSTED_PROXIES = options.trustedProxies;
+  }
+  if (options.relayExchangeKey !== undefined) {
+    env.DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY = options.relayExchangeKey;
   }
   env.DOHC_SHARE_WEB_TEST_VIEWER_ASSETS_DIR = viewerAssetsDir;
   const mainUrl = new URL("./main.ts", import.meta.url);
@@ -710,10 +801,28 @@ async function exchangeSession(port: number): Promise<LinkSession> {
   });
   expect(response.statusCode).toBe(200);
   const body = JSON.parse(await readResponse(response)) as { session: string };
-  const setCookie = response.headers["set-cookie"]?.[0];
-  expect(setCookie).toBeDefined();
+  const setCookies = response.headers["set-cookie"] ?? [];
+  expect(setCookies).toHaveLength(2);
+  const cookie = setCookies.find(
+    (value) =>
+      value.startsWith("dohc_share_") &&
+      !value.startsWith("dohc_share_profile_"),
+  );
+  const profileCookie = setCookies.find((value) =>
+    value.startsWith("dohc_share_profile_"),
+  );
+  expect(cookie).toBeDefined();
+  expect(profileCookie).toBeDefined();
+  for (const setCookie of setCookies) {
+    expect(setCookie).toContain("; Path=/;");
+    expect(setCookie).toContain("; Secure;");
+    expect(setCookie).toContain("; HttpOnly;");
+    expect(setCookie).toContain("; SameSite=Strict");
+    expect(setCookie).not.toMatch(/(?:^|;)\s*Domain=/iu);
+  }
   return {
-    cookie: setCookie!.split(";", 1)[0]!,
+    cookie: cookie!.split(";", 1)[0]!,
+    profileCookie: profileCookie!.split(";", 1)[0]!,
     discriminator: body.session,
   };
 }
@@ -865,6 +974,68 @@ async function startRelay(onExchangeBody?: (body: Buffer) => void): Promise<stri
   const address = server.address();
   if (!address || typeof address === "string") {
     throw new Error("test relay did not bind to a TCP port");
+  }
+  return `http://127.0.0.1:${address.port}`;
+}
+
+async function startDiscussionRelay(
+  discussions: CapturedDiscussionRequest[],
+): Promise<string> {
+  const server = createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+    request.on("end", () => {
+      if (request.method === "POST" && request.url === "/sync/link-exchange") {
+        response.setHeader("content-type", "application/json");
+        response.end(
+          JSON.stringify({
+            ok: true,
+            grantId: "grant-discussion-integration",
+            capabilityToken: CAPABILITY_TOKEN,
+            capabilityExpiresAtMs: Date.now() + 15 * 60_000,
+          }),
+        );
+        return;
+      }
+      if (request.method === "POST" && request.url === "/sync/link/discussion") {
+        discussions.push({
+          authorization: request.headers.authorization,
+          body: Buffer.concat(chunks),
+          exchangeKey: request.headers["x-dohc-relay-exchange-key"] as
+            | string
+            | undefined,
+          profileSecret: request.headers["x-dohc-link-profile-secret"] as
+            | string
+            | undefined,
+        });
+        response.setHeader("content-type", "application/json");
+        response.end(
+          JSON.stringify({
+            ok: true,
+            message: {
+              messageId: `message-${discussions.length}`,
+              createdAtMs: discussions.length,
+              deleted: false,
+              body: "accepted",
+              author: {
+                kind: "link",
+                displayName: "Integration profile",
+                unverified: true,
+              },
+            },
+          }),
+        );
+        return;
+      }
+      response.statusCode = 404;
+      response.end();
+    });
+  });
+  relayServers.add(server);
+  await listenOnEphemeralPort(server);
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("discussion test relay did not bind to a TCP port");
   }
   return `http://127.0.0.1:${address.port}`;
 }

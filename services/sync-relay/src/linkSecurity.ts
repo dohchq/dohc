@@ -56,6 +56,13 @@ export function hashLinkBearer(secret: string, key: BinaryLike): string {
   return createHmac("sha256", key).update(secret).digest("base64url");
 }
 
+export function hashLinkProfileSecret(secret: string, key: BinaryLike): string {
+  return createHmac("sha256", key)
+    .update("link-profile\n")
+    .update(secret)
+    .digest("base64url");
+}
+
 export function hashLinkHandoffCode(code: string, key: BinaryLike): string {
   return createHmac("sha256", key)
     .update("link-handoff\n")

@@ -16,6 +16,8 @@ export const SHARE_WEB_SECURITY_HEADERS = Object.freeze({
 
 const REFUSAL_BODY = JSON.stringify({ ok: false, error: "not found" });
 const MAX_EXCHANGE_BODY_BYTES = 8 * 1024;
+const MAX_DISCUSSION_ENVELOPE_BYTES = 16 * 1024;
+const MAX_RELAY_RESPONSE_BYTES = 2 * 1024 * 1024;
 export const EXCHANGE_BUCKET_CAPACITY = 12;
 const EXCHANGE_REFILL_PER_SECOND = 0.2;
 const EXCHANGE_MAX_IPS = 10_000;
@@ -23,12 +25,21 @@ const DEFAULT_MAX_SESSIONS = 10_000;
 export const MAX_SESSIONS_PER_GRANT = 512;
 const MAX_BLOB_PROXIES_PER_SESSION = 8;
 const MAX_BLOB_PROXIES_PER_GRANT = 24;
-const DEFAULT_HANDOFF_RELAY_TIMEOUT_MS = 10_000;
+const MAX_ACTIVITY_HOLDS_PER_SESSION = 8;
+const MAX_ACTIVITY_HOLDS_PER_GRANT = 24;
+const DEFAULT_RELAY_REQUEST_TIMEOUT_MS = 10_000;
 const LINK_REFRESH_WINDOW_MS = 5 * 60 * 1_000;
 export const LINK_SESSION_RENEWAL_GRACE_MS = 7 * 24 * 60 * 60 * 1_000;
+const PROFILE_COOKIE_MAX_AGE_SECONDS = 400 * 24 * 60 * 60;
 const RASTER_SIGNATURE_BYTES = 12;
 const HANDOFF_CODE = /^[A-Za-z0-9_-]{43}$/u;
 const SESSION_DISCRIMINATOR = /^[A-Za-z0-9_-]{12}$/u;
+const PROFILE_SECRET = /^[A-Za-z0-9_-]{43}$/u;
+const DISCUSSION_CURSOR = /^[A-Za-z0-9_-]{1,1024}$/u;
+const DISCUSSION_LIMIT = /^[1-9][0-9]{0,2}$/u;
+const DISCUSSION_REVISION = /^(?:0|[1-9][0-9]{0,15})$/u;
+const DISCUSSION_HOLD = /^(?:0|[1-9][0-9]{0,4})$/u;
+const MAX_DISCUSSION_ACTIVITY_HOLD_MS = 30_000;
 const SHA256_HEX = /^[a-f0-9]{64}$/u;
 
 type RelayFetch = (request: Request) => Promise<Response>;
@@ -59,6 +70,7 @@ export interface CreateShareWebHandlerOptions {
   fetchRelay?: RelayFetch;
   nowMs?: () => number;
   newSessionToken?: () => string;
+  newProfileSecret?: () => string;
   maxSessions?: number;
   viewerAssetsDir?: string;
   handoffRelayTimeoutMs?: number;
@@ -120,6 +132,15 @@ class ShareWebSessionStore {
     session.capabilityToken = capabilityToken;
     session.expiresAtMs = expiresAtMs;
     return session;
+  }
+
+  isCurrent(
+    discriminator: string,
+    token: string,
+    capabilityToken: string,
+    nowMs: number,
+  ): boolean {
+    return this.get(discriminator, token, nowMs)?.capabilityToken === capabilityToken;
   }
 
   private prune(nowMs: number): void {
@@ -201,16 +222,21 @@ class ShareWebExchangeRateLimiter {
   }
 }
 
-class ShareWebBlobProxyLimiter {
+class ShareWebInFlightLimiter {
   private readonly inFlightBySession = new Map<string, number>();
   private readonly inFlightByGrant = new Map<string, number>();
+
+  constructor(
+    private readonly maxPerSession: number,
+    private readonly maxPerGrant: number,
+  ) {}
 
   acquire(sessionIdentity: string, grantIdentity: string): (() => void) | null {
     const sessionInFlight = this.inFlightBySession.get(sessionIdentity) ?? 0;
     const grantInFlight = this.inFlightByGrant.get(grantIdentity) ?? 0;
     if (
-      sessionInFlight >= MAX_BLOB_PROXIES_PER_SESSION ||
-      grantInFlight >= MAX_BLOB_PROXIES_PER_GRANT
+      sessionInFlight >= this.maxPerSession ||
+      grantInFlight >= this.maxPerGrant
     ) {
       return null;
     }
@@ -247,6 +273,10 @@ function cookieName(discriminator: string): string {
   return `dohc_share_${discriminator}`;
 }
 
+function profileCookieName(discriminator: string): string {
+  return `dohc_share_profile_${discriminator}`;
+}
+
 function securityHeaders(init: HeadersInit = {}): Headers {
   const headers = new Headers(init);
   for (const [key, value] of Object.entries(SHARE_WEB_SECURITY_HEADERS)) {
@@ -267,13 +297,15 @@ function jsonResponse(
   body: unknown,
   init: { status?: number; headers?: HeadersInit } = {},
 ): Response {
+  const headers = new Headers(init.headers);
+  headers.set("content-type", "application/json");
   return response(JSON.stringify(body), {
     ...init,
-    headers: { "content-type": "application/json", ...Object.fromEntries(new Headers(init.headers)) },
+    headers,
   });
 }
 
-function refused(status: 404 | 429 | 503 = 404, headers: HeadersInit = {}): Response {
+function refused(status: 404 | 409 | 429 | 503 = 404, headers: HeadersInit = {}): Response {
   return response(REFUSAL_BODY, {
     status,
     headers: { "content-type": "application/json", ...Object.fromEntries(new Headers(headers)) },
@@ -307,34 +339,249 @@ async function exchangeInput(request: Request): Promise<string | null> {
   }
 }
 
+async function discussionInput(request: Request): Promise<string | null> {
+  try {
+    const text = await request.text();
+    if (Buffer.byteLength(text, "utf8") > MAX_DISCUSSION_ENVELOPE_BYTES) return null;
+    const input: unknown = JSON.parse(text);
+    if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+    const body = input as Record<string, unknown>;
+    if (
+      Object.keys(body).some(
+        (key) => key !== "body" && key !== "idempotencyKey" && key !== "claimedName",
+      ) ||
+      typeof body.body !== "string" ||
+      typeof body.idempotencyKey !== "string" ||
+      (Object.hasOwn(body, "claimedName") && typeof body.claimedName !== "string")
+    ) {
+      return null;
+    }
+    return text;
+  } catch {
+    return null;
+  }
+}
+
+function discussionRelayPath(request: Request): string | null {
+  const url = new URL(request.url);
+  for (const key of url.searchParams.keys()) {
+    if (
+      key !== "session" &&
+      key !== "cursor" &&
+      key !== "limit" &&
+      key !== "direction"
+    ) {
+      return null;
+    }
+  }
+  if (
+    url.searchParams.getAll("session").length > 1 ||
+    url.searchParams.getAll("cursor").length > 1 ||
+    url.searchParams.getAll("limit").length > 1 ||
+    url.searchParams.getAll("direction").length > 1
+  ) {
+    return null;
+  }
+  const cursor = url.searchParams.get("cursor");
+  const limit = url.searchParams.get("limit");
+  const direction = url.searchParams.get("direction");
+  if (
+    (cursor !== null && !DISCUSSION_CURSOR.test(cursor)) ||
+    (limit !== null && (!DISCUSSION_LIMIT.test(limit) || Number(limit) > 100)) ||
+    (direction !== null &&
+      direction !== "oldest-first" &&
+      direction !== "newest-first")
+  ) {
+    return null;
+  }
+  const relaySearch = new URLSearchParams();
+  if (cursor !== null) relaySearch.set("cursor", cursor);
+  if (direction !== null) relaySearch.set("direction", direction);
+  if (limit !== null) relaySearch.set("limit", limit);
+  const serialized = relaySearch.toString();
+  return `/sync/link/discussion${serialized ? `?${serialized}` : ""}`;
+}
+
+function discussionActivityRelayPath(
+  request: Request,
+): { path: string; holdMs: number } | null {
+  const url = new URL(request.url);
+  if (
+    [...url.searchParams.keys()].some(
+      (key) => key !== "since" && key !== "hold" && key !== "limit",
+    ) ||
+    url.searchParams.getAll("since").length !== 1 ||
+    url.searchParams.getAll("hold").length !== 1 ||
+    url.searchParams.getAll("limit").length !== 1
+  ) {
+    return null;
+  }
+  const since = url.searchParams.get("since")!;
+  const hold = url.searchParams.get("hold")!;
+  const limit = url.searchParams.get("limit")!;
+  if (
+    !DISCUSSION_REVISION.test(since) ||
+    !Number.isSafeInteger(Number(since)) ||
+    !DISCUSSION_HOLD.test(hold) ||
+    Number(hold) > MAX_DISCUSSION_ACTIVITY_HOLD_MS ||
+    !DISCUSSION_LIMIT.test(limit) ||
+    Number(limit) > 100
+  ) {
+    return null;
+  }
+  const relaySearch = new URLSearchParams({ since, hold, limit });
+  return {
+    path: `/sync/link/discussion/activity?${relaySearch}`,
+    holdMs: Number(hold),
+  };
+}
+
+function hasOnlySessionQuery(request: Request, discriminator: string): boolean {
+  const params = new URL(request.url).searchParams;
+  const session = params.get("session");
+  return (
+    [...params.keys()].every((key) => key === "session") &&
+    params.getAll("session").length <= 1 &&
+    (session === null || session === discriminator)
+  );
+}
+
+async function discussionState(
+  relayResponse: Response,
+): Promise<
+  | { state: "blocked" | "paused"; activityRevision: number }
+  | { state: "limit-reached" }
+  | null
+> {
+  try {
+    const body: unknown = await relayResponse.json();
+    if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+    const record = body as Record<string, unknown>;
+    if (relayResponse.status === 403) {
+      if (
+        Object.keys(record).sort().join(",") !==
+          "activityRevision,code,error,ok" ||
+        record.ok !== false ||
+        typeof record.activityRevision !== "number" ||
+        !Number.isSafeInteger(record.activityRevision) ||
+        record.activityRevision < 0
+      ) {
+        return null;
+      }
+      if (
+        record.code === "link_discussion_blocked" &&
+        record.error === "link discussion writes are blocked"
+      ) {
+        return {
+          state: "blocked",
+          activityRevision: record.activityRevision,
+        };
+      }
+      if (
+        record.code === "link_discussion_paused" &&
+        record.error === "link discussion writes are paused"
+      ) {
+        return {
+          state: "paused",
+          activityRevision: record.activityRevision,
+        };
+      }
+      return null;
+    }
+    if (
+      relayResponse.status === 413 &&
+      Object.keys(record).sort().join(",") === "code,error,ok" &&
+      record.ok === false &&
+      record.code === "discussion_limit_reached" &&
+      record.error === "discussion message limit reached"
+    ) {
+      return { state: "limit-reached" };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function relayRequest(relayUrl: string, path: string, init: RequestInit = {}): Request {
   return new Request(new URL(path, `${relayUrl.replace(/\/+$/u, "")}/`), init);
 }
 
-function boundedHandoffRelayRequest(
-  clientRequest: Request,
+function boundedRelayRequest(
+  clientSignal: AbortSignal | undefined,
   relayUrl: string,
+  path: string,
   init: RequestInit,
   timeoutMs: number,
 ): { request: Request; dispose: () => void } {
   const relayAbort = new AbortController();
-  const abortFromClient = (): void => relayAbort.abort(clientRequest.signal.reason);
-  if (clientRequest.signal.aborted) {
-    abortFromClient();
-  } else {
-    clientRequest.signal.addEventListener("abort", abortFromClient, { once: true });
+  const abortFromClient = (): void => relayAbort.abort(clientSignal?.reason);
+  if (clientSignal) {
+    if (clientSignal.aborted) {
+      abortFromClient();
+    } else {
+      clientSignal.addEventListener("abort", abortFromClient, { once: true });
+    }
   }
   const deadline = setTimeout(() => relayAbort.abort(), timeoutMs);
   return {
-    request: relayRequest(relayUrl, "/sync/link-handoff", {
+    request: relayRequest(relayUrl, path, {
       ...init,
       signal: relayAbort.signal,
     }),
     dispose: () => {
       clearTimeout(deadline);
-      clientRequest.signal.removeEventListener("abort", abortFromClient);
+      clientSignal?.removeEventListener("abort", abortFromClient);
     },
   };
+}
+
+async function completeRelayResponse(relayResponse: Response): Promise<Response> {
+  const declaredLength = relayResponse.headers.get("content-length");
+  if (
+    declaredLength !== null &&
+    /^[0-9]+$/u.test(declaredLength) &&
+    Number(declaredLength) > MAX_RELAY_RESPONSE_BYTES
+  ) {
+    await relayResponse.body?.cancel().catch(() => undefined);
+    throw new Error("relay response exceeds the public proxy limit");
+  }
+
+  const reader = relayResponse.body?.getReader();
+  const chunks: Uint8Array[] = [];
+  let bufferedBytes = 0;
+  if (reader) {
+    while (true) {
+      const read = await reader.read();
+      if (read.done) break;
+      if (read.value.byteLength === 0) continue;
+      if (read.value.byteLength > MAX_RELAY_RESPONSE_BYTES - bufferedBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error("relay response exceeds the public proxy limit");
+      }
+      chunks.push(read.value);
+      bufferedBytes += read.value.byteLength;
+    }
+  }
+
+  let chunkIndex = 0;
+  const body = bufferedBytes === 0
+    ? null
+    : new ReadableStream<Uint8Array>({
+        pull(controller) {
+          const chunk = chunks[chunkIndex++];
+          if (chunk) controller.enqueue(chunk);
+          if (chunkIndex === chunks.length) controller.close();
+        },
+        cancel() {
+          chunks.length = 0;
+        },
+      });
+  return new Response(body, {
+    status: relayResponse.status,
+    statusText: relayResponse.statusText,
+    headers: relayResponse.headers,
+  });
 }
 
 function sessionCookie(
@@ -351,6 +598,14 @@ function sessionCookie(
   );
   return (
     `${cookieName(discriminator)}=${token}; Path=/; Max-Age=${maxAge}; ` +
+    "Secure; HttpOnly; SameSite=Strict"
+  );
+}
+
+function profileCookie(discriminator: string, secret: string): string {
+  return (
+    `${profileCookieName(discriminator)}=${secret}; Path=/; ` +
+    `Max-Age=${PROFILE_COOKIE_MAX_AGE_SECONDS}; ` +
     "Secure; HttpOnly; SameSite=Strict"
   );
 }
@@ -548,13 +803,21 @@ export function createShareWebHandler({
   fetchRelay = (request) => fetch(request),
   nowMs = () => Date.now(),
   newSessionToken = () => randomBytes(32).toString("base64url"),
+  newProfileSecret = () => randomBytes(32).toString("base64url"),
   maxSessions = DEFAULT_MAX_SESSIONS,
   viewerAssetsDir,
-  handoffRelayTimeoutMs = DEFAULT_HANDOFF_RELAY_TIMEOUT_MS,
+  handoffRelayTimeoutMs = DEFAULT_RELAY_REQUEST_TIMEOUT_MS,
 }: CreateShareWebHandlerOptions): (request: Request) => Promise<Response> {
   const sessions = new ShareWebSessionStore(maxSessions);
   const exchangeRateLimiter = new ShareWebExchangeRateLimiter();
-  const blobProxyLimiter = new ShareWebBlobProxyLimiter();
+  const blobProxyLimiter = new ShareWebInFlightLimiter(
+    MAX_BLOB_PROXIES_PER_SESSION,
+    MAX_BLOB_PROXIES_PER_GRANT,
+  );
+  const activityHoldLimiter = new ShareWebInFlightLimiter(
+    MAX_ACTIVITY_HOLDS_PER_SESSION,
+    MAX_ACTIVITY_HOLDS_PER_GRANT,
+  );
   const refreshes = new Map<string, Promise<RefreshAttempt>>();
 
   async function readSession(request: Request): Promise<{
@@ -613,18 +876,23 @@ export function createShareWebHandler({
     if (!refresh) {
       const expectedCapabilityToken = capabilityBeforeRefresh;
       const pending = (async (): Promise<RefreshAttempt> => {
+        const boundedRelay = boundedRelayRequest(
+          undefined,
+          relayUrl,
+          "/sync/link-refresh",
+          {
+            method: "POST",
+            headers: {
+              authorization: `LinkCapability ${expectedCapabilityToken}`,
+              ...(relayExchangeKey
+                ? { "x-dohc-relay-exchange-key": relayExchangeKey }
+                : {}),
+            },
+          },
+          DEFAULT_RELAY_REQUEST_TIMEOUT_MS,
+        );
         try {
-          const relayResponse = await fetchRelay(
-            relayRequest(relayUrl, "/sync/link-refresh", {
-              method: "POST",
-              headers: {
-                authorization: `LinkCapability ${expectedCapabilityToken}`,
-                ...(relayExchangeKey
-                  ? { "x-dohc-relay-exchange-key": relayExchangeKey }
-                  : {}),
-              },
-            }),
-          );
+          const relayResponse = await fetchRelay(boundedRelay.request);
           if (relayResponse.status === 401) return { status: "invalid" };
           if (relayResponse.status !== 200) return { status: "unavailable" };
           const refreshed = parsedRelaySession(
@@ -646,6 +914,8 @@ export function createShareWebHandler({
             : { status: "unavailable" };
         } catch {
           return { status: "unavailable" };
+        } finally {
+          boundedRelay.dispose();
         }
       })();
       const tracked = pending.finally(() => {
@@ -714,6 +984,13 @@ export function createShareWebHandler({
         const discriminator = linkDiscriminator(exchanged.grantId);
         const token = newSessionToken();
         if (!/^[A-Za-z0-9_-]{16,}$/u.test(token)) return refused();
+        const cookies = parseCookies(request.headers.get("cookie"));
+        const existingProfile = cookies.get(profileCookieName(discriminator));
+        const profile =
+          existingProfile && PROFILE_SECRET.test(existingProfile)
+            ? existingProfile
+            : newProfileSecret();
+        if (!PROFILE_SECRET.test(profile)) return refused();
         sessions.set(
           token,
           {
@@ -725,18 +1002,18 @@ export function createShareWebHandler({
           },
           nowMs(),
         );
+        const responseHeaders = new Headers();
+        responseHeaders.append(
+          "set-cookie",
+          sessionCookie(discriminator, token, exchanged.expiresAtMs, nowMs()),
+        );
+        responseHeaders.append(
+          "set-cookie",
+          profileCookie(discriminator, profile),
+        );
         return jsonResponse(
           { ok: true, session: discriminator },
-          {
-            headers: {
-              "set-cookie": sessionCookie(
-                discriminator,
-                token,
-                exchanged.expiresAtMs,
-                nowMs(),
-              ),
-            },
-          },
+          { headers: responseHeaders },
         );
       } catch {
         return refused();
@@ -753,9 +1030,10 @@ export function createShareWebHandler({
         ? { "set-cookie": refreshed.setCookie }
         : {};
       const capabilityToken = authenticated.session.capabilityToken;
-      const boundedRelayRequest = boundedHandoffRelayRequest(
-        request,
+      const boundedRelay = boundedRelayRequest(
+        request.signal,
         relayUrl,
+        "/sync/link-handoff",
         {
           method: "POST",
           headers: {
@@ -768,7 +1046,7 @@ export function createShareWebHandler({
         handoffRelayTimeoutMs,
       );
       try {
-        const relayResponse = await fetchRelay(boundedRelayRequest.request);
+        const relayResponse = await fetchRelay(boundedRelay.request);
         if (relayResponse.status === 429) {
           return refused(429, refreshedCookieHeaders);
         }
@@ -799,7 +1077,157 @@ export function createShareWebHandler({
       } catch {
         return refused(503, refreshedCookieHeaders);
       } finally {
-        boundedRelayRequest.dispose();
+        boundedRelay.dispose();
+      }
+    }
+
+    if (
+      pathname === "/api/view/discussion" ||
+      pathname === "/api/view/discussion/activity"
+    ) {
+      const isActivity = pathname === "/api/view/discussion/activity";
+      if (
+        (isActivity && request.method !== "GET") ||
+        (!isActivity && request.method !== "GET" && request.method !== "POST")
+      ) {
+        return refused();
+      }
+      const authenticated = await readSession(request);
+      if (!authenticated) return refused();
+
+      let relayPath: string;
+      let relayTimeoutMs = DEFAULT_RELAY_REQUEST_TIMEOUT_MS;
+      let appendBody: string | null = null;
+      let profileSecret: string | null = null;
+      if (isActivity) {
+        const parsedPath = discussionActivityRelayPath(request);
+        if (!parsedPath) return refused();
+        relayPath = parsedPath.path;
+        relayTimeoutMs += parsedPath.holdMs;
+        profileSecret = parseCookies(request.headers.get("cookie")).get(
+          profileCookieName(authenticated.discriminator),
+        ) ?? null;
+        if (!profileSecret || !PROFILE_SECRET.test(profileSecret)) return refused();
+      } else if (request.method === "GET") {
+        const parsedPath = discussionRelayPath(request);
+        if (!parsedPath) return refused();
+        relayPath = parsedPath;
+        profileSecret = parseCookies(request.headers.get("cookie")).get(
+          profileCookieName(authenticated.discriminator),
+        ) ?? null;
+        if (!profileSecret || !PROFILE_SECRET.test(profileSecret)) return refused();
+      } else {
+        if (
+          !relayExchangeKey ||
+          !hasOnlySessionQuery(request, authenticated.discriminator)
+        ) {
+          return refused();
+        }
+        profileSecret = parseCookies(request.headers.get("cookie")).get(
+          profileCookieName(authenticated.discriminator),
+        ) ?? null;
+        if (!profileSecret || !PROFILE_SECRET.test(profileSecret)) return refused();
+        appendBody = await discussionInput(request);
+        if (appendBody === null) return refused();
+        relayPath = "/sync/link/discussion";
+      }
+
+      const refreshed = await refreshSession(authenticated);
+      if (!refreshed.ok) return refused(refreshed.status);
+      const refreshedCookieHeaders: Record<string, string> = refreshed.setCookie
+        ? { "set-cookie": refreshed.setCookie }
+        : {};
+      const capabilityToken = authenticated.session.capabilityToken;
+      const releaseActivityHold = isActivity
+        ? activityHoldLimiter.acquire(
+            sessionKey(authenticated.discriminator, authenticated.token),
+            authenticated.session.grantId,
+          )
+        : null;
+      if (isActivity && !releaseActivityHold) {
+        return refused(429, refreshedCookieHeaders);
+      }
+      const boundedRelay = boundedRelayRequest(
+        request.signal,
+        relayUrl,
+        relayPath,
+        {
+          method: request.method,
+          headers: {
+            authorization: `LinkCapability ${capabilityToken}`,
+            ...(isActivity
+              ? { "x-dohc-link-profile-secret": profileSecret! }
+              : request.method === "POST"
+              ? {
+                  "content-type": "application/json",
+                  "x-dohc-link-profile-secret": profileSecret!,
+                  "x-dohc-relay-exchange-key": relayExchangeKey!,
+                }
+              : { "x-dohc-link-profile-secret": profileSecret! }),
+          },
+          ...(appendBody === null ? {} : { body: appendBody }),
+        },
+        relayTimeoutMs,
+      );
+      try {
+        const relayResponse = await completeRelayResponse(
+          await fetchRelay(boundedRelay.request),
+        );
+        if (
+          !sessions.isCurrent(
+            authenticated.discriminator,
+            authenticated.token,
+            capabilityToken,
+            nowMs(),
+          )
+        ) {
+          await relayResponse.body?.cancel().catch(() => undefined);
+          return refused(isActivity ? 409 : 404);
+        }
+        if (relayResponse.status === 200) {
+          return response(relayResponse.body, {
+            headers: {
+              "content-type": "application/json",
+              ...refreshedCookieHeaders,
+            },
+          });
+        }
+        if (
+          (relayResponse.status === 403 || relayResponse.status === 413) &&
+          !isActivity
+        ) {
+          const discussionRefusal = await discussionState(relayResponse);
+          return discussionRefusal
+            ? jsonResponse(
+                { ok: false, ...discussionRefusal },
+                {
+                  status:
+                    discussionRefusal.state === "limit-reached" ? 413 : 403,
+                  headers: refreshedCookieHeaders,
+                },
+              )
+            : refused(404, refreshedCookieHeaders);
+        }
+        if (relayResponse.status === 401) {
+          sessions.deleteIfCapability(
+            authenticated.discriminator,
+            authenticated.token,
+            capabilityToken,
+          );
+          return refused(404, refreshedCookieHeaders);
+        }
+        if (relayResponse.status === 429) {
+          return refused(429, refreshedCookieHeaders);
+        }
+        return refused(
+          relayResponse.status >= 500 ? 503 : 404,
+          refreshedCookieHeaders,
+        );
+      } catch {
+        return refused(503, refreshedCookieHeaders);
+      } finally {
+        boundedRelay.dispose();
+        releaseActivityHold?.();
       }
     }
 

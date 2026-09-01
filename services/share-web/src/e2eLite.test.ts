@@ -45,7 +45,11 @@ async function listen(handler: (request: Request) => Promise<Response>): Promise
       ).then(
         async (webResponse) => {
           outgoing.statusCode = webResponse.status;
-          for (const [key, value] of webResponse.headers) outgoing.setHeader(key, value);
+          for (const [key, value] of webResponse.headers) {
+            if (key !== "set-cookie") outgoing.setHeader(key, value);
+          }
+          const setCookies = webResponse.headers.getSetCookie();
+          if (setCookies.length > 0) outgoing.setHeader("set-cookie", setCookies);
           outgoing.end(Buffer.from(await webResponse.arrayBuffer()));
         },
         (error: unknown) => {
@@ -157,7 +161,7 @@ describe("share-web e2e-lite", () => {
     const linkResponse = await fetch(`${relayUrl}/sync/workspace-e2e/shares/links`, {
       method: "POST",
       headers: ownerHeaders,
-      body: JSON.stringify({ paths: ["docs"] }),
+      body: JSON.stringify({ paths: ["docs"], access: "view" }),
     });
     expect(linkResponse.status).toBe(200);
     const link = await body(linkResponse);
@@ -179,9 +183,17 @@ describe("share-web e2e-lite", () => {
     });
     expect(exchanged.status).toBe(200);
     const session = (await body(exchanged)).session;
-    const cookie = exchanged.headers.get("set-cookie")!.split(";", 1)[0]!;
+    const cookie = exchanged.headers
+      .getSetCookie()
+      .map((setCookie) => setCookie.split(";", 1)[0]!)
+      .find(
+        (pair) =>
+          pair.startsWith("dohc_share_") &&
+          !pair.startsWith("dohc_share_profile_"),
+      );
+    expect(cookie).toBeDefined();
     const sessionHeaders = {
-      cookie,
+      cookie: cookie!,
       "x-dohc-link-session": String(session),
     };
 

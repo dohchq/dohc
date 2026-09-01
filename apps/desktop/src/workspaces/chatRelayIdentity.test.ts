@@ -310,6 +310,7 @@ describe("share view chat identity (#646 PR2)", () => {
         shareView: {
           shareId: "share-1",
           granterEmail: "granter@dohc.test",
+          genericChatWritable: true,
           grantedSelector: { paths: ["docs"], versionId: null, access: "comment" },
           relayUrl: "https://relay.dohc.test",
         },

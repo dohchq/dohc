@@ -22,9 +22,10 @@ const goodSelector = { paths: ["docs"], versionId: null, access: "view" };
 // A grant written before the level existed.
 const staleSelector = { paths: ["docs"], versionId: null };
 
-const shareView = (selector: unknown) => ({
+const shareView = (selector: unknown, genericChatWritable: unknown = false) => ({
   shareId: "share-1",
   granterEmail: "sam@dohc.test",
+  genericChatWritable,
   grantedSelector: selector,
 });
 
@@ -46,6 +47,39 @@ describe("workspace summary projection", () => {
     );
     expect(summary.shareView?.access).toBe("comment");
     expect(summary.shareMounts?.[0]?.access).toBe("edit");
+  });
+
+  it("carries generic chat authority without deriving it from the level", () => {
+    const writable = workspaceSummaryFor(
+      entry({
+        shareView: shareView({ ...goodSelector, access: "comment" }, true),
+      }),
+    );
+    const readOnly = workspaceSummaryFor(
+      entry({
+        shareView: shareView({ ...goodSelector, access: "comment" }, false),
+      }),
+    );
+    expect(writable.shareView?.genericChatWritable).toBe(true);
+    expect(readOnly.shareView?.genericChatWritable).toBe(false);
+  });
+
+  it("defaults a missing or malformed stored chat capability without damaging the grant", () => {
+    for (const genericChatWritable of [undefined, null, "yes", 1]) {
+      const raw = shareView({ ...goodSelector, access: "comment" });
+      if (genericChatWritable === undefined) {
+        delete (raw as { genericChatWritable?: unknown }).genericChatWritable;
+      } else {
+        raw.genericChatWritable = genericChatWritable;
+      }
+      const summary = workspaceSummaryFor(entry({ shareView: raw }));
+      expect(
+        summary.shareView?.damaged,
+        "MUTATION: display-only chat metadata must not damage the file grant",
+      ).toBeUndefined();
+      expect(summary.shareView?.access).toBe("comment");
+      expect(summary.shareView?.genericChatWritable).toBe(false);
+    }
   });
 
   // The defect CodeRabbit found: one unreadable share record threw out of the

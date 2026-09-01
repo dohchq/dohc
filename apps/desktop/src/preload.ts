@@ -347,12 +347,38 @@ const bridge: DohcDesktopBridge = {
   revokeRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.revokeRelayShare, payload),
   createRelayShareLink: (payload) =>
     ipcRenderer.invoke(CHANNELS.createRelayShareLink, payload),
+  addRelayShareLink: (payload) =>
+    ipcRenderer.invoke(CHANNELS.addRelayShareLink, payload),
   listRelayShareLinks: (payload) =>
     ipcRenderer.invoke(CHANNELS.listRelayShareLinks, payload),
+  retuneRelayShareLink: (payload) =>
+    ipcRenderer.invoke(CHANNELS.retuneRelayShareLink, payload),
   rotateRelayShareLink: (payload) =>
     ipcRenderer.invoke(CHANNELS.rotateRelayShareLink, payload),
   revokeRelayShareLink: (payload) =>
     ipcRenderer.invoke(CHANNELS.revokeRelayShareLink, payload),
+  listRelayShareDiscussion: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listRelayShareDiscussion, payload),
+  pollRelayShareDiscussionActivity: (payload) =>
+    ipcRenderer.invoke(CHANNELS.pollRelayShareDiscussionActivity, payload),
+  cancelRelayShareDiscussionActivity: (payload) =>
+    ipcRenderer.invoke(CHANNELS.cancelRelayShareDiscussionActivity, payload),
+  appendRelayShareDiscussion: (payload) =>
+    ipcRenderer.invoke(CHANNELS.appendRelayShareDiscussion, payload),
+  deleteRelayShareDiscussionMessage: (payload) =>
+    ipcRenderer.invoke(CHANNELS.deleteRelayShareDiscussionMessage, payload),
+  blockRelayShareDiscussionPrincipal: (payload) =>
+    ipcRenderer.invoke(CHANNELS.blockRelayShareDiscussionPrincipal, payload),
+  unblockRelayShareDiscussionPrincipal: (payload) =>
+    ipcRenderer.invoke(CHANNELS.unblockRelayShareDiscussionPrincipal, payload),
+  pauseRelayShareDiscussion: (payload) =>
+    ipcRenderer.invoke(CHANNELS.pauseRelayShareDiscussion, payload),
+  resumeRelayShareDiscussion: (payload) =>
+    ipcRenderer.invoke(CHANNELS.resumeRelayShareDiscussion, payload),
+  promoteRelayShareGrant: (payload) =>
+    ipcRenderer.invoke(CHANNELS.promoteRelayShareGrant, payload),
+  revokeRelayShareGrant: (payload) =>
+    ipcRenderer.invoke(CHANNELS.revokeRelayShareGrant, payload),
   shareChatChannel: (payload) => ipcRenderer.invoke(CHANNELS.shareChatChannel, payload),
   listChatChannelShares: (payload) =>
     ipcRenderer.invoke(CHANNELS.listChatChannelShares, payload),

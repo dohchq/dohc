@@ -160,7 +160,10 @@ type Setup = {
   capability: string;
 };
 
-async function setup(overrides: HandlerOverrides = {}): Promise<Setup> {
+async function setup(
+  overrides: HandlerOverrides = {},
+  access: "view" | "comment" = "view",
+): Promise<Setup> {
   const { storage, dbPath } = await newStorage();
   const now = { value: 10_000 };
   const h = handler(storage, {
@@ -185,7 +188,7 @@ async function setup(overrides: HandlerOverrides = {}): Promise<Setup> {
     request(
       OWNER,
       `/sync/${WORKSPACE}/shares/${SHARE_ID}/links`,
-      jsonBody({ access: "view" }),
+      jsonBody({ access }),
     ),
   );
   expect(linkResponse.status).toBe(200);
@@ -687,6 +690,290 @@ describe("single-use authenticated link handoff", () => {
     ]);
   });
 
+  it("hands off Comment access and gives the named recipient the current link level", async () => {
+    const state = await setup({}, "comment");
+    expect(state.link).toMatchObject({ access: "comment", generation: 1 });
+
+    const minted = await mint(state);
+    const response = await state.h(redeemRequest(RECIPIENT, minted.code));
+    expect(response.status).toBe(200);
+    const redeemed = await json(response);
+    expect(redeemed).toMatchObject({
+      ok: true,
+      shareId: SHARE_ID,
+      access: "comment",
+    });
+    expect(state.storage.getShareGrant(String(redeemed.grantId))).toMatchObject({
+      access: "comment",
+      generation: 1,
+      parentGrantId: state.link.grantId,
+    });
+  });
+
+  it("keeps Comment handoff dependents in discussion without granting share-log append authority", async () => {
+    const state = await setup({}, "comment");
+    const redeemed = await json(
+      await state.h(redeemRequest(RECIPIENT, (await mint(state)).code)),
+    );
+    expect(redeemed).toMatchObject({ ok: true, access: "comment" });
+
+    const dependentExact = await json(
+      await state.h(request(RECIPIENT, `/sync/shares/${SHARE_ID}`)),
+    );
+    const dependentList = await json(
+      await state.h(request(RECIPIENT, "/sync/shares")),
+    );
+    expect(dependentExact.genericChatWritable).toBe(false);
+    expect(dependentList.received).toEqual([
+      expect.objectContaining({
+        shareId: SHARE_ID,
+        genericChatWritable: false,
+      }),
+    ]);
+
+    const discussion = await state.h(
+      request(
+        RECIPIENT,
+        `/sync/shares/${SHARE_ID}/discussion`,
+        jsonBody({
+          body: "A named handoff comment",
+          idempotencyKey: "handoff-comment-1",
+        }),
+      ),
+    );
+    expect(discussion.status, await discussion.clone().text()).toBe(200);
+    expect(await json(discussion)).toMatchObject({
+      ok: true,
+      message: {
+        body: "A named handoff comment",
+        author: { kind: "named" },
+      },
+    });
+
+    const seeded = await state.h(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/log`,
+        jsonBody({
+          originId: "owner-origin",
+          ops: [
+            {
+              originSeq: 0,
+              opKind: "moment.append",
+              recordedAtMs: 11_000,
+              payload: {
+                momentId: "moment-handoff-file",
+                versionId: "main",
+                objectId: "object-handoff-file",
+                path: "docs/handoff.md",
+                recordedAtMs: 11_000,
+                operation: "write",
+                payloadBeforeBlobSha256: null,
+                payloadBeforePath: null,
+                payloadAfterBlobSha256: null,
+                payloadAfterPath: "docs/handoff.md",
+                metadata: { origin: "user" },
+                beforePresent: "null",
+              },
+            },
+          ],
+        }),
+      ),
+    );
+    expect(seeded.status, await seeded.clone().text()).toBe(200);
+
+    const batch = {
+      originId: "recipient-origin",
+      ops: [
+        {
+          originSeq: 0,
+          opKind: "chat.thread.create",
+          recordedAtMs: 12_000,
+          payload: {
+            threadId: "thread-handoff",
+            title: "Handoff question",
+            createdAtMs: 12_000,
+            linkedAtMs: 12_000,
+            linkedPath: "docs/handoff.md",
+          },
+        },
+        {
+          originSeq: 1,
+          opKind: "chat.message.append",
+          recordedAtMs: 12_001,
+          payload: {
+            messageId: "message-handoff",
+            threadId: "thread-handoff",
+            authorKind: "human",
+            authorDisplayName: "Recipient",
+            authorUserId: RECIPIENT,
+            body: "Does this need a change?",
+            createdAtMs: 12_001,
+          },
+        },
+      ],
+    };
+    const database = inspect(state.dbPath);
+    const durableRecipientRows = (): number =>
+      Number(
+        database
+          .prepare(
+            "SELECT COUNT(*) AS count FROM sync_relay_log WHERE workspace_id = ? AND origin_id = ?",
+          )
+          .get(WORKSPACE, `share:${SHARE_ID}:${batch.originId}`)?.count ?? 0,
+      );
+
+    database
+      .prepare(
+        `INSERT INTO sync_relay_share_grants (
+           grant_id, share_id, principal_kind, principal_user_id, principal_email,
+           access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id
+         ) VALUES (?, ?, 'user', ?, NULL, 'comment', 1, 'active', ?, NULL, NULL)`,
+      )
+      .run("owner-issued-other-comment", SHARE_ID, OTHER_ACCOUNT, 9_000);
+    const independentExact = await json(
+      await state.h(request(OTHER_ACCOUNT, `/sync/shares/${SHARE_ID}`)),
+    );
+    const independentList = await json(
+      await state.h(request(OTHER_ACCOUNT, "/sync/shares")),
+    );
+    expect(independentExact.genericChatWritable).toBe(true);
+    expect(independentList.received).toEqual([
+      expect.objectContaining({
+        shareId: SHARE_ID,
+        genericChatWritable: true,
+      }),
+    ]);
+
+    const refused = await state.h(
+      request(
+        RECIPIENT,
+        `/sync/shares/${SHARE_ID}/log`,
+        jsonBody(batch),
+      ),
+    );
+    expect(await serialized(refused)).toEqual({
+      status: 403,
+      body: '{"ok":false,"error":"this share does not accept appends","code":"share_read_only"}',
+    });
+    expect(durableRecipientRows()).toBe(0);
+
+    database
+      .prepare(
+        `INSERT INTO sync_relay_share_grants (
+           grant_id, share_id, principal_kind, principal_user_id, principal_email,
+           access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id
+         ) VALUES (?, ?, 'user', ?, NULL, 'comment', 1, 'active', ?, NULL, NULL)`,
+      )
+      .run("owner-issued-recipient-comment", SHARE_ID, RECIPIENT, 10_000);
+    expect(
+      state.storage
+        .listActiveShareGrantsForRecipient(SHARE_ID, RECIPIENT)
+        .map((grant) => grant.grantId),
+    ).toEqual([redeemed.grantId, "owner-issued-recipient-comment"]);
+
+    const mixedExact = await json(
+      await state.h(request(RECIPIENT, `/sync/shares/${SHARE_ID}`)),
+    );
+    const mixedList = await json(
+      await state.h(request(RECIPIENT, "/sync/shares")),
+    );
+    expect(mixedExact.genericChatWritable).toBe(true);
+    expect(mixedList.received).toEqual([
+      expect.objectContaining({
+        shareId: SHARE_ID,
+        genericChatWritable: true,
+      }),
+    ]);
+
+    const accepted = await state.h(
+      request(
+        RECIPIENT,
+        `/sync/shares/${SHARE_ID}/log`,
+        jsonBody(batch),
+      ),
+    );
+    expect(accepted.status, await accepted.clone().text()).toBe(200);
+    expect(await json(accepted)).toMatchObject({
+      ok: true,
+      accepted: 2,
+      inserted: 2,
+    });
+    expect(durableRecipientRows()).toBe(2);
+  });
+
+  it.each(["retune", "revoke"] as const)(
+    "resolves a Comment handoff after %s wins before the storage commit",
+    async (transition) => {
+      const state = await setup({}, "comment");
+      const minted = await mint(state);
+      let armed = true;
+      const racedStorage = new Proxy(state.storage, {
+        get(target, property, receiver) {
+          const value = Reflect.get(target, property, receiver) as unknown;
+          if (property !== "redeemLinkHandoffCode" || typeof value !== "function") {
+            return typeof value === "function" ? value.bind(target) : value;
+          }
+          return (input: Parameters<SyncRelayStorage["redeemLinkHandoffCode"]>[0]) => {
+            if (armed) {
+              armed = false;
+              if (transition === "retune") {
+                expect(
+                  target.retuneShareGrant({
+                    shareId: SHARE_ID,
+                    grantId: String(state.link.grantId),
+                    access: "view",
+                    changedAtMs: state.now.value + 1,
+                    expectedDependentGrantIds: [],
+                    guard: () => undefined,
+                  }),
+                ).toMatchObject({ ok: true });
+              } else {
+                expect(
+                  target.revokeShareGrant({
+                    shareId: SHARE_ID,
+                    grantId: String(state.link.grantId),
+                    revokedAtMs: state.now.value + 1,
+                  }),
+                ).toMatchObject({ ok: true });
+              }
+            }
+            return target.redeemLinkHandoffCode(input);
+          };
+        },
+      });
+      const racedHandler = handler(state.storage, {
+        storage: racedStorage,
+        nowMs: () => state.now.value,
+        newGrantId: () => `raced-${transition}-dependent`,
+      });
+
+      const response = await racedHandler(redeemRequest(RECIPIENT, minted.code));
+      expect(armed).toBe(false);
+      const dependents = dependentRows(
+        inspect(state.dbPath, true),
+        String(state.link.grantId),
+        RECIPIENT,
+      );
+      if (transition === "retune") {
+        expect(response.status).toBe(200);
+        expect(await json(response)).toMatchObject({
+          ok: true,
+          access: "view",
+        });
+        expect(dependents).toEqual([
+          expect.objectContaining({
+            access: "view",
+            parent_grant_id: state.link.grantId,
+          }),
+        ]);
+      } else {
+        await expectGeneric(response);
+        expect(dependents).toEqual([]);
+      }
+    },
+  );
+
   it("caps active dependents at the owner mutation boundary without blocking an existing account", async () => {
     const state = await setup();
     const database = inspect(state.dbPath);
@@ -862,7 +1149,13 @@ describe("single-use authenticated link handoff", () => {
       await state.h(redeemRequest(OTHER_ACCOUNT, (await mint(state)).code)),
     );
     expect(
-      state.storage.promoteShareGrant({ shareId: SHARE_ID, grantId: String(first.grantId) }),
+      state.storage.promoteShareGrant({
+        shareId: SHARE_ID,
+        grantId: String(first.grantId),
+        expectedParentGrantId: String(state.link.grantId),
+        expectedParentGeneration: 1,
+        guard: () => undefined,
+      }),
     ).toMatchObject({ ok: true, grant: { parentGrantId: null } });
 
     const second = await json(

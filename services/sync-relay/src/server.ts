@@ -12,6 +12,7 @@ import {
   constantTimeHashEqual,
   hashLinkBearer,
   hashLinkHandoffCode,
+  hashLinkProfileSecret,
   hashRelayExchangeKey,
   LinkEgressRateLimiter,
   LinkExchangeRateLimiter,
@@ -30,6 +31,10 @@ import {
   validateLinkCapability,
   verifyRelayExchangeKey,
 } from "./linkSecurity";
+import {
+  DiscussionActivityCapacityError,
+  DiscussionActivityHub,
+} from "./discussionActivity";
 import {
   PresenceCapacityError,
   PresenceHub,
@@ -60,6 +65,9 @@ import {
 } from "./shareFilter";
 import {
   SHARED_BLOB_CANDIDATE_LIMIT,
+  LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT,
+  LINK_DISCUSSION_PAGE_LIMIT,
+  normalizeDiscussionDisplayName,
   SyncRelayBlobMissingError,
   SyncRelayConflictError,
   SyncRelayQuotaExceededError,
@@ -68,8 +76,13 @@ import {
   type ShareProposalOpRow,
   type SyncRelayLogInput,
   type SyncRelayLogRow,
+  type SyncRelayIndependentGrantInventoryCursor,
   type SyncRelayLinkInventoryCursor,
   type SyncRelayLinkInventoryRow,
+  type SyncRelayShareDiscussionCursor,
+  type SyncRelayShareDiscussionMessageRow,
+  type SyncRelayShareDiscussionActivityPage,
+  type SyncRelayShareDiscussionPage,
   type SyncRelayShareGrantRow,
   type SyncRelayShareWithGrantRow,
   type SyncRelayStorage,
@@ -77,6 +90,7 @@ import {
 import {
   authorizeShareAction,
   authorizeLinkShareAction,
+  resolveReceivedShareAuthority,
   selectorTargetsBlockedChannel,
   type AuthorizedShareAction,
   type ShareAction,
@@ -94,13 +108,20 @@ function composePublicLinkUrl(shareWebOrigin: string, secret: string): string {
   return `${shareWebOrigin}/s/#${secret}`;
 }
 
-function validatePhase2LinkAccess(value: unknown): "view" {
+function isPublicLinkAccess(value: string): value is "view" | "comment" {
+  return value === "view" || value === "comment";
+}
+
+function validatePublicLinkAccess(value: unknown): "view" | "comment" {
   const validation = validateFileShareAccess(value);
   if (!validation.ok) {
     throw relayHttpError(RELAY_ERRORS[validation.code], validation.message);
   }
-  if (validation.access !== "view") {
-    throw relayHttpError(RELAY_ERRORS.invalid_access, 'access must be "view"');
+  if (!isPublicLinkAccess(validation.access)) {
+    throw relayHttpError(
+      RELAY_ERRORS.invalid_access,
+      'access must be "view" or "comment"',
+    );
   }
   return validation.access;
 }
@@ -115,6 +136,10 @@ export interface CreateSyncRelayHandlerOptions {
   resolveUserIdByEmail?: (email: string) => Promise<string | null> | string | null;
   // Display-only reverse lookup for share listings; never used for authz.
   lookupUserEmail?: (userId: string) => Promise<string | null> | string | null;
+  // Better Auth display name for discussion authorship; never used for authz.
+  lookupUserDisplayName?: (
+    userId: string,
+  ) => Promise<string | null> | string | null;
   newShareId?: () => string;
   newGrantId?: () => string;
   // #646 PR3a: ids the relay MINTS — proposal ids, and the moment and object
@@ -127,6 +152,9 @@ export interface CreateSyncRelayHandlerOptions {
   // tests can assert it holds only in-memory state (never a storage row).
   // Absent => a fresh in-memory hub, which is correct for production too.
   presence?: PresenceHub;
+  // Wake-only long-poll coordination. Durable revisions and data stay in
+  // storage, so replacing this hub cannot invalidate a client watermark.
+  discussionActivity?: DiscussionActivityHub;
   // Relay-instance HMAC key. When absent, every link route refuses without
   // touching storage. main.ts requires it outside development and test.
   linkKey?: string | Uint8Array;
@@ -153,6 +181,8 @@ type SyncRelayRoute =
   | { route: "link-share" }
   | { route: "link-current" }
   | { route: "link-log" }
+  | { route: "link-discussion" }
+  | { route: "link-discussion-activity" }
   | { route: "link-blob"; sha256: string }
   | { route: "workspaces" }
   | { route: "blob"; workspaceId: string; sha256: string }
@@ -171,7 +201,12 @@ type SyncRelayRoute =
   | { route: "share-revoke"; shareId: string }
   | { route: "share-link-rotate"; shareId: string; grantId: string }
   | { route: "share-link-retune"; shareId: string; grantId: string }
+  | { route: "share-grant-promote"; shareId: string; grantId: string }
+  | { route: "share-grant-revoke"; shareId: string; grantId: string }
   | { route: "share-log"; shareId: string }
+  | { route: "share-discussion"; shareId: string }
+  | { route: "share-discussion-activity"; shareId: string }
+  | { route: "share-discussion-moderation"; shareId: string }
   | { route: "share-blob"; shareId: string; sha256: string }
   // #646 PR3a. The recipient's half of the proposal lane is share-scoped; the
   // granter's half is WORKSPACE-scoped, so its authorization is the one
@@ -228,6 +263,12 @@ export const MAX_KEY_ENVELOPE_BYTES = 16 * 1024;
 export const MAX_OPS_PER_REQUEST = 500;
 export const DEFAULT_LOG_PAGE_SIZE = 100;
 export const MAX_LOG_PAGE_SIZE = 500;
+const DEFAULT_DISCUSSION_PAGE_SIZE = 50;
+export const DISCUSSION_DISPLAY_NAME_LOOKUP_DEADLINE_MS = 1_000;
+export const DEFAULT_DISCUSSION_ACTIVITY_HOLD_MS = 25_000;
+export const MAX_DISCUSSION_ACTIVITY_HOLD_MS = 30_000;
+const DISCUSSION_CURSOR_MAX_CHARS = 1_024;
+const DISCUSSION_MODERATION_HANDLE_MAX_CHARS = 512;
 const MAX_LINK_CURRENT_FILES = 5_000;
 // One accountless response may scan this many raw log rows for admitted ops.
 export const MAX_RAW_ROWS_PER_LINK_PAGE = 10_000;
@@ -321,16 +362,51 @@ function settledMomentIdentity(row: SyncRelayLogRow): SettledMomentIdentity | nu
   return { objectId, versionId, referencedPaths, settledPath, deleted };
 }
 
+async function discussionDisplayName(
+  lookupUserDisplayName:
+    | CreateSyncRelayHandlerOptions["lookupUserDisplayName"]
+    | undefined,
+  userId: string,
+): Promise<string> {
+  if (!lookupUserDisplayName) return "Unnamed";
+
+  let lookup: Promise<string | null>;
+  try {
+    lookup = Promise.resolve(lookupUserDisplayName(userId));
+  } catch {
+    return "Unnamed";
+  }
+
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const deadlineResult = new Promise<null>((resolve) => {
+      deadline = setTimeout(
+        () => resolve(null),
+        DISCUSSION_DISPLAY_NAME_LOOKUP_DEADLINE_MS,
+      );
+      deadline.unref();
+    });
+    const lookedUpName = await Promise.race([lookup, deadlineResult]);
+    return normalizeDiscussionDisplayName(lookedUpName) ?? "Unnamed";
+  } catch {
+    return "Unnamed";
+  } finally {
+    if (deadline) clearTimeout(deadline);
+  }
+}
+
 export function createSyncRelayHandler({
   storage,
   resolveActor,
   nowMs = () => Date.now(),
   resolveUserIdByEmail,
   lookupUserEmail,
+  lookupUserDisplayName,
   newShareId = () => randomUUID(),
   newGrantId = () => randomUUID(),
   newId = () => randomUUID(),
   presence = new PresenceHub(),
+  discussionActivity = new DiscussionActivityHub(),
   linkKey,
   shareWebOrigin,
   relayExchangeKey,
@@ -686,6 +762,154 @@ export function createSyncRelayHandler({
     throw notFound();
   }
 
+  type DiscussionViewer = "public" | "named" | "owner";
+
+  const privateResponse = (response: Response): Response => {
+    response.headers.set("cache-control", "private, no-store");
+    return response;
+  };
+
+  const privateJsonResponse = (body: unknown, status = 200): Response =>
+    privateResponse(jsonResponse(body, status));
+
+  const privateErrorResponse = (error: unknown): Response =>
+    privateResponse(errorResponse(error));
+
+  const projectDiscussionMessage = (
+    message: SyncRelayShareDiscussionMessageRow & {
+      linkPrincipalBlocked?: boolean | null;
+    },
+    viewer: DiscussionViewer,
+  ): Record<string, unknown> => {
+    const base = {
+      messageId: message.messageId,
+      createdAtMs: message.createdAtMs,
+      deleted: message.deletedAtMs !== null,
+    };
+    if (message.deletedAtMs !== null && viewer !== "owner") return base;
+    const author =
+      message.authorKind === "link"
+        ? {
+            kind: "link" as const,
+            displayName: message.displayNameSnapshot,
+            unverified: true as const,
+          }
+        : {
+            kind: "named" as const,
+            displayName: message.displayNameSnapshot,
+          };
+    return {
+      ...base,
+      ...(message.deletedAtMs === null ? { body: message.body } : {}),
+      author,
+      ...(viewer === "owner" &&
+      message.authorKind === "link" &&
+      message.linkGrantId !== null &&
+      message.linkPrincipalId !== null
+        ? {
+            moderation: {
+              linkGrantId: message.linkGrantId,
+              linkPrincipalId: message.linkPrincipalId,
+              blocked: message.linkPrincipalBlocked === true,
+            },
+          }
+        : {}),
+    };
+  };
+
+  const requireDiscussionAuthority = (
+    shareId: string,
+    actorUserId: string,
+    action: "read" | "append",
+    requestedWorkspaceId?: string,
+  ): { viewer: "owner" | "named" } => {
+    const share = storage.getShare(shareId);
+    if (!share) throw notFound();
+    if (
+      storage.workspaceIsOwnedBy(share.workspaceId, actorUserId)
+    ) {
+      if (share.workspaceId !== requestedWorkspaceId) throw notFound();
+      return { viewer: "owner" };
+    }
+    if (requestedWorkspaceId !== undefined) throw notFound();
+    const authorized = requireShareAction(shareId, actorUserId, "read");
+    if (
+      action === "append" &&
+      authorized.grant.access !== "comment" &&
+      authorized.grant.access !== "edit"
+    ) {
+      throw shareNotAppendable();
+    }
+    return { viewer: "named" };
+  };
+
+  const isCurrentDiscussionOwner = (
+    shareId: string,
+    actorUserId: string,
+  ): boolean => {
+    const share = storage.getShare(shareId);
+    return (
+      share !== null &&
+      storage.workspaceIsOwnedBy(share.workspaceId, actorUserId)
+    );
+  };
+
+  const discussionPage = (
+    page: SyncRelayShareDiscussionPage,
+    viewer: DiscussionViewer,
+    profileName: string | null = null,
+  ): Record<string, unknown> => {
+    return {
+      ok: true,
+      activityRevision: page.activityRevision,
+      ...(viewer === "owner"
+        ? { linkCommentsPaused: page.linkCommentsPaused }
+        : {}),
+      ...(viewer === "public" ? { profileName } : {}),
+      messages: page.messages.map((message) =>
+        projectDiscussionMessage(message, viewer),
+      ),
+      nextCursor:
+        page.nextCursor === null
+          ? null
+          : encodeDiscussionCursor(page.nextCursor),
+    };
+  };
+
+  const discussionActivityPage = (
+    page: SyncRelayShareDiscussionActivityPage,
+    viewer: DiscussionViewer,
+  ): Record<string, unknown> => ({
+    ok: true,
+    latestRevision: page.latestRevision,
+    cursorRevision: page.cursorRevision,
+    hasMore: page.hasMore,
+    messages: page.messages.map((message) =>
+      projectDiscussionMessage(message, viewer),
+    ),
+    ...(viewer === "owner"
+      ? {
+          linkCommentsPaused: page.linkCommentsPaused,
+          principals: page.principals.map((principal) => ({
+            principalId: principal.principalId,
+            blocked: principal.blockedAtMs !== null,
+          })),
+        }
+      : {}),
+  });
+
+  const publicDiscussionActivityPage = (
+    page: SyncRelayShareDiscussionActivityPage,
+    access: "view" | "comment",
+    composerState: "available" | "blocked" | "paused",
+    profileName: string | null,
+  ): Record<string, unknown> => ({
+    ...discussionActivityPage(page, "public"),
+    access,
+    composerState,
+    profileName,
+  });
+
   function requireOwnedLinkGrant(
     shareId: string,
     grantId: string,
@@ -700,6 +924,29 @@ export function createSyncRelayHandler({
       !grant ||
       grant.shareId !== share.shareId ||
       grant.principalKind !== "link" ||
+      grant.status !== "active" ||
+      grant.revokedAtMs !== null
+    ) {
+      throw notFound();
+    }
+    return { share, grant };
+  }
+
+  function requireOwnedNamedGrant(
+    shareId: string,
+    grantId: string,
+    actor: { userId: string },
+  ): SyncRelayShareWithGrantRow {
+    const share = storage.getShare(shareId);
+    const grant = storage.getShareGrant(grantId);
+    if (
+      !share ||
+      share.granterUserId !== actor.userId ||
+      !storage.workspaceIsOwnedBy(share.workspaceId, actor.userId) ||
+      !grant ||
+      grant.shareId !== share.shareId ||
+      grant.principalKind !== "user" ||
+      !grant.principalUserId ||
       grant.status !== "active" ||
       grant.revokedAtMs !== null
     ) {
@@ -727,10 +974,7 @@ export function createSyncRelayHandler({
     };
   }
 
-  const shareSummary = async (
-    row: SyncRelayShareWithGrantRow,
-    side: "granted" | "received",
-  ): Promise<Record<string, unknown>> => {
+  const shareSummaryBase = (row: SyncRelayShareWithGrantRow): Record<string, unknown> => {
     const { share, grant } = row;
     const storedSelector = parseStoredAnyShareSelectorJson(share.selectorJson);
     // This serialization boundary is the one authority that decides whether
@@ -743,7 +987,7 @@ export function createSyncRelayHandler({
         : isShareAccessValue(grant.access))
         ? storedSelector
         : null;
-    const base = {
+    return {
       shareId: share.shareId,
       // An unreadable row says so. It does NOT get a stand-in scope: empty
       // paths with no version would claim the entire live workspace, on a row
@@ -765,30 +1009,42 @@ export function createSyncRelayHandler({
         : { damaged: true as const, ...storedSelectorKind(share.selectorJson) }),
       createdAtMs: share.createdAtMs,
     };
-    if (side === "granted") {
-      // A pending invite has no recipient user id yet; surface the addressed
-      // email the granter typed. A claimed/real share resolves the email from
-      // its recipient id for display.
-      const recipientEmail = grant.principalUserId
-        ? lookupUserEmail
-          ? await lookupUserEmail(grant.principalUserId)
-          : null
-        : grant.principalEmail;
-      return {
-        ...base,
-        workspaceId: share.workspaceId,
-        recipientUserId: grant.principalUserId,
-        recipientEmail,
-        revokedAtMs: grant.revokedAtMs,
-      };
-    }
+  };
+
+  const grantedShareSummary = async (
+    row: SyncRelayShareWithGrantRow,
+  ): Promise<Record<string, unknown>> => {
+    const { share, grant } = row;
+    // A pending invite has no recipient user id yet; surface the addressed
+    // email the granter typed. A claimed/real share resolves the email from
+    // its recipient id for display.
+    const recipientEmail = grant.principalUserId
+      ? lookupUserEmail
+        ? await lookupUserEmail(grant.principalUserId)
+        : null
+      : grant.principalEmail;
+    return {
+      ...shareSummaryBase(row),
+      workspaceId: share.workspaceId,
+      recipientUserId: grant.principalUserId,
+      recipientEmail,
+      revokedAtMs: grant.revokedAtMs,
+    };
+  };
+
+  const receivedShareSummary = (
+    row: SyncRelayShareWithGrantRow,
+    granterEmail: string | null,
+    genericChatWritable: boolean,
+  ): Record<string, unknown> => {
     // Received summaries deliberately omit the workspace id: the recipient's
     // access is share-scoped, and the granter's workspace identity is not
     // theirs to see.
     return {
-      ...base,
-      granterUserId: share.granterUserId,
-      granterEmail: lookupUserEmail ? await lookupUserEmail(share.granterUserId) : null,
+      ...shareSummaryBase(row),
+      granterUserId: row.share.granterUserId,
+      granterEmail,
+      genericChatWritable,
     };
   };
 
@@ -810,6 +1066,22 @@ export function createSyncRelayHandler({
     generation: grant.generation,
     status: grant.status,
     createdAtMs: grant.createdAtMs,
+    revokedAtMs: grant.revokedAtMs,
+    parentGrantId: grant.parentGrantId,
+  });
+
+  const namedGrantTransitionBody = (grant: {
+    grantId: string;
+    access: string;
+    generation: number;
+    status: string;
+    revokedAtMs: number | null;
+    parentGrantId: string | null;
+  }) => ({
+    grantId: grant.grantId,
+    access: grant.access,
+    generation: grant.generation,
+    status: grant.status,
     revokedAtMs: grant.revokedAtMs,
     parentGrantId: grant.parentGrantId,
   });
@@ -836,6 +1108,23 @@ export function createSyncRelayHandler({
       access: grant.access,
       generation: grant.generation,
       createdAtMs: grant.createdAtMs,
+    };
+  };
+
+  const independentGrantSummary = async (grant: SyncRelayShareGrantRow) => {
+    let recipientEmail = grant.principalEmail;
+    if (lookupUserEmail && grant.principalUserId) {
+      try {
+        recipientEmail = await lookupUserEmail(grant.principalUserId);
+      } catch {
+        recipientEmail = null;
+      }
+    }
+    return {
+      shareId: grant.shareId,
+      grantId: grant.grantId,
+      recipientUserId: grant.principalUserId,
+      recipientEmail,
     };
   };
 
@@ -1217,6 +1506,560 @@ export function createSyncRelayHandler({
     );
   };
 
+  const respondToLinkDiscussion = async (request: Request): Promise<Response> => {
+    const refused = (): Response => privateErrorResponse(notFound());
+    if (!linkKey) return refused();
+    if (request.method !== "GET" && request.method !== "POST") {
+      return privateErrorResponse(methodNotAllowed());
+    }
+    if (
+      request.method === "POST" &&
+      (relayExchangeKeyHash === undefined || !hasValidRelayExchangeKey(request))
+    ) {
+      return refused();
+    }
+    const profileSecret = request.headers.get("x-dohc-link-profile-secret");
+    if (
+      (request.method === "POST" && profileSecret === null) ||
+      (profileSecret !== null && !/^[A-Za-z0-9_-]{43}$/u.test(profileSecret))
+    ) {
+      return refused();
+    }
+
+    try {
+      const { capabilityToken, capability } = requireLinkRead(
+        request,
+        linkReadRateLimiter,
+        linkGrantReadRateLimiter,
+      );
+      if (request.method === "GET") {
+        const url = new URL(request.url);
+        const cursor = decodeDiscussionCursor(url.searchParams.get("cursor"));
+        const limit = parseDiscussionLimit(url.searchParams.get("limit"));
+        const direction = parseDiscussionDirection(
+          url.searchParams.get("direction"),
+        );
+        const storedPage = storage.listShareDiscussionMessages({
+          shareId: capability.shareId,
+          ...(direction === "newest-first"
+            ? { before: cursor }
+            : { after: cursor }),
+          direction,
+          limit,
+        });
+        const principal = profileSecret === null
+          ? null
+          : storage.getLinkPrincipalForGrantProfile(
+              capability.grantId,
+              hashLinkProfileSecret(profileSecret, linkKey),
+            );
+        const page = discussionPage(
+          storedPage,
+          "public",
+          principal?.displayName ?? null,
+        );
+        requireFreshLinkRead(capabilityToken, capability);
+        return privateResponse(
+          linkJsonResponse(capability.shareId, capability.grantId, page),
+        );
+      }
+
+      const input = parseLinkDiscussionAppendBody(await readJsonObject(request));
+      const result = storage.appendLinkDiscussionMessage({
+        capabilityHash: capability.session.capabilityHash,
+        profileTokenHash: hashLinkProfileSecret(profileSecret!, linkKey),
+        claimedName: input.claimedName,
+        body: input.body,
+        idempotencyKey: input.idempotencyKey,
+        createdAtMs: nowMs(),
+        guard: () => {
+          requireFreshLinkRead(capabilityToken, capability);
+        },
+      });
+      if (!result.ok) {
+        if (result.reason === "invalid-input") {
+          return privateErrorResponse(badRequest("discussion message is invalid"));
+        }
+        if (result.reason === "paused") {
+          return privateJsonResponse(
+            {
+              ok: false,
+              error: "link discussion writes are paused",
+              code: RELAY_ERRORS.link_discussion_paused.code,
+              activityRevision: result.activityRevision,
+            },
+            RELAY_ERRORS.link_discussion_paused.status,
+          );
+        }
+        if (result.reason === "blocked") {
+          return privateJsonResponse(
+            {
+              ok: false,
+              error: "link discussion writes are blocked",
+              code: RELAY_ERRORS.link_discussion_blocked.code,
+              activityRevision: result.activityRevision,
+            },
+            RELAY_ERRORS.link_discussion_blocked.status,
+          );
+        }
+        if (
+          result.reason === "principal-limit" ||
+          result.reason === "lifetime-limit" ||
+          result.reason === "share-limit"
+        ) {
+          return privateErrorResponse(
+            relayHttpError(
+              RELAY_ERRORS.discussion_limit_reached,
+              "discussion message limit reached",
+            ),
+          );
+        }
+        return refused();
+      }
+      if (!result.replayed) discussionActivity.wake(capability.shareId);
+      return privateResponse(
+        linkJsonResponse(capability.shareId, capability.grantId, {
+          ok: true,
+          message: projectDiscussionMessage(result.message, "public"),
+        }),
+      );
+    } catch (error) {
+      if (
+        error instanceof HttpError &&
+        (error.statusCode === 401 || error.code === RELAY_ERRORS.not_found.code)
+      ) {
+        return refused();
+      }
+      return privateErrorResponse(error);
+    }
+  };
+
+  const respondToLinkDiscussionActivity = async (
+    request: Request,
+  ): Promise<Response> => {
+    const refused = (): Response => privateErrorResponse(notFound());
+    if (!linkKey) return refused();
+    if (request.method !== "GET") {
+      return privateErrorResponse(methodNotAllowed());
+    }
+    const profileSecret = request.headers.get("x-dohc-link-profile-secret");
+    if (profileSecret === null || !/^[A-Za-z0-9_-]{43}$/u.test(profileSecret)) {
+      return refused();
+    }
+
+    try {
+      const { capabilityToken, capability } = requireLinkRead(
+        request,
+        linkReadRateLimiter,
+        linkGrantReadRateLimiter,
+      );
+      const query = parseDiscussionActivityQuery(new URL(request.url).searchParams);
+      const observedRevision = storage.getShareDiscussionRevision(capability.shareId);
+      if (observedRevision === null) return refused();
+      if (query.since > observedRevision) {
+        throw badRequest("since is ahead of discussion activity");
+      }
+      if (query.since === observedRevision && query.hold > 0) {
+        try {
+          await discussionActivity.wait(
+            capability.shareId,
+            `link:${capability.session.capabilityHash}`,
+            {
+              holdMs: query.hold,
+              signal: request.signal,
+              shouldPark: () => {
+                try {
+                  requireFreshLinkRead(capabilityToken, capability);
+                  return (
+                    storage.getShareDiscussionRevision(capability.shareId) ===
+                    query.since
+                  );
+                } catch {
+                  return false;
+                }
+              },
+            },
+          );
+        } catch (error) {
+          if (error instanceof DiscussionActivityCapacityError) {
+            throw linkReadRateLimited();
+          }
+          throw error;
+        }
+      }
+
+      // Every settled wait (wake, timeout, or abort) re-establishes the
+      // capability before reading durable state, then once more before bytes
+      // leave the process.
+      requireFreshLinkRead(capabilityToken, capability);
+      const page = storage.listShareDiscussionActivity({
+        shareId: capability.shareId,
+        sinceRevision: query.since,
+        limit: query.limit,
+      });
+      const principal = storage.getLinkPrincipalForGrantProfile(
+        capability.grantId,
+        hashLinkProfileSecret(profileSecret, linkKey),
+      );
+      const composerState = page.linkCommentsPaused
+        ? "paused"
+        : principal !== null && principal.blockedAtMs !== null
+          ? "blocked"
+          : "available";
+      const fresh = requireFreshLinkRead(capabilityToken, capability);
+      if (!isPublicLinkAccess(fresh.access)) return refused();
+      return privateResponse(
+        linkJsonResponse(
+          capability.shareId,
+          capability.grantId,
+          publicDiscussionActivityPage(
+            page,
+            fresh.access,
+            composerState,
+            principal?.displayName ?? null,
+          ),
+        ),
+      );
+    } catch (error) {
+      if (
+        error instanceof HttpError &&
+        (error.statusCode === 401 || error.code === RELAY_ERRORS.not_found.code)
+      ) {
+        return refused();
+      }
+      return privateErrorResponse(error);
+    }
+  };
+
+  const respondToShareDiscussion = async (
+    request: Request,
+    shareId: string,
+  ): Promise<Response> => {
+    try {
+      const url = new URL(request.url);
+      const actor = await resolveActor(
+        request,
+        request.method === "GET"
+          ? (url.searchParams.get("workspaceId") ?? "")
+          : "",
+      );
+      if (
+        !actor.userId ||
+        Buffer.byteLength(actor.userId, "utf8") >
+          LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT
+      ) {
+        throw badRequest("discussion actor id is invalid");
+      }
+      await claimPendingShares(actor.userId);
+      if (request.method === "GET") {
+        const query = parseDiscussionListQuery(url.searchParams);
+        const initialAuthority = requireDiscussionAuthority(
+          shareId,
+          actor.userId,
+          "read",
+          query.workspaceId,
+        );
+        if (
+          query.direction === "newest-first" &&
+          initialAuthority.viewer !== "owner"
+        ) {
+          throw notFound();
+        }
+        const storedPage = storage.listShareDiscussionMessages({
+          shareId,
+          ...(query.direction === "newest-first"
+            ? { before: query.cursor }
+            : { after: query.cursor }),
+          direction: query.direction,
+          limit: query.limit,
+        });
+        const finalAuthority = requireDiscussionAuthority(
+          shareId,
+          actor.userId,
+          "read",
+          query.workspaceId,
+        );
+        if (
+          query.direction === "newest-first" &&
+          finalAuthority.viewer !== "owner"
+        ) {
+          throw notFound();
+        }
+        return privateJsonResponse(
+          discussionPage(storedPage, finalAuthority.viewer),
+        );
+      }
+      if (request.method !== "POST") {
+        return privateErrorResponse(methodNotAllowed());
+      }
+
+      const input = parseNamedDiscussionAppendBody(await readJsonObject(request));
+      const authority = requireDiscussionAuthority(
+        shareId,
+        actor.userId,
+        "read",
+        input.workspaceId,
+      );
+      const displayName = await discussionDisplayName(
+        lookupUserDisplayName,
+        actor.userId,
+      );
+      const result = storage.appendAuthenticatedDiscussionMessage({
+        shareId,
+        authorUserId: actor.userId,
+        displayName,
+        body: input.body,
+        idempotencyKey: input.idempotencyKey,
+        createdAtMs: nowMs(),
+        readGuard: () => {
+          const current = requireDiscussionAuthority(
+            shareId,
+            actor.userId,
+            "read",
+            input.workspaceId,
+          );
+          return current.viewer === "owner" ? "owner" : "recipient";
+        },
+        appendGuard: () => {
+          const current = requireDiscussionAuthority(
+            shareId,
+            actor.userId,
+            "append",
+            input.workspaceId,
+          );
+          return current.viewer === "owner" ? "owner" : "recipient";
+        },
+      });
+      if (!result.ok) {
+        if (result.reason === "idempotency-conflict") {
+          throw relayHttpError(
+            RELAY_ERRORS.conflict,
+            "idempotency key was already used for a different message",
+          );
+        }
+        if (result.reason === "rate-limit") {
+          throw relayHttpError(
+            RELAY_ERRORS.discussion_rate_limited,
+            "discussion message rate limit reached",
+          );
+        }
+        if (result.reason === "lifetime-limit") {
+          throw relayHttpError(
+            RELAY_ERRORS.discussion_limit_reached,
+            "recipient discussion message limit reached",
+          );
+        }
+        if (result.reason === "share-limit") {
+          throw relayHttpError(
+            RELAY_ERRORS.discussion_limit_reached,
+            "share discussion message limit reached",
+          );
+        }
+        if (result.reason === "workspace-quota") {
+          throw relayHttpError(RELAY_ERRORS.quota_exceeded, "workspace quota exceeded");
+        }
+        throw badRequest("discussion message is invalid");
+      }
+      if (!result.replayed) discussionActivity.wake(shareId);
+      return privateJsonResponse({
+        ok: true,
+        message: projectDiscussionMessage(result.message, authority.viewer),
+      });
+    } catch (error) {
+      return privateErrorResponse(error);
+    }
+  };
+
+  const respondToShareDiscussionActivity = async (
+    request: Request,
+    shareId: string,
+  ): Promise<Response> => {
+    if (request.method !== "GET") {
+      return privateErrorResponse(methodNotAllowed());
+    }
+    try {
+      const url = new URL(request.url);
+      const actor = await resolveActor(
+        request,
+        url.searchParams.get("workspaceId") ?? "",
+      );
+      if (
+        !actor.userId ||
+        Buffer.byteLength(actor.userId, "utf8") >
+          LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT
+      ) {
+        throw badRequest("discussion actor id is invalid");
+      }
+      await claimPendingShares(actor.userId);
+      const query = parseDiscussionActivityQuery(url.searchParams);
+      const initialAuthority = requireDiscussionAuthority(
+        shareId,
+        actor.userId,
+        "read",
+        query.workspaceId,
+      );
+      const observedRevision = storage.getShareDiscussionRevision(shareId);
+      if (observedRevision === null) throw notFound();
+      if (query.since > observedRevision) {
+        throw badRequest("since is ahead of discussion activity");
+      }
+      if (query.since === observedRevision && query.hold > 0) {
+        try {
+          await discussionActivity.wait(shareId, `user:${actor.userId}`, {
+            holdMs: query.hold,
+            signal: request.signal,
+            shouldPark: () => {
+              try {
+                const authority = requireDiscussionAuthority(
+                  shareId,
+                  actor.userId,
+                  "read",
+                  query.workspaceId,
+                );
+                return (
+                  (initialAuthority.viewer !== "owner" ||
+                    authority.viewer === "owner") &&
+                  storage.getShareDiscussionRevision(shareId) === query.since
+                );
+              } catch {
+                return false;
+              }
+            },
+          });
+        } catch (error) {
+          if (error instanceof DiscussionActivityCapacityError) {
+            throw linkReadRateLimited();
+          }
+          throw error;
+        }
+      }
+
+      const postWakeAuthority = requireDiscussionAuthority(
+        shareId,
+        actor.userId,
+        "read",
+        query.workspaceId,
+      );
+      if (
+        initialAuthority.viewer === "owner" &&
+        postWakeAuthority.viewer !== "owner"
+      ) {
+        throw notFound();
+      }
+      const page = storage.listShareDiscussionActivity({
+        shareId,
+        sinceRevision: query.since,
+        limit: query.limit,
+      });
+      const finalAuthority = requireDiscussionAuthority(
+        shareId,
+        actor.userId,
+        "read",
+        query.workspaceId,
+      );
+      if (
+        initialAuthority.viewer === "owner" &&
+        finalAuthority.viewer !== "owner"
+      ) {
+        throw notFound();
+      }
+      return privateJsonResponse(
+        discussionActivityPage(page, finalAuthority.viewer),
+      );
+    } catch (error) {
+      return privateErrorResponse(error);
+    }
+  };
+
+  const respondToShareDiscussionModeration = async (
+    request: Request,
+    shareId: string,
+  ): Promise<Response> => {
+    const refused = (): Response => privateErrorResponse(notFound());
+    if (request.method !== "POST") return refused();
+    let actorUserId: string;
+    let action: DiscussionModerationAction;
+    let workspaceId: string;
+    let input: Record<string, unknown>;
+    try {
+      input = await readJsonObject(request);
+      workspaceId = parseWorkspaceId(input.workspaceId);
+    } catch (error) {
+      return privateErrorResponse(error);
+    }
+    try {
+      const actor = await resolveActor(request, workspaceId);
+      const share = storage.getShare(shareId);
+      if (
+        !actor.userId ||
+        Buffer.byteLength(actor.userId, "utf8") >
+          LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT ||
+        !share ||
+        !isCurrentDiscussionOwner(shareId, actor.userId)
+      ) {
+        return refused();
+      }
+      requireShareWorkspace(share, workspaceId);
+      actorUserId = actor.userId;
+      action = parseDiscussionModerationAction(input);
+    } catch {
+      return refused();
+    }
+    try {
+      const changedAtMs = nowMs();
+      if (action.action === "delete") {
+        const deleted = storage.deleteShareDiscussionMessage({
+          shareId,
+          workspaceId,
+          messageId: action.messageId,
+          deletedAtMs: changedAtMs,
+          actorUserId,
+        });
+        if (deleted === null) return refused();
+        discussionActivity.wake(shareId);
+        return privateJsonResponse({
+          ok: true,
+          message: {
+            messageId: deleted.messageId,
+            createdAtMs: deleted.createdAtMs,
+            deleted: true,
+          },
+        });
+      }
+      if (action.action === "block" || action.action === "unblock") {
+        const blocked = action.action === "block";
+        if (
+          !storage.setLinkPrincipalBlocked({
+            shareId,
+            workspaceId,
+            principalId: action.principalId,
+            actorUserId,
+            blockedAtMs: blocked ? changedAtMs : null,
+          })
+        ) {
+          return refused();
+        }
+        discussionActivity.wake(shareId);
+        return privateJsonResponse({ ok: true, blocked });
+      }
+      const linkCommentsPaused = action.action === "pause";
+      if (
+        !storage.setShareLinkWritesPaused({
+          shareId,
+          workspaceId,
+          actorUserId,
+          pausedAtMs: linkCommentsPaused ? changedAtMs : null,
+        })
+      ) {
+        return refused();
+      }
+      discussionActivity.wake(shareId);
+      return privateJsonResponse({ ok: true, linkCommentsPaused });
+    } catch (error) {
+      return privateErrorResponse(error);
+    }
+  };
+
   const requireRefreshableLinkSession = (request: Request, refreshedAtMs: number) => {
     if (!linkKey) throw invalidLinkCapability();
     const match = /^LinkCapability ([A-Za-z0-9_-]{43})$/u.exec(
@@ -1294,7 +2137,7 @@ export function createSyncRelayHandler({
       if (
         !authorized.ok ||
         authorized.grant.generation !== found.credential.generation ||
-        authorized.grant.access !== "view"
+        !isPublicLinkAccess(authorized.grant.access)
       ) {
         return refused();
       }
@@ -1334,7 +2177,8 @@ export function createSyncRelayHandler({
           if (
             !fresh.ok ||
             fresh.grant.generation !== found.grant.generation ||
-            fresh.grant.generation !== current.credential.generation
+            fresh.grant.generation !== current.credential.generation ||
+            fresh.grant.access !== authorized.grant.access
           ) {
             throw notFound();
           }
@@ -1375,7 +2219,8 @@ export function createSyncRelayHandler({
     });
     if (
       !authorized.ok ||
-      authorized.grant.generation !== current.session.generation
+      authorized.grant.generation !== current.session.generation ||
+      !isPublicLinkAccess(authorized.grant.access)
     ) {
       throw invalidLinkCapability();
     }
@@ -1402,7 +2247,8 @@ export function createSyncRelayHandler({
           !fresh.ok ||
           fresh.share.shareId !== authorized.share.shareId ||
           fresh.grant.grantId !== authorized.grant.grantId ||
-          fresh.grant.generation !== authorized.grant.generation
+          fresh.grant.generation !== authorized.grant.generation ||
+          fresh.grant.access !== authorized.grant.access
         ) {
           throw invalidLinkCapability();
         }
@@ -1456,7 +2302,7 @@ export function createSyncRelayHandler({
               fresh.grantId === capability.grantId &&
               fresh.generation === capability.generation &&
               fresh.access === capability.access &&
-              fresh.access === "view"
+              isPublicLinkAccess(fresh.access)
             );
           } catch {
             return false;
@@ -1519,7 +2365,7 @@ export function createSyncRelayHandler({
           return (
             authorized.ok &&
             authorized.grant.grantId === storedCode.grantId &&
-            authorized.grant.access === "view"
+            isPublicLinkAccess(authorized.grant.access)
           );
         } catch {
           return false;
@@ -1555,6 +2401,21 @@ export function createSyncRelayHandler({
         const actor = await resolveActor(request, "");
         return await respondToLinkRedeem(request, actor.userId);
       }
+      if (route.route === "link-discussion") {
+        return await respondToLinkDiscussion(request);
+      }
+      if (route.route === "link-discussion-activity") {
+        return await respondToLinkDiscussionActivity(request);
+      }
+      if (route.route === "share-discussion") {
+        return await respondToShareDiscussion(request, route.shareId);
+      }
+      if (route.route === "share-discussion-activity") {
+        return await respondToShareDiscussionActivity(request, route.shareId);
+      }
+      if (route.route === "share-discussion-moderation") {
+        return await respondToShareDiscussionModeration(request, route.shareId);
+      }
       if (
         route.route === "link-share" ||
         route.route === "link-current" ||
@@ -1583,14 +2444,14 @@ export function createSyncRelayHandler({
             capability.effectiveSelector,
             epochLogFloor,
           );
-          requireFreshLinkRead(capabilityToken, capability);
+          const fresh = requireFreshLinkRead(capabilityToken, capability);
           const presentation = createAccountlessPathProjection(
-            capability.effectiveSelector,
+            fresh.effectiveSelector,
           );
-          return linkJsonResponse(capability.shareId, capability.grantId, {
+          return linkJsonResponse(fresh.shareId, fresh.grantId, {
             ok: true,
             effectiveSelector: presentation.selector,
-            access: capability.access,
+            access: fresh.access,
             ...freshness,
           });
         }
@@ -1603,8 +2464,14 @@ export function createSyncRelayHandler({
             limit: linkCurrentFileLimit,
           });
           if (snapshot.tooMany) throw notFound();
-          const presentation = createAccountlessPathProjection(
+          const freshness = newestFilteredOpFreshness(
+            share.workspaceId,
             capability.effectiveSelector,
+            snapshot.epochLogFloor,
+          );
+          const fresh = requireFreshLinkRead(capabilityToken, capability);
+          const presentation = createAccountlessPathProjection(
+            fresh.effectiveSelector,
           );
           const files = snapshot.files.map((file) => {
             const path = presentation.projectPath(file.path);
@@ -1615,16 +2482,10 @@ export function createSyncRelayHandler({
               contentKind: file.contentKind,
             };
           });
-          const freshness = newestFilteredOpFreshness(
-            share.workspaceId,
-            capability.effectiveSelector,
-            snapshot.epochLogFloor,
-          );
-          requireFreshLinkRead(capabilityToken, capability);
-          return linkJsonResponse(capability.shareId, capability.grantId, {
+          return linkJsonResponse(fresh.shareId, fresh.grantId, {
             ok: true,
             effectiveSelector: presentation.selector,
-            access: capability.access,
+            access: fresh.access,
             files,
             nextCursor: snapshot.nextCursor,
             epochLogFloor: snapshot.epochLogFloor,
@@ -1747,7 +2608,7 @@ export function createSyncRelayHandler({
           storage
             .listSharesGrantedBy(actor.userId)
             .filter((row) => row.grant.principalKind !== "link")
-            .map((row) => shareSummary(row, "granted")),
+            .map((row) => grantedShareSummary(row)),
         );
         const receivedByShare = new Map<string, SyncRelayShareWithGrantRow[]>();
         for (const row of storage
@@ -1757,32 +2618,53 @@ export function createSyncRelayHandler({
           if (rows) rows.push(row);
           else receivedByShare.set(row.share.shareId, [row]);
         }
-        const receivedRows = await Promise.all(
+        const receivedLookups = await Promise.all(
           [...receivedByShare.values()].map(async (rows) => {
             const fallback = rows[0]!;
-            const effective = authorizeShareAction({
-              storage,
-              actorUserId: actor.userId,
-              shareId: fallback.share.shareId,
-              action: "read",
-            });
-            const row = effective.ok
-              ? { share: effective.share, grant: effective.grant }
-              : fallback;
-            return {
-              row,
-              summary: await shareSummary(row, "received"),
-            };
+            const granterEmail = lookupUserEmail
+              ? await lookupUserEmail(fallback.share.granterUserId)
+              : null;
+            return { fallback, granterEmail };
           }),
         );
-        // Re-evaluate AFTER the async display-name lookups, immediately before
-        // serialization. A pre-provisioned wire that became an agent channel
-        // during those awaits must not get one final recipient-list exposure.
-        const received = receivedRows.flatMap(({ row, summary }) => {
-          const selector = parseStoredAnyShareSelectorJson(row.share.selectorJson);
-          return selector && selectorTargetsBlockedChannel(storage, row.share.workspaceId, selector)
+        const received = receivedLookups.flatMap(({ fallback, granterEmail }) => {
+          const effective = resolveReceivedShareAuthority({
+            storage,
+            actorUserId: actor.userId,
+            shareId: fallback.share.shareId,
+          });
+          if (effective.ok) {
+            return [
+              receivedShareSummary(
+                { share: effective.share, grant: effective.grant },
+                granterEmail,
+                effective.genericChatWritable,
+              ),
+            ];
+          }
+
+          const currentFallback = effective.fallback;
+          if (!currentFallback) return [];
+          // A damaged fallback does not carry validated selector authority.
+          // Recheck its selector immediately before serialization so a channel
+          // that became blocked does not get one final exposure.
+          const selector = parseStoredAnyShareSelectorJson(
+            currentFallback.share.selectorJson,
+          );
+          return selector &&
+            selectorTargetsBlockedChannel(
+              storage,
+              currentFallback.share.workspaceId,
+              selector,
+            )
             ? []
-            : [summary];
+            : [
+                receivedShareSummary(
+                  currentFallback,
+                  granterEmail,
+                  effective.genericChatWritable,
+                ),
+              ];
         });
         return jsonResponse({ ok: true, granted, received });
       }
@@ -1790,12 +2672,21 @@ export function createSyncRelayHandler({
 
       if (route.route === "share" && request.method === "GET") {
         await claimPendingShares(actor.userId);
-        const authorized = requireShareAction(route.shareId, actor.userId, "read");
-        const summary = await shareSummary(
+        const initial = requireShareAction(route.shareId, actor.userId, "read");
+        const granterEmail = lookupUserEmail
+          ? await lookupUserEmail(initial.share.granterUserId)
+          : null;
+        const authorized = resolveReceivedShareAuthority({
+          storage,
+          actorUserId: actor.userId,
+          shareId: route.shareId,
+        });
+        if (!authorized.ok) throw notFound();
+        const summary = receivedShareSummary(
           { share: authorized.share, grant: authorized.grant },
-          "received",
+          granterEmail,
+          authorized.genericChatWritable,
         );
-        requireShareAction(route.shareId, actor.userId, "read");
         return jsonResponse({ ok: true, ...summary });
       }
       if (route.route === "share") throw methodNotAllowed();
@@ -1843,6 +2734,7 @@ export function createSyncRelayHandler({
         }
         if (!secret) throw notFound();
         terminateLinkStreamsForGrant(result.grant.grantId);
+        discussionActivity.wake(share.shareId);
         return jsonResponse({
           ok: true,
           ...linkGrantBody(result.grant),
@@ -1852,17 +2744,24 @@ export function createSyncRelayHandler({
       if (route.route === "share-link-rotate") throw methodNotAllowed();
 
       if (route.route === "share-link-retune" && request.method === "POST") {
+        const input = await readJsonObject(request);
+        const workspaceId = parseWorkspaceId(input.workspaceId);
         const { share, grant } = requireOwnedLinkGrant(
           route.shareId,
           route.grantId,
           actor,
         );
-        const input = await readJsonObject(request);
+        requireShareWorkspace(share, workspaceId);
+        if (!isPublicLinkAccess(grant.access)) throw notFound();
         const expectedDependentGrantIds = parseExpectedDependentGrantIds(input, [
+          "workspaceId",
           "access",
           "expectedDependentGrantIds",
         ]);
-        const access = validatePhase2LinkAccess(input.access);
+        const access = validatePublicLinkAccess(input.access);
+        const widening = grant.access === "view" && access === "comment";
+        if (widening && (!linkKey || !shareWebOrigin)) throw notFound();
+        let secret: string | null = null;
         const result = storage.retuneShareGrant({
           shareId: share.shareId,
           grantId: grant.grantId,
@@ -1870,8 +2769,24 @@ export function createSyncRelayHandler({
           changedAtMs: nowMs(),
           expectedDependentGrantIds,
           guard: () => {
-            requireOwnedLinkGrant(share.shareId, grant.grantId, actor);
+            const current = requireOwnedLinkGrant(
+              share.shareId,
+              grant.grantId,
+              actor,
+            );
+            requireShareWorkspace(current.share, workspaceId);
           },
+          ...(widening
+            ? {
+                mintCredential: () => {
+                  secret = newLinkBearer();
+                  return {
+                    credentialId: newId(),
+                    secretHash: hashLinkBearer(secret, linkKey!),
+                  };
+                },
+              }
+            : {}),
         });
         if (!result.ok) {
           if ("reason" in result && result.reason === "dependents-changed") {
@@ -1879,13 +2794,85 @@ export function createSyncRelayHandler({
           }
           throw notFound();
         }
-        terminateLinkStreamsForGrant(result.grant.grantId);
+        if (widening) terminateLinkStreamsForGrant(result.grant.grantId);
+        discussionActivity.wake(share.shareId);
         return jsonResponse({
           ok: true,
           ...linkGrantBody(result.grant),
+          ...(secret === null
+            ? {}
+            : { url: composePublicLinkUrl(shareWebOrigin!, secret) }),
         });
       }
       if (route.route === "share-link-retune") throw methodNotAllowed();
+
+      if (route.route === "share-grant-promote" && request.method === "POST") {
+        const input = await readJsonObject(request);
+        const workspaceId = parseWorkspaceId(input.workspaceId);
+        const { share } = requireOwnedNamedGrant(
+          route.shareId,
+          route.grantId,
+          actor,
+        );
+        requireShareWorkspace(share, workspaceId);
+        const { expectedParentGrantId, expectedParentGeneration } =
+          parsePromotionExpectation(input);
+        const result = storage.promoteShareGrant({
+          shareId: route.shareId,
+          grantId: route.grantId,
+          expectedParentGrantId,
+          expectedParentGeneration,
+          guard: () => {
+            const current = requireOwnedNamedGrant(
+              route.shareId,
+              route.grantId,
+              actor,
+            );
+            requireShareWorkspace(current.share, workspaceId);
+          },
+        });
+        if (!result.ok) throw notFound();
+        discussionActivity.wake(route.shareId);
+        return jsonResponse({
+          ok: true,
+          ...namedGrantTransitionBody(result.grant),
+        });
+      }
+      if (route.route === "share-grant-promote") throw methodNotAllowed();
+
+      if (route.route === "share-grant-revoke" && request.method === "POST") {
+        const input = await readJsonObject(request);
+        const workspaceId = parseWorkspaceId(input.workspaceId);
+        if (Object.keys(input).some((key) => key !== "workspaceId")) {
+          throw badRequest("request body contains an unknown field");
+        }
+        const { share } = requireOwnedNamedGrant(
+          route.shareId,
+          route.grantId,
+          actor,
+        );
+        requireShareWorkspace(share, workspaceId);
+        const result = storage.revokeShareGrant({
+          shareId: route.shareId,
+          grantId: route.grantId,
+          revokedAtMs: nowMs(),
+          guard: () => {
+            const current = requireOwnedNamedGrant(
+              route.shareId,
+              route.grantId,
+              actor,
+            );
+            requireShareWorkspace(current.share, workspaceId);
+          },
+        });
+        if (!result.ok) throw notFound();
+        discussionActivity.wake(route.shareId);
+        return jsonResponse({
+          ok: true,
+          ...namedGrantTransitionBody(result.grant),
+        });
+      }
+      if (route.route === "share-grant-revoke") throw methodNotAllowed();
 
       if (route.route === "share-revoke" && request.method === "POST") {
         const share = storage.getShare(route.shareId);
@@ -1928,10 +2915,12 @@ export function createSyncRelayHandler({
             throw notFound();
           }
           terminateLinkStreamsForGrant(result.grant.grantId);
+          discussionActivity.wake(share.shareId);
           return jsonResponse({ ok: true, ...linkGrantBody(result.grant) });
         }
         if (storage.revokeShare(route.shareId, nowMs())) {
           terminateLinkStreamsForShare(route.shareId);
+          discussionActivity.wake(route.shareId);
         }
         return jsonResponse({ ok: true, shareId: route.shareId });
       }
@@ -2658,20 +3647,50 @@ export function createSyncRelayHandler({
       if (route.route === "share-link-create-atomic" && request.method === "GET") {
         if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
         const url = new URL(request.url);
-        if (url.searchParams.getAll("cursor").length > 1) {
+        if (
+          url.searchParams.getAll("cursor").length > 1 ||
+          url.searchParams.getAll("independentGrantCursor").length > 1
+        ) {
           throw badRequest("cursor is invalid");
         }
+        const linkCursor = decodeLinkInventoryCursor(
+          url.searchParams.get("cursor"),
+        );
+        const independentGrantCursor = decodeIndependentGrantInventoryCursor(
+          url.searchParams.get("independentGrantCursor"),
+        );
         const page = storage.listLinkGrantsByWorkspace(
           route.workspaceId,
-          decodeLinkInventoryCursor(url.searchParams.get("cursor")),
+          linkCursor,
         );
-        const links = await Promise.all(
-          page.links.map(linkInventorySummary),
-        );
+        const independentGrantPage = storage.listActiveIndependentShareGrants({
+          workspaceId: route.workspaceId,
+          shareIds: page.links.map((row) => row.share.shareId),
+          ...(independentGrantCursor
+            ? { cursor: independentGrantCursor }
+            : {}),
+        });
+        const [links, independentGrants] = await Promise.all([
+          independentGrantCursor
+            ? []
+            : Promise.all(page.links.map(linkInventorySummary)),
+          Promise.all(
+            independentGrantPage.grants.map(independentGrantSummary),
+          ),
+        ]);
         if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
         return jsonResponse({
           ok: true,
           links,
+          independentGrants,
+          ...(independentGrantPage.nextCursor
+            ? {
+                nextIndependentGrantCursor:
+                  encodeIndependentGrantInventoryCursor(
+                    independentGrantPage.nextCursor,
+                  ),
+              }
+            : {}),
           ...(page.nextCursor
             ? { nextCursor: encodeLinkInventoryCursor(page.nextCursor) }
             : {}),
@@ -2680,9 +3699,14 @@ export function createSyncRelayHandler({
 
       if (route.route === "share-link-create-atomic" && request.method === "POST") {
         const input = await readJsonObject(request);
-        if (Object.keys(input).some((key) => key !== "paths" && key !== "versionId")) {
-          throw badRequest("A View link accepts only paths and versionId.");
+        if (
+          Object.keys(input).some(
+            (key) => key !== "paths" && key !== "versionId" && key !== "access",
+          )
+        ) {
+          throw badRequest("A link accepts only access, paths, and versionId.");
         }
+        const access = validatePublicLinkAccess(input.access);
         const validation = validateShareSelector({
           paths: input.paths,
           versionId: input.versionId,
@@ -2708,7 +3732,7 @@ export function createSyncRelayHandler({
           principalKind: "link" as const,
           principalUserId: null,
           principalEmail: null,
-          access: "view",
+          access,
           generation: 1,
           status: "active" as const,
           createdAtMs,
@@ -2743,7 +3767,10 @@ export function createSyncRelayHandler({
 
       if (route.route === "share-link-create" && request.method === "POST") {
         const input = await readJsonObject(request);
-        const access = validatePhase2LinkAccess(input.access);
+        if (Object.keys(input).some((key) => key !== "access")) {
+          throw badRequest("A link accepts only access.");
+        }
+        const access = validatePublicLinkAccess(input.access);
         const share = storage.getShare(route.shareId);
         const selector = share
           ? parseStoredAnyShareSelectorJson(share.selectorJson)
@@ -3186,6 +4213,16 @@ function parseRoute(request: Request): SyncRelayRoute {
     if (parts[2] === "share") return { route: "link-share" };
     if (parts[2] === "current") return { route: "link-current" };
     if (parts[2] === "log") return { route: "link-log" };
+    if (parts[2] === "discussion") return { route: "link-discussion" };
+  }
+  if (
+    parts.length === 4 &&
+    parts[0] === "sync" &&
+    parts[1] === "link" &&
+    parts[2] === "discussion" &&
+    parts[3] === "activity"
+  ) {
+    return { route: "link-discussion-activity" };
   }
   if (
     parts.length === 4 &&
@@ -3220,7 +4257,38 @@ function parseRoute(request: Request): SyncRelayRoute {
         grantId: parseShareId(parts[4]),
       };
     }
+    if (parts.length === 6 && parts[3] === "grants" && parts[5] === "promote") {
+      return {
+        route: "share-grant-promote",
+        shareId,
+        grantId: parseShareId(parts[4]),
+      };
+    }
+    if (parts.length === 6 && parts[3] === "grants" && parts[5] === "revoke") {
+      return {
+        route: "share-grant-revoke",
+        shareId,
+        grantId: parseShareId(parts[4]),
+      };
+    }
     if (parts.length === 4 && parts[3] === "log") return { route: "share-log", shareId };
+    if (parts.length === 4 && parts[3] === "discussion") {
+      return { route: "share-discussion", shareId };
+    }
+    if (
+      parts.length === 5 &&
+      parts[3] === "discussion" &&
+      parts[4] === "activity"
+    ) {
+      return { route: "share-discussion-activity", shareId };
+    }
+    if (
+      parts.length === 5 &&
+      parts[3] === "discussion" &&
+      parts[4] === "moderation"
+    ) {
+      return { route: "share-discussion-moderation", shareId };
+    }
     if (parts.length === 4 && parts[3] === "presence") return { route: "share-presence", shareId };
     if (parts.length === 5 && parts[3] === "blobs" && parts[4]) {
       return { route: "share-blob", shareId, sha256: parts[4] };
@@ -3396,6 +4464,295 @@ function decodeLinkInventoryCursor(
   };
 }
 
+function encodeIndependentGrantInventoryCursor(
+  cursor: SyncRelayIndependentGrantInventoryCursor,
+): string {
+  return Buffer.from(JSON.stringify({ version: 1, ...cursor }), "utf8").toString(
+    "base64url",
+  );
+}
+
+function decodeIndependentGrantInventoryCursor(
+  value: string | null,
+): SyncRelayIndependentGrantInventoryCursor | undefined {
+  if (value === null) return undefined;
+  const invalid = () => badRequest("independentGrantCursor is invalid");
+  if (
+    value.length === 0 ||
+    value.length > LINK_INVENTORY_CURSOR_MAX_CHARS ||
+    !/^[A-Za-z0-9_-]+$/u.test(value)
+  ) {
+    throw invalid();
+  }
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+  } catch {
+    throw invalid();
+  }
+  if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) {
+    throw invalid();
+  }
+  const row = decoded as Record<string, unknown>;
+  if (
+    Object.keys(row).sort().join("\0") !==
+      ["grantCreatedAtMs", "grantId", "shareId", "version"]
+        .sort()
+        .join("\0") ||
+    row.version !== 1 ||
+    !Number.isSafeInteger(row.grantCreatedAtMs) ||
+    Number(row.grantCreatedAtMs) < 0 ||
+    typeof row.shareId !== "string" ||
+    row.shareId.length === 0 ||
+    row.shareId.length > MAX_SHARE_ID_CHARS ||
+    !/^[a-z0-9][a-z0-9-]*$/u.test(row.shareId) ||
+    typeof row.grantId !== "string" ||
+    row.grantId.length === 0 ||
+    row.grantId.length > MAX_SHARE_ID_CHARS ||
+    !/^[a-z0-9][a-z0-9-]*$/u.test(row.grantId)
+  ) {
+    throw invalid();
+  }
+  return {
+    shareId: row.shareId,
+    grantCreatedAtMs: Number(row.grantCreatedAtMs),
+    grantId: row.grantId,
+  };
+}
+
+function encodeDiscussionCursor(cursor: SyncRelayShareDiscussionCursor): string {
+  return Buffer.from(JSON.stringify({ version: 1, ...cursor }), "utf8").toString(
+    "base64url",
+  );
+}
+
+function decodeDiscussionCursor(
+  value: string | null,
+): SyncRelayShareDiscussionCursor | undefined {
+  if (value === null) return undefined;
+  const invalid = () => badRequest("cursor is invalid");
+  if (
+    value.length === 0 ||
+    value.length > DISCUSSION_CURSOR_MAX_CHARS ||
+    !/^[A-Za-z0-9_-]+$/u.test(value)
+  ) {
+    throw invalid();
+  }
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+  } catch {
+    throw invalid();
+  }
+  if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) {
+    throw invalid();
+  }
+  const row = decoded as Record<string, unknown>;
+  if (
+    Object.keys(row).sort().join("\0") !==
+      ["createdAtMs", "messageId", "version"].sort().join("\0") ||
+    row.version !== 1 ||
+    !Number.isSafeInteger(row.createdAtMs) ||
+    Number(row.createdAtMs) < 0 ||
+    typeof row.messageId !== "string" ||
+    row.messageId.length === 0 ||
+    row.messageId.length > 512
+  ) {
+    throw invalid();
+  }
+  return {
+    createdAtMs: Number(row.createdAtMs),
+    messageId: row.messageId,
+  };
+}
+
+function parseDiscussionLimit(value: string | null): number {
+  if (value === null) return DEFAULT_DISCUSSION_PAGE_SIZE;
+  if (!/^[1-9][0-9]{0,2}$/u.test(value)) {
+    throw badRequest("limit is invalid");
+  }
+  const limit = Number(value);
+  if (limit > LINK_DISCUSSION_PAGE_LIMIT) {
+    throw badRequest(`limit must not exceed ${LINK_DISCUSSION_PAGE_LIMIT}`);
+  }
+  return limit;
+}
+
+function parseDiscussionDirection(
+  value: string | null,
+): "oldest-first" | "newest-first" {
+  if (value === null || value === "oldest-first") return "oldest-first";
+  if (value === "newest-first") return "newest-first";
+  throw badRequest("direction is invalid");
+}
+
+function parseOptionalDiscussionWorkspaceId(
+  searchParams: URLSearchParams,
+): string | undefined {
+  const values = searchParams.getAll("workspaceId");
+  if (values.length === 0) return undefined;
+  if (values.length !== 1) {
+    throw badRequest("workspaceId is invalid");
+  }
+  return parseWorkspaceId(values[0]);
+}
+
+function parseDiscussionListQuery(searchParams: URLSearchParams): {
+  workspaceId?: string;
+  cursor: SyncRelayShareDiscussionCursor | undefined;
+  limit: number;
+  direction: "oldest-first" | "newest-first";
+} {
+  const allowed = new Set(["workspaceId", "cursor", "limit", "direction"]);
+  for (const key of searchParams.keys()) {
+    if (!allowed.has(key) || searchParams.getAll(key).length !== 1) {
+      throw badRequest("discussion query is invalid");
+    }
+  }
+  return {
+    workspaceId: parseOptionalDiscussionWorkspaceId(searchParams),
+    cursor: decodeDiscussionCursor(searchParams.get("cursor")),
+    limit: parseDiscussionLimit(searchParams.get("limit")),
+    direction: parseDiscussionDirection(searchParams.get("direction")),
+  };
+}
+
+function parseDiscussionActivityQuery(searchParams: URLSearchParams): {
+  workspaceId?: string;
+  since: number;
+  hold: number;
+  limit: number;
+} {
+  const allowed = new Set(["workspaceId", "since", "hold", "limit"]);
+  for (const key of searchParams.keys()) {
+    if (!allowed.has(key) || searchParams.getAll(key).length !== 1) {
+      throw badRequest("discussion activity query is invalid");
+    }
+  }
+  const parseNonnegative = (value: string | null, name: string): number => {
+    if (value === null || !/^(0|[1-9][0-9]*)$/u.test(value)) {
+      throw badRequest(`${name} is invalid`);
+    }
+    const parsed = Number(value);
+    if (!Number.isSafeInteger(parsed)) throw badRequest(`${name} is invalid`);
+    return parsed;
+  };
+  const since = parseNonnegative(searchParams.get("since"), "since");
+  const holdValue = searchParams.get("hold");
+  const hold =
+    holdValue === null
+      ? DEFAULT_DISCUSSION_ACTIVITY_HOLD_MS
+      : parseNonnegative(holdValue, "hold");
+  if (hold > MAX_DISCUSSION_ACTIVITY_HOLD_MS) {
+    throw badRequest(
+      `hold must not exceed ${MAX_DISCUSSION_ACTIVITY_HOLD_MS}`,
+    );
+  }
+  return {
+    workspaceId: parseOptionalDiscussionWorkspaceId(searchParams),
+    since,
+    hold,
+    limit: parseDiscussionLimit(searchParams.get("limit")),
+  };
+}
+
+function parseLinkDiscussionAppendBody(input: Record<string, unknown>): {
+  body: string;
+  idempotencyKey: string;
+  claimedName?: string;
+} {
+  const keys = Object.keys(input);
+  if (
+    keys.some(
+      (key) => key !== "body" && key !== "idempotencyKey" && key !== "claimedName",
+    ) ||
+    !Object.hasOwn(input, "body") ||
+    !Object.hasOwn(input, "idempotencyKey") ||
+    typeof input.body !== "string" ||
+    typeof input.idempotencyKey !== "string" ||
+    (Object.hasOwn(input, "claimedName") && typeof input.claimedName !== "string")
+  ) {
+    throw badRequest("discussion append body is invalid");
+  }
+  return {
+    body: input.body,
+    idempotencyKey: input.idempotencyKey,
+    ...(typeof input.claimedName === "string"
+      ? { claimedName: input.claimedName }
+      : {}),
+  };
+}
+
+function parseNamedDiscussionAppendBody(input: Record<string, unknown>): {
+  workspaceId?: string;
+  body: string;
+  idempotencyKey: string;
+} {
+  if (
+    Object.keys(input).some(
+      (key) =>
+        key !== "workspaceId" && key !== "body" && key !== "idempotencyKey",
+    ) ||
+    !Object.hasOwn(input, "body") ||
+    !Object.hasOwn(input, "idempotencyKey") ||
+    typeof input.body !== "string" ||
+    typeof input.idempotencyKey !== "string"
+  ) {
+    throw badRequest("discussion append body is invalid");
+  }
+  return {
+    ...(Object.hasOwn(input, "workspaceId")
+      ? { workspaceId: parseWorkspaceId(input.workspaceId) }
+      : {}),
+    body: input.body,
+    idempotencyKey: input.idempotencyKey,
+  };
+}
+
+type DiscussionModerationAction =
+  | { action: "delete"; messageId: string }
+  | { action: "block" | "unblock"; principalId: string }
+  | { action: "pause" | "resume" };
+
+function parseDiscussionModerationAction(
+  input: Record<string, unknown>,
+): DiscussionModerationAction {
+  const validHandle = (value: unknown): value is string =>
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= DISCUSSION_MODERATION_HANDLE_MAX_CHARS;
+  if (input.action === "delete") {
+    if (
+      Object.keys(input).sort().join("\0") !==
+        ["action", "messageId", "workspaceId"].join("\0") ||
+      !validHandle(input.messageId)
+    ) {
+      throw notFound();
+    }
+    return { action: "delete", messageId: input.messageId };
+  }
+  if (input.action === "block" || input.action === "unblock") {
+    if (
+      Object.keys(input).sort().join("\0") !==
+        ["action", "principalId", "workspaceId"].join("\0") ||
+      !validHandle(input.principalId)
+    ) {
+      throw notFound();
+    }
+    return { action: input.action, principalId: input.principalId };
+  }
+  if (input.action === "pause" || input.action === "resume") {
+    if (
+      Object.keys(input).sort().join("\0") !==
+      ["action", "workspaceId"].join("\0")
+    ) {
+      throw notFound();
+    }
+    return { action: input.action };
+  }
+  throw notFound();
+}
+
 function parseExpectedDependentGrantIds(
   input: Record<string, unknown>,
   allowedKeys: readonly string[],
@@ -3420,6 +4777,35 @@ function parseExpectedDependentGrantIds(
     normalized.add(grantId);
   }
   return [...normalized];
+}
+
+function parsePromotionExpectation(input: Record<string, unknown>): {
+  expectedParentGrantId: string;
+  expectedParentGeneration: number;
+} {
+  const allowedKeys = [
+    "workspaceId",
+    "expectedParentGrantId",
+    "expectedParentGeneration",
+  ];
+  if (Object.keys(input).some((key) => !allowedKeys.includes(key))) {
+    throw badRequest("request body contains an unknown field");
+  }
+  const expectedParentGrantId = parseShareId(
+    typeof input.expectedParentGrantId === "string"
+      ? input.expectedParentGrantId
+      : undefined,
+  );
+  if (
+    !Number.isSafeInteger(input.expectedParentGeneration) ||
+    Number(input.expectedParentGeneration) < 1
+  ) {
+    throw badRequest("expectedParentGeneration must be a positive integer");
+  }
+  return {
+    expectedParentGrantId,
+    expectedParentGeneration: Number(input.expectedParentGeneration),
+  };
 }
 
 async function readJsonObject(request: Request): Promise<Record<string, unknown>> {

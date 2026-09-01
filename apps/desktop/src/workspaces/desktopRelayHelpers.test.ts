@@ -99,6 +99,7 @@ describe("desktop relay helpers", () => {
         shareId: "share-a",
         granterUserId: "user-a",
         granterEmail: "owner@example.test",
+        genericChatWritable: true,
         selector: {
           paths: ["docs"],
           versionId: "version-a",
@@ -120,6 +121,7 @@ describe("desktop relay helpers", () => {
       shareId: "share-a",
       granterUserId: "user-a",
       granterEmail: "owner@example.test",
+      genericChatWritable: true,
       selector: { paths: ["docs"], versionId: "version-a", access: "edit" },
       createdAtMs: 42,
     });
@@ -188,6 +190,18 @@ describe("desktop relay helpers", () => {
         shareId: "share-a",
         selector: { paths: ["docs"], versionId: null },
         access: null,
+        genericChatWritable: true,
+      },
+      {
+        shareId: "share-a",
+        selector: { paths: ["docs"], versionId: null },
+        access: "view",
+      },
+      {
+        shareId: "share-a",
+        selector: { paths: ["docs"], versionId: null },
+        access: "view",
+        genericChatWritable: "yes",
       },
     ];
     for (const body of unreadable) {
@@ -215,6 +229,7 @@ describe("desktop relay helpers", () => {
               shareId: "share-channel",
               granterUserId: "user-a",
               granterEmail: null,
+              genericChatWritable: false,
               selector: {
                 kind: "chat-channel",
                 channelWireId: "wire-a",
