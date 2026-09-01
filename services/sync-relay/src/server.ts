@@ -2642,16 +2642,24 @@ export function createSyncRelayHandler({
             ];
           }
 
-          // A damaged fallback does not carry validated authority. Recheck its
-          // selector immediately before serialization so a channel that became
-          // blocked during the email lookup does not get one final exposure.
-          const selector = parseStoredAnyShareSelectorJson(fallback.share.selectorJson);
+          const currentFallback = effective.fallback;
+          if (!currentFallback) return [];
+          // A damaged fallback does not carry validated selector authority.
+          // Recheck its selector immediately before serialization so a channel
+          // that became blocked does not get one final exposure.
+          const selector = parseStoredAnyShareSelectorJson(
+            currentFallback.share.selectorJson,
+          );
           return selector &&
-            selectorTargetsBlockedChannel(storage, fallback.share.workspaceId, selector)
+            selectorTargetsBlockedChannel(
+              storage,
+              currentFallback.share.workspaceId,
+              selector,
+            )
             ? []
             : [
                 receivedShareSummary(
-                  fallback,
+                  currentFallback,
                   granterEmail,
                   effective.genericChatWritable,
                 ),

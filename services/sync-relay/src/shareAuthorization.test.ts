@@ -142,6 +142,7 @@ describe("share authorization", () => {
       channelKind?: "channel" | "dm" | "agent" | null;
       selectedGrantId: string | null;
       genericChatWritable: boolean;
+      fallbackGrantId?: string;
     }> = [
       {
         name: "dependent-only Comment",
@@ -200,6 +201,7 @@ describe("share authorization", () => {
         storedShare: damagedShare,
         selectedGrantId: null,
         genericChatWritable: false,
+        fallbackGrantId: directComment.grantId,
       },
       {
         name: "blocked channel",
@@ -208,6 +210,7 @@ describe("share authorization", () => {
         channelKind: "agent",
         selectedGrantId: null,
         genericChatWritable: false,
+        fallbackGrantId: blockedGrant.grantId,
       },
     ];
 
@@ -233,11 +236,16 @@ describe("share authorization", () => {
         testCase.genericChatWritable,
       );
       if (testCase.selectedGrantId === null) {
-        expect(result, testCase.name).toEqual({
+        expect(result, testCase.name).toMatchObject({
           ok: false,
           reason: "gauntlet",
           genericChatWritable: false,
         });
+        if (!result.ok) {
+          expect(result.fallback?.grant.grantId, testCase.name).toBe(
+            testCase.fallbackGrantId,
+          );
+        }
       } else {
         expect(result.ok, testCase.name).toBe(true);
         if (result.ok) {

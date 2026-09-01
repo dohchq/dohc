@@ -366,6 +366,33 @@ describe("share grants", () => {
     expect(counted.scansForShare("share-post-await")).toBe(2);
   });
 
+  it("omits a received-list row revoked during the granter email lookup", async () => {
+    const storage = await testStorage();
+    claimStorageWorkspace(storage);
+    storage.createShare(directShareInput("share-list-post-await"));
+    let markLookupStarted!: () => void;
+    const lookupStarted = new Promise<void>((resolve) => {
+      markLookupStarted = resolve;
+    });
+    let releaseLookup!: () => void;
+    const lookupGate = new Promise<void>((resolve) => {
+      releaseLookup = resolve;
+    });
+    const h = handler(storage, async (userId) => {
+      if (userId !== GRANTER) return `${userId}@dohc.test`;
+      markLookupStarted();
+      await lookupGate;
+      return `${userId}@dohc.test`;
+    });
+
+    const pending = h(request(RECIPIENT, "/sync/shares"));
+    await lookupStarted;
+    expect(storage.revokeShare("share-list-post-await", 2_000)).toBe(true);
+    releaseLookup();
+
+    expect((await json(await pending)).received).toEqual([]);
+  });
+
   it("creates a share by recipient email and lists it on both sides", async () => {
     const storage = await testStorage();
     const h = handler(storage);

@@ -10,6 +10,7 @@ import {
 import type {
   SyncRelayShareGrantRow,
   SyncRelayShareRow,
+  SyncRelayShareWithGrantRow,
   SyncRelayStorage,
 } from "./storage";
 
@@ -43,7 +44,12 @@ export type ShareAuthorizationResult<Selector extends AnyShareSelector = AnyShar
 
 export type ReceivedShareAuthorityResult =
   | (AuthorizedShareAction & { genericChatWritable: boolean })
-  | { ok: false; reason: "gauntlet"; genericChatWritable: false };
+  | {
+      ok: false;
+      reason: "gauntlet";
+      genericChatWritable: false;
+      fallback: SyncRelayShareWithGrantRow | null;
+    };
 
 type ShareAuthorizationInput = {
   storage: ShareAuthorizationStorage;
@@ -114,14 +120,18 @@ export function resolveReceivedShareAuthority(
   );
   let readable: AuthorizedShareAction | null = null;
   let genericChatWritable = false;
+  let fallback: SyncRelayShareWithGrantRow | null = null;
   for (const grant of grants) {
     if (grant.shareId !== input.shareId) continue;
-    const validated = validateShareGrant({
+    const current = resolveCurrentShareGrant({
       storage: input.storage,
       grantId: grant.grantId,
       principalKind: "user",
       principalUserId: input.actorUserId,
     });
+    if (!current) continue;
+    fallback ??= current;
+    const validated = validateCurrentShareGrant(input.storage, current);
     if (!validated.ok) continue;
     if (
       readable === null ||
@@ -134,7 +144,7 @@ export function resolveReceivedShareAuthority(
   }
   return readable
     ? { ...readable, genericChatWritable }
-    : { ok: false, reason: "gauntlet", genericChatWritable: false };
+    : { ok: false, reason: "gauntlet", genericChatWritable: false, fallback };
 }
 
 export function authorizeLinkShareAction(
@@ -160,6 +170,15 @@ function authorizeShareGrantAction(
 function validateShareGrant(
   input: Omit<ShareGrantAuthorizationInput, "action">,
 ): ShareAuthorizationResult {
+  const current = resolveCurrentShareGrant(input);
+  return current
+    ? validateCurrentShareGrant(input.storage, current)
+    : { ok: false, reason: "gauntlet" };
+}
+
+function resolveCurrentShareGrant(
+  input: Omit<ShareGrantAuthorizationInput, "action">,
+): SyncRelayShareWithGrantRow | null {
   const grant = input.storage.getShareGrant(input.grantId);
   if (
     !grant ||
@@ -171,11 +190,11 @@ function validateShareGrant(
     !validStoredPrincipal(grant) ||
     (input.principalKind === "user" && grant.principalUserId !== input.principalUserId)
   ) {
-    return { ok: false, reason: "gauntlet" };
+    return null;
   }
   const share = input.storage.getShare(grant.shareId);
   if (!share || !input.storage.workspaceIsOwnedBy(share.workspaceId, share.granterUserId)) {
-    return { ok: false, reason: "gauntlet" };
+    return null;
   }
   if (grant.parentGrantId !== null) {
     const parent = input.storage.getShareGrant(grant.parentGrantId);
@@ -188,14 +207,22 @@ function validateShareGrant(
       parent.revokedAtMs !== null ||
       !accessAtMost(grant.access, parent.access)
     ) {
-      return { ok: false, reason: "gauntlet" };
+      return null;
     }
   }
 
+  return { share, grant };
+}
+
+function validateCurrentShareGrant(
+  storage: ShareAuthorizationStorage,
+  current: SyncRelayShareWithGrantRow,
+): ShareAuthorizationResult {
+  const { share, grant } = current;
   const storedSelector = parseStoredAnyShareSelectorJson(share.selectorJson);
   if (!storedSelector) return { ok: false, reason: "gauntlet" };
 
-  if (selectorTargetsBlockedChannel(input.storage, share.workspaceId, storedSelector)) {
+  if (selectorTargetsBlockedChannel(storage, share.workspaceId, storedSelector)) {
     return { ok: false, reason: "gauntlet" };
   }
   const effectiveSelector = effectiveShareSelector(storedSelector, grant.access);
