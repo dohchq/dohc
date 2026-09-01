@@ -1354,6 +1354,8 @@ enum Command {
         search_policy: Arc<SearchPolicySnapshot>,
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
+        root_dir: PathBuf,
+        root_guard: Arc<dyn WorkspaceRootGuard>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError>>,
     },
@@ -2582,6 +2584,8 @@ impl ActorHandle {
         search_policy: Arc<SearchPolicySnapshot>,
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
+        root_dir: PathBuf,
+        root_guard: Arc<dyn WorkspaceRootGuard>,
     ) -> Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError> {
         debug_assert_sync_context();
         let (reply, reply_rx) = oneshot::channel();
@@ -2591,6 +2595,8 @@ impl ActorHandle {
                 search_policy,
                 leases,
                 faults,
+                root_dir,
+                root_guard,
                 token: CancellationToken::new(),
                 reply,
             })
@@ -8063,6 +8069,8 @@ fn worker_main(
                 search_policy,
                 leases,
                 faults,
+                root_dir,
+                root_guard,
                 token,
                 reply,
             } => {
@@ -8074,6 +8082,8 @@ fn worker_main(
                         &leases,
                         faults.as_ref(),
                         &token,
+                        &root_dir,
+                        root_guard.as_ref(),
                     )
                 });
                 let _ = reply.send(outcome);
@@ -14680,6 +14690,8 @@ fn capture_ingest_batch_on_store(
     leases: &LeaseRegistry,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
+    root_dir: &std::path::Path,
+    root_guard: &dyn WorkspaceRootGuard,
 ) -> Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError> {
     let Some(first) = inputs.first() else {
         return Ok(Vec::new());
@@ -14707,6 +14719,7 @@ fn capture_ingest_batch_on_store(
         }
         .into());
     }
+    validate_workspace_root(root_dir, Some(root_guard))?;
     ensure_mutation_version_on_store(
         store,
         &first.workspace_id,
@@ -14717,6 +14730,7 @@ fn capture_ingest_batch_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
+    validate_workspace_root(root_dir, Some(root_guard))?;
 
     let outcome = store.write_with(faults, |tx| {
         let indexing = CaptureIndexing::UseSnapshot(Arc::clone(search_policy));
@@ -14819,6 +14833,20 @@ mod capture_batch_fast_path_tests {
     use rusqlite::hooks::{AuthAction, Authorization, TransactionOperation};
     use std::sync::Mutex;
 
+    struct ExistingRootGuard;
+
+    impl WorkspaceRootGuard for ExistingRootGuard {
+        fn validate(&self, root_dir: &std::path::Path) -> Result<(), RuntimeError> {
+            root_dir
+                .is_dir()
+                .then_some(())
+                .ok_or(RuntimeError::Identity {
+                    reason: "test workspace root disappeared",
+                    source: None,
+                })
+        }
+    }
+
     #[test]
     fn clean_capture_batch_uses_one_batch_savepoint() {
         let scratch = ScratchDir::new().expect("scratch");
@@ -14867,6 +14895,8 @@ mod capture_batch_fast_path_tests {
             &LeaseRegistry::new(),
             &NoFaults,
             &CancellationToken::new(),
+            scratch.path(),
+            &ExistingRootGuard,
         )
         .expect("capture clean batch");
 
@@ -14916,6 +14946,8 @@ mod capture_batch_fast_path_tests {
             &leases,
             &NoFaults,
             &CancellationToken::new(),
+            scratch.path(),
+            &ExistingRootGuard,
         )
         .expect("capture fallback batch");
 
@@ -16269,6 +16301,142 @@ mod capture_secret_root_guard_tests {
             }
             self.bound.validate(root_dir)
         }
+    }
+
+    #[test]
+    fn queued_capture_batch_refuses_a_replacement_workspace_root() {
+        const PATH: &str = "notes/queued.md";
+
+        let store_scratch = ScratchDir::new().expect("store scratch");
+        let root_scratch = ScratchDir::new().expect("workspace root scratch");
+        let moved_scratch = ScratchDir::new().expect("moved root scratch");
+        let root = root_scratch.path().to_path_buf();
+        let moved_root = moved_scratch.path().join("original-root");
+        let db = store_scratch.engine_db_path().expect("engine db path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        std::fs::create_dir_all(root.join("notes")).expect("create original notes");
+        std::fs::write(root.join(PATH), b"original body").expect("write original file");
+
+        // Hold the writer on a command already ahead of the batch. Enqueuing
+        // both commands directly proves the root replacement happens after the
+        // batch entered the actor queue and before its transaction can start.
+        let blocker = PausedRootGuard::bind(&root);
+        let blocker_guard: Arc<dyn WorkspaceRootGuard> = blocker.clone();
+        let (blocker_reply, blocker_reply_rx) = oneshot::channel();
+        actor
+            .tx
+            .blocking_send(Command::CaptureRetire {
+                input: CaptureRetire {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    version_id: VERSION_ID.to_owned(),
+                    path: "missing.md".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    now_ms: 2,
+                    request_id: None,
+                    only_if_text_head: false,
+                    only_if_capture_origin: true,
+                    allow_ydoc_origin: true,
+                },
+                workspace_root: Some((root.clone(), Some(blocker_guard))),
+                self_writes: None,
+                leases: LeaseRegistry::new(),
+                faults: Arc::new(NoFaults),
+                token: CancellationToken::new(),
+                reply: blocker_reply,
+            })
+            .expect("queue actor blocker");
+        blocker.wait_until_reached();
+
+        let captured_guard: Arc<dyn WorkspaceRootGuard> = Arc::new(BoundRootGuard::bind(&root));
+        let (batch_reply, batch_reply_rx) = oneshot::channel();
+        actor
+            .tx
+            .blocking_send(Command::CaptureIngestBatch {
+                inputs: vec![CaptureIngest {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    version_id: VERSION_ID.to_owned(),
+                    path: PATH.to_owned(),
+                    text: "original body".to_owned(),
+                    metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
+                    metadata_summary: Some("Reconciled offline edits".to_owned()),
+                    metadata_correlation_id: Some("queued-root-swap".to_owned()),
+                    author_json: None,
+                    now_ms: 3,
+                    request_id: None,
+                    claim_foreign_head: false,
+                }],
+                search_policy: Arc::new(read_engine_search_policy(&root)),
+                leases: LeaseRegistry::new(),
+                faults: Arc::new(NoFaults),
+                root_dir: root.clone(),
+                root_guard: captured_guard,
+                token: CancellationToken::new(),
+                reply: batch_reply,
+            })
+            .expect("queue capture batch behind blocker");
+
+        std::fs::rename(&root, &moved_root).expect("move original workspace root");
+        std::fs::create_dir_all(root.join("notes")).expect("create replacement notes");
+        std::fs::write(root.join(PATH), b"replacement body").expect("write replacement file");
+        let replacement_before = std::fs::read(root.join(PATH)).expect("read replacement file");
+        blocker.release();
+        let blocker_result = blocker_reply_rx
+            .blocking_recv()
+            .expect("receive blocker result");
+        let batch_result = batch_reply_rx
+            .blocking_recv()
+            .expect("receive batch result");
+        let replacement_after = std::fs::read(root.join(PATH)).expect("reread replacement file");
+
+        std::fs::remove_dir_all(&root).expect("remove replacement workspace root");
+        std::fs::rename(&moved_root, &root).expect("restore original workspace root");
+        drop(actor);
+        supervisor.close(&db).expect("close actor");
+        let mut store = EngineStore::open(&db, 5).expect("reopen store");
+        let captured = VersionedTextStore::new(&mut store)
+            .read_text(WORKSPACE_ID, VERSION_ID, PATH)
+            .expect("read refused capture");
+        let durable_rows = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT \
+                       (SELECT COUNT(*) FROM path_aliases WHERE workspace_id=?1) + \
+                       (SELECT COUNT(*) FROM snapshots WHERE workspace_id=?1) + \
+                       (SELECT COUNT(*) FROM moments WHERE workspace_id=?1) + \
+                       (SELECT COUNT(*) FROM file_objects WHERE workspace_id=?1) + \
+                       (SELECT COUNT(*) FROM replication_log WHERE workspace_id=?1) + \
+                       (SELECT COUNT(*) FROM engine_search_files_fts WHERE workspace_id=?1)",
+                    [WORKSPACE_ID],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .expect("count durable capture rows");
+
+        assert!(matches!(
+            blocker_result,
+            Err(RuntimeError::Identity {
+                reason: "workspace root changed during capture",
+                ..
+            })
+        ));
+        assert!(matches!(
+            batch_result,
+            Err(RuntimeError::Identity {
+                reason: "workspace root changed during capture",
+                ..
+            })
+        ));
+        assert!(
+            captured.is_none(),
+            "the queued batch must not create a snapshot"
+        );
+        assert_eq!(
+            durable_rows, 0,
+            "snapshots, moments, replication, and search must remain unchanged"
+        );
+        assert_eq!(replacement_after, replacement_before);
     }
 
     #[test]

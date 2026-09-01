@@ -1,6 +1,9 @@
 import { expect, test } from "@playwright/test";
-import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Page } from "@playwright/test";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
@@ -20,6 +23,58 @@ import {
 
 const SHOT_DIR = process.env.UI_AUDIT_SHOT_DIR ?? "";
 test.skip(SHOT_DIR === "", "set UI_AUDIT_SHOT_DIR to capture UI audit screenshots");
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+const DESKTOP_ROOT = resolve(REPO_ROOT, "apps/desktop");
+const CAPTURE_MANIFEST = "ui-audit-capture.json";
+
+type CaptureManifest = {
+  schemaVersion: 1;
+  state: "in-progress" | "complete";
+  commit: string;
+  startedAt: string;
+  completedAt: string | null;
+  bundles: {
+    mainSha256: string;
+    rendererTreeSha256: string;
+    engineSha256: string;
+  };
+  shots: Array<{ name: string; sha256: string }>;
+};
+
+let activeCapture: CaptureManifest | null = null;
+
+function git(args: string[]): string {
+  return execFileSync("git", args, { cwd: REPO_ROOT, encoding: "utf8" }).trim();
+}
+
+async function sha256File(path: string): Promise<string> {
+  return createHash("sha256").update(await readFile(path)).digest("hex");
+}
+
+async function sha256Tree(directory: string): Promise<string> {
+  const entries: string[] = [];
+  async function visit(path: string, relative: string): Promise<void> {
+    const children = await readdir(path, { withFileTypes: true });
+    children.sort((left, right) => left.name.localeCompare(right.name));
+    for (const child of children) {
+      const childPath = join(path, child.name);
+      const childRelative = relative ? `${relative}/${child.name}` : child.name;
+      if (child.isDirectory()) await visit(childPath, childRelative);
+      else if (child.isFile()) entries.push(`${childRelative}\0${await sha256File(childPath)}`);
+    }
+  }
+  await visit(directory, "");
+  return createHash("sha256").update(entries.join("\n")).digest("hex");
+}
+
+async function writeCaptureManifest(): Promise<void> {
+  if (!activeCapture) throw new Error("UI audit capture is not active");
+  await writeFile(
+    join(SHOT_DIR, CAPTURE_MANIFEST),
+    `${JSON.stringify(activeCapture, null, 2)}\n`,
+    "utf8",
+  );
+}
 
 const RICH_DOC = `# Q3 product plan
 
@@ -100,7 +155,17 @@ Invited agent,340,0.07
 `;
 
 async function shot(page: Page, name: string): Promise<void> {
-  await page.screenshot({ path: join(SHOT_DIR, `${name}.png`) });
+  if (!activeCapture) throw new Error("UI audit capture is not active");
+  const fileName = `${name}.png`;
+  if (activeCapture.shots.some((shot) => shot.name === fileName)) {
+    throw new Error(`duplicate UI audit screenshot: ${fileName}`);
+  }
+  const bytes = await page.screenshot({ path: join(SHOT_DIR, fileName) });
+  activeCapture.shots.push({
+    name: fileName,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+  });
+  await writeCaptureManifest();
 }
 
 async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
@@ -120,7 +185,34 @@ async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
 
 test("@ui-audit capture baseline screenshots", async () => {
   test.setTimeout(240_000);
+  const captureCommit = git(["rev-parse", "HEAD"]);
+  if (git(["status", "--porcelain"]) !== "") {
+    throw new Error("commit the worktree before capturing UI audit evidence");
+  }
   await mkdir(SHOT_DIR, { recursive: true });
+  if ((await readdir(SHOT_DIR)).length !== 0) {
+    throw new Error("UI_AUDIT_SHOT_DIR must be empty before capture");
+  }
+  activeCapture = {
+    schemaVersion: 1,
+    state: "in-progress",
+    commit: captureCommit,
+    startedAt: new Date().toISOString(),
+    completedAt: null,
+    bundles: {
+      mainSha256: await sha256File(join(DESKTOP_ROOT, "dist/main/main.js")),
+      rendererTreeSha256: await sha256Tree(join(DESKTOP_ROOT, "dist/renderer")),
+      engineSha256: await sha256File(
+        join(
+          DESKTOP_ROOT,
+          "target/debug",
+          `dohc-workspace-engine${process.platform === "win32" ? ".exe" : ""}`,
+        ),
+      ),
+    },
+    shots: [],
+  };
+  await writeCaptureManifest();
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
@@ -302,7 +394,17 @@ test("@ui-audit capture baseline screenshots", async () => {
       await page.waitForTimeout(500);
       await shot(page, "20-properties-panel-light");
     }
+    if (
+      git(["rev-parse", "HEAD"]) !== captureCommit ||
+      git(["status", "--porcelain"]) !== ""
+    ) {
+      throw new Error("the worktree changed during the UI audit capture");
+    }
+    activeCapture.state = "complete";
+    activeCapture.completedAt = new Date().toISOString();
+    await writeCaptureManifest();
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
+    activeCapture = null;
   }
 });

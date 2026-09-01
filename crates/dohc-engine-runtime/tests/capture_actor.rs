@@ -1,7 +1,7 @@
 use dohc_engine_domain::VersionedTextStore;
 use dohc_engine_runtime::{
     CancellationToken, CaptureIngest, CaptureRetire, MAX_CAPTURE_INGEST_BATCH_BYTES,
-    MAX_CAPTURE_INGEST_BATCH_OPS, NoFaults, RuntimeError, WorkspaceSupervisor,
+    MAX_CAPTURE_INGEST_BATCH_OPS, NoFaults, RuntimeError, WorkspaceRootGuard, WorkspaceSupervisor,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
@@ -9,6 +9,20 @@ use std::path::Path;
 use std::sync::Arc;
 
 const BATCH_WORKSPACE_ID: &str = "ws-capture-batch-fault";
+
+struct ExistingRootGuard;
+
+impl WorkspaceRootGuard for ExistingRootGuard {
+    fn validate(&self, root_dir: &Path) -> Result<(), RuntimeError> {
+        root_dir
+            .is_dir()
+            .then_some(())
+            .ok_or(RuntimeError::Identity {
+                reason: "test workspace root disappeared",
+                source: None,
+            })
+    }
+}
 
 fn capture_batch_inputs() -> Vec<CaptureIngest> {
     [
@@ -239,6 +253,8 @@ fn bounded_capture_batch_contains_a_leased_path_and_replays_without_duplicates()
             Arc::clone(&policy),
             leases.clone(),
             Arc::new(NoFaults),
+            scratch.path().to_path_buf(),
+            Arc::new(ExistingRootGuard),
         )
         .expect("commit successful siblings");
     assert_eq!(first.len(), 3);
@@ -316,7 +332,14 @@ fn bounded_capture_batch_contains_a_leased_path_and_replays_without_duplicates()
     drop(held);
     let handle = supervisor.open(&db, 2).expect("reopen actor").actor;
     let replay = handle
-        .capture_ingest_batch_blocking(inputs, policy, leases, Arc::new(NoFaults))
+        .capture_ingest_batch_blocking(
+            inputs,
+            policy,
+            leases,
+            Arc::new(NoFaults),
+            scratch.path().to_path_buf(),
+            Arc::new(ExistingRootGuard),
+        )
         .expect("retry whole chunk after lease release");
     assert!(replay[0].as_ref().is_ok_and(|write| write.deduped));
     assert!(replay[1].as_ref().is_ok_and(|write| !write.deduped));
@@ -353,6 +376,8 @@ fn capture_batch_rejects_a_missing_named_version_before_writing() {
             )),
             dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
+            scratch.path().to_path_buf(),
+            Arc::new(ExistingRootGuard),
         )
         .expect_err("missing named version must be rejected");
     assert!(matches!(
@@ -395,6 +420,8 @@ fn capture_batch_refuses_invalid_shapes_before_mutation() {
             Arc::clone(&policy),
             leases.clone(),
             Arc::new(NoFaults),
+            scratch.path().to_path_buf(),
+            Arc::new(ExistingRootGuard),
         )
         .expect("empty batch is a no-op");
     assert!(empty.is_empty());
@@ -406,6 +433,8 @@ fn capture_batch_refuses_invalid_shapes_before_mutation() {
             Arc::clone(&policy),
             leases.clone(),
             Arc::new(NoFaults),
+            scratch.path().to_path_buf(),
+            Arc::new(ExistingRootGuard),
         )
         .expect_err("overlong batch must be refused");
     assert!(matches!(
@@ -423,6 +452,8 @@ fn capture_batch_refuses_invalid_shapes_before_mutation() {
             Arc::clone(&policy),
             leases.clone(),
             Arc::new(NoFaults),
+            scratch.path().to_path_buf(),
+            Arc::new(ExistingRootGuard),
         )
         .expect_err("oversized batch must be refused");
     assert!(matches!(
@@ -440,6 +471,8 @@ fn capture_batch_refuses_invalid_shapes_before_mutation() {
             policy,
             leases,
             Arc::new(NoFaults),
+            scratch.path().to_path_buf(),
+            Arc::new(ExistingRootGuard),
         )
         .expect_err("mixed coordinates must be refused");
     assert!(matches!(
@@ -485,6 +518,8 @@ fn capture_batch_replaces_a_duplicate_path_without_duplicate_fts_rows() {
             policy,
             dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
+            scratch.path().to_path_buf(),
+            Arc::new(ExistingRootGuard),
         )
         .expect("capture duplicate path batch");
     assert!(
@@ -572,6 +607,8 @@ fn added_batch_preserves_a_foreign_head_and_indexes_its_new_sibling() {
             policy,
             dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
+            scratch.path().to_path_buf(),
+            Arc::new(ExistingRootGuard),
         )
         .expect("capture added batch around foreign head");
     assert!(matches!(
@@ -628,6 +665,8 @@ fn capture_batch_storage_before_persist_rolls_back_the_whole_chunk() {
             Arc::clone(&policy),
             dohc_engine_collab::LeaseRegistry::new(),
             faults.clone(),
+            scratch.path().to_path_buf(),
+            Arc::new(ExistingRootGuard),
         )
         .expect_err("pre-persist fault reports an uncertain batch");
     assert!(matches!(error, RuntimeError::OperationCrashed));
@@ -652,6 +691,8 @@ fn capture_batch_storage_before_persist_rolls_back_the_whole_chunk() {
             policy,
             dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
+            scratch.path().to_path_buf(),
+            Arc::new(ExistingRootGuard),
         )
         .expect("replay rolled-back batch");
     assert!(
@@ -681,6 +722,8 @@ fn capture_batch_storage_after_commit_replays_without_duplicate_side_effects() {
             Arc::clone(&policy),
             dohc_engine_collab::LeaseRegistry::new(),
             faults.clone(),
+            scratch.path().to_path_buf(),
+            Arc::new(ExistingRootGuard),
         )
         .expect_err("post-commit fault reports an uncertain batch");
     assert!(matches!(error, RuntimeError::OperationCrashed));
@@ -699,6 +742,8 @@ fn capture_batch_storage_after_commit_replays_without_duplicate_side_effects() {
             policy,
             dohc_engine_collab::LeaseRegistry::new(),
             Arc::new(NoFaults),
+            scratch.path().to_path_buf(),
+            Arc::new(ExistingRootGuard),
         )
         .expect("replay uncertain batch");
     assert!(

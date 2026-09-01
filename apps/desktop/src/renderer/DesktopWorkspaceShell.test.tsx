@@ -7093,22 +7093,34 @@ describe("workspace shell errors", () => {
 
   it("keeps a failed workspace inert and opens it when the user retries", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.openWorkspace.mockRejectedValueOnce(new Error("Watcher failed"));
+    bridge.openWorkspace
+      .mockRejectedValueOnce(new Error("Watcher failed"))
+      .mockRejectedValueOnce(new Error("Watcher still unavailable"));
 
     renderShell(bridge);
 
-    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
-      "Watcher failed",
-    );
+    const recovery = await screen.findByTestId("workspace-open-failed");
+    expect(recovery.getAttribute("role")).toBe("alert");
+    expect(recovery.textContent).toContain("Couldn’t open this workspace");
+    expect(recovery.textContent).toContain("Watcher failed");
+    expect(recovery.textContent).toContain("Choose another workspace from the title bar");
+    expect(within(recovery).queryByRole("button", { name: /dismiss/i })).toBeNull();
     expect(screen.getByTestId("workspace-workbench").hasAttribute("inert")).toBe(true);
 
-    fireEvent.click(screen.getByTestId("workspace-shell-error-retry"));
+    fireEvent.click(within(recovery).getByRole("button", { name: "Try again" }));
 
     await waitFor(() => expect(bridge.openWorkspace).toHaveBeenCalledTimes(2));
+    const repeatedRecovery = await screen.findByTestId("workspace-open-failed");
+    expect(repeatedRecovery.textContent).toContain("Watcher still unavailable");
+    expect(screen.getByTestId("workspace-workbench").hasAttribute("inert")).toBe(true);
+
+    fireEvent.click(within(repeatedRecovery).getByRole("button", { name: "Try again" }));
+
+    await waitFor(() => expect(bridge.openWorkspace).toHaveBeenCalledTimes(3));
     await waitFor(() =>
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
-    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(screen.queryByTestId("workspace-open-failed")).toBeNull();
     expect(screen.getByTestId("workspace-workbench").hasAttribute("inert")).toBe(false);
   });
 

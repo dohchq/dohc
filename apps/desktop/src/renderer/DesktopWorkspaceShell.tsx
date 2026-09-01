@@ -1945,11 +1945,14 @@ export function DesktopWorkspaceShell(props: {
   const [workspaceOpenFailedFor, setWorkspaceOpenFailedFor] = useState<{
     workspaceId: string;
     selectionGeneration: number;
+    message: string;
   } | null>(null);
   const [workspaceOpenAttempt, setWorkspaceOpenAttempt] = useState(0);
-  const workspaceOpenFailed =
+  const workspaceOpenFailure =
     workspaceOpenFailedFor?.workspaceId === workspaceId &&
-    workspaceOpenFailedFor.selectionGeneration === workspaceSelectionGeneration;
+    workspaceOpenFailedFor.selectionGeneration === workspaceSelectionGeneration
+      ? workspaceOpenFailedFor
+      : null;
   // Set-aside recovery markers (#567): every path holding a draft marks its
   // tab and Open Editors row — inactive tabs included, because the store is
   // knowable for all of them (#579 review, r4). Deliberately NOT part of
@@ -4856,13 +4859,11 @@ export function DesktopWorkspaceShell(props: {
         status = await bridge().openWorkspace({ workspaceId });
       } catch (error) {
         if (!cancelled) {
+          const detail = error instanceof Error ? error.message.trim() : "";
           setWorkspaceOpenFailedFor({
             workspaceId,
             selectionGeneration: workspaceSelectionGeneration,
-          });
-          reportShellError("Could not open this workspace.", error, () => {
-            setWorkspaceOpenFailedFor(null);
-            setWorkspaceOpenAttempt((attempt) => attempt + 1);
+            message: detail || "dohc could not open this workspace.",
           });
         }
         return;
@@ -6805,7 +6806,27 @@ export function DesktopWorkspaceShell(props: {
           </ChatsPanel>
         ) : null}
       </div>
-      {!workspaceIsReady && !workspaceOpenFailed ? (
+      {!workspaceIsReady && workspaceOpenFailure ? (
+        <div
+          data-testid="workspace-open-failed"
+          role="alert"
+          className="absolute inset-x-0 bottom-0 top-10 z-10 flex flex-col items-center justify-center gap-3 bg-bg px-6 text-center"
+        >
+          <div className="max-w-md space-y-1.5">
+            <p className="text-sm font-medium text-ink">Couldn’t open this workspace</p>
+            <p className="text-xs text-muted">{workspaceOpenFailure.message}</p>
+            <p className="text-xs text-muted">Choose another workspace from the title bar.</p>
+          </div>
+          <PrimaryButton
+            onClick={() => {
+              setWorkspaceOpenFailedFor(null);
+              setWorkspaceOpenAttempt((attempt) => attempt + 1);
+            }}
+          >
+            Try again
+          </PrimaryButton>
+        </div>
+      ) : !workspaceIsReady ? (
         <div
           data-testid="workspace-preparing"
           role="status"

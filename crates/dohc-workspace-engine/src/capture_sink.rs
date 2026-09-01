@@ -1067,11 +1067,14 @@ impl StoreCaptureSink {
     }
 
     fn commit_added_text_batch(&self, batch: Vec<PreparedTextCapture>) -> BatchIngestResult {
-        if self.require_captured_root().is_err() {
-            return BatchIngestResult::Uncertain {
-                attempted: batch.len(),
-            };
-        }
+        let root_guard = match self.root_guard() {
+            Ok(root_guard) => root_guard,
+            Err(_) => {
+                return BatchIngestResult::Uncertain {
+                    attempted: batch.len(),
+                };
+            }
+        };
         let mut inputs = Vec::with_capacity(batch.len());
         let mut identities = Vec::with_capacity(batch.len());
         for prepared in batch {
@@ -1083,6 +1086,8 @@ impl StoreCaptureSink {
             Arc::clone(&self.search_policy),
             self.leases.clone(),
             Arc::new(NoFaults),
+            self.shadow_root.clone(),
+            root_guard,
         );
         match results {
             Ok(results) if results.len() == identities.len() => {
