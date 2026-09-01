@@ -8082,8 +8082,7 @@ fn worker_main(
                         &leases,
                         faults.as_ref(),
                         &token,
-                        &root_dir,
-                        root_guard.as_ref(),
+                        (&root_dir, root_guard.as_ref()),
                     )
                 });
                 let _ = reply.send(outcome);
@@ -14690,9 +14689,9 @@ fn capture_ingest_batch_on_store(
     leases: &LeaseRegistry,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
-    root_dir: &std::path::Path,
-    root_guard: &dyn WorkspaceRootGuard,
+    workspace_root: (&std::path::Path, &dyn WorkspaceRootGuard),
 ) -> Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError> {
+    let (root_dir, root_guard) = workspace_root;
     let Some(first) = inputs.first() else {
         return Ok(Vec::new());
     };
@@ -14895,8 +14894,7 @@ mod capture_batch_fast_path_tests {
             &LeaseRegistry::new(),
             &NoFaults,
             &CancellationToken::new(),
-            scratch.path(),
-            &ExistingRootGuard,
+            (scratch.path(), &ExistingRootGuard),
         )
         .expect("capture clean batch");
 
@@ -14946,8 +14944,7 @@ mod capture_batch_fast_path_tests {
             &leases,
             &NoFaults,
             &CancellationToken::new(),
-            scratch.path(),
-            &ExistingRootGuard,
+            (scratch.path(), &ExistingRootGuard),
         )
         .expect("capture fallback batch");
 
@@ -16395,9 +16392,9 @@ mod capture_secret_root_guard_tests {
         drop(actor);
         supervisor.close(&db).expect("close actor");
         let mut store = EngineStore::open(&db, 5).expect("reopen store");
-        let captured = VersionedTextStore::new(&mut store)
-            .read_text(WORKSPACE_ID, VERSION_ID, PATH)
-            .expect("read refused capture");
+        let main_version = VersionedTextStore::new(&mut store)
+            .get_main_version(WORKSPACE_ID)
+            .expect("read refused workspace version");
         let durable_rows = store
             .read_with(|conn| {
                 conn.query_row(
@@ -16429,8 +16426,8 @@ mod capture_secret_root_guard_tests {
             })
         ));
         assert!(
-            captured.is_none(),
-            "the queued batch must not create a snapshot"
+            main_version.is_none(),
+            "the queued batch must not create a version"
         );
         assert_eq!(
             durable_rows, 0,
