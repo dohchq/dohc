@@ -22,7 +22,9 @@
 //! scanned path through the sink — narrowed-but-unchanged paths retire via
 //! the sink's NotOwned branch, and newly-widened paths re-ingest.
 
-use crate::capture_sink::{CaptureProvenance, SelfWriteSuppression, StoreCaptureSink};
+use crate::capture_sink::{
+    CaptureProvenance, CapturedRoot, SelfWriteSuppression, StoreCaptureSink,
+};
 use crate::{CAPTURE_MOMENT_RECORDED_EVENT, EngineEvents};
 use dohc_engine_collab::LeaseRegistry;
 use dohc_engine_domain::COLLECTION_SCHEMA_FILENAME;
@@ -2017,6 +2019,33 @@ struct FilesLayer {
     refresh_epoch: u64,
 }
 
+/// A filesystem result and the physical workspace directory that produced it.
+/// The binding is taken before the scan starts and stays with the plan through
+/// apply, so a replacement directory at the same pathname cannot donate bytes
+/// to an older generation.
+struct RootBoundRun {
+    captured_root: Arc<CapturedRoot>,
+    run: ReconcileRun,
+}
+
+fn bind_capture_root(root: &Path) -> Result<Arc<CapturedRoot>, FilesError> {
+    CapturedRoot::bind(root)
+        .map(Arc::new)
+        .map_err(|error| FilesError::InvalidRoot {
+            reason: error.reason,
+        })
+}
+
+async fn reconcile_if_dirty_bound(
+    root: &Path,
+    files: &FilesHandle,
+    cancel: CancellationToken,
+) -> Result<RootBoundRun, FilesError> {
+    let captured_root = bind_capture_root(root)?;
+    let run = files.reconcile_if_dirty(cancel).await?;
+    Ok(RootBoundRun { captured_root, run })
+}
+
 impl FilesLayer {
     /// Spawn the files actor and attach the watcher; the watcher's startup
     /// reconcile (the full baseline scan) is returned for the caller to
@@ -2032,7 +2061,8 @@ impl FilesLayer {
         seed: Option<(ScanManifest, ScanGeneration)>,
         policy_fingerprint: Option<u64>,
         refresh_epoch: u64,
-    ) -> Result<(FilesLayer, ReconcileRun), FilesError> {
+    ) -> Result<(FilesLayer, RootBoundRun), FilesError> {
+        let captured_root = bind_capture_root(root)?;
         let files =
             FilesActor::spawn_async_with_manifest(root.to_path_buf(), ScanBounds::default(), seed)
                 .await?;
@@ -2045,7 +2075,10 @@ impl FilesLayer {
                     policy_fingerprint,
                     refresh_epoch,
                 },
-                start.initial_reconcile,
+                RootBoundRun {
+                    captured_root,
+                    run: start.initial_reconcile,
+                },
             )),
             Err(err) => {
                 let mut files = files;
@@ -2876,7 +2909,7 @@ impl DriverEnv for RealEnv {
             && may_publish_early_import(&self.status)
             && seed_loaded
             && workspace_missing
-            && is_safe_fresh_import_plan(&initial)
+            && is_safe_fresh_import_plan(&initial.run)
             && fingerprint_before_seed.is_some()
             && fingerprint_after_scan == fingerprint_before_seed
             && refresh_after_scan == refresh_epoch
@@ -2890,7 +2923,7 @@ impl DriverEnv for RealEnv {
         }
 
         #[cfg(feature = "harness")]
-        if matches!(initial, ReconcileRun::Completed(_))
+        if matches!(&initial.run, ReconcileRun::Completed(_))
             && let Some(probe) = &self.apply_probe
         {
             probe.pause_initial_if_armed(cancel).await;
@@ -2928,11 +2961,12 @@ impl DriverEnv for RealEnv {
                         () = initial_cancel.cancelled() => break,
                         () = tokio::time::sleep(DRIVE_INTERVAL) => {}
                     }
-                    settled = match fresh
-                        .files
-                        .handle()
-                        .reconcile_if_dirty(initial_cancel.child_token())
-                        .await
+                    settled = match reconcile_if_dirty_bound(
+                        &self.root,
+                        &fresh.files.handle(),
+                        initial_cancel.child_token(),
+                    )
+                    .await
                     {
                         Ok(run) => {
                             apply_run(
@@ -3006,14 +3040,16 @@ impl DriverEnv for RealEnv {
         if self.refresh_due(layer) {
             return TickIo::RefreshRequired;
         }
-        let run = layer
-            .files
-            .handle()
-            .reconcile_if_dirty(cancel.child_token())
-            .await;
+        let run =
+            reconcile_if_dirty_bound(&self.root, &layer.files.handle(), cancel.child_token()).await;
         #[cfg(feature = "harness")]
-        if matches!(run, Ok(ReconcileRun::Completed(_)))
-            && let Some(probe) = &self.apply_probe
+        if matches!(
+            &run,
+            Ok(RootBoundRun {
+                run: ReconcileRun::Completed(_),
+                ..
+            })
+        ) && let Some(probe) = &self.apply_probe
         {
             probe.pause_if_armed().await;
         }
@@ -3027,9 +3063,17 @@ impl DriverEnv for RealEnv {
             // a flush claim `settled` over them.
             // Cancelled commits nothing (dirty stays put): teardown is
             // racing this tick, and it must not be mistaken for quiescence.
-            Ok(ReconcileRun::Cancelled) => TickIo::Cancelled,
-            Ok(ReconcileRun::Converged) => {
-                if !apply_run(self.apply_context(), layer, ReconcileRun::Converged, cancel).await {
+            Ok(RootBoundRun {
+                run: ReconcileRun::Cancelled,
+                ..
+            }) => TickIo::Cancelled,
+            Ok(
+                run @ RootBoundRun {
+                    run: ReconcileRun::Converged,
+                    ..
+                },
+            ) => {
+                if !apply_run(self.apply_context(), layer, run, cancel).await {
                     return TickIo::Applied { clean: false };
                 }
                 if self.status.degraded() {
@@ -3144,6 +3188,7 @@ pub(crate) async fn reconcile_full_for_switch(
         .await
         .map_err(|_| SwitchReconcileError::Unavailable)?
         .into_scan_seed();
+    let captured_root = bind_capture_root(root).map_err(|_| SwitchReconcileError::Unavailable)?;
     let files =
         FilesActor::spawn_async_with_manifest(root.to_path_buf(), ScanBounds::default(), seed)
             .await
@@ -3188,7 +3233,14 @@ pub(crate) async fn reconcile_full_for_switch(
                 #[cfg(feature = "harness")]
                 apply_probe: None,
             };
-            if apply_run_with_handle(context, &handle, run, &token).await {
+            if apply_bound_run_with_handle(
+                context,
+                &handle,
+                RootBoundRun { captured_root, run },
+                &token,
+            )
+            .await
+            {
                 Ok(manifest_changed)
             } else {
                 Err(SwitchReconcileError::ApplyFailed)
@@ -3323,16 +3375,30 @@ fn moment_recorded_payload(
 async fn apply_run(
     context: ApplyRunContext<'_>,
     layer: &FilesLayer,
-    run: ReconcileRun,
+    run: RootBoundRun,
     cancel: &CancellationToken,
 ) -> bool {
-    apply_run_with_handle(context, &layer.files.handle(), run, cancel).await
+    apply_bound_run_with_handle(context, &layer.files.handle(), run, cancel).await
 }
 
+#[cfg(test)]
 async fn apply_run_with_handle(
     context: ApplyRunContext<'_>,
     files: &FilesHandle,
     run: ReconcileRun,
+    cancel: &CancellationToken,
+) -> bool {
+    let captured_root = match bind_capture_root(context.root) {
+        Ok(root) => root,
+        Err(_) => return false,
+    };
+    apply_bound_run_with_handle(context, files, RootBoundRun { captured_root, run }, cancel).await
+}
+
+async fn apply_bound_run_with_handle(
+    context: ApplyRunContext<'_>,
+    files: &FilesHandle,
+    run: RootBoundRun,
     cancel: &CancellationToken,
 ) -> bool {
     let ApplyRunContext {
@@ -3349,6 +3415,7 @@ async fn apply_run_with_handle(
         apply_probe,
     } = context;
     let now_ms = wall_now_ms();
+    let RootBoundRun { captured_root, run } = run;
     let (plan, collection_reconcile_requested) = match run {
         ReconcileRun::Completed(plan) => {
             let requested = status.take_collection_reconcile_request()
@@ -3463,6 +3530,7 @@ async fn apply_run_with_handle(
     let apply_plan = plan.clone();
     let apply_author_json = author_json.clone();
     let apply_cancel = cancel.clone();
+    let apply_captured_root = Arc::clone(&captured_root);
     // The retained-over-cap loop below retires through its OWN sink; it must
     // carry the same pass provenance or its deletes split the reconcile/fence
     // history group with NULL correlation ids.
@@ -3478,11 +3546,12 @@ async fn apply_run_with_handle(
             // A FRESH sink per run: the policy snapshot and (lazily loaded)
             // secret key are re-read per reconcile task, matching the TS
             // one-policy-snapshot-per-task rule.
-            let mut sink = StoreCaptureSink::new_with_self_writes(
+            let mut sink = StoreCaptureSink::new_with_bound_root(
                 apply_actor,
                 apply_workspace,
                 version_id,
                 apply_root,
+                apply_captured_root,
                 now_ms,
                 apply_author_json,
                 apply_leases,
@@ -3596,6 +3665,7 @@ async fn apply_run_with_handle(
             let retire_self_writes = self_writes.clone();
             let retire_author_json = author_json.clone();
             let retire_pass_provenance = retire_provenance.clone();
+            let retire_captured_root = Arc::clone(&captured_root);
             // A DEDICATED plain thread, same as the apply above: the sink's
             // blocking actor calls assert they run OUTSIDE any tokio runtime
             // context, and spawn_blocking threads carry the runtime handle.
@@ -3603,11 +3673,12 @@ async fn apply_run_with_handle(
             let retire_thread = std::thread::Builder::new()
                 .name("dohc-capture-overcap-retire".to_owned())
                 .spawn(move || {
-                    let mut sink = StoreCaptureSink::new_with_self_writes(
+                    let mut sink = StoreCaptureSink::new_with_bound_root(
                         retire_actor,
                         retire_workspace,
                         retire_version,
                         retire_root,
+                        retire_captured_root,
                         now_ms,
                         retire_author_json,
                         retire_leases,
@@ -3760,6 +3831,92 @@ async fn ack_all_failed(files: &FilesHandle, plan: ReconcilePlan, status: &Arc<D
     };
     if files.acknowledge_capture(plan, receipt).await.is_err() {
         status.mark_degraded();
+    }
+}
+
+#[cfg(test)]
+mod root_bound_run_tests {
+    use super::*;
+    use dohc_engine_runtime::WorkspaceSupervisor;
+    use dohc_engine_testkit::ScratchDir;
+
+    const WORKSPACE_ID: &str = "ws-root-bound-run";
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prepared_plan_refuses_a_replacement_workspace_root() {
+        let store_scratch = ScratchDir::new().expect("store scratch");
+        let capture_scratch = ScratchDir::new().expect("capture scratch");
+        let root = capture_scratch.path().join("workspace");
+        let moved_root = capture_scratch.path().join("workspace-moved");
+        std::fs::create_dir(&root).expect("create capture root");
+        std::fs::write(root.join("plan.md"), b"original workspace content")
+            .expect("write original content");
+
+        let db = store_scratch
+            .engine_db_path()
+            .expect("engine database path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        let files = FilesActor::spawn_async(root.clone(), ScanBounds::default())
+            .await
+            .expect("files actor");
+        let files = FilesActorCloseGuard::new(files);
+        let captured_root = Arc::new(CapturedRoot::bind(&root).expect("bind plan root"));
+        let run = files
+            .handle()
+            .reconcile(CancellationToken::new())
+            .await
+            .expect("prepare reconcile plan");
+        assert!(matches!(&run, ReconcileRun::Completed(plan) if !plan.ops.is_empty()));
+
+        std::fs::rename(&root, &moved_root).expect("move planned workspace root");
+        std::fs::create_dir(&root).expect("install replacement workspace root");
+        std::fs::write(root.join("plan.md"), b"replacement workspace content")
+            .expect("write replacement content");
+
+        let leases = LeaseRegistry::new();
+        let status = Arc::new(DriverStatus::default());
+        let self_writes = SelfWriteSuppression::default();
+        let clean = apply_bound_run_with_handle(
+            ApplyRunContext {
+                root: &root,
+                actor: &actor,
+                workspace_id: WORKSPACE_ID,
+                leases: &leases,
+                status: &status,
+                self_writes: &self_writes,
+                author_json: None,
+                provenance: CaptureProvenance::default(),
+                events: EngineEvents::default(),
+                #[cfg(feature = "harness")]
+                apply_probe: None,
+            },
+            &files.handle(),
+            RootBoundRun { captured_root, run },
+            &CancellationToken::new(),
+        )
+        .await;
+
+        assert!(!clean, "a plan cannot adopt a replacement directory");
+        assert!(
+            files.handle().stats().await.expect("files stats").dirty,
+            "the refused plan stays dirty for a fresh scan"
+        );
+
+        files.close().await;
+        supervisor.close(&db).expect("close actor");
+        let connection = rusqlite::Connection::open(&db).expect("open store observer");
+        let moments = connection
+            .query_row(
+                "SELECT COUNT(*) FROM moments WHERE workspace_id = ?1 AND path = 'plan.md'",
+                [WORKSPACE_ID],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count captured moments");
+        assert_eq!(moments, 0, "replacement bytes must never enter the store");
+
+        std::fs::remove_dir_all(&root).expect("remove replacement workspace root");
+        std::fs::rename(&moved_root, &root).expect("restore planned workspace root");
     }
 }
 

@@ -214,7 +214,7 @@ impl dohc_engine_runtime::SelfWriteRecorder for SelfWriteSuppression {
 /// cannot be recycled while this binding is live; Windows file ids do not need
 /// that pin, and an open directory handle would prevent the replacement this
 /// guard must detect.
-struct CapturedRoot {
+pub(crate) struct CapturedRoot {
     canonical_path: PathBuf,
     identity: file_id::FileId,
     #[cfg(unix)]
@@ -234,7 +234,7 @@ impl WorkspaceRootGuard for CapturedRoot {
 
 impl CapturedRoot {
     #[cfg(unix)]
-    fn bind(root: &Path) -> Result<Self, CaptureError> {
+    pub(crate) fn bind(root: &Path) -> Result<Self, CaptureError> {
         use std::os::unix::fs::MetadataExt;
 
         let canonical_path = root.canonicalize().map_err(|_| ESCAPES_ROOT)?;
@@ -251,7 +251,7 @@ impl CapturedRoot {
     }
 
     #[cfg(not(unix))]
-    fn bind(root: &Path) -> Result<Self, CaptureError> {
+    pub(crate) fn bind(root: &Path) -> Result<Self, CaptureError> {
         let canonical_path = root.canonicalize().map_err(|_| ESCAPES_ROOT)?;
         if !canonical_path
             .metadata()
@@ -345,6 +345,7 @@ impl StoreCaptureSink {
         )
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_with_self_writes(
         actor: ActorHandle,
@@ -362,6 +363,60 @@ impl StoreCaptureSink {
         // this generation instead of letting a later directory inherit the
         // absent root's default policy snapshot.
         let captured_root = CapturedRoot::bind(&shadow_root).map(Arc::new);
+        Self::new_with_captured_root(
+            actor,
+            workspace_id,
+            version_id,
+            shadow_root,
+            captured_root,
+            now_ms,
+            author_json,
+            leases,
+            self_writes,
+            provenance,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_bound_root(
+        actor: ActorHandle,
+        workspace_id: impl Into<String>,
+        version_id: impl Into<String>,
+        shadow_root: impl Into<PathBuf>,
+        captured_root: Arc<CapturedRoot>,
+        now_ms: i64,
+        author_json: Option<String>,
+        leases: LeaseRegistry,
+        self_writes: SelfWriteSuppression,
+        provenance: CaptureProvenance,
+    ) -> Self {
+        Self::new_with_captured_root(
+            actor,
+            workspace_id,
+            version_id,
+            shadow_root.into(),
+            Ok(captured_root),
+            now_ms,
+            author_json,
+            leases,
+            self_writes,
+            provenance,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_captured_root(
+        actor: ActorHandle,
+        workspace_id: impl Into<String>,
+        version_id: impl Into<String>,
+        shadow_root: PathBuf,
+        captured_root: Result<Arc<CapturedRoot>, CaptureError>,
+        now_ms: i64,
+        author_json: Option<String>,
+        leases: LeaseRegistry,
+        self_writes: SelfWriteSuppression,
+        provenance: CaptureProvenance,
+    ) -> Self {
         // `.dohc/files.toml` can only NARROW engine ownership below the hard
         // floor. See [`PolicyState`] for the absent/malformed/unreadable
         // split: only a file that exists but cannot be READ makes ownership

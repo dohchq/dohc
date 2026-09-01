@@ -50,6 +50,13 @@ type ThreadsState =
   | { status: "unavailable"; message: string }
   | { status: "ready"; fileObjectId: string | null; threads: ChatThreadRecord[] };
 
+const WORKSPACE_UPDATING_MESSAGE = "Workspace is still updating. Try again.";
+const THREAD_LOAD_RETRY_MS = 1_000;
+
+function isWorkspaceUpdatingInvokeError(error: unknown): boolean {
+  return ipcErrorMessage(error, "") === WORKSPACE_UPDATING_MESSAGE;
+}
+
 // The per-file Chats panel: thread list with a calm empty state, inline
 // create, and a thread view with a composer. Every async response is gated
 // by a liveness token before it touches state (workspace/file switches must
@@ -101,20 +108,30 @@ export function LinkedChatsPanel(props: {
     if (!filePath) return;
     const token = ++liveToken.current;
     setThreadsState({ status: "loading" });
-    try {
-      const result = await bridge().listFileChats({ workspaceId, path: filePath });
-      if (token !== liveToken.current) return;
-      setThreadsState({
-        status: "ready",
-        fileObjectId: result.fileObjectId,
-        threads: result.threads,
-      });
-    } catch (error) {
-      if (token !== liveToken.current) return;
-      setThreadsState({
-        status: "unavailable",
-        message: ipcErrorMessage(error, "Could not load Chats for this file."),
-      });
+    while (token === liveToken.current) {
+      try {
+        const result = await bridge().listFileChats({ workspaceId, path: filePath });
+        if (token !== liveToken.current) return;
+        setThreadsState({
+          status: "ready",
+          fileObjectId: result.fileObjectId,
+          threads: result.threads,
+        });
+        return;
+      } catch (error) {
+        if (token !== liveToken.current) return;
+        if (isWorkspaceUpdatingInvokeError(error)) {
+          await new Promise((resolveDelay) =>
+            setTimeout(resolveDelay, THREAD_LOAD_RETRY_MS),
+          );
+          continue;
+        }
+        setThreadsState({
+          status: "unavailable",
+          message: ipcErrorMessage(error, "Could not load Chats for this file."),
+        });
+        return;
+      }
     }
   }, [filePath, workspaceId]);
 
