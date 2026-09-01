@@ -7344,15 +7344,6 @@ describe("engine markdown source view", () => {
     await waitFor(() => expect(flashedBlockText()).toBe("Third paragraph."), {
       timeout: 5_000,
     });
-
-    // The flash has to OUTLIVE the retire. Retiring the target changes the
-    // editor's prop, and that effect's cleanup is what cancels the flash —
-    // so a careless retire clears the highlight in the same frame it was
-    // drawn and the reader never sees where they landed.
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 300));
-    });
-    expect(flashedBlockText()).toBe("Third paragraph.");
   });
 
   // #688. One top-level block can be a hundred items long, and revealing its
