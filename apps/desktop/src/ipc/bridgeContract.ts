@@ -1325,6 +1325,20 @@ export const ListFileChatsResult = z.object({
 });
 export type ListFileChatsResult = z.infer<typeof ListFileChatsResult>;
 
+// Main classifies the daemon's typed refusal before Electron turns a rejected
+// invoke into a message-only Error. The renderer receives this closed result,
+// so retry behavior never depends on user-facing daemon copy.
+export const ListFileChatsResponse = z.union([
+  ListFileChatsResult,
+  z
+    .object({
+      status: z.literal("refused"),
+      code: z.literal("workspace-updating"),
+    })
+    .strict(),
+]);
+export type ListFileChatsResponse = z.infer<typeof ListFileChatsResponse>;
+
 export const CreateFileChatPayload = z.object({
   workspaceId: WORKSPACE_ID,
   path: PATH_STRING,
@@ -5820,7 +5834,7 @@ export interface DohcDesktopBridge {
   restoreEngineMomentFile(
     payload: RestoreEngineMomentFilePayload,
   ): Promise<RestoreEngineMomentFileResult>;
-  listFileChats(payload: ListFileChatsPayload): Promise<ListFileChatsResult>;
+  listFileChats(payload: ListFileChatsPayload): Promise<ListFileChatsResponse>;
   createFileChat(payload: CreateFileChatPayload): Promise<CreateFileChatResult>;
   listChatMessages(
     payload: ListChatMessagesPayload,

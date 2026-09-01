@@ -187,7 +187,6 @@ import {
   RestoreEngineMomentFilePayload,
   RestoreEngineMomentFileResult,
   ListFileChatsPayload,
-  ListFileChatsResult,
   CreateFileChatPayload,
   CreateFileChatResult,
   ListChatMessagesPayload,
@@ -313,6 +312,7 @@ import { registerPluginIpcHandlers } from "./ipc/pluginIpcHandlers";
 import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
 import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMutationOwner";
 import { registerWorkspaceSearchIpcHandlers } from "./ipc/workspaceSearchIpc";
+import { listFileChatsForIpc } from "./ipc/fileChatsIpc";
 // The relay presence transport is a dependency-free module (no DOM/React): main
 // reuses it so the presence wire contract (routes, publish/leave/poll) lives in
 // ONE place. Main is the ONLY holder of the relay bearer token — the renderer's
@@ -10842,18 +10842,20 @@ function registerIpcHandlers(
     // is one the share already served, and an out-of-selector thread was
     // never served by the relay nor applied by the engine boundary — there is
     // no superset here to filter.
-    const scope = await requireChatScope(input.workspaceId);
-    const { workspace, store } = scope;
-    const fileObjectId = await chatFileObjectId(scope, input.path);
-    const threads = fileObjectId
-      ? await store.listThreadsForFile({
-          workspaceId: workspace.workspaceId,
-          objectId: fileObjectId,
-        })
-      : [];
-    return ListFileChatsResult.parse({
-      fileObjectId,
-      threads: threads.map(chatThreadForIpc),
+    return listFileChatsForIpc(async () => {
+      const scope = await requireChatScope(input.workspaceId);
+      const { workspace, store } = scope;
+      const fileObjectId = await chatFileObjectId(scope, input.path);
+      const threads = fileObjectId
+        ? await store.listThreadsForFile({
+            workspaceId: workspace.workspaceId,
+            objectId: fileObjectId,
+          })
+        : [];
+      return {
+        fileObjectId,
+        threads: threads.map(chatThreadForIpc),
+      };
     });
   });
 

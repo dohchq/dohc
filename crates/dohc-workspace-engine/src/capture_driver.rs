@@ -3381,20 +3381,6 @@ async fn apply_run(
     apply_bound_run_with_handle(context, &layer.files.handle(), run, cancel).await
 }
 
-#[cfg(test)]
-async fn apply_run_with_handle(
-    context: ApplyRunContext<'_>,
-    files: &FilesHandle,
-    run: ReconcileRun,
-    cancel: &CancellationToken,
-) -> bool {
-    let captured_root = match bind_capture_root(context.root) {
-        Ok(root) => root,
-        Err(_) => return false,
-    };
-    apply_bound_run_with_handle(context, files, RootBoundRun { captured_root, run }, cancel).await
-}
-
 async fn apply_bound_run_with_handle(
     context: ApplyRunContext<'_>,
     files: &FilesHandle,
@@ -4252,10 +4238,14 @@ mod collection_reconcile_scheduling_tests {
         let status = Arc::new(DriverStatus::default());
         let self_writes = SelfWriteSuppression::default();
         status.request_collection_reconcile();
-        let first_clean = apply_run_with_handle(
+        let first_root = bind_capture_root(scratch.path()).expect("bind first run root");
+        let first_clean = apply_bound_run_with_handle(
             collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes),
             &files.handle(),
-            ReconcileRun::Converged,
+            RootBoundRun {
+                captured_root: first_root,
+                run: ReconcileRun::Converged,
+            },
             &CancellationToken::new(),
         )
         .await;
@@ -4271,10 +4261,14 @@ mod collection_reconcile_scheduling_tests {
         );
 
         drop(lease);
-        let second_clean = apply_run_with_handle(
+        let second_root = bind_capture_root(scratch.path()).expect("bind second run root");
+        let second_clean = apply_bound_run_with_handle(
             collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes),
             &files.handle(),
-            ReconcileRun::Converged,
+            RootBoundRun {
+                captured_root: second_root,
+                run: ReconcileRun::Converged,
+            },
             &CancellationToken::new(),
         )
         .await;
@@ -4345,10 +4339,14 @@ mod collection_reconcile_scheduling_tests {
         let status = Arc::new(DriverStatus::default());
         let self_writes = SelfWriteSuppression::default();
         status.request_collection_reconcile();
-        let first_clean = apply_run_with_handle(
+        let first_root = bind_capture_root(scratch.path()).expect("bind first run root");
+        let first_clean = apply_bound_run_with_handle(
             collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes),
             &files.handle(),
-            ReconcileRun::Converged,
+            RootBoundRun {
+                captured_root: first_root,
+                run: ReconcileRun::Converged,
+            },
             &CancellationToken::new(),
         )
         .await;
@@ -4381,10 +4379,14 @@ mod collection_reconcile_scheduling_tests {
         assert_eq!(beta_state, "adopted");
 
         drop(lease);
-        let second_clean = apply_run_with_handle(
+        let second_root = bind_capture_root(scratch.path()).expect("bind second run root");
+        let second_clean = apply_bound_run_with_handle(
             collection_apply_context(scratch.path(), &actor, &leases, &status, &self_writes),
             &files.handle(),
-            ReconcileRun::Converged,
+            RootBoundRun {
+                captured_root: second_root,
+                run: ReconcileRun::Converged,
+            },
             &CancellationToken::new(),
         )
         .await;
@@ -4548,6 +4550,7 @@ mod collection_reconcile_scheduling_tests {
 
         std::fs::write(&record_path, b"Alpha task").expect("strip adopted record id");
         wait_for_watcher_dirty(&handle).await;
+        let changed_root = bind_capture_root(scratch.path()).expect("bind changed run root");
         let changed = handle
             .reconcile_if_dirty(CancellationToken::new())
             .await
@@ -4567,7 +4570,7 @@ mod collection_reconcile_scheduling_tests {
             "stripping the id must travel through the ordinary Changed path"
         );
         assert!(
-            apply_run_with_handle(
+            apply_bound_run_with_handle(
                 ApplyRunContext {
                     root: scratch.path(),
                     actor: &actor,
@@ -4582,7 +4585,10 @@ mod collection_reconcile_scheduling_tests {
                     apply_probe: None,
                 },
                 &handle,
-                ReconcileRun::Completed(changed_plan),
+                RootBoundRun {
+                    captured_root: changed_root,
+                    run: ReconcileRun::Completed(changed_plan),
+                },
                 &CancellationToken::new(),
             )
             .await,
@@ -4726,6 +4732,7 @@ mod collection_reconcile_scheduling_tests {
 
         std::fs::write(&record_path, REPAIRED).expect("repair collection record frontmatter");
         wait_for_watcher_dirty(&handle).await;
+        let changed_root = bind_capture_root(scratch.path()).expect("bind changed run root");
         let changed = handle
             .reconcile_if_dirty(CancellationToken::new())
             .await
@@ -4745,7 +4752,7 @@ mod collection_reconcile_scheduling_tests {
             "repairing malformed frontmatter must travel through the Changed path"
         );
         assert!(
-            apply_run_with_handle(
+            apply_bound_run_with_handle(
                 ApplyRunContext {
                     root: scratch.path(),
                     actor: &actor,
@@ -4760,7 +4767,10 @@ mod collection_reconcile_scheduling_tests {
                     apply_probe: None,
                 },
                 &handle,
-                ReconcileRun::Completed(changed_plan),
+                RootBoundRun {
+                    captured_root: changed_root,
+                    run: ReconcileRun::Completed(changed_plan),
+                },
                 &CancellationToken::new(),
             )
             .await,
@@ -4792,8 +4802,9 @@ mod collection_reconcile_scheduling_tests {
         // rich-document lineage, then asks capture to reconcile again.
         seed_plain_richdoc_lineage(&actor, "tasks/alpha.md", REPAIRED).await;
         status.request_collection_reconcile();
+        let converged_root = bind_capture_root(scratch.path()).expect("bind converged run root");
         assert!(
-            apply_run_with_handle(
+            apply_bound_run_with_handle(
                 ApplyRunContext {
                     root: scratch.path(),
                     actor: &actor,
@@ -4808,7 +4819,10 @@ mod collection_reconcile_scheduling_tests {
                     apply_probe: None,
                 },
                 &handle,
-                ReconcileRun::Converged,
+                RootBoundRun {
+                    captured_root: converged_root,
+                    run: ReconcileRun::Converged,
+                },
                 &CancellationToken::new(),
             )
             .await,
@@ -4918,7 +4932,8 @@ mod collection_reconcile_scheduling_tests {
         let status = Arc::new(DriverStatus::default());
         let self_writes = SelfWriteSuppression::default();
         let leases = LeaseRegistry::new();
-        let clean = apply_run_with_handle(
+        let captured_root = bind_capture_root(scratch.path()).expect("bind converged run root");
+        let clean = apply_bound_run_with_handle(
             ApplyRunContext {
                 root: scratch.path(),
                 actor: &actor,
@@ -4933,7 +4948,10 @@ mod collection_reconcile_scheduling_tests {
                 apply_probe: None,
             },
             &files.handle(),
-            ReconcileRun::Converged,
+            RootBoundRun {
+                captured_root,
+                run: ReconcileRun::Converged,
+            },
             &CancellationToken::new(),
         )
         .await;

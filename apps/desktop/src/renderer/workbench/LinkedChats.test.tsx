@@ -72,11 +72,10 @@ describe("LinkedChatsPanel startup", () => {
   it("keeps loading and retries while the workspace import is still settling", async () => {
     vi.useFakeTimers();
     bridgeMock.listFileChats
-      .mockRejectedValueOnce(
-        new Error(
-          "Error invoking remote method 'chat.listFile': Error: Workspace is still updating. Try again.",
-        ),
-      )
+      .mockResolvedValueOnce({
+        status: "refused",
+        code: "workspace-updating",
+      })
       .mockResolvedValue({ fileObjectId: "object-1", threads: [] });
 
     render(
@@ -122,10 +121,72 @@ describe("LinkedChatsPanel startup", () => {
     expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(1);
   });
 
+  it("does not retry an error that only has the old updating message", async () => {
+    vi.useFakeTimers();
+    bridgeMock.listFileChats.mockRejectedValue(
+      new Error("Workspace is still updating. Try again."),
+    );
+
+    render(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="docs/plan.md"
+        onError={() => undefined}
+      />,
+    );
+
+    await act(async () => undefined);
+    expect(screen.getByText("Try again")).toBeTruthy();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops persistent updating retries at the limit", async () => {
+    vi.useFakeTimers();
+    bridgeMock.listFileChats.mockResolvedValue({
+      status: "refused",
+      code: "workspace-updating",
+    });
+
+    render(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="docs/plan.md"
+        onError={() => undefined}
+      />,
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(121_000);
+    });
+
+    expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(122);
+    expect(screen.getByText("Workspace is still updating. Try again.")).toBeTruthy();
+    expect(screen.getByText("Try again")).toBeTruthy();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(122);
+
+    bridgeMock.listFileChats.mockResolvedValueOnce({
+      fileObjectId: "object-1",
+      threads: [],
+    });
+    await act(async () => screen.getByText("Try again").click());
+    expect(screen.getByTestId("linked-chats-panel")).toBeTruthy();
+    expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(123);
+  });
+
   it("cancels an updating retry when the selected file changes", async () => {
     vi.useFakeTimers();
     bridgeMock.listFileChats
-      .mockRejectedValueOnce(new Error("Workspace is still updating. Try again."))
+      .mockResolvedValueOnce({
+        status: "refused",
+        code: "workspace-updating",
+      })
       .mockResolvedValue({ fileObjectId: "object-2", threads: [] });
     const view = render(
       <LinkedChatsPanel
