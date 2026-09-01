@@ -82,4 +82,18 @@ describe("LiveObjectBinding shared vectors", () => {
 
     expect(() => parseLiveObjectBinding(input)).toThrow(TypeError);
   });
+
+  it("refuses an inherited selectorPaths entry", () => {
+    const input = structuredClone(canonical.input);
+    const selectorPaths = new Array<string>(1);
+    const selectorPathPrototype = Object.create(Array.prototype) as string[];
+    Object.defineProperty(selectorPathPrototype, "0", {
+      value: "notes/owner.md",
+      enumerable: true,
+    });
+    Object.setPrototypeOf(selectorPaths, selectorPathPrototype);
+    input.selectorPaths = selectorPaths;
+
+    expect(() => parseLiveObjectBinding(input)).toThrow(TypeError);
+  });
 });

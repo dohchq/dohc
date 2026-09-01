@@ -129,6 +129,11 @@ export function parseLiveObjectBinding(value: unknown): LiveObjectBinding {
   ) {
     throw new TypeError("selectorPaths must contain from 1 through 100 paths.");
   }
+  for (let index = 0; index < rawSelectorPaths.length; index += 1) {
+    if (!Object.hasOwn(rawSelectorPaths, index)) {
+      throw new TypeError("selectorPaths must contain from 1 through 100 paths.");
+    }
+  }
 
   const selectorPaths = [
     ...new Set(
