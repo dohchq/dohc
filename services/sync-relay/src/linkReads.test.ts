@@ -11,6 +11,7 @@ import {
   type RelayOp,
 } from "../../share-web/viewer/src/model";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { DiscussionActivityHub } from "./discussionActivity";
 import {
   hashLinkBearer,
   LinkEgressRateLimiter,
@@ -109,6 +110,7 @@ function handler(
     linkCapabilityReadFallbackPageSize?: number;
     linkCurrentFileLimit?: number;
     newLinkBearer?: () => string;
+    discussionActivity?: DiscussionActivityHub;
   } = {},
 ): SyncRelayHandler {
   let id = 0;
@@ -135,6 +137,7 @@ function handler(
       options.linkCapabilityReadFallbackPageSize,
     linkCurrentFileLimit: options.linkCurrentFileLimit,
     newLinkBearer: options.newLinkBearer,
+    discussionActivity: options.discussionActivity,
   };
   return createSyncRelayHandler(handlerOptions);
 }
@@ -532,6 +535,395 @@ describe("LinkEgressRateLimiter", () => {
 });
 
 describe("relay capability reads", () => {
+  it("parks a link log read until selected durable state advances", async () => {
+    const storage = await newStorage();
+    const activity = new DiscussionActivityHub();
+    const h = handler(storage, { discussionActivity: activity });
+    const seeded = await seed(h, "comment");
+    const initial = await json(
+      await h(
+        linkRequest(
+          seeded.capability,
+          "/sync/link/log?since=0&limit=500",
+        ),
+      ),
+    );
+    const initialCursor = Number(initial.nextCursor);
+
+    const held = h(
+      linkRequest(
+        seeded.capability,
+        `/sync/link/log?since=${String(initialCursor)}&limit=500&hold=30000`,
+      ),
+    );
+    expect(
+      await Promise.race([
+        held.then(() => "settled"),
+        Promise.resolve("pending"),
+      ]),
+    ).toBe("pending");
+    expect(activity.stats()).toEqual({ shares: 1, waiters: 1 });
+
+    await appendMoments(h, [
+      moment(2, "private/hidden.md", "hidden\n", 1_200),
+    ]);
+    expect(
+      await Promise.race([
+        held.then(() => "settled"),
+        Promise.resolve("pending"),
+      ]),
+    ).toBe("pending");
+    expect(activity.stats()).toEqual({ shares: 1, waiters: 1 });
+
+    await putBlob(h, "private update\n");
+    await appendMoments(h, [
+      moment(3, "private/held-noise.md", "private update\n", 1_300),
+    ]);
+    expect(
+      await Promise.race([
+        held.then(() => "settled"),
+        Promise.resolve("pending"),
+      ]),
+    ).toBe("pending");
+    expect(activity.stats()).toEqual({ shares: 1, waiters: 1 });
+
+    const selectedBody = "# selected settlement\n";
+    await putBlob(h, selectedBody);
+    await appendMoments(h, [
+      moment(4, "docs/shared.md", selectedBody, 1_400, {
+        beforePath: "docs/shared.md",
+        beforeContent: "# shared\n",
+      }),
+    ]);
+    const selected = await json(await held);
+    expect(selected).toMatchObject({
+      ok: true,
+      hasMore: false,
+      ops: [
+        {
+          relaySeq: initialCursor + 2,
+          originSeq: 4,
+          opKind: "moment.append",
+          payload: expect.objectContaining({
+            path: "docs/shared.md",
+            payloadAfterPath: "docs/shared.md",
+            payloadAfterBlobSha256: sha256(selectedBody),
+          }),
+          recordedAtMs: 1_400,
+        },
+      ],
+    });
+    expect(selected.ops).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ originId: expect.anything() })]),
+    );
+    expect(activity.stats()).toEqual({ shares: 0, waiters: 0 });
+
+    const raceBody = "# registered race\n";
+    await putBlob(h, raceBody);
+    const originalFetchLogPage = storage.fetchLogPage.bind(storage);
+    let raceFetches = 0;
+    let raceArmed = true;
+    const fetchSpy = vi.spyOn(storage, "fetchLogPage").mockImplementation((input) => {
+      raceFetches += 1;
+      if (raceArmed && raceFetches === 2) {
+        raceArmed = false;
+        const racedMoment = moment(0, "docs/shared.md", raceBody, 1_500, {
+          beforePath: "docs/shared.md",
+          beforeContent: selectedBody,
+        });
+        storage.appendLogBatch({
+          workspaceId: WORKSPACE,
+          originId: "origin-race",
+          ops: [{
+            ...racedMoment,
+            payloadJson: JSON.stringify(racedMoment.payload),
+          }],
+        });
+      }
+      return originalFetchLogPage(input);
+    });
+    const raced = await json(
+      await h(
+        linkRequest(
+          seeded.capability,
+          `/sync/link/log?since=${String(selected.nextCursor)}&limit=500&hold=30000`,
+        ),
+      ),
+    );
+    fetchSpy.mockRestore();
+    expect(raceArmed).toBe(false);
+    expect(raced).toMatchObject({
+      ops: [
+        expect.objectContaining({
+          originSeq: 0,
+          payload: expect.objectContaining({
+            payloadAfterBlobSha256: sha256(raceBody),
+          }),
+        }),
+      ],
+    });
+
+    const narrowedRead = h(
+      linkRequest(
+        seeded.capability,
+        `/sync/link/log?since=${String(raced.nextCursor)}&limit=500&hold=30000`,
+      ),
+    );
+    expect(
+      await Promise.race([
+        narrowedRead.then(() => "settled"),
+        Promise.resolve("pending"),
+      ]),
+    ).toBe("pending");
+    const shareId = storage.getShareGrant(seeded.grantId)!.shareId;
+    const generationBeforeNarrowing = storage.getShareGrant(seeded.grantId)!.generation;
+    expect(
+      (
+        await h(
+          request(
+            OWNER,
+            `/sync/shares/${shareId}/links/${seeded.grantId}/retune`,
+            jsonBody({
+              workspaceId: WORKSPACE,
+              access: "view",
+              expectedDependentGrantIds: [],
+            }),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    expect(storage.getShareGrant(seeded.grantId)).toMatchObject({
+      access: "view",
+      generation: generationBeforeNarrowing,
+    });
+    expect(
+      await Promise.race([
+        narrowedRead.then(() => "settled"),
+        Promise.resolve("pending"),
+      ]),
+    ).toBe("pending");
+    expect(activity.stats()).toEqual({ shares: 1, waiters: 1 });
+
+    const narrowedBody = "# selected after access narrowing\n";
+    await putBlob(h, narrowedBody);
+    await appendMoments(h, [
+      moment(5, "docs/shared.md", narrowedBody, 1_550, {
+        beforePath: "docs/shared.md",
+        beforeContent: raceBody,
+      }),
+    ]);
+    const narrowed = await json(await narrowedRead);
+    expect(narrowed).toMatchObject({
+      ops: [
+        expect.objectContaining({
+          originSeq: 5,
+          payload: expect.objectContaining({
+            payloadAfterBlobSha256: sha256(narrowedBody),
+          }),
+        }),
+      ],
+    });
+
+    const revokedRead = h(
+      linkRequest(
+        seeded.capability,
+        `/sync/link/log?since=${String(narrowed.nextCursor)}&limit=500&hold=30000`,
+      ),
+    );
+    expect(
+      await Promise.race([
+        revokedRead.then(() => "settled"),
+        Promise.resolve("pending"),
+      ]),
+    ).toBe("pending");
+    const refusedBody = "# must not escape after revoke\n";
+    await putBlob(h, refusedBody);
+    const refusedMoment = moment(
+      0,
+      "docs/shared.md",
+      refusedBody,
+      1_600,
+      { beforePath: "docs/shared.md", beforeContent: narrowedBody },
+    );
+    storage.appendLogBatch({
+      workspaceId: WORKSPACE,
+      originId: "origin-before-revoke",
+      ops: [{
+        ...refusedMoment,
+        payloadJson: JSON.stringify({
+          ...refusedMoment.payload,
+          momentId: "moment-before-revoke",
+        }),
+      }],
+    });
+    expect(
+      (
+        await h(
+          request(
+            OWNER,
+            `/sync/shares/${String(storage.getShareGrant(seeded.grantId)!.shareId)}/revoke`,
+            jsonBody({
+              grantId: seeded.grantId,
+              workspaceId: WORKSPACE,
+              expectedDependentGrantIds: [],
+            }),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    const revoked = await revokedRead;
+    expect(`${String(revoked.status)}:${await revoked.text()}`).toBe(
+      `401:${LINK_REFUSAL_BODY}`,
+    );
+    expect(activity.stats()).toEqual({ shares: 0, waiters: 0 });
+
+    const serializationRace = await createLink(h, {
+      paths: ["docs"],
+      access: "view",
+    });
+    const beforeSerializationRace = await json(
+      await h(
+        linkRequest(
+          serializationRace.capability,
+          "/sync/link/log?since=0&limit=500",
+        ),
+      ),
+    );
+    const serializationRead = h(
+      linkRequest(
+        serializationRace.capability,
+        `/sync/link/log?since=${String(beforeSerializationRace.nextCursor)}&limit=500&hold=30000`,
+      ),
+    );
+    expect(
+      await Promise.race([
+        serializationRead.then(() => "settled"),
+        Promise.resolve("pending"),
+      ]),
+    ).toBe("pending");
+    const fetchBeforeSerialization = storage.fetchLogPage.bind(storage);
+    let revokedDuringSerialization = false;
+    const serializationFetchSpy = vi
+      .spyOn(storage, "fetchLogPage")
+      .mockImplementation((input) => {
+        const rows = fetchBeforeSerialization(input);
+        if (!revokedDuringSerialization) {
+          const result = storage.revokeShareGrant({
+            shareId: serializationRace.shareId,
+            grantId: serializationRace.grantId,
+            revokedAtMs: 1_650,
+            expectedDependentGrantIds: [],
+          });
+          revokedDuringSerialization = result.ok;
+        }
+        return rows;
+      });
+    const serializationBody = "# authority changed before serialization\n";
+    await putBlob(h, serializationBody);
+    await appendMoments(h, [
+      moment(6, "docs/shared.md", serializationBody, 1_650, {
+        beforePath: "docs/shared.md",
+        beforeContent: refusedBody,
+      }),
+    ]);
+    const refusedSerialization = await serializationRead;
+    serializationFetchSpy.mockRestore();
+    expect(revokedDuringSerialization).toBe(true);
+    expect(
+      `${String(refusedSerialization.status)}:${await refusedSerialization.text()}`,
+    ).toBe(`401:${LINK_REFUSAL_BODY}`);
+
+    const fresh = await createLink(h, { paths: ["docs"], access: "view" });
+    const current = await json(
+      await h(linkRequest(fresh.capability, "/sync/link/log?since=0&limit=500")),
+    );
+    const abortController = new AbortController();
+    const abortRequest = request(
+      null,
+      `/sync/link/log?since=${String(current.nextCursor)}&limit=500&hold=30000`,
+      {
+        headers: { authorization: `LinkCapability ${fresh.capability}` },
+        signal: abortController.signal,
+      },
+    );
+    const abortedRead = h(abortRequest);
+    expect(
+      await Promise.race([
+        abortedRead.then(() => "settled"),
+        Promise.resolve("pending"),
+      ]),
+    ).toBe("pending");
+    abortController.abort();
+    await abortedRead;
+    expect(activity.stats()).toEqual({ shares: 0, waiters: 0 });
+
+    const timedOut = await h(
+      linkRequest(
+        fresh.capability,
+        `/sync/link/log?since=${String(current.nextCursor)}&limit=500&hold=1`,
+      ),
+    );
+    expect(timedOut.status).toBe(200);
+    expect(activity.stats()).toEqual({ shares: 0, waiters: 0 });
+
+    const cappedActivity = new DiscussionActivityHub({ maxTotalWaiters: 1 });
+    const cappedHandler = handler(storage, { discussionActivity: cappedActivity });
+    const capAbort = new AbortController();
+    const filled = cappedHandler(
+      request(
+        null,
+        `/sync/link/log?since=${String(current.nextCursor)}&limit=500&hold=30000`,
+        {
+          headers: { authorization: `LinkCapability ${fresh.capability}` },
+          signal: capAbort.signal,
+        },
+      ),
+    );
+    expect(
+      await Promise.race([
+        filled.then(() => "settled"),
+        Promise.resolve("pending"),
+      ]),
+    ).toBe("pending");
+    const limited = await cappedHandler(
+      linkRequest(
+        fresh.capability,
+        `/sync/link/log?since=${String(current.nextCursor)}&limit=500&hold=30000`,
+      ),
+    );
+    expect(limited.status).toBe(429);
+    expect(await json(limited)).toEqual({
+      ok: false,
+      error: "too many link reads",
+      code: "link_read_rate_limited",
+    });
+    expect(cappedActivity.stats()).toEqual({ shares: 1, waiters: 1 });
+    capAbort.abort();
+    await filled;
+    expect(cappedActivity.stats()).toEqual({ shares: 0, waiters: 0 });
+
+    for (const hold of [
+      "",
+      "-1",
+      "+1",
+      "1.5",
+      "1e3",
+      "0x10",
+      "%201",
+      "30001",
+      "9007199254740992",
+      "bad",
+    ]) {
+      const invalid = await h(
+        linkRequest(
+          fresh.capability,
+          `/sync/link/log?since=${String(current.nextCursor)}&limit=500&hold=${hold}`,
+        ),
+      );
+      expect(invalid.status, `hold=${hold}`).toBe(400);
+    }
+  });
+
   it("keeps simultaneous View and Comment grants bound to their own access", async () => {
     const storage = await newStorage();
     const h = handler(storage);

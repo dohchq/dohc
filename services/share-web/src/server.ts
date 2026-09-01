@@ -1254,6 +1254,7 @@ export function createShareWebHandler({
         : {};
 
       const isBlob = pathname.startsWith("/api/view/blob/");
+      const isLog = pathname === "/api/view/log";
       const releaseBlobProxy = isBlob
         ? blobProxyLimiter.acquire(
             sessionKey(authenticated.discriminator, authenticated.token),
@@ -1272,6 +1273,18 @@ export function createShareWebHandler({
             signal: request.signal,
           }),
         );
+        if (
+          isLog &&
+          !sessions.isCurrent(
+            authenticated.discriminator,
+            authenticated.token,
+            readCapabilityToken,
+            nowMs(),
+          )
+        ) {
+          await relayResponse.body?.cancel().catch(() => undefined);
+          return refused(409, refreshedCookieHeaders);
+        }
         if (relayResponse.status !== 200) {
           releaseBlobProxy?.();
           if (relayResponse.status === 429) {

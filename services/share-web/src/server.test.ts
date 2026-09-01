@@ -689,6 +689,96 @@ describe("share-web sessions", () => {
     expect(readCalls).toBe(2);
   });
 
+  it("returns 409 when a held read completes under a replaced capability", async () => {
+    let now = 1_000;
+    let resolveHeldRead: ((response: Response) => void) | undefined;
+    let markHeldReadStarted: (() => void) | undefined;
+    const heldReadStarted = new Promise<void>((resolve) => {
+      markHeldReadStarted = resolve;
+    });
+    let staleBodyCancelled = false;
+    const readCapabilities: string[] = [];
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      relayExchangeKey: "share-web-to-relay-refresh-exchange-key",
+      publicHosts: new Set([HOST]),
+      nowMs: () => now,
+      newSessionToken: () => Buffer.alloc(32, 29).toString("base64url"),
+      fetchRelay: async (relayRequest) => {
+        const pathname = new URL(relayRequest.url).pathname;
+        const authorization = relayRequest.headers.get("authorization") ?? "";
+        if (pathname === "/sync/link-exchange") {
+          return Response.json({
+            ok: true,
+            grantId: "grant-held-refresh-race",
+            capabilityToken: CAP_ALPHA_1,
+            capabilityExpiresAtMs: 901_000,
+          });
+        }
+        if (pathname === "/sync/link-refresh") {
+          expect(authorization).toBe(`LinkCapability ${CAP_ALPHA_1}`);
+          return Response.json({
+            ok: true,
+            grantId: "grant-held-refresh-race",
+            capabilityToken: CAP_ALPHA_2,
+            capabilityExpiresAtMs: now + 900_000,
+          });
+        }
+        readCapabilities.push(authorization);
+        if (pathname === "/sync/link/log") {
+          expect(authorization).toBe(`LinkCapability ${CAP_ALPHA_1}`);
+          markHeldReadStarted?.();
+          return await new Promise<Response>((resolve) => {
+            resolveHeldRead = resolve;
+          });
+        }
+        expect(pathname).toBe("/sync/link/share");
+        expect(authorization).toBe(`LinkCapability ${CAP_ALPHA_2}`);
+        return Response.json({ ok: true, access: "view" });
+      },
+    });
+    const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
+    const body = (await exchanged.json()) as { session: string };
+    const sessionHeaders = {
+      cookie: cookiePair(exchanged),
+      "x-dohc-link-session": body.session,
+    };
+
+    const held = handler(
+      request("/api/view/log?since=7&limit=500&hold=30000", {
+        headers: sessionHeaders,
+      }),
+    );
+    await heldReadStarted;
+    now = 601_001;
+    const refreshed = await handler(
+      request("/api/view/meta", { headers: sessionHeaders }),
+    );
+    expect(refreshed.status).toBe(200);
+
+    resolveHeldRead?.(new Response(new ReadableStream({
+      cancel: () => {
+        staleBodyCancelled = true;
+      },
+    }), { status: 401 }));
+    const stale = await held;
+    expect({ status: stale.status, body: await stale.text() }).toEqual({
+      status: 409,
+      body: shareWebRefusalBody,
+    });
+    expect(staleBodyCancelled).toBe(true);
+
+    const followUp = await handler(
+      request("/api/view/meta", { headers: sessionHeaders }),
+    );
+    expect(followUp.status).toBe(200);
+    expect(readCapabilities).toEqual([
+      `LinkCapability ${CAP_ALPHA_1}`,
+      `LinkCapability ${CAP_ALPHA_2}`,
+      `LinkCapability ${CAP_ALPHA_2}`,
+    ]);
+  });
+
   it("keeps a near-expiry session after a network refresh failure and retries renewal on the next request", async () => {
     let now = 1_000;
     let refreshCalls = 0;

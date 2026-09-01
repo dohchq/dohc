@@ -29,6 +29,7 @@
     "react-dom": "^19.2.8"
   },
   "devDependencies": {
+    "@dohc/live-session-contract": "workspace:*",
     "@dohc/sync-relay": "workspace:*",
     "@playwright/test": "^1.62.1",
     "@types/node": "^24.13.3",
