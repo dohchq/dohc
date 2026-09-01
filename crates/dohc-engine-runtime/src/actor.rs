@@ -38,8 +38,11 @@ use crate::search::{
 use crate::search::{SearchPolicySnapshot, read_engine_search_policy, resolve_effective_policy};
 use dohc_engine_collab::{
     AppendOutcome, CacheStats, CloseOutcome, CollabError, ContentKind, DocKey, LeaseRegistry,
-    LineageClaimStatus, Projection, Regime, SceneAsset, WriterDocCache, Ydoc,
+    LineageClaimStatus, OwnerDeliveryReceipt, OwnerOutboxAcknowledgeResult, OwnerOutboxAppendInput,
+    OwnerOutboxAppendResult, OwnerOutboxError, OwnerOutboxQuarantineInput, Projection, Regime,
+    SceneAsset, WriterDocCache, Ydoc, acknowledge_owner_outbox, append_owner_outbox,
     encode_scene_asset_record, encode_scene_asset_records, import_portable_scene,
+    quarantine_owner_outbox,
 };
 use dohc_engine_crypto::{SecretDataKey, SecretPlaintext, load_key_file};
 use dohc_engine_domain::{
@@ -1733,6 +1736,22 @@ enum Command {
         workspace_id: String,
         version_id: String,
         reply: oneshot::Sender<Result<Vec<CaptureManifestSeedEntry>, RuntimeError>>,
+    },
+    OwnerYdocOutboxAppend {
+        workspace_id: String,
+        input: OwnerOutboxAppendInput,
+        reply: oneshot::Sender<Result<OwnerOutboxAppendResult, OwnerOutboxError>>,
+    },
+    OwnerYdocOutboxAcknowledge {
+        workspace_id: String,
+        outbox_id: String,
+        receipts: Vec<OwnerDeliveryReceipt>,
+        reply: oneshot::Sender<Result<OwnerOutboxAcknowledgeResult, OwnerOutboxError>>,
+    },
+    OwnerYdocOutboxQuarantine {
+        workspace_id: String,
+        input: OwnerOutboxQuarantineInput,
+        reply: oneshot::Sender<Result<(), OwnerOutboxError>>,
     },
     YdocOpenState {
         workspace_id: String,
@@ -4196,6 +4215,59 @@ impl ActorHandle {
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn owner_ydoc_outbox_append(
+        &self,
+        workspace_id: String,
+        input: OwnerOutboxAppendInput,
+    ) -> Result<Result<OwnerOutboxAppendResult, OwnerOutboxError>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::OwnerYdocOutboxAppend {
+                workspace_id,
+                input,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)
+    }
+
+    pub async fn owner_ydoc_outbox_acknowledge(
+        &self,
+        workspace_id: String,
+        outbox_id: String,
+        receipts: Vec<OwnerDeliveryReceipt>,
+    ) -> Result<Result<OwnerOutboxAcknowledgeResult, OwnerOutboxError>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::OwnerYdocOutboxAcknowledge {
+                workspace_id,
+                outbox_id,
+                receipts,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)
+    }
+
+    pub async fn owner_ydoc_outbox_quarantine(
+        &self,
+        workspace_id: String,
+        input: OwnerOutboxQuarantineInput,
+    ) -> Result<Result<(), OwnerOutboxError>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::OwnerYdocOutboxQuarantine {
+                workspace_id,
+                input,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)
     }
 
     /// Capture a secret file on the actor's single writer thread.
@@ -9069,6 +9141,32 @@ fn worker_main(
             } => {
                 let outcome = capture_manifest_seed(&store, &workspace_id, &version_id)
                     .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::OwnerYdocOutboxAppend {
+                workspace_id,
+                input,
+                reply,
+            } => {
+                let outcome = append_owner_outbox(&mut store, &workspace_id, input);
+                let _ = reply.send(outcome);
+            }
+            Command::OwnerYdocOutboxAcknowledge {
+                workspace_id,
+                outbox_id,
+                receipts,
+                reply,
+            } => {
+                let outcome =
+                    acknowledge_owner_outbox(&mut store, &workspace_id, &outbox_id, &receipts);
+                let _ = reply.send(outcome);
+            }
+            Command::OwnerYdocOutboxQuarantine {
+                workspace_id,
+                input,
+                reply,
+            } => {
+                let outcome = quarantine_owner_outbox(&mut store, &workspace_id, input);
                 let _ = reply.send(outcome);
             }
             Command::CaptureRetire {

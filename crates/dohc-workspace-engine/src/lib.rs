@@ -15,7 +15,9 @@ pub use capture_sink::{SelfWriteSuppression, StoreCaptureSink};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use dohc_engine_collab::{CollabError, ContentKind, DocKey, Lease, LeaseRegistry, Regime};
+use dohc_engine_collab::{
+    CollabError, ContentKind, DocKey, Lease, LeaseRegistry, OwnerOutboxError, Regime,
+};
 use dohc_engine_domain::{
     AgentRunRecord, AutomationClaim, AutomationFailure, AutomationSettle, AutomationTrigger,
     BookmarkMode, BookmarkTargetKind, ChannelThreadSummary, ChatActorKind, ChatAgentReadState,
@@ -1074,6 +1076,12 @@ pub struct EngineService {
         Arc<tokio::sync::Notify>,
         Arc<std::sync::atomic::AtomicBool>,
     )>,
+    #[cfg(test)]
+    owner_outbox_append_probe: Option<(
+        Arc<tokio::sync::Notify>,
+        Arc<tokio::sync::Notify>,
+        Arc<std::sync::atomic::AtomicBool>,
+    )>,
     /// PER-EngineService by design. Production runs exactly ONE EngineService per
     /// daemon process (the stdio host constructs a single service), so the
     /// `BLOB_EGRESS_BYTE_BUDGET` resident-memory ceiling is per-process there.
@@ -1284,6 +1292,8 @@ impl EngineService {
             capture_apply_probe: None,
             #[cfg(test)]
             open_install_probe: None,
+            #[cfg(test)]
+            owner_outbox_append_probe: None,
             blob_egress_budget: BlobEgressBudget::new(BLOB_EGRESS_BYTE_BUDGET),
         }
     }
@@ -1467,6 +1477,22 @@ impl EngineService {
                     request.params.clone(),
                 )
                 .await?
+            }
+            "ydoc.ownerOutbox.append" => {
+                self.owner_ydoc_outbox_append(request.workspace, request.params)
+                    .await?
+            }
+            "ydoc.ownerOutbox.readPending" => {
+                self.owner_ydoc_outbox_read_pending(request.workspace, request.params)
+                    .await?
+            }
+            "ydoc.ownerOutbox.acknowledge" => {
+                self.owner_ydoc_outbox_acknowledge(request.workspace, request.params)
+                    .await?
+            }
+            "ydoc.ownerOutbox.quarantine" => {
+                self.owner_ydoc_outbox_quarantine(request.workspace, request.params)
+                    .await?
             }
             "ydoc.settle" => {
                 self.ydoc_settle(&ctx, request.workspace, request.params)
@@ -8265,6 +8291,174 @@ impl EngineService {
         Ok(json!({ "failed": true }))
     }
 
+    async fn owner_ydoc_outbox_append(
+        &self,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: OwnerYDocOutboxAppendParams = parse(params)?;
+        validate_owner_outbox_wire_binding(&params.binding)?;
+        validate_owner_outbox_limit(params.limits.max_pending_bytes)?;
+        validate_owner_outbox_limit(params.limits.max_pending_age_ms)?;
+        let handle = handle.ok_or_else(workspace_unavailable)?;
+        let open = self.open(Some(&handle))?;
+        #[cfg(test)]
+        if let Some((reached, release, armed)) = &self.owner_outbox_append_probe
+            && armed.swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            reached.notify_one();
+            release.notified().await;
+        }
+        let base_update = decode_owner_outbox_base64(&params.base_update_base64)?;
+        let update = decode_owner_outbox_base64(&params.update_base64)?;
+        let _serial = Arc::clone(&open.session_ops).lock_owned().await;
+        let open = self.open(Some(&handle))?;
+        let result = open
+            .actor
+            .owner_ydoc_outbox_append(
+                open.workspace_id.clone(),
+                dohc_engine_collab::OwnerOutboxAppendInput {
+                    binding: params.binding,
+                    base_update,
+                    append_key: params.append_key,
+                    update,
+                    limits: dohc_engine_collab::OwnerOutboxLimits {
+                        max_pending_bytes: params.limits.max_pending_bytes,
+                        max_pending_age_ms: params.limits.max_pending_age_ms,
+                    },
+                    created_at_ms: now_ms()?,
+                },
+            )
+            .await
+            .map_err(map_runtime)?
+            .map_err(map_owner_outbox)?;
+        Ok(json!({
+            "outboxId": result.outbox_id,
+            "sequence": result.sequence,
+            "deliveryId": result.delivery_id,
+            "updateDigest": result.update_digest,
+            "pendingBytes": result.pending_bytes,
+            "oldestEntryAtMs": result.oldest_entry_at_ms,
+            "state": result.state.as_str(),
+        }))
+    }
+
+    async fn owner_ydoc_outbox_read_pending(
+        &self,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: OwnerYDocOutboxIdParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id;
+        let db_path = open.db_path;
+        let pending = tokio::task::spawn_blocking(move || {
+            let store = dohc_engine_storage::EngineStore::open_read_only(&db_path)?;
+            dohc_engine_collab::read_pending_owner_outbox(&store, &workspace_id, &params.outbox_id)
+        })
+        .await
+        .map_err(|_| wire(ErrorCode::Internal, "owner-outbox-worker-failed"))?
+        .map_err(map_owner_outbox)?;
+        let entries = pending
+            .entries
+            .into_iter()
+            .map(|entry| {
+                json!({
+                    "sequence": entry.sequence,
+                    "appendKey": entry.append_key,
+                    "deliveryId": entry.delivery_id,
+                    "updateDigest": entry.update_digest,
+                    "updateBase64": base64::engine::general_purpose::STANDARD.encode(entry.update),
+                    "byteLength": entry.byte_length,
+                    "createdAtMs": entry.created_at_ms,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "outboxId": pending.outbox_id,
+            "binding": pending.binding,
+            "baseUpdateDigest": pending.base_update_digest,
+            "baseUpdateBase64": base64::engine::general_purpose::STANDARD.encode(pending.base_update),
+            "state": pending.state.as_str(),
+            "pendingBytes": pending.pending_bytes,
+            "oldestEntryAtMs": pending.oldest_entry_at_ms,
+            "entries": entries,
+            "quarantineReason": pending.quarantine_reason,
+            "observedBinding": pending.observed_binding,
+        }))
+    }
+
+    async fn owner_ydoc_outbox_acknowledge(
+        &self,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: OwnerYDocOutboxAcknowledgeParams = parse(params)?;
+        for receipt in &params.receipts {
+            if receipt.journal_cursor < 0
+                || receipt.journal_cursor > dohc_engine_protocol::MAX_WIRE_INTEGER as i64
+            {
+                return Err(wire(
+                    ErrorCode::InvalidParams,
+                    "invalid-owner-outbox-receipt",
+                ));
+            }
+        }
+        let receipts = params
+            .receipts
+            .into_iter()
+            .map(|receipt| dohc_engine_collab::OwnerDeliveryReceipt {
+                delivery_id: receipt.delivery_id,
+                update_digest: receipt.update_digest,
+                journal_cursor: receipt.journal_cursor,
+                accepting_host_epoch: receipt.accepting_host_epoch,
+            })
+            .collect::<Vec<_>>();
+        let handle = handle.ok_or_else(workspace_unavailable)?;
+        let open = self.open(Some(&handle))?;
+        let _serial = Arc::clone(&open.session_ops).lock_owned().await;
+        let open = self.open(Some(&handle))?;
+        let result = open
+            .actor
+            .owner_ydoc_outbox_acknowledge(open.workspace_id.clone(), params.outbox_id, receipts)
+            .await
+            .map_err(map_runtime)?
+            .map_err(map_owner_outbox)?;
+        Ok(json!({
+            "acknowledged": result.acknowledged,
+            "pendingBytes": result.pending_bytes,
+            "oldestEntryAtMs": result.oldest_entry_at_ms,
+        }))
+    }
+
+    async fn owner_ydoc_outbox_quarantine(
+        &self,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: OwnerYDocOutboxQuarantineParams = parse(params)?;
+        if let Some(binding) = &params.observed_binding {
+            validate_owner_outbox_wire_binding(binding)?;
+        }
+        let handle = handle.ok_or_else(workspace_unavailable)?;
+        let open = self.open(Some(&handle))?;
+        let _serial = Arc::clone(&open.session_ops).lock_owned().await;
+        let open = self.open(Some(&handle))?;
+        open.actor
+            .owner_ydoc_outbox_quarantine(
+                open.workspace_id.clone(),
+                dohc_engine_collab::OwnerOutboxQuarantineInput {
+                    outbox_id: params.outbox_id,
+                    reason: params.reason,
+                    observed_binding: params.observed_binding,
+                },
+            )
+            .await
+            .map_err(map_runtime)?
+            .map_err(map_owner_outbox)?;
+        Ok(json!({ "quarantined": true }))
+    }
+
     async fn ydoc_open(
         &self,
         ctx: &RequestContext,
@@ -10597,6 +10791,54 @@ struct HistoryPageParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct MomentsGetParams {
     moment_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OwnerYDocOutboxLimitsParams {
+    max_pending_bytes: i64,
+    max_pending_age_ms: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OwnerYDocOutboxAppendParams {
+    binding: dohc_engine_collab::LiveObjectBinding,
+    base_update_base64: String,
+    append_key: String,
+    update_base64: String,
+    limits: OwnerYDocOutboxLimitsParams,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OwnerYDocOutboxIdParams {
+    outbox_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OwnerYDocDeliveryReceiptParams {
+    delivery_id: String,
+    update_digest: String,
+    journal_cursor: i64,
+    accepting_host_epoch: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OwnerYDocOutboxAcknowledgeParams {
+    outbox_id: String,
+    receipts: Vec<OwnerYDocDeliveryReceiptParams>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OwnerYDocOutboxQuarantineParams {
+    outbox_id: String,
+    reason: String,
+    #[serde(default)]
+    observed_binding: Option<dohc_engine_collab::LiveObjectBinding>,
 }
 
 #[derive(Deserialize)]
@@ -13067,6 +13309,64 @@ fn parse<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, WireError> {
     serde_json::from_value(value).map_err(|_| wire(ErrorCode::InvalidParams, "invalid parameters"))
 }
 
+fn validate_owner_outbox_wire_binding(
+    binding: &dohc_engine_collab::LiveObjectBinding,
+) -> Result<(), WireError> {
+    if binding.restore_fence_generation < 0
+        || binding.restore_fence_generation > dohc_engine_protocol::MAX_WIRE_INTEGER as i64
+    {
+        return Err(wire(
+            ErrorCode::InvalidParams,
+            "invalid-owner-outbox-binding",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_owner_outbox_limit(value: i64) -> Result<(), WireError> {
+    if value <= 0 || value > dohc_engine_protocol::MAX_WIRE_INTEGER as i64 {
+        return Err(wire(ErrorCode::InvalidParams, "invalid-owner-outbox-limit"));
+    }
+    Ok(())
+}
+
+fn decode_owner_outbox_base64(value: &str) -> Result<Vec<u8>, WireError> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .map_err(|_| wire(ErrorCode::InvalidParams, "invalid-owner-outbox-base64"))?;
+    if base64::engine::general_purpose::STANDARD.encode(&bytes) != value {
+        return Err(wire(
+            ErrorCode::InvalidParams,
+            "invalid-owner-outbox-base64",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn map_owner_outbox(error: OwnerOutboxError) -> WireError {
+    match error {
+        OwnerOutboxError::InvalidInput(_) => {
+            wire(ErrorCode::InvalidParams, "invalid-owner-outbox-input")
+        }
+        OwnerOutboxError::WorkspaceMismatch => {
+            wire(ErrorCode::InvalidParams, "owner-outbox-workspace-mismatch")
+        }
+        OwnerOutboxError::ParentMismatch => {
+            wire(ErrorCode::InvalidParams, "owner-outbox-parent-mismatch")
+        }
+        OwnerOutboxError::AppendKeyMismatch => {
+            wire(ErrorCode::InvalidParams, "owner-outbox-append-key-mismatch")
+        }
+        OwnerOutboxError::Frozen => wire(ErrorCode::InvalidParams, "owner-outbox-frozen"),
+        OwnerOutboxError::NotFound => wire(ErrorCode::InvalidParams, "owner-outbox-not-found"),
+        OwnerOutboxError::ReceiptMismatch => {
+            wire(ErrorCode::InvalidParams, "owner-outbox-receipt-mismatch")
+        }
+        OwnerOutboxError::Corrupt => wire(ErrorCode::Internal, "owner-outbox-state-corrupt"),
+        OwnerOutboxError::Storage(error) => map_runtime(RuntimeError::Storage(error)),
+    }
+}
+
 fn parse_ydoc_content_kind(raw: &str) -> Result<ContentKind, WireError> {
     match raw {
         "plaintext" => Ok(ContentKind::Plaintext),
@@ -13600,6 +13900,27 @@ mod tests {
     use std::time::Duration;
 
     const SHADOW_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn owner_outbox_append_params(workspace_id: &str, append_key: &str) -> Value {
+        json!({
+            "binding": {
+                "workspaceId": workspace_id,
+                "mainVersionId": "main",
+                "objectId": "object-1",
+                "lineageClaimId": "lineage-1",
+                "currentPath": "notes/owner.md",
+                "selectorPaths": ["notes/owner.md"],
+                "restoreFenceGeneration": 0
+            },
+            "baseUpdateBase64": base64::engine::general_purpose::STANDARD.encode(b"base"),
+            "appendKey": append_key,
+            "updateBase64": base64::engine::general_purpose::STANDARD.encode(b"update"),
+            "limits": {
+                "maxPendingBytes": 1_000,
+                "maxPendingAgeMs": 1_000
+            }
+        })
+    }
 
     #[test]
     fn collection_number_marker_shaped_user_objects_use_depth_neutral_key_escaping() {
@@ -15543,6 +15864,130 @@ mod tests {
             .workspace_close(Some(handle))
             .await
             .expect("workspace close");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn owner_outbox_append_waits_for_the_workspace_session_barrier() {
+        // MUTATION: remove the owner outbox session_ops acquisition -> the
+        // append commits while this test still holds the lifecycle guard.
+        let scratch = ScratchDir::new().expect("scratch");
+        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
+            .expect("shadow marker");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = Arc::new(EngineService::with_supervisor(supervisor));
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": "owner-outbox-session-barrier",
+                    "captureMode": "none"
+                }),
+            )
+            .await
+            .expect("workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+        let open = service.open(Some(&handle)).expect("open workspace");
+        let held = Arc::clone(&open.session_ops).lock_owned().await;
+
+        let appending_service = Arc::clone(&service);
+        let appending_handle = handle.clone();
+        let mut appending = tokio::spawn(async move {
+            appending_service
+                .owner_ydoc_outbox_append(
+                    Some(appending_handle),
+                    owner_outbox_append_params("owner-outbox-session-barrier", "serialized-append"),
+                )
+                .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut appending)
+                .await
+                .is_err(),
+            "owner outbox append must wait behind session_ops"
+        );
+
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(10), appending)
+            .await
+            .expect("append completed after barrier release")
+            .expect("append task")
+            .expect("owner outbox append");
+        service
+            .workspace_close(Some(handle))
+            .await
+            .expect("workspace close");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn owner_outbox_append_cannot_commit_after_close_wins_the_session_barrier() {
+        // MUTATION: bypass the actor with EngineStore::open after the session_ops
+        // barrier -> the paused append reopens engine.db and commits after close.
+        let scratch = ScratchDir::new().expect("scratch");
+        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
+            .expect("shadow marker");
+        let db_path = scratch.path().join(".dohc/engine/engine.db");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mut service = EngineService::with_supervisor(supervisor);
+        service.owner_outbox_append_probe = Some((
+            Arc::clone(&reached),
+            Arc::clone(&release),
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        ));
+        let service = Arc::new(service);
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": "owner-outbox-close-race",
+                    "captureMode": "none"
+                }),
+            )
+            .await
+            .expect("workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+
+        let appending_service = Arc::clone(&service);
+        let appending_handle = handle.clone();
+        let appending = tokio::spawn(async move {
+            appending_service
+                .owner_ydoc_outbox_append(
+                    Some(appending_handle),
+                    owner_outbox_append_params("owner-outbox-close-race", "append-after-close"),
+                )
+                .await
+        });
+        reached.notified().await;
+        service
+            .workspace_close(Some(handle))
+            .await
+            .expect("workspace close");
+        release.notify_one();
+
+        let error = appending
+            .await
+            .expect("append task")
+            .expect_err("a stale append must not survive workspace close");
+        assert_eq!(error.code, ErrorCode::WorkspaceUnavailable);
+        let store = dohc_engine_storage::EngineStore::open_read_only(&db_path)
+            .expect("read closed workspace store");
+        let entries = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM owner_ydoc_outbox_entries",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .expect("outbox entry count");
+        assert_eq!(entries, 0, "close must leave no post-teardown mutation");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

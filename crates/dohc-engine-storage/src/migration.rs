@@ -3151,6 +3151,75 @@ ALTER TABLE ydoc_deferred_updates ADD COLUMN record_facts_json TEXT;
 
 pub(crate) const DEFERRED_RECORD_FACTS_MIGRATION_ID: &str = "v1-deferred-record-facts";
 
+/// Ordinal 48. Durable recovery queue for owner-authored Y.Doc updates that
+/// must reach the configured service host before the local copy can forget
+/// them. Its blob references are deliberately independent of live Y.Doc,
+/// object, alias, snapshot, and version rows: replacement cannot cascade away
+/// recovery evidence.
+const V1_OWNER_YDOC_OUTBOX_DDL: &str = "\
+CREATE TABLE owner_ydoc_outboxes (
+    outbox_id                 TEXT NOT NULL PRIMARY KEY,
+    workspace_id              TEXT NOT NULL,
+    main_version_id           TEXT NOT NULL,
+    object_id                 TEXT NOT NULL,
+    lineage_claim_id          TEXT NOT NULL,
+    current_path              TEXT NOT NULL,
+    selector_paths_json       TEXT NOT NULL CHECK (json_valid(selector_paths_json)),
+    restore_fence_generation  INTEGER NOT NULL CHECK (restore_fence_generation >= 0),
+    base_update_digest        TEXT NOT NULL,
+    base_blob_digest          TEXT NOT NULL,
+    base_byte_length          INTEGER NOT NULL CHECK (base_byte_length > 0),
+    state                     TEXT NOT NULL CHECK (state IN ('active', 'sealed', 'quarantined')),
+    pending_bytes             INTEGER NOT NULL CHECK (pending_bytes >= 0),
+    oldest_entry_at_ms        INTEGER CHECK (oldest_entry_at_ms IS NULL OR oldest_entry_at_ms >= 0),
+    next_sequence             INTEGER NOT NULL CHECK (next_sequence >= 1),
+    quarantine_reason         TEXT,
+    observed_binding_json     TEXT CHECK (
+      observed_binding_json IS NULL OR json_valid(observed_binding_json)
+    ),
+    created_at_ms             INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    CHECK (
+      (state = 'quarantined' AND quarantine_reason IS NOT NULL) OR
+      (state != 'quarantined' AND quarantine_reason IS NULL AND observed_binding_json IS NULL)
+    ),
+    CHECK (
+      (pending_bytes = 0 AND oldest_entry_at_ms IS NULL) OR
+      (pending_bytes > 0 AND oldest_entry_at_ms IS NOT NULL)
+    ),
+    UNIQUE (workspace_id, main_version_id, object_id, lineage_claim_id),
+    FOREIGN KEY (base_blob_digest)
+      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT
+) STRICT;
+
+CREATE TABLE owner_ydoc_outbox_entries (
+    outbox_id                TEXT NOT NULL,
+    sequence                 INTEGER NOT NULL CHECK (sequence >= 1),
+    append_key               TEXT NOT NULL UNIQUE,
+    delivery_id              TEXT NOT NULL UNIQUE,
+    update_digest            TEXT NOT NULL,
+    update_blob_digest       TEXT,
+    byte_length              INTEGER NOT NULL CHECK (byte_length > 0),
+    created_at_ms            INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    pending                  INTEGER NOT NULL CHECK (pending IN (0, 1)),
+    result_pending_bytes     INTEGER NOT NULL CHECK (result_pending_bytes > 0),
+    result_oldest_entry_at_ms INTEGER NOT NULL CHECK (result_oldest_entry_at_ms >= 0),
+    result_state             TEXT NOT NULL CHECK (result_state IN ('active', 'sealed')),
+    CHECK (
+      (pending = 1 AND update_blob_digest IS NOT NULL) OR
+      (pending = 0 AND update_blob_digest IS NULL)
+    ),
+    PRIMARY KEY (outbox_id, sequence),
+    FOREIGN KEY (outbox_id)
+      REFERENCES owner_ydoc_outboxes(outbox_id) ON DELETE RESTRICT,
+    FOREIGN KEY (update_blob_digest)
+      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT
+) STRICT;
+CREATE INDEX owner_ydoc_outbox_entries_pending
+    ON owner_ydoc_outbox_entries(outbox_id, sequence) WHERE pending=1;
+";
+
+pub(crate) const OWNER_YDOC_OUTBOX_MIGRATION_ID: &str = "v1-owner-ydoc-outbox";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -3492,6 +3561,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: DEFERRED_RECORD_FACTS_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_DEFERRED_RECORD_FACTS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 48,
+        id: OWNER_YDOC_OUTBOX_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_OWNER_YDOC_OUTBOX_DDL,
         sets_user_version: None,
     },
 ];

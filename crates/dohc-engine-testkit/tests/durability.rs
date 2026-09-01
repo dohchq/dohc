@@ -368,8 +368,9 @@ fn close_reopen_mutate_cycle_stays_writable() {
     // index (ordinal 43), global generation-first indexes (ordinal 44),
     // record attribution on updates and field history (ordinal 45), the
     // automation subscription and claim tables (ordinal 46), and the drained
-    // record-event decision on deferred Y.Doc coordinates (ordinal 47).
-    assert_eq!(store.migration_ledger_len().expect("ledger"), 48);
+    // record-event decision on deferred Y.Doc coordinates (ordinal 47), and
+    // the owner Y.Doc outbox (ordinal 48).
+    assert_eq!(store.migration_ledger_len().expect("ledger"), 49);
     let conflict_objects = store
         .read_with(|conn| {
             conn.query_row(

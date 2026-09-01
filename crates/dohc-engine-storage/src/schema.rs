@@ -86,6 +86,8 @@ const REQUIRED_TABLES: &[&str] = &[
     "ydoc_inactive_lineages",
     "ydoc_base_relay_candidates",
     "ydoc_recovery_decisions",
+    "owner_ydoc_outboxes",
+    "owner_ydoc_outbox_entries",
     "share_view_file_lane",
     "replication_pending_conflict_bundles",
     "replication_pending_conflict_ops",

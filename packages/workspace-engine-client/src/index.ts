@@ -10,6 +10,7 @@ export * from "./ydoc/generated/WireError";
 export * from "./ydoc/generated/WorkspaceHandle";
 export * from "./ydoc/generated/serde_json/JsonValue";
 export * from "./ydoc/ydocLiveAdapter";
+export * from "./ydoc/ownerYDocOutbox";
 export * from "./ydoc/ydocLoopbackEngine";
 export * from "./ydoc/ydocProviderSession";
 export * from "./ydoc/ydocWireContract";
