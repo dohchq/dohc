@@ -5108,10 +5108,13 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         operation: "update",
       }]);
       await waitFor(
-        () => pipeline.list().some((plugin) =>
-          plugin.id === "renamed-plugin" && plugin.status === "discovered"
-        ),
-        "Manifest identity change did not land as an unapproved discovery.",
+        () => {
+          const plugins = pipeline.list();
+          return plugins.some((plugin) =>
+            plugin.id === "renamed-plugin" && plugin.status === "discovered"
+          ) && !plugins.some((plugin) => plugin.id === "example-plugin");
+        },
+        "Manifest identity change did not finish as an unapproved discovery.",
       );
       expect(pipeline.list().some((plugin) => plugin.id === "example-plugin")).toBe(false);
       expect(

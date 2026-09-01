@@ -1,5 +1,11 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import {
   afterEach,
   beforeAll,
@@ -9,15 +15,18 @@ import {
   it,
   vi,
 } from "vitest";
+import type { GetBacklinksResult } from "../ipc/bridgeContract";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import { FileInspector } from "./FileInspector";
 
 // Keep Vite transforms out of Testing Library's one-second assertion window.
-// Read mode also preloads MarkdownEditor, so await both imports before render.
+// Read mode also preloads MarkdownEditor, while a truncated read lazy-loads
+// SourceCodeEditor, so await all three imports before render.
 beforeAll(async () => {
   await Promise.all([
     import("./markdown/IncrementalMarkdownDocument"),
     import("./editor/MarkdownEditor"),
+    import("./SourceCodeEditor"),
   ]);
 });
 
@@ -53,6 +62,7 @@ const engineDocState: UseEngineDoc = {
   readArtifactAsset: async () => {
     throw new Error("no artifact asset");
   },
+  flushPendingLocalUpdates: async () => undefined,
 };
 
 vi.mock("./collab/useEngineDoc", () => ({
@@ -67,17 +77,24 @@ const TABLE_DOCUMENT = [
   "| name | 214 |",
   "| entry | 1024 |",
   "",
+  // Cross the 64 KiB WYSIWYG threshold without using a truncated read. This
+  // test owns the non-truncated rich-read branch; the test below owns the
+  // bounded source branch for truncated Markdown.
+  "x".repeat(64 * 1024),
+  "",
 ].join("\n");
 
 describe("FileInspector renders markdown through the shared component map", () => {
   const bridgeMock = {
-    // A truncated read opens in read mode, which is where the rendered
-    // document — rather than the editor — is what the reader looks at.
+    // A document over the WYSIWYG threshold opens in read mode, which is where
+    // the rendered document — rather than the editor — is what this test reads.
     readWorkspaceText: vi.fn(async () => ({
       text: TABLE_DOCUMENT,
-      truncated: true,
+      truncated: false,
     })),
     writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
+    openFileExternally: vi.fn(async () => undefined),
+    getBacklinks: vi.fn(async (): Promise<GetBacklinksResult> => ({ sources: [] })),
     listWorkspaceFiles: vi.fn(async () => ({
       files: [{ path: "a.md", kind: "file" }],
       folders: [],
@@ -124,5 +141,54 @@ describe("FileInspector renders markdown through the shared component map", () =
     // so the page never scrolls sideways. react-markdown's bare table has no
     // wrapper at all, which is what makes this the probe for the map.
     expect(pane.parentElement?.className).toContain("overflow-x-auto");
+  });
+
+  it("shows truncated markdown in the bounded read-only source viewer", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "# Large document\n\nThis is the bounded prefix.\n",
+      truncated: true,
+    });
+    bridgeMock.getBacklinks.mockResolvedValueOnce({
+      sources: [
+        {
+          sourcePath: "notes/launch.md",
+          sourceTitle: "Launch",
+          snippets: [
+            {
+              text: "Review [[Large document]].",
+              line: 3,
+              highlightStart: 7,
+              highlightEnd: 25,
+            },
+          ],
+        },
+      ],
+    });
+    const view = render(<FileInspector workspaceId="ws-1" path="large.md" />);
+
+    const source = await screen.findByTestId("markdown-source-view");
+    const content = await waitFor(() => {
+      const found = source.querySelector(".cm-content");
+      expect(found).not.toBeNull();
+      return found as HTMLElement;
+    });
+
+    expect(content.getAttribute("contenteditable")).toBe("false");
+    expect(content.textContent).toContain("# Large document");
+    expect(screen.getByTestId("view-markdown")).toBeTruthy();
+    expect(view.container.querySelector(".dohc-readable-text")).toBeNull();
+    expect(screen.getByTestId("truncated-notice")).toBeTruthy();
+    expect(await screen.findByText("Linked mentions")).toBeTruthy();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open the full file externally" }),
+    );
+    await waitFor(() =>
+      expect(bridgeMock.openFileExternally).toHaveBeenCalledWith({
+        workspaceId: "ws-1",
+        relativePath: "large.md",
+      }),
+    );
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
   });
 });

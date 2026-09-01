@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CloudLogin } from "./CloudLogin";
 
@@ -29,7 +30,11 @@ function deferred<T>() {
 beforeEach(() => {
   vi.useRealTimers();
   vi.resetAllMocks();
-  bridgeMock.cloudStatus.mockResolvedValue({ connected: false, workspaceSynced: false });
+  bridgeMock.cloudStatus.mockResolvedValue({
+    connected: false,
+    managedCloudStatus: "unconfigured",
+    workspaceSynced: false,
+  });
   bridgeMock.cloudEnableSync.mockResolvedValue(undefined);
   bridgeMock.cloudLoginStart.mockResolvedValue({
     userCode: "ABCD",
@@ -45,6 +50,213 @@ afterEach(() => {
 });
 
 describe("CloudLogin", () => {
+  it("keeps managed Cloud unknown and offers retry when status loading fails", async () => {
+    bridgeMock.cloudStatus
+      .mockRejectedValueOnce(new Error("engine unavailable"))
+      .mockResolvedValueOnce({
+        connected: false,
+        managedCloudStatus: "ready",
+        workspaceSynced: false,
+      });
+
+    render(<CloudLogin workspaceId="ws-1" />);
+
+    expect((await screen.findByTestId("cloud-status-error")).textContent).toBe(
+      "dohc could not check the cloud connection.",
+    );
+    expect(screen.queryByTestId("cloud-managed-unconfigured")).toBeNull();
+    expect(screen.queryByTestId("cloud-server-url")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("cloud-status-retry"));
+
+    expect(await screen.findByTestId("cloud-use-self-host")).toBeTruthy();
+    expect(bridgeMock.cloudStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses the configured managed Cloud flow without showing infrastructure fields", async () => {
+    bridgeMock.cloudStatus.mockResolvedValue({
+      connected: false,
+      managedCloudStatus: "ready",
+      workspaceSynced: false,
+    });
+
+    render(<CloudLogin workspaceId="ws-1" />);
+
+    const connect = await screen.findByTestId("cloud-connect-start");
+    expect(screen.queryByTestId("cloud-server-url")).toBeNull();
+    expect(screen.queryByTestId("cloud-relay-url")).toBeNull();
+    expect(screen.getByTestId("cloud-use-self-host")).toBeTruthy();
+
+    fireEvent.click(connect);
+    await waitFor(() => expect(bridgeMock.cloudLoginStart).toHaveBeenCalledWith({}));
+  });
+
+  it("shows an explicit self-host path when managed Cloud is not configured", async () => {
+    render(<CloudLogin workspaceId="ws-1" />);
+
+    expect((await screen.findByTestId("cloud-managed-unconfigured")).textContent).toContain(
+      "isn't configured in this build",
+    );
+    expect((screen.getByTestId("cloud-server-url") as HTMLInputElement).placeholder).toBe(
+      "https://cloud.example.com",
+    );
+    expect((screen.getByTestId("cloud-relay-url") as HTMLInputElement).placeholder).toBe(
+      "https://relay.example.com",
+    );
+
+    fireEvent.click(screen.getByTestId("cloud-connect-start"));
+    const error = screen.getByRole("alert");
+    expect(error.textContent).toBe(
+      "Enter the cloud server URL and sync relay URL.",
+    );
+    const serverUrl = screen.getByTestId("cloud-server-url");
+    const relayUrl = screen.getByTestId("cloud-relay-url");
+    expect(serverUrl.getAttribute("aria-invalid")).toBe("true");
+    expect(relayUrl.getAttribute("aria-invalid")).toBe("true");
+    expect(serverUrl.getAttribute("aria-describedby")).toBe(error.id);
+    expect(relayUrl.getAttribute("aria-describedby")).toBe(error.id);
+    expect(document.activeElement).toBe(serverUrl);
+    expect(bridgeMock.cloudLoginStart).not.toHaveBeenCalled();
+  });
+
+  it("submits self-hosted origins with Enter", async () => {
+    const user = userEvent.setup();
+    render(<CloudLogin workspaceId="ws-1" />);
+
+    await user.type(
+      await screen.findByTestId("cloud-server-url"),
+      "https://cloud.example.test",
+    );
+    await user.type(
+      screen.getByTestId("cloud-relay-url"),
+      "https://relay.example.test{Enter}",
+    );
+
+    await waitFor(() =>
+      expect(bridgeMock.cloudLoginStart).toHaveBeenCalledWith({
+        serverUrl: "https://cloud.example.test",
+        relayUrl: "https://relay.example.test",
+      }),
+    );
+  });
+
+  it("reports an incomplete managed configuration without hiding self-hosting", async () => {
+    bridgeMock.cloudStatus.mockResolvedValue({
+      connected: false,
+      managedCloudStatus: "invalid",
+      workspaceSynced: false,
+    });
+
+    render(<CloudLogin workspaceId="ws-1" />);
+
+    expect((await screen.findByTestId("cloud-managed-invalid")).textContent).toContain(
+      "incomplete server settings",
+    );
+    expect(screen.getByTestId("cloud-server-url")).toBeTruthy();
+    expect(screen.getByTestId("cloud-relay-url")).toBeTruthy();
+    expect(screen.queryByTestId("cloud-use-managed")).toBeNull();
+  });
+
+  it("switches from managed Cloud to a validated self-hosted server", async () => {
+    bridgeMock.cloudStatus.mockResolvedValue({
+      connected: false,
+      managedCloudStatus: "ready",
+      workspaceSynced: false,
+    });
+
+    render(<CloudLogin workspaceId="ws-1" />);
+    fireEvent.click(await screen.findByTestId("cloud-use-self-host"));
+    expect(screen.getByTestId("cloud-use-managed")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("cloud-use-managed"));
+    expect(screen.queryByTestId("cloud-server-url")).toBeNull();
+    fireEvent.click(screen.getByTestId("cloud-use-self-host"));
+    fireEvent.change(screen.getByTestId("cloud-server-url"), {
+      target: { value: " HTTPS://Cloud.Example.Test:443/ " },
+    });
+    fireEvent.change(screen.getByTestId("cloud-relay-url"), {
+      target: { value: "https://Relay.Example.Test/" },
+    });
+    fireEvent.click(screen.getByTestId("cloud-connect-start"));
+
+    await waitFor(() =>
+      expect(bridgeMock.cloudLoginStart).toHaveBeenCalledWith({
+        serverUrl: "https://cloud.example.test",
+        relayUrl: "https://relay.example.test",
+      }),
+    );
+  });
+
+  it("rejects a self-hosted URL that is not an origin", async () => {
+    render(<CloudLogin workspaceId="ws-1" />);
+    await screen.findByTestId("cloud-server-url");
+    fireEvent.change(screen.getByTestId("cloud-server-url"), {
+      target: { value: "https://cloud.example.test/api" },
+    });
+    fireEvent.change(screen.getByTestId("cloud-relay-url"), {
+      target: { value: "https://relay.example.test" },
+    });
+    fireEvent.click(screen.getByTestId("cloud-connect-start"));
+
+    expect(screen.getByTestId("cloud-connection-error").textContent).toBe(
+      "Enter the cloud server URL as an HTTP or HTTPS origin.",
+    );
+    const serverUrl = screen.getByTestId("cloud-server-url");
+    const relayUrl = screen.getByTestId("cloud-relay-url");
+    expect(serverUrl.getAttribute("aria-invalid")).toBe("true");
+    expect(serverUrl.getAttribute("aria-describedby")).toBe(
+      "cloud-connection-error",
+    );
+    expect(relayUrl.getAttribute("aria-invalid")).toBe("false");
+    expect(relayUrl.getAttribute("aria-describedby")).toBeNull();
+    expect(document.activeElement).toBe(serverUrl);
+    expect(bridgeMock.cloudLoginStart).not.toHaveBeenCalled();
+  });
+
+  it("marks only an invalid self-hosted relay origin", async () => {
+    render(<CloudLogin workspaceId="ws-1" />);
+    await screen.findByTestId("cloud-server-url");
+    fireEvent.change(screen.getByTestId("cloud-server-url"), {
+      target: { value: "https://cloud.example.test" },
+    });
+    fireEvent.change(screen.getByTestId("cloud-relay-url"), {
+      target: { value: "https://relay.example.test/api" },
+    });
+    fireEvent.click(screen.getByTestId("cloud-connect-start"));
+
+    expect(screen.getByRole("alert").textContent).toBe(
+      "Enter the sync relay URL as an HTTP or HTTPS origin.",
+    );
+    const serverUrl = screen.getByTestId("cloud-server-url");
+    const relayUrl = screen.getByTestId("cloud-relay-url");
+    expect(serverUrl.getAttribute("aria-invalid")).toBe("false");
+    expect(serverUrl.getAttribute("aria-describedby")).toBeNull();
+    expect(relayUrl.getAttribute("aria-invalid")).toBe("true");
+    expect(relayUrl.getAttribute("aria-describedby")).toBe(
+      "cloud-connection-error",
+    );
+    expect(document.activeElement).toBe(relayUrl);
+    expect(bridgeMock.cloudLoginStart).not.toHaveBeenCalled();
+  });
+
+  it("uses loopback only when the user enters it", async () => {
+    render(<CloudLogin workspaceId="ws-1" />);
+    await screen.findByTestId("cloud-server-url");
+    fireEvent.change(screen.getByTestId("cloud-server-url"), {
+      target: { value: "http://localhost:1786" },
+    });
+    fireEvent.change(screen.getByTestId("cloud-relay-url"), {
+      target: { value: "http://localhost:1788" },
+    });
+    fireEvent.click(screen.getByTestId("cloud-connect-start"));
+
+    await waitFor(() =>
+      expect(bridgeMock.cloudLoginStart).toHaveBeenCalledWith({
+        serverUrl: "http://localhost:1786",
+        relayUrl: "http://localhost:1788",
+      }),
+    );
+  });
+
   it("ignores stale status responses after switching workspaces", async () => {
     const oldStatus = deferred<{
       connected: boolean;
@@ -79,6 +291,11 @@ describe("CloudLogin", () => {
     vi.useFakeTimers();
     const poll = deferred<{ status: "complete"; email: string }>();
     bridgeMock.cloudLoginPoll.mockImplementationOnce(() => poll.promise);
+    bridgeMock.cloudStatus.mockResolvedValue({
+      connected: false,
+      managedCloudStatus: "ready",
+      workspaceSynced: false,
+    });
 
     const { rerender } = render(<CloudLogin workspaceId="old" />);
     await act(async () => {});
@@ -203,7 +420,10 @@ describe("CloudLogin", () => {
       relayUrl: "http://localhost:1788",
     });
     const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.assign(navigator, { clipboard: { writeText } });
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
 
     render(<CloudLogin workspaceId="ws-1" />);
     const code = await screen.findByTestId("cloud-sync-code");
@@ -248,6 +468,7 @@ describe("CloudLogin", () => {
     bridgeMock.cloudStatus
       .mockResolvedValueOnce({
         connected: false,
+        managedCloudStatus: "ready",
         workspaceSynced: true,
       })
       .mockResolvedValueOnce({

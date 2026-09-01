@@ -47,6 +47,17 @@ describe("desktop user settings model", () => {
     );
   });
 
+  it("rejects the removed launch-behavior section instead of keeping a dual schema", () => {
+    const obsolete = {
+      ...DEFAULT_USER_SETTINGS,
+      appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark" as const },
+      general: { launchBehavior: "recent" },
+    };
+
+    expect(DesktopUserSettings.safeParse(obsolete).success).toBe(false);
+    expect(parseDesktopUserSettings(obsolete)).toEqual(DEFAULT_USER_SETTINGS);
+  });
+
   it("merges patches without dropping sibling sections", () => {
     const next = mergeDesktopUserSettings(DEFAULT_USER_SETTINGS, {
       appearance: { themeMode: "dark", density: "compact", reduceMotion: true },
@@ -67,7 +78,6 @@ describe("desktop user settings model", () => {
     const legacySettings = {
       version: DEFAULT_USER_SETTINGS.version,
       appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark" as const },
-      general: DEFAULT_USER_SETTINGS.general,
       editor: DEFAULT_USER_SETTINGS.editor,
       notifications: DEFAULT_USER_SETTINGS.notifications,
     };
@@ -88,7 +98,6 @@ describe("desktop user settings model", () => {
         density: "compact" as const,
         reduceMotion: true,
       },
-      general: DEFAULT_USER_SETTINGS.general,
       editor: DEFAULT_USER_SETTINGS.editor,
       notifications: DEFAULT_USER_SETTINGS.notifications,
       runner: DEFAULT_RUNNER_SETTINGS,
@@ -126,7 +135,6 @@ describe("desktop user settings model", () => {
     const legacy = {
       version: 1 as const,
       appearance: DEFAULT_USER_SETTINGS.appearance,
-      general: DEFAULT_USER_SETTINGS.general,
       editor: DEFAULT_USER_SETTINGS.editor,
       notifications: DEFAULT_USER_SETTINGS.notifications,
       runner: DEFAULT_RUNNER_SETTINGS,
@@ -275,7 +283,6 @@ describe("desktop user settings store", () => {
           ...DEFAULT_USER_SETTINGS.appearance,
           themeMode: "dark",
         },
-        general: DEFAULT_USER_SETTINGS.general,
         editor: DEFAULT_USER_SETTINGS.editor,
         notifications: DEFAULT_USER_SETTINGS.notifications,
       }),

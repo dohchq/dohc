@@ -59,6 +59,8 @@ pub struct WorkspaceSupervisor {
 pub struct SupervisorOpen {
     pub actor: ActorHandle,
     pub created_actor: bool,
+    /// Authoritative database disposition from `EngineStore::open`.
+    pub store_freshly_created: bool,
 }
 
 /// An actor removed from the registry while its `Closing` marker remains held.
@@ -177,6 +179,7 @@ impl WorkspaceSupervisor {
                             return Ok(SupervisorOpen {
                                 actor: actor.handle(),
                                 created_actor: false,
+                                store_freshly_created: actor.store_was_freshly_created(),
                             });
                         }
                         continue; // slot changed under us; re-evaluate
@@ -210,10 +213,14 @@ impl WorkspaceSupervisor {
                 WorkspaceActor::spawn_read_only(db_path.to_path_buf(), identity.clone(), 1)
             }
         };
+        let store_freshly_created = spawned
+            .as_ref()
+            .is_ok_and(WorkspaceActor::store_was_freshly_created);
         self.finalize_reservation(identity, spawned)
             .map(|actor| SupervisorOpen {
                 actor,
                 created_actor: true,
+                store_freshly_created,
             })
     }
 
@@ -424,4 +431,33 @@ fn lock(mutex: &Mutex<Registry>) -> MutexGuard<'_, Registry> {
 /// Wait on the condvar, recovering from a poisoned lock the same way.
 fn wait<'a>(cv: &Condvar, guard: MutexGuard<'a, Registry>) -> MutexGuard<'a, Registry> {
     cv.wait(guard).unwrap_or_else(|poison| poison.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WorkspaceSupervisor;
+    use dohc_engine_testkit::ScratchDir;
+
+    #[test]
+    fn open_reports_actor_ownership_and_store_disposition() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let db = scratch.engine_db_path().expect("engine db path");
+        let supervisor = WorkspaceSupervisor::new();
+
+        let first = supervisor.open(&db, 1).expect("first open");
+        assert!(first.created_actor);
+        assert!(first.store_freshly_created);
+
+        let attached = supervisor.open(&db, 2).expect("attach to active actor");
+        assert!(!attached.created_actor);
+        assert!(attached.store_freshly_created);
+        drop((first, attached));
+
+        supervisor.close(&db).expect("close fresh actor");
+        let reopened = supervisor.open(&db, 3).expect("reopen existing store");
+        assert!(reopened.created_actor);
+        assert!(!reopened.store_freshly_created);
+        drop(reopened);
+        supervisor.close(&db).expect("close reopened actor");
+    }
 }

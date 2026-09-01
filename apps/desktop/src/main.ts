@@ -182,13 +182,11 @@ import {
   TryInWorkspaceVersionResult,
   WorkspaceVersionRecord,
   ListEngineMomentsPayload,
-  ListEngineMomentsResult,
   ReadEngineMomentPayload,
   ReadEngineMomentResult,
   RestoreEngineMomentFilePayload,
   RestoreEngineMomentFileResult,
   ListFileChatsPayload,
-  ListFileChatsResult,
   CreateFileChatPayload,
   CreateFileChatResult,
   ListChatMessagesPayload,
@@ -314,6 +312,7 @@ import { registerPluginIpcHandlers } from "./ipc/pluginIpcHandlers";
 import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
 import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMutationOwner";
 import { registerWorkspaceSearchIpcHandlers } from "./ipc/workspaceSearchIpc";
+import { listFileChatsForIpc } from "./ipc/fileChatsIpc";
 // The relay presence transport is a dependency-free module (no DOM/React): main
 // reuses it so the presence wire contract (routes, publish/leave/poll) lives in
 // ONE place. Main is the ONLY holder of the relay bearer token — the renderer's
@@ -463,6 +462,7 @@ import {
   type ShareLogPage,
 } from "./workspaces/dmChats";
 import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
+import { resolveManagedCloudConfiguration } from "./workspaces/cloudConfiguration";
 import {
   clearDeclinedDm,
   declineDm,
@@ -577,7 +577,7 @@ import {
 } from "./workspaces/workspaceSecretEnrollmentState";
 import {
   engineMomentDetailForIpc,
-  engineMomentForIpc,
+  listEngineMomentsForIpc,
   versionConflictForIpc,
 } from "./ipc/engineHistoryIpc";
 import {
@@ -588,6 +588,7 @@ import {
 import type { WorkspaceEngineCapture } from "./workspaces/workspaceEngineCapture";
 import { probeEngineStoreRefusal } from "./workspaces/workspaceEngineCapture";
 import { createReceivedShareEngineAccess } from "./workspaces/receivedShareEngineAccess";
+import { waitForReceivedShareCaptureReady } from "./workspaces/receivedShareCaptureReady";
 import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLiveStore";
 import type { ActiveAgentRun } from "./workspaces/workspaceWatcher";
 import {
@@ -624,6 +625,7 @@ import {
   type AttachedEngineWorkspace,
   type EngineWorkspace,
 } from "@dohc/workspace-engine-client/daemon";
+import { createDesktopEngineWorkspaceSessions } from "./workspaces/desktopEngineWorkspaceSessions";
 import {
   createDesktopLinkedChatStore,
   type DesktopLinkedChatStore,
@@ -1011,6 +1013,10 @@ function createPluginWorkspaceRuntimeParts(
         }
         return pluginHostRef.requestDriver(pluginId, spawnId, method, params);
       },
+      stopDriverSpawn: (pluginId, spawnId) => {
+        if (!pluginHostRef) return Promise.resolve();
+        return pluginHostRef.stopDriverSpawn(pluginId, spawnId);
+      },
     },
     reservedDriverIds: BUILT_IN_AGENT_DRIVER_IDS,
   });
@@ -1359,6 +1365,7 @@ function testImportPaths(): string[] | null {
 // handlers register inside whenReady. The session token lives encrypted in
 // the credential store and never crosses IPC.
 let cachedCloudLogin: CloudLogin | null = null;
+const managedCloudConfiguration = resolveManagedCloudConfiguration(process.env);
 function cloudLogin(): CloudLogin {
   if (!cachedCloudLogin) {
     cachedCloudLogin = createCloudLogin({
@@ -1371,7 +1378,12 @@ function cloudLogin(): CloudLogin {
             safeStorage.decryptString(Buffer.from(cipherText, "base64")),
         },
       }),
-      defaultServerUrl: process.env.DOHC_CLOUD_URL ?? "http://localhost:1786",
+      ...(managedCloudConfiguration.status === "ready"
+        ? {
+            defaultServerUrl: managedCloudConfiguration.serverUrl,
+            defaultRelayUrl: managedCloudConfiguration.relayUrl,
+          }
+        : {}),
     });
   }
   return cachedCloudLogin;
@@ -7344,6 +7356,7 @@ function registerIpcHandlers(
     }
     return CloudStatusResult.parse({
       ...status,
+      managedCloudStatus: managedCloudConfiguration.status,
       ...(input.workspaceId
         ? {
             workspaceSynced: !!workspace?.remote,
@@ -9754,15 +9767,37 @@ function registerIpcHandlers(
         // physical operation is already held before this wait begins.
         await engineDaemonStartup;
         operation.assertCurrent();
-        const workspace = operation.workspace;
-        if (!shareViewIsPresent(workspace.shareView)) {
-          throw new Error("This workspace is not a shared view.");
-        }
-        if (!workspace.shareView) {
-          throw new Error(
-            "This shared view's record is damaged, so it can't refresh safely. Remove it, then open the share code again.",
-          );
-        }
+        const currentShareViewWorkspace = () => {
+          operation.assertCurrent();
+          const current = operation.workspace;
+          const shareView = current.shareView;
+          if (!shareViewIsPresent(shareView)) {
+            throw new Error("This workspace is not a shared view.");
+          }
+          if (!shareView) {
+            throw new Error(
+              "This shared view's record is damaged, so it can't refresh safely. Remove it, then open the share code again.",
+            );
+          }
+          return { ...current, shareView };
+        };
+        let workspace = currentShareViewWorkspace();
+        // A proven large fresh import can publish its workspace handle before
+        // initial capture finishes. Every share.* RPC stays fenced until the
+        // phase reaches ready or degraded, including the Edit identity call
+        // below. Wait before relay work and before taking the workspace file
+        // scheduler so the shell remains usable and a workspace switch stops
+        // the background refresh promptly.
+        const shareStore = receivedShareEngine.storeFor({
+          engineWorkspaceId: workspace.workspaceId,
+          rootPath: workspace.rootPath,
+          attachmentId: workspace.attachmentId,
+        });
+        await waitForReceivedShareCaptureReady({
+          readStatus: shareStore.watcherStatus?.bind(shareStore),
+          assertCurrent: () => operation.assertCurrent(),
+        });
+        workspace = currentShareViewWorkspace();
         // Refresh the relay-derived chat fact for the banner's next step. It
         // does not grant desktop generic-chat writes. Keep the share identity
         // current for the separate Edit proposal lane.
@@ -10761,21 +10796,16 @@ function registerIpcHandlers(
       input.workspaceId,
       "Engine history",
     );
-    const page = await capture.listMoments({
-      ...(input.limit !== undefined ? { limit: input.limit } : {}),
-      ...(input.beforeMomentOrder !== undefined
-        ? { beforeMomentOrder: input.beforeMomentOrder }
-        : {}),
-    });
-    return ListEngineMomentsResult.parse({
-      moments: page.moments.map((moment) =>
-        engineMomentForIpc(moment, agentAuthorDisplayName),
-      ),
-      nextBeforeMomentOrder: page.nextBeforeMomentOrder,
-      latestMomentOrder: page.latestMomentOrder,
-      activeVersionId: page.activeVersionId,
-      protectedTruncated: page.protectedTruncated,
-    });
+    return listEngineMomentsForIpc(
+      () =>
+        capture.listMoments({
+          ...(input.limit !== undefined ? { limit: input.limit } : {}),
+          ...(input.beforeMomentOrder !== undefined
+            ? { beforeMomentOrder: input.beforeMomentOrder }
+            : {}),
+        }),
+      agentAuthorDisplayName,
+    );
   });
 
   ipcMain.handle(CHANNELS.readEngineMoment, async (event, payload) => {
@@ -10812,18 +10842,20 @@ function registerIpcHandlers(
     // is one the share already served, and an out-of-selector thread was
     // never served by the relay nor applied by the engine boundary — there is
     // no superset here to filter.
-    const scope = await requireChatScope(input.workspaceId);
-    const { workspace, store } = scope;
-    const fileObjectId = await chatFileObjectId(scope, input.path);
-    const threads = fileObjectId
-      ? await store.listThreadsForFile({
-          workspaceId: workspace.workspaceId,
-          objectId: fileObjectId,
-        })
-      : [];
-    return ListFileChatsResult.parse({
-      fileObjectId,
-      threads: threads.map(chatThreadForIpc),
+    return listFileChatsForIpc(async () => {
+      const scope = await requireChatScope(input.workspaceId);
+      const { workspace, store } = scope;
+      const fileObjectId = await chatFileObjectId(scope, input.path);
+      const threads = fileObjectId
+        ? await store.listThreadsForFile({
+            workspaceId: workspace.workspaceId,
+            objectId: fileObjectId,
+          })
+        : [];
+      return {
+        fileObjectId,
+        threads: threads.map(chatThreadForIpc),
+      };
     });
   });
 
@@ -13186,7 +13218,8 @@ async function startRustEngineDaemon(): Promise<boolean> {
       rustEngineDaemon,
       relayTransportRoutes,
     );
-    rustEngineWorkspaceSessions = new EngineWorkspaceSessions(relaySource);
+    rustEngineWorkspaceSessions =
+      createDesktopEngineWorkspaceSessions(relaySource);
     rustEngineRelayClient = new EngineRelayClient({
       sessions: rustEngineWorkspaceSessions,
       routes: relayTransportRoutes,

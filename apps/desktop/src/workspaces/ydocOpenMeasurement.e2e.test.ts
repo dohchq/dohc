@@ -49,6 +49,12 @@ const SLOWEST_HEALTHY_MACHINE_FACTOR = 40;
 // than the reason for its size.
 const LIVE_MEASUREMENT_FACTOR = 8;
 
+// The lifecycle's background startup smoke is not part of this measurement.
+// Give it a 30-second harness deadline so full-suite contention
+// cannot kill the shared transport before ydoc.open records its own 5-second
+// deadline.
+const MEASUREMENT_HARNESS_REQUEST_TIMEOUT_MS = 30_000;
+
 // One transport per measurement, and so one open per transport: `openMs` is
 // undefined until that open answers, and a second one would be a harness bug
 // rather than a sample to keep.
@@ -128,6 +134,7 @@ it.skipIf(engine.missing)(
     let lifecycle = new EngineDaemonLifecycle({
       command: engine.require(),
       maxRestarts: 0,
+      requestTimeoutMs: MEASUREMENT_HARNESS_REQUEST_TIMEOUT_MS,
     });
     await lifecycle.start();
     let sessions = createRealDaemonWorkspaceSessions(lifecycle);
@@ -228,6 +235,7 @@ it.skipIf(engine.missing)(
       lifecycle = new EngineDaemonLifecycle({
         command: engine.require(),
         maxRestarts: 0,
+        requestTimeoutMs: MEASUREMENT_HARNESS_REQUEST_TIMEOUT_MS,
       });
       await lifecycle.start();
       sessions = createRealDaemonWorkspaceSessions(lifecycle);

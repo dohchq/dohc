@@ -1237,6 +1237,7 @@ test("Comment handoff opens files without creating a second generic chat", async
         refusal = error instanceof Error ? error.message : String(error);
       }
       const threads = await api.listFileChats({ workspaceId, path: "docs/shared.md" });
+      if ("status" in threads) throw new Error(threads.code);
       return {
         refusal,
         threadCount: threads.threads.length,
@@ -1369,6 +1370,7 @@ test("direct named Comment keeps desktop generic chat read-only", async () => {
         refusal = error instanceof Error ? error.message : String(error);
       }
       const threads = await api.listFileChats({ workspaceId, path: "docs/shared.md" });
+      if ("status" in threads) throw new Error(threads.code);
       // The workspace-wide listing is NOT routed to a share view: a share
       // view gets per-file chat only, and #627 is the reason the whole
       // surface is refused rather than filtered.

@@ -101,6 +101,8 @@ describe("SitePreviewPage", () => {
     expect(sandbox).not.toContain("allow-popups");
     expect(sandbox).not.toContain("allow-modals");
     expect(sandbox).not.toContain("allow-top-navigation");
+    expect(frame.style.colorScheme).toBe("light");
+    expect(frame.style.backgroundColor).toBe("canvas");
     const frameUrl = new URL(frame.getAttribute("src") ?? "");
     expect(frameUrl.origin).toBe("http://127.0.0.1:49152");
     expect(frameUrl.searchParams.has("dohcHostOrigin")).toBe(false);

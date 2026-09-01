@@ -1,4 +1,7 @@
-import type { ArtifactAssetDescriptor } from "@dohc/workspace-engine-client";
+import {
+  DaemonRefusalError,
+  type ArtifactAssetDescriptor,
+} from "@dohc/workspace-engine-client";
 import * as Y from "yjs";
 import { describe, expect, it, vi } from "vitest";
 
@@ -994,6 +997,17 @@ describe("engine Y.Doc IPC adapter", () => {
       ],
       [
         new YDocSessionUnreleasedError("notes/a.md", new Error("held")),
+        { available: false, engineMayHoldDocument: true },
+      ],
+      [
+        new DaemonRefusalError(
+          {
+            code: "OVERLOADED",
+            message: "Workspace is still updating. Try again.",
+            retry: "afterBackoff",
+          },
+          undefined,
+        ),
         { available: false, engineMayHoldDocument: true },
       ],
       [

@@ -28,6 +28,7 @@ import {
   type VersionedComparisonRecord,
   type VersionedTextListEntry,
   type VersionedTextReadValue,
+  type WatcherStatusResult,
 } from "@dohc/workspace-engine-client";
 import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
@@ -155,11 +156,7 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
   }>;
   flushCapture?(): Promise<void>;
   reconcileCapture?(): Promise<void>;
-  watcherStatus?(): Promise<{
-    running: boolean;
-    degraded: boolean;
-    terminal: boolean;
-  }>;
+  watcherStatus?(): Promise<WatcherStatusResult>;
   setCaptureAuthor?(author: MomentAuthor | null): Promise<void>;
 };
 
@@ -1266,6 +1263,19 @@ export function createCaptureLiveStores(
       // A second switch straight after the first therefore threw
       // "did not settle" at whoever asked for it.
       let outcome = await runRead(async (adapter) => await adapter.flushCapture());
+      if (!outcome.settled) {
+        const status = await runRead(async (adapter) => await adapter.watcherStatus());
+        if (status.phase === "starting" || status.phase === "importing") {
+          throw new DaemonRefusalError(
+            {
+              code: "OVERLOADED",
+              message: "Workspace is still updating. Try again.",
+              retry: "afterBackoff",
+            },
+            undefined,
+          );
+        }
+      }
       for (
         let attempt = 0;
         !outcome.settled && attempt < FLUSH_SETTLE_ATTEMPTS;

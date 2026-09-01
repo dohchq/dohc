@@ -164,7 +164,7 @@ function formatDay(recordedAtMs: number): { label: string; dateTime: string } {
 function MomentRow(props: {
   moment: EngineMomentRecord;
   nested?: boolean;
-  onOpenMoment: (momentId: string) => void;
+  onOpenMoment: (momentId: string, filePath: string) => void;
 }) {
   const { moment } = props;
   const recordedAt = formatRecordedAt(moment.recordedAtMs);
@@ -179,7 +179,7 @@ function MomentRow(props: {
       data-moment-path={moment.path}
       title={`Open diff for ${moment.path}`}
       aria-label={`Open diff for ${moment.path}`}
-      onClick={() => props.onOpenMoment(moment.id)}
+      onClick={() => props.onOpenMoment(moment.id, moment.path)}
       className={`block w-full px-3 py-2 text-left transition-colors hover:bg-line/25 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent ${
         props.nested ? "pl-8" : ""
       }`}
@@ -247,7 +247,7 @@ function MomentRow(props: {
 
 function GroupRow(props: {
   group: EngineHistoryGroup;
-  onOpenMoment: (momentId: string) => void;
+  onOpenMoment: (momentId: string, filePath: string) => void;
 }) {
   const { group } = props;
   const [expanded, setExpanded] = useState(false);
@@ -328,7 +328,7 @@ export function EngineHistoryView(props: {
   loadingMore: boolean;
   protectedTruncated: boolean;
   onLoadMore: () => void;
-  onOpenMoment: (momentId: string) => void;
+  onOpenMoment: (momentId: string, filePath: string) => void;
 }) {
   const [query, setQuery] = useState("");
   const normalizedQuery = query.trim().toLowerCase();

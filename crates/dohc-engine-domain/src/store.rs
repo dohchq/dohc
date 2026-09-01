@@ -55,6 +55,12 @@ pub const INBAND_CONTENT_CAP_BYTES: usize = 48 * 1024;
 // constant so they cannot drift.
 const _: () = assert!(INBAND_CONTENT_CAP_BYTES == 49152);
 
+// `get_moment` hydrates text payloads through this larger history-only cap.
+// Its SQL is static, so keep the construction path for prepared capture
+// results pinned to the same literal.
+const MOMENT_TEXT_HYDRATION_CAP_BYTES: usize = 128 * 1024;
+const _: () = assert!(MOMENT_TEXT_HYDRATION_CAP_BYTES == 131072);
+
 /// The versioning domain bound to one workspace store. Cheap to construct per
 /// call; holds only a mutable borrow of the writer.
 pub struct VersionedTextStore<'a> {
@@ -92,27 +98,7 @@ impl<'a> VersionedTextStore<'a> {
         let ws = workspace_id.to_owned();
         let ver = main_version_id.to_owned();
         let outcome = self.store.write_with(faults, |tx| {
-            tx.execute(
-                "INSERT INTO versioned_workspaces (workspace_id, main_version_id) VALUES (?1, ?2)",
-                params![ws, ver],
-            )
-            .map_err(DomainError::sql_persist)?;
-            tx.execute(
-                "INSERT INTO versions \
-                 (workspace_id, version_id, kind, name, created_at_ms, fork_version_id, fork_moment_id) \
-                 VALUES (?1, ?2, 'main', 'Main', ?3, NULL, NULL)",
-                params![ws, ver, now_ms],
-            )
-            .map_err(DomainError::sql_persist)?;
-            Ok::<_, DomainError>(VersionRecord {
-                workspace_id: ws.clone(),
-                version_id: ver.clone(),
-                kind: VersionKind::Main,
-                name: "Main".to_owned(),
-                created_at_ms: now_ms,
-                fork_version_id: None,
-                fork_moment_id: None,
-            })
+            ensure_main_version_in_tx(tx, &ws, &ver, now_ms)
         })?;
         committed(outcome)
     }
@@ -2034,6 +2020,46 @@ impl<'a> VersionedTextStore<'a> {
     }
 }
 
+/// Ensure the workspace's main version inside the caller's transaction.
+///
+/// Capture uses this seam so root-identity validation, first-version
+/// bootstrap, and the captured file commit share one rollback boundary.
+pub fn ensure_main_version_in_tx(
+    tx: &Connection,
+    workspace_id: &str,
+    main_version_id: &str,
+    now_ms: i64,
+) -> Result<VersionRecord, DomainError> {
+    validate_identifier(workspace_id, "workspace_id")?;
+    validate_identifier(main_version_id, "version_id")?;
+
+    if let Some(existing_main) = workspace_main_version_id(tx, workspace_id)? {
+        return get_version(tx, workspace_id, &existing_main)?.ok_or(DomainError::VersionNotFound);
+    }
+
+    tx.execute(
+        "INSERT INTO versioned_workspaces (workspace_id, main_version_id) VALUES (?1, ?2)",
+        params![workspace_id, main_version_id],
+    )
+    .map_err(DomainError::sql_persist)?;
+    tx.execute(
+        "INSERT INTO versions \
+         (workspace_id, version_id, kind, name, created_at_ms, fork_version_id, fork_moment_id) \
+         VALUES (?1, ?2, 'main', 'Main', ?3, NULL, NULL)",
+        params![workspace_id, main_version_id, now_ms],
+    )
+    .map_err(DomainError::sql_persist)?;
+    Ok(VersionRecord {
+        workspace_id: workspace_id.to_owned(),
+        version_id: main_version_id.to_owned(),
+        kind: VersionKind::Main,
+        name: "Main".to_owned(),
+        created_at_ms: now_ms,
+        fork_version_id: None,
+        fork_moment_id: None,
+    })
+}
+
 struct RollbackPrep {
     moment: MomentRecord,
     before: Option<SnapshotRecord>,
@@ -2093,6 +2119,130 @@ pub struct ProjectedWriteText<'a> {
     pub request_id: Option<&'a str>,
 }
 
+/// State the caller has already proved for one text mutation. Keeping this
+/// private makes the domain write the only persistence implementation while
+/// letting autonomous capture reuse the object binding, preimage, and moment
+/// order it had to resolve before deriving its collision-resistant moment id.
+struct PreparedTextWrite {
+    object_id: String,
+    before: Option<SnapshotRecord>,
+    moment_order: i64,
+    content_sha256: String,
+    bind_object: bool,
+    bind_alias: bool,
+    known_object: Option<FileObjectRecord>,
+    #[cfg(test)]
+    capture_prepared: bool,
+}
+
+struct ResolvedCaptureObject {
+    object_id: String,
+    reserved_moment_order: Option<i64>,
+    known_object: Option<FileObjectRecord>,
+}
+
+/// Transaction-local facts shared by one actor-owned capture batch.
+///
+/// The runtime advances `next_moment_order` only after an item's effects have
+/// been accepted by the surrounding rollback scope. Keeping the proposed order
+/// immutable while an item runs makes a failed or deduped item consume nothing,
+/// while still giving object disambiguation and moment derivation the same
+/// candidate.
+#[doc(hidden)]
+pub struct CaptureIngestBatchContext {
+    workspace_id: String,
+    version_id: String,
+    producer_id: Option<String>,
+    moment_order_cursor: CaptureMomentOrderCursor,
+}
+
+#[derive(Clone, Copy)]
+enum CaptureMomentOrderCursor {
+    Uninitialized,
+    Ready(i64),
+    Exhausted,
+}
+
+impl CaptureIngestBatchContext {
+    /// Establish the shared coordinate. Producer and order stay lazy so an
+    /// all-dedupe replay keeps the legacy short-circuit and does not gain
+    /// unrelated failure modes.
+    pub fn new(
+        tx: &Transaction<'_>,
+        workspace_id: &str,
+        version_id: &str,
+    ) -> Result<Self, DomainError> {
+        if !version_exists(tx, workspace_id, version_id)? {
+            return Err(DomainError::VersionNotFound);
+        }
+        Ok(Self {
+            workspace_id: workspace_id.to_owned(),
+            version_id: version_id.to_owned(),
+            producer_id: None,
+            moment_order_cursor: CaptureMomentOrderCursor::Uninitialized,
+        })
+    }
+
+    /// Advance after the surrounding rollback scope accepts the item's side
+    /// effects. A dedupe points at an existing moment and consumes no order.
+    pub fn commit_result(&mut self, result: &WriteResult) -> Result<(), DomainError> {
+        if result.deduped {
+            return Ok(());
+        }
+        let next_moment_order = match self.moment_order_cursor {
+            CaptureMomentOrderCursor::Ready(next_moment_order) => next_moment_order,
+            CaptureMomentOrderCursor::Uninitialized => {
+                return Err(DomainError::StateCorrupt {
+                    reason: "capture batch committed a moment without reserving an order",
+                });
+            }
+            CaptureMomentOrderCursor::Exhausted => {
+                return Err(DomainError::StateCorrupt {
+                    reason: "capture batch committed a moment after order exhaustion",
+                });
+            }
+        };
+        if result.moment.moment_order != next_moment_order {
+            return Err(DomainError::StateCorrupt {
+                reason: "capture batch moment order diverged from its cursor",
+            });
+        }
+        self.moment_order_cursor = match next_moment_order.checked_add(1) {
+            Some(next_moment_order) => CaptureMomentOrderCursor::Ready(next_moment_order),
+            None => CaptureMomentOrderCursor::Exhausted,
+        };
+        Ok(())
+    }
+
+    fn validates(&self, input: &CaptureIngest) -> bool {
+        input.workspace_id == self.workspace_id && input.version_id == self.version_id
+    }
+
+    fn proposed_moment_order(&mut self, tx: &Transaction<'_>) -> Result<i64, DomainError> {
+        match self.moment_order_cursor {
+            CaptureMomentOrderCursor::Ready(next_moment_order) => Ok(next_moment_order),
+            CaptureMomentOrderCursor::Uninitialized => {
+                let next_moment_order = next_moment_order(tx)?;
+                self.moment_order_cursor = CaptureMomentOrderCursor::Ready(next_moment_order);
+                Ok(next_moment_order)
+            }
+            CaptureMomentOrderCursor::Exhausted => Err(DomainError::StateCorrupt {
+                reason: "capture batch moment order overflowed",
+            }),
+        }
+    }
+
+    fn producer_id(&mut self, tx: &Transaction<'_>) -> Result<&str, DomainError> {
+        if self.producer_id.is_none() {
+            self.producer_id = Some(capture_producer_id(tx, &self.workspace_id)?);
+        }
+        Ok(self
+            .producer_id
+            .as_deref()
+            .expect("capture producer was initialized"))
+    }
+}
+
 impl<'a> From<&'a WriteText> for ProjectedWriteText<'a> {
     fn from(input: &'a WriteText) -> Self {
         Self {
@@ -2116,6 +2266,8 @@ impl<'a> From<&'a WriteText> for ProjectedWriteText<'a> {
 thread_local! {
     static WRITE_TEXT_OWNERSHIP_COUNTS: std::cell::Cell<(usize, usize)> =
         const { std::cell::Cell::new((0, 0)) };
+    static CAPTURE_PREPARED_WRITE_COUNTS: std::cell::Cell<(usize, usize)> =
+        const { std::cell::Cell::new((0, 0)) };
 }
 
 #[cfg(test)]
@@ -2138,6 +2290,24 @@ fn reset_write_text_ownership_counts() {
 #[cfg(test)]
 fn write_text_ownership_counts() -> (usize, usize) {
     WRITE_TEXT_OWNERSHIP_COUNTS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn reset_capture_prepared_write_counts() {
+    CAPTURE_PREPARED_WRITE_COUNTS.with(|counts| counts.set((0, 0)));
+}
+
+#[cfg(test)]
+fn note_capture_prepared_write(read_back: bool) {
+    CAPTURE_PREPARED_WRITE_COUNTS.with(|counts| {
+        let (prepared, read_backs) = counts.get();
+        counts.set((prepared + 1, read_backs + usize::from(read_back)));
+    });
+}
+
+#[cfg(test)]
+fn capture_prepared_write_counts() -> (usize, usize) {
+    CAPTURE_PREPARED_WRITE_COUNTS.with(std::cell::Cell::get)
 }
 
 /// Validate a write and normalize only its path through the R07
@@ -2246,8 +2416,43 @@ pub fn capture_ingest_with_admission_in_tx<E>(
 where
     E: From<DomainError>,
 {
+    capture_ingest_with_context_and_admission_in_tx(tx, input, None, admit)
+}
+
+/// Capture one item using facts reserved by its actor-owned batch.
+#[doc(hidden)]
+pub fn capture_ingest_in_batch_with_admission_in_tx<E>(
+    tx: &Transaction<'_>,
+    input: &CaptureIngest,
+    batch: &mut CaptureIngestBatchContext,
+    admit: impl FnOnce(&str, &str, &str) -> Result<(), E>,
+) -> Result<WriteResult, E>
+where
+    E: From<DomainError>,
+{
+    capture_ingest_with_context_and_admission_in_tx(tx, input, Some(batch), admit)
+}
+
+fn capture_ingest_with_context_and_admission_in_tx<E>(
+    tx: &Transaction<'_>,
+    input: &CaptureIngest,
+    mut batch: Option<&mut CaptureIngestBatchContext>,
+    admit: impl FnOnce(&str, &str, &str) -> Result<(), E>,
+) -> Result<WriteResult, E>
+where
+    E: From<DomainError>,
+{
     let input = normalized_capture_ingest(input)?;
-    if !version_exists(tx, &input.workspace_id, &input.version_id)? {
+    if batch
+        .as_deref()
+        .is_some_and(|batch| !batch.validates(&input))
+    {
+        return Err(DomainError::InvalidInput {
+            reason: "capture batch coordinates do not match",
+        }
+        .into());
+    }
+    if batch.is_none() && !version_exists(tx, &input.workspace_id, &input.version_id)? {
         return Err(DomainError::VersionNotFound.into());
     }
     let (author_kind, author_json) = match input.author_json.as_deref() {
@@ -2261,25 +2466,28 @@ where
     let (summary_kind, summary) = hash_optional_text_fields(input.metadata_summary.as_deref());
     let (correlation_kind, correlation) =
         hash_optional_text_fields(input.metadata_correlation_id.as_deref());
-    let payload_hash = hash_fields(&[
-        b"capture-ingest",
-        input.workspace_id.as_bytes(),
-        input.version_id.as_bytes(),
-        input.path.as_bytes(),
-        input.text.as_bytes(),
-        input.metadata_origin.as_bytes(),
-        summary_kind,
-        summary,
-        correlation_kind,
-        correlation,
-        author_kind,
-        author_json,
-        if input.claim_foreign_head {
-            b"claim-foreign".as_slice()
-        } else {
-            b"own-only".as_slice()
-        },
-    ]);
+    let payload_hash = hash_request_fields(
+        input.request_id.as_deref(),
+        &[
+            b"capture-ingest",
+            input.workspace_id.as_bytes(),
+            input.version_id.as_bytes(),
+            input.path.as_bytes(),
+            input.text.as_bytes(),
+            input.metadata_origin.as_bytes(),
+            summary_kind,
+            summary,
+            correlation_kind,
+            correlation,
+            author_kind,
+            author_json,
+            if input.claim_foreign_head {
+                b"claim-foreign".as_slice()
+            } else {
+                b"own-only".as_slice()
+            },
+        ],
+    );
     if let Some(request_id) = &input.request_id
         && let Some(recorded) = lookup_request(tx, request_id)?
     {
@@ -2290,20 +2498,31 @@ where
             .map_err(E::from);
     }
 
-    let target_object_id =
-        alias_object_id(tx, &input.workspace_id, &input.version_id, &input.path)?.unwrap_or_else(
-            || derive_capture_object_id(&input.workspace_id, &input.version_id, &input.path),
-        );
+    let existing_alias = alias_object_id(tx, &input.workspace_id, &input.version_id, &input.path)?;
+    let target_object_id = existing_alias.clone().unwrap_or_else(|| {
+        derive_capture_object_id(&input.workspace_id, &input.version_id, &input.path)
+    });
     admit(&input.workspace_id, &input.version_id, &target_object_id)?;
 
-    let (object_id, reserved_moment_order) = resolve_capture_object(
+    let resolved = resolve_capture_object(
         tx,
         &input.workspace_id,
         &input.version_id,
         &input.path,
         input.now_ms,
+        existing_alias,
+        batch.as_deref_mut(),
     )?;
-    let before = get_snapshot(tx, &input.workspace_id, &input.version_id, &object_id)?;
+    let before = if resolved.known_object.is_some() {
+        None
+    } else {
+        get_snapshot(
+            tx,
+            &input.workspace_id,
+            &input.version_id,
+            &resolved.object_id,
+        )?
+    };
     // OWNERSHIP: capture only overwrites heads written with ITS OWN origin.
     // A head that arrived by another route (RPC, replication) may have no
     // disk counterpart at all, so letting disk bytes overwrite it would
@@ -2332,7 +2551,7 @@ where
                     input.metadata_origin,
                     input.workspace_id,
                     input.version_id,
-                    object_id
+                    resolved.object_id
                 ],
             )
             .map_err(DomainError::sql_persist)?;
@@ -2375,34 +2594,56 @@ where
         author_json,
         now_ms.as_bytes(),
     ]);
-    let next_order = match reserved_moment_order {
+    let next_order = match resolved.reserved_moment_order {
         Some(next_order) => next_order,
-        None => next_moment_order(tx)?,
+        None => match batch.as_deref_mut() {
+            Some(batch) => batch.proposed_moment_order(tx)?,
+            None => next_moment_order(tx)?,
+        },
     };
-    let producer_id = capture_producer_id(tx, &input.workspace_id)?;
+    let producer_id = match batch {
+        Some(batch) => Cow::Borrowed(batch.producer_id(tx)?),
+        None => Cow::Owned(capture_producer_id(tx, &input.workspace_id)?),
+    };
     let moment_id = derive_capture_moment_id(
-        &producer_id,
+        producer_id.as_ref(),
         &input.workspace_id,
-        &object_id,
+        &resolved.object_id,
         next_order,
         "write",
         &mutation_identity,
     );
-    let write = WriteText {
-        workspace_id: input.workspace_id.clone(),
-        version_id: input.version_id.clone(),
-        object_id,
-        path: input.path.clone(),
-        text: input.text.clone(),
-        moment_id,
-        metadata_origin: input.metadata_origin.clone(),
-        metadata_summary,
-        metadata_correlation_id: input.metadata_correlation_id.clone(),
-        author_json: input.author_json.clone(),
+    let write = normalized_write_input(ProjectedWriteText {
+        workspace_id: &input.workspace_id,
+        version_id: &input.version_id,
+        object_id: &resolved.object_id,
+        path: Cow::Borrowed(&input.path),
+        text: Cow::Borrowed(&input.text),
+        moment_id: &moment_id,
+        metadata_origin: &input.metadata_origin,
+        metadata_summary: metadata_summary.as_deref(),
+        metadata_correlation_id: input.metadata_correlation_id.as_deref(),
+        author_json: input.author_json.as_deref(),
         now_ms: input.now_ms,
         request_id: None,
-    };
-    let result = write_text_in_tx(tx, &write)?;
+    })?;
+    let result = write_normalized_text_in_tx_with_journal(
+        tx,
+        write,
+        true,
+        false,
+        Some(PreparedTextWrite {
+            object_id: resolved.object_id.clone(),
+            before,
+            moment_order: next_order,
+            content_sha256,
+            bind_object: false,
+            bind_alias: false,
+            known_object: resolved.known_object,
+            #[cfg(test)]
+            capture_prepared: true,
+        }),
+    )?;
     if result.moment.moment_order != next_order {
         return Err(DomainError::StateCorrupt {
             reason: "capture moment order diverged from reserved order",
@@ -2679,16 +2920,24 @@ where
             .map_err(E::from);
     }
 
-    let target_object_id = alias_object_id(tx, &input.workspace_id, &input.version_id, &path)?
+    let existing_alias = alias_object_id(tx, &input.workspace_id, &input.version_id, &path)?;
+    let target_object_id = existing_alias
+        .clone()
         .unwrap_or_else(|| derive_capture_object_id(&input.workspace_id, &input.version_id, &path));
     admit(&input.workspace_id, &input.version_id, &target_object_id)?;
 
-    let (object_id, reserved_moment_order) = resolve_capture_object(
+    let ResolvedCaptureObject {
+        object_id,
+        reserved_moment_order,
+        ..
+    } = resolve_capture_object(
         tx,
         &input.workspace_id,
         &input.version_id,
         &path,
         input.now_ms,
+        existing_alias,
+        None,
     )?;
     let before = get_snapshot(tx, &input.workspace_id, &input.version_id, &object_id)?;
     if let Some(existing) = &before
@@ -3142,7 +3391,7 @@ pub fn write_projected_text_in_tx<'a>(
     // alias exists — the settle that follows is binding ITS OWN object,
     // not colliding with another.
     let input = normalized_write_input(input.into())?;
-    write_normalized_text_in_tx_with_journal(tx, input, false, true)
+    write_normalized_text_in_tx_with_journal(tx, input, false, true, None)
 }
 
 fn write_text_in_tx_with_journal(
@@ -3152,7 +3401,7 @@ fn write_text_in_tx_with_journal(
     allow_preallocated_object: bool,
 ) -> Result<WriteResult, DomainError> {
     let input = normalized_write_input(input.into())?;
-    write_normalized_text_in_tx_with_journal(tx, input, journal, allow_preallocated_object)
+    write_normalized_text_in_tx_with_journal(tx, input, journal, allow_preallocated_object, None)
 }
 
 fn write_normalized_text_in_tx_with_journal(
@@ -3160,33 +3409,40 @@ fn write_normalized_text_in_tx_with_journal(
     input: ProjectedWriteText<'_>,
     journal: bool,
     allow_preallocated_object: bool,
+    prepared: Option<PreparedTextWrite>,
 ) -> Result<WriteResult, DomainError> {
     #[cfg(test)]
     note_write_text_ownership(matches!(&input.text, Cow::Owned(_)));
     let ws = input.workspace_id;
-    if !version_exists(tx, ws, input.version_id)? {
+    if prepared.is_none() && !version_exists(tx, ws, input.version_id)? {
         return Err(DomainError::VersionNotFound);
     }
 
-    let blob = text_blob_sha256(&input.text);
+    let blob = prepared
+        .as_ref()
+        .map(|prepared| prepared.content_sha256.clone())
+        .unwrap_or_else(|| text_blob_sha256(&input.text));
     let (author_kind, author_json) = hash_author_fields(input.author_json);
     let (summary_kind, summary) = hash_optional_text_fields(input.metadata_summary);
     let (correlation_kind, correlation_id) =
         hash_optional_text_fields(input.metadata_correlation_id);
-    let payload_hash = hash_fields(&[
-        input.version_id.as_bytes(),
-        input.path.as_bytes(),
-        input.text.as_bytes(),
-        input.moment_id.as_bytes(),
-        input.object_id.as_bytes(),
-        input.metadata_origin.as_bytes(),
-        summary_kind,
-        summary,
-        correlation_kind,
-        correlation_id,
-        author_kind,
-        author_json,
-    ]);
+    let payload_hash = hash_request_fields(
+        input.request_id,
+        &[
+            input.version_id.as_bytes(),
+            input.path.as_bytes(),
+            input.text.as_bytes(),
+            input.moment_id.as_bytes(),
+            input.object_id.as_bytes(),
+            input.metadata_origin.as_bytes(),
+            summary_kind,
+            summary,
+            correlation_kind,
+            correlation_id,
+            author_kind,
+            author_json,
+        ],
+    );
     if let Some(request_id) = input.request_id
         && let Some(recorded) = lookup_request(tx, request_id)?
     {
@@ -3195,7 +3451,12 @@ fn write_normalized_text_in_tx_with_journal(
         }
         return reconstruct_write(tx, input.workspace_id, input.moment_id);
     }
-    if let Some(existing) = get_moment(tx, ws, input.moment_id)? {
+    if moment_exists(tx, ws, input.moment_id)? {
+        let Some(existing) = get_moment(tx, ws, input.moment_id)? else {
+            // Text and protected history share one workspace-wide moment-id
+            // namespace, while `get_moment` resolves only plaintext history.
+            return Err(DomainError::DuplicateMomentId);
+        };
         let exact = existing.version_id == input.version_id
             && existing.path == input.path.as_ref()
             && existing.operation == MomentOp::Write
@@ -3209,70 +3470,96 @@ fn write_normalized_text_in_tx_with_journal(
             return write_result_from_moment(tx, ws, existing, true);
         }
         // The oracle's contract: a caller-supplied moment id reused with
-        // DIFFERENT content is duplicate-moment-id (the exact-match arm
-        // above is the idempotent replay; only requestId reuse maps to the
-        // idempotency-mismatch code).
-        return Err(DomainError::DuplicateMomentId);
-    }
-    // Text and protected history share one workspace-wide moment-id namespace.
-    // `get_moment` intentionally resolves only plaintext history, so retain
-    // the exact-text replay above and then reject a secret-table collision in
-    // this same transaction before inserting the text row.
-    if moment_exists(tx, ws, input.moment_id)? {
+        // DIFFERENT content is duplicate-moment-id (the exact-match arm above
+        // is the idempotent replay; only requestId reuse maps to mismatch).
         return Err(DomainError::DuplicateMomentId);
     }
 
-    let existing_object = alias_object_id(tx, ws, input.version_id, &input.path)?;
-    let before = match &existing_object {
-        Some(object_id) => get_snapshot(tx, ws, input.version_id, object_id)?,
+    let prepared = match prepared {
+        Some(prepared) => prepared,
         None => {
-            if input.object_id.is_empty() {
-                return Err(DomainError::InvalidInput {
-                    reason: "object_id must not be empty for a new path",
-                });
-            }
-            if object_exists(tx, ws, input.object_id)? {
-                let bare_preallocation =
-                    allow_preallocated_object && !object_has_any_binding(tx, ws, input.object_id)?;
-                if !bare_preallocation {
-                    return Err(DomainError::InvalidInput {
-                        reason: "object_id is already bound to another object",
-                    });
+            let existing_object = alias_object_id(tx, ws, input.version_id, &input.path)?;
+            let before = match &existing_object {
+                Some(object_id) => get_snapshot(tx, ws, input.version_id, object_id)?,
+                None => {
+                    if input.object_id.is_empty() {
+                        return Err(DomainError::InvalidInput {
+                            reason: "object_id must not be empty for a new path",
+                        });
+                    }
+                    if object_exists(tx, ws, input.object_id)? {
+                        let bare_preallocation = allow_preallocated_object
+                            && !object_has_any_binding(tx, ws, input.object_id)?;
+                        if !bare_preallocation {
+                            return Err(DomainError::InvalidInput {
+                                reason: "object_id is already bound to another object",
+                            });
+                        }
+                    }
+                    None
                 }
+            };
+            let is_new_object = existing_object.is_none();
+            PreparedTextWrite {
+                object_id: existing_object.unwrap_or_else(|| input.object_id.to_owned()),
+                before,
+                moment_order: next_moment_order(tx)?,
+                content_sha256: blob.clone(),
+                bind_object: is_new_object,
+                bind_alias: true,
+                known_object: None,
+                #[cfg(test)]
+                capture_prepared: false,
             }
-            None
         }
     };
-    let is_new_object = existing_object.is_none();
-    let object_id = existing_object.unwrap_or_else(|| input.object_id.to_owned());
+    let PreparedTextWrite {
+        object_id,
+        before,
+        moment_order,
+        content_sha256: _,
+        bind_object,
+        bind_alias,
+        known_object,
+        #[cfg(test)]
+        capture_prepared,
+    } = prepared;
     let before_blob = before.as_ref().and_then(|s| s.blob_sha256.clone());
     let before_content_kind = before
         .as_ref()
         .map_or_else(|| "text".to_owned(), |s| s.content_kind.clone());
     let before_binary_sha256 = before.as_ref().and_then(|s| s.binary_sha256.clone());
     let before_latest_moment_id = before.as_ref().map(|s| s.latest_moment_id.clone());
-    let moment_order = next_moment_order(tx)?;
 
-    if is_new_object {
+    if bind_object {
         // OR IGNORE: the preallocated-object path (live Y.Doc seed) already
         // holds this row; every other new-object path inserts fresh.
         tx.execute(
             "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms)              VALUES (?1, ?2, ?3)",
-            params![ws, object_id, input.now_ms],
+            params![input.workspace_id, object_id, input.now_ms],
         )
         .map_err(DomainError::sql_persist)?;
     }
-    tx.execute(
-        "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
-        params![blob, input.text.len() as i64, input.text.as_ref()],
-    )
-    .map_err(DomainError::sql_persist)?;
-    tx.execute(
-        "INSERT OR IGNORE INTO path_aliases (workspace_id, version_id, path, object_id) \
-         VALUES (?1, ?2, ?3, ?4)",
-        params![ws, input.version_id, input.path.as_ref(), object_id],
-    )
-    .map_err(DomainError::sql_persist)?;
+    let blob_inserted = tx
+        .execute(
+            "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
+            params![blob, input.text.len() as i64, input.text.as_ref()],
+        )
+        .map_err(DomainError::sql_persist)?
+        != 0;
+    if bind_alias {
+        tx.execute(
+            "INSERT OR IGNORE INTO path_aliases (workspace_id, version_id, path, object_id) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                input.workspace_id,
+                input.version_id,
+                input.path.as_ref(),
+                object_id
+            ],
+        )
+        .map_err(DomainError::sql_persist)?;
+    }
     tx.execute(
         "INSERT INTO moments \
          (workspace_id, moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
@@ -3288,7 +3575,7 @@ fn write_normalized_text_in_tx_with_journal(
                   CASE WHEN ?9 = 2 THEN ?6 END, CASE WHEN ?9 = 2 THEN ?16 END, \
                   CASE ?16 WHEN 'binary' THEN ?17 ELSE ?10 END, ?6, 'text', ?8)",
         params![
-            ws,
+            input.workspace_id,
             moment_order,
             input.moment_id,
             input.version_id,
@@ -3324,7 +3611,7 @@ fn write_normalized_text_in_tx_with_journal(
            content_kind = excluded.content_kind, \
            binary_sha256 = excluded.binary_sha256",
         params![
-            ws,
+            input.workspace_id,
             input.version_id,
             object_id,
             input.path.as_ref(),
@@ -3353,20 +3640,72 @@ fn write_normalized_text_in_tx_with_journal(
         input.now_ms,
     )?;
 
-    let object = get_file_object(tx, ws, &object_id)?.ok_or(DomainError::StateCorrupt {
-        reason: "written snapshot points at a missing object",
-    })?;
-    let moment = get_moment(tx, ws, input.moment_id)?.ok_or(DomainError::StateCorrupt {
-        reason: "moment vanished within its own write transaction",
-    })?;
+    // A reused content-addressed row may be corrupt. Preserve the hydration
+    // check that the prepared fast path replaces unless this write inserted
+    // the blob and therefore established its text and recorded byte length.
+    let read_back = !blob_inserted || known_object.is_none();
+    #[cfg(test)]
+    if capture_prepared {
+        note_capture_prepared_write(read_back);
+    }
+    let result_path = input.path.into_owned();
+    let result_text = input.text.into_owned();
+    let (object, moment) = if read_back {
+        let object = get_file_object(tx, input.workspace_id, &object_id)?.ok_or(
+            DomainError::StateCorrupt {
+                reason: "written snapshot points at a missing object",
+            },
+        )?;
+        let moment = get_moment(tx, input.workspace_id, input.moment_id)?.ok_or(
+            DomainError::StateCorrupt {
+                reason: "moment vanished within its own write transaction",
+            },
+        )?;
+        (object, moment)
+    } else {
+        let object = known_object.ok_or(DomainError::StateCorrupt {
+            reason: "prepared capture result is missing its known object",
+        })?;
+        let byte_length = result_text.len() as i64;
+        let after_text =
+            (result_text.len() <= MOMENT_TEXT_HYDRATION_CAP_BYTES).then(|| result_text.clone());
+        let moment = MomentRecord {
+            moment_order,
+            moment_id: input.moment_id.to_owned(),
+            version_id: input.version_id.to_owned(),
+            object_id: object_id.clone(),
+            path: result_path.clone(),
+            recorded_at_ms: input.now_ms,
+            operation: MomentOp::Write,
+            after_content_kind: "text".to_owned(),
+            after_blob_sha256: Some(blob.clone()),
+            after_binary_sha256: None,
+            before_present: false,
+            before_blob_sha256: None,
+            before_content_kind: "text".to_owned(),
+            before_binary_sha256: None,
+            before_latest_moment_id: None,
+            metadata_origin: input.metadata_origin.to_owned(),
+            metadata_summary: input.metadata_summary.map(str::to_owned),
+            metadata_correlation_id: input.metadata_correlation_id.map(str::to_owned),
+            author_json: input.author_json.map(str::to_owned),
+            sync_record_only: false,
+            after_text,
+            after_byte_length: Some(byte_length),
+            before_text: None,
+            before_byte_length: None,
+            before_path: None,
+        };
+        (object, moment)
+    };
     Ok(WriteResult {
         object,
         snapshot: TextSnapshot {
-            workspace_id: ws.to_owned(),
+            workspace_id: input.workspace_id.to_owned(),
             version_id: input.version_id.to_owned(),
             object_id: object_id.clone(),
-            path: input.path.into_owned(),
-            text: input.text.into_owned(),
+            path: result_path,
+            text: result_text,
             blob_sha256: blob.clone(),
             updated_at_ms: input.now_ms,
             latest_moment_id: input.moment_id.to_owned(),
@@ -3613,31 +3952,46 @@ fn reconstruct_binary_write(
 /// reuse a live alias; else derive the framed object id and reuse it ONLY when
 /// it has no live alias anywhere; else mint an order-disambiguated id, with
 /// that reserved order returned so the caller can pin it against the moment
-/// the write actually persists.
+/// the write actually persists. A freshly inserted object record is returned
+/// too, so capture does not have to read back state it just established.
 fn resolve_capture_object(
     tx: &Transaction<'_>,
     workspace_id: &str,
     version_id: &str,
     path: &str,
     now_ms: i64,
-) -> Result<(String, Option<i64>), DomainError> {
+    existing_alias: Option<String>,
+    batch: Option<&mut CaptureIngestBatchContext>,
+) -> Result<ResolvedCaptureObject, DomainError> {
     let mut reserved_moment_order = None;
-    let object_id = match alias_object_id(tx, workspace_id, version_id, path)? {
+    let mut known_object = None;
+    let object_id = match existing_alias {
         Some(object_id) => object_id,
         None => {
             let derived_object_id = derive_capture_object_id(workspace_id, version_id, path);
-            let object_id = if !object_exists(tx, workspace_id, &derived_object_id)? {
-                tx.execute(
+            let inserted = tx
+                .execute(
                     "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
-                     VALUES (?1, ?2, ?3)",
+                     VALUES (?1, ?2, ?3) \
+                     ON CONFLICT (workspace_id, object_id) DO NOTHING",
                     params![workspace_id, derived_object_id, now_ms],
                 )
-                .map_err(DomainError::sql_persist)?;
+                .map_err(DomainError::sql_persist)?
+                != 0;
+            let object_id = if inserted {
+                known_object = Some(FileObjectRecord {
+                    workspace_id: workspace_id.to_owned(),
+                    object_id: derived_object_id.clone(),
+                    created_at_ms: now_ms,
+                });
                 derived_object_id
             } else if !object_has_live_alias(tx, workspace_id, &derived_object_id)? {
                 derived_object_id
             } else {
-                let next_order = next_moment_order(tx)?;
+                let next_order = match batch {
+                    Some(batch) => batch.proposed_moment_order(tx)?,
+                    None => next_moment_order(tx)?,
+                };
                 let disambiguated_object_id = derive_disambiguated_capture_object_id(
                     workspace_id,
                     version_id,
@@ -3650,6 +4004,11 @@ fn resolve_capture_object(
                     params![workspace_id, disambiguated_object_id, now_ms],
                 )
                 .map_err(DomainError::sql_persist)?;
+                known_object = Some(FileObjectRecord {
+                    workspace_id: workspace_id.to_owned(),
+                    object_id: disambiguated_object_id.clone(),
+                    created_at_ms: now_ms,
+                });
                 reserved_moment_order = Some(next_order);
                 disambiguated_object_id
             };
@@ -3662,7 +4021,11 @@ fn resolve_capture_object(
             object_id
         }
     };
-    Ok((object_id, reserved_moment_order))
+    Ok(ResolvedCaptureObject {
+        object_id,
+        reserved_moment_order,
+        known_object,
+    })
 }
 
 fn reconstruct_capture_write(
@@ -4465,6 +4828,17 @@ fn alias_object_id(
     .map_err(DomainError::sql_corrupt)
 }
 
+const NEXT_MOMENT_ORDER_SQL: &str = "\
+SELECT MAX(
+    COALESCE((SELECT MAX(moment_order) FROM moments), 0),
+    COALESCE((
+        SELECT MAX(target_generation)
+        FROM materialization_jobs
+        WHERE job_id NOT GLOB 'version-switch-mat_*'
+          AND job_id NOT GLOB 'version-switch-secret-mat_*'
+    ), 0)
+)";
+
 pub(crate) fn next_moment_order(conn: &Connection) -> Result<i64, DomainError> {
     // Ordinary materialization rows are the durable high-water mark when
     // rollback history surgery removes a tip moment. Pending and terminal
@@ -4472,19 +4846,12 @@ pub(crate) fn next_moment_order(conn: &Connection) -> Result<i64, DomainError> {
     // newer than an already-issued compensating restore. Version-switch
     // projections use snapshot timestamps as generations, so they are a
     // separate ordering domain and must not advance the mutation sequence.
-    let max: Option<i64> = conn
-        .query_row(
-            "SELECT MAX(generation) FROM ( \
-                 SELECT moment_order AS generation FROM moments \
-                 UNION ALL \
-                 SELECT target_generation AS generation FROM materialization_jobs \
-                 WHERE job_id NOT GLOB 'version-switch-mat_*' \
-                   AND job_id NOT GLOB 'version-switch-secret-mat_*')",
-            [],
-            |row| row.get(0),
-        )
+    let max: i64 = conn
+        .query_row(NEXT_MOMENT_ORDER_SQL, [], |row| row.get(0))
         .map_err(DomainError::sql_corrupt)?;
-    Ok(max.unwrap_or(0) + 1)
+    max.checked_add(1).ok_or(DomainError::StateCorrupt {
+        reason: "moment order high water is exhausted",
+    })
 }
 
 fn latest_moment_order(
@@ -5948,6 +6315,10 @@ pub(crate) fn hash_fields(fields: &[&[u8]]) -> String {
     hex(&hasher.finalize())
 }
 
+fn hash_request_fields(request_id: Option<&str>, fields: &[&[u8]]) -> String {
+    request_id.map_or_else(String::new, |_| hash_fields(fields))
+}
+
 pub(crate) fn hash_author_fields(author_json: Option<&str>) -> (&'static [u8], &[u8]) {
     match author_json {
         Some(author_json) => (b"some", author_json.as_bytes()),
@@ -5982,14 +6353,374 @@ mod tests {
     use std::borrow::Cow;
 
     use super::{
-        ProjectedWriteText, VersionedTextStore, object_has_references,
-        reset_write_text_ownership_counts, write_projected_text_in_tx, write_text_in_tx,
-        write_text_ownership_counts,
+        CaptureIngestBatchContext, MOMENT_TEXT_HYDRATION_CAP_BYTES, NEXT_MOMENT_ORDER_SQL,
+        ProjectedWriteText, VersionedTextStore, capture_ingest_in_batch_with_admission_in_tx,
+        capture_prepared_write_counts, derive_capture_moment_id, derive_capture_object_id,
+        derive_disambiguated_capture_object_id, hash_fields, hash_optional_text_fields,
+        next_moment_order, object_has_references, reset_capture_prepared_write_counts,
+        reset_write_text_ownership_counts, text_blob_sha256, write_projected_text_in_tx,
+        write_text_in_tx, write_text_ownership_counts,
     };
-    use crate::WriteText;
-    use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
+    use crate::{
+        CaptureIngest, CaptureRetire, DomainError, RenameTextFile, WriteResult, WriteText,
+    };
+    use dohc_engine_storage::{
+        EngineStore, MaterializationJobSpec, NoFaults, Preimage, TxnOutcome, put_binary_blob,
+        record_completed_job,
+    };
     use dohc_engine_testkit::ScratchDir;
-    use rusqlite::Connection;
+    use rusqlite::{Connection, params};
+
+    fn moment_order_semantics_connection() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        conn.execute_batch(
+            "CREATE TABLE moments (moment_order INTEGER NOT NULL); \
+             CREATE TABLE materialization_jobs ( \
+                 job_id TEXT PRIMARY KEY, \
+                 target_generation INTEGER NOT NULL \
+             );",
+        )
+        .expect("create moment-order tables");
+        conn
+    }
+
+    fn capture_input(path: &str, text: String, now_ms: i64) -> CaptureIngest {
+        CaptureIngest {
+            workspace_id: "ws".to_owned(),
+            version_id: "main".to_owned(),
+            path: path.to_owned(),
+            text,
+            metadata_origin: "capture".to_owned(),
+            metadata_summary: Some("Captured test file".to_owned()),
+            metadata_correlation_id: Some("capture-pass-1".to_owned()),
+            author_json: Some(r#"{"kind":"capture-test"}"#.to_owned()),
+            now_ms,
+            request_id: None,
+            claim_foreign_head: false,
+        }
+    }
+
+    fn capture_text(store: &mut EngineStore, path: &str, text: String, now_ms: i64) -> WriteResult {
+        VersionedTextStore::new(store)
+            .capture_ingest(&capture_input(path, text, now_ms), &NoFaults)
+            .expect("capture text")
+    }
+
+    fn assert_capture_matches_hydrated(store: &mut EngineStore, captured: &WriteResult) {
+        let versioned = VersionedTextStore::new(store);
+        let hydrated_moment = versioned
+            .get_moment("ws", &captured.moment.moment_id)
+            .expect("read captured moment")
+            .expect("captured moment exists");
+        let hydrated_snapshot = versioned
+            .read_text("ws", "main", &captured.snapshot.path)
+            .expect("read captured snapshot")
+            .expect("captured snapshot exists");
+
+        assert_eq!(captured.moment, hydrated_moment);
+        assert_eq!(captured.snapshot, hydrated_snapshot);
+    }
+
+    #[test]
+    fn next_moment_order_preserves_global_and_job_high_water_semantics() {
+        let mut conn = moment_order_semantics_connection();
+        assert_eq!(next_moment_order(&conn).expect("empty order"), 1);
+
+        conn.execute_batch(
+            "INSERT INTO moments (moment_order) VALUES (7), (12); \
+             INSERT INTO materialization_jobs (job_id, target_generation) VALUES \
+                 ('mutation-mat_a', 40), \
+                 ('version-switch-mat_ignored', 100), \
+                 ('version-switch-secret-mat_ignored', 101);",
+        )
+        .expect("seed global order domains");
+        assert_eq!(next_moment_order(&conn).expect("job high water"), 41);
+
+        let transaction = conn.transaction().expect("begin rollback probe");
+        transaction
+            .execute(
+                "INSERT INTO materialization_jobs (job_id, target_generation) VALUES (?1, ?2)",
+                ("mutation-mat_rolled_back", 70),
+            )
+            .expect("reserve rolled-back generation");
+        assert_eq!(
+            next_moment_order(&transaction).expect("transaction high water"),
+            71
+        );
+        transaction.rollback().expect("roll back generation probe");
+
+        assert_eq!(
+            next_moment_order(&conn).expect("high water after rollback"),
+            41,
+            "a rolled-back transaction must not reserve a generation"
+        );
+
+        conn.execute("INSERT INTO moments (moment_order) VALUES (80)", [])
+            .expect("seed moment high water");
+        assert_eq!(
+            next_moment_order(&conn).expect("moment high water"),
+            81,
+            "the global moment maximum must win when it exceeds every job generation"
+        );
+    }
+
+    #[test]
+    fn next_moment_order_fails_closed_when_the_high_water_is_exhausted() {
+        let conn = moment_order_semantics_connection();
+        conn.execute("INSERT INTO moments (moment_order) VALUES (?1)", [i64::MAX])
+            .expect("seed exhausted moment order");
+
+        assert!(matches!(
+            next_moment_order(&conn),
+            Err(DomainError::StateCorrupt {
+                reason: "moment order high water is exhausted"
+            })
+        ));
+    }
+
+    #[test]
+    fn next_moment_order_uses_generation_first_indexes() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let store =
+            EngineStore::open(&scratch.engine_db_path().expect("db"), 1).expect("open store");
+        let details = store
+            .read_with(|conn| {
+                let mut statement =
+                    conn.prepare(&format!("EXPLAIN QUERY PLAN {NEXT_MOMENT_ORDER_SQL}"))?;
+                statement
+                    .query_map([], |row| row.get::<_, String>(3))?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .expect("query plan against migrated schema");
+
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("idx_moments_global_order")),
+            "moment maximum must use its global generation index: {details:?}"
+        );
+        assert!(
+            details
+                .iter()
+                .any(|detail| { detail.contains("idx_materialization_jobs_mutation_generation") }),
+            "materialization maximum must use its filtered generation index: {details:?}"
+        );
+        assert!(
+            details.iter().all(|detail| {
+                !detail.starts_with("SCAN moments")
+                    && !detail.starts_with("SCAN materialization_jobs")
+            }),
+            "the high-water query must not scan either growing table: {details:?}"
+        );
+    }
+
+    #[test]
+    fn capture_batch_preserves_producer_and_global_high_water_parity() {
+        fn initialized_store(db: &std::path::Path) -> EngineStore {
+            let mut store = EngineStore::open(db, 1).expect("open store");
+            VersionedTextStore::new(&mut store)
+                .ensure_main_version("ws", "main", 1, &NoFaults)
+                .expect("ensure main version");
+            let outcome = store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "INSERT INTO sync_identity \
+                         (workspace_id, origin_id, replication_epoch, stream_identity, created_at_ms) \
+                         VALUES ('ws', 'origin-capture-parity', 'epoch', 'stream', 1)",
+                        [],
+                    )
+                    .map_err(DomainError::sql_persist)?;
+                    let content_sha256 =
+                        put_binary_blob(tx, b"capture high-water fixture")
+                            .map_err(DomainError::from)?;
+                    record_completed_job(
+                        tx,
+                        &MaterializationJobSpec {
+                            job_id: "mutation-mat_capture-high-water".to_owned(),
+                            workspace_id: "ws".to_owned(),
+                            target_path: "notes/high-water.md".to_owned(),
+                            content_sha256,
+                            preimage: Preimage::Absent,
+                            target_generation: 40,
+                            now_ms: 1,
+                        },
+                    )
+                    .map_err(DomainError::from)?;
+                    Ok::<_, DomainError>(())
+                })
+                .expect("seed producer and high water");
+            super::committed(outcome).expect("commit producer and high water");
+            store
+        }
+
+        let sequential_scratch = ScratchDir::new().expect("sequential scratch");
+        let batch_scratch = ScratchDir::new().expect("batch scratch");
+        let mut sequential =
+            initialized_store(&sequential_scratch.engine_db_path().expect("sequential db"));
+        let mut batched = initialized_store(&batch_scratch.engine_db_path().expect("batch db"));
+        let inputs = vec![
+            capture_input("notes/a.md", "alpha".to_owned(), 10),
+            capture_input("notes/b.md", "bravo".to_owned(), 11),
+            capture_input("notes/c.md", "charlie".to_owned(), 12),
+        ];
+
+        let expected = inputs
+            .iter()
+            .map(|input| {
+                VersionedTextStore::new(&mut sequential)
+                    .capture_ingest(input, &NoFaults)
+                    .expect("sequential capture")
+            })
+            .collect::<Vec<_>>();
+
+        let outcome = batched
+            .write_with(&NoFaults, |tx| {
+                let mut context = CaptureIngestBatchContext::new(tx, "ws", "main")?;
+                let mut results = Vec::with_capacity(inputs.len());
+                for input in &inputs {
+                    tx.execute_batch("SAVEPOINT capture_batch_parity")
+                        .map_err(DomainError::sql_persist)?;
+                    let result = capture_ingest_in_batch_with_admission_in_tx(
+                        tx,
+                        input,
+                        &mut context,
+                        |_, _, _| Ok::<_, DomainError>(()),
+                    )?;
+                    tx.execute_batch("RELEASE capture_batch_parity")
+                        .map_err(DomainError::sql_persist)?;
+                    context.commit_result(&result)?;
+                    results.push(result);
+                }
+                Ok::<_, DomainError>(results)
+            })
+            .expect("capture batch");
+        let actual = super::committed(outcome).expect("commit capture batch");
+
+        assert_eq!(actual, expected);
+        assert_eq!(
+            actual
+                .iter()
+                .map(|result| result.moment.moment_order)
+                .collect::<Vec<_>>(),
+            vec![41, 42, 43],
+            "the materialization-job high-water must seed the shared cursor"
+        );
+    }
+
+    #[test]
+    fn capture_batch_reuses_candidate_after_item_savepoint_rollback() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let mut store =
+            EngineStore::open(&scratch.engine_db_path().expect("db"), 1).expect("open store");
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .expect("ensure main version");
+
+        let outcome = store
+            .write_with(&NoFaults, |tx| {
+                let mut context = CaptureIngestBatchContext::new(tx, "ws", "main")?;
+                tx.execute_batch("SAVEPOINT capture_batch_failed_item")
+                    .map_err(DomainError::sql_persist)?;
+                let rolled_back = capture_ingest_in_batch_with_admission_in_tx(
+                    tx,
+                    &capture_input("notes/rolled-back.md", "first".to_owned(), 10),
+                    &mut context,
+                    |_, _, _| Ok::<_, DomainError>(()),
+                )?;
+                let candidate = rolled_back.moment.moment_order;
+                tx.execute_batch(
+                    "ROLLBACK TO capture_batch_failed_item; \
+                     RELEASE capture_batch_failed_item",
+                )
+                .map_err(DomainError::sql_persist)?;
+
+                tx.execute_batch("SAVEPOINT capture_batch_retry_candidate")
+                    .map_err(DomainError::sql_persist)?;
+                let captured = capture_ingest_in_batch_with_admission_in_tx(
+                    tx,
+                    &capture_input("notes/committed.md", "second".to_owned(), 11),
+                    &mut context,
+                    |_, _, _| Ok::<_, DomainError>(()),
+                )?;
+                tx.execute_batch("RELEASE capture_batch_retry_candidate")
+                    .map_err(DomainError::sql_persist)?;
+                context.commit_result(&captured)?;
+                Ok::<_, DomainError>((candidate, captured))
+            })
+            .expect("capture around rolled-back item");
+        let (candidate, captured) =
+            super::committed(outcome).expect("commit surviving capture item");
+
+        assert_eq!(captured.moment.moment_order, candidate);
+        assert_eq!(captured.snapshot.path, "notes/committed.md");
+        assert!(
+            VersionedTextStore::new(&mut store)
+                .read_text("ws", "main", "notes/rolled-back.md")
+                .expect("read rolled-back path")
+                .is_none(),
+            "the failed item's savepoint must leave no state behind"
+        );
+    }
+
+    #[test]
+    fn capture_batch_accepts_a_final_maximum_moment_order() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let mut store =
+            EngineStore::open(&scratch.engine_db_path().expect("db"), 1).expect("open store");
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .expect("ensure main version");
+        let outcome = store
+            .write_with(&NoFaults, |tx| {
+                let content_sha256 = put_binary_blob(tx, b"moment-order exhaustion fixture")
+                    .map_err(DomainError::from)?;
+                record_completed_job(
+                    tx,
+                    &MaterializationJobSpec {
+                        job_id: "mutation-mat_before-order-exhaustion".to_owned(),
+                        workspace_id: "ws".to_owned(),
+                        target_path: "notes/before-order-exhaustion.md".to_owned(),
+                        content_sha256,
+                        preimage: Preimage::Absent,
+                        target_generation: i64::MAX - 1,
+                        now_ms: 1,
+                    },
+                )
+                .map_err(DomainError::from)?;
+                Ok::<_, DomainError>(())
+            })
+            .expect("seed maximum high-water");
+        super::committed(outcome).expect("commit maximum high-water");
+
+        let outcome = store
+            .write_with(&NoFaults, |tx| {
+                let mut context = CaptureIngestBatchContext::new(tx, "ws", "main")?;
+                tx.execute_batch("SAVEPOINT capture_maximum_order")
+                    .map_err(DomainError::sql_persist)?;
+                let captured = capture_ingest_in_batch_with_admission_in_tx(
+                    tx,
+                    &capture_input("notes/final.md", "final".to_owned(), 2),
+                    &mut context,
+                    |_, _, _| Ok::<_, DomainError>(()),
+                )?;
+                tx.execute_batch("RELEASE capture_maximum_order")
+                    .map_err(DomainError::sql_persist)?;
+                context.commit_result(&captured)?;
+                assert!(
+                    matches!(
+                        context.proposed_moment_order(tx),
+                        Err(DomainError::StateCorrupt {
+                            reason: "capture batch moment order overflowed"
+                        })
+                    ),
+                    "only a later mutation should observe cursor exhaustion"
+                );
+                Ok::<_, DomainError>(captured)
+            })
+            .expect("capture final maximum-order item");
+        let captured = super::committed(outcome).expect("commit final maximum-order item");
+        assert_eq!(captured.moment.moment_order, i64::MAX);
+    }
 
     #[test]
     fn direct_write_borrows_text_and_projected_write_moves_owned_text() {
@@ -6058,6 +6789,323 @@ mod tests {
             (1, 1),
             "the shared writer must exercise one borrowed and one owned text path"
         );
+    }
+
+    #[test]
+    fn fresh_capture_reuses_prepared_state_without_result_readback() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let mut store =
+            EngineStore::open(&scratch.engine_db_path().expect("db"), 1).expect("open store");
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .expect("ensure main version");
+
+        reset_capture_prepared_write_counts();
+        let text = "prepared capture body";
+        let captured = VersionedTextStore::new(&mut store)
+            .capture_ingest(
+                &CaptureIngest {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    path: "notes/fresh.md".to_owned(),
+                    text: text.to_owned(),
+                    metadata_origin: "capture".to_owned(),
+                    metadata_summary: Some("Captured fresh file".to_owned()),
+                    metadata_correlation_id: Some("capture-pass-1".to_owned()),
+                    author_json: Some(r#"{"kind":"capture-test"}"#.to_owned()),
+                    now_ms: 2,
+                    request_id: None,
+                    claim_foreign_head: false,
+                },
+                &NoFaults,
+            )
+            .expect("capture fresh text");
+
+        assert_eq!(
+            capture_prepared_write_counts(),
+            (1, 0),
+            "fresh capture must persist its resolved state without rereading the wide result"
+        );
+        let expected_blob_sha256 = text_blob_sha256(text);
+        assert_eq!(captured.snapshot.blob_sha256, expected_blob_sha256);
+        assert_eq!(
+            captured.moment.after_blob_sha256.as_deref(),
+            Some(expected_blob_sha256.as_str())
+        );
+        let versioned = VersionedTextStore::new(&mut store);
+        let hydrated_moment = versioned
+            .get_moment("ws", &captured.moment.moment_id)
+            .expect("read captured moment")
+            .expect("captured moment exists");
+        let hydrated_snapshot = versioned
+            .read_text("ws", "main", "notes/fresh.md")
+            .expect("read captured snapshot")
+            .expect("captured snapshot exists");
+
+        assert_eq!(captured.moment, hydrated_moment);
+        assert_eq!(captured.snapshot, hydrated_snapshot);
+    }
+
+    #[test]
+    fn fresh_capture_reused_corrupt_blob_fails_closed_and_rolls_back() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let mut store =
+            EngineStore::open(&scratch.engine_db_path().expect("db"), 1).expect("open store");
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .expect("ensure main version");
+
+        let text = "prepared capture body";
+        let blob_sha256 = text_blob_sha256(text);
+        let seed = store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
+                    params![blob_sha256, text.len() as i64, "corrupt"],
+                )
+                .map_err(DomainError::sql_persist)?;
+                Ok::<_, DomainError>(())
+            })
+            .expect("seed corrupt blob");
+        assert!(matches!(seed, TxnOutcome::Committed(())));
+
+        reset_capture_prepared_write_counts();
+        let error = VersionedTextStore::new(&mut store)
+            .capture_ingest(
+                &capture_input("notes/corrupt.md", text.to_owned(), 2),
+                &NoFaults,
+            )
+            .expect_err("capture must reject the corrupt reused blob");
+
+        assert!(matches!(
+            error,
+            DomainError::StateCorrupt {
+                reason: "moment blob length does not match its content"
+            }
+        ));
+        assert_eq!(
+            capture_prepared_write_counts(),
+            (1, 1),
+            "a reused blob must force the prepared capture through result hydration"
+        );
+        let durable_rows = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT \
+                       (SELECT COUNT(*) FROM file_objects WHERE workspace_id = 'ws'), \
+                       (SELECT COUNT(*) FROM path_aliases WHERE workspace_id = 'ws'), \
+                       (SELECT COUNT(*) FROM snapshots WHERE workspace_id = 'ws'), \
+                       (SELECT COUNT(*) FROM moments WHERE workspace_id = 'ws'), \
+                       (SELECT COUNT(*) FROM replication_journal)",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, i64>(4)?,
+                        ))
+                    },
+                )
+            })
+            .expect("inspect rolled-back capture");
+        assert_eq!(
+            durable_rows,
+            (0, 0, 0, 0, 0),
+            "the integrity failure must roll back every capture row"
+        );
+        let corrupt_blob = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT byte_length, text FROM blobs WHERE sha256 = ?1",
+                    [&blob_sha256],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                )
+            })
+            .expect("read corrupt seed after rollback");
+        assert_eq!(corrupt_blob, (text.len() as i64, "corrupt".to_owned()));
+    }
+
+    #[test]
+    fn fresh_capture_fast_path_matches_hydration_at_history_text_cap() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let mut store =
+            EngineStore::open(&scratch.engine_db_path().expect("db"), 1).expect("open store");
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .expect("ensure main version");
+
+        for (index, byte_length) in [
+            MOMENT_TEXT_HYDRATION_CAP_BYTES,
+            MOMENT_TEXT_HYDRATION_CAP_BYTES + 1,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            reset_capture_prepared_write_counts();
+            let captured = capture_text(
+                &mut store,
+                &format!("notes/history-cap-{index}.md"),
+                "x".repeat(byte_length),
+                index as i64 + 2,
+            );
+
+            assert_eq!(capture_prepared_write_counts(), (1, 0));
+            assert_eq!(
+                captured.moment.after_text.is_some(),
+                byte_length == MOMENT_TEXT_HYDRATION_CAP_BYTES
+            );
+            assert_capture_matches_hydrated(&mut store, &captured);
+        }
+    }
+
+    #[test]
+    fn renamed_capture_path_uses_disambiguated_object_fast_path() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let mut store =
+            EngineStore::open(&scratch.engine_db_path().expect("db"), 1).expect("open store");
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .expect("ensure main version");
+
+        let original_path = "notes/renamed.md";
+        let first = capture_text(&mut store, original_path, "first body".to_owned(), 2);
+        assert_eq!(
+            first.object.object_id,
+            derive_capture_object_id("ws", "main", original_path)
+        );
+        VersionedTextStore::new(&mut store)
+            .rename_text_file(
+                &RenameTextFile {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    from_path: original_path.to_owned(),
+                    to_path: "notes/archive.md".to_owned(),
+                    moment_id: "rename-captured-file".to_owned(),
+                    request_id: None,
+                    metadata_origin: "test".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 3,
+                },
+                &NoFaults,
+            )
+            .expect("rename captured file");
+
+        reset_capture_prepared_write_counts();
+        let replacement = capture_input(original_path, "replacement body".to_owned(), 4);
+        let outcome = store
+            .write_with(&NoFaults, |tx| {
+                let proposed_order = next_moment_order(tx)?;
+                let mut context = CaptureIngestBatchContext::new(tx, "ws", "main")?;
+                tx.execute_batch("SAVEPOINT capture_disambiguation")
+                    .map_err(DomainError::sql_persist)?;
+                let captured = capture_ingest_in_batch_with_admission_in_tx(
+                    tx,
+                    &replacement,
+                    &mut context,
+                    |_, _, _| Ok::<_, DomainError>(()),
+                )?;
+                tx.execute_batch("RELEASE capture_disambiguation")
+                    .map_err(DomainError::sql_persist)?;
+                context.commit_result(&captured)?;
+                Ok::<_, DomainError>((proposed_order, captured))
+            })
+            .expect("capture disambiguated path");
+        let (proposed_order, captured) =
+            super::committed(outcome).expect("commit disambiguated capture");
+
+        assert_ne!(captured.object.object_id, first.object.object_id);
+        assert_eq!(captured.moment.moment_order, proposed_order);
+        assert_eq!(
+            captured.object.object_id,
+            derive_disambiguated_capture_object_id("ws", "main", original_path, proposed_order),
+            "object disambiguation and the persisted moment must share one order candidate"
+        );
+        let producer_id = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT engine_uuid FROM engine_ownership WHERE rowid_guard=1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+            })
+            .expect("read capture producer");
+        let (summary_kind, summary) = hash_optional_text_fields(Some("Captured test file"));
+        let (correlation_kind, correlation) = hash_optional_text_fields(Some("capture-pass-1"));
+        let mutation_identity = hash_fields(&[
+            original_path.as_bytes(),
+            text_blob_sha256("replacement body").as_bytes(),
+            b"capture",
+            summary_kind,
+            summary,
+            correlation_kind,
+            correlation,
+            b"some",
+            br#"{"kind":"capture-test"}"#,
+            b"4",
+        ]);
+        assert_eq!(
+            captured.moment.moment_id,
+            derive_capture_moment_id(
+                &producer_id,
+                "ws",
+                &captured.object.object_id,
+                proposed_order,
+                "write",
+                &mutation_identity,
+            ),
+            "moment derivation must use the same order candidate as object disambiguation"
+        );
+        assert_eq!(
+            capture_prepared_write_counts(),
+            (1, 0),
+            "capture must keep the fast path after disambiguating the occupied derived object id"
+        );
+        assert_capture_matches_hydrated(&mut store, &captured);
+    }
+
+    #[test]
+    fn retired_capture_reuses_unaliased_object_with_result_hydration() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let mut store =
+            EngineStore::open(&scratch.engine_db_path().expect("db"), 1).expect("open store");
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .expect("ensure main version");
+
+        let path = "notes/recreated.md";
+        let first = capture_text(&mut store, path, "first body".to_owned(), 2);
+        VersionedTextStore::new(&mut store)
+            .capture_retire(
+                &CaptureRetire {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    path: path.to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    now_ms: 3,
+                    request_id: None,
+                    only_if_text_head: true,
+                    only_if_capture_origin: true,
+                    allow_ydoc_origin: false,
+                },
+                &NoFaults,
+            )
+            .expect("retire captured file");
+
+        reset_capture_prepared_write_counts();
+        let captured = capture_text(&mut store, path, "recreated body".to_owned(), 4);
+
+        assert_eq!(captured.object.object_id, first.object.object_id);
+        assert_eq!(
+            capture_prepared_write_counts(),
+            (1, 1),
+            "capture must hydrate a pre-existing object that it did not insert"
+        );
+        assert_capture_matches_hydrated(&mut store, &captured);
     }
 
     #[test]

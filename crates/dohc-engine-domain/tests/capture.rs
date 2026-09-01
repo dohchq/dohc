@@ -467,8 +467,16 @@ fn request_ids_replay_ingest_and_retire_exactly_once() {
     let replay = VersionedTextStore::new(&mut store)
         .capture_ingest(&write_replay, &NO_FAULTS)
         .expect("capture replay");
-    assert!(replay.deduped);
-    assert_eq!(replay.moment.moment_id, first.moment.moment_id);
+    let mut expected_replay = first.clone();
+    expected_replay.deduped = true;
+    assert_eq!(replay, expected_replay);
+
+    let mut write_mismatch = write;
+    write_mismatch.text = "changed request body".to_owned();
+    let error = VersionedTextStore::new(&mut store)
+        .capture_ingest(&write_mismatch, &NO_FAULTS)
+        .expect_err("changed capture request must not replay");
+    assert!(matches!(error, DomainError::IdempotencyKeyReuseMismatch));
 
     let mut delete = retire("a.md", 20);
     delete.request_id = Some("capture-retire-request".to_owned());

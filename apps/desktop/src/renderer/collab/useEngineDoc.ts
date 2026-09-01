@@ -225,6 +225,9 @@ export type UseEngineDoc = {
     descriptor: ArtifactAssetDescriptor;
     bytes: Uint8Array;
   }>;
+  // Push every accepted renderer edit to main and wait for acknowledgement.
+  // Explorer mutations await this before main settles the old-path session.
+  flushPendingLocalUpdates: EngineYDocBinding["flushPendingLocalUpdates"];
 };
 
 // What ONE open answers: a workspace, a path, the gate, and the active-version
@@ -258,6 +261,7 @@ type EngineDocOpenOutcome =
       versionId: string | null;
       artifactAssets: readonly ArtifactAssetDescriptor[];
       readArtifactAsset: EngineYDocBinding["readArtifactAsset"];
+      flushPendingLocalUpdates: EngineYDocBinding["flushPendingLocalUpdates"];
     }
   | { kind: "unavailable" }
   // Their OWN kinds, not flags on "unavailable": only the unqualified outcome
@@ -963,6 +967,7 @@ function createEngineDocSession(
         versionId: bound.versionId,
         artifactAssets: [...bound.artifactAssets],
         readArtifactAsset: (descriptor) => bound.readArtifactAsset(descriptor),
+        flushPendingLocalUpdates: () => bound.flushPendingLocalUpdates(),
       });
     }
     reportSaveState(
@@ -1316,6 +1321,7 @@ function createEngineDocSession(
               artifactAssets: bound.artifactAssets,
               readArtifactAsset: (descriptor) =>
                 bound.readArtifactAsset(descriptor),
+              flushPendingLocalUpdates: () => bound.flushPendingLocalUpdates(),
             });
           });
           // An edit is unsaved the instant it happens. Only main's settle
@@ -1334,6 +1340,7 @@ function createEngineDocSession(
             artifactAssets: bound.artifactAssets,
             readArtifactAsset: (descriptor) =>
               bound.readArtifactAsset(descriptor),
+            flushPendingLocalUpdates: () => bound.flushPendingLocalUpdates(),
           });
         } catch {
           if (!disposed) {
@@ -1657,6 +1664,10 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
               `Artifact asset ${descriptor.id} cannot load without a live document session.`,
             ),
           );
+  const flushPendingLocalUpdates =
+    outcome?.kind === "bound"
+      ? outcome.flushPendingLocalUpdates
+      : () => Promise.resolve();
   const removalInProgress =
     outcome?.kind === "removal-in-progress" ? outcome.removal : null;
   const deletedWhileEditing =
@@ -1700,5 +1711,6 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     removalInProgress,
     artifactAssets,
     readArtifactAsset,
+    flushPendingLocalUpdates,
   };
 }

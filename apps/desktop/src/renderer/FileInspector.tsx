@@ -84,6 +84,7 @@ import {
 } from "./sharedLocalDocument";
 import { documentVersionKey } from "./documentVersionKey";
 import { LazyMarkdownReadView } from "./markdown/LazyMarkdownReadView";
+import { useAuthoritativeValueRevision } from "./useAuthoritativeValueRevision";
 
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
 
@@ -1605,7 +1606,7 @@ function MarkdownView(props: {
   // docs toggle the read-only source projection; the legacy autosave editor
   // switches its existing (editable) source mode.
   registerSourceToggle?: (toggle: (() => void) | null) => void;
-  // Only the active editor group may claim focus when its source textarea
+  // Only the active editor group may claim focus when its source editor
   // mounts. Omitted preserves the single-editor behavior for existing callers.
   autoFocus?: boolean;
   // The engine refused the open because the path is not in this workspace's
@@ -1698,7 +1699,7 @@ function MarkdownView(props: {
   // Search lands HERE. ONE jump at a time, in one of two states: the LINE the
   // result named, and — once the engine editor has something to map it
   // against — the BLOCK holding that line (#661). Whichever surface owns the
-  // document consumes it: the plain source textarea selects the line, the
+  // document consumes it: the source editor selects the line, the
   // engine editor reveals the block. Consuming it retires it, so a later
   // commit cannot replay the jump.
   const [jump, setJump] = useState<
@@ -1736,7 +1737,6 @@ function MarkdownView(props: {
     // Applied once per jump: nonce is the identity of one click.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scrollTargetNonce]);
-  const editorRef = useRef<HTMLTextAreaElement | null>(null);
   const wysiwygRef = useRef<MarkdownEditorHandle | null>(null);
   const latestDraft = useRef(props.body);
   const baseContentHash = useRef(props.contentHash);
@@ -1766,6 +1766,10 @@ function MarkdownView(props: {
   const capturedConflictDraft = useRef<string | null>(null);
   const conflictDraftId = useRef<number | null>(null);
   const draftRevision = useRef(0);
+  // CodeMirror owns local keystrokes. Advance only when an accepted external
+  // value must replace its document and local undo history.
+  const [sourceValueRevision, bumpSourceValueRevision] =
+    useAuthoritativeValueRevision();
   const unmounted = useRef(false);
   const serializeDraftRef = useRef<() => string>(() => props.body);
   const editing = surfaceMode !== "read";
@@ -1833,6 +1837,7 @@ function MarkdownView(props: {
       return;
     }
     draftRevision.current += 1;
+    bumpSourceValueRevision();
     setDraft(sharedSnapshot.body);
     setSavedBody(sharedSnapshot.body);
     if (mode === "wysiwyg") {
@@ -1840,7 +1845,7 @@ function MarkdownView(props: {
         markdownEditorBody(sharedSnapshot.body),
       );
     }
-  }, [engine.available, mode, sharedSnapshot]);
+  }, [bumpSourceValueRevision, engine.available, mode, sharedSnapshot]);
 
   function captureLatestConflictDraft(text?: string) {
     const capturedText =
@@ -1905,6 +1910,7 @@ function MarkdownView(props: {
     }
     unsavedDraft.current = false;
     draftRevision.current += 1;
+    bumpSourceValueRevision();
     blockedDraftRevision.current = Math.max(
       blockedDraftRevision.current,
       draftRevision.current,
@@ -2005,6 +2011,7 @@ function MarkdownView(props: {
       // set-aside title/property edit would keep painting the view and ride
       // into the next property save (#579 review, r7). Reset here.
       draftRevision.current += 1;
+      bumpSourceValueRevision();
       setDraft(props.body);
       setSavedBody(props.body);
       latestDraft.current = props.body;
@@ -2054,7 +2061,7 @@ function MarkdownView(props: {
     // PropertiesPanel own the frontmatter (both write frontmatter through
     // latestDraft.current). Merge the live editor body over that frontmatter so
     // a save never emits the stale mount-time body. Source mode edits the full
-    // markdown directly in the textarea, so latestDraft.current is canonical.
+    // markdown directly in CodeMirror, so latestDraft.current is canonical.
     if (surfaceMode === "wysiwyg") {
       const body = wysiwygRef.current?.getMarkdown() ?? markdownEditorBody(draft);
       return mergeMarkdownEditorBody(latestDraft.current, body);
@@ -2100,21 +2107,6 @@ function MarkdownView(props: {
   useEffect(() => {
     if (surfaceMode === "read") void loadMarkdownEditor();
   }, [surfaceMode, props.path]);
-
-  useEffect(() => {
-    if (jump?.kind !== "line" || surfaceMode !== "source") return;
-    const textarea = editorRef.current;
-    if (!textarea) return;
-    const { start, end } = lineSpanInText(textarea.value, jump.line);
-    textarea.focus();
-    textarea.setSelectionRange(start, end);
-    const lineHeight = Number.parseFloat(getComputedStyle(textarea).lineHeight) || 21;
-    textarea.scrollTop = Math.max(
-      0,
-      (jump.line - 1) * lineHeight - textarea.clientHeight / 3,
-    );
-    setJump(null);
-  }, [jump, surfaceMode]);
 
   const { onSaveStateChange } = props;
 
@@ -2233,6 +2225,10 @@ function MarkdownView(props: {
   const writesBlocked = () =>
     readOnlyRef.current || writesRefusedRef.current || staleBaseline.current;
   const engineMode = engine.available && engine.doc !== null;
+  const engineModeRef = useRef(engineMode);
+  engineModeRef.current = engineMode;
+  const flushEngineUpdatesRef = useRef(engine.flushPendingLocalUpdates);
+  flushEngineUpdatesRef.current = engine.flushPendingLocalUpdates;
 
   // "View markdown as source" (engine mode): a READ-ONLY projection of the
   // canonical Y.Doc through the same yDocToMarkdown the settle uses to write
@@ -2448,6 +2444,7 @@ function MarkdownView(props: {
         ? sharedBeforeResync.contentHash
         : props.contentHash;
       draftRevision.current += 1;
+      bumpSourceValueRevision();
       setDraft(resyncBody);
       setSavedBody(resyncBody);
       latestDraft.current = resyncBody;
@@ -2502,8 +2499,8 @@ function MarkdownView(props: {
     observer.observe(container, { childList: true, subtree: true });
     return () => observer.disconnect();
   }, [surfaceMode, pendingRenderedHeadingIndex]);
-  // The engine editor's line-jump seam (#661). Engine mode renders no source
-  // textarea, so before this every engine-backed search result opened at the
+  // The engine editor's line-jump seam (#661). Engine mode renders no editable
+  // source editor, so before this every engine-backed search result opened at the
   // top of the document. The jump is retired HERE, once, for every engine-
   // backed open — including the recovery path, whose `props.body` is empty
   // (the failed read, #564) and therefore resolves to the first block.
@@ -2607,7 +2604,7 @@ function MarkdownView(props: {
   // One toggle for both branches (the shell's palette command and Ctrl/Cmd+/
   // route through it): engine mode flips the read-only source projection; the
   // legacy autosave editor switches its existing source mode — editable where
-  // the .md on disk IS the source of truth, readOnly-textarea on read-only
+  // the .md on disk IS the source of truth, and read-only on shared or truncated
   // docs (shared views / truncated reads), so "view source" works everywhere
   // a markdown document renders.
   function toggleSourceView() {
@@ -2946,13 +2943,14 @@ function MarkdownView(props: {
     }
     const text = shared.body;
     latestDraft.current = text;
+    bumpSourceValueRevision();
     setDraft(text);
     wysiwygRef.current?.replaceMarkdown(markdownEditorBody(text));
   }
 
   function switchMode(next: "read" | "wysiwyg" | "source") {
     // Read-only docs (shared views, truncated reads) still allow SOURCE — the
-    // textarea renders with the readOnly attribute, so it is a view, not an
+    // source editor is read-only, so it is a view, not an
     // edit surface (search jumps already force source mode this way). Only
     // the editable WYSIWYG mode is off-limits.
     if (readOnly && next === "wysiwyg") return;
@@ -2971,7 +2969,14 @@ function MarkdownView(props: {
     // `opening` too, so Ctrl+/ answers the same as the disabled button (#533).
     if (readOnly || opening) return;
     if (mode === "read") {
-      switchMode("wysiwyg");
+      // Large documents open in read mode because mounting the rich editor is
+      // expensive. Keep that performance boundary when editing starts: source
+      // mode handles the full draft without building a ProseMirror document.
+      switchMode(
+        props.body.length > WYSIWYG_MARKDOWN_THRESHOLD_BYTES
+          ? "source"
+          : "wysiwyg",
+      );
       return;
     }
     if (mode === "wysiwyg") {
@@ -3125,6 +3130,9 @@ function MarkdownView(props: {
   useEffect(() => {
     if (!registerDraftFlush) return;
     registerDraftFlush((options) => {
+      if (engineModeRef.current) {
+        return flushEngineUpdatesRef.current();
+      }
       if (flushInFlight.current) {
         const inFlight = flushInFlight.current;
         if (!options?.captureOnFailure) return inFlight;
@@ -3509,27 +3517,34 @@ function MarkdownView(props: {
       ) : null}
       {documentNotices}
       {surfaceMode === "source" ? (
-        <>
-          <textarea
-            data-testid="markdown-editor"
-            ref={editorRef}
-            autoFocus={props.autoFocus ?? true}
+        <Suspense
+          fallback={
+            <div className="flex min-h-0 flex-1 items-center justify-center text-xs text-subtle">
+              Loading editor...
+            </div>
+          }
+        >
+          <LazySourceCodeEditor
+            testId="markdown-editor"
             value={draft}
+            valueRevision={sourceValueRevision}
+            language="markdown"
+            path={props.path}
             readOnly={readOnly}
+            autoFocus={props.autoFocus ?? true}
+            scrollLine={jump?.kind === "line" ? jump.line : undefined}
+            pendingUndo={props.pendingUndo}
+            onPendingUndoConsumed={props.onPendingUndoConsumed}
             onFocus={onLocalEditorFocus}
-            onChange={(e) => onDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if ((e.metaKey || e.ctrlKey) && e.key === "s") {
-                e.preventDefault();
-                if (saveTimer.current) clearTimeout(saveTimer.current);
-                void saveNow();
-              }
+            onScrollLineApplied={() => setJump(null)}
+            onChange={onDraft}
+            onSave={() => {
+              if (saveTimer.current) clearTimeout(saveTimer.current);
+              void saveNow();
             }}
-            spellCheck={false}
-            className="min-h-0 flex-1 resize-none bg-bg p-6 font-mono text-[14px] leading-relaxed text-ink outline-none"
           />
           <MarkdownRenderCommitted onRendered={onMarkdownRendered} />
-        </>
+        </Suspense>
       ) : surfaceMode === "wysiwyg" ? (
         // data-dohc-doc-pane: see the note on the engine pane above.
         <div
@@ -3584,6 +3599,37 @@ function MarkdownView(props: {
               <MarkdownRenderCommitted onRendered={onMarkdownRendered} />
             </Suspense>
           </EditorErrorBoundary>
+          {backlinks}
+        </div>
+      ) : props.truncated ? (
+        // A truncated read is already a bounded prefix and is permanently
+        // read-only. Rendering that prefix as rich Markdown used to schedule
+        // every remaining block for idle backfill, growing a 3 MiB document
+        // past 136,000 DOM nodes after the first window painted. CodeMirror
+        // keeps the source readable with a viewport-bounded DOM and makes the
+        // partial-file boundary explicit instead of presenting it as a whole
+        // rich document. Keep view-markdown: callers use it as the mounted
+        // document surface regardless of which read representation owns it.
+        <div data-testid="view-markdown" className="flex min-h-0 flex-1 flex-col">
+          <Suspense
+            fallback={
+              <div className="flex flex-1 items-center justify-center text-xs text-subtle">
+                Loading source...
+              </div>
+            }
+          >
+            <LazySourceCodeEditor
+              testId="markdown-source-view"
+              value={props.body}
+              valueRevision={props.contentReadTicket}
+              language="markdown"
+              path={props.path}
+              readOnly
+              onChange={() => undefined}
+              onSave={() => undefined}
+            />
+            <MarkdownRenderCommitted onRendered={onMarkdownRendered} />
+          </Suspense>
           {backlinks}
         </div>
       ) : (
@@ -4882,7 +4928,7 @@ type FileInspectorProps = {
   // (command palette seam) — registerDraftFlush precedent.
   registerSourceToggle?: (toggle: (() => void) | null) => void;
   // Editor groups keep inactive inspectors mounted. They pass false so a
-  // source textarea mounting there cannot steal focus from the active group.
+  // source editor mounting there cannot steal focus from the active group.
   autoFocus?: boolean;
   // Workspace-switch instrumentation waits for the restored active file to
   // finish its read and, when applicable, bind its live document session.

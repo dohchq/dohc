@@ -8,6 +8,7 @@ import {
 import { useState } from "react";
 import type { SitePackageInfo } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
+import { PrimaryButton } from "../ui/controls";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
 import { siteTabPath } from "./workbenchState";
 
@@ -64,9 +65,24 @@ export function SitesView(props: {
   // scripts, and preview modes until the user manually refreshed it.
   filesSettledRevision: number;
   onOpenPath: (path: string) => void;
+  onCreateFirstSite: () => Promise<void>;
+  // A received share workspace rejects folder creation in main, including
+  // for edit grants. Mounted shares inside a normal workspace do not set it.
+  receivedShareWorkspace?: boolean;
 }) {
   const state = useSites(props.workspaceId, props.filesSettledRevision);
   const sites = state.status === "ready" ? state.sites : [];
+  const [creating, setCreating] = useState(false);
+
+  const createFirstSite = async () => {
+    if (creating || props.receivedShareWorkspace) return;
+    setCreating(true);
+    try {
+      await props.onCreateFirstSite();
+    } finally {
+      setCreating(false);
+    }
+  };
 
   return (
     <div data-testid="sites-view" className="flex min-h-0 flex-1 flex-col">
@@ -91,8 +107,20 @@ export function SitesView(props: {
           <Globe2 size={18} aria-hidden className="text-subtle" />
           <span className="text-xs font-medium text-ink">No sites yet</span>
           <span className="max-w-52 text-xs leading-relaxed text-muted">
-            Add a folder with an index.html file, and it shows up here.
+            {props.receivedShareWorkspace
+              ? "This shared view cannot create a site. Ask the workspace owner to add one."
+              : "Start with one editable HTML file in your workspace."}
           </span>
+          {!props.receivedShareWorkspace ? (
+            <PrimaryButton
+              data-testid="sites-create-first"
+              disabled={creating}
+              onClick={() => void createFirstSite()}
+              className="mt-1"
+            >
+              {creating ? "Creating site…" : "Create site"}
+            </PrimaryButton>
+          ) : null}
         </div>
       ) : (
         <ul className="m-0 flex min-h-0 flex-1 list-none flex-col gap-2 overflow-y-auto p-2">

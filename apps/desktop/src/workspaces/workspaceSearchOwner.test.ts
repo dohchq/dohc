@@ -1,4 +1,8 @@
-import type { SearchResult } from "@dohc/workspace-engine-client";
+import {
+  DaemonRefusalError,
+  isWorkspaceUpdatingRefusal,
+  type SearchResult,
+} from "@dohc/workspace-engine-client";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -521,6 +525,44 @@ describe("WorkspaceSearchOwner", () => {
     flush.resolve();
     await expectStopped(pending);
 
+    expect(registry.starts).toEqual([]);
+    expect(sender.send).not.toHaveBeenCalled();
+  });
+
+  it("does not query while the capture flush reports initial import", async () => {
+    const rootPath = await makeRoot();
+    const registry = createFakeRegistry();
+    const queryEngine = vi.fn(async () => []);
+    const owner = new WorkspaceSearchOwner({
+      searchRegistry: registry.adapter,
+      prepareOwnedSearch: async () => ({ allowPath: () => true }),
+      engineCaptureFor: () => ({
+        flush: async () => {
+          throw new DaemonRefusalError(
+            {
+              code: "OVERLOADED",
+              message: "Workspace is still updating. Try again.",
+              retry: "afterBackoff",
+            },
+            undefined,
+          );
+        },
+      }),
+      queryEngine,
+      logError: vi.fn(),
+    });
+    const sender = createSender(18);
+
+    const error = await owner
+      .start(
+        sender,
+        authority({ workspaceId: "workspace-1", rootPath }),
+        searchPayload("initial-import"),
+      )
+      .catch((reason: unknown) => reason);
+
+    expect(isWorkspaceUpdatingRefusal(error)).toBe(true);
+    expect(queryEngine).not.toHaveBeenCalled();
     expect(registry.starts).toEqual([]);
     expect(sender.send).not.toHaveBeenCalled();
   });

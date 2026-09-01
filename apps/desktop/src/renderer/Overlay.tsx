@@ -6,9 +6,7 @@ import {
   type ReactNode,
 } from "react";
 import { isTopOverlay, pushOverlay, removeOverlay } from "./guestBlockingUi";
-
-const FOCUSABLE_SELECTOR =
-  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+import { trapModalTabKey } from "./modalFocus";
 
 // Shared modal scaffold: dimmed backdrop that closes on click, with an inner
 // panel that swallows clicks. Used by the command palette, quick-open, new
@@ -42,13 +40,6 @@ export function Overlay(props: {
   }, []);
 
   useEffect(() => {
-    function focusableElements(): HTMLElement[] {
-      const panel = panelRef.current;
-      return panel
-        ? [...panel.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)]
-        : [];
-    }
-
     function onKeyDown(event: KeyboardEvent): void {
       if (!isTopOverlay(idRef.current)) return;
       if (event.key === "Escape") {
@@ -56,26 +47,7 @@ export function Overlay(props: {
         onCloseRef.current();
         return;
       }
-      if (event.key !== "Tab") return;
-      const elements = focusableElements();
-      const first = elements[0];
-      const last = elements[elements.length - 1];
-      if (!first || !last) {
-        event.preventDefault();
-        panelRef.current?.focus();
-        return;
-      }
-      const active = document.activeElement;
-      const insidePanel = active !== null && panelRef.current?.contains(active);
-      if (event.shiftKey) {
-        if (!insidePanel || active === first) {
-          event.preventDefault();
-          last.focus();
-        }
-      } else if (!insidePanel || active === last) {
-        event.preventDefault();
-        first.focus();
-      }
+      trapModalTabKey(event, panelRef.current);
     }
 
     document.addEventListener("keydown", onKeyDown, true);

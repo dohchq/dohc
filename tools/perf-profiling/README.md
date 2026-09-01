@@ -24,8 +24,15 @@ The runner performs these actions:
 1. Seeds deterministic workspaces under `<output>/fixtures`.
 2. Stages the worktree-root engine through the existing E2E preflight.
 3. Runs each profiling spec in a separate Electron profile.
-4. Runs the five scenarios serially.
-5. Writes each raw artifact and `summary.json` under the output directory.
+4. Runs the six scenarios serially.
+5. Writes an attributable `run.json` before launching the scenarios.
+6. Writes each raw artifact and `summary.json` under the output directory.
+
+Scenarios continue after one fails. The command still exits unsuccessfully,
+and `summary.json` records the failure beside every completed scenario. This
+keeps one broken path from hiding the rest of the launch evidence. Each
+scenario also has its own Playwright output directory, so a later pass cannot
+erase an earlier failure screenshot or trace.
 
 The runner does not build the app or the Rust engine.
 
@@ -53,7 +60,8 @@ Full scale contains these workspaces:
 
 - `large-flat`: 15,000 files, including 9,000 Markdown files and one 5,000-file folder. Other files stay in collapsed buckets.
 - `large-deep`: 8,000 files distributed through eight folder levels.
-- `big-docs`: five Markdown files from 1 MiB through 5 MiB.
+- `big-docs`: one editable 250 KiB Markdown file plus stress files from 1 MiB
+  through 5 MiB.
 - `drawings`: Excalidraw scenes with 300 and 1,500 elements.
 
 The seeded RNG, file ordering, fixed timestamps, and JSON formatting make fixture bytes stable across runs.
@@ -64,10 +72,17 @@ Each scenario JSON keeps raw marks, CDP metrics, long tasks, and CPU profiles wh
 
 `summary.json` contains:
 
+- the exact Git commit, dirty state, and SHA-256 hashes of the desktop bundles,
+  staged engine, and fixture manifest;
 - workspace-switch phase median and p95 offsets;
 - the top ten functions by sampled self time for each CPU profile;
-- long-task counts and total duration;
+- long-task support, counts, total duration, and longest task;
+- Explorer expansion-to-first-child and expansion-to-complete-tree timings;
 - React commit counts when available;
-- scenario-specific Explorer, Quick Open, Graph, Excalidraw, and big-document metrics.
+- scenario-specific Explorer, Quick Open, Graph, Excalidraw, editable
+  big-document, and bounded oversized-read metrics.
+
+A missing scenario is `null`, never a pass. `complete` is true only when every
+scenario produced an artifact.
 
 React commit counts are currently `null`. The app has no production React Profiler or commit mark.

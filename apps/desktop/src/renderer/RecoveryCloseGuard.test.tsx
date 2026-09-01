@@ -11,6 +11,7 @@ import {
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppErrorBoundary } from "./ErrorBoundary";
+import { Overlay } from "./Overlay";
 import {
   RecoveryCloseGuard,
   requestGuardedUpdateInstall,
@@ -85,6 +86,69 @@ afterEach(() => {
 // irreversible exit. The guard announces it first — and carries the recovery
 // list, so the warning offers the very actions it demands.
 describe("RecoveryCloseGuard", () => {
+  it("contains focus and returns it after the user goes back", async () => {
+    const user = userEvent.setup();
+    captureOrphanedDraft("ws-1", "a.md", "Kept!");
+    render(
+      <RecoveryCloseGuard>
+        <button type="button">Open document</button>
+      </RecoveryCloseGuard>,
+    );
+    const opener = screen.getByRole("button", { name: "Open document" });
+    opener.focus();
+
+    act(() => {
+      window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
+    });
+    const dialog = await screen.findByTestId("recovery-close-warning");
+    const buttons = within(dialog).getAllByRole("button");
+    const first = buttons[0];
+    const last = buttons[buttons.length - 1];
+
+    expect(document.activeElement).toBe(dialog);
+    await user.keyboard("{Shift>}{Tab}{/Shift}");
+    expect(document.activeElement).toBe(last);
+
+    dialog.focus();
+    await user.keyboard("{Tab}");
+    expect(document.activeElement).toBe(first);
+
+    last.focus();
+    await user.keyboard("{Tab}");
+    expect(document.activeElement).toBe(first);
+
+    await user.click(screen.getByTestId("recovery-close-goback"));
+    expect(document.activeElement).toBe(opener);
+  });
+
+  it("keeps an underlying overlay from competing for Tab focus", async () => {
+    const user = userEvent.setup();
+    const underlyingFocus = vi.fn();
+    captureOrphanedDraft("ws-1", "a.md", "Kept!");
+    render(
+      <RecoveryCloseGuard>
+        <Overlay onClose={() => undefined}>
+          <div role="dialog" aria-modal="true">
+            <button type="button" onFocus={underlyingFocus}>
+              Underlying action
+            </button>
+          </div>
+        </Overlay>
+      </RecoveryCloseGuard>,
+    );
+
+    act(() => {
+      window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
+    });
+    const dialog = await screen.findByTestId("recovery-close-warning");
+    underlyingFocus.mockClear();
+
+    await user.keyboard("{Tab}");
+
+    expect(document.activeElement).toBe(within(dialog).getAllByRole("button")[0]);
+    expect(underlyingFocus).not.toHaveBeenCalled();
+  });
+
   it("warns before closing while set-aside edits exist, offers the list, and closes on 'Close anyway'", async () => {
     const user = userEvent.setup();
     noteWorkspaceLabel("ws-1", "Personal notes");

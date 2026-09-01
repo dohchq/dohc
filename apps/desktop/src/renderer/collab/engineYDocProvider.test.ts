@@ -486,6 +486,23 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     await binding.destroy();
   });
 
+  it("flushes an accepted local edit before a path mutation may continue", async () => {
+    const mock = mockTransport();
+    const batches = manualBatchScheduler();
+    const binding = await bindEngineYDoc(mock.transport, batches.scheduler);
+
+    typeIntoBody(binding.doc!, "Rename-safe edit.");
+    expect(batches.pendingCount()).toBe(1);
+    expect(mock.shipped).toEqual([]);
+
+    await binding.flushPendingLocalUpdates();
+
+    expect(batches.pendingCount()).toBe(0);
+    expect(mock.shipped).toHaveLength(1);
+    expect(bodyText(mock.mainDoc)).toContain("Rename-safe edit.");
+    await binding.destroy();
+  });
+
   it("ships a local editor edit to main, and does NOT ship engine-sourced updates back (no echo)", async () => {
     const mock = mockTransport();
     const batches = manualBatchScheduler();

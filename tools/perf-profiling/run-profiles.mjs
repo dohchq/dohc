@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { cpus, hostname, totalmem } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import process from "node:process";
@@ -18,6 +19,7 @@ const SCENARIOS = [
   { artifact: "quickopen-graph", spec: "quickopen-graph.spec.ts" },
   { artifact: "excalidraw-profile", spec: "excalidraw-profile.spec.ts" },
   { artifact: "bigdoc-profile", spec: "bigdoc-profile.spec.ts" },
+  { artifact: "bigdoc-read-profile", spec: "bigdoc-read-profile.spec.ts" },
 ];
 
 function usage() {
@@ -75,6 +77,95 @@ async function run(command, args, options = {}) {
   }
 }
 
+async function capture(command, args, options = {}) {
+  const child = spawn(command, args, {
+    cwd: options.cwd ?? repoRoot,
+    env: options.env ?? process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  const [code, signal] = await once(child, "close");
+  if (code !== 0) {
+    throw new Error(
+      `${command} exited ${code ?? `after signal ${signal ?? "unknown"}`}: ${stderr.trim()}`,
+    );
+  }
+  return stdout.trim();
+}
+
+export async function runProfilingScenarios({
+  output,
+  headed,
+  env,
+  scenarios = SCENARIOS,
+  execute = run,
+  desktopRootPath = desktopRoot,
+}) {
+  const failures = [];
+  try {
+    for (const scenario of scenarios) {
+      const artifactPath = join(output, `${scenario.artifact}.json`);
+      await rm(artifactPath, { force: true });
+      const args = [
+        "scripts/run-playwright.mjs",
+        "--config",
+        "e2e/profiling/playwright.config.ts",
+        `e2e/profiling/${scenario.spec}`,
+        "--workers=1",
+        "--output",
+        join(output, "playwright", scenario.artifact),
+      ];
+      if (headed) args.push("--headed");
+      try {
+        await execute(process.execPath, args, { cwd: desktopRootPath, env });
+        if (!existsSync(artifactPath)) {
+          throw new Error(
+            `Playwright succeeded but did not produce the expected artifact ${artifactPath}.`,
+          );
+        }
+      } catch (error) {
+        failures.push({
+          scenario: scenario.artifact,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return failures;
+  } finally {
+    await rm(join(output, "workspaces"), { recursive: true, force: true });
+  }
+}
+
+async function sha256File(path) {
+  return createHash("sha256").update(await readFile(path)).digest("hex");
+}
+
+async function sha256Tree(root) {
+  const entries = await readdir(root, { recursive: true, withFileTypes: true });
+  const files = entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => join(entry.parentPath, entry.name))
+    .sort();
+  const hash = createHash("sha256");
+  for (const path of files) {
+    hash.update(path.slice(root.length).replaceAll("\\", "/"));
+    hash.update("\0");
+    hash.update(await readFile(path));
+    hash.update("\0");
+  }
+  return hash.digest("hex");
+}
+
 function percentile(values, fraction) {
   if (values.length === 0) return null;
   const sorted = [...values].sort((left, right) => left - right);
@@ -127,16 +218,29 @@ function topSelfTimeFunctions(profile) {
 }
 
 function commonSummary(measurements) {
+  const longTaskEntries = measurements.longTasks?.entries ?? [];
   return {
     cpuProfileTop10SelfTimeFunctions: topSelfTimeFunctions(measurements.cpuProfile),
+    longTaskObserverSupported: measurements.longTasks?.supported ?? null,
     longTaskCount: measurements.longTasks?.count ?? null,
     longTaskTotalDurationMs: measurements.longTasks?.totalDurationMs ?? null,
+    longestTaskMs:
+      measurements.longTasks?.supported === true
+        ? longTaskEntries.length > 0
+          ? Math.max(...longTaskEntries.map(({ duration }) => duration))
+          : 0
+        : null,
     reactCommitCount: measurements.reactCommitCount ?? null,
   };
 }
 
 function summarizeArtifacts(artifacts) {
-  const switchMeasurements = artifacts["switch-profile"].measurements;
+  const switchMeasurements = artifacts["switch-profile"]?.measurements;
+  const explorer = artifacts["explorer-profile"]?.measurements;
+  const quickOpen = artifacts["quickopen-graph"]?.measurements;
+  const excalidraw = artifacts["excalidraw-profile"]?.measurements;
+  const bigDoc = artifacts["bigdoc-profile"]?.measurements;
+  const bigDocRead = artifacts["bigdoc-read-profile"]?.measurements;
   const phases = [
     "switch-start",
     "session-admitted",
@@ -145,59 +249,98 @@ function summarizeArtifacts(artifacts) {
     "history-ready",
     "restored-active-surface-ready",
   ];
-  const phaseOffsetsMs = Object.fromEntries(
-    phases.map((phase) => [
-      phase,
-      summarizeSeries(
-        switchMeasurements.timeline.flatMap((entry) =>
-          Number.isFinite(entry.phases[phase]) ? [entry.phases[phase]] : [],
-        ),
-      ),
-    ]),
-  );
-  const explorer = artifacts["explorer-profile"].measurements;
-  const quickOpen = artifacts["quickopen-graph"].measurements;
-  const excalidraw = artifacts["excalidraw-profile"].measurements;
-  const bigDoc = artifacts["bigdoc-profile"].measurements;
+  const phaseOffsetsMs = switchMeasurements
+    ? Object.fromEntries(
+        phases.map((phase) => [
+          phase,
+          summarizeSeries(
+            switchMeasurements.timeline.flatMap((entry) =>
+              Number.isFinite(entry.phases[phase]) ? [entry.phases[phase]] : [],
+            ),
+          ),
+        ]),
+      )
+    : null;
+
   return {
-    switch: {
-      ...commonSummary(switchMeasurements),
-      switches: switchMeasurements.switches,
-      elapsedMs: switchMeasurements.elapsedMs,
-      phaseOffsetsMs,
-    },
-    explorer: {
-      ...commonSummary(explorer),
-      mountedRows: explorer.mountedRows,
-      interactionDurationMs: explorer.interactionDurationMs,
-      taskDurationSeconds: explorer.performance?.delta?.TaskDuration ?? null,
-      scriptDurationSeconds: explorer.performance?.delta?.ScriptDuration ?? null,
-    },
-    quickOpenGraph: {
-      ...commonSummary(quickOpen),
-      queryTimings: quickOpen.queryTimings,
-      graphOpenToReadyMs: quickOpen.graphOpenToReadyMs,
-      graphDocCount: quickOpen.graphDocCount,
-      graphLinkCount: quickOpen.graphLinkCount,
-    },
-    excalidraw: {
-      ...commonSummary(excalidraw),
-      elementCount: artifacts["excalidraw-profile"].fixture.elementCount,
-      pointerFrames: excalidraw.pointerFrames,
-      actualDragDurationMs: excalidraw.actualDragDurationMs,
-      taskDurationSeconds: excalidraw.performance?.delta?.TaskDuration ?? null,
-      scriptDurationSeconds: excalidraw.performance?.delta?.ScriptDuration ?? null,
-    },
-    bigDoc: {
-      ...commonSummary(bigDoc),
-      bytes: artifacts["bigdoc-profile"].fixture.bytes,
-      typedCharacters: bigDoc.typedCharacters,
-      elapsedMs: bigDoc.elapsedMs,
-      markdownOpenMs:
-        bigDoc.rendererMarks?.after?.measures?.["markdown-open"] ?? null,
-      taskDurationSeconds: bigDoc.performance?.delta?.TaskDuration ?? null,
-      scriptDurationSeconds: bigDoc.performance?.delta?.ScriptDuration ?? null,
-    },
+    switch: switchMeasurements
+      ? {
+          ...commonSummary(switchMeasurements),
+          switches: switchMeasurements.switches,
+          elapsedMs: switchMeasurements.elapsedMs,
+          phaseOffsetsMs,
+        }
+      : null,
+    explorer: explorer
+      ? {
+          ...commonSummary(explorer),
+          mountedRows: explorer.mountedRows,
+          mountedRowsAfterExpand: explorer.mountedRowsAfterExpand,
+          expandToAriaMs: explorer.expandToAriaMs,
+          expandToFirstChildMs: explorer.expandToFirstChildMs,
+          expandToLastRowMs: explorer.expandToLastRowMs,
+          endNavigationToLastRowMs: explorer.endNavigationToLastRowMs,
+          interactionDurationMs: explorer.interactionDurationMs,
+          taskDurationSeconds: explorer.performance?.delta?.TaskDuration ?? null,
+          scriptDurationSeconds: explorer.performance?.delta?.ScriptDuration ?? null,
+        }
+      : null,
+    quickOpenGraph: quickOpen
+      ? {
+          ...commonSummary(quickOpen),
+          queryTimings: quickOpen.queryTimings,
+          graphOpenToReadyMs: quickOpen.graphOpenToReadyMs,
+          graphDocCount: quickOpen.graphDocCount,
+          graphLinkCount: quickOpen.graphLinkCount,
+        }
+      : null,
+    excalidraw: excalidraw
+      ? {
+          ...commonSummary(excalidraw),
+          elementCount:
+            artifacts["excalidraw-profile"].fixture?.elementCount ?? null,
+          pointerFrames: excalidraw.pointerFrames,
+          actualDragDurationMs: excalidraw.actualDragDurationMs,
+          taskDurationSeconds: excalidraw.performance?.delta?.TaskDuration ?? null,
+          scriptDurationSeconds: excalidraw.performance?.delta?.ScriptDuration ?? null,
+        }
+      : null,
+    bigDoc: bigDoc
+      ? {
+          ...commonSummary(bigDoc),
+          bytes: artifacts["bigdoc-profile"].fixture?.bytes ?? null,
+          typedCharacters: bigDoc.typedCharacters,
+          typingDurationMs: bigDoc.typingDurationMs,
+          elapsedMs: bigDoc.elapsedMs,
+          markdownOpenMs:
+            bigDoc.rendererMarks?.after?.measures?.["markdown-open"] ?? null,
+          taskDurationSeconds: bigDoc.performance?.delta?.TaskDuration ?? null,
+          scriptDurationSeconds: bigDoc.performance?.delta?.ScriptDuration ?? null,
+        }
+      : null,
+    bigDocRead: bigDocRead
+      ? {
+          ...commonSummary(bigDocRead),
+          bytes: artifacts["bigdoc-read-profile"].fixture?.bytes ?? null,
+          elapsedMs: bigDocRead.elapsedMs,
+          sourceDescendants: bigDocRead.sourceDescendants,
+          renderedLines: bigDocRead.renderedLines,
+          pageNodes: bigDocRead.pageNodes,
+          taskDurationSeconds: bigDocRead.performance?.delta?.TaskDuration ?? null,
+          scriptDurationSeconds: bigDocRead.performance?.delta?.ScriptDuration ?? null,
+        }
+      : null,
+  };
+}
+
+export function createSummary(runEnvelope, failures, artifacts, scenarios = SCENARIOS) {
+  return {
+    ...runEnvelope,
+    complete:
+      failures.length === 0 &&
+      scenarios.every(({ artifact }) => Object.hasOwn(artifacts, artifact)),
+    failures,
+    scenarios: summarizeArtifacts(artifacts),
   };
 }
 
@@ -223,39 +366,29 @@ async function main() {
   // Stages the worktree-root target/debug daemon into the path Electron uses.
   await run(process.execPath, ["scripts/require-e2e-engine.mjs"], { cwd: desktopRoot });
 
-  const env = {
-    ...process.env,
-    DOHC_PROFILE_FIXTURES: fixtures,
-    DOHC_PROFILE_OUTPUT: options.output,
-    DOHC_PROFILE_SCALE: options.tiny ? "tiny" : "full",
-    DOHC_PROFILE_SMOKE: options.tiny ? "1" : "0",
-  };
-  for (const scenario of SCENARIOS) {
-    const args = [
-      "scripts/run-playwright.mjs",
-      "--config",
-      "e2e/profiling/playwright.config.ts",
-      `e2e/profiling/${scenario.spec}`,
-      "--workers=1",
-    ];
-    if (options.headed) args.push("--headed");
-    await run(process.execPath, args, { cwd: desktopRoot, env });
-  }
-
-  const artifacts = {};
-  for (const { artifact } of SCENARIOS) {
-    artifacts[artifact] = JSON.parse(
-      await readFile(join(options.output, `${artifact}.json`), "utf8"),
-    );
-  }
   const seedManifest = JSON.parse(
     await readFile(join(fixtures, "seed-manifest.json"), "utf8"),
   );
-  const summary = {
+  const stagedEngine = join(
+    desktopRoot,
+    "target",
+    "debug",
+    `dohc-workspace-engine${process.platform === "win32" ? ".exe" : ""}`,
+  );
+  const gitStatus = await capture("git", ["status", "--short"]);
+  const runEnvelope = {
     schemaVersion: 1,
     capturedAt: new Date().toISOString(),
     scale: options.tiny ? "tiny" : "full",
     seed: seedManifest.seed,
+    source: {
+      gitCommit: await capture("git", ["rev-parse", "HEAD"]),
+      gitDirty: gitStatus.length > 0,
+      mainBundleSha256: await sha256File(join(desktopRoot, "dist", "main", "main.js")),
+      rendererTreeSha256: await sha256Tree(join(desktopRoot, "dist", "renderer")),
+      engineSha256: await sha256File(stagedEngine),
+      fixtureManifestSha256: await sha256File(join(fixtures, "seed-manifest.json")),
+    },
     machine: {
       hostname: hostname(),
       platform: process.platform,
@@ -265,15 +398,43 @@ async function main() {
       logicalCpuCount: cpus().length,
       totalMemoryBytes: totalmem(),
     },
-    scenarios: summarizeArtifacts(artifacts),
   };
+  await writeFile(
+    join(options.output, "run.json"),
+    `${JSON.stringify(runEnvelope, null, 2)}\n`,
+  );
+
+  const env = {
+    ...process.env,
+    DOHC_PROFILE_FIXTURES: fixtures,
+    DOHC_PROFILE_OUTPUT: options.output,
+    DOHC_PROFILE_SCALE: options.tiny ? "tiny" : "full",
+    DOHC_PROFILE_SMOKE: options.tiny ? "1" : "0",
+  };
+  const failures = await runProfilingScenarios({
+    output: options.output,
+    headed: options.headed,
+    env,
+  });
+
+  const artifacts = {};
+  for (const { artifact } of SCENARIOS) {
+    const path = join(options.output, `${artifact}.json`);
+    if (existsSync(path)) artifacts[artifact] = JSON.parse(await readFile(path, "utf8"));
+  }
+  const summary = createSummary(runEnvelope, failures, artifacts);
   await writeFile(join(options.output, "summary.json"), `${JSON.stringify(summary, null, 2)}\n`);
   console.log(`[perf-profiling] wrote ${join(options.output, "summary.json")}`);
+  if (failures.length > 0) {
+    throw new Error(`${failures.length} profiling scenario(s) failed; partial summary preserved.`);
+  }
 }
 
-try {
-  await main();
-} catch (error) {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    await main();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  }
 }

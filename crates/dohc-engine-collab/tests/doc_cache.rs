@@ -64,18 +64,27 @@ fn decode_hex(encoded: &str) -> Vec<u8> {
         .collect()
 }
 
-/// Redefine an update's payload in place (same client, same clocks, different
-/// content) — the hostile-redefinition shape the parity gate must reject.
+/// Redefine an update's plaintext payload in place (same client, same clocks,
+/// different content) — the hostile-redefinition shape the parity gate must
+/// reject.
 fn flip_payload_byte(update: &[u8], from: u8, to: u8) -> Vec<u8> {
-    let positions: Vec<usize> = update
+    let marker = b"plainText";
+    let marker_at = update
+        .windows(marker.len())
+        .position(|window| window == marker)
+        .expect("plainText root marker present");
+    let payload_len_at = marker_at + marker.len();
+    let payload_start = payload_len_at + 1;
+    let payload_end = payload_start + usize::from(update[payload_len_at]);
+    let positions: Vec<usize> = update[payload_start..payload_end]
         .iter()
         .enumerate()
-        .filter_map(|(i, b)| (*b == from).then_some(i))
+        .filter_map(|(offset, byte)| (*byte == from).then_some(payload_start + offset))
         .collect();
     assert_eq!(
         positions.len(),
         1,
-        "payload byte must be unambiguous in the wire bytes"
+        "payload byte must be unambiguous in the plaintext payload"
     );
     let mut hostile = update.to_vec();
     hostile[positions[0]] = to;

@@ -42,6 +42,11 @@ notify = "8"
 # Already in the tree via `notify`; same safe API the runtime's EngineDbIdentity
 # uses, so this crate keeps forbid(unsafe_code).
 file-id = "0.2"
+# Stable cross-platform identity for already-open file handles. The post-hash
+# fence compares the descriptor we hashed with one opened from the current path;
+# moving both handles into this safe wrapper avoids unstable Windows metadata
+# APIs and keeps the identity observation tied to those exact objects.
+same-file = "1"
 # Shared `.dohc/files.toml` / `visibility.toml` parsing and search-policy
 # resolution. Both the runtime's local index path and sync's replicated index
 # path consume this one implementation.

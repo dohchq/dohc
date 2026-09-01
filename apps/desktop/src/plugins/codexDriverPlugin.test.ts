@@ -1,4 +1,4 @@
-import { mkdir, cp, readFile, rm } from "node:fs/promises";
+import { mkdir, cp, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -10,7 +10,7 @@ import {
   type AgentSession,
 } from "../agents/AgentDriver";
 import { JsonRpcTransport } from "../agents/JsonRpcTransport";
-import { createTestScratch } from "../workspaces/testTemp";
+import { createTestScratch, removeTestScratch } from "../workspaces/testTemp";
 import { PluginHost, type PluginHostOptions } from "./PluginHost";
 import { PluginChildProcessBroker } from "./pluginChildProcessBroker";
 import { createPluginAgentDrivers, type PluginAgentDrivers } from "./pluginAgentDrivers";
@@ -40,9 +40,7 @@ const liveBrokers: PluginChildProcessBroker[] = [];
 afterEach(async () => {
   await Promise.allSettled(liveHosts.splice(0).map((host) => host.stopAll()));
   await Promise.allSettled(liveBrokers.splice(0).map((broker) => broker.dispose()));
-  await Promise.all(
-    scratchRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
-  );
+  await Promise.all(scratchRoots.splice(0).map((root) => removeTestScratch(root)));
 });
 
 async function until<T>(
@@ -94,6 +92,10 @@ async function startCodexPlugin(
       requestDriver: (pluginId, spawnId, method, params) => {
         if (!host) throw new Error("The plugin host is not running.");
         return host.requestDriver(pluginId, spawnId, method, params);
+      },
+      stopDriverSpawn: (pluginId, spawnId) => {
+        if (!host) return Promise.resolve();
+        return host.stopDriverSpawn(pluginId, spawnId);
       },
     },
     // The real list. A driver id dohc still ships is one this plugin could

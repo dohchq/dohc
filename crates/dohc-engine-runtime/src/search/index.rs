@@ -71,11 +71,11 @@ fn delete_file_index_row(
     version_id: &str,
     object_id: &str,
 ) -> Result<(), SearchError> {
-    conn.execute(
+    conn.prepare_cached(
         "DELETE FROM engine_search_files_fts \
          WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-        params![workspace_id, version_id, object_id],
-    )?;
+    )?
+    .execute(params![workspace_id, version_id, object_id])?;
     Ok(())
 }
 
@@ -88,11 +88,11 @@ fn insert_file_index_row(
     path: &str,
     text: &str,
 ) -> Result<(), SearchError> {
-    conn.execute(
+    conn.prepare_cached(
         "INSERT INTO engine_search_files_fts \
          (workspace_id, version_id, object_id, path, text) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![workspace_id, version_id, object_id, path, text],
-    )?;
+    )?
+    .execute(params![workspace_id, version_id, object_id, path, text])?;
     Ok(())
 }
 
@@ -117,6 +117,71 @@ pub fn upsert_file_search_index(
     text: &str,
 ) -> Result<(), SearchError> {
     let policy = read_engine_search_policy(root_dir);
+    maintain_file_search_index_with_policy(
+        conn,
+        &policy,
+        workspace_id,
+        version_id,
+        object_id,
+        path,
+        text,
+        true,
+    )
+}
+
+/// Maintain the FTS row for a newly committed capture moment.
+///
+/// A non-deduped moment minted by the current schema records whether it had a
+/// concrete live preimage. A version fork can still have an indexed fallback
+/// from `fork_base_snapshots`, so that indexed preimage is checked by its
+/// primary key before skipping the otherwise full-table FTS5 metadata-key
+/// DELETE. Public upsert callers stay conservative and always remove an
+/// existing row first.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn update_file_search_index_for_capture(
+    conn: &Connection,
+    policy: &SearchPolicySnapshot,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+    path: &str,
+    text: &str,
+    had_preimage: bool,
+) -> Result<(), SearchError> {
+    let inherited_preimage = if had_preimage || policy.is_degraded() {
+        false
+    } else {
+        conn.prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM fork_base_snapshots \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3)",
+        )?
+        .query_row(params![workspace_id, version_id, object_id], |row| {
+            row.get::<_, bool>(0)
+        })?
+    };
+    maintain_file_search_index_with_policy(
+        conn,
+        policy,
+        workspace_id,
+        version_id,
+        object_id,
+        path,
+        text,
+        had_preimage || inherited_preimage,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn maintain_file_search_index_with_policy(
+    conn: &Connection,
+    policy: &SearchPolicySnapshot,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+    path: &str,
+    text: &str,
+    remove_existing: bool,
+) -> Result<(), SearchError> {
     if policy.is_degraded() {
         // Freeze, don't drop. Invalidate an existing healthy certification in
         // this mutation transaction; no row already means ensure must rebuild.
@@ -127,8 +192,10 @@ pub fn upsert_file_search_index(
         )?;
         return Ok(());
     }
-    delete_file_index_row(conn, workspace_id, version_id, object_id)?;
-    if !path_is_search_indexed(&policy, path) {
+    if remove_existing {
+        delete_file_index_row(conn, workspace_id, version_id, object_id)?;
+    }
+    if !path_is_search_indexed(policy, path) {
         return Ok(());
     }
     let search_text = extract_search_text(path, text);
@@ -517,6 +584,9 @@ pub fn display_title_for(stored_title: &str, first_body: Option<&str>) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn snippet_title_collapses_and_bounds() {
@@ -548,5 +618,162 @@ mod tests {
             chat_message_text("Bot", true, "beep"),
             "Bot\nBot (agent)\nbeep"
         );
+    }
+
+    #[test]
+    fn fifteen_thousand_fresh_capture_rows_issue_no_fts_delete() {
+        const ROWS: usize = 15_000;
+        let scratch = dohc_engine_testkit::ScratchDir::new().expect("scratch");
+        let policy = read_engine_search_policy(scratch.path());
+        let mut conn = Connection::open_in_memory().expect("open memory database");
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE engine_search_files_fts USING fts5(\
+                 workspace_id UNINDEXED, version_id UNINDEXED, \
+                 object_id UNINDEXED, path UNINDEXED, text, tokenize='trigram'\
+             );\
+             CREATE TABLE fork_base_snapshots (\
+                 workspace_id TEXT NOT NULL, version_id TEXT NOT NULL, \
+                 object_id TEXT NOT NULL, \
+                 PRIMARY KEY (workspace_id, version_id, object_id)\
+             );",
+        )
+        .expect("create file FTS");
+
+        // The authorizer runs when SQLite prepares a statement. Denying a
+        // top-level DELETE on the FTS table makes this a direct execution-path
+        // proof rather than a timing assertion: one attempted per-file delete
+        // fails the test immediately.
+        let deletes = Arc::new(AtomicUsize::new(0));
+        let observed_deletes = Arc::clone(&deletes);
+        conn.authorizer(Some(move |context: AuthContext<'_>| match context.action {
+            AuthAction::Delete {
+                table_name: "engine_search_files_fts",
+            } => {
+                observed_deletes.fetch_add(1, Ordering::Relaxed);
+                Authorization::Deny
+            }
+            _ => Authorization::Allow,
+        }))
+        .expect("install delete guard");
+
+        let tx = conn.transaction().expect("begin fresh index transaction");
+        for index in 0..ROWS {
+            let object_id = format!("fresh-object-{index:05}");
+            let path = format!("note-{index:05}.md");
+            update_file_search_index_for_capture(
+                &tx,
+                &policy,
+                "fresh-workspace",
+                "main",
+                &object_id,
+                &path,
+                "fresh capture body",
+                false,
+            )
+            .expect("insert fresh capture row");
+        }
+        tx.commit().expect("commit fresh index transaction");
+
+        let (rows, objects): (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), COUNT(DISTINCT object_id) \
+                 FROM engine_search_files_fts",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("count fresh FTS rows");
+        assert_eq!((rows, objects), (ROWS as i64, ROWS as i64));
+        assert_eq!(deletes.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn fork_base_capture_replaces_its_fallback_fts_row() {
+        let scratch = dohc_engine_testkit::ScratchDir::new().expect("scratch");
+        let policy = read_engine_search_policy(scratch.path());
+        let conn = Connection::open_in_memory().expect("open memory database");
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE engine_search_files_fts USING fts5(\
+                 workspace_id UNINDEXED, version_id UNINDEXED, \
+                 object_id UNINDEXED, path UNINDEXED, text, tokenize='trigram'\
+             );\
+             CREATE TABLE fork_base_snapshots (\
+                 workspace_id TEXT NOT NULL, version_id TEXT NOT NULL, \
+                 object_id TEXT NOT NULL, \
+                 PRIMARY KEY (workspace_id, version_id, object_id)\
+             );\
+             INSERT INTO fork_base_snapshots (workspace_id, version_id, object_id) \
+             VALUES ('workspace', 'branch', 'object');\
+             INSERT INTO engine_search_files_fts \
+             (workspace_id, version_id, object_id, path, text) \
+             VALUES ('workspace', 'branch', 'object', 'old.md', 'stale fallback text');",
+        )
+        .expect("seed fork fallback index");
+
+        update_file_search_index_for_capture(
+            &conn,
+            &policy,
+            "workspace",
+            "branch",
+            "object",
+            "new.md",
+            "replacement text",
+            false,
+        )
+        .expect("replace fallback index row");
+
+        let rows: Vec<(String, String)> = conn
+            .prepare(
+                "SELECT path, text FROM engine_search_files_fts \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+            )
+            .expect("prepare index query")
+            .query_map(params!["workspace", "branch", "object"], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .expect("query index")
+            .collect::<rusqlite::Result<_>>()
+            .expect("read index rows");
+        assert_eq!(
+            rows,
+            vec![("new.md".to_owned(), "replacement text".to_owned())]
+        );
+    }
+
+    #[test]
+    fn public_file_upsert_remains_conservative_delete_first() {
+        let scratch = dohc_engine_testkit::ScratchDir::new().expect("scratch");
+        let conn = Connection::open_in_memory().expect("open memory database");
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE engine_search_files_fts USING fts5(\
+                 workspace_id UNINDEXED, version_id UNINDEXED, \
+                 object_id UNINDEXED, path UNINDEXED, text, tokenize='trigram'\
+             );",
+        )
+        .expect("create file FTS");
+        let deletes = Arc::new(AtomicUsize::new(0));
+        let observed_deletes = Arc::clone(&deletes);
+        conn.authorizer(Some(move |context: AuthContext<'_>| match context.action {
+            AuthAction::Delete {
+                table_name: "engine_search_files_fts",
+            } => {
+                observed_deletes.fetch_add(1, Ordering::Relaxed);
+                Authorization::Deny
+            }
+            _ => Authorization::Allow,
+        }))
+        .expect("install delete guard");
+
+        let error = upsert_file_search_index(
+            &conn,
+            scratch.path(),
+            "workspace",
+            "main",
+            "object",
+            "note.md",
+            "body",
+        )
+        .expect_err("public upsert must attempt its conservative delete");
+        assert!(matches!(error, SearchError::Storage(_)));
+        assert_eq!(deletes.load(Ordering::Relaxed), 1);
     }
 }

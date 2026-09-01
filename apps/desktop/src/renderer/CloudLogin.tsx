@@ -1,5 +1,6 @@
 import { Check, Cloud, Copy, ExternalLink, LogOut } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { canonicalCloudOrigin } from "../workspaces/cloudConfiguration";
 import { buildSyncCode } from "../workspaces/syncCode";
 import { bridge } from "./bridge";
 import { openLinkExternally } from "./linkActivation";
@@ -7,10 +8,17 @@ import { PrimaryButton, SecondaryButton } from "./ui/controls";
 
 type WorkspaceSecretState = "none" | "protected-key-present" | "protected-key-missing";
 type PassphrasePurpose = "enable" | "protect" | "unlock";
+type ManagedCloudStatus = "unknown" | "ready" | "unconfigured" | "invalid";
+type ConnectionMode = "managed" | "self-host";
+type ConnectionError = {
+  message: string;
+  invalid: "both" | "server" | "relay";
+};
 const MIN_PASSPHRASE_LENGTH = 8;
 
 type Phase =
   | { kind: "loading" }
+  | { kind: "status-failed" }
   | { kind: "disconnected" }
   | { kind: "code"; userCode: string; verificationUri: string }
   | { kind: "connected"; email: string }
@@ -40,9 +48,16 @@ export function CloudLogin(props: {
   const [passphrase, setPassphrase] = useState("");
   const [workspaceSecretState, setWorkspaceSecretState] =
     useState<WorkspaceSecretState>("none");
+  const [managedCloudStatus, setManagedCloudStatus] =
+    useState<ManagedCloudStatus>("unknown");
+  const [statusAttempt, setStatusAttempt] = useState(0);
+  const [connectionMode, setConnectionMode] = useState<ConnectionMode>("self-host");
+  const [connectionError, setConnectionError] = useState<ConnectionError | null>(null);
   const [serverUrl, setServerUrl] = useState("");
   const [relayUrl, setRelayUrl] = useState("");
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const serverUrlInput = useRef<HTMLInputElement | null>(null);
+  const relayUrlInput = useRef<HTMLInputElement | null>(null);
   const sessionRef = useRef(0);
   const protectPassphraseTooShort =
     needsPassphrase &&
@@ -69,6 +84,11 @@ export function CloudLogin(props: {
     setPassphrasePurpose("enable");
     setPassphrase("");
     setWorkspaceSecretState("none");
+    setManagedCloudStatus("unknown");
+    setConnectionMode("self-host");
+    setConnectionError(null);
+    setServerUrl("");
+    setRelayUrl("");
     void bridge()
       .cloudStatus(props.workspaceId ? { workspaceId: props.workspaceId } : {})
       .then((status) => {
@@ -76,6 +96,9 @@ export function CloudLogin(props: {
         setWorkspaceSynced(status.workspaceSynced ?? false);
         setWorkspaceSyncConnected(status.workspaceSyncConnected ?? false);
         setWorkspaceSecretState(status.workspaceSecretState ?? "none");
+        const configuredStatus = status.managedCloudStatus;
+        setManagedCloudStatus(configuredStatus);
+        setConnectionMode(configuredStatus === "ready" ? "managed" : "self-host");
         if (status.serverUrl) setServerUrl(status.serverUrl);
         if (status.relayUrl) setRelayUrl(status.relayUrl);
         setPhase(
@@ -85,13 +108,13 @@ export function CloudLogin(props: {
         );
       })
       .catch(() => {
-        if (session === sessionRef.current) setPhase({ kind: "disconnected" });
+        if (session === sessionRef.current) setPhase({ kind: "status-failed" });
       });
     return () => {
       if (sessionRef.current === session) sessionRef.current += 1;
       clearPollTimer();
     };
-  }, [props.workspaceId]);
+  }, [props.workspaceId, statusAttempt]);
 
   async function enableSync() {
     if (!props.workspaceId || syncBusy) return;
@@ -188,15 +211,59 @@ export function CloudLogin(props: {
   }
 
   async function connect() {
+    let connection: { serverUrl: string; relayUrl: string } | undefined;
+    if (connectionMode === "self-host") {
+      const normalizedServerUrl = canonicalCloudOrigin(serverUrl);
+      const normalizedRelayUrl = canonicalCloudOrigin(relayUrl);
+      const missingServer = !serverUrl.trim();
+      const missingRelay = !relayUrl.trim();
+      if (missingServer || missingRelay) {
+        setConnectionError({
+          message:
+            missingServer && missingRelay
+              ? "Enter the cloud server URL and sync relay URL."
+              : missingServer
+                ? "Enter the cloud server URL."
+                : "Enter the sync relay URL.",
+          invalid:
+            missingServer && missingRelay
+              ? "both"
+              : missingServer
+                ? "server"
+                : "relay",
+        });
+        (missingServer ? serverUrlInput : relayUrlInput).current?.focus();
+        return;
+      }
+      if (!normalizedServerUrl) {
+        setConnectionError({
+          message: "Enter the cloud server URL as an HTTP or HTTPS origin.",
+          invalid: "server",
+        });
+        serverUrlInput.current?.focus();
+        return;
+      }
+      if (!normalizedRelayUrl) {
+        setConnectionError({
+          message: "Enter the sync relay URL as an HTTP or HTTPS origin.",
+          invalid: "relay",
+        });
+        relayUrlInput.current?.focus();
+        return;
+      }
+      connection = {
+        serverUrl: normalizedServerUrl,
+        relayUrl: normalizedRelayUrl,
+      };
+    }
+
     const session = sessionRef.current + 1;
     sessionRef.current = session;
     clearPollTimer();
+    setConnectionError(null);
     setPhase({ kind: "loading" });
     try {
-      const started = await bridge().cloudLoginStart({
-        ...(serverUrl.trim() ? { serverUrl: serverUrl.trim() } : {}),
-        ...(relayUrl.trim() ? { relayUrl: relayUrl.trim() } : {}),
-      });
+      const started = await bridge().cloudLoginStart(connection ?? {});
       if (session !== sessionRef.current) return;
       setPhase({ kind: "code", ...started });
       pollUntilDone(session);
@@ -204,7 +271,10 @@ export function CloudLogin(props: {
       if (session === sessionRef.current) {
         setPhase({
           kind: "failed",
-          reason: "Couldn't reach the server. Is dohc Cloud (or your self-host) running?",
+          reason:
+            connectionMode === "managed"
+              ? "dohc could not reach dohc Cloud. Check your connection, then try again."
+              : "dohc could not reach this self-hosted server. Check both URLs, then try again.",
         });
       }
     }
@@ -278,46 +348,180 @@ export function CloudLogin(props: {
         <p className="mb-0 mt-2 text-xs text-subtle">Checking connection…</p>
       ) : null}
 
+      {phase.kind === "status-failed" ? (
+        <div>
+          <p
+            data-testid="cloud-status-error"
+            role="alert"
+            className="mb-0 mt-2 text-xs text-danger"
+          >
+            dohc could not check the cloud connection.
+          </p>
+          <SecondaryButton
+            type="button"
+            data-testid="cloud-status-retry"
+            onClick={() => setStatusAttempt((attempt) => attempt + 1)}
+            className="mt-3"
+          >
+            Retry
+          </SecondaryButton>
+        </div>
+      ) : null}
+
       {phase.kind === "disconnected" || phase.kind === "failed" ? (
         <>
-          <p className="mb-0 mt-2 text-xs leading-relaxed text-muted">
-            Sync this workspace for sharing, backup, and team collaboration.
-            Everything keeps working locally — cloud is additive, never required.
-          </p>
           {phase.kind === "failed" ? (
             <p data-testid="cloud-login-error" className="mb-0 mt-2 text-xs text-danger">
               {phase.reason}
             </p>
           ) : null}
-          <label className="mt-3 block text-[11px] font-medium text-subtle">
-            Cloud server URL
-            <input
-              spellCheck={false}
-              data-testid="cloud-server-url"
-              value={serverUrl}
-              onChange={(event) => setServerUrl(event.currentTarget.value)}
-              placeholder="http://localhost:1786"
-              className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink outline-none placeholder:text-subtle focus:border-ink"
-            />
-          </label>
-          <label className="mt-2 block text-[11px] font-medium text-subtle">
-            Sync relay URL
-            <input
-              spellCheck={false}
-              data-testid="cloud-relay-url"
-              value={relayUrl}
-              onChange={(event) => setRelayUrl(event.currentTarget.value)}
-              placeholder="http://localhost:1788"
-              className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink outline-none placeholder:text-subtle focus:border-ink"
-            />
-          </label>
-          <PrimaryButton
-            data-testid="cloud-connect-start"
-            onClick={() => void connect()}
-            className="mt-3"
-          >
-            Connect
-          </PrimaryButton>
+          {managedCloudStatus === "ready" && connectionMode === "managed" ? (
+            <>
+              <p className="mb-0 mt-2 text-xs leading-relaxed text-muted">
+                Connect to dohc Cloud for sync and sharing. Your workspace keeps
+                working locally without a connection.
+              </p>
+              <PrimaryButton
+                data-testid="cloud-connect-start"
+                onClick={() => void connect()}
+                className="mt-3"
+              >
+                Connect to dohc Cloud
+              </PrimaryButton>
+              <SecondaryButton
+                type="button"
+                data-testid="cloud-use-self-host"
+                onClick={() => {
+                  setConnectionMode("self-host");
+                  setConnectionError(null);
+                }}
+                className="ml-2 mt-3"
+              >
+                Use a self-hosted server
+              </SecondaryButton>
+            </>
+          ) : (
+            <>
+              {managedCloudStatus === "unconfigured" ? (
+                <p
+                  data-testid="cloud-managed-unconfigured"
+                  className="mb-0 mt-2 text-xs leading-relaxed text-muted"
+                >
+                  dohc Cloud isn't configured in this build. You can still connect
+                  to a self-hosted server.
+                </p>
+              ) : null}
+              {managedCloudStatus === "invalid" ? (
+                <>
+                  <p
+                    data-testid="cloud-managed-invalid"
+                    className="mb-0 mt-2 text-xs leading-relaxed text-danger"
+                  >
+                    dohc Cloud is unavailable because this build has incomplete
+                    server settings.
+                  </p>
+                  <p className="mb-0 mt-1 text-xs leading-relaxed text-muted">
+                    Connect a self-hosted server instead.
+                  </p>
+                </>
+              ) : null}
+              {managedCloudStatus === "ready" ? (
+                <SecondaryButton
+                  type="button"
+                  data-testid="cloud-use-managed"
+                  onClick={() => {
+                    setConnectionMode("managed");
+                    setConnectionError(null);
+                  }}
+                  className="mt-3"
+                >
+                  Use dohc Cloud
+                </SecondaryButton>
+              ) : null}
+              <form
+                noValidate
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void connect();
+                }}
+              >
+                <p className="mb-0 mt-3 text-[11px] font-semibold text-ink">
+                  Self-hosted server
+                </p>
+                <p className="mb-0 mt-1 text-[11px] leading-relaxed text-subtle">
+                  Enter the server and sync relay origins from your administrator.
+                  Origins cannot include paths, queries, fragments, or sign-in details.
+                </p>
+                <label className="mt-3 block text-[11px] font-medium text-subtle">
+                  Cloud server URL
+                  <input
+                    ref={serverUrlInput}
+                    spellCheck={false}
+                    aria-invalid={
+                      connectionError?.invalid === "both" ||
+                      connectionError?.invalid === "server"
+                    }
+                    aria-describedby={
+                      connectionError?.invalid === "both" ||
+                      connectionError?.invalid === "server"
+                        ? "cloud-connection-error"
+                        : undefined
+                    }
+                    data-testid="cloud-server-url"
+                    value={serverUrl}
+                    onChange={(event) => {
+                      setServerUrl(event.currentTarget.value);
+                      setConnectionError(null);
+                    }}
+                    placeholder="https://cloud.example.com"
+                    className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink placeholder:text-subtle focus:border-ink"
+                  />
+                </label>
+                <label className="mt-2 block text-[11px] font-medium text-subtle">
+                  Sync relay URL
+                  <input
+                    ref={relayUrlInput}
+                    spellCheck={false}
+                    aria-invalid={
+                      connectionError?.invalid === "both" ||
+                      connectionError?.invalid === "relay"
+                    }
+                    aria-describedby={
+                      connectionError?.invalid === "both" ||
+                      connectionError?.invalid === "relay"
+                        ? "cloud-connection-error"
+                        : undefined
+                    }
+                    data-testid="cloud-relay-url"
+                    value={relayUrl}
+                    onChange={(event) => {
+                      setRelayUrl(event.currentTarget.value);
+                      setConnectionError(null);
+                    }}
+                    placeholder="https://relay.example.com"
+                    className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink placeholder:text-subtle focus:border-ink"
+                  />
+                </label>
+                {connectionError ? (
+                  <p
+                    id="cloud-connection-error"
+                    data-testid="cloud-connection-error"
+                    role="alert"
+                    className="mb-0 mt-2 text-xs text-danger"
+                  >
+                    {connectionError.message}
+                  </p>
+                ) : null}
+                <PrimaryButton
+                  type="submit"
+                  data-testid="cloud-connect-start"
+                  className="mt-3"
+                >
+                  Connect
+                </PrimaryButton>
+              </form>
+            </>
+          )}
         </>
       ) : null}
 

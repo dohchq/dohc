@@ -4,7 +4,7 @@ import {
   type Request,
 } from "@dohc/workspace-engine-client";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,7 +13,7 @@ import type { DohcPluginManifest } from "./pluginManifestSchema";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { JsonRpcTransport } from "../agents/JsonRpcTransport";
 import { stopProcessTreePosix } from "../process/posixSpawn";
-import { createTestScratch } from "../workspaces/testTemp";
+import { createTestScratch, removeTestScratch } from "../workspaces/testTemp";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
 import {
   localWorkspaceSdkDatabaseEditor,
@@ -48,13 +48,13 @@ const tempRoots: string[] = [];
 const hosts: PluginHost[] = [];
 
 async function waitFor(
-  predicate: () => boolean,
+  predicate: () => boolean | Promise<boolean>,
   message: string,
   timeoutMs = 5_000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (predicate()) return;
+    if (await predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(message);
@@ -337,9 +337,7 @@ function mutateDisabledState(
 
 afterEach(async () => {
   await Promise.allSettled(hosts.splice(0).map((host) => host.stopAll()));
-  await Promise.all(
-    tempRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
-  );
+  await Promise.all(tempRoots.splice(0).map((root) => removeTestScratch(root)));
 });
 
 describe("PluginHost", () => {
@@ -2386,11 +2384,15 @@ describe("PluginHost", () => {
       () => host.getStatus("hello-plugin") === "ready",
       "Heartbeat plugin did not become ready.",
     );
-    await delay(500);
+    await waitFor(
+      () => existsSync(heartbeatPath),
+      "Heartbeat descendant did not create its output.",
+    );
     const firstSize = (await stat(heartbeatPath)).size;
-    await delay(300);
-    const secondSize = (await stat(heartbeatPath)).size;
-    expect(secondSize).toBeGreaterThan(firstSize);
+    await waitFor(
+      async () => (await stat(heartbeatPath)).size > firstSize,
+      "Heartbeat descendant did not keep writing.",
+    );
 
     await host.stop("hello-plugin");
     await delay(500);

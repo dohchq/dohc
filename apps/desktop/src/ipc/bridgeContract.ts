@@ -1064,6 +1064,23 @@ export const ListEngineMomentsResult = z.object({
 });
 export type ListEngineMomentsResult = z.infer<typeof ListEngineMomentsResult>;
 
+// `history.page` can answer that its capture flush is still settling. Main
+// classifies that typed daemon refusal before Electron serializes it into a
+// generic rejected invoke, then sends this small progress result instead.
+export const ListEngineMomentsUpdatingResult = z.object({
+  status: z.literal("updating"),
+});
+export type ListEngineMomentsUpdatingResult = z.infer<
+  typeof ListEngineMomentsUpdatingResult
+>;
+export const ListEngineMomentsResponse = z.union([
+  ListEngineMomentsResult,
+  ListEngineMomentsUpdatingResult,
+]);
+export type ListEngineMomentsResponse = z.infer<
+  typeof ListEngineMomentsResponse
+>;
+
 export const ReadEngineMomentPayload = z.object({
   workspaceId: WORKSPACE_ID,
   momentId: MOMENT_ID,
@@ -1307,6 +1324,20 @@ export const ListFileChatsResult = z.object({
   threads: z.array(ChatThreadRecord),
 });
 export type ListFileChatsResult = z.infer<typeof ListFileChatsResult>;
+
+// Main classifies the daemon's typed refusal before Electron turns a rejected
+// invoke into a message-only Error. The renderer receives this closed result,
+// so retry behavior never depends on user-facing daemon copy.
+export const ListFileChatsResponse = z.union([
+  ListFileChatsResult,
+  z
+    .object({
+      status: z.literal("refused"),
+      code: z.literal("workspace-updating"),
+    })
+    .strict(),
+]);
+export type ListFileChatsResponse = z.infer<typeof ListFileChatsResponse>;
 
 export const CreateFileChatPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -3375,6 +3406,7 @@ export type CloudStatusPayload = z.infer<typeof CloudStatusPayload>;
 
 export const CloudStatusResult = z.object({
   connected: z.boolean(),
+  managedCloudStatus: z.enum(["ready", "unconfigured", "invalid"]),
   email: z.string().optional(),
   serverUrl: z.string().optional(),
   relayUrl: z.string().optional(),
@@ -5255,6 +5287,22 @@ export const WorkspaceSearchPayload = z.object({
 });
 export type WorkspaceSearchPayload = z.infer<typeof WorkspaceSearchPayload>;
 
+// Main classifies the daemon's typed refusal before Electron turns a rejected
+// invoke into a message-only Error. The renderer receives this closed result,
+// so retry behavior never depends on user-facing daemon copy.
+export const WorkspaceSearchStartResult = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("accepted") }).strict(),
+  z
+    .object({
+      status: z.literal("refused"),
+      code: z.literal("workspace-updating"),
+    })
+    .strict(),
+]);
+export type WorkspaceSearchStartResult = z.infer<
+  typeof WorkspaceSearchStartResult
+>;
+
 export const CancelWorkspaceSearchPayload = z.object({
   searchId: SEARCH_ID,
 });
@@ -5779,14 +5827,14 @@ export interface DohcDesktopBridge {
   // workspace-engine alpha flag: for unflagged workspaces every call rejects.
   listEngineMoments(
     payload: ListEngineMomentsPayload,
-  ): Promise<ListEngineMomentsResult>;
+  ): Promise<ListEngineMomentsResponse>;
   readEngineMoment(
     payload: ReadEngineMomentPayload,
   ): Promise<ReadEngineMomentResult>;
   restoreEngineMomentFile(
     payload: RestoreEngineMomentFilePayload,
   ): Promise<RestoreEngineMomentFileResult>;
-  listFileChats(payload: ListFileChatsPayload): Promise<ListFileChatsResult>;
+  listFileChats(payload: ListFileChatsPayload): Promise<ListFileChatsResponse>;
   createFileChat(payload: CreateFileChatPayload): Promise<CreateFileChatResult>;
   listChatMessages(
     payload: ListChatMessagesPayload,
@@ -5951,10 +5999,13 @@ export interface DohcDesktopBridge {
   }): Promise<void>;
   holdQuit(): Promise<void>;
   resumeQuit(): Promise<void>;
-  // Workspace content search (Phase E5.0). Resolves when the search has been
-  // ACCEPTED and the rg child spawned; results stream separately through
-  // onSearchResults. Issuing a new search cancels the previous one in main.
-  searchWorkspace(payload: WorkspaceSearchPayload): Promise<void>;
+  // Workspace content search (Phase E5.0). Answers accepted after the rg child
+  // spawns, or returns a typed updating refusal while initial capture runs;
+  // results stream separately through onSearchResults. A new search cancels
+  // the previous one in main.
+  searchWorkspace(
+    payload: WorkspaceSearchPayload,
+  ): Promise<WorkspaceSearchStartResult>;
   cancelWorkspaceSearch(payload: CancelWorkspaceSearchPayload): Promise<void>;
   // Streamed result batches, validated batch-by-batch in the preload via the
   // closed dependency-free parseSearchResultsEvent check. Returns an

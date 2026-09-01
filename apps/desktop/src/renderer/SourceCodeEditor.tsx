@@ -119,18 +119,24 @@ export function SourceCodeEditor(props: {
   language: string;
   path: string;
   readOnly?: boolean;
+  autoFocus?: boolean;
   scrollLine?: number;
   pendingUndo?: SourceCodePendingUndo;
   onPendingUndoConsumed?: (token: number) => void;
+  onFocus?: () => void;
+  onScrollLineApplied?: () => void;
   onChange: (next: string) => void;
   onSave: () => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
+  const historyCompartment = useRef(new Compartment()).current;
   const readOnlyCompartment = useRef(new Compartment()).current;
   const languageCompartment = useRef(new Compartment()).current;
   const onChangeRef = useRef(props.onChange);
   const onSaveRef = useRef(props.onSave);
+  const onFocusRef = useRef(props.onFocus);
+  const onScrollLineAppliedRef = useRef(props.onScrollLineApplied);
   const valueRef = useRef(props.value);
   const applyingRemoteValue = useRef(false);
   const appliedUndoToken = useRef<number | null>(null);
@@ -140,6 +146,8 @@ export function SourceCodeEditor(props: {
   useEffect(() => {
     onChangeRef.current = props.onChange;
     onSaveRef.current = props.onSave;
+    onFocusRef.current = props.onFocus;
+    onScrollLineAppliedRef.current = props.onScrollLineApplied;
   });
 
   useEffect(() => {
@@ -153,7 +161,7 @@ export function SourceCodeEditor(props: {
           lineNumbers(),
           foldGutter(),
           highlightActiveLineGutter(),
-          history(),
+          historyCompartment.of(history()),
           drawSelection(),
           dropCursor(),
           rectangularSelection(),
@@ -169,6 +177,10 @@ export function SourceCodeEditor(props: {
           languageCompartment.of(codeMirrorLanguage(props.path, props.language)),
           keymap.of([indentWithTab, ...defaultKeymap, ...historyKeymap, ...foldKeymap]),
           EditorView.domEventHandlers({
+            focus() {
+              onFocusRef.current?.();
+              return false;
+            },
             keydown(event) {
               if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
                 event.preventDefault();
@@ -186,6 +198,7 @@ export function SourceCodeEditor(props: {
       }),
     });
     viewRef.current = view;
+    if (props.autoFocus) view.focus();
     return () => {
       view.destroy();
       viewRef.current = null;
@@ -200,18 +213,30 @@ export function SourceCodeEditor(props: {
     if (!view) return;
     const next = valueRef.current;
     const current = view.state.doc.toString();
-    if (current === next) return;
     // Local onChange echoes do not change valueRevision. Accepted external
     // values do, so a delayed local echo cannot replace a newer CodeMirror
     // document. The revision also lets external text match an older local
     // snapshot without being mistaken for that snapshot's delayed echo.
+    //
+    // CodeMirror maps old history entries across an addToHistory=false
+    // replacement. It does not discard them, so Undo after an authoritative
+    // disk or peer revision can splice the old body into the accepted one.
+    // Recreate the history field even when the accepted text is unchanged:
+    // the revision, rather than a text difference, is the authority boundary.
     applyingRemoteValue.current = true;
     view.dispatch({
-      changes: { from: 0, to: current.length, insert: next },
+      ...(current === next
+        ? {}
+        : { changes: { from: 0, to: current.length, insert: next } }),
+      effects: historyCompartment.reconfigure([]),
+      annotations: Transaction.addToHistory.of(false),
+    });
+    view.dispatch({
+      effects: historyCompartment.reconfigure(history()),
       annotations: Transaction.addToHistory.of(false),
     });
     applyingRemoteValue.current = false;
-  }, [props.valueRevision]);
+  }, [props.valueRevision, historyCompartment]);
 
   useEffect(() => {
     const view = viewRef.current;
@@ -275,6 +300,7 @@ export function SourceCodeEditor(props: {
       selection: { anchor: line.from, head: line.to },
       effects: EditorView.scrollIntoView(line.from, { y: "center" }),
     });
+    onScrollLineAppliedRef.current?.();
   }, [props.scrollLine]);
 
   return (

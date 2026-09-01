@@ -577,7 +577,7 @@ describe("ChatsView channels", () => {
 // reaches its own mark-read and had no reason to refetch the counts it loaded
 // at mount. The shell reports each landed read through readRevision.
 describe("ChatsView panel navigator unread badges", () => {
-  function navigator(readRevision: number) {
+  function navigator(readRevision: number, threadRevision = 0) {
     return (
       <ChatsView
         workspaceId="workspace-a"
@@ -585,6 +585,7 @@ describe("ChatsView panel navigator unread badges", () => {
         onError={vi.fn()}
         onOpenInTab={vi.fn()}
         readRevision={readRevision}
+        threadRevision={threadRevision}
       />
     );
   }
@@ -606,6 +607,27 @@ describe("ChatsView panel navigator unread badges", () => {
 
     await waitFor(() => {
       expect(screen.queryByTestId("chats-channel-unread")).toBeNull();
+    });
+  });
+
+  it("refetches a channel count once the shell reports a started thread", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ threadCount: 0 })],
+      fileThreads: [],
+    });
+    const view = render(navigator(0, 0));
+    expect((await screen.findByTestId("chats-channel")).textContent).toContain(
+      "0 chats",
+    );
+
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ threadCount: 1 })],
+      fileThreads: [],
+    });
+    view.rerender(navigator(0, 1));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("chats-channel").textContent).toContain("1 chat");
     });
   });
 
@@ -2095,13 +2117,14 @@ describe("ChatsView My agent", () => {
 describe("ChatsView composer-first threads (anti-forum)", () => {
   it("starts a thread from the channel composer with Enter and NO title prompt", async () => {
     const user = userEvent.setup();
+    const onThreadStarted = vi.fn();
     const startedThread = thread();
     bridgeMock.startChannelThread.mockResolvedValue({
       thread: startedThread,
       message: message(),
       viewerAuthorId: "you@example.com",
     });
-    renderView();
+    renderView(vi.fn(), vi.fn(), { onThreadStarted });
 
     await user.click(await screen.findByTestId("chats-channel"));
     // The channel view offers exactly one input: the composer. No title
@@ -2125,6 +2148,7 @@ describe("ChatsView composer-first threads (anti-forum)", () => {
     expect(screen.getByTestId("chats-message-body").textContent).toBe(
       "Should we ship on Friday?",
     );
+    expect(onThreadStarted).toHaveBeenCalledTimes(1);
   });
 
   it("can react to a newly started thread before any reload", async () => {

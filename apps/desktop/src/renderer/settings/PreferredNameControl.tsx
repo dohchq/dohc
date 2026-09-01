@@ -64,12 +64,12 @@ export function PreferredNameControl(props: {
         value={draft}
         maxLength={MAX_PREFERRED_NAME_LENGTH}
         disabled={saving}
-        placeholder="Ice"
+        placeholder="Enter your name"
         autoComplete="name"
         onChange={(event) => setDraft(event.currentTarget.value)}
         onBlur={() => void commit()}
         onKeyDown={onKeyDown}
-        className="h-8 w-full rounded-md border border-line bg-bg px-2.5 text-[12px] text-ink placeholder:text-subtle focus:border-ink focus-visible:outline-none disabled:opacity-60"
+        className="h-8 w-full rounded-md border border-line bg-bg px-2.5 text-[12px] text-ink placeholder:text-subtle focus:border-ink disabled:opacity-60"
       />
       <span data-testid={`${prefix}-preview`} className="text-[10px] text-subtle">
         Messages will appear as <span className="font-medium text-ink">{preview}</span>.

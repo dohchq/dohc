@@ -13,7 +13,10 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
-import { ENGINE_STORE_BACKUP_DIR } from "../ipc/bridgeContract";
+import {
+  ENGINE_STORE_BACKUP_DIR,
+  SetWorkspaceUiStatePayload,
+} from "../ipc/bridgeContract";
 
 // These drive userEvent through async UI settles — 67 findBy* awaits across 47
 // tests — so the wall-clock profile is the file, not one test (#372).
@@ -32,6 +35,7 @@ import type {
   EngineMomentRecord,
   FileChatThreadRecord,
   ImportWorkspaceFilesResult,
+  ListEngineMomentsResponse,
   ListEngineMomentsResult,
   ListFileChatsResult,
   ListMyShareChangesResult,
@@ -660,7 +664,9 @@ function makeBridge(
         searchCallback = null;
       };
     }),
-    searchWorkspace: vi.fn(async (_payload: WorkspaceSearchPayload) => undefined),
+    searchWorkspace: vi.fn(async (_payload: WorkspaceSearchPayload) => ({
+      status: "accepted" as const,
+    })),
     cancelWorkspaceSearch: vi.fn(async () => undefined),
     startPluginPanel: vi.fn(async (): Promise<StartPluginPanelResult> => ({
       status: "ok" as const,
@@ -694,7 +700,7 @@ function makeEngineBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     // Typed to the contract, not to this empty default: a test that drives
     // real pages must be able to swap the implementation.
     listEngineMoments: vi.fn(
-      async (): Promise<ListEngineMomentsResult> => ({
+      async (): Promise<ListEngineMomentsResponse> => ({
         moments: [],
         nextBeforeMomentOrder: null,
         latestMomentOrder: 0,
@@ -779,6 +785,52 @@ function renderShell(
       onSwitchWorkspace={() => {}}
     />,
   );
+}
+
+async function enterMarkdownSource(
+  user: ReturnType<typeof userEvent.setup>,
+  scope: HTMLElement = document.body,
+): Promise<HTMLElement> {
+  const shell = await screen.findByTestId("workspace-shell");
+  await waitFor(() => expect(shell.dataset.ready).toBe("true"));
+
+  const queries = within(scope);
+  const currentSource = queries
+    .queryByTestId("markdown-editor")
+    ?.querySelector<HTMLElement>(".cm-content");
+  if (currentSource?.getAttribute("contenteditable") === "true") {
+    return currentSource;
+  }
+
+  const toggle = (await queries.findByTestId(
+    "markdown-edit-toggle",
+  )) as HTMLButtonElement;
+  await waitFor(() => expect(toggle.disabled).toBe(false));
+
+  // The label names the next surface: Edit (read) -> Source (WYSIWYG) ->
+  // WYSIWYG (source).
+  if (toggle.textContent === "Edit") {
+    await user.click(toggle);
+    await waitFor(() => expect(toggle.textContent).toBe("Source"));
+  }
+  if (toggle.textContent === "Source") {
+    await user.click(toggle);
+  } else {
+    expect(toggle.textContent).toBe("WYSIWYG");
+  }
+  return await waitFor(() => {
+    const content = queries
+      .getByTestId("markdown-editor")
+      .querySelector<HTMLElement>(".cm-content");
+    expect(content?.getAttribute("contenteditable")).toBe("true");
+    return content!;
+  });
+}
+
+function sourceEditorText(editor: HTMLElement): string {
+  return Array.from(editor.querySelectorAll<HTMLElement>(".cm-line"), (line) =>
+    line.textContent ?? "",
+  ).join("\n");
 }
 
 function shellBootstrapProps(bridge: ReturnType<typeof makeBridge>) {
@@ -2041,8 +2093,7 @@ describe("editor groups", () => {
     );
     const left = screen.getByRole("region", { name: "Editor group 1" });
     const right = screen.getByRole("region", { name: "Editor group 2" });
-    await user.click(within(left).getByTestId("markdown-edit-toggle"));
-    await user.type(within(left).getByTestId("markdown-editor"), "Draft");
+    await user.type(await enterMarkdownSource(user, left), "Draft");
     await waitFor(() =>
       expect(within(left).getByTestId("tab-dirty")).toBeTruthy(),
     );
@@ -2116,9 +2167,8 @@ describe("editor groups", () => {
 
     const left = await screen.findByTestId("editor-group-left");
     const right = await screen.findByTestId("editor-group-right");
-    await user.click(await within(left).findByTestId("markdown-edit-toggle"));
     await user.type(
-      await within(left).findByTestId("markdown-editor"),
+      await enterMarkdownSource(user, left),
       " dirty",
     );
 
@@ -2198,8 +2248,7 @@ describe("editor groups", () => {
     const left = screen.getByTestId("editor-group-left");
     const middle = screen.getByTestId("editor-group-middle");
     const right = screen.getByTestId("editor-group-right");
-    await user.click(within(left).getByTestId("markdown-edit-toggle"));
-    await user.type(within(left).getByTestId("markdown-editor"), " dirty");
+    await user.type(await enterMarkdownSource(user, left), " dirty");
     await waitFor(() => expect(within(left).getByTestId("tab-dirty")).toBeTruthy());
     Object.defineProperty(document, "elementFromPoint", {
       configurable: true,
@@ -2280,8 +2329,7 @@ describe("editor groups", () => {
     );
     const left = screen.getByTestId("editor-group-left");
     const right = screen.getByTestId("editor-group-right");
-    await user.click(within(left).getByTestId("markdown-edit-toggle"));
-    await user.type(within(left).getByTestId("markdown-editor"), " dirty");
+    await user.type(await enterMarkdownSource(user, left), " dirty");
     await waitFor(() => expect(within(left).getByTestId("tab-dirty")).toBeTruthy());
 
     await user.click(within(left).getByTestId("create-editor-group-right"));
@@ -2559,8 +2607,7 @@ describe("editor groups", () => {
     );
     const left = screen.getByRole("region", { name: "Editor group 1" });
     const right = screen.getByRole("region", { name: "Editor group 2" });
-    await user.click(within(right).getByTestId("markdown-edit-toggle"));
-    await user.type(within(right).getByTestId("markdown-editor"), "Draft");
+    await user.type(await enterMarkdownSource(user, right), "Draft");
     await waitFor(() => expect(within(right).getByTestId("tab-dirty")).toBeTruthy());
 
     await user.click(within(right).getByTestId("create-editor-group-right"));
@@ -2590,8 +2637,7 @@ describe("editor groups", () => {
     renderShell(bridge);
 
     await screen.findByTestId("view-markdown");
-    await user.click(screen.getByTestId("markdown-edit-toggle"));
-    await user.type(screen.getByTestId("markdown-editor"), "Draft");
+    await user.type(await enterMarkdownSource(user), "Draft");
     await waitFor(() => expect(screen.getByTestId("tab-dirty")).toBeTruthy());
 
     fireEvent.contextMenu(screen.getByTestId("tab-a.md"));
@@ -2652,8 +2698,7 @@ describe("editor groups", () => {
     );
     const left = screen.getByRole("region", { name: "Editor group 1" });
     const right = screen.getByRole("region", { name: "Editor group 2" });
-    await user.click(within(left).getByTestId("markdown-edit-toggle"));
-    await user.type(within(left).getByTestId("markdown-editor"), "Draft");
+    await user.type(await enterMarkdownSource(user, left), "Draft");
     await waitFor(() => expect(within(left).getByTestId("tab-dirty")).toBeTruthy());
     Object.defineProperty(document, "elementFromPoint", {
       configurable: true,
@@ -2736,10 +2781,8 @@ describe("editor groups", () => {
     const left = screen.getByRole("region", { name: "Editor group 1" });
     const middle = screen.getByRole("region", { name: "Editor group 2" });
     const right = screen.getByRole("region", { name: "Editor group 3" });
-    await user.click(within(left).getByTestId("markdown-edit-toggle"));
-    await user.type(within(left).getByTestId("markdown-editor"), "Left draft");
-    await user.click(within(middle).getByTestId("markdown-edit-toggle"));
-    await user.type(within(middle).getByTestId("markdown-editor"), "Middle draft");
+    await user.type(await enterMarkdownSource(user, left), "Left draft");
+    await user.type(await enterMarkdownSource(user, middle), "Middle draft");
     await waitFor(() => {
       expect(within(left).getByTestId("tab-dirty")).toBeTruthy();
       expect(within(middle).getByTestId("tab-dirty")).toBeTruthy();
@@ -2909,10 +2952,8 @@ describe("editor groups", () => {
     const left = screen.getByRole("region", { name: "Editor group 1" });
     const middle = screen.getByRole("region", { name: "Editor group 2" });
     const right = screen.getByRole("region", { name: "Editor group 3" });
-    await user.click(within(left).getByTestId("markdown-edit-toggle"));
-    await user.type(within(left).getByTestId("markdown-editor"), "Left draft");
-    await user.click(within(middle).getByTestId("markdown-edit-toggle"));
-    await user.type(within(middle).getByTestId("markdown-editor"), "Middle draft");
+    await user.type(await enterMarkdownSource(user, left), "Left draft");
+    await user.type(await enterMarkdownSource(user, middle), "Middle draft");
     await waitFor(() =>
       expect(
         screen
@@ -3007,8 +3048,7 @@ describe("editor groups", () => {
       );
       const left = screen.getByRole("region", { name: "Editor group 1" });
       const right = screen.getByRole("region", { name: "Editor group 2" });
-      await user.click(within(left).getByTestId("markdown-edit-toggle"));
-      await user.type(within(left).getByTestId("markdown-editor"), "Draft");
+      await user.type(await enterMarkdownSource(user, left), "Draft");
       await waitFor(() =>
         expect(within(left).getByTestId("tab-dirty")).toBeTruthy(),
       );
@@ -3243,8 +3283,7 @@ describe("editor groups", () => {
       );
       const left = screen.getByRole("region", { name: "Editor group 1" });
       const right = screen.getByRole("region", { name: "Editor group 2" });
-      await user.click(within(left).getByTestId("markdown-edit-toggle"));
-      await user.type(within(left).getByTestId("markdown-editor"), "Draft");
+      await user.type(await enterMarkdownSource(user, left), "Draft");
       await waitFor(() =>
         expect(within(left).getByTestId("tab-dirty")).toBeTruthy(),
       );
@@ -3449,8 +3488,7 @@ describe("editor groups", () => {
     const user = userEvent.setup();
     renderShell(bridge);
     await screen.findByTestId("view-markdown");
-    await user.click(screen.getByTestId("markdown-edit-toggle"));
-    await user.type(await screen.findByTestId("markdown-editor"), "Draft!");
+    await user.type(await enterMarkdownSource(user), "Draft!");
     await screen.findByTestId("tab-dirty");
 
     await user.click(screen.getByTestId("tab-b.md"));
@@ -5051,8 +5089,7 @@ describe("ui-state merge-on-load", () => {
 
     // Type into the restored tab's document without letting it settle.
     await screen.findByTestId("view-markdown");
-    await user.click(screen.getByTestId("markdown-edit-toggle"));
-    await user.type(await screen.findByTestId("markdown-editor"), "Draft!");
+    await user.type(await enterMarkdownSource(user), "Draft!");
     await screen.findByTestId("tab-dirty");
     expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
 
@@ -7022,15 +7059,93 @@ describe("engine store recovery", () => {
 });
 
 describe("workspace shell errors", () => {
-  it("reports openWorkspace failures instead of leaving an unhandled rejection", async () => {
+  it("keeps the workbench unavailable while existing files are prepared", async () => {
+    const decision = deferred<typeof SYNC_STATUS>();
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.openWorkspace.mockRejectedValueOnce(new Error("Watcher failed"));
+    bridge.openWorkspace = vi.fn(() => decision.promise);
 
     renderShell(bridge);
 
-    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
-      "Watcher failed",
+    const preparing = await screen.findByTestId("workspace-preparing");
+    expect(preparing.getAttribute("role")).toBe("status");
+    expect(preparing.textContent).toContain("Preparing this workspace");
+    expect(preparing.textContent).toContain(
+      "dohc is checking your existing files before editing starts.",
     );
+    expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
+    expect(
+      screen.getByTestId("workspace-workbench").hasAttribute("inert"),
+    ).toBe(true);
+
+    await act(async () => {
+      decision.resolve(SYNC_STATUS);
+      await decision.promise;
+    });
+
+    await waitFor(() =>
+      expect(screen.queryByTestId("workspace-preparing")).toBeNull(),
+    );
+    expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true");
+    expect(
+      screen.getByTestId("workspace-workbench").hasAttribute("inert"),
+    ).toBe(false);
+  });
+
+  it("keeps a failed workspace inert and opens it when the user retries", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace
+      .mockRejectedValueOnce(new Error("Watcher failed"))
+      .mockRejectedValueOnce(new Error("Watcher still unavailable"));
+
+    renderShell(bridge);
+
+    const recovery = await screen.findByTestId("workspace-open-failed");
+    expect(recovery.getAttribute("role")).toBe("alert");
+    expect(recovery.textContent).toContain("Couldn’t open this workspace");
+    expect(recovery.textContent).toContain("Watcher failed");
+    expect(recovery.textContent).toContain("Choose another workspace from the title bar");
+    expect(within(recovery).queryByRole("button", { name: /dismiss/i })).toBeNull();
+    expect(screen.getByTestId("workspace-workbench").hasAttribute("inert")).toBe(true);
+
+    fireEvent.click(within(recovery).getByRole("button", { name: "Try again" }));
+
+    await waitFor(() => expect(bridge.openWorkspace).toHaveBeenCalledTimes(2));
+    const repeatedRecovery = await screen.findByTestId("workspace-open-failed");
+    expect(repeatedRecovery.textContent).toContain("Watcher still unavailable");
+    expect(screen.getByTestId("workspace-workbench").hasAttribute("inert")).toBe(true);
+
+    fireEvent.click(within(repeatedRecovery).getByRole("button", { name: "Try again" }));
+
+    await waitFor(() => expect(bridge.openWorkspace).toHaveBeenCalledTimes(3));
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+    expect(screen.queryByTestId("workspace-open-failed")).toBeNull();
+    expect(screen.getByTestId("workspace-workbench").hasAttribute("inert")).toBe(false);
+  });
+
+  it("retries a failed initial listing without reopening the workspace", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listWorkspaceFiles.mockRejectedValueOnce(new Error("Listing failed"));
+
+    renderShell(bridge);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+    expect(screen.getByTestId("workspace-workbench").hasAttribute("inert")).toBe(
+      false,
+    );
+    expect(
+      (await screen.findByTestId("workspace-shell-error")).textContent,
+    ).toContain("Could not refresh workspace files. Listing failed");
+    expect(bridge.openWorkspace).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByTestId("workspace-shell-error-retry"));
+
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2));
+    expect(bridge.openWorkspace).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
   it("reports refresh failures after a successful file import without retrying import", async () => {
@@ -7080,8 +7195,7 @@ describe("file-open-start marking", () => {
     renderShell(bridge);
 
     await screen.findByTestId("view-markdown");
-    await user.click(screen.getByTestId("markdown-edit-toggle"));
-    await user.type(screen.getByTestId("markdown-editor"), "Draft");
+    await user.type(await enterMarkdownSource(user), "Draft");
     await waitFor(() => expect(screen.getByTestId("tab-dirty")).toBeTruthy());
     const mark = vi.spyOn(rendererMarks, "mark");
 
@@ -7458,7 +7572,7 @@ async function openDirtyMarkdown(
   bridge: ReturnType<typeof makeBridge>,
 ): Promise<{
   user: ReturnType<typeof userEvent.setup>;
-  editor: HTMLTextAreaElement;
+  editor: HTMLElement;
 }> {
   const user = userEvent.setup();
   renderShell(bridge);
@@ -7467,13 +7581,12 @@ async function openDirtyMarkdown(
   )!;
   await user.click(row);
   await screen.findByTestId("view-markdown");
-  await user.click(screen.getByTestId("markdown-edit-toggle"));
-  const editor = await screen.findByTestId("markdown-editor");
+  const editor = await enterMarkdownSource(user);
   await user.type(editor, "Draft!");
   await waitFor(() =>
     expect(screen.queryAllByTestId("tab-dirty").length).toBeGreaterThan(0),
   );
-  return { user, editor: editor as HTMLTextAreaElement };
+  return { user, editor };
 }
 
 describe("dirty tab close boundaries", () => {
@@ -7493,7 +7606,7 @@ describe("dirty tab close boundaries", () => {
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
     expect(screen.getByTestId("tab-a.md")).toBeTruthy();
     expect(editor.isConnected).toBe(true);
-    expect(editor.value).toContain("Draft!");
+    expect(editor.textContent).toContain("Draft!");
     expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
       "disk full",
     );
@@ -7552,10 +7665,7 @@ describe("dirty tab close boundaries", () => {
     // This is a later action, but b.md was already in the captured close set.
     // Its newly mounted editor therefore needs its own flush before it closes.
     await user.click(screen.getByTestId("tab-b.md"));
-    await user.click(await screen.findByTestId("markdown-edit-toggle"));
-    const bEditor = (await screen.findByTestId(
-      "markdown-editor",
-    )) as HTMLTextAreaElement;
+    const bEditor = await enterMarkdownSource(user);
     await user.type(bEditor, "Second draft!");
 
     await act(async () => {
@@ -7639,8 +7749,7 @@ describe("dirty tab close boundaries", () => {
     await screen.findByTestId("tab-c.md");
     await waitFor(() => expect(screen.getAllByTestId("view-markdown")).toHaveLength(2));
     const left = screen.getByRole("region", { name: "Editor group 1" });
-    await user.click(within(left).getByTestId("markdown-edit-toggle"));
-    await user.type(within(left).getByTestId("markdown-editor"), "Draft!");
+    await user.type(await enterMarkdownSource(user, left), "Draft!");
     await within(screen.getByTestId("tab-a.md")).findByTestId("tab-dirty");
     await user.click(
       within(left).getByRole("button", { name: "Close editor group" }),
@@ -7697,10 +7806,8 @@ describe("dirty tab close boundaries", () => {
     await waitFor(() => expect(screen.getAllByTestId("view-markdown")).toHaveLength(2));
     const left = screen.getByRole("region", { name: "Editor group 1" });
     const right = screen.getByRole("region", { name: "Editor group 2" });
-    await user.click(within(left).getByTestId("markdown-edit-toggle"));
-    await user.type(within(left).getByTestId("markdown-editor"), "Left draft");
-    await user.click(within(right).getByTestId("markdown-edit-toggle"));
-    await user.type(within(right).getByTestId("markdown-editor"), "Right draft");
+    await user.type(await enterMarkdownSource(user, left), "Left draft");
+    await user.type(await enterMarkdownSource(user, right), "Right draft");
     await waitFor(() => expect(screen.getAllByTestId("tab-dirty")).toHaveLength(2));
 
     await user.click(screen.getByRole("button", { name: "Close all editors" }));
@@ -7708,8 +7815,8 @@ describe("dirty tab close boundaries", () => {
     await waitFor(() => expect(screen.getAllByTestId("tab-dirty")).toHaveLength(1));
 
     const firstEditor = firstPath === "a.md"
-      ? within(left).getByTestId("markdown-editor")
-      : within(right).getByTestId("markdown-editor");
+      ? within(left).getByTestId("markdown-editor").querySelector<HTMLElement>(".cm-content")!
+      : within(right).getByTestId("markdown-editor").querySelector<HTMLElement>(".cm-content")!;
     await user.type(firstEditor, " changed again");
     await waitFor(() => expect(screen.getAllByTestId("tab-dirty")).toHaveLength(2));
 
@@ -7944,6 +8051,25 @@ describe("share unmount projection", () => {
   });
 });
 describe("shared view banner", () => {
+  it("does not offer site creation in a received share workspace", async () => {
+    const user = userEvent.setup();
+    const bridge = Object.assign(makeShareBridge(), {
+      listSites: vi.fn(async () => ({ sites: [] })),
+    });
+    renderShell(bridge, SHARE_VIEW);
+
+    await user.click(await screen.findByTestId("activity-sites"));
+
+    expect(
+      await screen.findByText(
+        "This shared view cannot create a site. Ask the workspace owner to add one.",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Create site" })).toBeNull();
+    expect(bridge.createWorkspaceFolder).not.toHaveBeenCalled();
+    expect(bridge.createWorkspaceFile).not.toHaveBeenCalled();
+  });
+
   it("tells a view recipient the view is read-only", async () => {
     const bridge = makeShareBridge();
     renderShell(bridge, {
@@ -8772,6 +8898,63 @@ describe("content search", () => {
     expect(document.activeElement).toBe(input);
   });
 
+  it("shows an invocation failure with a retry instead of zero results", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.searchWorkspace
+      .mockRejectedValueOnce(new Error("Workspace root vanished."))
+      .mockResolvedValueOnce({ status: "accepted" });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-search"));
+    await user.type(await screen.findByTestId("search-input"), "apples");
+
+    const error = await screen.findByTestId("workspace-shell-error");
+    expect(error.textContent).toContain(
+      "dohc could not search this workspace. Workspace root vanished.",
+    );
+    expect(screen.queryByTestId("search-summary")).toBeNull();
+    expect(screen.queryByTestId("search-empty-state")).toBeNull();
+
+    await user.click(screen.getByTestId("workspace-shell-error-retry"));
+
+    expect(bridge.searchWorkspace).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(screen.getByTestId("search-spinner")).toBeTruthy();
+  });
+
+  it("clears a failed search banner when a newer search succeeds", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.searchWorkspace
+      .mockRejectedValueOnce(new Error("Workspace root vanished."))
+      .mockResolvedValueOnce({ status: "accepted" });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(screen.getByTestId("activity-search"));
+    const input = await screen.findByTestId("search-input");
+    await user.type(input, "apples");
+    await screen.findByTestId("workspace-shell-error");
+
+    fireEvent.change(input, { target: { value: "bananas" } });
+    await waitFor(() => expect(bridge.searchWorkspace).toHaveBeenCalledTimes(2));
+    const newer = bridge.searchWorkspace.mock.calls[1]![0];
+    expect(newer.query).toBe("bananas");
+    act(() => {
+      bridge.emitSearchResults({
+        searchId: newer.searchId,
+        entries: [],
+        done: true,
+        limitHit: false,
+      });
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("search-summary").textContent).toBe("No results"),
+    );
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
   it("clears the activity badge as soon as the query is cleared", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
@@ -9040,10 +9223,7 @@ describe("explorer destructive change flush boundaries", () => {
       .getAllByTestId("tree-row")
       .find((candidate) => candidate.dataset.path === "docs/b.md")!;
     await user.click(bRow);
-    await user.click(await screen.findByTestId("markdown-edit-toggle"));
-    const bEditor = (await screen.findByTestId(
-      "markdown-editor",
-    )) as HTMLTextAreaElement;
+    const bEditor = await enterMarkdownSource(user);
     await user.type(bEditor, "Second draft!");
 
     await act(async () => {
@@ -9134,7 +9314,7 @@ describe("explorer destructive change flush boundaries", () => {
 
     await user.click(editor);
     await user.type(editor, " Late");
-    const lateDraft = editor.value;
+    const lateDraft = sourceEditorText(editor);
     await user.keyboard("{Control>}s{/Control}");
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
     expect(bridge.writeWorkspaceText.mock.calls[1]?.[0]).toEqual({
@@ -9197,7 +9377,7 @@ describe("explorer destructive change flush boundaries", () => {
 
     await user.click(editor);
     await user.type(editor, " Late");
-    const lateDraft = editor.value;
+    const lateDraft = sourceEditorText(editor);
     await user.keyboard("{Control>}s{/Control}");
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
     expect(bridge.writeWorkspaceText.mock.calls[1]?.[0]).toEqual(
@@ -9260,7 +9440,7 @@ describe("explorer destructive change flush boundaries", () => {
 
     await user.click(editor);
     await user.type(editor, " Late");
-    const lateDraft = editor.value;
+    const lateDraft = sourceEditorText(editor);
     await user.keyboard("{Control>}s{/Control}");
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
 
@@ -9340,15 +9520,14 @@ describe("explorer destructive change flush boundaries", () => {
 
     await user.click(editorA);
     await user.type(editorA, " Late A");
-    const lateADraft = editorA.value;
+    const lateADraft = sourceEditorText(editorA);
     await user.keyboard("{Control>}s{/Control}");
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
 
     await user.click(screen.getByTestId("tab-b.md"));
-    await user.click(await screen.findByTestId("markdown-edit-toggle"));
-    const editorB = (await screen.findByTestId("markdown-editor")) as HTMLTextAreaElement;
+    const editorB = await enterMarkdownSource(user);
     await user.type(editorB, "Late B");
-    const lateBDraft = editorB.value;
+    const lateBDraft = sourceEditorText(editorB);
     await user.keyboard("{Control>}s{/Control}");
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(3));
 
@@ -9416,15 +9595,14 @@ describe("explorer destructive change flush boundaries", () => {
 
     await user.click(editorA);
     await user.type(editorA, " Late A");
-    const lateADraft = editorA.value;
+    const lateADraft = sourceEditorText(editorA);
     await user.keyboard("{Control>}s{/Control}");
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
 
     await user.click(screen.getByTestId("tab-b.md"));
-    await user.click(await screen.findByTestId("markdown-edit-toggle"));
-    const editorB = (await screen.findByTestId("markdown-editor")) as HTMLTextAreaElement;
+    const editorB = await enterMarkdownSource(user);
     await user.type(editorB, "Late B");
-    const lateBDraft = editorB.value;
+    const lateBDraft = sourceEditorText(editorB);
     await user.keyboard("{Control>}s{/Control}");
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(3));
 
@@ -9488,7 +9666,7 @@ describe("explorer destructive change flush boundaries", () => {
 
     await user.click(editor);
     await user.type(editor, " Late");
-    const lateDraft = editor.value;
+    const lateDraft = sourceEditorText(editor);
     await user.keyboard("{Control>}s{/Control}");
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
 
@@ -10042,6 +10220,94 @@ describe("history page", () => {
     };
   }
 
+  it("persists a moment diff opened for a valid multibyte file path", async () => {
+    const filePath = `目录/${"界".repeat(500)}.md`;
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(async () =>
+      historyPage([{ ...historyMoment("m-1", "Wrote the file"), path: filePath }]),
+    );
+    const validStates: WorkspaceUiState[] = [];
+    bridge.setWorkspaceUiState.mockImplementation(async (payload) => {
+      validStates.push(SetWorkspaceUiStatePayload.parse(payload).state);
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await settleEngineOnRead(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+    await user.click(await screen.findByTestId("engine-moment-open"));
+    const tabPath = momentDiffTabPath("m-1");
+    await screen.findByTestId(`tab-${tabPath}`);
+    fireEvent(window, new Event("beforeunload"));
+
+    await waitFor(() =>
+      expect(
+        validStates.some((state) =>
+          storedTabs(state).includes(tabPath),
+        ),
+      ).toBe(true),
+    );
+    expect(filePath.length).toBeLessThanOrEqual(4096);
+    expect(encodeURIComponent(filePath).length).toBeGreaterThan(4096);
+  });
+
+  it("retries an updating history inline until it is ready without a global error", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let issued = 0;
+      const bridge = makeEngineBridge(Promise.resolve(null));
+      bridge.listEngineMoments = vi.fn(async (): Promise<ListEngineMomentsResponse> => {
+        issued += 1;
+        return issued === 1
+          ? { status: "updating" }
+          : historyPage([historyMoment("m-ready", "Captured after updating")]);
+      });
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      renderShell(bridge);
+
+      await user.click(screen.getByTestId("activity-history"));
+      await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
+      expect(screen.getByText("Loading history...")).toBeTruthy();
+      expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+
+      await act(async () => {
+        await vi.runOnlyPendingTimersAsync();
+      });
+
+      expect(await screen.findByText("Captured after updating")).toBeTruthy();
+      expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+      expect(document.body.textContent).not.toContain(
+        "History is still updating. Try again.",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops retrying an updating history and leaves the retry inline", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const bridge = makeEngineBridge(Promise.resolve(null));
+      bridge.listEngineMoments = vi.fn(
+        async (): Promise<ListEngineMomentsResponse> => ({ status: "updating" }),
+      );
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      renderShell(bridge);
+
+      await user.click(screen.getByTestId("activity-history"));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000);
+      });
+
+      expect(bridge.listEngineMoments).toHaveBeenCalledTimes(5);
+      expect(await screen.findByTestId("history-updating")).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
+      expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("shows the protected truncation marker from the history page", async () => {
     const bridge = makeEngineBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(async () => ({
@@ -10122,6 +10388,14 @@ describe("history page", () => {
         "true",
       ),
     );
+    expect(within(left).getByRole("tab", { name: "Diff: plan.md" }).title).toBe(
+      "History diff: notes/plan.md",
+    );
+    await user.click(screen.getByTestId("activity-explorer"));
+    const openMoment = screen
+      .getAllByTestId("open-editor-row")
+      .find((row) => row.dataset.path === momentPath);
+    expect(openMoment?.textContent).toContain("Diff: plan.md");
     expect(left.dataset.active).toBe("true");
     expect(within(left).queryByTestId("tab-race-a.txt")).toBeNull();
   });
@@ -10169,7 +10443,9 @@ describe("history page", () => {
       expect(within(group).getByTestId("tab-b.md").dataset.active).toBe("true"),
     );
     expect(
-      within(group).queryByTestId(`tab-${momentDiffTabPath("m-1")}`),
+      within(group).queryByTestId(
+        `tab-${momentDiffTabPath("m-1")}`,
+      ),
     ).toBeNull();
   });
 
@@ -10278,6 +10554,7 @@ describe("history page", () => {
   // displayed is still dropped, so a slow response cannot move the timeline
   // backward.
   it("ignores a history page that resolves after a newer one committed", async () => {
+    const previousOrdinal = rendererMarks.readSwitchTimeline().at(-1)?.ordinal ?? 0;
     const older = deferred<ListEngineMomentsResult>();
     const newer = deferred<ListEngineMomentsResult>();
     let issued = 0;
@@ -10300,6 +10577,12 @@ describe("history page", () => {
       await newer.promise;
     });
     expect(await screen.findByText("Added the launch checklist")).toBeTruthy();
+    await waitFor(() => {
+      const timeline = rendererMarks
+        .readSwitchTimeline()
+        .find((entry) => entry.ordinal > previousOrdinal);
+      expect(timeline?.phases["history-ready"]).toEqual(expect.any(Number));
+    });
 
     await act(async () => {
       older.resolve(historyPage([historyMoment("m-older", "Reordered the plan")]));
@@ -11563,6 +11846,7 @@ describe("history page", () => {
       await Promise.resolve();
     });
     expect(screen.queryByTestId("history-load-failed")).toBeNull();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
 
     await act(async () => {
       newer.resolve(historyPage([historyMoment("m-1", "Wrote the plan")]));
@@ -12929,6 +13213,173 @@ describe("history page", () => {
     expect(placeholder.textContent).not.toContain("Settings");
   });
 
+  it("commits opted-out sync status when the sibling agent read fails", async () => {
+    const syncingStatus = { ...SYNC_STATUS, state: "syncing" as const };
+    let failNextAgentRead = false;
+    let statusChanged = false;
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.getSyncStatus = vi.fn(async () =>
+      statusChanged ? syncingStatus : SYNC_STATUS,
+    );
+    bridge.getAgentRunStatus = vi.fn(async () => {
+      if (failNextAgentRead) {
+        failNextAgentRead = false;
+        throw new Error("agent status failed");
+      }
+      return {
+        mcpEnabled: false,
+        activeRun: null,
+        lastRun: null,
+      };
+    });
+    renderShell(bridge);
+
+    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalledTimes(1));
+    expect(screen.getByTestId("sync-status").dataset.state).toBe("synced");
+
+    statusChanged = true;
+    failNextAgentRead = true;
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("sync-status").dataset.state).toBe("syncing"),
+    );
+    const error = await screen.findByTestId("workspace-shell-error");
+    expect(error.textContent).toContain("dohc could not refresh agent runs.");
+    expect(error.textContent).not.toContain("Could not refresh history.");
+  });
+
+  it("marks opted-out history ready when one status lane succeeds", async () => {
+    const previousOrdinal = rendererMarks.readSwitchTimeline().at(-1)?.ordinal ?? 0;
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.getAgentRunStatus = vi.fn(async () => {
+      throw new Error("agent status failed");
+    });
+    renderShell(bridge);
+
+    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridge.getAgentRunStatus).toHaveBeenCalledTimes(1));
+    await screen.findByTestId("workspace-shell-error");
+    await waitFor(() => {
+      const timeline = rendererMarks
+        .readSwitchTimeline()
+        .find((entry) => entry.ordinal > previousOrdinal);
+      expect(timeline?.phases["history-ready"]).toEqual(expect.any(Number));
+    });
+  });
+
+  it("does not mark opted-out history ready when both status lanes fail", async () => {
+    const previousOrdinal = rendererMarks.readSwitchTimeline().at(-1)?.ordinal ?? 0;
+    const bridge = makeBridge(Promise.resolve(null));
+    const statusRead = deferred<SyncStatusResult>();
+    const agentRead = deferred<AgentRunStatusResult>();
+    bridge.getSyncStatus = vi.fn(() => statusRead.promise);
+    bridge.getAgentRunStatus = vi.fn(() => agentRead.promise);
+    renderShell(bridge);
+
+    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridge.getAgentRunStatus).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      // refreshHistory registered its aggregate settlement before these reads
+      // left the synchronous call stack. Awaiting the same lane promises here
+      // is the exact completion fence for its all-settled continuation.
+      const refreshSettled = Promise.allSettled([
+        statusRead.promise,
+        agentRead.promise,
+      ]);
+      statusRead.reject(new Error("sync status failed"));
+      agentRead.reject(new Error("agent status failed"));
+      await refreshSettled;
+    });
+    await screen.findByTestId("workspace-shell-error");
+
+    const timeline = rendererMarks
+      .readSwitchTimeline()
+      .find((entry) => entry.ordinal > previousOrdinal);
+    expect(timeline).toBeDefined();
+    expect(timeline?.phases["history-ready"]).toBeUndefined();
+  });
+
+  it("does not report an older opted-out refresh after a newer one succeeds", async () => {
+    let failOlderRead!: (error: Error) => void;
+    let holdNextRead = false;
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.getSyncStatus = vi.fn(() => {
+      if (holdNextRead) {
+        holdNextRead = false;
+        return new Promise<never>((_resolve, reject) => {
+          failOlderRead = reject;
+        });
+      }
+      return Promise.resolve(SYNC_STATUS);
+    });
+    renderShell(bridge);
+
+    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalledTimes(1));
+
+    holdNextRead = true;
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(holdNextRead).toBe(false));
+
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalledTimes(3));
+
+    await act(async () => {
+      failOlderRead(new Error("older sync status failed"));
+      await Promise.resolve();
+    });
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  it("commits an older opted-out refresh when the newer one fails", async () => {
+    const syncingStatus = { ...SYNC_STATUS, state: "syncing" as const };
+    const heldStatus = deferred<typeof SYNC_STATUS | typeof syncingStatus>();
+    let holdNextRead = false;
+    let failNextRead = false;
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.getSyncStatus = vi.fn(() => {
+      if (holdNextRead) {
+        holdNextRead = false;
+        return heldStatus.promise;
+      }
+      if (failNextRead) {
+        failNextRead = false;
+        return Promise.reject(new Error("sync status failed"));
+      }
+      return Promise.resolve(SYNC_STATUS);
+    });
+    renderShell(bridge);
+
+    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalledTimes(1));
+
+    holdNextRead = true;
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(holdNextRead).toBe(false));
+
+    failNextRead = true;
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(failNextRead).toBe(false));
+    expect(await screen.findByTestId("workspace-shell-error")).toBeTruthy();
+
+    await act(async () => {
+      heldStatus.resolve(syncingStatus);
+      await heldStatus.promise;
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("sync-status").dataset.state).toBe("syncing"),
+    );
+  });
+
   it("does not reopen the workspace when the engine setting enables history", async () => {
     const settings = deferred<WorkspaceSettingsResult>();
     const bridge = makeEngineBridge(Promise.resolve(null));
@@ -13941,6 +14392,18 @@ describe("shared view moment-diff tab", () => {
     const bridge = makeEngineBridge(
       Promise.resolve(storedStateWithTabs([MOMENT_TAB], MOMENT_TAB)),
     );
+    bridge.readEngineMoment = vi.fn(async (): Promise<ReadEngineMomentResult> => ({
+      moment: {
+        id: "m-1",
+        versionId: "main",
+        path: "notes/plan.md",
+        recordedAtMs: 100,
+        operation: "write",
+        origin: "local-file",
+        beforeText: "old plan\n",
+        afterText: "new plan\n",
+      },
+    }));
     renderShell(bridge);
 
     await waitFor(() =>
@@ -13949,6 +14412,8 @@ describe("shared view moment-diff tab", () => {
         momentId: "m-1",
       }),
     );
+    const tab = await screen.findByRole("tab", { name: "Diff: plan.md" });
+    expect(tab.title).toBe("History diff: notes/plan.md");
     expect(screen.queryByTestId("moment-diff-share-view")).toBeNull();
     expect(screen.queryByTestId("moment-diff-off")).toBeNull();
   });
@@ -14647,6 +15112,36 @@ describe("chats panel (right side)", () => {
     await waitFor(() => {
       expect(panel.style.width).toBe("900px");
     });
+  });
+
+  it("exposes the chats resize separator to keyboard users", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    renderShell(bridge);
+
+    const panel = await screen.findByTestId("chats-panel");
+    const handle = screen.getByTestId("chats-panel-resize");
+    expect(handle.tabIndex).toBe(0);
+    expect(handle.getAttribute("aria-valuemin")).toBe("240");
+    expect(handle.getAttribute("aria-valuemax")).toBe("2400");
+    expect(handle.getAttribute("aria-valuenow")).toBe("360");
+
+    fireEvent.keyDown(handle, { key: "ArrowLeft" });
+    await waitFor(() => expect(panel.style.width).toBe("376px"));
+    expect(handle.getAttribute("aria-valuenow")).toBe("376");
+
+    fireEvent.keyDown(handle, { key: "ArrowRight" });
+    await waitFor(() => expect(panel.style.width).toBe("360px"));
+
+    fireEvent.keyDown(handle, { key: "PageUp" });
+    await waitFor(() => expect(panel.style.width).toBe("488px"));
+    fireEvent.keyDown(handle, { key: "PageDown" });
+    await waitFor(() => expect(panel.style.width).toBe("360px"));
+    fireEvent.keyDown(handle, { key: "Home" });
+    await waitFor(() => expect(panel.style.width).toBe("240px"));
+    expect(handle.getAttribute("aria-valuenow")).toBe("240");
+    fireEvent.keyDown(handle, { key: "End" });
+    await waitFor(() => expect(panel.style.width).toBe("2400px"));
+    expect(handle.getAttribute("aria-valuenow")).toBe("2400");
   });
 
   it("the 'This file' tab shows the active file's chats surface", async () => {
@@ -15648,9 +16143,8 @@ describe("set-aside draft recovery", () => {
     renderShell(bridge);
 
     await screen.findByTestId("view-markdown");
-    await user.click(screen.getByTestId("markdown-edit-toggle"));
     await user.type(
-      await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 }),
+      await enterMarkdownSource(user),
       "Draft!",
     );
     await screen.findByTestId("tab-dirty");
@@ -15677,7 +16171,9 @@ describe("set-aside draft recovery", () => {
     );
     expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
     expect(
-      (screen.getByTestId("markdown-editor") as HTMLTextAreaElement).value,
+      screen
+        .getByTestId("markdown-editor")
+        .querySelector<HTMLElement>(".cm-content")?.textContent,
     ).toContain("Draft!");
   });
 });

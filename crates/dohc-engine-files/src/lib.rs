@@ -51,8 +51,8 @@ pub use bounds::{
     MAX_CAPTURE_BINARY_BYTES, MAX_CAPTURE_TEXT_BYTES, OverCapPolicy, ScanBounds, ScanBoundsBuilder,
 };
 pub use capture::{
-    CaptureApplyResult, CaptureError, CaptureSink, CapturedIngest, IngestOutcome,
-    apply_reconcile_plan, apply_then_ack,
+    BatchIngestResult, CaptureApplyResult, CaptureError, CaptureSink, CapturedIngest,
+    IngestOutcome, apply_reconcile_plan, apply_reconcile_plan_cancellable, apply_then_ack,
 };
 pub use diff::{ManifestEntry, ScanDiff, ScanManifest, diff_scans};
 pub use error::FilesError;

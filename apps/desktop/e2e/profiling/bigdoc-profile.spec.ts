@@ -1,18 +1,20 @@
 import { expect, test } from "@playwright/test";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { explorerRow, revealExplorerPath } from "../helpers/workspace";
 import { startCdpCapture } from "./cdpCapture";
 import {
   launchFixture,
-  middleBigDoc,
+  editableBigDoc,
   readRendererMarks,
   writeProfileArtifact,
 } from "./harness";
 
-test("profiles opening, typing in, and viewing source for the middle big document", async () => {
+test("profiles opening, typing in, and saving the 250 KiB document", async () => {
   const context = await launchFixture("big-docs", "profile-bigdoc");
   try {
     const { page, desktop, manifest } = context;
-    const document = middleBigDoc(manifest);
+    const document = editableBigDoc(manifest);
     await revealExplorerPath(page, document.path);
     const beforeMarks = await readRendererMarks(page);
     const capture = await startCdpCapture(desktop.app, page);
@@ -21,45 +23,38 @@ test("profiles opening, typing in, and viewing source for the middle big documen
     const editToggle = page.getByTestId("markdown-edit-toggle");
     await expect(editToggle).toBeVisible({ timeout: 240_000 });
     await expect(editToggle).toHaveText("Edit");
-    // The toggle is disabled while the engine session opens and stays
-    // disabled for read-only documents. Both are measurements, not
-    // failures: record how long enablement took, or that it never came,
-    // and profile whichever surfaces the document actually offers.
-    const editEnabledAfterMs = await editToggle
-      .waitFor({ state: "visible", timeout: 0 })
-      .then(async () => {
-        const enableStartedAt = performance.now();
-        try {
-          await expect(editToggle).toBeEnabled({ timeout: 120_000 });
-          return performance.now() - enableStartedAt;
-        } catch {
-          return null;
-        }
-      });
-    const disabledReason =
-      editEnabledAfterMs === null
-        ? await editToggle.getAttribute("title").then(
-            (title) => title ?? "read-only (no opening tooltip)",
-          )
-        : null;
-    let typedCharacters = 0;
-    let sourceToggled = false;
-    if (editEnabledAfterMs !== null) {
-      await editToggle.click();
-      const editor = page.getByTestId("markdown-editor");
-      await expect(editor).toBeVisible({ timeout: 240_000 });
-      await editor.click();
-      await page.keyboard.press("ControlOrMeta+End");
-      const typedText = "profilex-0123456789-abcdefghij";
-      expect(typedText).toHaveLength(30);
-      await page.keyboard.type(typedText);
-      typedCharacters = typedText.length;
-      await expect(editToggle).toHaveText("Source");
-      await editToggle.click();
-      await expect(editToggle).toHaveText("WYSIWYG", { timeout: 120_000 });
-      await expect(editor).toHaveJSProperty("tagName", "TEXTAREA");
-      sourceToggled = true;
-    }
+    const enableStartedAt = performance.now();
+    await expect(editToggle).toBeEnabled({ timeout: 120_000 });
+    const editEnabledAfterMs = performance.now() - enableStartedAt;
+    await editToggle.click();
+    const editor = page.getByTestId("markdown-editor");
+    await expect(editor).toBeVisible({ timeout: 120_000 });
+    await expect(editor.locator(".cm-content")).toHaveAttribute(
+      "contenteditable",
+      "true",
+    );
+    await editor.click();
+    await page.keyboard.press("ControlOrMeta+End");
+    const typedText = "profilex-0123456789-abcdefghij";
+    expect(typedText).toHaveLength(30);
+    const typingStartedAt = performance.now();
+    await page.keyboard.type(typedText);
+    const typingDurationMs = performance.now() - typingStartedAt;
+    await expect(editToggle).toHaveText("WYSIWYG", { timeout: 10_000 });
+    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute(
+      "data-state",
+      "saved",
+      { timeout: 30_000 },
+    );
+    await expect
+      .poll(
+        async () =>
+          await readFile(join(context.fixtureRoot, document.path), "utf8").catch(
+            () => "",
+          ),
+        { timeout: 30_000 },
+      )
+      .toContain(typedText);
     const captured = await capture.stop();
     const afterMarks = await readRendererMarks(page);
 
@@ -73,9 +68,8 @@ test("profiles opening, typing in, and viewing source for the middle big documen
       measurements: {
         elapsedMs: performance.now() - startedAt,
         editEnabledAfterMs,
-        disabledReason,
-        typedCharacters,
-        sourceToggled,
+        typingDurationMs,
+        typedCharacters: typedText.length,
         rendererMarks: { before: beforeMarks, after: afterMarks },
         ...captured,
         reactCommitCount: null,

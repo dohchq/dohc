@@ -64,6 +64,27 @@ function connectedGraph(): WorkspaceGraphResult {
   };
 }
 
+function denseGraph(nodeCount: number, edgeCount: number): WorkspaceGraphResult {
+  const nodes = Array.from({ length: nodeCount }, (_, index) => ({
+    path: `note-${index.toString().padStart(4, "0")}.md`,
+    title: `Note ${index}`,
+    incoming: 0,
+    outgoing: 0,
+  }));
+  return {
+    nodes,
+    edges: Array.from({ length: edgeCount }, (_, index) => ({
+      source: nodes[Math.floor(index / nodeCount)]!.path,
+      target: nodes[index % nodeCount]!.path,
+      kind: "wikilink" as const,
+    })),
+    unresolvedLinks: 0,
+    scannedFileCount: nodeCount,
+    omittedFileCount: 0,
+    truncatedFileCount: 0,
+  };
+}
+
 function colonPathGraph(): WorkspaceGraphResult {
   return {
     nodes: [
@@ -131,6 +152,126 @@ afterEach(() => {
 });
 
 describe("GraphView", () => {
+  it("bounds the panel DOM while keeping the active document reachable", async () => {
+    const nodes = Array.from({ length: 2_000 }, (_, index) => ({
+      path: `note-${index.toString().padStart(4, "0")}.md`,
+      title: `Note ${index}`,
+      incoming: index % 17,
+      outgoing: index % 11,
+    }));
+    const activePath = nodes.at(-1)!.path;
+    vi.stubGlobal("dohcDesktop", {
+      readWorkspaceGraph: vi.fn(async () => ({
+        nodes,
+        edges: [],
+        unresolvedLinks: 0,
+        scannedFileCount: nodes.length,
+        omittedFileCount: 7_000,
+        truncatedFileCount: 0,
+      })),
+    });
+
+    render(
+      <GraphView
+        workspaceId="ws-large-graph"
+        activePath={activePath}
+        refreshKey="0"
+        onOpenPath={vi.fn()}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId("graph-view").dataset.state).toBe("ready"),
+    );
+    await waitFor(
+      () => expect(screen.queryAllByTestId("graph-node")).toHaveLength(240),
+      { timeout: 5_000 },
+    );
+    expect(screen.getAllByTestId("graph-file-row")).toHaveLength(240);
+    expect(
+      screen.getAllByTestId("graph-node").some((node) => node.dataset.path === activePath),
+    ).toBe(true);
+    expect(screen.getByTestId("graph-unresolved-count").textContent).toContain(
+      "240 of 2000 docs shown",
+    );
+    expect(screen.getByTestId("graph-unresolved-count").textContent).toContain(
+      "7000 omitted",
+    );
+  });
+
+  it("uses the larger bounded slice in the full-page graph", async () => {
+    const nodes = Array.from({ length: 900 }, (_, index) => ({
+      path: `page-${index}.md`,
+      title: `Page ${index}`,
+      incoming: index % 5,
+      outgoing: 0,
+    }));
+    vi.stubGlobal("dohcDesktop", {
+      readWorkspaceGraph: vi.fn(async () => ({
+        nodes,
+        edges: [],
+        unresolvedLinks: 0,
+        scannedFileCount: nodes.length,
+        omittedFileCount: 0,
+        truncatedFileCount: 0,
+      })),
+    });
+
+    render(
+      <GraphView
+        workspaceId="ws-page-graph"
+        activePath={null}
+        refreshKey="0"
+        variant="page"
+        onOpenPath={vi.fn()}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId("graph-view").dataset.state).toBe("ready"),
+    );
+    await waitFor(
+      () => expect(screen.queryAllByTestId("graph-node")).toHaveLength(500),
+      { timeout: 5_000 },
+    );
+    expect(screen.queryAllByTestId("graph-file-row")).toHaveLength(0);
+    expect(screen.getByTestId("graph-unresolved-count").textContent).toContain(
+      "500 of 900 docs shown",
+    );
+  });
+
+  it.each([
+    { variant: "panel" as const, nodeCount: 240, edgeLimit: 2_000 },
+    { variant: "page" as const, nodeCount: 500, edgeLimit: 5_000 },
+  ])(
+    "reports the $variant link limit instead of implying every link is drawn",
+    async ({ variant, nodeCount, edgeLimit }) => {
+      vi.stubGlobal("dohcDesktop", {
+        readWorkspaceGraph: vi.fn(async () => denseGraph(nodeCount, edgeLimit + 1)),
+      });
+
+      render(
+        <GraphView
+          workspaceId={`ws-${variant}-edge-limit`}
+          activePath={null}
+          refreshKey="0"
+          variant={variant}
+          onOpenPath={vi.fn()}
+        />,
+      );
+
+      await waitFor(() =>
+        expect(screen.getByTestId("graph-view").dataset.state).toBe("ready"),
+      );
+      expect(screen.getByTestId("graph-link-count").textContent).toBe(
+        `${edgeLimit + 1} links`,
+      );
+      expect(screen.getByTestId("graph-unresolved-count").textContent).toContain(
+        `${edgeLimit} of ${edgeLimit + 1} links shown`,
+      );
+    },
+  );
+
   it("does not commit React renders during force-simulation frames", async () => {
     const frames = stubAnimationFrames();
     vi.stubGlobal("dohcDesktop", {

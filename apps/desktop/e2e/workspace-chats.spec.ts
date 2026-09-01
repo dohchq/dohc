@@ -51,6 +51,9 @@ test("flagged: general channel, composer-first chats, relaunch persistence, unre
     // Straight into the thread; the snippet is the display title; the
     // signed-out desktop's human author displays as "You".
     await expect(page.getByTestId("chats-thread-view")).toBeVisible();
+    await expect(
+      page.getByTestId("chats-panel").getByTestId("chats-channel"),
+    ).toContainText("1 chat");
     await expect(page.getByTestId("chats-thread-title")).toHaveText(
       "Let's plan the launch this week.",
     );
@@ -124,6 +127,7 @@ test("flagged: general channel, composer-first chats, relaunch persistence, unre
       await page.getByTestId("titlebar-chats-sidebar").click();
     }
     await expect(panel.getByTestId("chats-channel-name")).toHaveText("general");
+    await expect(panel.getByTestId("chats-channel")).toContainText("2 chats");
     await panel.getByTestId("chats-channel").click();
     // Two threads exist now (the agent seeded one between sessions), so pick
     // the composer-created one by its snippet title.

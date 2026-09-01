@@ -83,7 +83,7 @@ pub(crate) fn scan(root: &Path) -> Result<Inventory, RehearsalError> {
     };
     let mut entries = Vec::with_capacity(files.len());
     for ((relative_path, _, expected_size), outcome) in files.into_iter().zip(outcomes) {
-        let HashOutcome::Hashed { sha256, bytes } = outcome else {
+        let HashOutcome::Hashed { sha256, bytes, .. } = outcome else {
             return Err(RehearsalError::Io {
                 code: "inventory-hash-incomplete",
             });

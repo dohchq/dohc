@@ -17,6 +17,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -28,6 +29,7 @@ import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import type { DraftFlush } from "../FileInspector";
 import { Overlay } from "../Overlay";
+import { momentDiffName } from "./EditorTabs";
 import { planDrop, type DragSource } from "./file-tree-dnd";
 import { navigateTree, type FlatRow } from "./file-tree-nav";
 import { withMarkdownDefault } from "./new-file-name";
@@ -44,6 +46,7 @@ import {
   isGraphTabPath,
   isHistoryDiffTabPath,
   isHistoryTabPath,
+  isMomentDiffTabPath,
   isPluginDetailsTabPath,
   isPluginPanelTabPath,
   isPluginWebAppTabPath,
@@ -75,6 +78,8 @@ export interface ExplorerProps {
   // Paths with a set-aside draft (#567): marks Open Editors rows for every
   // tab, not only the active one (#579 review, r4).
   recoveryPaths: ReadonlySet<string>;
+  /** Display names for virtual paths that cannot carry a useful file name. */
+  tabLabels?: ReadonlyMap<string, string>;
   expandedFolders: string[];
   pinned: string[];
   // Max height of the Open Editors list (workbench state, persisted): the
@@ -125,9 +130,17 @@ type EditingState =
 
 type VisibleRow = FlatRow & {
   kind: WorkspaceFileEntry["kind"] | null;
+  positionInSet: number;
+  setSize: number;
   // The page's `icon` frontmatter emoji, shown in place of the file glyph.
   icon?: string;
 };
+
+type TreeRenderItem =
+  | { kind: "row"; key: string; row: VisibleRow }
+  | { kind: "edit"; key: "edit-row"; depth: number };
+
+type VirtualRange = { start: number; end: number };
 
 // A page emoji stands in for the generic file glyph when the file's
 // frontmatter carries one (Notion-style). Sized to sit on the same baseline
@@ -181,12 +194,15 @@ function FileKindIcon({ kind }: { kind: WorkspaceFileEntry["kind"] }) {
   return <FileText size={13} aria-hidden className="shrink-0" />;
 }
 
-export function editorTitle(path: string): string {
+export function editorTitle(path: string, label?: string): string {
   if (isGraphTabPath(path)) return "Graph";
   if (isHistoryTabPath(path)) return "History";
   if (isHistoryDiffTabPath(path)) {
     const parsed = parseHistoryDiffTabPath(path);
     return `Diff: ${leafOf(parsed?.filePath ?? "file")}`;
+  }
+  if (isMomentDiffTabPath(path)) {
+    return momentDiffName(label);
   }
   if (isPluginPanelTabPath(path)) {
     return `Plugin: ${parsePluginPanelTabPath(path)?.panelId ?? "panel"}`;
@@ -252,8 +268,19 @@ function IndentGuides({ depth }: { depth: number }) {
 // and the resize handle below the fold of a shorter one (the list is its own
 // overscroll-contained scroller — wheel scrolling would trap inside it).
 const OPEN_EDITORS_VIEWPORT_FRACTION = 0.6;
+const TREE_ROW_HEIGHT = 28;
+const TREE_VIRTUALIZATION_THRESHOLD = 200;
+const TREE_VIRTUAL_OVERSCAN = 12;
+const TREE_INITIAL_WINDOW_SIZE = 64;
+
 function viewportOpenEditorsCap(): number {
   return Math.round(window.innerHeight * OPEN_EDITORS_VIEWPORT_FRACTION);
+}
+
+function rangeAroundIndex(index: number, itemCount: number): VirtualRange {
+  const halfWindow = Math.floor(TREE_INITIAL_WINDOW_SIZE / 2);
+  const start = Math.max(0, Math.min(index - halfWindow, itemCount - TREE_INITIAL_WINDOW_SIZE));
+  return { start, end: Math.min(itemCount, start + TREE_INITIAL_WINDOW_SIZE) };
 }
 
 // Memoized row: primitives + stable callbacks only, so a selection change
@@ -294,6 +321,8 @@ const TreeRow = memo(function TreeRow(props: {
         data-kind={row.isFolder ? "folder" : "file"}
         data-drop-state={props.dropPreview?.kind}
         aria-level={row.depth + 1}
+        aria-posinset={row.positionInSet}
+        aria-setsize={row.setSize}
         aria-selected={props.selected}
         {...(row.isFolder ? { "aria-expanded": row.isExpanded } : {})}
         tabIndex={props.focused ? 0 : -1}
@@ -314,7 +343,8 @@ const TreeRow = memo(function TreeRow(props: {
         // Background style) — box-shadow/background only, NEVER `outline`:
         // the base outline-none nulls --tw-outline-style later in the same
         // cascade layer, which made an outline-based highlight unrenderable.
-        className={`relative flex h-7 w-full items-center gap-1.5 rounded-md pr-2 text-left text-[13px] outline-none transition-colors duration-75 ${
+        style={{ height: TREE_ROW_HEIGHT }}
+        className={`relative flex w-full items-center gap-1.5 rounded-md pr-2 text-left text-[13px] outline-none transition-colors duration-75 ${
           props.dropPreview
             ? dropClass
             : props.active
@@ -416,7 +446,14 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   const [confirmDelete, setConfirmDelete] = useState<string[] | null>(null);
   const [opError, setOpError] = useState<string | null>(null);
   const rowRefs = useRef(new Map<string, HTMLButtonElement>());
+  const pendingFocusPath = useRef<string | null>(null);
+  const fileTreeRef = useRef<HTMLElement>(null);
+  const workspaceTreeRef = useRef<HTMLUListElement>(null);
   const openEditorsListRef = useRef<HTMLUListElement>(null);
+  const [virtualRange, setVirtualRange] = useState<VirtualRange>({
+    start: 0,
+    end: TREE_INITIAL_WINDOW_SIZE,
+  });
   // Pointer position + cap at drag start — heights derive from the DELTA, not
   // from the list's edges: the list is max-height (shorter lists shrink to
   // fit), so the handle can sit ABOVE the cap and an edge-based height would
@@ -439,6 +476,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   // Internal drag state: HTML5 DnD dataTransfer is unreadable during
   // dragover, so the dragged selection rides in a ref for the whole gesture.
   const dragSources = useRef<DragSource[] | null>(null);
+  // Keep the actual drag-origin element mounted while Chromium owns the
+  // gesture. A virtualized source that disappears during auto-scroll does not
+  // receive dragend, which can otherwise leave a stale internal move armed.
+  const [dragOriginPath, setDragOriginPath] = useState<string | null>(null);
   const hoverExpandTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -529,7 +570,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   const rows = useMemo(() => {
     const out: VisibleRow[] = [];
     const walk = (node: TreeNode, depth: number, parentPath: string | null) => {
-      for (const child of node.children) {
+      for (const [childIndex, child] of node.children.entries()) {
         const isFolder = child.file === null;
         const isExpanded = isFolder && expandedSet.has(child.fullPath);
         out.push({
@@ -539,6 +580,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           depth,
           parentPath,
           kind: child.file?.kind ?? null,
+          positionInSet: childIndex + 1,
+          setSize: node.children.length,
           ...(child.file?.icon ? { icon: child.file.icon } : {}),
         });
         if (isFolder && isExpanded) walk(child, depth + 1, child.fullPath);
@@ -553,6 +596,87 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   const rowsRef = useRef(rows);
   rowsRef.current = rows;
 
+  const renderItems = useMemo<TreeRenderItem[]>(() => {
+    const items: TreeRenderItem[] = [];
+    if (editing?.mode === "create" && editing.parentPath === "") {
+      items.push({ kind: "edit", key: "edit-row", depth: 0 });
+    }
+    for (const row of rows) {
+      if (editing?.mode === "rename" && editing.path === row.fullPath) {
+        items.push({ kind: "edit", key: "edit-row", depth: row.depth });
+      } else {
+        items.push({ kind: "row", key: row.fullPath, row });
+      }
+      if (
+        editing?.mode === "create" &&
+        editing.parentPath !== "" &&
+        editing.parentPath === row.fullPath
+      ) {
+        items.push({ kind: "edit", key: "edit-row", depth: row.depth + 1 });
+      }
+    }
+    return items;
+  }, [editing, rows]);
+
+  const renderIndexByPath = useMemo(() => {
+    const indexes = new Map<string, number>();
+    for (const [index, item] of renderItems.entries()) {
+      if (item.kind === "row") indexes.set(item.row.fullPath, index);
+    }
+    return indexes;
+  }, [renderItems]);
+
+  const virtualized = renderItems.length > TREE_VIRTUALIZATION_THRESHOLD;
+
+  const updateVirtualRange = useCallback(() => {
+    if (!virtualized) return;
+    const container = fileTreeRef.current;
+    const list = workspaceTreeRef.current;
+    if (!container || !list) return;
+
+    const containerRect = container.getBoundingClientRect();
+    const listRect = list.getBoundingClientRect();
+    const listTop = listRect.top - containerRect.top + container.scrollTop;
+    const viewportTop = Math.max(0, container.scrollTop - listTop);
+    const firstVisible = Math.min(
+      renderItems.length - 1,
+      Math.floor(viewportTop / TREE_ROW_HEIGHT),
+    );
+    const visibleCount = Math.max(
+      1,
+      Math.ceil(container.clientHeight / TREE_ROW_HEIGHT),
+    );
+    const next = {
+      start: Math.max(0, firstVisible - TREE_VIRTUAL_OVERSCAN),
+      end: Math.min(
+        renderItems.length,
+        firstVisible + visibleCount + TREE_VIRTUAL_OVERSCAN,
+      ),
+    };
+    setVirtualRange((current) =>
+      current.start === next.start && current.end === next.end ? current : next,
+    );
+  }, [renderItems.length, virtualized]);
+
+  useLayoutEffect(() => {
+    updateVirtualRange();
+  }, [
+    updateVirtualRange,
+    filesExpanded,
+    openEditorsExpanded,
+    openEditorsHeight,
+    openEditorCount,
+    props.pinned.length,
+  ]);
+
+  useEffect(() => {
+    const container = fileTreeRef.current;
+    if (!container || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(updateVirtualRange);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [updateVirtualRange]);
+
   const folderPathSet = useMemo(() => new Set(projected.folders), [projected]);
 
   const isFolderPath = useCallback(
@@ -565,10 +689,32 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     else rowRefs.current.delete(path);
   }, []);
 
-  const focusRow = useCallback((path: string) => {
-    setFocusedPath(path);
-    rowRefs.current.get(path)?.focus();
-  }, []);
+  const focusRow = useCallback(
+    (path: string) => {
+      setFocusedPath(path);
+      const element = rowRefs.current.get(path);
+      if (element) {
+        pendingFocusPath.current = null;
+        element.focus();
+        return;
+      }
+      pendingFocusPath.current = path;
+      const index = renderIndexByPath.get(path);
+      if (index !== undefined) {
+        setVirtualRange(rangeAroundIndex(index, renderItems.length));
+      }
+    },
+    [renderIndexByPath, renderItems.length],
+  );
+
+  useLayoutEffect(() => {
+    const path = pendingFocusPath.current;
+    if (!path || path !== focusedPath) return;
+    const element = rowRefs.current.get(path);
+    if (!element) return;
+    pendingFocusPath.current = null;
+    element.focus();
+  }, [focusedPath, virtualRange]);
 
   const beginCreate = useCallback(
     (kind: "file" | "folder", parentPath: string) => {
@@ -604,11 +750,14 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     [beginCreate, creationParentPath],
   );
 
-  const beginRename = useCallback((path: string, isFolder: boolean) => {
-    setEditValue(leafOf(path));
-    editDone.current = false;
-    setEditing({ mode: "rename", path, isFolder });
-  }, []);
+  const beginRename = useCallback(
+    (path: string, isFolder: boolean) => {
+      setEditValue(leafOf(path));
+      editDone.current = false;
+      setEditing({ mode: "rename", path, isFolder });
+    },
+    [],
+  );
 
   useEffect(() => {
     if (props.createRequest) beginCreate(props.createRequest.kind, "");
@@ -791,6 +940,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   // ---- selection + clicks ----
 
   const selectSingle = useCallback((path: string) => {
+    pendingFocusPath.current = null;
     setSelection(new Set([path]));
     setAnchorPath(path);
     setFocusedPath(path);
@@ -798,6 +948,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
   const onRowClick = useCallback(
     (path: string, event: MouseEvent) => {
+      pendingFocusPath.current = null;
       const rowList = rowsRef.current;
       const isFolder =
         rowList.find((row) => row.fullPath === path)?.isFolder ?? false;
@@ -930,6 +1081,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         path: p,
         kind: isFolderPath(p) ? "folder" : "file",
       }));
+      setDragOriginPath(path);
       event.dataTransfer.effectAllowed = "move";
       // Some platforms require data for a drag to start.
       event.dataTransfer.setData("text/plain", paths.join("\n"));
@@ -1039,6 +1191,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       if (dragSources.current) {
         const sources = dragSources.current;
         dragSources.current = null;
+        setDragOriginPath(null);
         performMoves(sources, targetDir);
         return;
       }
@@ -1061,6 +1214,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
   const onRowDragEnd = useCallback(() => {
     dragSources.current = null;
+    setDragOriginPath(null);
     clearDragPreview();
   }, [clearDragPreview]);
 
@@ -1160,7 +1314,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
   const editRow = (depth: number): ReactNode => (
     <li role="none" key="edit-row">
-      <div className="flex h-7 items-center gap-1.5 pr-2">
+      <div style={{ height: TREE_ROW_HEIGHT }} className="flex items-center gap-1.5 pr-2">
         <span aria-hidden className="w-1 shrink-0" />
         <IndentGuides depth={depth} />
         {editing?.mode === "rename" && editing.isFolder ? (
@@ -1225,9 +1379,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     }
   }
 
-  // Insert the create-editbox right under its parent folder row (or at the
-  // top for a root create); a rename-editbox replaces its row in place.
-  const renderedRows: ReactNode[] = [];
   const rootDropPreview = dropPreview?.targetPath === null ? dropPreview : null;
   const dropPreviewForRow = (row: VisibleRow): RowDropPreview | null => {
     if (!dropPreview || dropPreview.targetPath === null) return null;
@@ -1242,39 +1393,84 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     }
     return null;
   };
-  if (editing?.mode === "create" && editing.parentPath === "") {
-    renderedRows.push(editRow(0));
+
+  // Keep the DOM proportional to the viewport. The full flattened row list
+  // remains authoritative for keyboard navigation and range selection; only
+  // its fixed-height presentation is windowed. A focused row stays mounted
+  // outside the viewport so wheel scrolling never destroys the roving tab
+  // stop or drops browser focus.
+  const mountedIndexes = new Set<number>();
+  const range = virtualized
+    ? {
+        start: Math.max(0, Math.min(virtualRange.start, renderItems.length)),
+        end: Math.max(0, Math.min(virtualRange.end, renderItems.length)),
+      }
+    : { start: 0, end: renderItems.length };
+  for (let index = range.start; index < range.end; index += 1) {
+    mountedIndexes.add(index);
   }
-  for (const row of rows) {
-    if (editing?.mode === "rename" && editing.path === row.fullPath) {
-      renderedRows.push(editRow(row.depth));
-      continue;
+  if (virtualized && focusedPath) {
+    const focusedIndex = renderIndexByPath.get(focusedPath);
+    if (focusedIndex !== undefined) mountedIndexes.add(focusedIndex);
+  }
+  if (virtualized && dragOriginPath) {
+    const dragOriginIndex = renderIndexByPath.get(dragOriginPath);
+    if (dragOriginIndex !== undefined) mountedIndexes.add(dragOriginIndex);
+  }
+  if (virtualized && editing) {
+    const editIndex = renderItems.findIndex((item) => item.kind === "edit");
+    if (editIndex !== -1) mountedIndexes.add(editIndex);
+  }
+
+  const renderedRows: ReactNode[] = [];
+  let nextIndex = 0;
+  for (const index of [...mountedIndexes].sort((left, right) => left - right)) {
+    if (index > nextIndex) {
+      renderedRows.push(
+        <li
+          key={`virtual-space-${nextIndex}-${index}`}
+          role="none"
+          aria-hidden
+          style={{ height: (index - nextIndex) * TREE_ROW_HEIGHT }}
+        />,
+      );
     }
+    const item = renderItems[index];
+    if (!item) continue;
+    if (item.kind === "edit") {
+      renderedRows.push(editRow(item.depth));
+    } else {
+      const row = item.row;
+      renderedRows.push(
+        <TreeRow
+          key={item.key}
+          row={row}
+          selected={selection.has(row.fullPath)}
+          active={activeTab === row.fullPath}
+          focused={focusedPath === row.fullPath}
+          dropPreview={dropPreviewForRow(row)}
+          registerRef={registerRef}
+          onRowClick={onRowClick}
+          onRowContextMenu={onRowContextMenu}
+          onRowDragStart={onRowDragStart}
+          onRowDragOver={onRowDragOver}
+          onRowDrop={onRowDrop}
+          onRowDragLeave={onRowDragLeave}
+          onRowDragEnd={onRowDragEnd}
+        />,
+      );
+    }
+    nextIndex = index + 1;
+  }
+  if (virtualized && nextIndex < renderItems.length) {
     renderedRows.push(
-      <TreeRow
-        key={row.fullPath}
-        row={row}
-        selected={selection.has(row.fullPath)}
-        active={activeTab === row.fullPath}
-        focused={focusedPath === row.fullPath}
-        dropPreview={dropPreviewForRow(row)}
-        registerRef={registerRef}
-        onRowClick={onRowClick}
-        onRowContextMenu={onRowContextMenu}
-        onRowDragStart={onRowDragStart}
-        onRowDragOver={onRowDragOver}
-        onRowDrop={onRowDrop}
-        onRowDragLeave={onRowDragLeave}
-        onRowDragEnd={onRowDragEnd}
+      <li
+        key={`virtual-space-${nextIndex}-${renderItems.length}`}
+        role="none"
+        aria-hidden
+        style={{ height: (renderItems.length - nextIndex) * TREE_ROW_HEIGHT }}
       />,
     );
-    if (
-      editing?.mode === "create" &&
-      editing.parentPath !== "" &&
-      editing.parentPath === row.fullPath
-    ) {
-      renderedRows.push(editRow(row.depth + 1));
-    }
   }
 
   const empty = rows.length === 0 && !editing;
@@ -1282,9 +1478,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   return (
     <>
       <nav
+        ref={fileTreeRef}
         data-testid="file-tree"
         aria-label="Files"
         onKeyDown={onTreeKeyDown}
+        onScroll={updateVirtualRange}
         onDragOver={onContainerDragOver}
         onDrop={onContainerDrop}
         onDragLeave={onContainerDragLeave}
@@ -1387,7 +1585,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                         const dirty =
                           props.dirtyPaths.has(tab.path) ||
                           props.recoveryPaths.has(tab.path);
-                        const title = editorTitle(tab.path);
+                        const title = editorTitle(
+                          tab.path,
+                          props.tabLabels?.get(tab.path),
+                        );
                         return (
                           <li
                             key={`${group.id}:${tab.path}`}
@@ -1592,7 +1793,12 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                   Create your first file
                 </button>
               ) : (
-                <ul role="tree" aria-label="Workspace files" className="m-0 list-none p-0">
+                <ul
+                  ref={workspaceTreeRef}
+                  role="tree"
+                  aria-label="Workspace files"
+                  className="m-0 list-none p-0"
+                >
                   {renderedRows}
                 </ul>
               )}

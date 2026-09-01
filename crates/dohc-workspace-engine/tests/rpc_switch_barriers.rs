@@ -35,6 +35,33 @@ fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Va
     }
 }
 
+async fn wait_until_capture_ready(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    mut id: u64,
+) {
+    let deadline = tokio::time::Instant::now() + TEST_TIMEOUT;
+    loop {
+        let status = transport
+            .call(
+                RequestContext::unbounded(),
+                request(id, "watcher.status", Some(handle.clone()), json!({})),
+            )
+            .await
+            .expect("watcher.status");
+        id += 1;
+        if status.result["phase"] == json!("ready") {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "startup capture never became ready: {}",
+            status.result
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
 async fn fixture(
     name: &str,
     service: EngineService,
@@ -67,6 +94,7 @@ async fn fixture(
     .await
     .expect("open");
     let handle = serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
+    wait_until_capture_ready(&transport, &handle, 1_000_000).await;
     (scratch, transport, handle, workspace_id)
 }
 
@@ -95,7 +123,10 @@ async fn open_additional_workspace(
     )
     .await
     .expect("open additional workspace");
-    serde_json::from_value(opened.result["workspace"].clone()).expect("additional handle")
+    let handle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("additional handle");
+    wait_until_capture_ready(transport, &handle, id.saturating_add(1_000_000)).await;
+    handle
 }
 
 async fn call(

@@ -1,8 +1,16 @@
 import { expect, test } from "@playwright/test";
-import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdir, readdir, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Page } from "@playwright/test";
 import { launchDesktopApp } from "./helpers/desktopApp";
+import {
+  currentUiAuditBundles,
+  readUiAuditBuildProvenance,
+} from "../scripts/ui-audit-build-provenance.mjs";
+import { expectedUiAuditShots } from "../scripts/validate-ui-audit.mjs";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
@@ -20,8 +28,55 @@ import {
 
 const SHOT_DIR = process.env.UI_AUDIT_SHOT_DIR ?? "";
 test.skip(SHOT_DIR === "", "set UI_AUDIT_SHOT_DIR to capture UI audit screenshots");
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+const DESKTOP_ROOT = resolve(REPO_ROOT, "apps/desktop");
+const CAPTURE_MANIFEST = "ui-audit-capture.json";
 
-const RICH_DOC = `# Q3 product plan
+type UiAuditBundles = {
+  mainTreeSha256: string;
+  preloadTreeSha256: string;
+  rendererTreeSha256: string;
+  engineSha256: string;
+};
+
+type CaptureManifest = {
+  schemaVersion: 1;
+  state: "in-progress" | "complete";
+  commit: string;
+  startedAt: string;
+  completedAt: string | null;
+  build: {
+    schemaVersion: 1;
+    commit: string;
+    builtAt: string;
+    bundles: UiAuditBundles;
+  };
+  bundles: UiAuditBundles;
+  shots: Array<{ name: string; sha256: string }>;
+};
+
+let activeCapture: CaptureManifest | null = null;
+
+function git(args: string[]): string {
+  return execFileSync("git", args, { cwd: REPO_ROOT, encoding: "utf8" }).trim();
+}
+
+async function writeCaptureManifest(): Promise<void> {
+  if (!activeCapture) throw new Error("UI audit capture is not active");
+  await writeFile(
+    join(SHOT_DIR, CAPTURE_MANIFEST),
+    `${JSON.stringify(activeCapture, null, 2)}\n`,
+    "utf8",
+  );
+}
+
+const RICH_DOC = `---
+status: In progress
+owner: Ice
+release: September launch
+---
+
+# Q3 product plan
 
 dohc turns messy work into an inspectable workspace. This quarter we focus on
 polish, collaboration, and making the editor feel effortless.
@@ -100,7 +155,17 @@ Invited agent,340,0.07
 `;
 
 async function shot(page: Page, name: string): Promise<void> {
-  await page.screenshot({ path: join(SHOT_DIR, `${name}.png`) });
+  if (!activeCapture) throw new Error("UI audit capture is not active");
+  const fileName = `${name}.png`;
+  if (activeCapture.shots.some((shot) => shot.name === fileName)) {
+    throw new Error(`duplicate UI audit screenshot: ${fileName}`);
+  }
+  const bytes = await page.screenshot({ path: join(SHOT_DIR, fileName) });
+  activeCapture.shots.push({
+    name: fileName,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+  });
+  await writeCaptureManifest();
 }
 
 async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
@@ -120,7 +185,31 @@ async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
 
 test("@ui-audit capture baseline screenshots", async () => {
   test.setTimeout(240_000);
+  const captureCommit = git(["rev-parse", "HEAD"]);
+  if (git(["status", "--porcelain"]) !== "") {
+    throw new Error("commit the worktree before capturing UI audit evidence");
+  }
   await mkdir(SHOT_DIR, { recursive: true });
+  if ((await readdir(SHOT_DIR)).length !== 0) {
+    throw new Error("UI_AUDIT_SHOT_DIR must be empty before capture");
+  }
+  const bundles = currentUiAuditBundles(DESKTOP_ROOT);
+  const build = readUiAuditBuildProvenance(
+    DESKTOP_ROOT,
+    captureCommit,
+    bundles,
+  );
+  activeCapture = {
+    schemaVersion: 1,
+    state: "in-progress",
+    commit: captureCommit,
+    startedAt: new Date().toISOString(),
+    completedAt: null,
+    build,
+    bundles,
+    shots: [],
+  };
+  await writeCaptureManifest();
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
@@ -143,16 +232,11 @@ test("@ui-audit capture baseline screenshots", async () => {
     const openFolder = page.getByRole("button", {
       name: /open an existing folder as a workspace/i,
     });
-    const sawFirstRun = await openFolder
-      .waitFor({ state: "visible", timeout: 8_000 })
-      .then(() => true)
-      .catch(() => false);
-    if (sawFirstRun) {
-      await shot(page, "01-first-run-light");
-      await setTheme(page, "dark");
-      await shot(page, "01-first-run-dark");
-      await setTheme(page, "light");
-    }
+    await openFolder.waitFor({ state: "visible", timeout: 8_000 });
+    await shot(page, "01-first-run-light");
+    await setTheme(page, "dark");
+    await shot(page, "01-first-run-dark");
+    await setTheme(page, "light");
     await openWorkspaceFromFirstRun(page, temp);
 
     // 02 — shell + explorer (workspace open, nothing focused)
@@ -271,15 +355,10 @@ test("@ui-audit capture baseline screenshots", async () => {
     await page.getByTestId("activity-settings").click();
     await page.waitForTimeout(500);
     const appearanceNav = page.getByRole("button", { name: /appearance/i }).first();
-    const hasAppearance = await appearanceNav
-      .waitFor({ state: "visible", timeout: 3_000 })
-      .then(() => true)
-      .catch(() => false);
-    if (hasAppearance) {
-      await appearanceNav.click();
-      await page.waitForTimeout(400);
-      await shot(page, "19-settings-appearance-light");
-    }
+    await appearanceNav.waitFor({ state: "visible", timeout: 3_000 });
+    await appearanceNav.click();
+    await page.waitForTimeout(400);
+    await shot(page, "19-settings-appearance-light");
     await page.keyboard.press("Escape");
 
     // 20 — inline properties under the title. They render in the document
@@ -292,17 +371,40 @@ test("@ui-audit capture baseline screenshots", async () => {
     await expect(page.getByTestId("markdown-editor")).toBeVisible({
       timeout: 20_000,
     });
+    await page
+      .getByTestId("properties-panel")
+      .waitFor({ state: "visible", timeout: 5_000 });
+    const propertyKeys = page.getByTestId("property-key");
+    await expect(propertyKeys).toHaveCount(3);
+    const propertyNames = await propertyKeys.evaluateAll((inputs) =>
+      inputs.map((input) => (input as HTMLInputElement).value),
+    );
+    const statusIndex = propertyNames.indexOf("status");
+    expect(statusIndex).toBeGreaterThanOrEqual(0);
+    await expect(page.getByTestId("property-value").nth(statusIndex)).toHaveValue(
+      "In progress",
+    );
+    await page.waitForTimeout(500);
+    await shot(page, "20-properties-panel-light");
     if (
-      await page
-        .getByTestId("properties-panel")
-        .waitFor({ state: "visible", timeout: 5_000 })
-        .then(() => true)
-        .catch(() => false)
+      git(["rev-parse", "HEAD"]) !== captureCommit ||
+      git(["status", "--porcelain"]) !== ""
     ) {
-      await page.waitForTimeout(500);
-      await shot(page, "20-properties-panel-light");
+      throw new Error("the worktree changed during the UI audit capture");
     }
+    const capturedShots = activeCapture.shots.map((entry) => entry.name).sort();
+    const expectedShots = [...expectedUiAuditShots].sort();
+    if (
+      capturedShots.length !== expectedShots.length ||
+      capturedShots.some((name, index) => name !== expectedShots[index])
+    ) {
+      throw new Error("the UI audit capture did not produce every required screenshot");
+    }
+    activeCapture.state = "complete";
+    activeCapture.completedAt = new Date().toISOString();
+    await writeCaptureManifest();
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
+    activeCapture = null;
   }
 });

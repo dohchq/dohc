@@ -5,6 +5,7 @@ import {
   type JsonValue,
   type Request,
   type Response,
+  type WatcherStatusResult,
 } from "@dohc/workspace-engine-client";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 
@@ -15,6 +16,13 @@ export type CaptureFlushResult = {
   running: boolean;
   degraded: boolean;
 };
+
+const READY_WATCHER_STATUS = {
+  running: true,
+  degraded: false,
+  terminal: false,
+  phase: "ready",
+} satisfies WatcherStatusResult;
 
 /**
  * Daemon-shaped `EngineWorkspaceSessions` backed by a real
@@ -86,7 +94,7 @@ export function mockLiveSessions(
       if (request.method === "watcher.status") {
         return {
           id: request.id,
-          result: { running: true, degraded: false, terminal: false },
+          result: READY_WATCHER_STATUS,
         };
       }
       if (request.method === "collections.listPendingAdoptions") {

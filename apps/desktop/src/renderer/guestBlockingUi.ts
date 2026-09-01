@@ -19,8 +19,10 @@ function publish(): void {
   for (const listener of listeners) listener();
 }
 
-/** Registers a full-screen overlay: it blocks the guest AND owns Escape while
- * it is the topmost one. Overlay calls this; nothing else should. */
+/** Registers a full-screen modal layer: it blocks the guest and owns modal
+ * keyboard handling while it is the topmost one. Overlay and the global
+ * recovery warning both register here so their document listeners never
+ * compete for the same Tab key. */
 export function pushOverlay(id: symbol): void {
   escapeStack.push(id);
   blockers.add(id);

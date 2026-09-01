@@ -7,9 +7,7 @@ import {
 } from "./harness";
 
 test("profiles eight Quick Open keystrokes and Graph construction", async () => {
-  const context = await launchFixture("large-flat", "profile-quickopen-graph", {
-    engine: false,
-  });
+  const context = await launchFixture("large-flat", "profile-quickopen-graph");
   try {
     const { page, manifest } = context;
     await startLongTaskObserver(page);
@@ -36,13 +34,28 @@ test("profiles eight Quick Open keystrokes and Graph construction", async () => 
     expect(typed).toHaveLength(8);
     await page.keyboard.press("Escape");
 
+    const graphButton = page.getByTestId("activity-graph");
+    if ((await graphButton.getAttribute("aria-current")) === "page") {
+      await page.getByTestId("activity-explorer").click();
+      await expect(graphButton).not.toHaveAttribute("aria-current", "page");
+    }
     const graphStart = await page.evaluate(() => performance.now());
-    await page.getByTestId("activity-graph").click();
-    const graph = page.locator('[data-testid="graph-view"][data-state="ready"]').first();
+    await graphButton.click();
+    const sidePanel = page.getByTestId("side-panel");
+    const graph = sidePanel.locator('[data-testid="graph-view"][data-state="ready"]');
     await expect(graph).toBeVisible({ timeout: 180_000 });
+    await expect(sidePanel.getByTestId("graph-node").first()).toBeVisible();
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    );
     const graphReady = await page.evaluate(() => performance.now());
-    const graphDocCount = await page.getByTestId("graph-doc-count").first().textContent();
-    const graphLinkCount = await page.getByTestId("graph-link-count").first().textContent();
+    const graphDocCount = await sidePanel.getByTestId("graph-doc-count").textContent();
+    const graphLinkCount = await sidePanel.getByTestId("graph-link-count").textContent();
+    const renderedGraphNodeCount = await sidePanel.getByTestId("graph-node").count();
+    const renderedGraphRowCount = await sidePanel.getByTestId("graph-file-row").count();
     const longTasks = await stopLongTaskObserver(page);
 
     await writeProfileArtifact("quickopen-graph", {
@@ -58,6 +71,8 @@ test("profiles eight Quick Open keystrokes and Graph construction", async () => 
         graphOpenToReadyMs: graphReady - graphStart,
         graphDocCount,
         graphLinkCount,
+        renderedGraphNodeCount,
+        renderedGraphRowCount,
         rendererMarks: await readRendererMarks(page),
         longTasks,
         reactCommitCount: null,

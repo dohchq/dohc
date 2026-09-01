@@ -1,4 +1,4 @@
-import { FileText, GitFork, RefreshCw, Unlink } from "lucide-react";
+import { FileText, GitFork, ListFilter, RefreshCw } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -92,14 +92,16 @@ const GRAPH_LAYOUT: Record<
 > = {
   // Nodes after the pairwise limit keep center and edge forces, but skip
   // repulsion: panel layouts degrade after 160 ranked nodes, page layouts after 280.
-  // One run handles at most 2,000 nodes and 10,000 edges. At 120 frames (about
-  // 2 seconds at 60 Hz), the 280-node pairwise cap bounds page work to 4.7M
-  // pair checks. A terminal commit discards residual motion.
+  // The graph response can describe 2,000 nodes, but mounting all of them as
+  // interactive SVG plus a second panel list creates a multi-hundred-ms main
+  // thread stall and an unreadable cloud. Keep the highest-connected slice
+  // (with the active document promoted to the front) and say how many are
+  // shown. Quick Open and Explorer remain the exhaustive file navigators.
   panel: {
     width: 260,
     height: 420,
-    nodeLimit: 2000,
-    edgeLimit: 10000,
+    nodeLimit: 240,
+    edgeLimit: 2000,
     pairwiseLimit: 160,
     labelLimit: 80,
     alphaDecay: 0.96,
@@ -108,8 +110,8 @@ const GRAPH_LAYOUT: Record<
   page: {
     width: 1200,
     height: 760,
-    nodeLimit: 2000,
-    edgeLimit: 10000,
+    nodeLimit: 500,
+    edgeLimit: 5000,
     pairwiseLimit: 280,
     labelLimit: 180,
     alphaDecay: 0.96,
@@ -131,6 +133,16 @@ function compareGraphNodes(activePath: string | null) {
     if (b.path === activePath) return 1;
     return degree(b) - degree(a) || a.path.localeCompare(b.path);
   };
+}
+
+function visibleGraphNodes(
+  graph: WorkspaceGraphResult,
+  activePath: string | null,
+  variant: GraphVariant,
+): WorkspaceGraphNode[] {
+  return [...graph.nodes]
+    .sort(compareGraphNodes(activePath))
+    .slice(0, GRAPH_LAYOUT[variant].nodeLimit);
 }
 
 function graphRadius(node: WorkspaceGraphNode, variant: GraphVariant): number {
@@ -229,7 +241,7 @@ function stopGraphMotion(
 
 function visibleEdges(
   graph: WorkspaceGraphResult,
-  nodes: ForceNode[],
+  nodes: readonly Pick<WorkspaceGraphNode, "path">[],
   variant: GraphVariant,
 ): VisibleGraphEdge[] {
   const paths = new Set(nodes.map((node) => node.path));
@@ -247,11 +259,8 @@ function useForceGraph(
 ) {
   const layout = GRAPH_LAYOUT[variant];
   const ordered = useMemo(
-    () =>
-      [...graph.nodes]
-        .sort(compareGraphNodes(activePath))
-        .slice(0, layout.nodeLimit),
-    [graph.nodes, activePath, layout.nodeLimit],
+    () => visibleGraphNodes(graph, activePath, variant),
+    [graph, activePath, variant],
   );
   const [points, setPoints] = useState<GraphPoint[]>([]);
   const nodesRef = useRef<ForceNode[]>([]);
@@ -490,8 +499,20 @@ function useForceGraph(
   };
 }
 
-function graphStatus(graph: WorkspaceGraphResult): string | null {
+function graphStatus(
+  graph: WorkspaceGraphResult,
+  shownNodeCount: number,
+  shownEdgeCount: number,
+): string | null {
   const notices: string[] = [];
+  if (shownNodeCount < graph.nodes.length) {
+    notices.push(`${shownNodeCount} of ${graph.nodes.length} docs shown`);
+  }
+  if (shownEdgeCount < graph.edges.length) {
+    notices.push(
+      `${shownEdgeCount} of ${graph.edges.length} link${graph.edges.length === 1 ? "" : "s"} shown`,
+    );
+  }
   if (graph.unresolvedLinks > 0) {
     notices.push(`${graph.unresolvedLinks} unresolved`);
   }
@@ -839,10 +860,14 @@ export function GraphView(props: {
         };
   const graph = scopedState.graph ?? EMPTY_GRAPH;
   const rows = useMemo(
-    () => [...graph.nodes].sort(compareGraphNodes(props.activePath)),
-    [graph.nodes, props.activePath],
+    () => visibleGraphNodes(graph, props.activePath, variant),
+    [graph, props.activePath, variant],
   );
-  const notice = graphStatus(graph);
+  const shownEdgeCount = useMemo(
+    () => visibleEdges(graph, rows, variant).length,
+    [graph, rows, variant],
+  );
+  const notice = graphStatus(graph, rows.length, shownEdgeCount);
 
   return (
     <div
@@ -875,7 +900,7 @@ export function GraphView(props: {
             data-testid="graph-unresolved-count"
             className="inline-flex items-center gap-1.5 font-mono text-[11px] text-subtle"
           >
-            <Unlink size={12} aria-hidden />
+            <ListFilter size={12} aria-hidden />
             {notice}
           </span>
         ) : null}
@@ -921,7 +946,9 @@ export function GraphView(props: {
       ) : graph.nodes.length === 0 ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center">
           <FileText size={18} aria-hidden className="text-subtle" />
-          <span className="text-xs text-muted">No markdown files</span>
+          <span className="text-xs text-muted">
+            Add a Markdown file to start building your graph.
+          </span>
         </div>
       ) : (
         <div

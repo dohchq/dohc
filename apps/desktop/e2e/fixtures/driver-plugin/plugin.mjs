@@ -1,10 +1,12 @@
 // A driver plugin in miniature: it declares one agent driver, probes for its
 // harness, and runs that harness as a real supervised child process, mapping
 // the harness's own line protocol to dohc's agent events.
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const mode = process.env.DOHC_PLUGIN_FIXTURE_MODE ?? "driver";
 const heartbeatPath = process.env.DOHC_DRIVER_FIXTURE_HEARTBEAT ?? "";
+const disposedPath = process.env.DOHC_DRIVER_FIXTURE_DISPOSED ?? "";
 
 function createDriver(ctx, options = {}) {
   return {
@@ -51,6 +53,9 @@ function createDriver(ctx, options = {}) {
         args,
         cwd: { workspaceRoot: true },
       });
+      if (options.recordPidOnStart && disposedPath) {
+        await writeFile(disposedPath, String(harness.pid), "utf8");
+      }
 
       let buffered = "";
       await harness.onOutput((output) => {
@@ -156,7 +161,14 @@ function createDriver(ctx, options = {}) {
           await harness.terminate();
         },
         async dispose() {
+          if (options.disposeBehavior === "hang") {
+            await new Promise(() => {});
+          }
+          if (options.disposeBehavior === "reject") {
+            throw new Error("fixture session cleanup failed");
+          }
           await harness.terminate();
+          if (disposedPath) await writeFile(disposedPath, "disposed", "utf8");
         },
       };
       if (!options.withoutOptionalMembers) {
@@ -206,6 +218,34 @@ switch (mode) {
         ctx.drivers.register(
           "fixture-harness",
           createDriver(ctx, { badCursor: true }),
+        );
+      },
+    };
+    break;
+  case "invalid-session-cleanup-hangs":
+    handler = {
+      activate(ctx) {
+        ctx.drivers.register(
+          "fixture-harness",
+          createDriver(ctx, {
+            badCursor: true,
+            disposeBehavior: "hang",
+            recordPidOnStart: true,
+          }),
+        );
+      },
+    };
+    break;
+  case "invalid-session-cleanup-rejects":
+    handler = {
+      activate(ctx) {
+        ctx.drivers.register(
+          "fixture-harness",
+          createDriver(ctx, {
+            badCursor: true,
+            disposeBehavior: "reject",
+            recordPidOnStart: true,
+          }),
         );
       },
     };

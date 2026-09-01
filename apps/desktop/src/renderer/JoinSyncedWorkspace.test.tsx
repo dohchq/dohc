@@ -236,9 +236,13 @@ describe("JoinSyncedWorkspace", () => {
   it("gates on sign-in and unlocks after the embedded login completes", async () => {
     const user = userEvent.setup();
     bridgeMock.cloudStatus
-      .mockResolvedValueOnce({ connected: false }) // panel gate
-      .mockResolvedValueOnce({ connected: false }) // embedded CloudLogin check
-      .mockResolvedValue({ connected: true, email: "ice@dohc.dev" });
+      .mockResolvedValueOnce({ connected: false, managedCloudStatus: "ready" }) // panel gate
+      .mockResolvedValueOnce({ connected: false, managedCloudStatus: "ready" }) // embedded CloudLogin check
+      .mockResolvedValue({
+        connected: true,
+        email: "ice@dohc.dev",
+        managedCloudStatus: "ready",
+      });
     bridgeMock.cloudLoginStart.mockResolvedValue({
       userCode: "ABCD",
       verificationUri: "https://cloud.dohc.dev/device",

@@ -4,14 +4,15 @@
 //! secret content; policy flips re-offer; teardown is clean and ordered.
 
 use dohc_engine_protocol::{
+    ErrorCode,
     transport::{EngineTransport, InProcessTransport, RequestContext},
     wire::{Request, WorkspaceHandle},
 };
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::{
-    CAPTURE_MOMENT_RECORDED_EVENT, CaptureApplyProbe, EngineEventNotice, EngineService,
-    shadow_fence::write_shadow_marker_for_harness,
+    CAPTURE_MOMENT_RECORDED_EVENT, CaptureApplyProbe, EARLY_IMPORT_MIN_ADDED_FILES,
+    EngineEventNotice, EngineService, shadow_fence::write_shadow_marker_for_harness,
 };
 use serde_json::{Value, json};
 use std::path::Path;
@@ -55,6 +56,33 @@ async fn open_workspace(
         .await
         .expect("workspace open");
     serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle")
+}
+
+async fn wait_until_capture_ready(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    mut id: u64,
+) {
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        let status = transport
+            .call(
+                RequestContext::unbounded(),
+                request(id, "watcher.status", Some(handle.clone()), json!({})),
+            )
+            .await
+            .expect("watcher.status");
+        id += 1;
+        if status.result["phase"] == json!("ready") {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "capture never became ready: {}",
+            status.result
+        );
+        tokio::task::yield_now().await;
+    }
 }
 
 async fn read_text(
@@ -425,6 +453,7 @@ async fn open_capture_author_stamps_the_startup_baseline() {
         .expect("workspace open");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+    wait_until_capture_ready(&transport, &handle, 2).await;
     let db_path = scratch.path().join(".dohc/engine/engine.db");
     transport
         .call(
@@ -1016,8 +1045,9 @@ async fn watcher_status_reports_a_live_driver_and_flush_settles() {
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1).await;
 
-    // The open barrier guarantees the startup baseline applied, so status
-    // reports a LIVE, non-terminal driver immediately — no polling.
+    // A fresh store may open while its all-Added baseline is importing. Wait
+    // on the explicit phase before asserting baseline-dependent state.
+    wait_until_capture_ready(&transport, &handle, 2).await;
     let status = transport
         .call(
             RequestContext::unbounded(),
@@ -1028,6 +1058,7 @@ async fn watcher_status_reports_a_live_driver_and_flush_settles() {
     assert_eq!(status.result["running"], json!(true));
     assert_eq!(status.result["terminal"], json!(false));
     assert_eq!(status.result["degraded"], json!(false));
+    assert_eq!(status.result["phase"], json!("ready"));
 
     // And a flush on the quiescent workspace settles: the baseline content
     // is already captured and acknowledged.
@@ -1058,6 +1089,713 @@ async fn watcher_status_reports_a_live_driver_and_flush_settles() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_small_fresh_workspace_waits_for_its_complete_baseline() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), "seed.md", b"small baseline");
+
+    let probe = CaptureApplyProbe::default();
+    probe.pause_next_apply();
+    let transport = Arc::new(InProcessTransport::new(Arc::new(
+        EngineService::with_capture_apply_probe_for_harness(probe.clone()),
+    )));
+    let opening_transport = Arc::clone(&transport);
+    let root = scratch.path().to_path_buf();
+    let mut opening = tokio::spawn(async move {
+        opening_transport
+            .call(
+                RequestContext::unbounded(),
+                request(
+                    1,
+                    "workspace.open",
+                    None,
+                    json!({
+                        "rootDir": root.to_string_lossy(),
+                        "workspaceId": WORKSPACE_ID
+                    }),
+                ),
+            )
+            .await
+    });
+    probe.wait_until_paused().await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut opening)
+            .await
+            .is_err(),
+        "a small baseline must finish before workspace.open returns"
+    );
+
+    probe.release();
+    let opened = opening
+        .await
+        .expect("open task")
+        .expect("workspace open after baseline");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
+    let status = transport
+        .call(
+            RequestContext::unbounded(),
+            request(2, "watcher.status", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("watcher.status");
+    assert_eq!(status.result["phase"], json!("ready"));
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(3, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fresh_import_opens_early_fences_partial_reads_and_preserves_foreign_heads() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), "same.md", b"same bytes");
+    write_file(scratch.path(), "different.md", b"disk bytes");
+    write_file(scratch.path(), ".env", b"TOKEN=baseline");
+    write_file(
+        scratch.path(),
+        "tasks/collection.yaml",
+        b"name: Tasks\nfields:\n  title:\n    type: text\n",
+    );
+    for index in 2..EARLY_IMPORT_MIN_ADDED_FILES {
+        write_file(scratch.path(), &format!("bulk/seed-{index:04}.md"), b"seed");
+    }
+
+    let probe = CaptureApplyProbe::default();
+    probe.pause_next_apply();
+    let transport = InProcessTransport::new(Arc::new(
+        EngineService::with_capture_apply_probe_for_harness(probe.clone()),
+    ));
+    let handle = tokio::time::timeout(
+        Duration::from_secs(2),
+        open_workspace(&transport, &scratch, 1),
+    )
+    .await
+    .expect("fresh open must not wait for the paused import");
+    probe.wait_until_paused().await;
+
+    let status = transport
+        .call(
+            RequestContext::unbounded(),
+            request(2, "watcher.status", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("watcher.status");
+    assert_eq!(status.result["phase"], json!("importing"));
+
+    let flush = transport
+        .call(
+            RequestContext::unbounded(),
+            request(3, "capture.flush", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("capture.flush answers while importing");
+    assert_eq!(flush.result["settled"], json!(false));
+
+    let main = transport
+        .call(
+            RequestContext::unbounded(),
+            request(4, "versions.ensureMain", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("idempotent main bootstrap stays available while importing");
+    assert_eq!(main.result["id"], json!("main"));
+    assert_eq!(main.result["kind"], json!("main"));
+
+    for (id, method) in [
+        (5, "history.page"),
+        (6, "search.query"),
+        (7, "versions.list"),
+        (50, "collections.list"),
+        (51, "collections.get"),
+        (52, "collections.query"),
+        (53, "collections.getRecord"),
+        (54, "collections.listPendingAdoptions"),
+    ] {
+        let error = transport
+            .call(
+                RequestContext::unbounded(),
+                request(id, method, Some(handle.clone()), json!({})),
+            )
+            .await
+            .expect_err("partial baseline read must be fenced");
+        assert_eq!(error.code, ErrorCode::Overloaded, "{method}");
+        assert_eq!(error.message, "Workspace is still updating. Try again.");
+    }
+
+    let secret_delete = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                55,
+                "secrets.delete",
+                Some(handle.clone()),
+                json!({
+                    "workspaceId": WORKSPACE_ID,
+                    "versionId": "main",
+                    "path": ".env",
+                    "origin": "api",
+                    "momentId": "secret-delete-during-import"
+                }),
+            ),
+        )
+        .await
+        .expect_err("a secret delete must not race the pending baseline");
+    assert_eq!(secret_delete.code, ErrorCode::Overloaded);
+    assert_eq!(
+        secret_delete.message,
+        "Workspace is still updating. Try again."
+    );
+
+    let secret_materialize = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                56,
+                "secrets.materialize",
+                Some(handle.clone()),
+                json!({ "versionId": "main", "path": ".env" }),
+            ),
+        )
+        .await
+        .expect_err("secret materialization must not read a partial baseline");
+    assert_eq!(secret_materialize.code, ErrorCode::Overloaded);
+    assert_eq!(
+        secret_materialize.message,
+        "Workspace is still updating. Try again."
+    );
+
+    let secret_write = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                57,
+                "secrets.write",
+                Some(handle.clone()),
+                json!({
+                    "workspaceId": WORKSPACE_ID,
+                    "versionId": "main",
+                    "path": ".env",
+                    "text": "TOKEN=rpc",
+                    "origin": "api",
+                    "momentId": "secret-write-during-import"
+                }),
+            ),
+        )
+        .await
+        .expect("a secret write may establish a foreign head during import");
+    assert_eq!(secret_write.result["changed"], json!(true));
+    assert_eq!(
+        secret_write.result["moment"]["id"],
+        json!("secret-write-during-import")
+    );
+
+    let existing_ydoc = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                8,
+                "ydoc.open",
+                Some(handle.clone()),
+                json!({
+                    "versionId": "main",
+                    "path": "same.md",
+                    "contentKind": "plaintext"
+                }),
+            ),
+        )
+        .await
+        .expect_err("a scanned artifact must not mint an absent lease");
+    assert_eq!(existing_ydoc.code, ErrorCode::Overloaded);
+
+    let absent_ydoc = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                9,
+                "ydoc.open",
+                Some(handle.clone()),
+                json!({
+                    "versionId": "main",
+                    "path": "new-live.md",
+                    "contentKind": "plaintext"
+                }),
+            ),
+        )
+        .await
+        .expect("a proven absent path stays available");
+    assert_eq!(absent_ydoc.result["head"], json!("absent"));
+
+    for (id, path, text, object, moment) in [
+        (10, "same.md", "same bytes", "rpc-same", "moment-same"),
+        (
+            11,
+            "different.md",
+            "rpc bytes",
+            "rpc-different",
+            "moment-different",
+        ),
+    ] {
+        transport
+            .call(
+                RequestContext::unbounded(),
+                request(
+                    id,
+                    "versionedText.write",
+                    Some(handle.clone()),
+                    json!({
+                        "versionId": "main",
+                        "objectId": object,
+                        "path": path,
+                        "text": text,
+                        "momentId": moment,
+                        "metadataOrigin": "api"
+                    }),
+                ),
+            )
+            .await
+            .expect("first RPC write while importing");
+    }
+
+    probe.release();
+    wait_until_capture_ready(&transport, &handle, 20).await;
+    assert_eq!(
+        read_text(&transport, &handle, 30, "same.md")
+            .await
+            .as_deref(),
+        Some("same bytes")
+    );
+    assert_eq!(
+        read_text(&transport, &handle, 31, "different.md")
+            .await
+            .as_deref(),
+        Some("rpc bytes"),
+        "a later Added capture must not claim or overwrite a foreign head"
+    );
+    let collections = transport
+        .call(
+            RequestContext::unbounded(),
+            request(32, "collections.list", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("collections become readable after the import");
+    assert_eq!(collections.result["collections"][0]["path"], json!("tasks"));
+
+    let captured_secrets = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                34,
+                "secrets.list",
+                Some(handle.clone()),
+                json!({ "versionId": "main" }),
+            ),
+        )
+        .await
+        .expect("baseline secret becomes readable after the import");
+    assert_eq!(captured_secrets.result["secrets"][0]["path"], json!(".env"));
+    assert_eq!(
+        captured_secrets.result["secrets"][0]["latestMomentId"],
+        json!("secret-write-during-import"),
+        "the baseline capture must not overwrite the RPC head"
+    );
+
+    let materialized_secret = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                33,
+                "secrets.materialize",
+                Some(handle.clone()),
+                json!({ "versionId": "main", "path": ".env" }),
+            ),
+        )
+        .await
+        .expect("the authoritative secret materializes after the import");
+    assert_eq!(materialized_secret.result["text"], json!("TOKEN=rpc"));
+
+    let deleted = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                35,
+                "secrets.delete",
+                Some(handle.clone()),
+                json!({
+                    "workspaceId": WORKSPACE_ID,
+                    "versionId": "main",
+                    "path": ".env",
+                    "origin": "api",
+                    "momentId": "secret-delete-after-import"
+                }),
+            ),
+        )
+        .await
+        .expect("secret delete succeeds after the import");
+    assert_eq!(
+        deleted.result["moment"]["id"],
+        json!("secret-delete-after-import")
+    );
+    let secrets_after_delete = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                36,
+                "secrets.list",
+                Some(handle.clone()),
+                json!({ "versionId": "main" }),
+            ),
+        )
+        .await
+        .expect("secrets remain readable after deletion");
+    assert_eq!(secrets_after_delete.result["secrets"], json!([]));
+
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(37, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stalled_fresh_import_retry_exits_importing_without_detaching_settle() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    for index in 0..EARLY_IMPORT_MIN_ADDED_FILES {
+        write_file(
+            scratch.path(),
+            &format!("bulk/seed-{index:04}.md"),
+            format!("seed {index}").as_bytes(),
+        );
+    }
+
+    let probe = CaptureApplyProbe::default();
+    probe.fail_next_apply_before_worker();
+    probe.pause_next_apply_worker();
+    probe.use_manual_initial_settle_deadline();
+    let transport = InProcessTransport::new(Arc::new(
+        EngineService::with_capture_apply_probe_for_harness(probe.clone()),
+    ));
+    let handle = tokio::time::timeout(
+        Duration::from_secs(2),
+        open_workspace(&transport, &scratch, 1),
+    )
+    .await
+    .expect("fresh open must not wait for the initial apply");
+    tokio::time::timeout(WAIT, probe.wait_until_apply_worker_paused())
+        .await
+        .expect("retry plain apply worker must reach the pause seam");
+
+    let importing = transport
+        .call(
+            RequestContext::unbounded(),
+            request(2, "watcher.status", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("watcher.status while apply worker is paused");
+    assert_eq!(importing.result["phase"], json!("importing"));
+    assert_eq!(importing.result["running"], json!(true));
+    assert_eq!(
+        importing.result["degraded"],
+        json!(true),
+        "the fast first failure must precede the paused retry"
+    );
+
+    probe.expire_initial_settle_deadline();
+    let degraded = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut id = 3;
+        loop {
+            let status = transport
+                .call(
+                    RequestContext::unbounded(),
+                    request(id, "watcher.status", Some(handle.clone()), json!({})),
+                )
+                .await
+                .expect("watcher.status after initial apply deadline");
+            id += 1;
+            if status.result["phase"] == json!("degraded") {
+                break status;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("manual apply deadline must leave importing before worker release");
+    assert_eq!(degraded.result["running"], json!(false));
+    assert_eq!(degraded.result["degraded"], json!(true));
+    assert_eq!(degraded.result["terminal"], json!(false));
+    assert_eq!(
+        probe.layer_start_count(),
+        0,
+        "the deadline must keep the layer future attached until its worker drains"
+    );
+
+    probe.release_apply_worker();
+    wait_until_capture_ready(&transport, &handle, 100).await;
+    assert_eq!(
+        read_text(&transport, &handle, 200, "bulk/seed-0000.md")
+            .await
+            .as_deref(),
+        Some("seed 0")
+    );
+    let last_index = EARLY_IMPORT_MIN_ADDED_FILES - 1;
+    let last_path = format!("bulk/seed-{last_index:04}.md");
+    let last_text = format!("seed {last_index}");
+    assert_eq!(
+        read_text(&transport, &handle, 201, &last_path)
+            .await
+            .as_deref(),
+        Some(last_text.as_str())
+    );
+
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(202, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close after recovered import");
+
+    let reopened = open_workspace(&transport, &scratch, 203).await;
+    wait_until_capture_ready(&transport, &reopened, 204).await;
+    assert_eq!(
+        read_text(&transport, &reopened, 300, "bulk/seed-0000.md")
+            .await
+            .as_deref(),
+        Some("seed 0")
+    );
+    assert_eq!(
+        read_text(&transport, &reopened, 301, &last_path)
+            .await
+            .as_deref(),
+        Some(last_text.as_str())
+    );
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(302, "workspace.close", Some(reopened), json!({})),
+        )
+        .await
+        .expect("close reopened workspace");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn existing_store_and_unreadable_policy_keep_the_strict_open_barrier() {
+    for unreadable_policy in [false, true] {
+        let scratch = ScratchDir::new().expect("scratch");
+        write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+        let probe = CaptureApplyProbe::default();
+        let service = Arc::new(EngineService::with_capture_apply_probe_for_harness(
+            probe.clone(),
+        ));
+        let transport = Arc::new(InProcessTransport::new(service));
+
+        if !unreadable_policy {
+            let seed = transport
+                .call(
+                    RequestContext::unbounded(),
+                    request(
+                        1,
+                        "workspace.open",
+                        None,
+                        json!({
+                            "rootDir": scratch.path().to_string_lossy(),
+                            "workspaceId": WORKSPACE_ID,
+                            "captureMode": "none"
+                        }),
+                    ),
+                )
+                .await
+                .expect("seed existing store");
+            let seed_handle: WorkspaceHandle =
+                serde_json::from_value(seed.result["workspace"].clone()).expect("seed handle");
+            transport
+                .call(
+                    RequestContext::unbounded(),
+                    request(2, "workspace.close", Some(seed_handle), json!({})),
+                )
+                .await
+                .expect("close seed");
+        } else {
+            std::fs::create_dir(scratch.path().join(".dohc/files.toml"))
+                .expect("unreadable policy shape");
+        }
+        write_file(scratch.path(), "seed.md", b"baseline bytes");
+        probe.pause_next_apply();
+
+        let opening_transport = Arc::clone(&transport);
+        let root = scratch.path().to_path_buf();
+        let mut opening = tokio::spawn(async move {
+            opening_transport
+                .call(
+                    RequestContext::unbounded(),
+                    request(
+                        3,
+                        "workspace.open",
+                        None,
+                        json!({
+                            "rootDir": root.to_string_lossy(),
+                            "workspaceId": WORKSPACE_ID
+                        }),
+                    ),
+                )
+                .await
+        });
+        probe.wait_until_paused().await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut opening)
+                .await
+                .is_err(),
+            "{} must not release before its baseline",
+            if unreadable_policy {
+                "unknown policy"
+            } else {
+                "existing store"
+            }
+        );
+        probe.release();
+        let opened = opening
+            .await
+            .expect("open task")
+            .expect("workspace open after baseline");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
+        let status = transport
+            .call(
+                RequestContext::unbounded(),
+                request(4, "watcher.status", Some(handle.clone()), json!({})),
+            )
+            .await
+            .expect("watcher.status");
+        assert_ne!(status.result["phase"], json!("importing"));
+        if unreadable_policy {
+            assert_eq!(status.result["phase"], json!("degraded"));
+            let versions = transport
+                .call(
+                    RequestContext::unbounded(),
+                    request(5, "versions.list", Some(handle.clone()), json!({})),
+                )
+                .await
+                .expect("bounded degraded startup must release safe reads");
+            assert_eq!(versions.result["versions"], json!([]));
+            let main = transport
+                .call(
+                    RequestContext::unbounded(),
+                    request(6, "versions.ensureMain", Some(handle.clone()), json!({})),
+                )
+                .await
+                .expect("main version bootstrap remains available");
+            assert_eq!(main.result["id"], json!("main"));
+            let versions = transport
+                .call(
+                    RequestContext::unbounded(),
+                    request(7, "versions.list", Some(handle.clone()), json!({})),
+                )
+                .await
+                .expect("bootstrapped version must be readable");
+            assert_eq!(versions.result["versions"][0]["versionId"], json!("main"));
+            let files = transport
+                .call(
+                    RequestContext::unbounded(),
+                    request(
+                        8,
+                        "versionedText.list",
+                        Some(handle.clone()),
+                        json!({ "versionId": "main" }),
+                    ),
+                )
+                .await
+                .expect("bounded degraded startup must release file reads");
+            assert_eq!(files.result["files"], json!([]));
+
+            // Restore a readable policy, then make the admitted Degraded
+            // handle drive its own recovery. The renderer's fileObjectId
+            // path is flush-dependent; returning `settled: false` directly
+            // from the RPC gate until the background cadence happens to run
+            // makes an already-open workspace unusable for Linked Chats.
+            std::fs::remove_dir(scratch.path().join(".dohc/files.toml"))
+                .expect("restore readable policy");
+            let mut settled = false;
+            for id in 80..84 {
+                let flush = transport
+                    .call(
+                        RequestContext::unbounded(),
+                        request(id, "capture.flush", Some(handle.clone()), json!({})),
+                    )
+                    .await
+                    .expect("degraded capture flush");
+                settled = flush.result["settled"] == json!(true);
+                if settled {
+                    break;
+                }
+            }
+            assert!(
+                settled,
+                "an admitted degraded handle must let flush drive a clean recovery"
+            );
+            assert_eq!(
+                read_text(&transport, &handle, 84, "seed.md")
+                    .await
+                    .as_deref(),
+                Some("baseline bytes"),
+                "the settling flush must install the baseline before dependent reads"
+            );
+        }
+        transport
+            .call(
+                RequestContext::unbounded(),
+                request(90, "workspace.close", Some(handle), json!({})),
+            )
+            .await
+            .expect("close");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn close_cancels_a_paused_fresh_import_and_reopen_converges() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), "seed.md", b"survives restart");
+    for index in 1..EARLY_IMPORT_MIN_ADDED_FILES {
+        write_file(scratch.path(), &format!("bulk/seed-{index:04}.md"), b"seed");
+    }
+    let probe = CaptureApplyProbe::default();
+    probe.pause_next_apply();
+    let transport = InProcessTransport::new(Arc::new(
+        EngineService::with_capture_apply_probe_for_harness(probe.clone()),
+    ));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    probe.wait_until_paused().await;
+
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        transport.call(
+            RequestContext::unbounded(),
+            request(2, "workspace.close", Some(handle), json!({})),
+        ),
+    )
+    .await
+    .expect("close must cancel between bounded import chunks")
+    .expect("close");
+
+    let reopened = open_workspace(&transport, &scratch, 3).await;
+    wait_for_text(&transport, &reopened, "seed.md", Some("survives restart")).await;
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(4, "workspace.close", Some(reopened), json!({})),
+        )
+        .await
+        .expect("final close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn capture_reconcile_forces_a_full_manifest_rebuild() {
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
@@ -1068,6 +1806,7 @@ async fn capture_reconcile_forces_a_full_manifest_rebuild() {
         EngineService::with_capture_apply_probe_for_harness(probe.clone()),
     ));
     let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_until_capture_ready(&transport, &handle, 2).await;
     let starts_before = probe.layer_start_count();
     write_file(
         scratch.path(),
@@ -1259,14 +1998,26 @@ async fn a_quarantined_path_keeps_capture_flush_unsettled() {
 
     // The baseline must settle first, so the locked file below is the ONLY
     // unclean thing in the workspace when the assertions run.
-    let baseline = transport
-        .call(
-            RequestContext::unbounded(),
-            request(2, "capture.flush", Some(handle.clone()), json!({})),
-        )
-        .await
-        .expect("baseline flush");
-    assert_eq!(baseline.result["settled"], json!(true));
+    let deadline = std::time::Instant::now() + WAIT;
+    let mut id = 2_u64;
+    loop {
+        let baseline = transport
+            .call(
+                RequestContext::unbounded(),
+                request(id, "capture.flush", Some(handle.clone()), json!({})),
+            )
+            .await
+            .expect("baseline flush");
+        id += 1;
+        if baseline.result["settled"] == json!(true) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fresh startup import never became ready"
+        );
+        tokio::task::yield_now().await;
+    }
 
     // A file every capture read genuinely fails on: created and written
     // through a NO-SHARE handle that stays open for the whole test
@@ -1285,7 +2036,7 @@ async fn a_quarantined_path_keeps_capture_flush_unsettled() {
     // Wait (bounded) for the watcher to notice and the first capture
     // failure to surface: the first flush answered after that is unsettled.
     let deadline = std::time::Instant::now() + WAIT;
-    let mut id = 10_u64;
+    id = id.max(10);
     loop {
         let flush = transport
             .call(

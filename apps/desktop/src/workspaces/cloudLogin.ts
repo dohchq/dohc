@@ -3,6 +3,7 @@ import {
   isCloudCredentialEmail,
   type CloudCredentials,
 } from "./cloudCredentialStore";
+import { canonicalCloudOrigin } from "./cloudConfiguration";
 
 // Desktop side of the OAuth device-authorization flow against dohc Cloud (or
 // a self-host server): start() asks the server for a short user code, the
@@ -34,7 +35,8 @@ export interface CloudLoginStore {
 
 export interface CloudLoginOptions {
   store: CloudLoginStore;
-  defaultServerUrl: string;
+  defaultServerUrl?: string;
+  defaultRelayUrl?: string;
   fetch?: typeof fetch;
 }
 
@@ -351,8 +353,21 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
         pending = null;
         return attemptEpoch;
       });
-      const server = (serverUrl ?? options.defaultServerUrl).replace(/\/+$/, "");
-      const relay = relayUrl?.trim().replace(/\/+$/, "");
+      const serverInput = serverUrl?.trim() || options.defaultServerUrl?.trim();
+      if (!serverInput) {
+        throw new Error(
+          "No dohc Cloud server is configured. Enter your self-hosted server URL.",
+        );
+      }
+      const server = canonicalCloudOrigin(serverInput);
+      if (!server) {
+        throw new Error("The cloud server URL must be an HTTP or HTTPS origin.");
+      }
+      const relayInput = relayUrl?.trim() || options.defaultRelayUrl?.trim();
+      const relay = relayInput ? canonicalCloudOrigin(relayInput) : undefined;
+      if (relayInput && !relay) {
+        throw new Error("The sync relay URL must be an HTTP or HTTPS origin.");
+      }
       const response = await postJson(`${server}/api/auth/device/code`, {
         client_id: CLIENT_ID,
       });

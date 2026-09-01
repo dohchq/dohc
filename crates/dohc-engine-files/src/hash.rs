@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread::JoinHandle;
+use std::time::UNIX_EPOCH;
 use tokio_util::sync::CancellationToken;
 
 /// One file to hash, tagged with its position in the caller's listing so
@@ -34,11 +35,28 @@ pub struct HashInput {
     pub abs: PathBuf,
 }
 
+/// The enumerate-time path state a scanner wants fenced by a post-hash stat.
+#[derive(Debug, Clone)]
+pub(crate) struct PostHashExpectation {
+    pub probe_path: Option<String>,
+    pub size: u64,
+    pub mtime_ms: i64,
+}
+
+pub(crate) type PostHashProbe = Arc<dyn Fn(&str) -> Option<std::io::ErrorKind> + Send + Sync>;
+
 /// The result of hashing one input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HashOutcome {
     /// Hashed to completion.
-    Hashed { sha256: String, bytes: u64 },
+    Hashed {
+        sha256: String,
+        bytes: u64,
+        /// Enumerate-time mtime retained only when the path still has the
+        /// expected size and mtime after the byte stream is hashed. Zero when
+        /// the caller did not request a fence or the path drifted.
+        stable_mtime_ms: i64,
+    },
     /// The token tripped while streaming this file; nothing durable produced.
     Cancelled,
     /// The file vanished between enumeration and open (a benign mid-scan race,
@@ -109,6 +127,8 @@ struct Job {
     index: usize,
     abs: PathBuf,
     token: CancellationToken,
+    post_hash: Option<PostHashExpectation>,
+    post_hash_probe: Option<PostHashProbe>,
 }
 
 /// Immutable per-worker config: the streaming read buffer size and the file-size
@@ -201,6 +221,33 @@ impl HashPool {
         inputs: &[HashInput],
         token: &CancellationToken,
     ) -> Result<HashRun, FilesError> {
+        self.hash_batched_inner(inputs, None, None, token)
+    }
+
+    /// Hash scanner inputs and fence each successful read with the path's
+    /// enumerate-time size/mtime pair before the worker takes another job.
+    pub(crate) fn hash_batched_with_post_stat(
+        &self,
+        inputs: &[HashInput],
+        expectations: &[PostHashExpectation],
+        probe: Option<PostHashProbe>,
+        token: &CancellationToken,
+    ) -> Result<HashRun, FilesError> {
+        if inputs.len() != expectations.len() {
+            return Err(FilesError::PoolUnavailable {
+                reason: "post-hash expectation count did not match hash inputs",
+            });
+        }
+        self.hash_batched_inner(inputs, Some(expectations), probe, token)
+    }
+
+    fn hash_batched_inner(
+        &self,
+        inputs: &[HashInput],
+        expectations: Option<&[PostHashExpectation]>,
+        probe: Option<PostHashProbe>,
+        token: &CancellationToken,
+    ) -> Result<HashRun, FilesError> {
         let Some(job_tx) = self.job_tx.as_ref() else {
             return Err(FilesError::PoolUnavailable {
                 reason: "hash pool has been torn down",
@@ -222,6 +269,10 @@ impl HashPool {
                         index: input.index,
                         abs: input.abs.clone(),
                         token: token.clone(),
+                        post_hash: expectations
+                            .and_then(|items| items.get(input.index))
+                            .cloned(),
+                        post_hash_probe: probe.clone(),
                     })
                     .map_err(|_| FilesError::PoolUnavailable {
                         reason: "hash pool job channel closed",
@@ -367,10 +418,79 @@ fn hash_one(job: &Job, buffer: &mut [u8], max_file_bytes: u64) -> HashOutcome {
             hasher.update(chunk);
         }
     }
+    let stable_mtime_ms = match &job.post_hash {
+        None => 0,
+        Some(expectation) => {
+            if let Some(kind) = job
+                .post_hash_probe
+                .as_ref()
+                .zip(expectation.probe_path.as_deref())
+                .and_then(|(probe, path)| probe(path))
+            {
+                return HashOutcome::Io { kind };
+            }
+            if post_hash_identity_matches(&file, &job.abs, expectation) {
+                expectation.mtime_ms
+            } else {
+                0
+            }
+        }
+    };
     HashOutcome::Hashed {
         sha256: to_hex(&hasher.finalize()),
         bytes,
+        stable_mtime_ms,
     }
+}
+
+fn metadata_matches(metadata: &std::fs::Metadata, expectation: &PostHashExpectation) -> bool {
+    metadata.is_file()
+        && metadata.len() == expectation.size
+        && mtime_ms(metadata) == expectation.mtime_ms
+}
+
+fn post_hash_identity_matches(
+    hashed_file: &std::fs::File,
+    current_path: &std::path::Path,
+    expectation: &PostHashExpectation,
+) -> bool {
+    let Ok(hashed_metadata) = hashed_file.metadata() else {
+        return false;
+    };
+    let Ok(current_file) = std::fs::File::open(current_path) else {
+        return false;
+    };
+    let Ok(current_metadata) = current_file.metadata() else {
+        return false;
+    };
+    if !metadata_matches(&hashed_metadata, expectation)
+        || !metadata_matches(&current_metadata, expectation)
+    {
+        return false;
+    }
+    let Ok(hashed_clone) = hashed_file.try_clone() else {
+        return false;
+    };
+    matches!(
+        (
+            same_file::Handle::from_file(hashed_clone),
+            same_file::Handle::from_file(current_file),
+        ),
+        (Ok(hashed), Ok(current)) if hashed == current
+    )
+}
+
+/// Milliseconds since the Unix epoch for a file's mtime, or `0` when the
+/// platform cannot supply it or the time predates the epoch. A zero mtime is
+/// "no observation": it never authorizes hash reuse, so the fallback fails
+/// safe toward hashing.
+pub(crate) fn mtime_ms(metadata: &std::fs::Metadata) -> i64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
 }
 
 /// Lowercase-hex encode a digest without allocating twice or risking a panic

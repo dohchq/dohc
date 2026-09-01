@@ -4,6 +4,7 @@ import type {
   ChatMessageRecord,
   ChatReactionRecord,
   ChatThreadRecord,
+  ListFileChatsResponse,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import {
@@ -49,6 +50,26 @@ type ThreadsState =
   | { status: "loading" }
   | { status: "unavailable"; message: string }
   | { status: "ready"; fileObjectId: string | null; threads: ChatThreadRecord[] };
+
+const WORKSPACE_UPDATING_MESSAGE = "Workspace is still updating. Try again.";
+const THREAD_LOAD_RETRY_MS = 1_000;
+// Initial capture has a 120s early-import decision ceiling. Leave one retry
+// interval for the Ready/Degraded transition, with a fail-safe if that bound
+// is ever violated.
+const THREAD_LOAD_RETRY_DEADLINE_MS = 121_000;
+
+function isWorkspaceUpdatingResponse(
+  response: ListFileChatsResponse,
+): response is Extract<
+  ListFileChatsResponse,
+  { status: "refused"; code: "workspace-updating" }
+> {
+  return (
+    "status" in response &&
+    response.status === "refused" &&
+    response.code === "workspace-updating"
+  );
+}
 
 // The per-file Chats panel: thread list with a calm empty state, inline
 // create, and a thread view with a composer. Every async response is gated
@@ -101,20 +122,42 @@ export function LinkedChatsPanel(props: {
     if (!filePath) return;
     const token = ++liveToken.current;
     setThreadsState({ status: "loading" });
-    try {
-      const result = await bridge().listFileChats({ workspaceId, path: filePath });
-      if (token !== liveToken.current) return;
-      setThreadsState({
-        status: "ready",
-        fileObjectId: result.fileObjectId,
-        threads: result.threads,
-      });
-    } catch (error) {
-      if (token !== liveToken.current) return;
-      setThreadsState({
-        status: "unavailable",
-        message: ipcErrorMessage(error, "Could not load Chats for this file."),
-      });
+    let updatingStartedAtMs: number | null = null;
+    while (token === liveToken.current) {
+      try {
+        const result = await bridge().listFileChats({ workspaceId, path: filePath });
+        if (token !== liveToken.current) return;
+        if (isWorkspaceUpdatingResponse(result)) {
+          const now = performance.now();
+          updatingStartedAtMs ??= now;
+          const remainingMs =
+            updatingStartedAtMs + THREAD_LOAD_RETRY_DEADLINE_MS - now;
+          if (remainingMs <= 0) {
+            setThreadsState({
+              status: "unavailable",
+              message: WORKSPACE_UPDATING_MESSAGE,
+            });
+            return;
+          }
+          await new Promise((resolveDelay) =>
+            setTimeout(resolveDelay, Math.min(THREAD_LOAD_RETRY_MS, remainingMs)),
+          );
+          continue;
+        }
+        setThreadsState({
+          status: "ready",
+          fileObjectId: result.fileObjectId,
+          threads: result.threads,
+        });
+        return;
+      } catch (error) {
+        if (token !== liveToken.current) return;
+        setThreadsState({
+          status: "unavailable",
+          message: ipcErrorMessage(error, "Could not load Chats for this file."),
+        });
+        return;
+      }
     }
   }, [filePath, workspaceId]);
 

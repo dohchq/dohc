@@ -725,7 +725,7 @@ mod ack_receipt_tests {
             captured: Vec::new(),
             not_owned_paths: vec!["over-cap.md".to_owned()],
             failed_applies: Vec::new(),
-            crashed_after_apply: None,
+            crashed_after_durable_boundary: None,
             degraded: false,
         };
         assert!(controller.tracks_path("over-cap.md"));
