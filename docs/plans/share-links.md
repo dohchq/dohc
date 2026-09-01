@@ -68,6 +68,8 @@ Gate:
 
 Gate: quota, moderation, and revoke-during-append tests pass; open public and owner panels converge through every discussion and moderation change; provenance shows link id and principal on every message; hostile markup, URL-scheme, and output-encoding tests cover comment bodies and claimed names, which are new attacker-controlled rendering inputs the Phase 2 gate never saw.
 
+**Status: DONE.** The Comment slice and its phase gate are complete. Live document Edit and apps remain disabled pending Phases 4 and 5.
+
 ## Phase 4: Edit
 
 - One configured session host per deployment (ADR 0003): the service host module for dohc Cloud and willing self-hosters; device-only mode otherwise. No automatic movement.
