@@ -1,9 +1,14 @@
 // @vitest-environment jsdom
-import { act, cleanup, renderHook } from "@testing-library/react";
+import { createElement } from "react";
+import { act, cleanup, render, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceSearchPayload } from "../../ipc/bridgeContract";
 import type { SearchResultsEvent } from "../../ipc/channels";
-import { useWorkspaceSearch, type SearchRunOptions } from "./useWorkspaceSearch";
+import {
+  useWorkspaceSearch,
+  type SearchRunOptions,
+  type WorkspaceSearchApi,
+} from "./useWorkspaceSearch";
 
 let searchResultsListener: ((event: SearchResultsEvent) => void) | null = null;
 const bridgeMock = {
@@ -256,5 +261,52 @@ describe("useWorkspaceSearch", () => {
       groups: [],
       totalMatches: 0,
     });
+  });
+
+  it("never renders the previous workspace's query or results during replacement", () => {
+    const snapshots: Array<
+      Pick<WorkspaceSearchApi, "model" | "criteria">
+    > = [];
+    let search!: WorkspaceSearchApi;
+    function Probe({ workspaceId }: { workspaceId: string }) {
+      search = useWorkspaceSearch(workspaceId);
+      snapshots.push({ model: search.model, criteria: search.criteria });
+      return null;
+    }
+    const view = render(createElement(Probe, { workspaceId: "workspace-1" }));
+
+    act(() => {
+      search.setCriteria({ ...options, includeGlob: "", excludeGlob: "" });
+      search.run(options);
+    });
+    const searchId = bridgeMock.searchWorkspace.mock.calls[0]?.[0].searchId;
+    act(() => {
+      searchResultsListener?.({
+        searchId,
+        entries: [
+          {
+            path: "old-workspace.md",
+            line: 1,
+            column: 1,
+            preview: "needle",
+            matchStart: 0,
+            matchEnd: 6,
+          },
+        ],
+        done: true,
+        limitHit: false,
+      });
+    });
+
+    snapshots.length = 0;
+    view.rerender(createElement(Probe, { workspaceId: "workspace-2" }));
+
+    expect(snapshots[0]?.model).toMatchObject({
+      searchId: null,
+      status: "idle",
+      groups: [],
+      totalMatches: 0,
+    });
+    expect(snapshots[0]?.criteria.query).toBe("");
   });
 });

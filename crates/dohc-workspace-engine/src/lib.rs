@@ -7972,20 +7972,31 @@ impl EngineService {
             .as_ref()
             .map(|driver| driver.status().snapshot().phase)
             .unwrap_or(capture_driver::CapturePhase::Ready);
-        let artifact_is_proven_absent =
-            match std::fs::symlink_metadata(open.root.join(&params.path)) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
-                Ok(_) | Err(_) => false,
-            };
-        if probe.head_blob_sha256.is_none()
-            && capture_phase != capture_driver::CapturePhase::Ready
-            && !artifact_is_proven_absent
+        if probe.head_blob_sha256.is_none() && capture_phase != capture_driver::CapturePhase::Ready
         {
-            // The initial scan has seen this artifact but has not installed
-            // its head yet. Refuse before lease acquisition; otherwise a new
-            // absent-lineage session can block capture and turn disk bytes
-            // into a misleading uncaptured-artifact failure.
-            return Err(initial_capture_updating());
+            let artifact_path = open.root.join(&params.path);
+            let artifact_probe = tokio::task::spawn_blocking(move || {
+                matches!(
+                    std::fs::symlink_metadata(artifact_path),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound
+                )
+            });
+            let artifact_is_proven_absent = tokio::select! {
+                biased;
+                () = cancellation.token.cancelled() => {
+                    return Err(cancellation.interruption("ydoc.open (artifact probe)"));
+                }
+                probed = artifact_probe => {
+                    probed.map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?
+                }
+            };
+            if !artifact_is_proven_absent {
+                // The initial scan has seen this artifact but has not installed
+                // its head yet. Refuse before lease acquisition; otherwise a new
+                // absent-lineage session can block capture and turn disk bytes
+                // into a misleading uncaptured-artifact failure.
+                return Err(initial_capture_updating());
+            }
         }
         let lease =
             self.leases

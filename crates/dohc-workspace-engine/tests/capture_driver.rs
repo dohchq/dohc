@@ -1464,6 +1464,128 @@ async fn fresh_import_opens_early_fences_partial_reads_and_preserves_foreign_hea
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stalled_fresh_import_retry_exits_importing_without_detaching_settle() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    for index in 0..EARLY_IMPORT_MIN_ADDED_FILES {
+        write_file(
+            scratch.path(),
+            &format!("bulk/seed-{index:04}.md"),
+            format!("seed {index}").as_bytes(),
+        );
+    }
+
+    let probe = CaptureApplyProbe::default();
+    probe.fail_next_apply_before_worker();
+    probe.pause_next_apply_worker();
+    probe.use_manual_initial_settle_deadline();
+    let transport = InProcessTransport::new(Arc::new(
+        EngineService::with_capture_apply_probe_for_harness(probe.clone()),
+    ));
+    let handle = tokio::time::timeout(
+        Duration::from_secs(2),
+        open_workspace(&transport, &scratch, 1),
+    )
+    .await
+    .expect("fresh open must not wait for the initial apply");
+    tokio::time::timeout(WAIT, probe.wait_until_apply_worker_paused())
+        .await
+        .expect("retry plain apply worker must reach the pause seam");
+
+    let importing = transport
+        .call(
+            RequestContext::unbounded(),
+            request(2, "watcher.status", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("watcher.status while apply worker is paused");
+    assert_eq!(importing.result["phase"], json!("importing"));
+    assert_eq!(importing.result["running"], json!(true));
+    assert_eq!(
+        importing.result["degraded"],
+        json!(true),
+        "the fast first failure must precede the paused retry"
+    );
+
+    probe.expire_initial_settle_deadline();
+    let degraded = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut id = 3;
+        loop {
+            let status = transport
+                .call(
+                    RequestContext::unbounded(),
+                    request(id, "watcher.status", Some(handle.clone()), json!({})),
+                )
+                .await
+                .expect("watcher.status after initial apply deadline");
+            id += 1;
+            if status.result["phase"] == json!("degraded") {
+                break status;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("manual apply deadline must leave importing before worker release");
+    assert_eq!(degraded.result["running"], json!(false));
+    assert_eq!(degraded.result["degraded"], json!(true));
+    assert_eq!(degraded.result["terminal"], json!(false));
+    assert_eq!(
+        probe.layer_start_count(),
+        0,
+        "the deadline must keep the layer future attached until its worker drains"
+    );
+
+    probe.release_apply_worker();
+    wait_until_capture_ready(&transport, &handle, 100).await;
+    assert_eq!(
+        read_text(&transport, &handle, 200, "bulk/seed-0000.md")
+            .await
+            .as_deref(),
+        Some("seed 0")
+    );
+    let last_index = EARLY_IMPORT_MIN_ADDED_FILES - 1;
+    let last_path = format!("bulk/seed-{last_index:04}.md");
+    let last_text = format!("seed {last_index}");
+    assert_eq!(
+        read_text(&transport, &handle, 201, &last_path)
+            .await
+            .as_deref(),
+        Some(last_text.as_str())
+    );
+
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(202, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close after recovered import");
+
+    let reopened = open_workspace(&transport, &scratch, 203).await;
+    wait_until_capture_ready(&transport, &reopened, 204).await;
+    assert_eq!(
+        read_text(&transport, &reopened, 300, "bulk/seed-0000.md")
+            .await
+            .as_deref(),
+        Some("seed 0")
+    );
+    assert_eq!(
+        read_text(&transport, &reopened, 301, &last_path)
+            .await
+            .as_deref(),
+        Some(last_text.as_str())
+    );
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(302, "workspace.close", Some(reopened), json!({})),
+        )
+        .await
+        .expect("close reopened workspace");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn existing_store_and_unreadable_policy_keep_the_strict_open_barrier() {
     for unreadable_policy in [false, true] {
         let scratch = ScratchDir::new().expect("scratch");

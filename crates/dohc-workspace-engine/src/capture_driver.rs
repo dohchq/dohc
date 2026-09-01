@@ -72,6 +72,12 @@ struct CaptureApplyProbeInner {
     commit_release: tokio::sync::Semaphore,
     gate_wait_armed: std::sync::atomic::AtomicBool,
     gate_wait_entered: tokio::sync::Semaphore,
+    worker_armed: std::sync::atomic::AtomicBool,
+    worker_entered: tokio::sync::Semaphore,
+    worker_release: (Mutex<bool>, std::sync::Condvar),
+    fail_before_worker_armed: std::sync::atomic::AtomicBool,
+    manual_initial_deadline_armed: std::sync::atomic::AtomicBool,
+    manual_initial_deadline: tokio::sync::Notify,
     version_scan_count: std::sync::atomic::AtomicU64,
     manifest_refresh_count: std::sync::atomic::AtomicU64,
     layer_start_count: std::sync::atomic::AtomicU64,
@@ -94,6 +100,12 @@ impl Default for CaptureApplyProbeInner {
             commit_release: tokio::sync::Semaphore::new(0),
             gate_wait_armed: std::sync::atomic::AtomicBool::new(false),
             gate_wait_entered: tokio::sync::Semaphore::new(0),
+            worker_armed: std::sync::atomic::AtomicBool::new(false),
+            worker_entered: tokio::sync::Semaphore::new(0),
+            worker_release: (Mutex::new(false), std::sync::Condvar::new()),
+            fail_before_worker_armed: std::sync::atomic::AtomicBool::new(false),
+            manual_initial_deadline_armed: std::sync::atomic::AtomicBool::new(false),
+            manual_initial_deadline: tokio::sync::Notify::new(),
             version_scan_count: std::sync::atomic::AtomicU64::new(0),
             manifest_refresh_count: std::sync::atomic::AtomicU64::new(0),
             layer_start_count: std::sync::atomic::AtomicU64::new(0),
@@ -180,6 +192,49 @@ impl CaptureApplyProbe {
             .forget();
     }
 
+    /// Pause the next plain apply worker after it starts but before it calls
+    /// the capture sink. The blocking release is deliberate: this seam proves
+    /// the async driver can time out while its `done_rx` remains pending.
+    pub fn pause_next_apply_worker(&self) {
+        self.inner.worker_armed.store(true, Ordering::Release);
+    }
+
+    pub async fn wait_until_apply_worker_paused(&self) {
+        self.inner
+            .worker_entered
+            .acquire()
+            .await
+            .expect("capture apply worker probe remains open")
+            .forget();
+    }
+
+    pub fn release_apply_worker(&self) {
+        let (release, wake) = &self.inner.worker_release;
+        *release
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        wake.notify_one();
+    }
+
+    /// Fail the next apply before its plain worker starts. The normal
+    /// all-failed acknowledgment keeps the plan dirty for a retry.
+    pub fn fail_next_apply_before_worker(&self) {
+        self.inner
+            .fail_before_worker_armed
+            .store(true, Ordering::Release);
+    }
+
+    /// Replace the production timer with a manual edge for one initial settle.
+    pub fn use_manual_initial_settle_deadline(&self) {
+        self.inner
+            .manual_initial_deadline_armed
+            .store(true, Ordering::Release);
+    }
+
+    pub fn expire_initial_settle_deadline(&self) {
+        self.inner.manual_initial_deadline.notify_one();
+    }
+
     pub fn version_scan_count(&self) -> u64 {
         self.inner.version_scan_count.load(Ordering::Acquire)
     }
@@ -250,6 +305,41 @@ impl CaptureApplyProbe {
     fn observe_gate_wait_if_armed(&self) {
         if self.inner.gate_wait_armed.swap(false, Ordering::AcqRel) {
             self.inner.gate_wait_entered.add_permits(1);
+        }
+    }
+
+    fn pause_worker_if_armed(&self) {
+        if !self.inner.worker_armed.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        self.inner.worker_entered.add_permits(1);
+        let (release, wake) = &self.inner.worker_release;
+        let mut released = release
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while !*released {
+            released = wake
+                .wait(released)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        *released = false;
+    }
+
+    fn fail_before_worker_if_armed(&self) -> bool {
+        self.inner
+            .fail_before_worker_armed
+            .swap(false, Ordering::AcqRel)
+    }
+
+    async fn initial_settle_deadline(&self) {
+        if self
+            .inner
+            .manual_initial_deadline_armed
+            .swap(false, Ordering::AcqRel)
+        {
+            self.inner.manual_initial_deadline.notified().await;
+        } else {
+            tokio::time::sleep(EARLY_IMPORT_APPLY_DEADLINE).await;
         }
     }
 
@@ -328,6 +418,12 @@ fn is_terminal(consecutive_failures: u32) -> bool {
 /// `workspace.open` is released anyway (degraded). Bounds open latency while
 /// keeping the common transient-failure case ordered.
 const BASELINE_SETTLE_ATTEMPTS: u32 = 3;
+
+/// A fresh workspace may open while its initial import continues, but that
+/// background work must not leave the observable phase stuck at `Importing`
+/// forever. The apply is cancelled at this edge and still drained in place so
+/// its worker, apply gate, and mandatory reconcile acknowledgment stay owned.
+const EARLY_IMPORT_APPLY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// What one driver tick observed about the files layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -582,6 +678,15 @@ impl DriverStatus {
                 return bits | STATUS_DEGRADED;
             }
             ((bits | STATUS_DEGRADED) & !STATUS_PHASE_MASK) | CapturePhase::Degraded.bits()
+        });
+    }
+    /// The early import exceeded its bounded apply window. The worker is
+    /// still draining under the apply gate, so this is degraded rather than a
+    /// terminal supervision failure, and capture cannot claim to be running.
+    fn mark_initial_apply_timed_out(&self) {
+        self.update(|bits| {
+            (((bits & !STATUS_RUNNING) | STATUS_DEGRADED) & !STATUS_PHASE_MASK)
+                | CapturePhase::Degraded.bits()
         });
     }
     /// A failure: not running, degraded, terminal iff the streak says so —
@@ -2648,7 +2753,18 @@ impl RealEnv {
             author_json: self.capture_author(),
             provenance,
             events: self.events.clone(),
+            #[cfg(feature = "harness")]
+            apply_probe: self.apply_probe.clone(),
         }
+    }
+
+    async fn initial_settle_deadline(&self) {
+        #[cfg(feature = "harness")]
+        if let Some(probe) = &self.apply_probe {
+            probe.initial_settle_deadline().await;
+            return;
+        }
+        tokio::time::sleep(EARLY_IMPORT_APPLY_DEADLINE).await;
     }
 }
 
@@ -2752,46 +2868,73 @@ impl DriverEnv for RealEnv {
         // daemon restart, and a rehydrated manifest may make this plan empty.
         self.status.request_collection_reconcile();
         let provenance = reconcile_provenance();
-        let mut settled = apply_run(
-            self.apply_context_with(provenance.clone()),
-            &fresh,
-            initial,
-            cancel,
-        )
-        .await;
-        // The open barrier must not release on a FAILED baseline: a caller
-        // whose first write lands before the retry could have it overwritten
-        // by the retry's capture of stale closed-period disk bytes. Retry a
-        // bounded number of times so a persistently failing path degrades the
-        // workspace instead of blocking open forever.
-        let mut attempts = 0;
-        while !settled && attempts < BASELINE_SETTLE_ATTEMPTS {
-            attempts += 1;
+        let (mut settled, initial_settle_timed_out) = {
+            let initial_cancel = cancel.child_token();
+            let initial_settle = async {
+                let mut settled = apply_run(
+                    self.apply_context_with(provenance.clone()),
+                    &fresh,
+                    initial,
+                    &initial_cancel,
+                )
+                .await;
+                // The open barrier must not release on a FAILED baseline: a
+                // caller whose first write lands before the retry could have
+                // it overwritten by the retry's capture of stale closed-period
+                // disk bytes. Retry a bounded number of times so a persistently
+                // failing path degrades the workspace instead of blocking open
+                // forever.
+                let mut attempts = 0;
+                while !settled && attempts < BASELINE_SETTLE_ATTEMPTS {
+                    attempts += 1;
+                    tokio::select! {
+                        biased;
+                        () = initial_cancel.cancelled() => break,
+                        () = tokio::time::sleep(DRIVE_INTERVAL) => {}
+                    }
+                    settled = match fresh
+                        .files
+                        .handle()
+                        .reconcile_if_dirty(initial_cancel.child_token())
+                        .await
+                    {
+                        Ok(run) => {
+                            apply_run(
+                                self.apply_context_with(provenance.clone()),
+                                &fresh,
+                                run,
+                                &initial_cancel,
+                            )
+                            .await
+                        }
+                        Err(_) => false,
+                    };
+                }
+                settled
+            };
+            tokio::pin!(initial_settle);
+            let initial_deadline = self.initial_settle_deadline();
+            tokio::pin!(initial_deadline);
             tokio::select! {
                 biased;
-                () = cancel.cancelled() => break,
-                () = tokio::time::sleep(DRIVE_INTERVAL) => {}
-            }
-            settled = match fresh
-                .files
-                .handle()
-                .reconcile_if_dirty(cancel.child_token())
-                .await
-            {
-                Ok(run) => {
-                    apply_run(
-                        self.apply_context_with(provenance.clone()),
-                        &fresh,
-                        run,
-                        cancel,
-                    )
-                    .await
+                settled = &mut initial_settle => (settled, false),
+                () = &mut initial_deadline, if early_import => {
+                    initial_cancel.cancel();
+                    self.status.mark_initial_apply_timed_out();
+                    // `workspace.open` already received this edge for an early
+                    // import. Re-sending is harmless and makes the timeout's
+                    // observable transition explicit if that contract changes.
+                    let _ = self.open_ready_tx.send(true);
+                    (initial_settle.await, true)
                 }
-                Err(_) => false,
-            };
+            }
+        };
+        if initial_settle_timed_out {
+            settled = false;
         }
         let fingerprint_after_apply = policy_fingerprint(&self.root);
-        let initial_ready = settled
+        let initial_ready = !initial_settle_timed_out
+            && settled
             && seed_loaded
             && !cancel.is_cancelled()
             && fingerprint_before_seed.is_some()
@@ -3006,6 +3149,8 @@ pub(crate) async fn reconcile_full_for_switch(
                 author_json,
                 provenance,
                 events,
+                #[cfg(feature = "harness")]
+                apply_probe: None,
             };
             if apply_run_with_handle(context, &handle, run, &token).await {
                 Ok(manifest_changed)
@@ -3076,6 +3221,8 @@ struct ApplyRunContext<'a> {
     /// Moment provenance stamped on every capture write of this run.
     provenance: CaptureProvenance,
     events: EngineEvents,
+    #[cfg(feature = "harness")]
+    apply_probe: Option<CaptureApplyProbe>,
 }
 
 struct CaptureThreadOutcome {
@@ -3162,6 +3309,8 @@ async fn apply_run_with_handle(
         author_json,
         provenance,
         events,
+        #[cfg(feature = "harness")]
+        apply_probe,
     } = context;
     let now_ms = wall_now_ms();
     let (plan, collection_reconcile_requested) = match run {
@@ -3230,6 +3379,18 @@ async fn apply_run_with_handle(
         }
         ReconcileRun::Cancelled => return true,
     };
+    #[cfg(feature = "harness")]
+    if apply_probe
+        .as_ref()
+        .is_some_and(CaptureApplyProbe::fail_before_worker_if_armed)
+    {
+        if collection_reconcile_requested {
+            status.request_collection_reconcile();
+        }
+        status.mark_degraded();
+        ack_all_failed(files, plan, status).await;
+        return false;
+    }
     // The ACTIVE version, precisely: only a genuinely uninitialized
     // workspace falls back to "main" (bootstrapped by ensure_main_version).
     // Storage errors and StateCorrupt must NOT be masked into a silent
@@ -3274,6 +3435,10 @@ async fn apply_run_with_handle(
     let apply_thread = std::thread::Builder::new()
         .name("dohc-capture-apply".to_owned())
         .spawn(move || {
+            #[cfg(feature = "harness")]
+            if let Some(probe) = &apply_probe {
+                probe.pause_worker_if_armed();
+            }
             // A FRESH sink per run: the policy snapshot and (lazily loaded)
             // secret key are re-read per reconcile task, matching the TS
             // one-policy-snapshot-per-task rule.
@@ -3699,6 +3864,8 @@ mod collection_reconcile_scheduling_tests {
             author_json: None,
             provenance: CaptureProvenance::default(),
             events: EngineEvents::default(),
+            #[cfg(feature = "harness")]
+            apply_probe: None,
         }
     }
 
@@ -4145,6 +4312,8 @@ mod collection_reconcile_scheduling_tests {
                     author_json: None,
                     provenance: CaptureProvenance::default(),
                     events: EngineEvents::default(),
+                    #[cfg(feature = "harness")]
+                    apply_probe: None,
                 },
                 &handle,
                 ReconcileRun::Completed(changed_plan),
@@ -4321,6 +4490,8 @@ mod collection_reconcile_scheduling_tests {
                     author_json: None,
                     provenance: CaptureProvenance::default(),
                     events: EngineEvents::default(),
+                    #[cfg(feature = "harness")]
+                    apply_probe: None,
                 },
                 &handle,
                 ReconcileRun::Completed(changed_plan),
@@ -4367,6 +4538,8 @@ mod collection_reconcile_scheduling_tests {
                     author_json: None,
                     provenance: CaptureProvenance::default(),
                     events: EngineEvents::default(),
+                    #[cfg(feature = "harness")]
+                    apply_probe: None,
                 },
                 &handle,
                 ReconcileRun::Converged,
@@ -4490,6 +4663,8 @@ mod collection_reconcile_scheduling_tests {
                 author_json: None,
                 provenance: CaptureProvenance::default(),
                 events: EngineEvents::default(),
+                #[cfg(feature = "harness")]
+                apply_probe: None,
             },
             &files.handle(),
             ReconcileRun::Converged,

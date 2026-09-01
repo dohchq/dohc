@@ -7108,6 +7108,30 @@ describe("workspace shell errors", () => {
     expect(screen.getByTestId("workspace-workbench").hasAttribute("inert")).toBe(false);
   });
 
+  it("retries a failed initial listing without reopening the workspace", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listWorkspaceFiles.mockRejectedValueOnce(new Error("Listing failed"));
+
+    renderShell(bridge);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+    expect(screen.getByTestId("workspace-workbench").hasAttribute("inert")).toBe(
+      false,
+    );
+    expect(
+      (await screen.findByTestId("workspace-shell-error")).textContent,
+    ).toContain("Could not refresh workspace files. Listing failed");
+    expect(bridge.openWorkspace).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByTestId("workspace-shell-error-retry"));
+
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2));
+    expect(bridge.openWorkspace).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
   it("reports refresh failures after a successful file import without retrying import", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
@@ -11743,6 +11767,7 @@ describe("history page", () => {
       await Promise.resolve();
     });
     expect(screen.queryByTestId("history-load-failed")).toBeNull();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
 
     await act(async () => {
       newer.resolve(historyPage([historyMoment("m-1", "Wrote the plan")]));
@@ -13107,6 +13132,84 @@ describe("history page", () => {
     });
     expect(placeholder.textContent).toContain("History is unavailable");
     expect(placeholder.textContent).not.toContain("Settings");
+  });
+
+  it("does not report an older opted-out refresh after a newer one succeeds", async () => {
+    let failOlderRead!: (error: Error) => void;
+    let holdNextRead = false;
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.getSyncStatus = vi.fn(() => {
+      if (holdNextRead) {
+        holdNextRead = false;
+        return new Promise<never>((_resolve, reject) => {
+          failOlderRead = reject;
+        });
+      }
+      return Promise.resolve(SYNC_STATUS);
+    });
+    renderShell(bridge);
+
+    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalledTimes(1));
+
+    holdNextRead = true;
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(holdNextRead).toBe(false));
+
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalledTimes(3));
+
+    await act(async () => {
+      failOlderRead(new Error("older sync status failed"));
+      await Promise.resolve();
+    });
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  it("commits an older opted-out refresh when the newer one fails", async () => {
+    const syncingStatus = { ...SYNC_STATUS, state: "syncing" as const };
+    const heldStatus = deferred<typeof SYNC_STATUS | typeof syncingStatus>();
+    let holdNextRead = false;
+    let failNextRead = false;
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.getSyncStatus = vi.fn(() => {
+      if (holdNextRead) {
+        holdNextRead = false;
+        return heldStatus.promise;
+      }
+      if (failNextRead) {
+        failNextRead = false;
+        return Promise.reject(new Error("sync status failed"));
+      }
+      return Promise.resolve(SYNC_STATUS);
+    });
+    renderShell(bridge);
+
+    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalledTimes(1));
+
+    holdNextRead = true;
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(holdNextRead).toBe(false));
+
+    failNextRead = true;
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(failNextRead).toBe(false));
+    expect(await screen.findByTestId("workspace-shell-error")).toBeTruthy();
+
+    await act(async () => {
+      heldStatus.resolve(syncingStatus);
+      await heldStatus.promise;
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("sync-status").dataset.state).toBe("syncing"),
+    );
   });
 
   it("does not reopen the workspace when the engine setting enables history", async () => {

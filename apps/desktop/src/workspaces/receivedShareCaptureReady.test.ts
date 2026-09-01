@@ -2,6 +2,20 @@ import { describe, expect, it, vi } from "vitest";
 import { waitForReceivedShareCaptureReady } from "./receivedShareCaptureReady";
 
 describe("waitForReceivedShareCaptureReady", () => {
+  it("returns immediately when the store has no status reader", async () => {
+    const assertCurrent = vi.fn();
+    const waitForPoll = vi.fn(async () => undefined);
+
+    await waitForReceivedShareCaptureReady({
+      readStatus: undefined,
+      assertCurrent,
+      waitForPoll,
+    });
+
+    expect(assertCurrent).not.toHaveBeenCalled();
+    expect(waitForPoll).not.toHaveBeenCalled();
+  });
+
   it("waits through an early import and rechecks renderer authority", async () => {
     const events: string[] = [];
     const readStatus = vi

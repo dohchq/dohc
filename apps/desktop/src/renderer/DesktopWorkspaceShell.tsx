@@ -2782,7 +2782,7 @@ export function DesktopWorkspaceShell(props: {
   // has settled nothing. Kept apart from the committed-page watermark on
   // purpose — a failure must not supersede the page lane, because an older
   // read that still succeeds is the only answer anyone has (#507).
-  const newestEngineHistoryRefresh = useRef(0);
+  const newestHistoryRefresh = useRef(0);
   // Liveness token for the engine history loads (bumped on unmount): a slow
   // response for one workspace must never repaint another.
   const engineHistoryToken = useRef(0);
@@ -2909,7 +2909,7 @@ export function DesktopWorkspaceShell(props: {
       // response from committing. The snapshot lanes invalidate themselves.
       engineHistoryToken.current += 1;
       committedEngineHistoryToken.current = engineHistoryToken.current;
-      newestEngineHistoryRefresh.current = engineHistoryToken.current;
+      newestHistoryRefresh.current = engineHistoryToken.current;
       blockedEngineHistoryRefresh.current = null;
     },
     [],
@@ -2990,13 +2990,13 @@ export function DesktopWorkspaceShell(props: {
     // The engine fetch runs only when main's status agrees a recorder exists
     // (#542): after a failed capture build the renderer's own read still
     // says engine-on, and every listEngineMoments call would error.
+    const token = ++engineHistoryToken.current;
+    newestHistoryRefresh.current = token;
     if (engineEnabled && !isShareView && !statusSaysNoRecorder(syncStatusLane.latest())) {
       // Latest-COMMITTED-wins: each request advances the token, and an answer
       // displays only if it is newer than the answer already displayed, so an
       // older response can never overwrite newer moments or move
       // latestMomentOrder backward (shared with loadMoreEngineHistory).
-      const token = ++engineHistoryToken.current;
-      newestEngineHistoryRefresh.current = token;
       // A read is on the way, so the surface does not know yet — which is a
       // different thing from knowing the last read failed. Saying so here is
       // also what makes the retry control show that it is working.
@@ -3029,12 +3029,12 @@ export function DesktopWorkspaceShell(props: {
           if (!("status" in response)) return response;
           if (
             attempt === HISTORY_UPDATING_RETRY_DELAYS_MS.length ||
-            token !== newestEngineHistoryRefresh.current
+            token !== newestHistoryRefresh.current
           ) {
             return response;
           }
           await waitForHistoryRetry(HISTORY_UPDATING_RETRY_DELAYS_MS[attempt]!);
-          if (token !== newestEngineHistoryRefresh.current) return response;
+          if (token !== newestHistoryRefresh.current) return response;
         }
         // The loop's inclusive bound always returns on its final attempt.
         throw new Error("History retry ladder ended without an answer.");
@@ -3080,13 +3080,12 @@ export function DesktopWorkspaceShell(props: {
         // about what the timeline holds. Only the newest read may give it:
         // an older one failing while a newer is still in flight has settled
         // nothing, and after unmount the counter belongs to no read at all.
-        if (token === newestEngineHistoryRefresh.current) {
-          setEngineHistoryReadState("failed");
-        }
+        if (token !== newestHistoryRefresh.current) return;
+        setEngineHistoryReadState("failed");
         throw error;
       }
       if ("status" in response) {
-        if (token === newestEngineHistoryRefresh.current) {
+        if (token === newestHistoryRefresh.current) {
           setEngineHistoryReadState("updating");
         }
         return "waiting" as const;
@@ -3138,11 +3137,17 @@ export function DesktopWorkspaceShell(props: {
     // settings panel and a second refresh also write, and an untimed write
     // ranked by arrival undid both — a run the user had just started, and a
     // newer status (#636).
-    const token = ++engineHistoryToken.current;
-    const [status, agent] = await Promise.all([
-      bridge().getSyncStatus({ workspaceId }),
-      readAgentStatusForHistory(),
-    ]);
+    let status: SyncStatusResult;
+    let agent: AgentRunStatusResult;
+    try {
+      [status, agent] = await Promise.all([
+        bridge().getSyncStatus({ workspaceId }),
+        readAgentStatusForHistory(),
+      ]);
+    } catch (error) {
+      if (token !== newestHistoryRefresh.current) return;
+      throw error;
+    }
     syncStatusLane.commit(token, status);
     agentActiveLane.commit(token, agent.activeRun !== null);
     markCurrentSwitchPhase("history-ready");
@@ -4810,31 +4815,9 @@ export function DesktopWorkspaceShell(props: {
     // as every other read of that lane.
     const token = ++engineHistoryToken.current;
     void (async () => {
+      let status: SyncStatusResult;
       try {
-        const status = await bridge().openWorkspace({ workspaceId });
-        if (cancelled) return;
-        markCurrentSwitchPhase("session-admitted");
-        // Main answers after the safe startup boundary: either a complete
-        // baseline or a proven large fresh import. This is the moment the
-        // decision exists, and the status committed beside it is the first one
-        // that describes that decided workspace (#626). The two commit
-        // together, so "decided" never runs ahead of what it decided.
-        // The lane may refuse this status, and the decision still stands: what
-        // outranks it is a NEWER status, which describes a workspace at least
-        // as decided as this one.
-        syncStatusLane.commit(token, status);
-        setCaptureDecidedFor(workspaceId);
-        workspaceAdmission.resolve();
-        setWorkspaceReadyFor({
-          workspaceId,
-          selectionGeneration: workspaceSelectionGeneration,
-        });
-        setWorkspaceOpenFailedFor(null);
-        const paintedCachedListing = await refreshFiles({ allowCached: true });
-        if (cancelled || !paintedCachedListing) return;
-        void refreshFiles().catch((error) =>
-          reportShellError("Could not refresh workspace files.", error),
-        );
+        status = await bridge().openWorkspace({ workspaceId });
       } catch (error) {
         if (!cancelled) {
           setWorkspaceOpenFailedFor({
@@ -4846,7 +4829,40 @@ export function DesktopWorkspaceShell(props: {
             setWorkspaceOpenAttempt((attempt) => attempt + 1);
           });
         }
+        return;
       }
+      if (cancelled) return;
+      markCurrentSwitchPhase("session-admitted");
+      // Main answers after the safe startup boundary: either a complete
+      // baseline or a proven large fresh import. This is the moment the
+      // decision exists, and the status committed beside it is the first one
+      // that describes that decided workspace (#626). The two commit
+      // together, so "decided" never runs ahead of what it decided.
+      // The lane may refuse this status, and the decision still stands: what
+      // outranks it is a NEWER status, which describes a workspace at least
+      // as decided as this one.
+      syncStatusLane.commit(token, status);
+      setCaptureDecidedFor(workspaceId);
+      workspaceAdmission.resolve();
+      setWorkspaceReadyFor({
+        workspaceId,
+        selectionGeneration: workspaceSelectionGeneration,
+      });
+      setWorkspaceOpenFailedFor(null);
+
+      const refreshInitialFiles = async () => {
+        const paintedCachedListing = await refreshFiles({ allowCached: true });
+        if (cancelled || !paintedCachedListing) return;
+        await refreshFiles();
+      };
+      const reportInitialFilesFailure = (error: unknown) => {
+        if (!cancelled) {
+          reportShellError("Could not refresh workspace files.", error, () => {
+            void refreshInitialFiles().catch(reportInitialFilesFailure);
+          });
+        }
+      };
+      void refreshInitialFiles().catch(reportInitialFilesFailure);
     })();
     return () => {
       cancelled = true;

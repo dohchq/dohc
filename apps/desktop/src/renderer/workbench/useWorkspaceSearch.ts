@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { WorkspaceSearchPayload } from "../../ipc/bridgeContract";
 import { rendererMarks } from "../../performance/rendererMarks";
 import { bridge } from "../bridge";
@@ -123,7 +123,7 @@ export function useWorkspaceSearch(workspaceId: string): WorkspaceSearchApi {
   // An updating retry belongs to the workspace that issued it. Workspace
   // replacement and unmount both invalidate it before the timer can invoke
   // the old authority again.
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (modelWorkspaceIdRef.current !== workspaceId) {
       modelWorkspaceIdRef.current = workspaceId;
       activeSearchRef.current = null;
@@ -226,5 +226,15 @@ export function useWorkspaceSearch(workspaceId: string): WorkspaceSearchApi {
     commit(idleSearchModel());
   }, [clearRetryTimer, commit]);
 
-  return { model, criteria, setCriteria, run, clear };
+  // A workspace replacement renders once before its layout effects run. Gate
+  // that render by ownership too, so React never hands the new workspace the
+  // previous workspace's query or results—even as an unpainted snapshot.
+  const ownsRenderedState = modelWorkspaceIdRef.current === workspaceId;
+  return {
+    model: ownsRenderedState ? model : idleSearchModel(),
+    criteria: ownsRenderedState ? criteria : blankSearchCriteria(),
+    setCriteria,
+    run,
+    clear,
+  };
 }
