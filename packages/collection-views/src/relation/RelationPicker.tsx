@@ -81,7 +81,17 @@ export function RelationPicker({
     };
   }, [executor, field.collection]);
 
-  const selected = useMemo(() => selectedIds(value), [value]);
+  // Optimistic selection: the host applies emitted changes through a
+  // serialized write queue, so the `value` prop lags behind rapid toggles.
+  // Deriving each toggle from the prop would drop the previous one; derive
+  // from local state instead, reconciled whenever the prop catches up (the
+  // effect also covers a collection switch, which remounts via key upstream
+  // but must not carry a stale selection if it ever does not).
+  const propSelected = useMemo(() => selectedIds(value), [value]);
+  const [selected, setSelected] = useState(propSelected);
+  useEffect(() => {
+    setSelected(propSelected);
+  }, [propSelected]);
   const shown = useMemo(() => {
     if (records === null) return [];
     const needle = search.trim().toLowerCase();
@@ -137,13 +147,13 @@ export function RelationPicker({
               <input
                 type="checkbox"
                 checked={selected.includes(record.id)}
-                onChange={() =>
-                  emit(
-                    selected.includes(record.id)
-                      ? selected.filter((id) => id !== record.id)
-                      : [...selected, record.id],
-                  )
-                }
+                onChange={() => {
+                  const next = selected.includes(record.id)
+                    ? selected.filter((id) => id !== record.id)
+                    : [...selected, record.id];
+                  setSelected(next);
+                  emit(next);
+                }}
               />
               {recordLabel(record)}
             </label>

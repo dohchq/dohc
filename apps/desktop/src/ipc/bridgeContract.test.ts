@@ -1145,6 +1145,25 @@ describe("collection IPC contracts (Phase 2 views)", () => {
     ).toThrow();
   });
 
+  it("accepts a record populated up to the shared schema field limit", () => {
+    // An agent-authored collection can legally carry more than 1,000 fields;
+    // the transport cap follows MAX_SCHEMA_COLLECTION_ITEMS, not a private
+    // bound (PR #996 round 3).
+    const values = Array.from({ length: 1_500 }, (_, index) => ({
+      field: `field_${index}`,
+      value: index,
+      validation: { status: "valid" },
+      resolvedRelations: [],
+    }));
+    const parsed = CollectionRecordSchema.safeParse({
+      id: "rec_abcdefghijklmnopqrstuvwxyz",
+      path: "tasks/wide.md",
+      conflicted: false,
+      values,
+    });
+    expect(parsed.success).toBe(true);
+  });
+
   it("rejects thousands-deep nested values with a validation error, not a stack overflow", () => {
     const base = { workspaceId: "workspace-1", collectionPath: "tasks" };
     const nested = (depth: number): unknown => {

@@ -156,9 +156,28 @@ describe("RelationPicker", () => {
     fireEvent.click(screen.getByRole("checkbox", { name: "Build" }));
     expect(emit).toHaveBeenLastCalledWith(["rec-a", "rec-b"]);
 
+    // The second toggle composes with the first optimistically; the host's
+    // serialized writes have not refreshed the value prop yet.
     fireEvent.click(design);
-    expect(emit).toHaveBeenLastCalledWith([]);
+    expect(emit).toHaveBeenLastCalledWith(["rec-b"]);
     expect(close).not.toHaveBeenCalled();
+  });
+
+  it("many: rapid toggles before a prop refresh compose instead of clobbering", async () => {
+    const emit = vi.fn();
+    render(
+      <RelationPicker
+        field={MANY}
+        value={[]}
+        executor={makeExecutor()}
+        emit={emit}
+        close={vi.fn()}
+      />,
+    );
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Design" }));
+    expect(emit).toHaveBeenLastCalledWith(["rec-a"]);
+    fireEvent.click(screen.getByRole("checkbox", { name: "Build" }));
+    expect(emit).toHaveBeenLastCalledWith(["rec-a", "rec-b"]);
   });
 
   it("filters the fetched page as the search text changes", async () => {

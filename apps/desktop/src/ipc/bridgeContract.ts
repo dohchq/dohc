@@ -500,14 +500,16 @@ const CollectionIndexedValueSchema = z.object({
   field: COLLECTION_NAME,
   value: CollectionValueSchema,
   validation: CollectionIndexedValueValidation,
-  resolvedRelations: z.array(CollectionResolvedRelation).max(1_000),
+  // The shared schema limit bounds both: a record carries at most one value
+  // per schema field, and a relation resolves at most one label per target.
+  resolvedRelations: z.array(CollectionResolvedRelation).max(MAX_SCHEMA_COLLECTION_ITEMS),
 });
 
 export const CollectionRecordSchema: z.ZodType<CollectionRecord> = z.object({
   id: z.string().min(1).max(200),
   path: PATH_STRING,
   conflicted: z.boolean(),
-  values: z.array(CollectionIndexedValueSchema).max(1_000),
+  values: z.array(CollectionIndexedValueSchema).max(MAX_SCHEMA_COLLECTION_ITEMS),
 });
 
 const CollectionRecordGroupSchema = z.object({
