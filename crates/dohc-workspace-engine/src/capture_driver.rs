@@ -3859,6 +3859,7 @@ async fn ack_all_failed(files: &FilesHandle, plan: ReconcilePlan, status: &Arc<D
 #[cfg(test)]
 mod root_bound_run_tests {
     use super::*;
+    use dohc_engine_files::CaptureSink;
     use dohc_engine_runtime::WorkspaceSupervisor;
     use dohc_engine_testkit::ScratchDir;
 
@@ -3871,6 +3872,8 @@ mod root_bound_run_tests {
         let root = capture_scratch.path().join("workspace");
         let moved_root = capture_scratch.path().join("workspace-moved");
         std::fs::create_dir(&root).expect("create capture root");
+        std::fs::write(root.join("seed.md"), b"seed workspace content")
+            .expect("write seed content");
         std::fs::write(root.join("plan.md"), b"original workspace content")
             .expect("write original content");
 
@@ -3879,6 +3882,21 @@ mod root_bound_run_tests {
             .expect("engine database path");
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        let seed_actor = actor.clone();
+        let seed_root = root.clone();
+        std::thread::spawn(move || {
+            StoreCaptureSink::new(seed_actor, WORKSPACE_ID, "main", seed_root, 1, None)
+                .ingest(
+                    "seed.md",
+                    0,
+                    "advisory-sha",
+                    "text/markdown",
+                    IngestReason::Added,
+                )
+                .expect("seed workspace");
+        })
+        .join()
+        .expect("workspace seed thread");
         let files = FilesActor::spawn_async(root.clone(), ScanBounds::default())
             .await
             .expect("files actor");
