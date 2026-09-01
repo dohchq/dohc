@@ -3663,6 +3663,7 @@ export const ListRelayShareLinksPayload = z
   .object({
     workspaceId: WORKSPACE_ID,
     cursor: RELAY_SHARE_LINK_CURSOR.optional(),
+    independentGrantCursor: RELAY_SHARE_LINK_CURSOR.optional(),
   })
   .strict();
 export type ListRelayShareLinksPayload = z.infer<
@@ -3723,6 +3724,7 @@ export const ListRelayShareLinksResult = z.object({
   links: z.array(RelayShareLinkRow).max(1000),
   independentGrants: z.array(RelayShareLinkIndependentGrant).max(1000),
   nextCursor: RELAY_SHARE_LINK_CURSOR.optional(),
+  nextIndependentGrantCursor: RELAY_SHARE_LINK_CURSOR.optional(),
 });
 export type ListRelayShareLinksResult = z.infer<
   typeof ListRelayShareLinksResult

@@ -229,11 +229,16 @@ describe("main-process owner relay share authorization", () => {
     expect(retune).not.toContain("ownerUserId");
   });
 
-  it("forwards only the bounded parsed inventory cursor", () => {
+  it("forwards only the bounded parsed inventory cursors", () => {
     const handler = handlerSource("listRelayShareLinks");
     expect(handler).toContain("input.cursor");
-    expect(handler).toContain("encodeURIComponent(input.cursor)");
+    expect(handler).toContain('query.set("cursor", input.cursor)');
+    expect(handler).toContain("input.independentGrantCursor");
+    expect(handler).toContain(
+      '"independentGrantCursor",\n                input.independentGrantCursor',
+    );
     expect(handler).not.toContain("payload.cursor");
+    expect(handler).not.toContain("payload.independentGrantCursor");
   });
 
   it("uses only the finalized owner discussion routes and bodies", () => {

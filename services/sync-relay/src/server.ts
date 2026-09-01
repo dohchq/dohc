@@ -76,6 +76,7 @@ import {
   type ShareProposalOpRow,
   type SyncRelayLogInput,
   type SyncRelayLogRow,
+  type SyncRelayIndependentGrantInventoryCursor,
   type SyncRelayLinkInventoryCursor,
   type SyncRelayLinkInventoryRow,
   type SyncRelayShareDiscussionCursor,
@@ -3646,26 +3647,50 @@ export function createSyncRelayHandler({
       if (route.route === "share-link-create-atomic" && request.method === "GET") {
         if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
         const url = new URL(request.url);
-        if (url.searchParams.getAll("cursor").length > 1) {
+        if (
+          url.searchParams.getAll("cursor").length > 1 ||
+          url.searchParams.getAll("independentGrantCursor").length > 1
+        ) {
           throw badRequest("cursor is invalid");
         }
+        const linkCursor = decodeLinkInventoryCursor(
+          url.searchParams.get("cursor"),
+        );
+        const independentGrantCursor = decodeIndependentGrantInventoryCursor(
+          url.searchParams.get("independentGrantCursor"),
+        );
         const page = storage.listLinkGrantsByWorkspace(
           route.workspaceId,
-          decodeLinkInventoryCursor(url.searchParams.get("cursor")),
+          linkCursor,
         );
-        const independentGrantRows = storage.listActiveIndependentShareGrants({
+        const independentGrantPage = storage.listActiveIndependentShareGrants({
           workspaceId: route.workspaceId,
           shareIds: page.links.map((row) => row.share.shareId),
+          ...(independentGrantCursor
+            ? { cursor: independentGrantCursor }
+            : {}),
         });
         const [links, independentGrants] = await Promise.all([
-          Promise.all(page.links.map(linkInventorySummary)),
-          Promise.all(independentGrantRows.map(independentGrantSummary)),
+          independentGrantCursor
+            ? []
+            : Promise.all(page.links.map(linkInventorySummary)),
+          Promise.all(
+            independentGrantPage.grants.map(independentGrantSummary),
+          ),
         ]);
         if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
         return jsonResponse({
           ok: true,
           links,
           independentGrants,
+          ...(independentGrantPage.nextCursor
+            ? {
+                nextIndependentGrantCursor:
+                  encodeIndependentGrantInventoryCursor(
+                    independentGrantPage.nextCursor,
+                  ),
+              }
+            : {}),
           ...(page.nextCursor
             ? { nextCursor: encodeLinkInventoryCursor(page.nextCursor) }
             : {}),
@@ -4435,6 +4460,62 @@ function decodeLinkInventoryCursor(
     shareCreatedAtMs: Number(row.shareCreatedAtMs),
     shareId: row.shareId,
     linkCreatedAtMs: Number(row.linkCreatedAtMs),
+    grantId: row.grantId,
+  };
+}
+
+function encodeIndependentGrantInventoryCursor(
+  cursor: SyncRelayIndependentGrantInventoryCursor,
+): string {
+  return Buffer.from(JSON.stringify({ version: 1, ...cursor }), "utf8").toString(
+    "base64url",
+  );
+}
+
+function decodeIndependentGrantInventoryCursor(
+  value: string | null,
+): SyncRelayIndependentGrantInventoryCursor | undefined {
+  if (value === null) return undefined;
+  const invalid = () => badRequest("independentGrantCursor is invalid");
+  if (
+    value.length === 0 ||
+    value.length > LINK_INVENTORY_CURSOR_MAX_CHARS ||
+    !/^[A-Za-z0-9_-]+$/u.test(value)
+  ) {
+    throw invalid();
+  }
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+  } catch {
+    throw invalid();
+  }
+  if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) {
+    throw invalid();
+  }
+  const row = decoded as Record<string, unknown>;
+  if (
+    Object.keys(row).sort().join("\0") !==
+      ["grantCreatedAtMs", "grantId", "shareId", "version"]
+        .sort()
+        .join("\0") ||
+    row.version !== 1 ||
+    !Number.isSafeInteger(row.grantCreatedAtMs) ||
+    Number(row.grantCreatedAtMs) < 0 ||
+    typeof row.shareId !== "string" ||
+    row.shareId.length === 0 ||
+    row.shareId.length > MAX_SHARE_ID_CHARS ||
+    !/^[a-z0-9][a-z0-9-]*$/u.test(row.shareId) ||
+    typeof row.grantId !== "string" ||
+    row.grantId.length === 0 ||
+    row.grantId.length > MAX_SHARE_ID_CHARS ||
+    !/^[a-z0-9][a-z0-9-]*$/u.test(row.grantId)
+  ) {
+    throw invalid();
+  }
+  return {
+    shareId: row.shareId,
+    grantCreatedAtMs: Number(row.grantCreatedAtMs),
     grantId: row.grantId,
   };
 }

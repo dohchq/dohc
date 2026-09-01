@@ -2143,6 +2143,105 @@ describe("Phase 3 owner link contract", () => {
 });
 
 describe("owner link inventory and impact preconditions", () => {
+  it("pages 1,001 promoted recipients for one linked share", async () => {
+    const storage = await newStorage();
+    expect(
+      storage.claimWorkspace({
+        workspaceId: WORKSPACE,
+        ownerUserId: OWNER,
+        createdAtMs: 2_000,
+      }),
+    ).toBe("created");
+    expect(
+      storage.createFileLinkShare({
+        share: {
+          shareId: "share-independent-pages",
+          workspaceId: WORKSPACE,
+          granterUserId: OWNER,
+          selectorJson: JSON.stringify({ paths: ["docs"], versionId: null }),
+          createdAtMs: 2_001,
+        },
+        grant: {
+          grantId: "link-independent-pages",
+          shareId: "share-independent-pages",
+          principalKind: "link",
+          principalUserId: null,
+          principalEmail: null,
+          access: "comment",
+          generation: 1,
+          status: "active",
+          createdAtMs: 2_001,
+          revokedAtMs: null,
+          parentGrantId: null,
+        },
+        credential: {
+          credentialId: "link-independent-pages-credential",
+          grantId: "link-independent-pages",
+          secretHash: hmac("link-independent-pages-secret"),
+          generation: 1,
+          mintedAtMs: 2_001,
+          retiredAtMs: null,
+        },
+        guard: () => {},
+      }),
+    ).toBe(true);
+
+    const expectedGrantIds = Array.from({ length: 1_001 }, (_, index) =>
+      `grant-promoted-${String(index).padStart(4, "0")}`,
+    );
+    for (const [index, grantId] of expectedGrantIds.entries()) {
+      expect(
+        storage.convertLinkGrant({
+          shareId: "share-independent-pages",
+          parentGrantId: "link-independent-pages",
+          grantId,
+          principalUserId: `recipient-${String(index).padStart(4, "0")}`,
+          createdAtMs: 3_000,
+        }),
+      ).toMatchObject({ ok: true });
+      expect(
+        storage.promoteShareGrant({
+          shareId: "share-independent-pages",
+          grantId,
+          expectedParentGrantId: "link-independent-pages",
+          expectedParentGeneration: 1,
+          guard: () => {},
+        }),
+      ).toMatchObject({ ok: true, grant: { parentGrantId: null } });
+    }
+
+    const h = handler(storage);
+    const firstResponse = await h(
+      request(OWNER, `/sync/${WORKSPACE}/shares/links`),
+    );
+    expect(firstResponse.status).toBe(200);
+    const first = await json(firstResponse);
+    expect(first.links).toHaveLength(1);
+    const firstGrants = first.independentGrants as Array<Record<string, unknown>>;
+    expect(firstGrants).toHaveLength(LINK_INVENTORY_PAGE_SIZE);
+    expect(first).not.toHaveProperty("nextCursor");
+    expect(first.nextIndependentGrantCursor).toEqual(expect.any(String));
+
+    const secondResponse = await h(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/shares/links?independentGrantCursor=${encodeURIComponent(String(first.nextIndependentGrantCursor))}`,
+      ),
+    );
+    expect(secondResponse.status).toBe(200);
+    const second = await json(secondResponse);
+    expect(second.links).toEqual([]);
+    const secondGrants = second.independentGrants as Array<Record<string, unknown>>;
+    expect(secondGrants).toHaveLength(1);
+    expect(second).not.toHaveProperty("nextIndependentGrantCursor");
+
+    const grantIds = [...firstGrants, ...secondGrants].map((row) =>
+      String(row.grantId),
+    );
+    expect(grantIds).toEqual(expectedGrantIds);
+    expect(new Set(grantIds).size).toBe(expectedGrantIds.length);
+  }, 30_000);
+
   it("pages 1,001 links without splitting dependents or losing concurrent changes", async () => {
     const storage = await newStorage();
     const independentGrantPageReads: unknown[][] = [];
@@ -2289,6 +2388,7 @@ describe("owner link inventory and impact preconditions", () => {
           workspaceId: WORKSPACE,
           shareIds: ["share-existing", "share-other-workspace"],
         })
+        .grants
         .map((grant) => grant.grantId),
     ).toEqual(["grant-0"]);
 
@@ -2431,6 +2531,24 @@ describe("owner link inventory and impact preconditions", () => {
       ok: false,
       code: "bad_request",
     });
+    const malformedIndependent = await h(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/shares/links?independentGrantCursor=not-json`,
+      ),
+    );
+    expect(malformedIndependent.status).toBe(400);
+    await expect(json(malformedIndependent)).resolves.toMatchObject({
+      ok: false,
+      code: "bad_request",
+    });
+    const repeatedIndependent = await h(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/shares/links?independentGrantCursor=a&independentGrantCursor=b`,
+      ),
+    );
+    expect(repeatedIndependent.status).toBe(400);
   });
 
   it("lists distinct active, revoked, and damaged links with resolved and unresolved dependents", async () => {
@@ -2618,6 +2736,16 @@ describe("owner link inventory and impact preconditions", () => {
       await denialBytes(
         await h(
           request("not-owner", `/sync/${WORKSPACE}/shares/links?cursor=not-json`),
+        ),
+      ),
+    ).toBe(missing);
+    expect(
+      await denialBytes(
+        await h(
+          request(
+            "not-owner",
+            `/sync/${WORKSPACE}/shares/links?independentGrantCursor=not-json`,
+          ),
         ),
       ),
     ).toBe(missing);

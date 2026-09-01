@@ -7865,9 +7865,17 @@ function registerIpcHandlers(
           run: () => {
             operation.assertCurrent();
             const path = `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/shares/links`;
+            const query = new URLSearchParams();
+            if (input.cursor) query.set("cursor", input.cursor);
+            if (input.independentGrantCursor) {
+              query.set(
+                "independentGrantCursor",
+                input.independentGrantCursor,
+              );
+            }
             return relayShareJsonWithCredentials<unknown>(
               credentials,
-              `${path}${input.cursor ? `?cursor=${encodeURIComponent(input.cursor)}` : ""}`,
+              `${path}${query.size > 0 ? `?${query.toString()}` : ""}`,
             );
           },
         });

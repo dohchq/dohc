@@ -1854,6 +1854,83 @@ describe("RelayShareDialog", () => {
     ).toHaveLength(1);
   });
 
+  it("drains independent-grant pages before publishing a link page", async () => {
+    const firstLink = readableLink("link-first", { shareId: "share-first" });
+    const secondLink = readableLink("link-second", { shareId: "share-second" });
+    const independentPage = controllable<{
+      links: LinkRow[];
+      independentGrants: ReadableGrantedRow[];
+      nextCursor: string;
+    }>();
+    bridgeMock.listRelayShareLinks
+      .mockResolvedValueOnce({
+        links: [firstLink],
+        independentGrants: [
+          independentGrant("independent-first", { shareId: "share-first" }),
+        ],
+        nextIndependentGrantCursor: "independent-page-2",
+        nextCursor: "link-page-2",
+      })
+      .mockReturnValueOnce(independentPage.promise)
+      .mockResolvedValueOnce({
+        links: [secondLink],
+        independentGrants: [
+          independentGrant("independent-second", { shareId: "share-second" }),
+        ],
+      });
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+
+    await showLinkPane(user);
+    await vi.waitFor(() => {
+      expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
+    });
+    expect(bridgeMock.listRelayShareLinks).toHaveBeenNthCalledWith(2, {
+      workspaceId: "ws-1",
+      independentGrantCursor: "independent-page-2",
+    });
+    expect(screen.queryByTestId("share-link-group-share-first")).toBeNull();
+
+    await act(async () => {
+      independentPage.resolve({
+        links: [firstLink],
+        independentGrants: [
+          independentGrant("independent-first-tail", {
+            shareId: "share-first",
+          }),
+        ],
+        nextCursor: "link-page-2",
+      });
+    });
+
+    expect(
+      await screen.findByTestId("share-link-group-share-first"),
+    ).toBeTruthy();
+    expect(
+      await screen.findByTestId("share-link-group-share-second"),
+    ).toBeTruthy();
+    expect(bridgeMock.listRelayShareLinks).toHaveBeenNthCalledWith(3, {
+      workspaceId: "ws-1",
+      cursor: "link-page-2",
+    });
+    const firstGroup = await openOwnerComments(user, "share-first");
+    expect(
+      within(firstGroup).getByTestId("share-independent-independent-first"),
+    ).toBeTruthy();
+    expect(
+      within(firstGroup).getByTestId(
+        "share-independent-independent-first-tail",
+      ),
+    ).toBeTruthy();
+    expect(bridgeMock.listRelayShares).not.toHaveBeenCalled();
+  });
+
   it("does not use stale root-grant eligibility after its inventory refresh fails", async () => {
     const inventory = {
       links: [

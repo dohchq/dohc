@@ -1211,35 +1211,58 @@ export function RelayShareDialog(props: {
         string,
         RelayShareLinkIndependentGrant
       >();
-      const seenCursors = new Set<string>();
-      let cursor: string | undefined;
+      const seenLinkCursors = new Set<string>();
+      let linkCursor: string | undefined;
       while (true) {
-        if (
-          !isCurrentLinkScope(scopeGeneration) ||
-          latestInventoryRequest.current !== requestId
-        ) {
-          return;
+        const seenIndependentGrantCursors = new Set<string>();
+        let independentGrantCursor: string | undefined;
+        let nextLinkCursor: string | undefined;
+        while (true) {
+          if (
+            !isCurrentLinkScope(scopeGeneration) ||
+            latestInventoryRequest.current !== requestId
+          ) {
+            return;
+          }
+          const result = await bridge().listRelayShareLinks({
+            workspaceId: props.workspaceId,
+            ...(linkCursor ? { cursor: linkCursor } : {}),
+            ...(independentGrantCursor
+              ? { independentGrantCursor }
+              : {}),
+          });
+          if (
+            !isCurrentLinkScope(scopeGeneration) ||
+            latestInventoryRequest.current !== requestId
+          ) {
+            return;
+          }
+          if (independentGrantCursor === undefined) {
+            inventory.push(...result.links);
+            nextLinkCursor = result.nextCursor;
+          } else if (result.nextCursor !== nextLinkCursor) {
+            throw new Error("dohc could not load all links.");
+          }
+          for (const grant of result.independentGrants) {
+            independentInventory.set(grant.grantId, grant);
+          }
+          if (result.nextIndependentGrantCursor === undefined) break;
+          if (
+            seenIndependentGrantCursors.has(
+              result.nextIndependentGrantCursor,
+            )
+          ) {
+            throw new Error("dohc could not load all links.");
+          }
+          seenIndependentGrantCursors.add(result.nextIndependentGrantCursor);
+          independentGrantCursor = result.nextIndependentGrantCursor;
         }
-        const result = await bridge().listRelayShareLinks({
-          workspaceId: props.workspaceId,
-          ...(cursor ? { cursor } : {}),
-        });
-        if (
-          !isCurrentLinkScope(scopeGeneration) ||
-          latestInventoryRequest.current !== requestId
-        ) {
-          return;
-        }
-        inventory.push(...result.links);
-        for (const grant of result.independentGrants) {
-          independentInventory.set(grant.grantId, grant);
-        }
-        if (result.nextCursor === undefined) break;
-        if (seenCursors.has(result.nextCursor)) {
+        if (nextLinkCursor === undefined) break;
+        if (seenLinkCursors.has(nextLinkCursor)) {
           throw new Error("dohc could not load all links.");
         }
-        seenCursors.add(result.nextCursor);
-        cursor = result.nextCursor;
+        seenLinkCursors.add(nextLinkCursor);
+        linkCursor = nextLinkCursor;
       }
       setLinks(inventory);
       setIndependentGrants([...independentInventory.values()]);

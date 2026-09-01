@@ -214,6 +214,7 @@ describe("owner relay share link IPC contract", () => {
     const parsed = ListRelayShareLinksResult.parse({
       ok: true,
       nextCursor: "next-page",
+      nextIndependentGrantCursor: "next-grant-page",
       links: [
         {
           ...readable,
@@ -229,9 +230,29 @@ describe("owner relay share link IPC contract", () => {
           credentialId: "must-not-cross",
         },
       ],
+      independentGrants: [
+        {
+          shareId: "share-1",
+          grantId: "independent-1",
+          recipientUserId: "user-1",
+          recipientEmail: "reader@example.test",
+        },
+      ],
     });
 
-    expect(parsed).toEqual({ links: [readable, damaged], nextCursor: "next-page" });
+    expect(parsed).toEqual({
+      links: [readable, damaged],
+      independentGrants: [
+        {
+          shareId: "share-1",
+          grantId: "independent-1",
+          recipientUserId: "user-1",
+          recipientEmail: "reader@example.test",
+        },
+      ],
+      nextCursor: "next-page",
+      nextIndependentGrantCursor: "next-grant-page",
+    });
     for (const row of parsed.links) {
       expect(row).not.toHaveProperty("url");
       expect(row).not.toHaveProperty("secret");
@@ -242,8 +263,13 @@ describe("owner relay share link IPC contract", () => {
       ListRelayShareLinksPayload.parse({
         workspaceId: "workspace-1",
         cursor: "next-page",
+        independentGrantCursor: "next-grant-page",
       }),
-    ).toEqual({ workspaceId: "workspace-1", cursor: "next-page" });
+    ).toEqual({
+      workspaceId: "workspace-1",
+      cursor: "next-page",
+      independentGrantCursor: "next-grant-page",
+    });
     expect(
       ListRelayShareLinksPayload.safeParse({
         workspaceId: "workspace-1",
@@ -253,12 +279,35 @@ describe("owner relay share link IPC contract", () => {
     expect(
       ListRelayShareLinksResult.safeParse({
         links: Array.from({ length: 1_001 }, () => readable),
+        independentGrants: [],
       }).success,
     ).toBe(false);
     expect(
       ListRelayShareLinksResult.safeParse({
         links: [],
+        independentGrants: [],
         nextCursor: "x".repeat(1_025),
+      }).success,
+    ).toBe(false);
+    expect(
+      ListRelayShareLinksResult.safeParse({
+        links: [],
+        independentGrants: [],
+        nextIndependentGrantCursor: "x".repeat(1_025),
+      }).success,
+    ).toBe(false);
+    expect(
+      ListRelayShareLinksResult.safeParse({
+        links: [],
+        independentGrants: [
+          {
+            shareId: "share-1",
+            grantId: "independent-1",
+            recipientUserId: "user-1",
+            recipientEmail: "reader@example.test",
+            secret: "must-not-cross",
+          },
+        ],
       }).success,
     ).toBe(false);
   });
