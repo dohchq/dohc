@@ -34,6 +34,8 @@ export const PLUGIN_HOST_METHODS = {
   driverEvent: "driver.event",
 } as const;
 
+export const PLUGIN_DRIVER_SESSION_ID_MAX_CHARS = 200;
+
 export interface PluginActivateParams {
   pluginId: string;
   pluginRoot: string;

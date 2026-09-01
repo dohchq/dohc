@@ -1,10 +1,12 @@
 // A driver plugin in miniature: it declares one agent driver, probes for its
 // harness, and runs that harness as a real supervised child process, mapping
 // the harness's own line protocol to dohc's agent events.
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const mode = process.env.DOHC_PLUGIN_FIXTURE_MODE ?? "driver";
 const heartbeatPath = process.env.DOHC_DRIVER_FIXTURE_HEARTBEAT ?? "";
+const disposedPath = process.env.DOHC_DRIVER_FIXTURE_DISPOSED ?? "";
 
 function createDriver(ctx, options = {}) {
   return {
@@ -157,6 +159,7 @@ function createDriver(ctx, options = {}) {
         },
         async dispose() {
           await harness.terminate();
+          if (disposedPath) await writeFile(disposedPath, "disposed", "utf8");
         },
       };
       if (!options.withoutOptionalMembers) {

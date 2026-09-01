@@ -13,6 +13,7 @@ import {
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
+  PLUGIN_DRIVER_SESSION_ID_MAX_CHARS,
   PLUGIN_HOST_METHODS,
   type PluginActivateParams,
   type PluginDriverAnswerPermissionParams,
@@ -202,11 +203,14 @@ function requireDriverSession(sessionKey: string): PluginAgentSession {
   return session;
 }
 
-// A resume cursor travels as JSON. A value that cannot make the trip would
-// otherwise fail inside the transport's own send, where nothing answers the
-// request the host is waiting on.
-function assertJsonValue(value: unknown, label: string): void {
-  if (value === undefined) return;
+// A resume cursor travels as JSON. Materialize that exact value before the
+// session becomes owned: a getter or toJSON method must not get a second chance
+// to fail later inside the transport, after the session has been registered.
+function jsonValueForWire(
+  value: unknown,
+  label: string,
+): PluginJsonValue | undefined {
+  if (value === undefined) return undefined;
   let rendered: string | undefined;
   try {
     rendered = JSON.stringify(value);
@@ -214,6 +218,36 @@ function assertJsonValue(value: unknown, label: string): void {
     rendered = undefined;
   }
   if (rendered === undefined) throw new Error(`${label} must be JSON data.`);
+  return JSON.parse(rendered) as PluginJsonValue;
+}
+
+function acceptedDriverSessionResult(
+  session: PluginAgentSession,
+): PluginDriverStartSessionResult {
+  const sessionId = session.sessionId;
+  if (
+    typeof sessionId !== "string" ||
+    sessionId.length === 0 ||
+    sessionId.length > PLUGIN_DRIVER_SESSION_ID_MAX_CHARS
+  ) {
+    throw new Error(
+      `A driver session's sessionId must be 1 to ${PLUGIN_DRIVER_SESSION_ID_MAX_CHARS} characters.`,
+    );
+  }
+  const resumeCursor = jsonValueForWire(
+    session.resumeCursor,
+    "A driver session's resumeCursor",
+  );
+  return {
+    sessionId,
+    ...(resumeCursor === undefined
+      ? {}
+      : { resumeCursor }),
+    supports: {
+      setModel: typeof session.setModel === "function",
+      answerUserInput: typeof session.answerUserInput === "function",
+    },
+  };
 }
 
 transport.onRequest(PLUGIN_HOST_METHODS.driverProbe, async (rawParams) => {
@@ -242,18 +276,22 @@ transport.onRequest(PLUGIN_HOST_METHODS.driverStartSession, async (rawParams) =>
       } satisfies PluginDriverEventParams);
     },
   });
-  assertJsonValue(session.resumeCursor, "A driver session's resumeCursor");
+  let result: PluginDriverStartSessionResult;
+  try {
+    result = acceptedDriverSessionResult(session);
+  } catch (error) {
+    try {
+      await session.dispose();
+    } catch (disposeError) {
+      throw new AggregateError(
+        [error, disposeError],
+        `${errorMessage(error)} Session cleanup also failed: ${errorMessage(disposeError)}`,
+      );
+    }
+    throw error;
+  }
   driverSessions.set(sessionKey, session);
-  return {
-    sessionId: session.sessionId,
-    ...(session.resumeCursor === undefined
-      ? {}
-      : { resumeCursor: session.resumeCursor as PluginJsonValue }),
-    supports: {
-      setModel: typeof session.setModel === "function",
-      answerUserInput: typeof session.answerUserInput === "function",
-    },
-  } satisfies PluginDriverStartSessionResult;
+  return result;
 });
 
 transport.onRequest(PLUGIN_HOST_METHODS.driverPrompt, async (rawParams) => {

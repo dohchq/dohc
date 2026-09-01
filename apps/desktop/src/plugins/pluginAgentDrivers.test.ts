@@ -68,6 +68,7 @@ interface DriverFixture {
   host: PluginHost;
   workspaceRoot: string;
   heartbeatPath: string;
+  disposedPath: string;
   warnings: string[];
   pluginStderr: () => string[];
 }
@@ -89,6 +90,7 @@ async function startDriverPlugin(
   const pluginRoot = join(root, "plugins", "driver-plugin");
   await cp(driverPluginSource, pluginRoot, { recursive: true });
   const heartbeatPath = join(workspaceRoot, "harness-heartbeat.txt");
+  const disposedPath = join(workspaceRoot, "session-disposed.txt");
 
   const broker = new PluginChildProcessBroker({
     dohcDir: root,
@@ -117,6 +119,7 @@ async function startDriverPlugin(
       env: {
         DOHC_PLUGIN_FIXTURE_MODE: mode,
         DOHC_DRIVER_FIXTURE_HEARTBEAT: heartbeatPath,
+        DOHC_DRIVER_FIXTURE_DISPOSED: disposedPath,
       },
       detached: true,
       label: `plugin ${params.pluginId}`,
@@ -169,6 +172,7 @@ async function startDriverPlugin(
     host,
     workspaceRoot,
     heartbeatPath,
+    disposedPath,
     warnings,
     pluginStderr: () => host?.getStderrLog("driver-plugin") ?? [],
   };
@@ -408,6 +412,7 @@ describe("plugin agent drivers, through the real plugin process", () => {
       await expect(startSession(fixture)).rejects.toThrow(
         /resumeCursor must be JSON data/,
       );
+      expect(await readFile(fixture.disposedPath, "utf8")).toBe("disposed");
     },
     30_000,
   );

@@ -9,6 +9,7 @@ import type {
   PermissionDecision,
 } from "../agents/AgentDriver";
 import {
+  PLUGIN_DRIVER_SESSION_ID_MAX_CHARS,
   PLUGIN_DRIVER_PROBE_TIMEOUT_MS,
   PLUGIN_HOST_METHODS,
   type PluginDriverAnswerPermissionParams,
@@ -60,7 +61,6 @@ const MAX_LOCATIONS = 20;
 const MAX_LOCATION_CHARS = 1_000;
 const MAX_PLAN_STEPS = 50;
 const MAX_PLAN_STEP_CHARS = 500;
-const MAX_SESSION_ID_CHARS = 200;
 
 function clamp(value: string | undefined, max: number): string | undefined {
   if (value === undefined) return undefined;
@@ -211,7 +211,7 @@ const EventParamsSchema = z.object({
 });
 
 const StartSessionResultSchema = z.object({
-  sessionId: z.string().min(1).max(MAX_SESSION_ID_CHARS),
+  sessionId: z.string().min(1).max(PLUGIN_DRIVER_SESSION_ID_MAX_CHARS),
   resumeCursor: JsonValue.optional(),
   supports: z.object({
     setModel: z.boolean(),
@@ -576,7 +576,7 @@ export function createPluginAgentDrivers(options: PluginAgentDriversOptions) {
           const started = StartSessionResultSchema.safeParse(result);
           if (!started.success) {
             throw new Error(
-              `Driver "${declared.id}" returned a session dohc cannot use: it must report a session id of 1 to ${MAX_SESSION_ID_CHARS} characters, a JSON resume cursor, and which optional members it supports.`,
+              `Driver "${declared.id}" returned a session dohc cannot use: it must report a session id of 1 to ${PLUGIN_DRIVER_SESSION_ID_MAX_CHARS} characters, a JSON resume cursor, and which optional members it supports.`,
             );
           }
           return createSession(
