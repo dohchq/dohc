@@ -1,4 +1,21 @@
 export {
+  HOST_CONTROL_IDENTIFIER_MAX_BYTES,
+  HOST_MODE_VALUES,
+  nextHostEpoch,
+  nextHostTransitionGeneration,
+  parseHostControlIdentifier,
+  parseHostEpoch,
+  parseHostMode,
+  parseHostTransitionGeneration,
+  type HostAdmissionState,
+  type HostControlSnapshot,
+  type HostEpoch,
+  type HostMode,
+  type HostTransitionGeneration,
+  type HostTransitionPhase,
+  type HostTransitionRecord,
+} from "./hostControl.js";
+export {
   LIVE_OBJECT_BINDING_IDENTIFIER_MAX_BYTES,
   LIVE_OBJECT_BINDING_PATH_MAX_BYTES,
   LIVE_OBJECT_BINDING_SELECTOR_PATH_MAX_COUNT,

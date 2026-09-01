@@ -2,6 +2,17 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
+import {
+  nextHostEpoch,
+  parseHostControlIdentifier,
+  parseHostEpoch,
+  parseHostMode,
+  parseHostTransitionGeneration,
+  type HostControlSnapshot,
+  type HostEpoch,
+  type HostMode,
+  type HostTransitionGeneration,
+} from "@dohc/live-session-contract/host-control";
 import { AGENT_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import {
@@ -27,6 +38,57 @@ import {
 } from "./linkSecurity";
 
 export const SHARED_BLOB_CANDIDATE_LIMIT = 64;
+
+export type LiveHostControlRefusalReason =
+  | "not-provisioned"
+  | "conflicting-provision"
+  | "stale-epoch"
+  | "wrong-mode"
+  | "wrong-host"
+  | "wrong-instance"
+  | "wrong-connection"
+  | "busy-transition"
+  | "draining"
+  | "closed"
+  | "same-mode"
+  | "stale-transition"
+  | "completed-transition-id"
+  | "exhausted-epoch"
+  | "exhausted-transition-generation";
+
+export type LiveHostControlResult =
+  | { readonly ok: true; readonly snapshot: HostControlSnapshot }
+  | { readonly ok: false; readonly reason: LiveHostControlRefusalReason };
+
+export interface LiveHostConnectionCoordinate {
+  readonly mode: HostMode;
+  readonly hostId: string;
+  readonly hostEpoch: HostEpoch;
+  readonly instanceId: string;
+  readonly connectionId: string;
+}
+
+export interface BeginLiveHostTransitionInput {
+  readonly from: LiveHostConnectionCoordinate;
+  readonly toMode: HostMode;
+  readonly toHostId: string;
+  readonly transitionId: string;
+  readonly startedAtMs: number;
+  readonly guard: () => void;
+}
+
+export interface ActivateLiveHostTransitionInput {
+  readonly transitionGeneration: HostTransitionGeneration;
+  readonly transitionId: string;
+  readonly transitionFromEpoch: HostEpoch;
+  readonly mode: HostMode;
+  readonly hostId: string;
+  readonly hostEpoch: HostEpoch;
+  readonly instanceId: string;
+  readonly connectionId: string;
+  readonly updatedAtMs: number;
+  readonly guard: () => void;
+}
 
 export interface SyncRelayLogInput {
   originSeq: number;
@@ -410,6 +472,33 @@ export interface AppendLogBatchGuardContext {
 
 export interface SyncRelayStorage {
   close(): void;
+  getLiveHostControl(): HostControlSnapshot | null;
+  provisionLiveHostControl(input: {
+    mode: HostMode;
+    hostId: string;
+    updatedAtMs: number;
+    guard: () => void;
+  }): LiveHostControlResult;
+  registerLiveHost(input: LiveHostConnectionCoordinate & {
+    updatedAtMs: number;
+    guard: () => void;
+  }): LiveHostControlResult;
+  disconnectLiveHost(input: LiveHostConnectionCoordinate & {
+    updatedAtMs: number;
+    guard: () => void;
+  }): LiveHostControlResult;
+  beginLiveHostTransition(input: BeginLiveHostTransitionInput): LiveHostControlResult;
+  abortLiveHostTransition(input: {
+    transitionId: string;
+    transitionGeneration: HostTransitionGeneration;
+    updatedAtMs: number;
+  }): LiveHostControlResult;
+  commitLiveHostTransitionEpoch(input: {
+    transitionId: string;
+    transitionGeneration: HostTransitionGeneration;
+    updatedAtMs: number;
+  }): LiveHostControlResult;
+  activateLiveHostTransition(input: ActivateLiveHostTransitionInput): LiveHostControlResult;
   claimWorkspace(input: {
     workspaceId: string;
     ownerUserId: string;
@@ -1128,6 +1217,224 @@ const NORMALIZED_SHARE_SCHEMA_SQL = `
     ON sync_relay_link_handoff_codes(grant_id, minted_at_ms);
 `;
 
+const SESSION_HOST_CONTROL_MIGRATION_ID = "session-host-control-v1";
+const SESSION_HOST_CONTROL_TABLE = "sync_relay_session_host_control";
+const SESSION_HOST_CONTROL_COLUMNS = [
+  "singleton_id",
+  "configured_mode",
+  "configured_host_id",
+  "host_epoch",
+  "transition_generation",
+  "admission_state",
+  "registered_instance_id",
+  "registered_connection_id",
+  "transition_phase",
+  "transition_id",
+  "transition_from_mode",
+  "transition_from_host_id",
+  "transition_from_instance_id",
+  "transition_from_connection_id",
+  "transition_from_epoch",
+  "transition_to_mode",
+  "transition_to_host_id",
+  "transition_started_at_ms",
+  "last_completed_transition_id",
+  "updated_at_ms",
+] as const;
+
+const SESSION_HOST_CONTROL_SCHEMA_SQL = `
+CREATE TABLE sync_relay_session_host_control (
+  singleton_id INTEGER NOT NULL PRIMARY KEY CHECK (singleton_id = 1),
+  configured_mode TEXT NOT NULL
+    CHECK (configured_mode IN ('device', 'service')),
+  configured_host_id TEXT NOT NULL
+    CHECK (length(CAST(configured_host_id AS BLOB)) BETWEEN 1 AND 1024),
+  host_epoch INTEGER NOT NULL
+    CHECK (host_epoch BETWEEN 1 AND 9007199254740991),
+  transition_generation INTEGER NOT NULL
+    CHECK (transition_generation BETWEEN 0 AND 9007199254740991),
+  admission_state TEXT NOT NULL
+    CHECK (admission_state IN ('closed', 'open', 'draining')),
+  registered_instance_id TEXT
+    CHECK (
+      registered_instance_id IS NULL OR
+      length(CAST(registered_instance_id AS BLOB)) BETWEEN 1 AND 1024
+    ),
+  registered_connection_id TEXT
+    CHECK (
+      registered_connection_id IS NULL OR
+      length(CAST(registered_connection_id AS BLOB)) BETWEEN 1 AND 1024
+    ),
+  transition_phase TEXT
+    CHECK (transition_phase IN ('draining', 'activating')),
+  transition_id TEXT
+    CHECK (
+      transition_id IS NULL OR
+      length(CAST(transition_id AS BLOB)) BETWEEN 1 AND 1024
+    ),
+  transition_from_mode TEXT
+    CHECK (transition_from_mode IN ('device', 'service')),
+  transition_from_host_id TEXT
+    CHECK (
+      transition_from_host_id IS NULL OR
+      length(CAST(transition_from_host_id AS BLOB)) BETWEEN 1 AND 1024
+    ),
+  transition_from_instance_id TEXT
+    CHECK (
+      transition_from_instance_id IS NULL OR
+      length(CAST(transition_from_instance_id AS BLOB)) BETWEEN 1 AND 1024
+    ),
+  transition_from_connection_id TEXT
+    CHECK (
+      transition_from_connection_id IS NULL OR
+      length(CAST(transition_from_connection_id AS BLOB)) BETWEEN 1 AND 1024
+    ),
+  transition_from_epoch INTEGER
+    CHECK (
+      transition_from_epoch IS NULL OR
+      transition_from_epoch BETWEEN 1 AND 9007199254740991
+    ),
+  transition_to_mode TEXT
+    CHECK (transition_to_mode IN ('device', 'service')),
+  transition_to_host_id TEXT
+    CHECK (
+      transition_to_host_id IS NULL OR
+      length(CAST(transition_to_host_id AS BLOB)) BETWEEN 1 AND 1024
+    ),
+  transition_started_at_ms INTEGER
+    CHECK (
+      transition_started_at_ms IS NULL OR
+      transition_started_at_ms BETWEEN 0 AND 9007199254740991
+    ),
+  last_completed_transition_id TEXT
+    CHECK (
+      last_completed_transition_id IS NULL OR
+      length(CAST(last_completed_transition_id AS BLOB)) BETWEEN 1 AND 1024
+    ),
+  updated_at_ms INTEGER NOT NULL
+    CHECK (updated_at_ms BETWEEN 0 AND 9007199254740991),
+  CHECK (
+    admission_state <> 'open' OR
+    (registered_instance_id IS NOT NULL AND registered_connection_id IS NOT NULL)
+  ),
+  CHECK (
+    registered_connection_id IS NULL OR registered_instance_id IS NOT NULL
+  ),
+  CHECK (
+    admission_state <> 'closed' OR registered_connection_id IS NULL
+  ),
+  CHECK (
+    last_completed_transition_id IS NULL OR transition_generation >= 1
+  ),
+  CHECK (
+    (
+      transition_phase IS NULL AND
+      transition_id IS NULL AND
+      transition_from_mode IS NULL AND
+      transition_from_host_id IS NULL AND
+      transition_from_instance_id IS NULL AND
+      transition_from_connection_id IS NULL AND
+      transition_from_epoch IS NULL AND
+      transition_to_mode IS NULL AND
+      transition_to_host_id IS NULL AND
+      transition_started_at_ms IS NULL AND
+      admission_state IN ('closed', 'open') AND
+      (admission_state = 'open' OR last_completed_transition_id IS NULL)
+    ) OR (
+      transition_phase = 'draining' AND
+      admission_state = 'draining' AND
+      transition_generation >= 1 AND
+      last_completed_transition_id IS NULL AND
+      transition_id IS NOT NULL AND
+      transition_from_mode IS NOT NULL AND
+      transition_from_host_id IS NOT NULL AND
+      transition_from_instance_id IS NOT NULL AND
+      transition_from_connection_id IS NOT NULL AND
+      transition_from_epoch IS NOT NULL AND
+      transition_to_mode IS NOT NULL AND
+      transition_to_host_id IS NOT NULL AND
+      transition_started_at_ms IS NOT NULL AND
+      configured_mode = transition_from_mode AND
+      configured_host_id = transition_from_host_id AND
+      registered_instance_id = transition_from_instance_id AND
+      registered_connection_id = transition_from_connection_id AND
+      host_epoch = transition_from_epoch AND
+      transition_to_mode <> transition_from_mode
+    ) OR (
+      transition_phase = 'activating' AND
+      admission_state = 'closed' AND
+      transition_generation >= 1 AND
+      last_completed_transition_id IS NULL AND
+      transition_id IS NOT NULL AND
+      transition_from_mode IS NOT NULL AND
+      transition_from_host_id IS NOT NULL AND
+      transition_from_instance_id IS NOT NULL AND
+      transition_from_connection_id IS NOT NULL AND
+      transition_from_epoch IS NOT NULL AND
+      transition_to_mode IS NOT NULL AND
+      transition_to_host_id IS NOT NULL AND
+      transition_started_at_ms IS NOT NULL AND
+      configured_mode = transition_to_mode AND
+      configured_host_id = transition_to_host_id AND
+      registered_instance_id IS NULL AND
+      registered_connection_id IS NULL AND
+      host_epoch = transition_from_epoch + 1 AND
+      transition_to_mode <> transition_from_mode
+    )
+  )
+) STRICT;
+`;
+
+function normalizedSchemaSql(value: string): string {
+  return value.trim().replace(/;$/, "").replace(/\s+/g, " ").toLowerCase();
+}
+
+function assertSessionHostControlSchema(db: SqliteDb): void {
+  const columns = db
+    .prepare(`PRAGMA table_info(${SESSION_HOST_CONTROL_TABLE})`)
+    .all()
+    .map((row) => String(row.name));
+  const schema = db
+    .prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?")
+    .get(SESSION_HOST_CONTROL_TABLE);
+  if (
+    columns.join("\u0000") !== SESSION_HOST_CONTROL_COLUMNS.join("\u0000") ||
+    typeof schema?.sql !== "string" ||
+    normalizedSchemaSql(schema.sql) !== normalizedSchemaSql(SESSION_HOST_CONTROL_SCHEMA_SQL)
+  ) {
+    throw new Error("session host control schema is missing or damaged");
+  }
+}
+
+function initializeSessionHostControlSchema(db: SqliteDb): void {
+  const marker = db
+    .prepare(
+      "SELECT EXISTS(SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?) AS complete",
+    )
+    .get(SESSION_HOST_CONTROL_MIGRATION_ID);
+  const existing = db
+    .prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?")
+    .get(SESSION_HOST_CONTROL_TABLE);
+  const marked = Number(marker?.complete ?? 0) === 1;
+
+  if (marked) {
+    if (existing === undefined) {
+      throw new Error("session host control migration is marked but its table is missing");
+    }
+    assertSessionHostControlSchema(db);
+    return;
+  }
+  if (existing !== undefined) {
+    throw new Error("unmarked session host control table already exists");
+  }
+
+  db.exec(SESSION_HOST_CONTROL_SCHEMA_SQL);
+  assertSessionHostControlSchema(db);
+  db.prepare(
+    "INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)",
+  ).run(SESSION_HOST_CONTROL_MIGRATION_ID, Date.now());
+}
+
 export function initializeSyncRelaySchema(db: SqliteDb): void {
   db.exec("BEGIN IMMEDIATE");
   try {
@@ -1423,6 +1730,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
         completed_at_ms INTEGER NOT NULL
       ) STRICT;
     `);
+    initializeSessionHostControlSchema(db);
     const shareColumns = db
       .prepare("PRAGMA table_info(sync_relay_shares)")
       .all()
@@ -2378,6 +2686,130 @@ function utf8Bytes(...values: Array<string | null>): number {
   );
 }
 
+function parseHostControlTimestamp(value: unknown, name: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new RangeError(`${name} must be a non-negative safe integer`);
+  }
+  return value as number;
+}
+
+function readLiveHostControl(db: SqliteDb): HostControlSnapshot | null {
+  const row = db
+    .prepare(`SELECT * FROM ${SESSION_HOST_CONTROL_TABLE} WHERE singleton_id = 1`)
+    .get();
+  if (row === undefined) return null;
+
+  const transitionGeneration = Number(row.transition_generation);
+  const phase = row.transition_phase;
+  const transition =
+    phase === null
+      ? null
+      : {
+          phase: parseHostTransitionPhase(phase),
+          transitionGeneration: parseHostTransitionGeneration(transitionGeneration),
+          transitionId: parseHostControlIdentifier(row.transition_id, "transition ID"),
+          fromMode: parseHostMode(row.transition_from_mode),
+          fromHostId: parseHostControlIdentifier(
+            row.transition_from_host_id,
+            "transition source host ID",
+          ),
+          fromInstanceId: parseHostControlIdentifier(
+            row.transition_from_instance_id,
+            "transition source instance ID",
+          ),
+          fromConnectionId: parseHostControlIdentifier(
+            row.transition_from_connection_id,
+            "transition source connection ID",
+          ),
+          fromEpoch: parseHostEpoch(row.transition_from_epoch),
+          toMode: parseHostMode(row.transition_to_mode),
+          toHostId: parseHostControlIdentifier(
+            row.transition_to_host_id,
+            "transition target host ID",
+          ),
+          startedAtMs: parseHostControlTimestamp(
+            row.transition_started_at_ms,
+            "transition start time",
+          ),
+        } as const;
+
+  return {
+    configuredMode: parseHostMode(row.configured_mode),
+    configuredHostId: parseHostControlIdentifier(row.configured_host_id, "configured host ID"),
+    hostEpoch: parseHostEpoch(row.host_epoch),
+    admissionState: parseHostAdmissionState(row.admission_state),
+    registeredInstanceId:
+      row.registered_instance_id === null
+        ? null
+        : parseHostControlIdentifier(row.registered_instance_id, "registered instance ID"),
+    registeredConnectionId:
+      row.registered_connection_id === null
+        ? null
+        : parseHostControlIdentifier(row.registered_connection_id, "registered connection ID"),
+    updatedAtMs: parseHostControlTimestamp(row.updated_at_ms, "host control update time"),
+    lastTransitionGeneration:
+      transitionGeneration === 0
+        ? null
+        : parseHostTransitionGeneration(transitionGeneration),
+    lastCompletedTransitionId:
+      row.last_completed_transition_id === null
+        ? null
+        : parseHostControlIdentifier(
+            row.last_completed_transition_id,
+            "last completed transition ID",
+          ),
+    transition,
+  };
+}
+
+function parseHostAdmissionState(value: unknown): HostControlSnapshot["admissionState"] {
+  if (value === "closed" || value === "open" || value === "draining") return value;
+  throw new Error("stored host admission state is invalid");
+}
+
+function parseHostTransitionPhase(
+  value: unknown,
+): NonNullable<HostControlSnapshot["transition"]>["phase"] {
+  if (value === "draining" || value === "activating") return value;
+  throw new Error("stored host transition phase is invalid");
+}
+
+function liveHostSuccess(snapshot: HostControlSnapshot): LiveHostControlResult {
+  return { ok: true, snapshot };
+}
+
+function liveHostRefusal(reason: LiveHostControlRefusalReason): LiveHostControlResult {
+  return { ok: false, reason };
+}
+
+function readRequiredLiveHostControl(db: SqliteDb): HostControlSnapshot {
+  const snapshot = readLiveHostControl(db);
+  if (snapshot === null) throw new Error("session host control row disappeared");
+  return snapshot;
+}
+
+function parseLiveHostConnectionCoordinate(
+  input: LiveHostConnectionCoordinate,
+): LiveHostConnectionCoordinate {
+  return {
+    mode: parseHostMode(input.mode),
+    hostId: parseHostControlIdentifier(input.hostId, "host ID"),
+    hostEpoch: parseHostEpoch(input.hostEpoch),
+    instanceId: parseHostControlIdentifier(input.instanceId, "host instance ID"),
+    connectionId: parseHostControlIdentifier(input.connectionId, "live connection ID"),
+  };
+}
+
+function compareConfiguredCoordinate(
+  snapshot: HostControlSnapshot,
+  coordinate: Pick<LiveHostConnectionCoordinate, "mode" | "hostId" | "hostEpoch">,
+): LiveHostControlRefusalReason | null {
+  if (snapshot.configuredMode !== coordinate.mode) return "wrong-mode";
+  if (snapshot.configuredHostId !== coordinate.hostId) return "wrong-host";
+  if (snapshot.hostEpoch !== coordinate.hostEpoch) return "stale-epoch";
+  return null;
+}
+
 export function openSyncRelayStorage(
   dbPath: string,
   options: OpenSyncRelayStorageOptions = {},
@@ -2473,6 +2905,312 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   close(): void {
     this.db.close();
+  }
+
+  getLiveHostControl(): HostControlSnapshot | null {
+    return readLiveHostControl(this.db);
+  }
+
+  provisionLiveHostControl(input: {
+    mode: HostMode;
+    hostId: string;
+    updatedAtMs: number;
+    guard: () => void;
+  }): LiveHostControlResult {
+    const mode = parseHostMode(input.mode);
+    const hostId = parseHostControlIdentifier(input.hostId, "configured host ID");
+    const updatedAtMs = parseHostControlTimestamp(input.updatedAtMs, "host control update time");
+    return this.tx(() => {
+      const existing = readLiveHostControl(this.db);
+      if (existing !== null) {
+        if (existing.configuredMode !== mode || existing.configuredHostId !== hostId) {
+          return liveHostRefusal("conflicting-provision");
+        }
+        input.guard();
+        return liveHostSuccess(existing);
+      }
+      input.guard();
+      this.db
+        .prepare(
+          `INSERT INTO ${SESSION_HOST_CONTROL_TABLE} (
+             singleton_id, configured_mode, configured_host_id, host_epoch,
+             transition_generation, admission_state, updated_at_ms
+           ) VALUES (1, ?, ?, 1, 0, 'closed', ?)`,
+        )
+        .run(mode, hostId, updatedAtMs);
+      return liveHostSuccess(readRequiredLiveHostControl(this.db));
+    });
+  }
+
+  registerLiveHost(input: LiveHostConnectionCoordinate & {
+    updatedAtMs: number;
+    guard: () => void;
+  }): LiveHostControlResult {
+    const coordinate = parseLiveHostConnectionCoordinate(input);
+    const updatedAtMs = parseHostControlTimestamp(input.updatedAtMs, "host registration time");
+    return this.tx(() => {
+      const snapshot = readLiveHostControl(this.db);
+      if (snapshot === null) return liveHostRefusal("not-provisioned");
+      const mismatch = compareConfiguredCoordinate(snapshot, coordinate);
+      if (mismatch !== null) return liveHostRefusal(mismatch);
+      if (snapshot.transition !== null) {
+        return liveHostRefusal(
+          snapshot.transition.phase === "draining" ? "draining" : "busy-transition",
+        );
+      }
+      if (
+        snapshot.registeredInstanceId !== null &&
+        snapshot.registeredInstanceId !== coordinate.instanceId
+      ) {
+        return liveHostRefusal("wrong-instance");
+      }
+      if (
+        snapshot.admissionState === "open" &&
+        snapshot.registeredConnectionId === coordinate.connectionId
+      ) {
+        input.guard();
+        return liveHostSuccess(snapshot);
+      }
+      input.guard();
+      this.db
+        .prepare(
+          `UPDATE ${SESSION_HOST_CONTROL_TABLE}
+           SET registered_instance_id = ?, registered_connection_id = ?,
+               admission_state = 'open', last_completed_transition_id = NULL,
+               updated_at_ms = ?
+           WHERE singleton_id = 1`,
+        )
+        .run(coordinate.instanceId, coordinate.connectionId, updatedAtMs);
+      return liveHostSuccess(readRequiredLiveHostControl(this.db));
+    });
+  }
+
+  disconnectLiveHost(input: LiveHostConnectionCoordinate & {
+    updatedAtMs: number;
+    guard: () => void;
+  }): LiveHostControlResult {
+    const coordinate = parseLiveHostConnectionCoordinate(input);
+    const updatedAtMs = parseHostControlTimestamp(input.updatedAtMs, "host disconnect time");
+    return this.tx(() => {
+      const snapshot = readLiveHostControl(this.db);
+      if (snapshot === null) return liveHostRefusal("not-provisioned");
+      const mismatch = compareConfiguredCoordinate(snapshot, coordinate);
+      if (mismatch !== null) return liveHostRefusal(mismatch);
+      if (snapshot.registeredInstanceId !== coordinate.instanceId) {
+        return liveHostRefusal("wrong-instance");
+      }
+      if (snapshot.registeredConnectionId !== coordinate.connectionId) {
+        return liveHostRefusal("wrong-connection");
+      }
+      if (snapshot.transition !== null) {
+        return liveHostRefusal(
+          snapshot.transition.phase === "draining" ? "draining" : "busy-transition",
+        );
+      }
+      if (snapshot.admissionState !== "open") return liveHostRefusal("closed");
+      input.guard();
+      this.db
+        .prepare(
+          `UPDATE ${SESSION_HOST_CONTROL_TABLE}
+           SET admission_state = 'closed', registered_connection_id = NULL,
+               last_completed_transition_id = NULL, updated_at_ms = ?
+           WHERE singleton_id = 1`,
+        )
+        .run(updatedAtMs);
+      return liveHostSuccess(readRequiredLiveHostControl(this.db));
+    });
+  }
+
+  beginLiveHostTransition(input: BeginLiveHostTransitionInput): LiveHostControlResult {
+    const from = parseLiveHostConnectionCoordinate(input.from);
+    const toMode = parseHostMode(input.toMode);
+    const toHostId = parseHostControlIdentifier(input.toHostId, "target host ID");
+    const transitionId = parseHostControlIdentifier(input.transitionId, "transition ID");
+    const startedAtMs = parseHostControlTimestamp(input.startedAtMs, "transition start time");
+    return this.tx(() => {
+      const snapshot = readLiveHostControl(this.db);
+      if (snapshot === null) return liveHostRefusal("not-provisioned");
+      const mismatch = compareConfiguredCoordinate(snapshot, from);
+      if (mismatch !== null) return liveHostRefusal(mismatch);
+      if (snapshot.registeredInstanceId !== from.instanceId) {
+        return liveHostRefusal("wrong-instance");
+      }
+      if (snapshot.registeredConnectionId !== from.connectionId) {
+        return liveHostRefusal("wrong-connection");
+      }
+      if (snapshot.transition !== null) return liveHostRefusal("busy-transition");
+      if (snapshot.admissionState !== "open") return liveHostRefusal("closed");
+      if (toMode === snapshot.configuredMode) return liveHostRefusal("same-mode");
+      if (snapshot.hostEpoch === Number.MAX_SAFE_INTEGER) {
+        return liveHostRefusal("exhausted-epoch");
+      }
+      if (snapshot.lastCompletedTransitionId === transitionId) {
+        return liveHostRefusal("completed-transition-id");
+      }
+      const storedGeneration = snapshot.lastTransitionGeneration ?? 0;
+      if (storedGeneration === Number.MAX_SAFE_INTEGER) {
+        return liveHostRefusal("exhausted-transition-generation");
+      }
+      const nextGeneration = parseHostTransitionGeneration(storedGeneration + 1);
+      input.guard();
+      this.db
+        .prepare(
+          `UPDATE ${SESSION_HOST_CONTROL_TABLE}
+           SET transition_generation = ?, admission_state = 'draining',
+               transition_phase = 'draining', transition_id = ?,
+               transition_from_mode = ?, transition_from_host_id = ?,
+               transition_from_instance_id = ?, transition_from_connection_id = ?,
+               transition_from_epoch = ?, transition_to_mode = ?,
+               transition_to_host_id = ?, transition_started_at_ms = ?,
+               last_completed_transition_id = NULL, updated_at_ms = ?
+           WHERE singleton_id = 1`,
+        )
+        .run(
+          nextGeneration,
+          transitionId,
+          from.mode,
+          from.hostId,
+          from.instanceId,
+          from.connectionId,
+          from.hostEpoch,
+          toMode,
+          toHostId,
+          startedAtMs,
+          startedAtMs,
+        );
+      return liveHostSuccess(readRequiredLiveHostControl(this.db));
+    });
+  }
+
+  abortLiveHostTransition(input: {
+    transitionId: string;
+    transitionGeneration: HostTransitionGeneration;
+    updatedAtMs: number;
+  }): LiveHostControlResult {
+    const transitionId = parseHostControlIdentifier(input.transitionId, "transition ID");
+    const transitionGeneration = parseHostTransitionGeneration(input.transitionGeneration);
+    const updatedAtMs = parseHostControlTimestamp(input.updatedAtMs, "transition abort time");
+    return this.tx(() => {
+      const snapshot = readLiveHostControl(this.db);
+      if (snapshot === null) return liveHostRefusal("not-provisioned");
+      if (
+        snapshot.transition?.phase !== "draining" ||
+        snapshot.transition.transitionId !== transitionId ||
+        snapshot.transition.transitionGeneration !== transitionGeneration
+      ) {
+        return liveHostRefusal("stale-transition");
+      }
+      this.db
+        .prepare(
+          `UPDATE ${SESSION_HOST_CONTROL_TABLE}
+           SET admission_state = 'closed', registered_connection_id = NULL,
+               transition_phase = NULL, transition_id = NULL,
+               transition_from_mode = NULL, transition_from_host_id = NULL,
+               transition_from_instance_id = NULL,
+               transition_from_connection_id = NULL, transition_from_epoch = NULL,
+               transition_to_mode = NULL, transition_to_host_id = NULL,
+               transition_started_at_ms = NULL, last_completed_transition_id = NULL,
+               updated_at_ms = ?
+           WHERE singleton_id = 1`,
+        )
+        .run(updatedAtMs);
+      return liveHostSuccess(readRequiredLiveHostControl(this.db));
+    });
+  }
+
+  commitLiveHostTransitionEpoch(input: {
+    transitionId: string;
+    transitionGeneration: HostTransitionGeneration;
+    updatedAtMs: number;
+  }): LiveHostControlResult {
+    const transitionId = parseHostControlIdentifier(input.transitionId, "transition ID");
+    const transitionGeneration = parseHostTransitionGeneration(input.transitionGeneration);
+    const updatedAtMs = parseHostControlTimestamp(input.updatedAtMs, "transition commit time");
+    return this.tx(() => {
+      const snapshot = readLiveHostControl(this.db);
+      if (snapshot === null) return liveHostRefusal("not-provisioned");
+      if (
+        snapshot.transition?.phase !== "draining" ||
+        snapshot.transition.transitionId !== transitionId ||
+        snapshot.transition.transitionGeneration !== transitionGeneration
+      ) {
+        return liveHostRefusal("stale-transition");
+      }
+      if (snapshot.hostEpoch === Number.MAX_SAFE_INTEGER) {
+        return liveHostRefusal("exhausted-epoch");
+      }
+      const nextEpoch = nextHostEpoch(snapshot.hostEpoch);
+      this.db
+        .prepare(
+          `UPDATE ${SESSION_HOST_CONTROL_TABLE}
+           SET configured_mode = transition_to_mode,
+               configured_host_id = transition_to_host_id, host_epoch = ?,
+               admission_state = 'closed', registered_instance_id = NULL,
+               registered_connection_id = NULL, transition_phase = 'activating',
+               updated_at_ms = ?
+           WHERE singleton_id = 1`,
+        )
+        .run(nextEpoch, updatedAtMs);
+      return liveHostSuccess(readRequiredLiveHostControl(this.db));
+    });
+  }
+
+  activateLiveHostTransition(input: ActivateLiveHostTransitionInput): LiveHostControlResult {
+    const transitionGeneration = parseHostTransitionGeneration(input.transitionGeneration);
+    const transitionId = parseHostControlIdentifier(input.transitionId, "transition ID");
+    const transitionFromEpoch = parseHostEpoch(input.transitionFromEpoch);
+    const coordinate = parseLiveHostConnectionCoordinate(input);
+    const updatedAtMs = parseHostControlTimestamp(input.updatedAtMs, "host activation time");
+    return this.tx(() => {
+      const snapshot = readLiveHostControl(this.db);
+      if (snapshot === null) return liveHostRefusal("not-provisioned");
+      if (
+        snapshot.transition === null &&
+        snapshot.admissionState === "open" &&
+        snapshot.lastCompletedTransitionId === transitionId &&
+        snapshot.lastTransitionGeneration === transitionGeneration &&
+        snapshot.configuredMode === coordinate.mode &&
+        snapshot.configuredHostId === coordinate.hostId &&
+        snapshot.hostEpoch === coordinate.hostEpoch &&
+        snapshot.hostEpoch === transitionFromEpoch + 1 &&
+        snapshot.registeredInstanceId === coordinate.instanceId &&
+        snapshot.registeredConnectionId === coordinate.connectionId
+      ) {
+        input.guard();
+        return liveHostSuccess(snapshot);
+      }
+      if (snapshot.transition?.phase !== "activating") {
+        return liveHostRefusal(
+          snapshot.transition === null ? "stale-transition" : "busy-transition",
+        );
+      }
+      const transition = snapshot.transition;
+      if (
+        transition.transitionGeneration !== transitionGeneration ||
+        transition.transitionId !== transitionId ||
+        transition.fromEpoch !== transitionFromEpoch
+      ) {
+        return liveHostRefusal("stale-transition");
+      }
+      const mismatch = compareConfiguredCoordinate(snapshot, coordinate);
+      if (mismatch !== null) return liveHostRefusal(mismatch);
+      input.guard();
+      this.db
+        .prepare(
+          `UPDATE ${SESSION_HOST_CONTROL_TABLE}
+           SET admission_state = 'open', registered_instance_id = ?,
+               registered_connection_id = ?, transition_phase = NULL,
+               last_completed_transition_id = transition_id, transition_id = NULL,
+               transition_from_mode = NULL, transition_from_host_id = NULL,
+               transition_from_instance_id = NULL,
+               transition_from_connection_id = NULL, transition_from_epoch = NULL,
+               transition_to_mode = NULL, transition_to_host_id = NULL,
+               transition_started_at_ms = NULL, updated_at_ms = ?
+           WHERE singleton_id = 1`,
+        )
+        .run(coordinate.instanceId, coordinate.connectionId, updatedAtMs);
+      return liveHostSuccess(readRequiredLiveHostControl(this.db));
+    });
   }
 
   claimWorkspace(input: {

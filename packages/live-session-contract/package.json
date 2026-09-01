@@ -4,6 +4,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./host-control": "./src/hostControl.ts",
     "./live-object-binding": "./src/liveObjectBinding.ts",
     "./limits": "./src/limits.ts",
     "./settlement": "./src/settlement.ts"

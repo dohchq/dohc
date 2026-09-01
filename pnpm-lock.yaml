@@ -837,6 +837,9 @@ importers:
 
   services/sync-relay:
     dependencies:
+      '@dohc/live-session-contract':
+        specifier: workspace:*
+        version: link:../../packages/live-session-contract
       '@dohc/security-contract':
         specifier: workspace:*
         version: link:../../packages/security-contract
