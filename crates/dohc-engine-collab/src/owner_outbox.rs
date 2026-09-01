@@ -5,13 +5,12 @@
 //! object binding plus a base update until a configured service host returns a
 //! durable receipt for each ordered update.
 
-use dohc_engine_domain::validate_addressable_plaintext_path;
+use crate::live_object_binding::LiveObjectBinding;
 use dohc_engine_storage::{
     get_binary_blob, hex_sha256, put_binary_blob_with_sha, EngineStore, NoFaults, StorageError,
     TxnOutcome, MAX_IDENTIFIER_BYTES,
 };
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 #[derive(Debug, thiserror::Error)]
@@ -20,6 +19,8 @@ pub enum OwnerOutboxError {
     InvalidInput(&'static str),
     #[error("owner Y.Doc outbox workspace does not match the engine handle")]
     WorkspaceMismatch,
+    #[error("owner Y.Doc outbox main version does not match durable workspace state")]
+    MainVersionMismatch,
     #[error("owner Y.Doc outbox immutable binding or base changed")]
     ParentMismatch,
     #[error("owner Y.Doc outbox append key was reused with different input")]
@@ -34,57 +35,6 @@ pub enum OwnerOutboxError {
     Corrupt,
     #[error(transparent)]
     Storage(#[from] StorageError),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LiveObjectBinding {
-    pub workspace_id: String,
-    pub main_version_id: String,
-    pub object_id: String,
-    pub lineage_claim_id: String,
-    pub current_path: String,
-    pub selector_paths: Vec<String>,
-    pub restore_fence_generation: i64,
-}
-
-impl LiveObjectBinding {
-    fn normalized(mut self) -> Result<Self, OwnerOutboxError> {
-        for value in [
-            self.workspace_id.as_str(),
-            self.main_version_id.as_str(),
-            self.object_id.as_str(),
-            self.lineage_claim_id.as_str(),
-        ] {
-            if value.is_empty()
-                || value.len() > MAX_IDENTIFIER_BYTES
-                || value.bytes().any(|byte| byte.is_ascii_control())
-            {
-                return Err(OwnerOutboxError::InvalidInput(
-                    "binding identifiers must be non-empty, bounded, and contain no control bytes",
-                ));
-            }
-        }
-        if self.restore_fence_generation < 0 {
-            return Err(OwnerOutboxError::InvalidInput(
-                "restore fence generation must be non-negative",
-            ));
-        }
-        self.current_path = normalize_path(&self.current_path)?;
-        self.selector_paths = self
-            .selector_paths
-            .iter()
-            .map(|path| normalize_path(path))
-            .collect::<Result<Vec<_>, _>>()?;
-        self.selector_paths.sort();
-        self.selector_paths.dedup();
-        if self.selector_paths.is_empty() {
-            return Err(OwnerOutboxError::InvalidInput(
-                "selector paths must not be empty",
-            ));
-        }
-        Ok(self)
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -217,7 +167,10 @@ pub fn append(
     workspace_id: &str,
     input: OwnerOutboxAppendInput,
 ) -> Result<OwnerOutboxAppendResult, OwnerOutboxError> {
-    let binding = input.binding.normalized()?;
+    let binding = input
+        .binding
+        .normalized()
+        .map_err(OwnerOutboxError::InvalidInput)?;
     require_workspace(workspace_id, &binding.workspace_id)?;
     input.limits.validate()?;
     validate_identifier(
@@ -241,6 +194,18 @@ pub fn append(
     let outbox_id = outbox_id(&binding, &base_update_digest, &binding_json);
 
     let outcome = store.write_with(&NoFaults, |tx| {
+        let durable_main_version_id = tx
+            .query_row(
+                "SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1",
+                [&binding.workspace_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(read_sql)?;
+        if durable_main_version_id.as_deref() != Some(binding.main_version_id.as_str()) {
+            return Err(OwnerOutboxError::MainVersionMismatch);
+        }
+
         if let Some((
             existing_outbox_id,
             sequence,
@@ -585,7 +550,7 @@ pub fn quarantine(
     )?;
     let observed_binding = input
         .observed_binding
-        .map(LiveObjectBinding::normalized)
+        .map(|binding| binding.normalized().map_err(OwnerOutboxError::InvalidInput))
         .transpose()?;
     let observed_binding_json = observed_binding.as_ref().map(binding_json).transpose()?;
     let outcome = store.write_with(&NoFaults, |tx| {
@@ -686,11 +651,6 @@ fn parent_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ParentRow> {
     })
 }
 
-fn normalize_path(path: &str) -> Result<String, OwnerOutboxError> {
-    validate_addressable_plaintext_path(path)
-        .map_err(|_| OwnerOutboxError::InvalidInput("binding path is invalid"))
-}
-
 fn require_workspace(expected: &str, observed: &str) -> Result<(), OwnerOutboxError> {
     if expected == observed {
         Ok(())
@@ -780,8 +740,29 @@ mod tests {
 
     fn store(tag: &str) -> (ScratchDir, EngineStore) {
         let dir = ScratchDir::new_named(tag).expect("scratch");
-        let store = EngineStore::open(&dir.join("engine.db"), 1).expect("store");
+        let mut store = EngineStore::open(&dir.join("engine.db"), 1).expect("store");
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .ensure_main_version("workspace-1", "main-1", 1, &NoFaults)
+            .expect("main version");
         (dir, store)
+    }
+
+    fn durable_write_counts(store: &EngineStore) -> (i64, i64, i64) {
+        store
+            .read_with(|conn| {
+                Ok::<_, rusqlite::Error>((
+                    conn.query_row("SELECT COUNT(*) FROM owner_ydoc_outboxes", [], |row| {
+                        row.get(0)
+                    })?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM owner_ydoc_outbox_entries",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row("SELECT COUNT(*) FROM binary_blobs", [], |row| row.get(0))?,
+                ))
+            })
+            .expect("durable write counts")
     }
 
     fn binding() -> LiveObjectBinding {
@@ -817,6 +798,33 @@ mod tests {
             journal_cursor: entry.sequence,
             accepting_host_epoch: "host-epoch-1".to_owned(),
         }
+    }
+
+    #[test]
+    fn mismatched_durable_main_version_refuses_without_writes() {
+        let (_dir, mut store) = store("owner-outbox-main-version-mismatch");
+        let before = durable_write_counts(&store);
+        let mut mismatched = input("key-1", b"one", 10);
+        mismatched.binding.main_version_id = "other-main".to_owned();
+
+        assert!(matches!(
+            append(&mut store, "workspace-1", mismatched),
+            Err(OwnerOutboxError::MainVersionMismatch)
+        ));
+        assert_eq!(durable_write_counts(&store), before);
+    }
+
+    #[test]
+    fn absent_durable_main_version_refuses_without_writes() {
+        let dir = ScratchDir::new_named("owner-outbox-main-version-absent").expect("scratch");
+        let mut store = EngineStore::open(&dir.join("engine.db"), 1).expect("store");
+        let before = durable_write_counts(&store);
+
+        assert!(matches!(
+            append(&mut store, "workspace-1", input("key-1", b"one", 10)),
+            Err(OwnerOutboxError::MainVersionMismatch)
+        ));
+        assert_eq!(durable_write_counts(&store), before);
     }
 
     #[test]

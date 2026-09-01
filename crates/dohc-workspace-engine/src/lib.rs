@@ -13351,6 +13351,10 @@ fn map_owner_outbox(error: OwnerOutboxError) -> WireError {
         OwnerOutboxError::WorkspaceMismatch => {
             wire(ErrorCode::InvalidParams, "owner-outbox-workspace-mismatch")
         }
+        OwnerOutboxError::MainVersionMismatch => wire(
+            ErrorCode::InvalidParams,
+            "owner-outbox-main-version-mismatch",
+        ),
         OwnerOutboxError::ParentMismatch => {
             wire(ErrorCode::InvalidParams, "owner-outbox-parent-mismatch")
         }
@@ -13902,16 +13906,20 @@ mod tests {
     const SHADOW_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     fn owner_outbox_append_params(workspace_id: &str, append_key: &str) -> Value {
+        let vectors: Value = serde_json::from_str(include_str!(
+            "../../../packages/live-session-contract/src/liveObjectBinding.vectors.json"
+        ))
+        .expect("shared LiveObjectBinding vectors");
+        let mut binding = vectors["accepted"]
+            .as_array()
+            .expect("accepted binding vectors")
+            .iter()
+            .find(|row| row["name"] == "canonical-binding")
+            .expect("canonical binding vector")["input"]
+            .clone();
+        binding["workspaceId"] = json!(workspace_id);
         json!({
-            "binding": {
-                "workspaceId": workspace_id,
-                "mainVersionId": "main",
-                "objectId": "object-1",
-                "lineageClaimId": "lineage-1",
-                "currentPath": "notes/owner.md",
-                "selectorPaths": ["notes/owner.md"],
-                "restoreFenceGeneration": 0
-            },
+            "binding": binding,
             "baseUpdateBase64": base64::engine::general_purpose::STANDARD.encode(b"base"),
             "appendKey": append_key,
             "updateBase64": base64::engine::general_purpose::STANDARD.encode(b"update"),
@@ -13920,6 +13928,58 @@ mod tests {
                 "maxPendingAgeMs": 1_000
             }
         })
+    }
+
+    #[test]
+    fn owner_outbox_main_version_mismatch_has_a_distinct_wire_refusal() {
+        let mapped = map_owner_outbox(OwnerOutboxError::MainVersionMismatch);
+        assert_eq!(mapped.code, ErrorCode::InvalidParams);
+        assert_eq!(mapped.message, "owner-outbox-main-version-mismatch");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn owner_outbox_main_version_mismatch_is_refused_over_the_wire() {
+        let scratch = ScratchDir::new().expect("scratch");
+        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
+            .expect("shadow marker");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let workspace_id = "owner-outbox-main-version-wire";
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace_id,
+                    "captureMode": "none"
+                }),
+            )
+            .await
+            .expect("workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+        service
+            .versions_ensure_main(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                json!({ "workspaceId": workspace_id }),
+            )
+            .await
+            .expect("ensure durable main version");
+        let mut params = owner_outbox_append_params(workspace_id, "main-version-mismatch");
+        params["binding"]["mainVersionId"] = json!("other-main");
+
+        let error = service
+            .owner_ydoc_outbox_append(Some(handle.clone()), params)
+            .await
+            .expect_err("mismatched main version");
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+        assert_eq!(error.message, "owner-outbox-main-version-mismatch");
+        service
+            .workspace_close(Some(handle))
+            .await
+            .expect("workspace close");
     }
 
     #[test]
@@ -15889,6 +15949,14 @@ mod tests {
             .expect("workspace open");
         let handle: WorkspaceHandle =
             serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+        service
+            .versions_ensure_main(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                json!({ "workspaceId": "owner-outbox-session-barrier" }),
+            )
+            .await
+            .expect("ensure durable main version");
         let open = service.open(Some(&handle)).expect("open workspace");
         let held = Arc::clone(&open.session_ops).lock_owned().await;
 
@@ -15953,6 +16021,14 @@ mod tests {
             .expect("workspace open");
         let handle: WorkspaceHandle =
             serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+        service
+            .versions_ensure_main(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                json!({ "workspaceId": "owner-outbox-close-race" }),
+            )
+            .await
+            .expect("ensure durable main version");
 
         let appending_service = Arc::clone(&service);
         let appending_handle = handle.clone();

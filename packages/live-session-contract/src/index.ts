@@ -1,4 +1,11 @@
 export {
+  LIVE_OBJECT_BINDING_IDENTIFIER_MAX_BYTES,
+  LIVE_OBJECT_BINDING_PATH_MAX_BYTES,
+  LIVE_OBJECT_BINDING_SELECTOR_PATH_MAX_COUNT,
+  parseLiveObjectBinding,
+  type LiveObjectBinding,
+} from "./liveObjectBinding.js";
+export {
   LIVE_MARKDOWN_MAX_BYTES,
   exceedsLiveMarkdownLimit,
   exceedsUtf8Bytes,

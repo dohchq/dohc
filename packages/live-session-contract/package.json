@@ -4,6 +4,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./live-object-binding": "./src/liveObjectBinding.ts",
     "./limits": "./src/limits.ts",
     "./settlement": "./src/settlement.ts"
   },
@@ -11,7 +12,12 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "@dohc/security-contract": "workspace:*",
+    "@dohc/workspace-core": "workspace:*"
+  },
   "devDependencies": {
+    "@types/node": "^24.13.3",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
   }

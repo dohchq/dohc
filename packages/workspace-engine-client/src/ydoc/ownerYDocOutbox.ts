@@ -1,8 +1,12 @@
-import { validateUserWritePath } from "@dohc/workspace-core/paths";
+import { parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
+import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import type { DaemonRequesterClient } from "../live/daemonLiveAdapter";
 import { WorkspaceDaemonRequester } from "../live/daemonLiveAdapter";
 import type { WorkspaceHandle } from "./generated/WorkspaceHandle";
 import type { JsonValue } from "./generated/serde_json/JsonValue";
+
+export { parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
+export type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 
 export const OWNER_YDOC_OUTBOX_METHOD = {
   append: "ydoc.ownerOutbox.append",
@@ -10,16 +14,6 @@ export const OWNER_YDOC_OUTBOX_METHOD = {
   acknowledge: "ydoc.ownerOutbox.acknowledge",
   quarantine: "ydoc.ownerOutbox.quarantine",
 } as const;
-
-export interface LiveObjectBinding {
-  readonly workspaceId: string;
-  readonly mainVersionId: string;
-  readonly objectId: string;
-  readonly lineageClaimId: string;
-  readonly currentPath: string;
-  readonly selectorPaths: readonly string[];
-  readonly restoreFenceGeneration: number;
-}
 
 export interface OwnerYDocOutboxLimits {
   readonly maxPendingBytes: number;
@@ -129,63 +123,6 @@ function base64ToBytes(value: unknown, name: string): Uint8Array {
   return new Uint8Array(Buffer.from(value, "base64"));
 }
 
-function normalizeBinding(binding: LiveObjectBinding): LiveObjectBinding {
-  for (const [name, value] of [
-    ["workspaceId", binding.workspaceId],
-    ["mainVersionId", binding.mainVersionId],
-    ["objectId", binding.objectId],
-    ["lineageClaimId", binding.lineageClaimId],
-  ] as const) {
-    if (typeof value !== "string" || value.length === 0) {
-      throw new TypeError(`${name} must be a non-empty string.`);
-    }
-  }
-  if (
-    !Number.isSafeInteger(binding.restoreFenceGeneration) ||
-    binding.restoreFenceGeneration < 0
-  ) {
-    throw new TypeError(
-      "restoreFenceGeneration must be a non-negative safe integer.",
-    );
-  }
-  const current = validateUserWritePath(binding.currentPath);
-  if (!current.ok) {
-    throw new TypeError(`currentPath is invalid (${current.reason}).`);
-  }
-  const selectorPaths = [...new Set(binding.selectorPaths.map((path) => {
-    const candidate = validateUserWritePath(path);
-    if (!candidate.ok) {
-      throw new TypeError(`selectorPaths contains an invalid path (${candidate.reason}).`);
-    }
-    return candidate.normalized;
-  }))].sort();
-  if (selectorPaths.length === 0) {
-    throw new TypeError("selectorPaths must contain at least one path.");
-  }
-  return {
-    ...binding,
-    currentPath: current.normalized,
-    selectorPaths,
-  };
-}
-
-function decodeBinding(value: unknown): LiveObjectBinding {
-  const raw = record(value, "binding");
-  const selectorPaths = raw.selectorPaths;
-  if (!Array.isArray(selectorPaths) || !selectorPaths.every((path) => typeof path === "string")) {
-    throw new TypeError("selectorPaths must be an array of strings.");
-  }
-  return normalizeBinding({
-    workspaceId: stringField(raw, "workspaceId"),
-    mainVersionId: stringField(raw, "mainVersionId"),
-    objectId: stringField(raw, "objectId"),
-    lineageClaimId: stringField(raw, "lineageClaimId"),
-    currentPath: stringField(raw, "currentPath"),
-    selectorPaths,
-    restoreFenceGeneration: wireInteger(raw, "restoreFenceGeneration"),
-  });
-}
-
 function assertLimits(limits: OwnerYDocOutboxLimits): void {
   for (const [name, value] of [
     ["maxPendingBytes", limits.maxPendingBytes],
@@ -231,7 +168,7 @@ export class OwnerYDocOutbox {
 
   async append(input: OwnerYDocOutboxAppendInput): Promise<OwnerYDocOutboxAppendResult> {
     this.assertLive();
-    const binding = normalizeBinding(input.binding);
+    const binding = parseLiveObjectBinding(input.binding);
     assertLimits(input.limits);
     if (input.baseUpdate.byteLength === 0 || input.update.byteLength === 0) {
       throw new TypeError("baseUpdate and update must be non-empty.");
@@ -280,7 +217,7 @@ export class OwnerYDocOutbox {
     const observed = raw.observedBinding;
     return {
       outboxId: stringField(raw, "outboxId"),
-      binding: decodeBinding(raw.binding),
+      binding: parseLiveObjectBinding(raw.binding),
       baseUpdateDigest: stringField(raw, "baseUpdateDigest"),
       baseUpdate: base64ToBytes(raw.baseUpdateBase64, "baseUpdateBase64"),
       state: state(raw.state),
@@ -302,7 +239,8 @@ export class OwnerYDocOutbox {
         };
       }),
       quarantineReason: nullableString(raw.quarantineReason, "quarantineReason"),
-      observedBinding: observed === null ? null : decodeBinding(observed),
+      observedBinding:
+        observed === null ? null : parseLiveObjectBinding(observed),
     };
   }
 
@@ -339,7 +277,11 @@ export class OwnerYDocOutbox {
         reason: input.reason,
         ...(input.observedBinding === undefined
           ? {}
-          : { observedBinding: normalizeBinding(input.observedBinding) }),
+          : {
+              observedBinding: parseLiveObjectBinding(
+                input.observedBinding,
+              ),
+            }),
       } as unknown as JsonValue,
       { workspace: this.workspace },
     );
