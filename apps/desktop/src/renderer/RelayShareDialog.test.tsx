@@ -2852,6 +2852,153 @@ describe("RelayShareDialog", () => {
     expect(within(row).queryByText(staleBody)).toBeNull();
   });
 
+  it("keeps the last good owner comment and revision when activity reuses its id", async () => {
+    const conflict = controllable<DiscussionActivity>();
+    const original = namedComment("message-1", "Original");
+    const forged = namedComment("message-1", "Forged");
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("link-1", { shareId: "share-1" })],
+    });
+    bridgeMock.listRelayShareDiscussion.mockResolvedValue(
+      discussionPage([original], { activityRevision: 1 }),
+    );
+    bridgeMock.pollRelayShareDiscussionActivity
+      .mockReturnValueOnce(conflict.promise)
+      .mockImplementation(() => new Promise(() => {}));
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await openOwnerComments(user, "share-1");
+
+    expect(await within(group).findByText("Original")).toBeTruthy();
+    await vi.waitFor(() => {
+      expect(bridgeMock.pollRelayShareDiscussionActivity).toHaveBeenCalledTimes(1);
+    });
+    await act(async () => {
+      conflict.resolve(
+        discussionActivity(2, {
+          messages: [forged],
+        }),
+      );
+    });
+
+    await vi.waitFor(() => {
+      expect(bridgeMock.pollRelayShareDiscussionActivity).toHaveBeenCalledTimes(2);
+    });
+    expect(within(group).getByText("Original")).toBeTruthy();
+    expect(within(group).queryByText("Forged")).toBeNull();
+    expect(bridgeMock.pollRelayShareDiscussionActivity).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ since: 1 }),
+    );
+  });
+
+  it("does not apply principal state from a rejected activity page", async () => {
+    const conflict = controllable<DiscussionActivity>();
+    const retry = controllable<DiscussionActivity>();
+    const original = linkComment("message-1", "Original", {
+      linkPrincipalId: "principal-1",
+    });
+    const forged = linkComment("message-1", "Forged", {
+      linkPrincipalId: "principal-1",
+    });
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("link-1", { shareId: "share-1" })],
+    });
+    bridgeMock.listRelayShareDiscussion.mockResolvedValue(
+      discussionPage([original], { activityRevision: 1 }),
+    );
+    bridgeMock.pollRelayShareDiscussionActivity
+      .mockReturnValueOnce(conflict.promise)
+      .mockReturnValueOnce(retry.promise)
+      .mockImplementation(() => new Promise(() => {}));
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await openOwnerComments(user, "share-1");
+    const row = await within(group).findByTestId("share-comment-message-1");
+    expect(within(row).queryByRole("button", { name: "Block" }) !== null).toBe(
+      true,
+    );
+
+    await act(async () => {
+      conflict.resolve(
+        discussionActivity(2, {
+          messages: [forged],
+          principals: [{ principalId: "principal-1", blocked: true }],
+        }),
+      );
+    });
+    await vi.waitFor(() => {
+      expect(bridgeMock.pollRelayShareDiscussionActivity).toHaveBeenCalledTimes(2);
+    });
+    expect(bridgeMock.pollRelayShareDiscussionActivity).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ since: 1 }),
+    );
+    await act(async () => {
+      retry.resolve(discussionActivity(2));
+    });
+    await vi.waitFor(() => {
+      expect(bridgeMock.pollRelayShareDiscussionActivity).toHaveBeenCalledTimes(3);
+    });
+
+    expect(within(row).queryByRole("button", { name: "Block" }) !== null).toBe(
+      true,
+    );
+    expect(within(row).queryByRole("button", { name: "Unblock" })).toBeNull();
+  });
+
+  it("keeps the last good window when a full read conflicts on an existing id", async () => {
+    const original = namedComment("message-1", "Original");
+    const forged = namedComment("message-1", "Forged");
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("link-1", { shareId: "share-1" })],
+    });
+    bridgeMock.listRelayShareDiscussion
+      .mockResolvedValueOnce(
+        discussionPage([original], { activityRevision: 1 }),
+      )
+      .mockResolvedValueOnce(
+        discussionPage([forged], { activityRevision: 2 }),
+      );
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await openOwnerComments(user, "share-1");
+    expect(await within(group).findByText("Original")).toBeTruthy();
+
+    await user.click(within(group).getByRole("button", { name: "Comments" }));
+    await user.click(within(group).getByRole("button", { name: "Comments" }));
+
+    await vi.waitFor(() => {
+      expect(bridgeMock.listRelayShareDiscussion).toHaveBeenCalledTimes(2);
+    });
+    expect(within(group).queryByText("Couldn't load comments.") !== null).toBe(
+      true,
+    );
+    expect(within(group).queryByText("Original") !== null).toBe(true);
+    expect(within(group).queryByText("Forged")).toBeNull();
+  });
+
   it.each([
     {
       label: "more than 2,000 normalized code points",

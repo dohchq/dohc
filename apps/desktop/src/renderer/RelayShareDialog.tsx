@@ -231,16 +231,29 @@ function emptyOwnerDiscussion(): OwnerDiscussionState {
 function mergeDiscussionMessages(
   current: RelayShareDiscussionMessage[],
   incoming: RelayShareDiscussionMessage[],
-): RelayShareDiscussionMessage[] {
+): RelayShareDiscussionMessage[] | null {
+  const merged = [...current];
   const byId = new Map(
-    current.map((message) => [message.messageId, message] as const),
+    merged.map((message) => [message.messageId, message] as const),
   );
   for (const message of incoming) {
     const existing = byId.get(message.messageId);
-    if (existing?.deleted && !message.deleted) continue;
+    if (existing === undefined) {
+      byId.set(message.messageId, message);
+      merged.push(message);
+      continue;
+    }
+    if (!sameDiscussionMessageIdentity(existing, message)) return null;
+    if (!existing.deleted && !message.deleted && existing.body !== message.body) {
+      return null;
+    }
+    if (existing.deleted && !message.deleted) continue;
+    const index = merged.indexOf(existing);
+    if (index === -1) return null;
+    merged[index] = message;
     byId.set(message.messageId, message);
   }
-  return [...byId.values()].sort(
+  return merged.sort(
     (left, right) =>
       left.createdAtMs - right.createdAtMs ||
       (left.messageId < right.messageId
@@ -249,6 +262,52 @@ function mergeDiscussionMessages(
           ? 1
           : 0),
   );
+}
+
+function sameDiscussionMessageIdentity(
+  left: RelayShareDiscussionMessage,
+  right: RelayShareDiscussionMessage,
+): boolean {
+  if (
+    left.messageId !== right.messageId ||
+    left.createdAtMs !== right.createdAtMs ||
+    left.author.kind !== right.author.kind ||
+    left.author.displayName !== right.author.displayName
+  ) {
+    return false;
+  }
+  if (left.author.kind === "named") return right.author.kind === "named";
+  return (
+    right.author.kind === "link" &&
+    "moderation" in left &&
+    "moderation" in right &&
+    left.author.unverified === right.author.unverified &&
+    left.moderation.linkGrantId === right.moderation.linkGrantId &&
+    left.moderation.linkPrincipalId === right.moderation.linkPrincipalId
+  );
+}
+
+function reconcileDiscussionWindowMessages(
+  current: RelayShareDiscussionMessage[],
+  incoming: RelayShareDiscussionMessage[],
+): RelayShareDiscussionMessage[] | null {
+  const authoritative = mergeDiscussionMessages([], incoming);
+  if (authoritative === null) return null;
+  const currentById = new Map(
+    current.map((message) => [message.messageId, message] as const),
+  );
+  const reconciled: RelayShareDiscussionMessage[] = [];
+  for (const message of authoritative) {
+    const existing = currentById.get(message.messageId);
+    if (existing === undefined) {
+      reconciled.push(message);
+      continue;
+    }
+    const merged = mergeDiscussionMessages([existing], [message]);
+    if (merged === null || merged.length !== 1) return null;
+    reconciled.push(merged[0]!);
+  }
+  return reconciled;
 }
 
 function applyDiscussionPrincipalOverrides(
@@ -397,6 +456,9 @@ export function RelayShareDialog(props: {
   const pendingDiscussionReconciliationByShareId = useRef(new Set<string>());
   const latestActivityGenerationByShareId = useRef(new Map<string, number>());
   const ownerActivityByShareId = useRef(new Map<string, OwnerActivityControl>());
+  const ownerDiscussionMessagesByShareId = useRef(
+    new Map<string, RelayShareDiscussionMessage[]>(),
+  );
   const expandedOwnerShareIdsRef = useRef(new Set<string>());
   const latestOwnerAppendRequest = useRef(0);
   const latestOwnerMutationRequest = useRef(0);
@@ -499,6 +561,7 @@ export function RelayShareDialog(props: {
     activeOwnerMutationShareId.current = null;
     eligibleShareIdsRef.current = new Set();
     expandedOwnerShareIdsRef.current = new Set();
+    ownerDiscussionMessagesByShareId.current.clear();
     setLinkBusy(false);
     setLinkRequestBusy(null);
     setLinkAccess("view");
@@ -534,6 +597,7 @@ export function RelayShareDialog(props: {
       activeOwnerMutationShareId.current = null;
       eligibleShareIdsRef.current = new Set();
       expandedOwnerShareIdsRef.current = new Set();
+      ownerDiscussionMessagesByShareId.current.clear();
     };
   }, [linkScope]);
 
@@ -573,6 +637,7 @@ export function RelayShareDialog(props: {
       if (!nextEligible.has(shareId)) {
         invalidateDiscussionRequest(shareId);
         expandedOwnerShareIdsRef.current.delete(shareId);
+        ownerDiscussionMessagesByShareId.current.delete(shareId);
         stopOwnerActivity(shareId);
       }
     }
@@ -776,21 +841,32 @@ export function RelayShareDialog(props: {
       ) {
         throw new Error("Invalid discussion activity cursor");
       }
+      const principalBlockedById = new Map(control.principalBlockedById);
       for (const principal of result.principals) {
-        control.principalBlockedById.set(
+        principalBlockedById.set(
           principal.principalId,
           principal.blocked,
         );
       }
 
+      const mergedMessages = mergeDiscussionMessages(
+        ownerDiscussionMessagesByShareId.current.get(control.shareId) ?? [],
+        result.messages,
+      );
+      if (mergedMessages === null) {
+        throw new Error("Invalid discussion activity messages");
+      }
+      const messages = applyDiscussionPrincipalOverrides(
+        mergedMessages,
+        principalBlockedById,
+      );
+      control.principalBlockedById = principalBlockedById;
+      ownerDiscussionMessagesByShareId.current.set(control.shareId, messages);
+
       updateOwnerDiscussion(control.shareId, (current) => {
         if (!isCurrentOwnerActivity(control) || !current.expanded) {
           return current;
         }
-        const messages = applyDiscussionPrincipalOverrides(
-          mergeDiscussionMessages(current.messages, result.messages),
-          control.principalBlockedById,
-        );
         return {
           ...current,
           activityRevision: result.cursorRevision,
@@ -885,21 +961,34 @@ export function RelayShareDialog(props: {
       if (!isCurrentDiscussionRequest(scopeGeneration, requestId, shareId)) {
         return;
       }
+      const currentMessages =
+        ownerDiscussionMessagesByShareId.current.get(shareId) ?? [];
+      const pageMessages =
+        cursor === undefined
+          ? reconcileDiscussionWindowMessages(currentMessages, result.messages)
+          : mergeDiscussionMessages([], result.messages);
+      if (pageMessages === null) {
+        throw new Error("Invalid discussion messages");
+      }
+      const mergedMessages =
+        cursor === undefined
+          ? pageMessages
+          : mergeDiscussionMessages(pageMessages, currentMessages);
+      if (mergedMessages === null) {
+        throw new Error("Invalid discussion messages");
+      }
+      const activityControl = ownerActivityByShareId.current.get(shareId);
+      const messages =
+        cursor !== undefined &&
+        activityControl !== undefined &&
+        isCurrentOwnerActivity(activityControl)
+          ? applyDiscussionPrincipalOverrides(
+              mergedMessages,
+              activityControl.principalBlockedById,
+            )
+          : mergedMessages;
+      ownerDiscussionMessagesByShareId.current.set(shareId, messages);
       updateOwnerDiscussion(shareId, (current) => {
-        const mergedMessages =
-          cursor === undefined
-            ? mergeDiscussionMessages([], result.messages)
-            : mergeDiscussionMessages(result.messages, current.messages);
-        const activityControl = ownerActivityByShareId.current.get(shareId);
-        const messages =
-          cursor !== undefined &&
-          activityControl !== undefined &&
-          isCurrentOwnerActivity(activityControl)
-            ? applyDiscussionPrincipalOverrides(
-                mergedMessages,
-                activityControl.principalBlockedById,
-              )
-            : mergedMessages;
         return {
           ...current,
           loaded: true,
@@ -1030,9 +1119,17 @@ export function RelayShareDialog(props: {
       ) {
         return;
       }
+      const messages = mergeDiscussionMessages(
+        ownerDiscussionMessagesByShareId.current.get(shareId) ?? [],
+        [result.message],
+      );
+      if (messages === null) {
+        throw new Error("Invalid discussion append message");
+      }
+      ownerDiscussionMessagesByShareId.current.set(shareId, messages);
       updateOwnerDiscussion(shareId, (current) => ({
         ...current,
-        messages: mergeDiscussionMessages(current.messages, [result.message]),
+        messages,
         draft: "",
         appendIntent: null,
         appendError: false,
