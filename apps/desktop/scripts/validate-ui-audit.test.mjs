@@ -52,7 +52,7 @@ test("runs the inherited pnpm JavaScript CLI without a shell", () => {
 
 test("refuses to fall back to a shell or another package manager", () => {
   assert.throws(
-    () => pnpmInvocation(["--version"], { pnpmCli: undefined }),
+    () => pnpmInvocation(["--version"], { pnpmCli: "" }),
     /through its pnpm package script/,
   );
   assert.throws(
