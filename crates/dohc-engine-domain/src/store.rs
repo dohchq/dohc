@@ -2034,8 +2034,7 @@ pub fn ensure_main_version_in_tx(
     validate_identifier(main_version_id, "version_id")?;
 
     if let Some(existing_main) = workspace_main_version_id(tx, workspace_id)? {
-        return get_version(tx, workspace_id, &existing_main)?
-            .ok_or(DomainError::VersionNotFound);
+        return get_version(tx, workspace_id, &existing_main)?.ok_or(DomainError::VersionNotFound);
     }
 
     tx.execute(

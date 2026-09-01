@@ -75,10 +75,10 @@ use dohc_engine_domain::{
     derive_capture_object_id, enqueue_binary_delete, enqueue_binary_rename, enqueue_write,
     ensure_main_version_in_tx, fork_version_keyless_with, get_collection, get_collection_record,
     get_secret_moment_keyless, has_secret_state, insert_text_conflict_if_absent,
-    is_collection_record_bound_in_tx,
-    list_collections, list_pending_collection_adoptions, list_secret_files_keyless,
-    list_secret_files_keyless_page, list_secret_moments_in_time_window_keyless,
-    list_secret_moments_page_keyless, query_collection_records, reconcile_collections_in_tx,
+    is_collection_record_bound_in_tx, list_collections, list_pending_collection_adoptions,
+    list_secret_files_keyless, list_secret_files_keyless_page,
+    list_secret_moments_in_time_window_keyless, list_secret_moments_page_keyless,
+    query_collection_records, reconcile_collections_in_tx,
     restore_secret_file_verbatim_with_metadata_and_after, rollback_compensating_moment_id,
     secret_file_len_keyless, select_snapshot_by_path_in_tx, set_collection_adoption_state_in_tx,
     synchronize_collection_frontmatter_index_in_tx, validate_addressable_plaintext_path,
@@ -14731,12 +14731,7 @@ fn capture_ingest_batch_on_store(
 
     let outcome = store.write_with(faults, |tx| {
         if bootstrap_main {
-            ensure_main_version_in_tx(
-                tx,
-                &first.workspace_id,
-                &first.version_id,
-                first.now_ms,
-            )?;
+            ensure_main_version_in_tx(tx, &first.workspace_id, &first.version_id, first.now_ms)?;
         }
         if token.is_cancelled() {
             return Err(RuntimeError::Cancelled);
@@ -16224,8 +16219,8 @@ mod capture_secret_root_guard_tests {
     use super::*;
     use crate::WorkspaceSupervisor;
     use dohc_engine_testkit::ScratchDir;
-    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::Condvar;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::time::Duration;
 
     const WORKSPACE_ID: &str = "workspace";
