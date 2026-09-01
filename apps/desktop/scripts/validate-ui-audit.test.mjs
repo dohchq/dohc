@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -15,6 +16,7 @@ import {
   readUiAuditBuildProvenance,
   writeUiAuditBuildProvenance,
 } from "./ui-audit-build-provenance.mjs";
+import { pnpmInvocation } from "./pnpm-invocation.mjs";
 
 const COMMIT = "a".repeat(40);
 const BUNDLES = {
@@ -29,6 +31,47 @@ const BUILD = {
   builtAt: "2026-08-30T03:59:00.000Z",
   bundles: BUNDLES,
 };
+
+test("runs the inherited pnpm JavaScript CLI without a shell", () => {
+  assert.deepEqual(
+    pnpmInvocation(["--filter", "@dohc/desktop", "build"], {
+      nodeExecutable: "/Program Files/node",
+      pnpmCli: "/Package Tools/pnpm.mjs",
+    }),
+    {
+      command: "/Program Files/node",
+      args: [
+        "/Package Tools/pnpm.mjs",
+        "--filter",
+        "@dohc/desktop",
+        "build",
+      ],
+    },
+  );
+});
+
+test("refuses to fall back to a shell or another package manager", () => {
+  assert.throws(
+    () => pnpmInvocation(["--version"], { pnpmCli: undefined }),
+    /through its pnpm package script/,
+  );
+  assert.throws(
+    () => pnpmInvocation(["--version"], { pnpmCli: "/tools/npm-cli.js" }),
+    /through its pnpm package script/,
+  );
+});
+
+test(
+  "the inherited pnpm CLI is directly executable by Node",
+  { skip: !process.env.npm_execpath },
+  () => {
+    const invocation = pnpmInvocation(["--version"]);
+    const result = spawnSync(invocation.command, invocation.args, { encoding: "utf8" });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout.trim(), /^11\.20\.0$/);
+  },
+);
 
 function pngHeader(width, height) {
   const bytes = Buffer.alloc(24);

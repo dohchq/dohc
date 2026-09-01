@@ -8,11 +8,11 @@ import {
   currentUiAuditBundles,
   writeUiAuditBuildProvenance,
 } from "./ui-audit-build-provenance.mjs";
+import { pnpmInvocation } from "./pnpm-invocation.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = resolve(scriptDir, "..");
 const repoRoot = resolve(desktopRoot, "../..");
-const pnpm = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
 
 function git(args) {
   return execFileSync("git", args, { cwd: repoRoot, encoding: "utf8" }).trim();
@@ -30,6 +30,11 @@ function run(command, args, env = process.env) {
   }
 }
 
+function runPnpm(args) {
+  const invocation = pnpmInvocation(args);
+  run(invocation.command, invocation.args);
+}
+
 if (!process.env.UI_AUDIT_SHOT_DIR?.trim()) {
   throw new Error("set UI_AUDIT_SHOT_DIR to an empty output directory");
 }
@@ -38,8 +43,8 @@ if (git(["status", "--porcelain"]) !== "") {
   throw new Error("commit the worktree before building UI audit evidence");
 }
 
-run(pnpm, ["--filter", "@dohc/desktop", "build:engine"]);
-run(pnpm, ["--filter", "@dohc/desktop", "build"]);
+runPnpm(["--filter", "@dohc/desktop", "build:engine"]);
+runPnpm(["--filter", "@dohc/desktop", "build"]);
 const stagedEngine = join(
   desktopRoot,
   "resources/workspace-engine",
