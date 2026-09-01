@@ -374,8 +374,16 @@ test("@ui-audit capture baseline screenshots", async () => {
     await page
       .getByTestId("properties-panel")
       .waitFor({ state: "visible", timeout: 5_000 });
-    await expect(page.getByTestId("property-key").first()).toHaveValue("status");
-    await expect(page.getByTestId("property-value").first()).toHaveValue("In progress");
+    const propertyKeys = page.getByTestId("property-key");
+    await expect(propertyKeys).toHaveCount(3);
+    const propertyNames = await propertyKeys.evaluateAll((inputs) =>
+      inputs.map((input) => (input as HTMLInputElement).value),
+    );
+    const statusIndex = propertyNames.indexOf("status");
+    expect(statusIndex).toBeGreaterThanOrEqual(0);
+    await expect(page.getByTestId("property-value").nth(statusIndex)).toHaveValue(
+      "In progress",
+    );
     await page.waitForTimeout(500);
     await shot(page, "20-properties-panel-light");
     if (
