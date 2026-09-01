@@ -3,12 +3,12 @@ import { join } from "node:path";
 import { expect, it } from "vitest";
 import * as Y from "yjs";
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
+import type { LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import {
   OwnerYDocOutbox,
   type DaemonRequesterClient,
   type LiveObjectBinding,
-  type OwnerYDocDeliveryReceipt,
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
@@ -76,7 +76,7 @@ class FakeOwnerHost implements OwnerYDocDelivery {
   readonly authorityEpochs: number[] = [];
   readonly doc = new Y.Doc();
   authorityCalls = 0;
-  readonly receipts = new Map<string, OwnerYDocDeliveryReceipt>();
+  readonly receipts = new Map<string, LiveUpdateReceipt>();
 
   async freshOwnerAuthority(): Promise<{
     kind: "authority";
@@ -116,7 +116,7 @@ class FakeOwnerHost implements OwnerYDocDelivery {
       startCursor: 1,
       endCursor: 1,
     });
-    const receipt: OwnerYDocDeliveryReceipt = {
+    const receipt: LiveUpdateReceipt = {
       deliveryId: envelope.deliveryId,
       updateDigest: envelope.updateDigest,
       journalCursor: 1,

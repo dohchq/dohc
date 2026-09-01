@@ -5,6 +5,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./host-control": "./src/hostControl.ts",
+    "./live-update-admission": "./src/liveUpdateAdmission.ts",
     "./live-object-binding": "./src/liveObjectBinding.ts",
     "./limits": "./src/limits.ts",
     "./settlement": "./src/settlement.ts"

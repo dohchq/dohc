@@ -1,7 +1,7 @@
-import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
-import type { HostEpoch } from "@dohc/live-session-contract/host-control";
 import { parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
+import { parseLiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
+import type { LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
 import type { DaemonRequesterClient } from "../live/daemonLiveAdapter";
 import { WorkspaceDaemonRequester } from "../live/daemonLiveAdapter";
 import type { WorkspaceHandle } from "./generated/WorkspaceHandle";
@@ -63,13 +63,6 @@ export interface OwnerYDocOutboxPending {
   readonly entries: readonly OwnerYDocOutboxEntry[];
   readonly quarantineReason: string | null;
   readonly observedBinding: LiveObjectBinding | null;
-}
-
-export interface OwnerYDocDeliveryReceipt {
-  readonly deliveryId: string;
-  readonly updateDigest: string;
-  readonly journalCursor: number;
-  readonly acceptingHostEpoch: HostEpoch;
 }
 
 export interface OwnerYDocOutboxQuarantineInput {
@@ -147,25 +140,6 @@ function nullableString(value: unknown, name: string): string | null {
   if (value === null) return null;
   if (typeof value !== "string") throw new TypeError(`${name} must be a string or null.`);
   return value;
-}
-
-function validatedReceipt(
-  receipt: OwnerYDocDeliveryReceipt,
-): OwnerYDocDeliveryReceipt {
-  let acceptingHostEpoch: HostEpoch;
-  try {
-    acceptingHostEpoch = parseHostEpoch(receipt.acceptingHostEpoch);
-  } catch {
-    throw new TypeError("acceptingHostEpoch must be a positive safe integer.");
-  }
-  if (!Number.isSafeInteger(receipt.journalCursor) || receipt.journalCursor < 1) {
-    throw new TypeError("journalCursor must be a positive safe integer.");
-  }
-  return {
-    ...receipt,
-    acceptingHostEpoch,
-    journalCursor: receipt.journalCursor,
-  };
 }
 
 export class OwnerYDocOutbox {
@@ -267,11 +241,16 @@ export class OwnerYDocOutbox {
 
   async acknowledge(
     outboxId: string,
-    receipts: readonly OwnerYDocDeliveryReceipt[],
+    receipts: readonly LiveUpdateReceipt[],
   ): Promise<{ acknowledged: number; pendingBytes: number; oldestEntryAtMs: number | null }> {
     this.assertLive();
     if (receipts.length === 0) throw new TypeError("receipts must not be empty.");
-    const validatedReceipts = Array.from(receipts, validatedReceipt);
+    for (let index = 0; index < receipts.length; index += 1) {
+      if (!Object.hasOwn(receipts, index)) {
+        throw new TypeError("receipts must be dense.");
+      }
+    }
+    const validatedReceipts = Array.from(receipts, parseLiveUpdateReceipt);
     const raw = record(
       await this.requester.request(
         OWNER_YDOC_OUTBOX_METHOD.acknowledge,

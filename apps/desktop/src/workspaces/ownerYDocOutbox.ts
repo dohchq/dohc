@@ -1,11 +1,11 @@
 import type {
   LiveObjectBinding,
-  OwnerYDocDeliveryReceipt,
   OwnerYDocOutbox,
   OwnerYDocOutboxEntry,
   OwnerYDocOutboxLimits,
 } from "@dohc/workspace-engine-client";
 import type { HostEpoch } from "@dohc/live-session-contract/host-control";
+import type { LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
 
 export interface FreshOwnerAuthority {
   /** Opaque, attempt-scoped authority. The outbox never persists it. */
@@ -35,7 +35,7 @@ export interface OwnerYDocDeliveryEnvelope {
 }
 
 export type OwnerYDocDeliveryResult =
-  | { readonly kind: "receipt"; readonly receipt: OwnerYDocDeliveryReceipt }
+  | { readonly kind: "receipt"; readonly receipt: LiveUpdateReceipt }
   | { readonly kind: "retry" }
   | {
       readonly kind: "quarantine";

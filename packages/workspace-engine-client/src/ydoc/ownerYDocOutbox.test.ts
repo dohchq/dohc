@@ -1,13 +1,11 @@
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
+import type { LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
 import { describe, expect, it } from "vitest";
 import type { DaemonRequesterClient } from "../live/daemonLiveAdapter";
 import type { Request } from "./generated/Request";
 import type { Response } from "./generated/Response";
 import type { WorkspaceHandle } from "./generated/WorkspaceHandle";
-import {
-  OwnerYDocOutbox,
-  type OwnerYDocDeliveryReceipt,
-} from "./ownerYDocOutbox.js";
+import { OwnerYDocOutbox } from "./ownerYDocOutbox.js";
 
 const WORKSPACE = "owner-outbox-receipt-test" as WorkspaceHandle;
 const SENTINEL = new Error("invalid receipt reached sendRequest");
@@ -35,7 +33,7 @@ function receipt(
   acceptingHostEpoch: number,
   journalCursor: number,
   suffix = "1",
-): OwnerYDocDeliveryReceipt {
+): LiveUpdateReceipt {
   return {
     deliveryId: `delivery-${suffix}`,
     updateDigest: suffix.repeat(64).slice(0, 64),
@@ -120,9 +118,35 @@ describe("OwnerYDocOutbox receipt boundary", () => {
     expect(client.requests).toEqual([]);
   });
 
+  it("uses the canonical receipt parser before sendRequest", async () => {
+    const client = new RecordingRequester(true);
+    const invalid = {
+      ...receipt(1, 1),
+      updateDigest: "A".repeat(64),
+    };
+
+    await expect(outbox(client).acknowledge("outbox-1", [invalid])).rejects.toThrow(
+      TypeError,
+    );
+    expect(client.requests).toEqual([]);
+  });
+
   it("refuses a sparse receipt array before sendRequest", async () => {
     const client = new RecordingRequester(true);
-    const receipts = new Array<OwnerYDocDeliveryReceipt>(1);
+    const receipts = new Array<LiveUpdateReceipt>(1);
+
+    await expect(outbox(client).acknowledge("outbox-1", receipts)).rejects.toThrow(
+      TypeError,
+    );
+    expect(client.requests).toEqual([]);
+  });
+
+  it("refuses a receipt array whose index exists only on its prototype", async () => {
+    const client = new RecordingRequester(true);
+    const receipts = new Array<LiveUpdateReceipt>(1);
+    const prototype = Object.create(Array.prototype) as Record<string, unknown>;
+    prototype[0] = receipt(1, 1);
+    Object.setPrototypeOf(receipts, prototype);
 
     await expect(outbox(client).acknowledge("outbox-1", receipts)).rejects.toThrow(
       TypeError,

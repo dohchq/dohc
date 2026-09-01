@@ -1,0 +1,119 @@
+{
+  "literals": {
+    "identifierMaxBytes": 512,
+    "sha256HexLength": 64,
+    "yjsClientIdMax": 9007199254740991,
+    "yjsStartClockMax": 4294967294,
+    "yjsEndClockMax": 4294967295,
+    "refusals": [
+      "invalid-update",
+      "authority-refused",
+      "stale-session",
+      "stale-binding",
+      "restore-fenced",
+      "provenance-refused",
+      "baseline-missing",
+      "delivery-conflict",
+      "capacity-refused"
+    ],
+    "retries": [
+      "admission-unavailable",
+      "host-unavailable",
+      "application-pending"
+    ]
+  },
+  "accepted": [
+    {
+      "parser": "parseLiveDocumentKey",
+      "case": "canonical document key",
+      "input": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1" },
+      "expected": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1" }
+    },
+    {
+      "parser": "parseServerDerivedLiveUpdateAuthority",
+      "case": "owner authority",
+      "input": { "principalKind": "owner", "principalId": "owner-1", "grantId": null, "grantGeneration": null },
+      "expected": { "principalKind": "owner", "principalId": "owner-1", "grantId": null, "grantGeneration": null }
+    },
+    {
+      "parser": "parseServerDerivedLiveUpdateAuthority",
+      "case": "named authority",
+      "input": { "principalKind": "named", "principalId": "person-1", "grantId": "grant-1", "grantGeneration": 1 },
+      "expected": { "principalKind": "named", "principalId": "person-1", "grantId": "grant-1", "grantGeneration": 1 }
+    },
+    {
+      "parser": "parseServerDerivedLiveUpdateAuthority",
+      "case": "link authority",
+      "input": { "principalKind": "link", "principalId": "link-session-1", "grantId": "grant-1", "grantGeneration": 2 },
+      "expected": { "principalKind": "link", "principalId": "link-session-1", "grantId": "grant-1", "grantGeneration": 2 }
+    },
+    {
+      "parser": "parseLiveUpdateSubmissionMetadata",
+      "case": "canonical submission metadata",
+      "input": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1", "currentPath": "notes/a.md", "selectorPaths": ["notes/b.md", "notes/a.md"], "restoreFenceGeneration": 0 } },
+      "expected": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1", "currentPath": "notes/a.md", "selectorPaths": ["notes/a.md", "notes/b.md"], "restoreFenceGeneration": 0 } }
+    },
+    {
+      "parser": "parseLiveUpdateReceipt",
+      "case": "canonical receipt",
+      "input": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "journalCursor": 1, "acceptingHostEpoch": 2 },
+      "expected": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "journalCursor": 1, "acceptingHostEpoch": 2 }
+    },
+    {
+      "parser": "parseRelayAcceptedLiveUpdate",
+      "case": "canonical accepted record",
+      "input": { "receipt": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "journalCursor": 1, "acceptingHostEpoch": 2 }, "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1", "currentPath": "notes/a.md", "selectorPaths": ["notes/a.md"], "restoreFenceGeneration": 0 }, "authority": { "principalKind": "named", "principalId": "person-1", "grantId": "grant-1", "grantGeneration": 1 }, "receivedAtMs": 0 },
+      "expected": { "receipt": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "journalCursor": 1, "acceptingHostEpoch": 2 }, "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1", "currentPath": "notes/a.md", "selectorPaths": ["notes/a.md"], "restoreFenceGeneration": 0 }, "authority": { "principalKind": "named", "principalId": "person-1", "grantId": "grant-1", "grantGeneration": 1 }, "receivedAtMs": 0 }
+    },
+    {
+      "parser": "parseLiveUpdateStructRange",
+      "case": "canonical struct range",
+      "input": { "clientId": 1, "startClock": 0, "endClock": 1 },
+      "expected": { "clientId": 1, "startClock": 0, "endClock": 1 }
+    },
+    {
+      "parser": "parseAdmittedLiveUpdateMetadata",
+      "case": "canonical admitted metadata",
+      "input": { "accepted": { "receipt": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "journalCursor": 1, "acceptingHostEpoch": 2 }, "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1", "currentPath": "notes/a.md", "selectorPaths": ["notes/a.md"], "restoreFenceGeneration": 0 }, "authority": { "principalKind": "named", "principalId": "person-1", "grantId": "grant-1", "grantGeneration": 1 }, "receivedAtMs": 0 }, "firstSeen": [{ "clientId": 1, "startClock": 0, "endClock": 1 }] },
+      "expected": { "accepted": { "receipt": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "journalCursor": 1, "acceptingHostEpoch": 2 }, "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1", "currentPath": "notes/a.md", "selectorPaths": ["notes/a.md"], "restoreFenceGeneration": 0 }, "authority": { "principalKind": "named", "principalId": "person-1", "grantId": "grant-1", "grantGeneration": 1 }, "receivedAtMs": 0 }, "firstSeen": [{ "clientId": 1, "startClock": 0, "endClock": 1 }] }
+    },
+    {
+      "parser": "parseLiveUpdateHostApplicationAck",
+      "case": "canonical application acknowledgement",
+      "input": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "journalCursor": 1, "acceptingHostEpoch": 2, "localYDocSequence": 1, "applicationReplayed": false },
+      "expected": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "journalCursor": 1, "acceptingHostEpoch": 2, "localYDocSequence": 1, "applicationReplayed": false }
+    },
+    {
+      "parser": "parseLiveUpdateAcceptResult",
+      "case": "canonical accepted result",
+      "input": { "kind": "accepted", "receipt": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "journalCursor": 1, "acceptingHostEpoch": 2 }, "replayed": true },
+      "expected": { "kind": "accepted", "receipt": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "journalCursor": 1, "acceptingHostEpoch": 2 }, "replayed": true }
+    }
+  ],
+  "refused": [
+    { "parser": "parseLiveDocumentKey", "case": "document key unknown field", "input": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1", "extra": true } },
+    { "parser": "parseServerDerivedLiveUpdateAuthority", "case": "owner with a grant", "input": { "principalKind": "owner", "principalId": "owner-1", "grantId": "grant-1", "grantGeneration": 1 } },
+    { "parser": "parseServerDerivedLiveUpdateAuthority", "case": "named without grant generation", "input": { "principalKind": "named", "principalId": "person-1", "grantId": "grant-1", "grantGeneration": null } },
+    { "parser": "parseLiveUpdateSubmissionMetadata", "case": "submission embeds update bytes", "input": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1", "currentPath": "notes/a.md", "selectorPaths": ["notes/a.md"], "restoreFenceGeneration": 0 }, "updateBase64": "AQ==" } },
+    { "parser": "parseLiveUpdateReceipt", "case": "receipt uppercase digest", "input": { "deliveryId": "delivery-1", "updateDigest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "journalCursor": 1, "acceptingHostEpoch": 2 } },
+    { "parser": "parseRelayAcceptedLiveUpdate", "case": "accepted record unknown route", "input": { "receipt": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "journalCursor": 1, "acceptingHostEpoch": 2 }, "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1", "currentPath": "notes/a.md", "selectorPaths": ["notes/a.md"], "restoreFenceGeneration": 0 }, "authority": { "principalKind": "named", "principalId": "person-1", "grantId": "grant-1", "grantGeneration": 1 }, "receivedAtMs": 0, "route": "device" } },
+    { "parser": "parseLiveUpdateStructRange", "case": "zero-length range", "input": { "clientId": 1, "startClock": 1, "endClock": 1 } },
+    { "parser": "parseAdmittedLiveUpdateMetadata", "case": "host metadata carries update", "input": { "accepted": { "receipt": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "journalCursor": 1, "acceptingHostEpoch": 2 }, "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1", "currentPath": "notes/a.md", "selectorPaths": ["notes/a.md"], "restoreFenceGeneration": 0 }, "authority": { "principalKind": "named", "principalId": "person-1", "grantId": "grant-1", "grantGeneration": 1 }, "receivedAtMs": 0 }, "firstSeen": [], "update": [1] } },
+    { "parser": "parseLiveUpdateHostApplicationAck", "case": "acknowledgement missing replay flag", "input": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "journalCursor": 1, "acceptingHostEpoch": 2, "localYDocSequence": 1 } },
+    { "parser": "parseLiveUpdateAcceptResult", "case": "unknown retry reason", "input": { "kind": "retry", "reason": "later" } }
+  ],
+  "replayIdentityConflicts": [
+    { "case": "digest differs", "changedField": "updateDigest", "original": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1", "currentPath": "notes/a.md", "selectorPaths": ["notes/a.md"], "restoreFenceGeneration": 0 }, "authority": { "principalKind": "named", "principalId": "person-1", "grantId": "grant-1", "grantGeneration": 1 } }, "conflicting": { "deliveryId": "delivery-1", "updateDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1", "currentPath": "notes/a.md", "selectorPaths": ["notes/a.md"], "restoreFenceGeneration": 0 }, "authority": { "principalKind": "named", "principalId": "person-1", "grantId": "grant-1", "grantGeneration": 1 } } },
+    { "case": "workspace differs", "changedField": "binding.workspaceId", "original": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1", "currentPath": "notes/a.md", "selectorPaths": ["notes/a.md"], "restoreFenceGeneration": 0 }, "authority": { "principalKind": "named", "principalId": "person-1", "grantId": "grant-1", "grantGeneration": 1 } }, "conflicting": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "binding": { "workspaceId": "workspace-2", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1", "currentPath": "notes/a.md", "selectorPaths": ["notes/a.md"], "restoreFenceGeneration": 0 }, "authority": { "principalKind": "named", "principalId": "person-1", "grantId": "grant-1", "grantGeneration": 1 } } },
+    { "case": "main version differs", "changedField": "binding.mainVersionId", "original": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1", "currentPath": "notes/a.md", "selectorPaths": ["notes/a.md"], "restoreFenceGeneration": 0 }, "authority": { "principalKind": "named", "principalId": "person-1", "grantId": "grant-1", "grantGeneration": 1 } }, "conflicting": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-2", "objectId": "object-1", "lineageClaimId": "lineage-1", "currentPath": "notes/a.md", "selectorPaths": ["notes/a.md"], "restoreFenceGeneration": 0 }, "authority": { "principalKind": "named", "principalId": "person-1", "grantId": "grant-1", "grantGeneration": 1 } } },
+    { "case": "object differs", "changedField": "binding.objectId", "original": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1", "currentPath": "notes/a.md", "selectorPaths": ["notes/a.md"], "restoreFenceGeneration": 0 }, "authority": { "principalKind": "named", "principalId": "person-1", "grantId": "grant-1", "grantGeneration": 1 } }, "conflicting": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-2", "lineageClaimId": "lineage-1", "currentPath": "notes/a.md", "selectorPaths": ["notes/a.md"], "restoreFenceGeneration": 0 }, "authority": { "principalKind": "named", "principalId": "person-1", "grantId": "grant-1", "grantGeneration": 1 } } },
+    { "case": "lineage differs", "changedField": "binding.lineageClaimId", "original": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1", "currentPath": "notes/a.md", "selectorPaths": ["notes/a.md"], "restoreFenceGeneration": 0 }, "authority": { "principalKind": "named", "principalId": "person-1", "grantId": "grant-1", "grantGeneration": 1 } }, "conflicting": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-2", "currentPath": "notes/a.md", "selectorPaths": ["notes/a.md"], "restoreFenceGeneration": 0 }, "authority": { "principalKind": "named", "principalId": "person-1", "grantId": "grant-1", "grantGeneration": 1 } } },
+    { "case": "current path differs", "changedField": "binding.currentPath", "original": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1", "currentPath": "notes/a.md", "selectorPaths": ["notes/a.md"], "restoreFenceGeneration": 0 }, "authority": { "principalKind": "named", "principalId": "person-1", "grantId": "grant-1", "grantGeneration": 1 } }, "conflicting": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1", "currentPath": "notes/b.md", "selectorPaths": ["notes/a.md"], "restoreFenceGeneration": 0 }, "authority": { "principalKind": "named", "principalId": "person-1", "grantId": "grant-1", "grantGeneration": 1 } } },
+    { "case": "selector paths differ", "changedField": "binding.selectorPaths", "original": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1", "currentPath": "notes/a.md", "selectorPaths": ["notes/a.md"], "restoreFenceGeneration": 0 }, "authority": { "principalKind": "named", "principalId": "person-1", "grantId": "grant-1", "grantGeneration": 1 } }, "conflicting": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1", "currentPath": "notes/a.md", "selectorPaths": ["notes/b.md"], "restoreFenceGeneration": 0 }, "authority": { "principalKind": "named", "principalId": "person-1", "grantId": "grant-1", "grantGeneration": 1 } } },
+    { "case": "restore fence differs", "changedField": "binding.restoreFenceGeneration", "original": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1", "currentPath": "notes/a.md", "selectorPaths": ["notes/a.md"], "restoreFenceGeneration": 0 }, "authority": { "principalKind": "named", "principalId": "person-1", "grantId": "grant-1", "grantGeneration": 1 } }, "conflicting": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1", "currentPath": "notes/a.md", "selectorPaths": ["notes/a.md"], "restoreFenceGeneration": 1 }, "authority": { "principalKind": "named", "principalId": "person-1", "grantId": "grant-1", "grantGeneration": 1 } } },
+    { "case": "principal kind differs", "changedField": "authority.principalKind", "original": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1", "currentPath": "notes/a.md", "selectorPaths": ["notes/a.md"], "restoreFenceGeneration": 0 }, "authority": { "principalKind": "named", "principalId": "person-1", "grantId": "grant-1", "grantGeneration": 1 } }, "conflicting": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1", "currentPath": "notes/a.md", "selectorPaths": ["notes/a.md"], "restoreFenceGeneration": 0 }, "authority": { "principalKind": "link", "principalId": "person-1", "grantId": "grant-1", "grantGeneration": 1 } } },
+    { "case": "principal identifier differs", "changedField": "authority.principalId", "original": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1", "currentPath": "notes/a.md", "selectorPaths": ["notes/a.md"], "restoreFenceGeneration": 0 }, "authority": { "principalKind": "named", "principalId": "person-1", "grantId": "grant-1", "grantGeneration": 1 } }, "conflicting": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1", "currentPath": "notes/a.md", "selectorPaths": ["notes/a.md"], "restoreFenceGeneration": 0 }, "authority": { "principalKind": "named", "principalId": "person-2", "grantId": "grant-1", "grantGeneration": 1 } } },
+    { "case": "grant identifier differs", "changedField": "authority.grantId", "original": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1", "currentPath": "notes/a.md", "selectorPaths": ["notes/a.md"], "restoreFenceGeneration": 0 }, "authority": { "principalKind": "named", "principalId": "person-1", "grantId": "grant-1", "grantGeneration": 1 } }, "conflicting": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1", "currentPath": "notes/a.md", "selectorPaths": ["notes/a.md"], "restoreFenceGeneration": 0 }, "authority": { "principalKind": "named", "principalId": "person-1", "grantId": "grant-2", "grantGeneration": 1 } } },
+    { "case": "grant generation differs", "changedField": "authority.grantGeneration", "original": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1", "currentPath": "notes/a.md", "selectorPaths": ["notes/a.md"], "restoreFenceGeneration": 0 }, "authority": { "principalKind": "named", "principalId": "person-1", "grantId": "grant-1", "grantGeneration": 1 } }, "conflicting": { "deliveryId": "delivery-1", "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "binding": { "workspaceId": "workspace-1", "mainVersionId": "main-1", "objectId": "object-1", "lineageClaimId": "lineage-1", "currentPath": "notes/a.md", "selectorPaths": ["notes/a.md"], "restoreFenceGeneration": 0 }, "authority": { "principalKind": "named", "principalId": "person-1", "grantId": "grant-1", "grantGeneration": 2 } } }
+  ]
+}
