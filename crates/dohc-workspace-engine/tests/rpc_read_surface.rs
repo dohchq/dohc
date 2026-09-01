@@ -204,7 +204,7 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
             tokio::time::Instant::now() < deadline,
             "startup capture never became ready: {status}"
         );
-        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
     // versions.active resolves to main on a fresh workspace.

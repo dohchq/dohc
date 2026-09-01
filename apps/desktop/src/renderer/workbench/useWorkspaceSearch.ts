@@ -10,10 +10,11 @@ import {
 } from "./search-model";
 
 const UPDATING_RETRY_DELAYS_MS = [100, 250, 500, 1_000] as const;
-// A fresh 15,000-file workspace stayed in initial capture for roughly another
-// 10–15s after it became interactive. Keep an early search alive across that
-// window, but never leave one polling the main process forever.
-const UPDATING_RETRY_DEADLINE_MS = 15_000;
+// The daemon may legitimately remain in Starting/Importing until its 120s
+// early-import decision. The structured refusal projects that state into this
+// lane; leave one saturated retry interval for the Ready/Degraded transition,
+// but retain a fail-safe if the daemon ever violates its decision bound.
+const UPDATING_RETRY_DEADLINE_MS = 121_000;
 
 interface ActiveSearch {
   readonly workspaceId: string;
@@ -182,9 +183,17 @@ export function useWorkspaceSearch(
         .searchWorkspace(active.payload)
         .then(
           (result) => {
-            if (!isCurrent() || result.status === "accepted") return;
+            if (!isCurrent()) return;
+            if (result.status === "accepted") {
+              if (modelRef.current.status === "updating") {
+                commit({ ...modelRef.current, status: "searching" });
+              }
+              return;
+            }
             if (result.code === "workspace-updating") {
-              commit({ ...modelRef.current, status: "updating" });
+              if (modelRef.current.status !== "updating") {
+                commit({ ...modelRef.current, status: "updating" });
+              }
               const now = performance.now();
               active.updatingStartedAtMs ??= now;
               const remainingMs =

@@ -3183,8 +3183,10 @@ export function DesktopWorkspaceShell(props: {
       (error) =>
         reportLaneFailure("dohc could not refresh agent runs.", error, askAgain),
     );
-    await Promise.allSettled([statusRead, agentRead]);
-    markCurrentSwitchPhase("history-ready");
+    const settled = await Promise.allSettled([statusRead, agentRead]);
+    if (settled.some((lane) => lane.status === "fulfilled")) {
+      markCurrentSwitchPhase("history-ready");
+    }
     return "ready" as const;
   }, [
     agentActiveLane,

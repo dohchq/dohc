@@ -414,6 +414,7 @@ dependencies = [
  "file-id",
  "notify",
  "rustix",
+ "same-file",
  "serde",
  "serde_json",
  "sha2",

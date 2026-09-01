@@ -429,15 +429,10 @@ fn hash_one(job: &Job, buffer: &mut [u8], max_file_bytes: u64) -> HashOutcome {
             {
                 return HashOutcome::Io { kind };
             }
-            match std::fs::metadata(&job.abs) {
-                Ok(metadata)
-                    if metadata.is_file()
-                        && metadata.len() == expectation.size
-                        && mtime_ms(&metadata) == expectation.mtime_ms =>
-                {
-                    expectation.mtime_ms
-                }
-                _ => 0,
+            if post_hash_identity_matches(&file, &job.abs, expectation) {
+                expectation.mtime_ms
+            } else {
+                0
             }
         }
     };
@@ -446,6 +441,43 @@ fn hash_one(job: &Job, buffer: &mut [u8], max_file_bytes: u64) -> HashOutcome {
         bytes,
         stable_mtime_ms,
     }
+}
+
+fn metadata_matches(metadata: &std::fs::Metadata, expectation: &PostHashExpectation) -> bool {
+    metadata.is_file()
+        && metadata.len() == expectation.size
+        && mtime_ms(metadata) == expectation.mtime_ms
+}
+
+fn post_hash_identity_matches(
+    hashed_file: &std::fs::File,
+    current_path: &std::path::Path,
+    expectation: &PostHashExpectation,
+) -> bool {
+    let Ok(hashed_metadata) = hashed_file.metadata() else {
+        return false;
+    };
+    let Ok(current_file) = std::fs::File::open(current_path) else {
+        return false;
+    };
+    let Ok(current_metadata) = current_file.metadata() else {
+        return false;
+    };
+    if !metadata_matches(&hashed_metadata, expectation)
+        || !metadata_matches(&current_metadata, expectation)
+    {
+        return false;
+    }
+    let Ok(hashed_clone) = hashed_file.try_clone() else {
+        return false;
+    };
+    matches!(
+        (
+            same_file::Handle::from_file(hashed_clone),
+            same_file::Handle::from_file(current_file),
+        ),
+        (Ok(hashed), Ok(current)) if hashed == current
+    )
 }
 
 /// Milliseconds since the Unix epoch for a file's mtime, or `0` when the

@@ -161,7 +161,7 @@ describe("EngineWorkspaceSessions", () => {
     ).toBe(false);
   });
 
-  it("keeps a document read-only while initial capture installs its head", () => {
+  it("recognizes the initial-capture workspace-updating refusal", () => {
     const refusal = daemonRefusal(
       "OVERLOADED",
       "Workspace is still updating. Try again.",

@@ -33,18 +33,27 @@ describe("managed cloud configuration", () => {
   });
 
   it("rejects malformed or secret-bearing managed endpoints", () => {
-    for (const serverUrl of [
+    const invalidUrls = [
       "cloud.example.test",
       "https://",
       "file:///cloud",
       "https://user:pass@cloud.example.test",
       "https://cloud.example.test/api",
       "https://cloud.example.test?token=secret",
-    ]) {
+    ];
+    for (const serverUrl of invalidUrls) {
       expect(
         resolveManagedCloudConfiguration({
           DOHC_CLOUD_URL: serverUrl,
           DOHC_CLOUD_RELAY_URL: "https://relay.example.test",
+        }),
+      ).toEqual({ status: "invalid" });
+    }
+    for (const relayUrl of invalidUrls) {
+      expect(
+        resolveManagedCloudConfiguration({
+          DOHC_CLOUD_URL: "https://cloud.example.test",
+          DOHC_CLOUD_RELAY_URL: relayUrl,
         }),
       ).toEqual({ status: "invalid" });
     }

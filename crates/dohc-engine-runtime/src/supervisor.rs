@@ -432,3 +432,32 @@ fn lock(mutex: &Mutex<Registry>) -> MutexGuard<'_, Registry> {
 fn wait<'a>(cv: &Condvar, guard: MutexGuard<'a, Registry>) -> MutexGuard<'a, Registry> {
     cv.wait(guard).unwrap_or_else(|poison| poison.into_inner())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::WorkspaceSupervisor;
+    use dohc_engine_testkit::ScratchDir;
+
+    #[test]
+    fn open_reports_actor_ownership_and_store_disposition() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let db = scratch.engine_db_path().expect("engine db path");
+        let supervisor = WorkspaceSupervisor::new();
+
+        let first = supervisor.open(&db, 1).expect("first open");
+        assert!(first.created_actor);
+        assert!(first.store_freshly_created);
+
+        let attached = supervisor.open(&db, 2).expect("attach to active actor");
+        assert!(!attached.created_actor);
+        assert!(attached.store_freshly_created);
+        drop((first, attached));
+
+        supervisor.close(&db).expect("close fresh actor");
+        let reopened = supervisor.open(&db, 3).expect("reopen existing store");
+        assert!(reopened.created_actor);
+        assert!(!reopened.store_freshly_created);
+        drop(reopened);
+        supervisor.close(&db).expect("close reopened actor");
+    }
+}

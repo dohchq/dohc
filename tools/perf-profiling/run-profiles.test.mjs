@@ -34,6 +34,20 @@ test("a summary cannot be complete when an artifact is missing", () => {
   assert.equal(summary.scenarios.switch, null);
 });
 
+test("a partial profile without fixture metadata still produces a summary", () => {
+  const artifacts = {
+    "excalidraw-profile": { measurements: {} },
+    "bigdoc-profile": { measurements: {} },
+    "bigdoc-read-profile": { measurements: {} },
+  };
+
+  const summary = createSummary({}, [], artifacts, []);
+
+  assert.equal(summary.scenarios.excalidraw.elementCount, null);
+  assert.equal(summary.scenarios.bigDoc.bytes, null);
+  assert.equal(summary.scenarios.bigDocRead.bytes, null);
+});
+
 test("a fresh artifact permits a complete summary", async (t) => {
   const output = await mkdtemp(join(tmpdir(), "dohc-run-profiles-"));
   t.after(() => rm(output, { recursive: true, force: true }));

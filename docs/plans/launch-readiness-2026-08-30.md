@@ -23,8 +23,8 @@ Baseline-dependent operations fail fast with an updating response during
 import. Both exact-head runs recovered all 15,000 moments and paths after restart.
 This is an explicit background-import boundary, not an unexplained wait or raw
 deadline.
-Fresh plans below 1,000 files keep the simpler strict barrier and do not expose
-a partial-ready state for ordinary workspaces.
+Fresh, clean all-Added imports below 1,000 files keep the simpler strict barrier
+and do not expose a partial-ready state for ordinary workspaces.
 
 The verdict is based on the production Electron build, fresh-profile and
 power-user computer-control tours, targeted durable-result E2Es, a 21-surface

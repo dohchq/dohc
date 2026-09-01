@@ -16,8 +16,9 @@ finish History. The exact-head daemon profiles return from `workspace.open` in
 and verify all History pages in 22.344-26.011 seconds. Both exact-head runs
 recovered exactly 15,000 moments and paths after a daemon restart. Operations
 that require a complete baseline return an explicit updating response during import.
-Plans below 1,000 Added files retain the strict baseline barrier, so ordinary
-small workspaces do not pay the complexity of a partial-ready shell.
+Fresh, clean all-Added imports below 1,000 files retain the strict baseline
+barrier, so ordinary small workspaces do not pay the complexity of a
+partial-ready shell.
 
 ## Results
 

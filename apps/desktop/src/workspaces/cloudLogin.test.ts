@@ -97,6 +97,19 @@ describe("cloud device-flow login", () => {
     expect(calls).toEqual([]);
   });
 
+  it("rejects a caller-supplied relay path before making a request", async () => {
+    const { impl, calls } = fakeFetch({});
+    const login = createCloudLogin({
+      store: memoryStore(),
+      fetch: impl,
+    });
+
+    await expect(
+      login.start("https://cloud.example.test", "https://relay.example.test/api"),
+    ).rejects.toThrow("sync relay URL must be an HTTP or HTTPS origin");
+    expect(calls).toEqual([]);
+  });
+
   it("uses an explicitly configured relay for the managed flow", async () => {
     const store = memoryStore();
     const { impl } = fakeFetch({

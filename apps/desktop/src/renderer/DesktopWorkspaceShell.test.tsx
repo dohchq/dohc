@@ -807,6 +807,8 @@ async function enterMarkdownSource(
   )) as HTMLButtonElement;
   await waitFor(() => expect(toggle.disabled).toBe(false));
 
+  // The label names the next surface: Edit (read) -> Source (WYSIWYG) ->
+  // WYSIWYG (source).
   if (toggle.textContent === "Edit") {
     await user.click(toggle);
     await waitFor(() => expect(toggle.textContent).toBe("Source"));
@@ -10234,6 +10236,7 @@ describe("history page", () => {
       ).toBe(true),
     );
     expect(filePath.length).toBeLessThanOrEqual(4096);
+    expect(encodeURIComponent(filePath).length).toBeGreaterThan(4096);
   });
 
   it("retries an updating history inline until it is ready without a global error", async () => {
@@ -13236,6 +13239,47 @@ describe("history page", () => {
     expect(error.textContent).not.toContain("Could not refresh history.");
   });
 
+  it("marks opted-out history ready when one status lane succeeds", async () => {
+    const previousOrdinal = rendererMarks.readSwitchTimeline().at(-1)?.ordinal ?? 0;
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.getAgentRunStatus = vi.fn(async () => {
+      throw new Error("agent status failed");
+    });
+    renderShell(bridge);
+
+    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridge.getAgentRunStatus).toHaveBeenCalledTimes(1));
+    await screen.findByTestId("workspace-shell-error");
+    await waitFor(() => {
+      const timeline = rendererMarks
+        .readSwitchTimeline()
+        .find((entry) => entry.ordinal > previousOrdinal);
+      expect(timeline?.phases["history-ready"]).toEqual(expect.any(Number));
+    });
+  });
+
+  it("does not mark opted-out history ready when both status lanes fail", async () => {
+    const previousOrdinal = rendererMarks.readSwitchTimeline().at(-1)?.ordinal ?? 0;
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.getSyncStatus = vi.fn(async () => {
+      throw new Error("sync status failed");
+    });
+    bridge.getAgentRunStatus = vi.fn(async () => {
+      throw new Error("agent status failed");
+    });
+    renderShell(bridge);
+
+    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridge.getAgentRunStatus).toHaveBeenCalledTimes(1));
+    await screen.findByTestId("workspace-shell-error");
+
+    const timeline = rendererMarks
+      .readSwitchTimeline()
+      .find((entry) => entry.ordinal > previousOrdinal);
+    expect(timeline).toBeDefined();
+    expect(timeline?.phases["history-ready"]).toBeUndefined();
+  });
+
   it("does not report an older opted-out refresh after a newer one succeeds", async () => {
     let failOlderRead!: (error: Error) => void;
     let holdNextRead = false;
@@ -15072,8 +15116,10 @@ describe("chats panel (right side)", () => {
     await waitFor(() => expect(panel.style.width).toBe("360px"));
     fireEvent.keyDown(handle, { key: "Home" });
     await waitFor(() => expect(panel.style.width).toBe("240px"));
+    expect(handle.getAttribute("aria-valuenow")).toBe("240");
     fireEvent.keyDown(handle, { key: "End" });
     await waitFor(() => expect(panel.style.width).toBe("2400px"));
+    expect(handle.getAttribute("aria-valuenow")).toBe("2400");
   });
 
   it("the 'This file' tab shows the active file's chats surface", async () => {

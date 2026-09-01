@@ -84,6 +84,7 @@ import {
 } from "./sharedLocalDocument";
 import { documentVersionKey } from "./documentVersionKey";
 import { LazyMarkdownReadView } from "./markdown/LazyMarkdownReadView";
+import { useAuthoritativeValueRevision } from "./useAuthoritativeValueRevision";
 
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
 
@@ -1765,9 +1766,10 @@ function MarkdownView(props: {
   const capturedConflictDraft = useRef<string | null>(null);
   const conflictDraftId = useRef<number | null>(null);
   const draftRevision = useRef(0);
-  // CodeMirror owns local keystrokes. Advance this revision only when an
-  // accepted external value must replace its document.
-  const sourceValueRevision = useRef(0);
+  // CodeMirror owns local keystrokes. Advance only when an accepted external
+  // value must replace its document and local undo history.
+  const [sourceValueRevision, bumpSourceValueRevision] =
+    useAuthoritativeValueRevision();
   const unmounted = useRef(false);
   const serializeDraftRef = useRef<() => string>(() => props.body);
   const editing = surfaceMode !== "read";
@@ -1835,7 +1837,7 @@ function MarkdownView(props: {
       return;
     }
     draftRevision.current += 1;
-    sourceValueRevision.current += 1;
+    bumpSourceValueRevision();
     setDraft(sharedSnapshot.body);
     setSavedBody(sharedSnapshot.body);
     if (mode === "wysiwyg") {
@@ -1843,7 +1845,7 @@ function MarkdownView(props: {
         markdownEditorBody(sharedSnapshot.body),
       );
     }
-  }, [engine.available, mode, sharedSnapshot]);
+  }, [bumpSourceValueRevision, engine.available, mode, sharedSnapshot]);
 
   function captureLatestConflictDraft(text?: string) {
     const capturedText =
@@ -1908,7 +1910,7 @@ function MarkdownView(props: {
     }
     unsavedDraft.current = false;
     draftRevision.current += 1;
-    sourceValueRevision.current += 1;
+    bumpSourceValueRevision();
     blockedDraftRevision.current = Math.max(
       blockedDraftRevision.current,
       draftRevision.current,
@@ -2009,7 +2011,7 @@ function MarkdownView(props: {
       // set-aside title/property edit would keep painting the view and ride
       // into the next property save (#579 review, r7). Reset here.
       draftRevision.current += 1;
-      sourceValueRevision.current += 1;
+      bumpSourceValueRevision();
       setDraft(props.body);
       setSavedBody(props.body);
       latestDraft.current = props.body;
@@ -2442,7 +2444,7 @@ function MarkdownView(props: {
         ? sharedBeforeResync.contentHash
         : props.contentHash;
       draftRevision.current += 1;
-      sourceValueRevision.current += 1;
+      bumpSourceValueRevision();
       setDraft(resyncBody);
       setSavedBody(resyncBody);
       latestDraft.current = resyncBody;
@@ -2941,7 +2943,7 @@ function MarkdownView(props: {
     }
     const text = shared.body;
     latestDraft.current = text;
-    sourceValueRevision.current += 1;
+    bumpSourceValueRevision();
     setDraft(text);
     wysiwygRef.current?.replaceMarkdown(markdownEditorBody(text));
   }
@@ -3525,7 +3527,7 @@ function MarkdownView(props: {
           <LazySourceCodeEditor
             testId="markdown-editor"
             value={draft}
-            valueRevision={sourceValueRevision.current}
+            valueRevision={sourceValueRevision}
             language="markdown"
             path={props.path}
             readOnly={readOnly}

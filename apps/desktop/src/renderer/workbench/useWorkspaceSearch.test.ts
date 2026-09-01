@@ -100,7 +100,7 @@ describe("useWorkspaceSearch", () => {
 
       expect(bridgeMock.searchWorkspace).toHaveBeenCalledTimes(2);
       expect(bridgeMock.searchWorkspace.mock.calls[1]?.[0]).toEqual(firstPayload);
-      expect(view.result.current.model.status).toBe("updating");
+      expect(view.result.current.model.status).toBe("searching");
 
       act(() => {
         searchResultsListener?.({
@@ -147,6 +147,43 @@ describe("useWorkspaceSearch", () => {
     }
   });
 
+  it("keeps retrying through a valid long initial capture", async () => {
+    vi.useFakeTimers();
+    try {
+      bridgeMock.searchWorkspace.mockImplementation(async () =>
+        performance.now() < 26_011
+          ? { status: "refused", code: "workspace-updating" }
+          : { status: "accepted" },
+      );
+      const view = renderHook(() =>
+        useWorkspaceSearch("workspace-1", reportSearchError, clearSearchError),
+      );
+
+      await act(async () => {
+        view.result.current.run(options);
+        await vi.advanceTimersByTimeAsync(27_000);
+      });
+
+      const searchIds = new Set(
+        bridgeMock.searchWorkspace.mock.calls.map(([payload]) => payload.searchId),
+      );
+      expect(searchIds.size).toBe(1);
+      expect(reportSearchError).not.toHaveBeenCalled();
+      const searchId = bridgeMock.searchWorkspace.mock.calls[0]?.[0].searchId;
+      act(() => {
+        searchResultsListener?.({
+          searchId,
+          entries: [],
+          done: true,
+          limitHit: false,
+        });
+      });
+      expect(view.result.current.model.status).toBe("complete");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("stops an updating retry lane at its deadline and exposes a fresh retry", async () => {
     vi.useFakeTimers();
     try {
@@ -163,7 +200,7 @@ describe("useWorkspaceSearch", () => {
 
       await act(async () => {
         view.result.current.run(options);
-        await vi.advanceTimersByTimeAsync(15_000);
+        await vi.advanceTimersByTimeAsync(121_000);
       });
 
       expect(view.result.current.model).toMatchObject({
@@ -456,6 +493,9 @@ describe("useWorkspaceSearch", () => {
         );
       });
     });
+
+    expect(view.getByTestId("committed-search-count").textContent).toBe("0");
+    expect(view.queryByText("Loading")).toBeNull();
 
     act(() => {
       searchResultsListener?.({

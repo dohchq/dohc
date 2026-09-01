@@ -297,7 +297,8 @@ function summarizeArtifacts(artifacts) {
     excalidraw: excalidraw
       ? {
           ...commonSummary(excalidraw),
-          elementCount: artifacts["excalidraw-profile"].fixture.elementCount,
+          elementCount:
+            artifacts["excalidraw-profile"].fixture?.elementCount ?? null,
           pointerFrames: excalidraw.pointerFrames,
           actualDragDurationMs: excalidraw.actualDragDurationMs,
           taskDurationSeconds: excalidraw.performance?.delta?.TaskDuration ?? null,
@@ -307,7 +308,7 @@ function summarizeArtifacts(artifacts) {
     bigDoc: bigDoc
       ? {
           ...commonSummary(bigDoc),
-          bytes: artifacts["bigdoc-profile"].fixture.bytes,
+          bytes: artifacts["bigdoc-profile"].fixture?.bytes ?? null,
           typedCharacters: bigDoc.typedCharacters,
           typingDurationMs: bigDoc.typingDurationMs,
           elapsedMs: bigDoc.elapsedMs,
@@ -320,7 +321,7 @@ function summarizeArtifacts(artifacts) {
     bigDocRead: bigDocRead
       ? {
           ...commonSummary(bigDocRead),
-          bytes: artifacts["bigdoc-read-profile"].fixture.bytes,
+          bytes: artifacts["bigdoc-read-profile"].fixture?.bytes ?? null,
           elapsedMs: bigDocRead.elapsedMs,
           sourceDescendants: bigDocRead.sourceDescendants,
           renderedLines: bigDocRead.renderedLines,

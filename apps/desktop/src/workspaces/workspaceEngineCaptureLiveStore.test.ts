@@ -8,6 +8,7 @@ import type {
   EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import {
+  isWorkspaceUpdatingRefusal,
   VERSIONED_METHOD,
   WORKSPACE_METHOD,
   type AgentAuthor,
@@ -358,7 +359,15 @@ describe("createCaptureLiveStores", () => {
   it("mutation proof: rejects an unsettled daemon capture flush", async () => {
     const client = clientFor(async (request) => ({
       id: request.id,
-      result: { settled: false, running: true, degraded: true },
+      result:
+        request.method === WORKSPACE_METHOD.watcherStatus
+          ? {
+              running: true,
+              degraded: false,
+              terminal: false,
+              phase: "ready",
+            }
+          : { settled: false, running: true, degraded: true },
     }));
     const { store } = createCaptureLiveStores(
       { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
@@ -366,6 +375,37 @@ describe("createCaptureLiveStores", () => {
     );
 
     await expect(store.flushCapture?.()).rejects.toThrow("did not settle");
+  });
+
+  it("classifies an unsettled initial capture before bounded settle polling", async () => {
+    const requests: Request[] = [];
+    const client = clientFor(async (request) => {
+      requests.push(request);
+      return {
+        id: request.id,
+        result:
+          request.method === WORKSPACE_METHOD.watcherStatus
+            ? {
+                running: true,
+                degraded: false,
+                terminal: false,
+                phase: "importing",
+              }
+            : { settled: false, running: true, degraded: false },
+      };
+    });
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+      sessionsFor(client),
+    );
+
+    const error = await store.flushCapture?.().catch((reason: unknown) => reason);
+
+    expect(isWorkspaceUpdatingRefusal(error)).toBe(true);
+    expect(requests.map((request) => request.method)).toEqual([
+      WORKSPACE_METHOD.captureFlush,
+      WORKSPACE_METHOD.watcherStatus,
+    ]);
   });
 
   // Every other refusal names itself in the MESSAGE, so the store recognises

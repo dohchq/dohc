@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { EditorView } from "@codemirror/view";
+import { isolateHistory } from "@codemirror/commands";
 import { configure } from "@testing-library/dom";
 import {
   act,
@@ -8390,10 +8391,8 @@ describe("engine markdown source view", () => {
       codeEditorView(editor);
       return codeEditorTestHost(editor);
     });
-    await waitFor(() => {
-      expect(reopenedSource.selectionStart).toBe(expected.start);
-      expect(reopenedSource.selectionEnd).toBe(expected.end);
-    });
+    expect(reopenedSource.selectionStart).toBe(expected.start);
+    expect(reopenedSource.selectionEnd).toBe(expected.end);
     expect(
       reopenedSource.value.slice(
         reopenedSource.selectionStart,
@@ -8605,14 +8604,12 @@ describe("engine markdown source view", () => {
       }
       return codeEditorTestHost(editor);
     });
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    });
-
     // MUTATION: advance appliedHeadingNonce for the suppressed target. The
     // switch then replays a destination that never landed for the reader.
-    expect(reopenedSource.selectionStart).toBe(0);
-    expect(reopenedSource.selectionEnd).toBe(0);
+    await waitFor(() => {
+      expect(reopenedSource.selectionStart).toBe(0);
+      expect(reopenedSource.selectionEnd).toBe(0);
+    });
   });
 
   it("blocks the source autosave for the full switch reread and sets the draft aside without a heading target", async () => {
@@ -11233,6 +11230,103 @@ describe("markdown document opening state", () => {
       { timeout: 5_000 },
     );
     await screen.findByTestId("orphaned-draft-notice");
+  });
+
+  it("clears source undo history when an accepted snapshot keeps the same text", async () => {
+    const bridge = makeHeldOpenBridge();
+    const acceptedHash = "a".repeat(64);
+    const localBuffer = getSharedLocalDocument(
+      documentVersionKey("ws-1", "a.md", 1),
+    );
+    const subscription = vi
+      .spyOn(localBuffer, "subscribe")
+      .mockImplementation(() => () => undefined);
+    let returnAcceptedSnapshot = false;
+    bridge.bridgeMock.readWorkspaceText.mockImplementation(async () =>
+      returnAcceptedSnapshot
+        ? {
+            text: DOC_MARKDOWN,
+            truncated: false,
+            contentHash: acceptedHash,
+          }
+        : {
+            text: DOC_MARKDOWN,
+            truncated: false,
+            contentHash: TEST_CONTENT_HASH,
+          },
+    );
+    bridge.bridgeMock.writeWorkspaceText.mockResolvedValue({
+      status: "conflict",
+      currentContentHash: acceptedHash,
+    });
+    let flush: DraftFlush | null = null;
+    const view = await renderLegacyMarkdown(bridge, (next) => {
+      flush = next;
+    });
+    const source = await enterLegacySourceMode();
+    const editor = codeEditorView(source);
+
+    act(() => {
+      editor.dispatch({
+        changes: { from: editor.state.doc.length, insert: "Draft" },
+        annotations: isolateHistory.of("full"),
+      });
+      editor.dispatch({
+        changes: {
+          from: editor.state.doc.length - "Draft".length,
+          to: editor.state.doc.length,
+        },
+        annotations: isolateHistory.of("full"),
+      });
+    });
+    expect(codeEditorText(source)).toBe(DOC_MARKDOWN);
+    await waitFor(() => expect(flush).not.toBeNull());
+    const acceptRead = vi
+      .spyOn(localBuffer, "acceptRead")
+      .mockReturnValue(true);
+    const readsBeforeAcceptance =
+      bridge.bridgeMock.readWorkspaceText.mock.calls.length;
+    returnAcceptedSnapshot = true;
+    await expect(flush!()).rejects.toThrow(
+      "The file changed on disk while dohc saved it.",
+    );
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        engineVersionKey={1}
+        refreshKey={1}
+        registerDraftFlush={(next) => {
+          flush = next;
+        }}
+      />,
+    );
+    await waitFor(() =>
+      expect(bridge.bridgeMock.readWorkspaceText.mock.calls.length).toBeGreaterThan(
+        readsBeforeAcceptance,
+      ),
+    );
+    await waitFor(() => expect(acceptRead).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const saveStateBeforeUndo = screen
+      .getByTestId("markdown-save-state")
+      .getAttribute("data-state");
+    bridge.bridgeMock.writeWorkspaceText.mockClear();
+
+    const user = userEvent.setup();
+    await user.click(await textEditorContent(source));
+    await user.keyboard("{Control>}z{/Control}");
+
+    expect(codeEditorText(source)).toBe(DOC_MARKDOWN);
+    expect(
+      screen.getByTestId("markdown-save-state").getAttribute("data-state"),
+    ).toBe(saveStateBeforeUndo);
+    expect(bridge.bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+    acceptRead.mockRestore();
+    subscription.mockRestore();
+    view.unmount();
   });
 
   it("recovers a queued legacy unmount draft when its I/O write rejects", async () => {

@@ -60,6 +60,7 @@ fn initialize_replicating_workspace(db: &Path) {
 
 #[derive(Debug, PartialEq, Eq)]
 struct CaptureBatchState {
+    storage_rows: i64,
     snapshots: Vec<(String, String)>,
     moments: Vec<String>,
     search: Vec<(String, String)>,
@@ -70,6 +71,15 @@ fn capture_batch_state(db: &Path) -> CaptureBatchState {
     let store = EngineStore::open(db, 100).expect("inspect batch state");
     store
         .read_with(|conn| {
+            let storage_rows = conn.query_row(
+                "SELECT \
+                   (SELECT COUNT(*) FROM path_aliases WHERE workspace_id=?1) + \
+                   (SELECT COUNT(*) FROM snapshots WHERE workspace_id=?1) + \
+                   (SELECT COUNT(*) FROM moments WHERE workspace_id=?1) + \
+                   (SELECT COUNT(*) FROM file_objects WHERE workspace_id=?1)",
+                [BATCH_WORKSPACE_ID],
+                |row| row.get(0),
+            )?;
             let snapshots = conn
                 .prepare(
                     "SELECT s.path,b.text FROM snapshots s \
@@ -98,6 +108,7 @@ fn capture_batch_state(db: &Path) -> CaptureBatchState {
                 .query_map([BATCH_WORKSPACE_ID], |row| row.get(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok::<_, rusqlite::Error>(CaptureBatchState {
+                storage_rows,
                 snapshots,
                 moments,
                 search,
@@ -109,6 +120,7 @@ fn capture_batch_state(db: &Path) -> CaptureBatchState {
 
 fn expected_capture_batch_state() -> CaptureBatchState {
     CaptureBatchState {
+        storage_rows: 12,
         snapshots: vec![
             ("notes/a.md".to_owned(), "alpha".to_owned()),
             ("notes/b.md".to_owned(), "bravo".to_owned()),
@@ -194,12 +206,6 @@ fn bounded_capture_batch_contains_a_leased_path_and_replays_without_duplicates()
     let policy = Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
         scratch.path(),
     ));
-    std::fs::create_dir_all(scratch.path().join(".dohc")).expect("policy directory");
-    std::fs::write(
-        scratch.path().join(".dohc/files.toml"),
-        "[[rule]]\npath = \"**\"\nsearchable = false\n",
-    )
-    .expect("narrow search policy after the pass snapshot");
 
     let input = |path: &str, text: &str| CaptureIngest {
         workspace_id: WORKSPACE_ID.to_owned(),
@@ -376,13 +382,13 @@ fn capture_batch_rejects_a_missing_named_version_before_writing() {
 fn capture_batch_refuses_invalid_shapes_before_mutation() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
+    let before = capture_batch_state(&db);
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
     let policy = Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
         scratch.path(),
     ));
     let leases = dohc_engine_collab::LeaseRegistry::new();
-
     let empty = handle
         .capture_ingest_batch_blocking(
             Vec::new(),
@@ -444,6 +450,7 @@ fn capture_batch_refuses_invalid_shapes_before_mutation() {
     ));
 
     supervisor.close(&db).expect("close actor");
+    assert_eq!(capture_batch_state(&db), before);
 }
 
 #[test]
@@ -629,6 +636,7 @@ fn capture_batch_storage_before_persist_rolls_back_the_whole_chunk() {
     assert_eq!(
         capture_batch_state(&db),
         CaptureBatchState {
+            storage_rows: 0,
             snapshots: Vec::new(),
             moments: Vec::new(),
             search: Vec::new(),

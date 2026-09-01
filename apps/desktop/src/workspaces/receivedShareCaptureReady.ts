@@ -1,11 +1,9 @@
 import { setTimeout as delay } from "node:timers/promises";
+import type { WatcherStatusResult } from "@dohc/workspace-engine-client";
 
 const CAPTURE_READY_POLL_MS = 250;
 
-type InitialCaptureStatus = {
-  phase: "starting" | "importing" | "ready" | "degraded";
-  terminal: boolean;
-};
+type InitialCaptureStatus = Pick<WatcherStatusResult, "phase" | "terminal">;
 
 export async function waitForReceivedShareCaptureReady(input: {
   readStatus: (() => Promise<InitialCaptureStatus>) | undefined;

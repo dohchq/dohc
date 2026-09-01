@@ -15,7 +15,7 @@ describe("profiling fixture preparation", () => {
     delete process.env.DOHC_PROFILE_OUTPUT;
   });
 
-  it("restores a pristine copy before every scenario", async () => {
+  it("isolates a pristine copy for every scenario", async () => {
     scratch = await createTestScratch("dohc-profile-fixture-");
     const fixturesRoot = join(scratch, "fixtures");
     const fixtureRoot = join(fixturesRoot, "large-flat");
@@ -42,7 +42,10 @@ describe("profiling fixture preparation", () => {
     const scenarioB = await prepareFixture("large-flat", "scenario-b");
 
     expect(scenarioA.rootPath).not.toBe(fixtureRoot);
-    expect(scenarioB.rootPath).toBe(scenarioA.rootPath);
+    expect(scenarioB.rootPath).not.toBe(scenarioA.rootPath);
+    expect(await readFile(join(engineDir, "engine.db"), "utf8")).toBe(
+      "scenario-a engine state",
+    );
     expect(existsSync(join(scenarioB.rootPath, ".dohc", "engine"))).toBe(false);
     expect(await readFile(join(scenarioB.rootPath, "notes", "fixture.md"), "utf8")).toBe(
       recordedInput,

@@ -70,7 +70,7 @@ export async function prepareFixture(
   workspaceId: string,
 ): Promise<{ rootPath: string; manifest: SeedManifest }> {
   const sourcePath = fixtureDirectory(name);
-  const rootPath = join(profileOutputDir(), "workspaces", name);
+  const rootPath = join(profileOutputDir(), "workspaces", name, workspaceId);
   await rm(rootPath, { recursive: true, force: true });
   await cp(sourcePath, rootPath, { recursive: true });
   await seedWorkspaceManifest({ rootPath }, workspaceId);
