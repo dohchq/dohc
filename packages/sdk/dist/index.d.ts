@@ -133,16 +133,34 @@ export type DohcFileWatchEvent = {
 export type DohcJsonValue = null | boolean | number | string | DohcJsonValue[] | {
     [key in string]?: DohcJsonValue;
 };
+/** The declared kind of actor behind a record change. */
+export type DohcChangeActorKind = "human" | "agent" | "automation";
+/**
+ * The replication coordinate of the change an event reports: the authoring
+ * device's origin id and its op sequence. Null for a change on a
+ * never-synced lineage, whose only durable per-change key is `historyId`.
+ */
+export type DohcRecordEventSource = {
+    originId: string;
+    originSeq: number;
+};
 /**
  * A record appeared in a collection. `author` is the recorded agent or user
  * identity when the host knows one, and null otherwise. `timestamp` is the
- * host's record timestamp in milliseconds.
+ * host's record timestamp in milliseconds. `actorKind`, `onBehalfOf`, and
+ * `depth` are the writer's declared attribution (null when undeclared);
+ * `source` is the change's replication coordinate (null for a never-synced
+ * change).
  */
 export type DohcRecordCreatedEvent = {
     collectionPath: string;
     recordId: string;
     author: string | null;
     timestamp: number;
+    actorKind: DohcChangeActorKind | null;
+    onBehalfOf: string | null;
+    depth: number | null;
+    source: DohcRecordEventSource | null;
 };
 /** A record changed. Same shape as {@link DohcRecordCreatedEvent}. */
 export type DohcRecordUpdatedEvent = DohcRecordCreatedEvent;
@@ -166,6 +184,10 @@ export type DohcRecordFieldChangedEvent = {
     timestamp: number;
     /** Device-local record-history row id. */
     historyId: number;
+    actorKind: DohcChangeActorKind | null;
+    onBehalfOf: string | null;
+    depth: number | null;
+    source: DohcRecordEventSource | null;
 };
 /**
  * What a collections.watch listener receives as `data`. The enclosing
@@ -346,7 +368,9 @@ export declare function createDohcClient(options?: CreateDohcClientOptions): {
         /**
          * Reports record changes at or below `collectionPath`, which is a
          * prefix: a collection to watch on its own, or a folder to watch with
-         * every collection under it. Changes outside it never arrive. Delivery
+         * every collection under it. Changes outside it never arrive. A watch
+         * on "." covers the collections this plugin could list when it
+         * subscribed; a collection created later needs a new watch. Delivery
          * is at most once; reconcile missed events from record history using
          * the last seen historyId.
          *
@@ -437,7 +461,9 @@ export declare const dohc: {
         /**
          * Reports record changes at or below `collectionPath`, which is a
          * prefix: a collection to watch on its own, or a folder to watch with
-         * every collection under it. Changes outside it never arrive. Delivery
+         * every collection under it. Changes outside it never arrive. A watch
+         * on "." covers the collections this plugin could list when it
+         * subscribed; a collection created later needs a new watch. Delivery
          * is at most once; reconcile missed events from record history using
          * the last seen historyId.
          *

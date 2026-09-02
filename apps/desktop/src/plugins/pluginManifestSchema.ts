@@ -219,6 +219,55 @@ const PluginDriver = z.object({
   ),
 }).strict();
 
+// An automation subscribes one handler to record changes on a collection
+// path. The origin device's desktop registers each declared automation with
+// the engine under "<plugin name>/<id>" and runs the named handler when a
+// change on that path is claimed (ADR 0008). Twenty is a workflow's worth of
+// triggers; a plugin needing more is running a system, not reacting to a
+// collection.
+export const MAX_PLUGIN_AUTOMATIONS = 20;
+
+// The id joins the engine's subscription table and record history as
+// "<plugin name>/<automation id>", so it uses the same typable charset a
+// driver id does — and no "/", which separates it from the plugin name.
+const PluginAutomationId = z.string()
+  .min(1)
+  .max(120, "must be 120 characters or fewer")
+  .regex(
+    /^[A-Za-z0-9][A-Za-z0-9._-]*$/,
+    "must start with a letter or digit and use only letters, digits, '.', '_', or '-'",
+  );
+
+// "." subscribes to every collection in the workspace, mirroring the engine's
+// own prefix rule; anything else is a workspace-relative folder path.
+const PluginAutomationCollection = z.union([
+  z.literal("."),
+  z.string()
+    .max(1024, "must be 1024 characters or fewer")
+    .transform((path, ctx) => {
+      const normalized = normalizePluginPath(path);
+      if (normalized !== null) return normalized;
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "must be \".\" or a non-empty workspace-relative collection path " +
+          "without NUL bytes, absolute prefixes, or '..' segments",
+      });
+      return z.NEVER;
+    }),
+]);
+
+// `handler` names the function the plugin registers with
+// ctx.automations.register during activation, so several automations can
+// share one handler. Same charset as the id.
+const PluginAutomation = z.object({
+  id: PluginAutomationId,
+  collection: PluginAutomationCollection,
+  handler: PluginAutomationId,
+}).strict();
+
+export type PluginAutomationDeclaration = z.infer<typeof PluginAutomation>;
+
 // A plugin's own settings, declared flat so dohc can render them without the
 // plugin running. Twenty entries is a settings panel, not a preferences
 // database; a plugin that needs more has outgrown a flat list and wants a
@@ -398,6 +447,12 @@ export const DohcPluginManifest = z.object({
       `settings: at most ${MAX_PLUGIN_SETTINGS} entries allowed`,
     )
     .optional(),
+  automations: z.array(PluginAutomation)
+    .max(
+      MAX_PLUGIN_AUTOMATIONS,
+      `automations: at most ${MAX_PLUGIN_AUTOMATIONS} entries allowed`,
+    )
+    .optional(),
   allowSkippedScripts: z.union([
     z.literal(true),
     z.array(NpmPackageName).max(
@@ -464,6 +519,19 @@ export const DohcPluginManifest = z.object({
       });
     }
     driverIds.add(driver.id);
+  });
+
+  const automationIds = new Set<string>();
+  manifest.automations?.forEach((automation, index) => {
+    if (automationIds.has(automation.id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["automations", index, "id"],
+        message:
+          `automation id "${automation.id}" must be unique within automations`,
+      });
+    }
+    automationIds.add(automation.id);
   });
 
   const settingKeys = new Set<string>();

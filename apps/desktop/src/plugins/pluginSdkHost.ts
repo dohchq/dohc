@@ -16,6 +16,26 @@ import {
 
 const ABORTED_ERROR_CODE = "DOHC_ABORTED";
 
+/**
+ * The authority an automation run's collection writes carry, derived
+ * main-side from the claim the executor is running on this exact spawn —
+ * never from the plugin's request. `depth` is the depth the WRITES carry:
+ * one greater than the claim's own (the trigger's) depth.
+ */
+export interface PluginAutomationRunAuthority {
+  claimId: string;
+  /** The engine subscription id: "<plugin name>/<automation id>". */
+  automationId: string;
+  onBehalfOf: string;
+  depth: number;
+  /**
+   * Writes this run has issued so far. Each write's idempotency key is the
+   * claim id plus this ordinal, so a handler that writes twice does not
+   * reuse a key, and a re-run replays the same sequence.
+   */
+  writes: number;
+}
+
 class PluginSdkAbortError extends Error {
   readonly code = ABORTED_ERROR_CODE;
 }
@@ -58,6 +78,17 @@ export interface PluginSdkHostContext {
    * path; this module treats both the same way.
    */
   signal?: AbortSignal;
+  /**
+   * The claim id this request declared itself part of (the SDK transport
+   * tags every request made inside a running automation handler), and
+   * main's resolution of it against the runs the executor actually started
+   * on this exact spawn. A declared claim that no longer resolves is a
+   * settled or foreign run: a collection write then refuses rather than
+   * silently downgrading to plugin attribution. Both absent for every
+   * other request.
+   */
+  automationClaimId?: string;
+  automationRun?: PluginAutomationRunAuthority;
   /** Absent for panel-driven SDK calls; only a plugin's own routeSdkRequest
    * path supplies this, since only the plugin's own process may broker
    * child processes on its behalf. */
@@ -233,14 +264,41 @@ export async function invokePluginSdkHost(
     case "collections.get":
     case "collections.query":
     case "collections.getRecord":
-    // The core host refuses a collection write on a read-only workspace
-    // itself (hostContext.writable), so the writes need no gate here.
-    case "collections.setFields":
-    case "collections.createRecord":
       return waitForOperation(
         context.signal,
         invokeWorkspaceSdkHost(hostContext, method, params),
       );
+    // The core host refuses a collection write on a read-only workspace
+    // itself (hostContext.writable), so the writes need no gate here — but a
+    // write made inside an automation run takes the run's own authority: the
+    // automation as author on behalf of the owner, at the chain depth main
+    // derived from the claim, keyed by the claim id so a re-run handler's
+    // identical write dedupes engine-side.
+    case "collections.setFields":
+    case "collections.createRecord": {
+      const run = context.automationRun;
+      if (context.automationClaimId !== undefined && run === undefined) {
+        throw new Error(
+          "This automation run has already settled, so its write was not applied.",
+        );
+      }
+      const writeContext: WorkspaceSdkHostContext = run
+        ? {
+            ...hostContext,
+            author: {
+              kind: "automation",
+              automationId: run.automationId,
+              onBehalfOf: run.onBehalfOf,
+              depth: run.depth,
+            },
+            collectionWriteIdempotencyKey: `${run.claimId}/${run.writes++}`,
+          }
+        : hostContext;
+      return waitForOperation(
+        context.signal,
+        invokeWorkspaceSdkHost(writeContext, method, params),
+      );
+    }
     case "databases.edit": {
       if (!context.isWritable()) {
         throw new Error("This plugin has read-only workspace authority.");

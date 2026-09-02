@@ -47,6 +47,7 @@ function fakeSession(options: { settleError?: Error } = {}): {
       applyOptions?: {
         actorOriginId?: string;
         attribution?: ChangeAttributionWire;
+        idempotencyKey?: string;
       },
     ) {
       // The real session journals the update and applies it to its doc.
@@ -127,6 +128,36 @@ describe("setCollectionRecordFields", () => {
     const frontmatter = log.doc.getMap("frontmatter");
     expect(frontmatter.get("status")).toBe("done");
     expect(frontmatter.get("estimate")).toBe(3);
+  });
+
+  it("records an automation author under its subscription id with its depth and claim key", async () => {
+    const root = await workspaceRoot();
+    const { session, log } = fakeSession();
+    const automation = {
+      kind: "automation",
+      automationId: "hello-plugin/triage",
+      onBehalfOf: "local",
+      depth: 1,
+    } as const;
+
+    await setCollectionRecordFields(contextFor(root, session), {
+      recordPath: "tasks/one.md",
+      fields: { status: "done" },
+      author: automation,
+      idempotencyKey: "claim-7",
+    });
+
+    // The actor origin IS the engine subscription id, so the engine's
+    // self-skip guard binds (lane 2), and the wire key is the claim id, so
+    // a re-run handler's identical write dedupes instead of writing twice.
+    expect(log.journaled).toEqual([
+      {
+        actorOriginId: "hello-plugin/triage",
+        attribution: { actorKind: "automation", onBehalfOf: "local", depth: 1 },
+        idempotencyKey: "claim-7",
+      },
+    ]);
+    expect(actorOriginIdFor(automation)).toBe("hello-plugin/triage");
   });
 
   it("keeps a non-agent author device-attributed, like a human edit", async () => {

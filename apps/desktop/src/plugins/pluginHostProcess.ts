@@ -2,9 +2,11 @@ import {
   createDohcClient,
   createPluginChildProcessClient,
   createProcessTransport,
+  runInAutomationClaimContext,
   type PluginActivateContext,
   type PluginAgentDriver,
   type PluginAgentSession,
+  type PluginAutomationHandler,
   type PluginHandler,
   type PluginJsonValue,
   type PluginSettings,
@@ -18,6 +20,7 @@ import {
   PLUGIN_DRIVER_SESSION_ID_MAX_CHARS,
   PLUGIN_HOST_METHODS,
   type PluginActivateParams,
+  type PluginAutomationRunParams,
   type PluginDriverAnswerPermissionParams,
   type PluginDriverAnswerUserInputParams,
   type PluginDriverEventParams,
@@ -40,6 +43,7 @@ const transport = createProcessTransport();
 const client = createDohcClient({ transport });
 const childProcesses = createPluginChildProcessClient(transport);
 const commandRuns = new Map<string, (...args: unknown[]) => unknown>();
+const automationHandlers = new Map<string, PluginAutomationHandler>();
 const drivers = new Map<string, PluginAgentDriver>();
 const driverSessions = new Map<string, PluginAgentSession>();
 let activeHandler: PluginHandler | null = null;
@@ -115,6 +119,11 @@ transport.onRequest(PLUGIN_HOST_METHODS.activate, async (rawParams) => {
         drivers.set(id, driver);
       },
     },
+    automations: {
+      register(id, handler) {
+        automationHandlers.set(id, handler);
+      },
+    },
   };
 
   await handler.activate(ctx);
@@ -182,6 +191,29 @@ transport.onRequest(PLUGIN_HOST_METHODS.stopWebApp, async (rawParams) => {
   }
   await activeHandler.stopWebApp(params.webAppId, params.instanceKey);
   return {};
+});
+
+transport.onRequest(PLUGIN_HOST_METHODS.automationRun, async (rawParams) => {
+  const params = rawParams as PluginAutomationRunParams;
+  const handler = automationHandlers.get(params.handler);
+  if (!handler) {
+    throw new Error(
+      `Automation handler "${params.handler}" is not registered.`,
+    );
+  }
+  // The claim context rides the handler's whole async execution, so every
+  // SDK request it makes names the claim — that is how the host attributes
+  // the run's collection writes to the automation.
+  await runInAutomationClaimContext(params.claimId, () =>
+    handler({
+      claimId: params.claimId,
+      automationId: params.automationId,
+      collectionPath: params.facts.collectionPath,
+      recordId: params.facts.recordId,
+      depth: params.facts.depth,
+    }),
+  );
+  return null;
 });
 
 transport.onRequest(PLUGIN_HOST_METHODS.invokeCommand, async (rawParams) => {

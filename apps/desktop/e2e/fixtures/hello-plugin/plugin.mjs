@@ -370,6 +370,22 @@ switch (mode) {
     };
     break;
   }
+  // Registers one automation handler that reports the run facts it received
+  // through a file write, so a test can prove the host's automation.run
+  // reaches the registered handler — and that the write it makes inside the
+  // run carries the claim's SDK context.
+  case "automation":
+    handler = {
+      activate(ctx) {
+        ctx.automations.register("triage", async (facts) => {
+          await ctx.client.files.write(
+            "automation-run-report.json",
+            `${JSON.stringify(facts)}\n`,
+          );
+        });
+      },
+    };
+    break;
   case "grandchild-heartbeat":
     handler = {
       async activate(ctx) {

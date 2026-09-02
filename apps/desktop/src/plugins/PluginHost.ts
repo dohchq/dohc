@@ -17,6 +17,7 @@ import {
   type PluginActivateParams,
   type PluginSettingsChangedParams,
   type PluginActivateResult,
+  type PluginAutomationRunParams,
   type PluginInvokeCommandParams,
   type PluginLogParams,
   type PluginRuntimeStatus,
@@ -101,6 +102,8 @@ export interface PluginHostOptions {
     /** Aborts when this exact spawn stops, crashes, or is replaced. */
     signal: AbortSignal,
     emitEvent: (subscriptionId: string, event: string, data: unknown) => void,
+    /** See SdkRequestParams.automationClaimId. */
+    automationClaimId?: string,
   ) => Promise<unknown>;
   /** This plugin's settings, resolved against its manifest, for activation.
    * Named by directoryName, never pluginId — settings are stored and looked
@@ -189,7 +192,11 @@ function isSdkRequestParams(params: unknown): params is SdkRequestParams {
     params !== null &&
     "method" in params &&
     typeof params.method === "string" &&
-    params.method.length > 0
+    params.method.length > 0 &&
+    (!("automationClaimId" in params) ||
+      params.automationClaimId === undefined ||
+      (typeof params.automationClaimId === "string" &&
+        params.automationClaimId.length > 0))
   );
 }
 
@@ -393,6 +400,30 @@ export class PluginHost {
     return spawn.transport.request(PLUGIN_HOST_METHODS.invokeCommand, {
       commandId,
     } satisfies PluginInvokeCommandParams);
+  }
+
+  /**
+   * Sends one claimed automation run to the running plugin's registered
+   * handler and resolves when the handler resolves. The caller (the
+   * workspace's automation executor) settles the claim on the outcome; a
+   * thrown handler reaches it as this promise's rejection.
+   */
+  async runAutomation(
+    pluginId: string,
+    params: PluginAutomationRunParams,
+  ): Promise<void> {
+    const record = this.plugins.get(pluginId);
+    const spawn = record?.current;
+    if (!record || !spawn?.transport) {
+      throw new Error(`Plugin "${pluginId}" is not running.`);
+    }
+    if (spawn.stopping) {
+      throw new Error(`Plugin "${pluginId}" is stopping.`);
+    }
+    if (record.status === "starting") {
+      throw new Error(`Plugin "${pluginId}" is still starting.`);
+    }
+    await spawn.transport.request(PLUGIN_HOST_METHODS.automationRun, params);
   }
 
   /**
@@ -1035,6 +1066,7 @@ export class PluginHost {
           { subscriptionId, event, data } satisfies SdkEventParams,
         );
       },
+      request.automationClaimId,
     );
   }
 

@@ -1,7 +1,22 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createInterface } from "node:readline";
 import { DohcSdkError, DohcSdkErrorCodes, createDohcClient, } from "./index.js";
 import { abortedError, assertRequestOptions } from "./requestOptions.js";
 export { createDohcClient };
+// The automation run the calling code is executing inside, carried on the
+// async context so every SDK request an automation handler makes — through
+// the ONE process-wide client — names the claim it belongs to. The host
+// resolves the claim id against the runs it actually started on this exact
+// process; the tag grants nothing by itself.
+const automationRunContext = new AsyncLocalStorage();
+/**
+ * Runs `work` (an automation handler invocation) inside the named claim's
+ * context. Called by the plugin host process around each `automation.run`;
+ * plugin code never calls it.
+ */
+export function runInAutomationClaimContext(claimId, work) {
+    return automationRunContext.run({ claimId }, work);
+}
 export const PLUGIN_CHILD_PROCESS_METHODS = {
     spawn: "childProcesses.spawn",
     spawnCommand: "childProcesses.command.spawn",
@@ -170,7 +185,12 @@ function createTransport(sendMessage, receiveMessages) {
                     onAbort();
                 if (settled)
                     return;
-                const nestedParams = params === undefined ? { method } : { method, params };
+                const automationClaimId = automationRunContext.getStore()?.claimId;
+                const nestedParams = {
+                    method,
+                    ...(params === undefined ? {} : { params }),
+                    ...(automationClaimId === undefined ? {} : { automationClaimId }),
+                };
                 if (!send({
                     jsonrpc: "2.0",
                     id,

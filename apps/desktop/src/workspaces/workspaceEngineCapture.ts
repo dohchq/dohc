@@ -393,11 +393,17 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   // (actor kind, `onBehalfOf`, chain depth). Both ride the primary journal
   // call; a dead-generation revive or recovery replay re-journals canonical
   // state without them, falling back to device attribution — the same
-  // attribution every human edit carries.
+  // attribution every human edit carries. `options.idempotencyKey` replaces
+  // the session-generated wire key for this one update (an automation run's
+  // claim id), so a re-run handler's identical write dedupes engine-side.
   applyLocalUpdate(
     update: Uint8Array,
     onArmed?: () => void,
-    options?: { actorOriginId?: string; attribution?: ChangeAttributionWire },
+    options?: {
+      actorOriginId?: string;
+      attribution?: ChangeAttributionWire;
+      idempotencyKey?: string;
+    },
   ): void;
   applyExternalMarkdownEdit(markdown: string): Promise<{ supported: boolean }>;
   close(options?: WorkspaceEngineYDocCloseOptions): Promise<void>;

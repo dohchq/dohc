@@ -265,6 +265,13 @@ export interface ApplyLocalUpdateOptions {
   actorOriginId?: string;
   /** Declared write provenance the engine records beside the actor origin. */
   attribution?: ChangeAttributionWire;
+  /**
+   * The wire idempotency key for this update's recordUpdate request, in
+   * place of the session-generated one. An automation run's write carries
+   * its claim id here, so a re-run handler's identical write dedupes
+   * engine-side instead of journaling twice.
+   */
+  idempotencyKey?: string;
 }
 
 export interface YdocLocalTextEdit {
@@ -898,7 +905,8 @@ export class YdocAdapterSession {
       // declaration would cost the user's edits.
       ...(seedUpdate ? { seed: true } : {}),
     };
-    const idempotencyKey = `${this.sessionId}:${this.nextLocalUpdateSeq++}`;
+    const idempotencyKey =
+      options?.idempotencyKey ?? `${this.sessionId}:${this.nextLocalUpdateSeq++}`;
     const result = decodeYdocRecordUpdateResult(
       await this.adapter.request(
         this.workspace,

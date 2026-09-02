@@ -16,6 +16,7 @@ export const PLUGIN_HOST_METHODS = {
   activate: "plugin.activate",
   deactivate: "plugin.deactivate",
   invokeCommand: "plugin.invokeCommand",
+  automationRun: "automation.run",
   startWebApp: "plugin.startWebApp",
   stopWebApp: "plugin.stopWebApp",
   settingsChanged: "plugin.settingsChanged",
@@ -209,6 +210,30 @@ export interface PluginSettingsChangedParams {
 export interface SdkRequestParams {
   method: string;
   params?: unknown;
+  /**
+   * The automation claim the requesting code is running inside, tagged by
+   * the SDK transport's async context. Main resolves it against the runs
+   * the executor actually started on this exact spawn; the tag itself
+   * grants nothing.
+   */
+  automationClaimId?: string;
+}
+
+/**
+ * One claimed automation run, sent host -> plugin. `automationId` is the
+ * manifest's own id and `handler` the registration name it declares — main
+ * resolves both from the admitted manifest, never from the claim alone.
+ */
+export interface PluginAutomationRunParams {
+  claimId: string;
+  automationId: string;
+  handler: string;
+  facts: {
+    collectionPath: string;
+    recordId: string;
+    /** The TRIGGERING change's chain depth; the run's writes carry depth + 1. */
+    depth: number;
+  };
 }
 
 export interface SdkEventParams {

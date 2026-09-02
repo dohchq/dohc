@@ -2142,6 +2142,16 @@ export type NonEmptyLocalAuthorLabel = string & {
 export type ChangeAuthor =
   | { kind: "user"; userId: string }
   | { kind: "agent"; agentId: string; onBehalfOf: string }
+  // An automation's write, derived main-side from the claim the executor is
+  // running — never from the plugin's own request. automationId is the
+  // engine subscription id ("<plugin name>/<automation id>"), and depth is
+  // the write's automation-chain depth: one greater than its trigger's.
+  | {
+      kind: "automation";
+      automationId: string;
+      onBehalfOf: string;
+      depth: number;
+    }
   | { kind: "local"; label: NonEmptyLocalAuthorLabel };
 
 interface EngineFileChange {

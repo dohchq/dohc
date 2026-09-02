@@ -1,5 +1,6 @@
 import { normalizeAbsolutePath, type WatcherEvent } from "@dohc/workspace-core";
 import type { PluginAgentDrivers } from "./pluginAgentDrivers";
+import type { PluginAutomations } from "./pluginAutomations";
 import {
   forgetRemovedPlugin,
   forgetUninstalledPlugin,
@@ -22,12 +23,14 @@ export interface PluginWorkspaceRuntimeParts {
   readonly pipeline: PluginPipeline;
   readonly agentDrivers: PluginAgentDrivers;
   readonly workspaceEvents: PluginWorkspaceEvents;
+  readonly automations: PluginAutomations;
 }
 
 export interface PluginWorkspaceRuntime {
   readonly pipeline: PluginPipeline;
   readonly agentDrivers: PluginAgentDrivers;
   readonly workspaceEvents: PluginWorkspaceEvents;
+  readonly automations: PluginAutomations;
   registeredPlugin(pluginId: string): RegisteredPlugin | undefined;
   rememberPlugin(registration: RegisteredPlugin): RegisteredPlugin;
   forgetUninstalledPlugin(input: {
@@ -62,6 +65,7 @@ class OwnedPluginWorkspaceRuntime implements PluginWorkspaceRuntime {
   readonly pipeline: PluginPipeline;
   readonly agentDrivers: PluginAgentDrivers;
   readonly workspaceEvents: PluginWorkspaceEvents;
+  readonly automations: PluginAutomations;
   private readonly workspaceId: string;
   private readonly workspaceRoot: string;
   private readonly registrations = new Map<string, RegisteredPlugin>();
@@ -78,6 +82,7 @@ class OwnedPluginWorkspaceRuntime implements PluginWorkspaceRuntime {
     this.pipeline = parts.pipeline;
     this.agentDrivers = parts.agentDrivers;
     this.workspaceEvents = parts.workspaceEvents;
+    this.automations = parts.automations;
   }
 
   start(): Promise<void> {
@@ -111,6 +116,15 @@ class OwnedPluginWorkspaceRuntime implements PluginWorkspaceRuntime {
     }
 
     await pipelineDisposal;
+
+    // Workspace close removes this desktop's automation subscriptions;
+    // best-effort, after the pipeline stops feeding it status events.
+    try {
+      await this.automations.dispose();
+    } catch (error) {
+      if (failure === undefined) failure = error;
+      else this.onCleanupError(error);
+    }
 
     try {
       this.workspaceEvents.dispose();

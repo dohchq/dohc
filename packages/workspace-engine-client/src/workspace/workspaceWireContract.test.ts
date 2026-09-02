@@ -537,3 +537,70 @@ describe("workspace wire schemas", () => {
     },
   );
 });
+
+describe("automations wire schemas", () => {
+  const claim = {
+    claimId: "claim-1",
+    automationId: "hello-plugin/triage",
+    trigger: { originId: "origin-a", originSeq: 7 },
+    recordId: "record-1",
+    collectionPath: "tasks",
+    depth: 0,
+    state: "pending",
+    attempts: 1,
+    createdAtMs: 1_000,
+    updatedAtMs: 1_000,
+  };
+
+  it("decodes the subscription round trip", () => {
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsSubscribe, {
+        subscribed: true,
+      }),
+    ).toEqual({ subscribed: true });
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsUnsubscribe, {
+        unsubscribed: false,
+      }),
+    ).toEqual({ unsubscribed: false });
+  });
+
+  it("decodes a coordinate-keyed claim from claimNext", () => {
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, claim),
+    ).toEqual(claim);
+  });
+
+  it("decodes null from a drained claimNext", () => {
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, null),
+    ).toBeNull();
+  });
+
+  it("decodes a history-keyed failed claim from settle", () => {
+    const failed = {
+      ...claim,
+      trigger: { historyId: 41 },
+      state: "failed",
+      error: "handler threw",
+    };
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, failed),
+    ).toEqual(failed);
+  });
+
+  it("refuses a claim with an unknown state or a malformed trigger", () => {
+    expect(() =>
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, {
+        ...claim,
+        state: "paused",
+      }),
+    ).toThrow(WorkspaceProtocolShapeError);
+    expect(() =>
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, {
+        ...claim,
+        trigger: { originId: "origin-a" },
+      }),
+    ).toThrow(WorkspaceProtocolShapeError);
+  });
+});

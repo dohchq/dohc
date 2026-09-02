@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createInterface } from "node:readline";
 import {
   DohcSdkError,
@@ -26,6 +27,25 @@ type RequestHandler = (params: unknown) => Promise<unknown> | unknown;
 interface PendingRequest {
   resolve(value: unknown): void;
   reject(error: DohcSdkError): void;
+}
+
+// The automation run the calling code is executing inside, carried on the
+// async context so every SDK request an automation handler makes — through
+// the ONE process-wide client — names the claim it belongs to. The host
+// resolves the claim id against the runs it actually started on this exact
+// process; the tag grants nothing by itself.
+const automationRunContext = new AsyncLocalStorage<{ claimId: string }>();
+
+/**
+ * Runs `work` (an automation handler invocation) inside the named claim's
+ * context. Called by the plugin host process around each `automation.run`;
+ * plugin code never calls it.
+ */
+export function runInAutomationClaimContext<T>(
+  claimId: string,
+  work: () => T,
+): T {
+  return automationRunContext.run({ claimId }, work);
 }
 
 export const PLUGIN_CHILD_PROCESS_METHODS = {
@@ -426,7 +446,36 @@ export interface PluginActivateContext {
   drivers: {
     register(id: string, driver: PluginAgentDriver): void;
   };
+  /**
+   * Registers the automation handlers this plugin's manifest names (each
+   * declared automation's `handler` field). Register every named handler
+   * during activation, like drivers: dohc claims a triggering change before
+   * it starts the plugin, and a claim whose handler never registered can
+   * only fail. Several automations may share one handler.
+   */
+  automations: {
+    register(id: string, handler: PluginAutomationHandler): void;
+  };
 }
+
+/**
+ * What an automation handler receives: the claimed change's fact summary.
+ * The handler reads the record (or its history) for field-level detail,
+ * like any collections.watch subscriber.
+ */
+export interface PluginAutomationRunFacts {
+  claimId: string;
+  /** The manifest's automation id (without the plugin-name prefix). */
+  automationId: string;
+  collectionPath: string;
+  recordId: string;
+  /** The TRIGGERING change's chain depth. This run's writes carry depth + 1. */
+  depth: number;
+}
+
+export type PluginAutomationHandler = (
+  facts: PluginAutomationRunFacts,
+) => Promise<void> | void;
 
 /** What PluginHandler.startWebApp returns: the URL the host navigates the
  * guest WebContentsView to. It may carry a one-time credential in its
@@ -661,7 +710,12 @@ function createTransport(
         if (requestOptions?.signal?.aborted) onAbort();
         if (settled) return;
 
-        const nestedParams = params === undefined ? { method } : { method, params };
+        const automationClaimId = automationRunContext.getStore()?.claimId;
+        const nestedParams = {
+          method,
+          ...(params === undefined ? {} : { params }),
+          ...(automationClaimId === undefined ? {} : { automationClaimId }),
+        };
         if (!send({
           jsonrpc: "2.0",
           id,

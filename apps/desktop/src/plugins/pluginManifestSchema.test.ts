@@ -4,6 +4,7 @@ import { MAX_PLUGIN_MANIFEST_FILE_BYTES } from "./pluginManifest";
 import { DEFAULT_DRIVER_ID_MAX_LENGTH } from "@dohc/workspace-contracts/workspace-settings-values";
 import {
   DohcPluginManifest,
+  MAX_PLUGIN_AUTOMATIONS,
   MAX_PLUGIN_DRIVERS,
   MAX_PLUGIN_DESCRIPTION_CHARS,
   MAX_PLUGIN_LICENSE_CHARS,
@@ -907,6 +908,80 @@ describe("DohcPluginManifest", () => {
     it("declares no settings at all and still parses", () => {
       const parsed = DohcPluginManifest.parse(minimalManifest);
       expect(parsed.settings).toBeUndefined();
+    });
+  });
+
+  describe("automations", () => {
+    const automation = {
+      id: "triage",
+      collection: "tasks",
+      handler: "triage",
+    } as const;
+
+    it("parses a declared automation and normalizes its collection path", () => {
+      expect(DohcPluginManifest.parse({
+        ...minimalManifest,
+        automations: [{ ...automation, collection: "tasks\\open/./" }],
+      }).automations).toEqual([{ ...automation, collection: "tasks/open" }]);
+    });
+
+    it("accepts \".\" as the whole-workspace collection", () => {
+      expect(DohcPluginManifest.parse({
+        ...minimalManifest,
+        automations: [{ ...automation, collection: "." }],
+      }).automations).toEqual([{ ...automation, collection: "." }]);
+    });
+
+    it("lets two automations share one handler", () => {
+      expect(DohcPluginManifest.safeParse({
+        ...minimalManifest,
+        automations: [
+          automation,
+          { id: "archive", collection: "tasks", handler: "triage" },
+        ],
+      }).success).toBe(true);
+    });
+
+    it("refuses a duplicate automation id", () => {
+      const result = DohcPluginManifest.safeParse({
+        ...minimalManifest,
+        automations: [automation, { ...automation, collection: "notes" }],
+      });
+      if (result.success) throw new Error("expected the duplicate id to reject");
+      expect(result.error.issues).toContainEqual(expect.objectContaining({
+        path: ["automations", 1, "id"],
+        message: 'automation id "triage" must be unique within automations',
+      }));
+    });
+
+    it.each([
+      ["a slash in the id", { ...automation, id: "a/b" }],
+      ["an escaping collection path", { ...automation, collection: "../tasks" }],
+      ["an absolute collection path", { ...automation, collection: "/tasks" }],
+      ["an empty collection path", { ...automation, collection: "" }],
+      ["a NUL byte in the collection", { ...automation, collection: "ta sks" }],
+      ["a slash in the handler", { ...automation, handler: "a/b" }],
+      ["a missing handler", { id: "triage", collection: "tasks" }],
+    ])("refuses %s", (_case, declared) => {
+      expect(DohcPluginManifest.safeParse({
+        ...minimalManifest,
+        automations: [declared],
+      }).success).toBe(false);
+    });
+
+    it("refuses an automation entry past the cap", () => {
+      const result = DohcPluginManifest.safeParse({
+        ...minimalManifest,
+        automations: Array.from({ length: MAX_PLUGIN_AUTOMATIONS + 1 }, (_, i) => ({
+          id: `automation-${i}`,
+          collection: "tasks",
+          handler: "run",
+        })),
+      });
+      if (result.success) throw new Error("expected the cap to reject the manifest");
+      expect(result.error.issues).toContainEqual(expect.objectContaining({
+        message: `automations: at most ${MAX_PLUGIN_AUTOMATIONS} entries allowed`,
+      }));
     });
   });
 });

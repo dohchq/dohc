@@ -5,6 +5,7 @@ import { DohcSdkError, DohcSdkErrorCodes } from ".";
 import {
   createPluginChildProcessClient,
   createProcessTransport,
+  runInAutomationClaimContext,
 } from "./node";
 
 function createStdioHarness() {
@@ -60,6 +61,27 @@ describe("@dohc/sdk/node", () => {
     harness.send({ jsonrpc: "2.0", id: 1, result: { text: "today" } });
 
     await expect(pending).resolves.toEqual({ text: "today" });
+  });
+
+  it("tags requests made inside an automation claim context with the claim id", async () => {
+    const harness = createStdioHarness();
+    const pending = runInAutomationClaimContext("claim-9", () =>
+      harness.transport.request("collections.setFields", { path: "tasks/a.md" }),
+    );
+
+    await expect(harness.nextLine()).resolves.toBe(
+      '{"jsonrpc":"2.0","id":1,"method":"sdk.request","params":{"method":"collections.setFields","params":{"path":"tasks/a.md"},"automationClaimId":"claim-9"}}\n',
+    );
+    harness.send({ jsonrpc: "2.0", id: 1, result: { path: "tasks/a.md" } });
+    await expect(pending).resolves.toEqual({ path: "tasks/a.md" });
+
+    // Outside the context the envelope stays untagged.
+    const untagged = harness.transport.request("files.read", { path: "a.md" });
+    await expect(harness.nextLine()).resolves.toBe(
+      '{"jsonrpc":"2.0","id":2,"method":"sdk.request","params":{"method":"files.read","params":{"path":"a.md"}}}\n',
+    );
+    harness.send({ jsonrpc: "2.0", id: 2, result: null });
+    await expect(untagged).resolves.toBeNull();
   });
 
   it("surfaces matching host errors as DohcSdkError instances", async () => {

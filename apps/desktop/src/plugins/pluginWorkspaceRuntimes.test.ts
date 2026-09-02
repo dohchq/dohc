@@ -31,6 +31,7 @@ interface TestParts {
     dispose: ReturnType<typeof vi.fn>;
     handleWatcherEvents: ReturnType<typeof vi.fn>;
   };
+  automations: { dispose: ReturnType<typeof vi.fn> };
 }
 
 function deferred(): {
@@ -69,6 +70,7 @@ function makeParts(overrides: {
       dispose: vi.fn(() => undefined),
       handleWatcherEvents: vi.fn(() => undefined),
     },
+    automations: { dispose: vi.fn(async () => undefined) },
   };
 }
 
@@ -77,6 +79,8 @@ function runtimeParts(parts: TestParts): PluginWorkspaceRuntimeParts {
     pipeline: parts.pipeline as unknown as PluginWorkspaceRuntimeParts["pipeline"],
     agentDrivers: parts.drivers as unknown as PluginAgentDrivers,
     workspaceEvents: parts.events as unknown as PluginWorkspaceEvents,
+    automations:
+      parts.automations as unknown as PluginWorkspaceRuntimeParts["automations"],
   };
 }
 

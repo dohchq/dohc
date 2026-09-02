@@ -609,6 +609,7 @@ import {
 } from "@dohc/workspace-engine-client/daemon";
 import { bridgeCaptureEventsToRenderer } from "./workspaces/captureActivityBridge";
 import { bridgeRecordEventsToPlugins } from "./workspaces/recordEventsBridge";
+import { bridgeAutomationClaimsToExecutors } from "./workspaces/automationClaimsBridge";
 import {
   broadcastWorkspaceActivity,
   workspaceActivityPayload,
@@ -699,7 +700,11 @@ import {
   ensurePluginStarted,
 } from "./plugins/pluginHostStart";
 import { createPluginAuthoredTextWriter } from "./plugins/pluginAuthoredWrite";
-import { invokePluginSdkHost } from "./plugins/pluginSdkHost";
+import { PluginAutomations } from "./plugins/pluginAutomations";
+import {
+  invokePluginSdkHost,
+  type PluginAutomationRunAuthority,
+} from "./plugins/pluginSdkHost";
 import { createOwnedWorkspaceSdkReads } from "./workspaces/ownedWorkspaceSdkReads";
 import { createPluginUtilityTransport } from "./plugins/pluginUtilityTransport";
 import { PluginChildProcessBroker } from "./plugins/pluginChildProcessBroker";
@@ -1036,6 +1041,55 @@ function createPluginWorkspaceRuntimeParts(
   // This workspace's plugin file subscriptions, fed by the settled watcher
   // batch (see onWatcherBatch) — the same feed the pipeline reads.
   const workspaceEvents = new PluginWorkspaceEvents();
+  // This workspace's origin-device automation executor (ADR 0008): engine
+  // access through the same attachment-pinned adapter collection reads take,
+  // manifests through the pipeline created below, and handler runs through
+  // the same host-ownership lease a command invocation holds.
+  const automations = new PluginAutomations({
+    withAdapter: (work) =>
+      withEngineAdapter(
+        {
+          workspaceId: workspace.workspaceId,
+          rootPath: workspace.rootPath,
+          attachmentId: authorityBinding.attachmentId,
+        },
+        work,
+      ),
+    declaredAutomations: (pluginId) =>
+      pipeline?.pluginRegistration(pluginId)?.manifest.automations ?? null,
+    runOnPlugin: async (pluginId, params) => {
+      const currentPipeline = pipeline;
+      if (!currentPipeline) {
+        throw new Error(`Plugin "${pluginId}" is not available yet.`);
+      }
+      const outcome = await currentPipeline.hostOwnership.runCommand(
+        pluginId,
+        async (commandAuthority) => {
+          const host = await ensurePluginStarted(
+            currentPipeline.host,
+            pluginId,
+            () =>
+              commandAuthority.start(() =>
+                currentPipeline.ensureStarted(pluginId, commandAuthority),
+              ),
+          );
+          await host.runAutomation(pluginId, params);
+          return { ok: true as const };
+        },
+      );
+      if (outcome.kind !== "completed") {
+        throw new Error(
+          `dohc is still working on plugin "${pluginId}", so the automation run could not start.`,
+        );
+      }
+    },
+    onError: (context, error) => {
+      console.error(
+        `[desktop] automations (${workspace.workspaceId}): ${context}:`,
+        error,
+      );
+    },
+  });
   const pluginHost = new PluginHost({
     stateDir: stateDir(),
     workspaceRoot: workspace.rootPath,
@@ -1069,7 +1123,15 @@ function createPluginWorkspaceRuntimeParts(
     // this, the plugin's own request path (not the panel path), supplies
     // invokeChildProcess — a panel is renderer-driven UI, not the plugin's
     // own activated code, so it never brokers child processes.
-    routeSdkRequest: (pluginId, method, params, spawnId, signal, emitEvent) =>
+    routeSdkRequest: (
+      pluginId,
+      method,
+      params,
+      spawnId,
+      signal,
+      emitEvent,
+      automationClaimId,
+    ) =>
       runWithAuthority(() =>
         invokeWorkspacePluginSdk({
           workspaceId: workspace.workspaceId,
@@ -1078,6 +1140,7 @@ function createPluginWorkspaceRuntimeParts(
           requestPath: "plugin-process",
           isWritable: () => !sharedViewOf(workspace.workspaceId),
           signal,
+          ...(automationClaimId === undefined ? {} : { automationClaimId }),
           invokeChildProcess: (childMethod, childParams) =>
             childProcessBroker.invoke(
               { pluginId, spawnId, signal, emitEvent },
@@ -1165,7 +1228,13 @@ function createPluginWorkspaceRuntimeParts(
     hostOwnership,
     resourcesBasePath: pluginResourcesBasePath(),
     pnpmRunnerEntry: join(import.meta.dirname, "pnpm-runner.js"),
-    onStatusChange: hooks.onPipelineStatus,
+    // The automation executor reads every status first, so a plugin's
+    // engine subscriptions are reconciled before the renderer hears about
+    // the same transition.
+    onStatusChange: (event) => {
+      automations.handlePipelineStatus(event);
+      hooks.onPipelineStatus(event);
+    },
     onRuntimeStopped: (pluginId) =>
       surfaces.stop({
         kind: "plugin",
@@ -1182,7 +1251,7 @@ function createPluginWorkspaceRuntimeParts(
           workspaceActivity.engineCaptureFor(lease.state.activity) !== null,
       ) ?? false,
   });
-  return { pipeline, agentDrivers: pluginDrivers, workspaceEvents };
+  return { pipeline, agentDrivers: pluginDrivers, workspaceEvents, automations };
 }
 
 async function relativeWorkspacePath(
@@ -4603,6 +4672,8 @@ async function invokeWorkspacePluginSdk(input: {
   requestPath: "panel" | "plugin-process";
   isWritable: () => boolean;
   signal?: AbortSignal;
+  /** The claim id the plugin-process request declared (see SdkRequestParams). */
+  automationClaimId?: string;
   invokeChildProcess?: (method: string, params?: unknown) => Promise<unknown>;
   subscribeFileWatch?: (params: unknown) => { subscriptionId: string };
   subscribeRecordWatch?: (
@@ -4618,12 +4689,28 @@ async function invokeWorkspacePluginSdk(input: {
     const signal = input.signal
       ? AbortSignal.any([input.signal, operation.signal])
       : operation.signal;
+    // Resolve a request-declared automation claim against the runs this
+    // workspace's executor actually started on this plugin — main-derived
+    // authority, like the author; the plugin's tag grants nothing.
+    const automationRun: PluginAutomationRunAuthority | undefined =
+      input.automationClaimId === undefined
+        ? undefined
+        : operation.state.pluginRuntimes
+            .current(input.workspaceId)
+            ?.automations.activeRun({
+              claimId: input.automationClaimId,
+              pluginId: input.pluginId,
+            });
     return invokePluginSdkHost(
       {
         pluginId: input.pluginId,
         workspaceRoot: workspace.rootPath,
         spawnId: input.spawnId,
         requestPath: input.requestPath,
+        ...(input.automationClaimId === undefined
+          ? {}
+          : { automationClaimId: input.automationClaimId }),
+        ...(automationRun === undefined ? {} : { automationRun }),
         // Read from the registration main holds, never from the request: what a
         // plugin may open is what its approved manifest declares.
         declaredWebApps: operation.state.pluginRuntimes
@@ -13461,6 +13548,12 @@ async function startRustEngineDaemon(): Promise<boolean> {
     // subscription, so route each one to the owning workspace's registry.
     bridgeRecordEventsToPlugins(rustEngineDaemon, (workspaceId) =>
       pluginWorkspaceRuntimes.current(workspaceId)?.workspaceEvents,
+    );
+    // The daemon also claims each local record change for its subscribed
+    // automations (ADR 0008); its automation.claimed events wake the owning
+    // workspace's executor to drain the durable claim table.
+    bridgeAutomationClaimsToExecutors(rustEngineDaemon, (workspaceId) =>
+      pluginWorkspaceRuntimes.current(workspaceId)?.automations,
     );
     const relaySource = new RelayConfiguredDaemonClientSource(
       rustEngineDaemon,
