@@ -1537,6 +1537,7 @@ pub(crate) fn verify_imported_conflict_effect_in_tx(
         return Ok(MomentApplyResult {
             conflicts_opened: 0,
             materialization_changes: Vec::new(),
+            record_facts: None,
         });
     }
     if parent_disposition != "applied" {
@@ -1562,6 +1563,7 @@ pub(crate) fn verify_imported_conflict_effect_in_tx(
     Ok(MomentApplyResult {
         conflicts_opened: 0,
         materialization_changes: Vec::new(),
+        record_facts: None,
     })
 }
 

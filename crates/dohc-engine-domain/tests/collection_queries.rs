@@ -672,7 +672,7 @@ fn numeric_equality_uses_one_rule_across_every_collection_surface() {
     let deduplicated = store
         .write_with(&NoFaults, |tx| {
             let writes_before = tx.total_changes();
-            index_collection_frontmatter_apply_in_tx(
+            let _ = index_collection_frontmatter_apply_in_tx(
                 tx,
                 WORKSPACE_ID,
                 VERSION_ID,
@@ -749,7 +749,7 @@ fn body_only_collection_apply_does_not_rewrite_index_or_history() {
     let outcome = store
         .write_with(&NoFaults, |tx| {
             let writes_before = tx.total_changes();
-            index_collection_frontmatter_apply_in_tx(
+            let _ = index_collection_frontmatter_apply_in_tx(
                 tx,
                 WORKSPACE_ID,
                 VERSION_ID,
@@ -850,7 +850,7 @@ fn multi_field_history_order_matches_across_independent_stores() {
                 )
             })
             .expect("apply multi-field update");
-        assert!(matches!(updated, TxnOutcome::Committed(())));
+        assert!(matches!(updated, TxnOutcome::Committed(Some(_))));
 
         store
             .read_with(|conn| {
@@ -1322,7 +1322,7 @@ fn changing_an_adopted_record_id_keeps_authored_history_under_the_engine_id() {
     let done = json!({ "id": FIRST_TASK_ID, "status": "done" });
     store
         .write_with(&NoFaults, |tx| {
-            index_collection_frontmatter_apply_in_tx(
+            let _ = index_collection_frontmatter_apply_in_tx(
                 tx,
                 WORKSPACE_ID,
                 VERSION_ID,
@@ -1822,7 +1822,7 @@ fn rename_and_same_id_copy_keep_identity_and_history_with_the_original_object() 
             )
         })
         .expect("record original field history");
-    assert!(matches!(history_added, TxnOutcome::Committed(())));
+    assert!(matches!(history_added, TxnOutcome::Committed(Some(_))));
 
     VersionedTextStore::new(&mut store)
         .rename_text_file(

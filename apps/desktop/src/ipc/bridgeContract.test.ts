@@ -3046,6 +3046,78 @@ describe("plugin guest SDK IPC contract", () => {
       parsePluginPanelSdkEventForIpc({ ...event, event: "" }),
     ).toBeNull();
   });
+
+  it("accepts collection record event data and rejects shapes outside the union", () => {
+    const base = {
+      workspaceId: "ws-plugins",
+      pluginId: "hello-plugin",
+      panelId: "main",
+      subscriptionId: "subscription-1",
+    };
+    const created = {
+      ...base,
+      event: "record.created",
+      data: {
+        collectionPath: "collections/people",
+        recordId: "rec-1",
+        author: null,
+        timestamp: 1_756_000_000_000,
+      },
+    };
+    const fieldChanged = {
+      ...base,
+      event: "record.field.changed",
+      data: {
+        collectionPath: "collections/people",
+        recordId: "rec-1",
+        field: "notes",
+        previous: { tags: ["a", "b"] },
+        // The engine's oversized-value marker is an ordinary JSON object.
+        next: { truncated: true, bytes: 9_000 },
+        author: "agent:sites",
+        timestamp: 1_756_000_000_000,
+        historyId: 7,
+      },
+    };
+
+    expect(parsePluginPanelSdkEventForIpc(created)).toEqual(created);
+    expect(parsePluginPanelSdkEventForIpc(fieldChanged)).toEqual(fieldChanged);
+
+    // Not a passthrough: a shape matching none of the union members is
+    // dropped, and so is a member shape with excess or mistyped fields.
+    expect(
+      parsePluginPanelSdkEventForIpc({ ...created, data: { anything: true } }),
+    ).toBeNull();
+    expect(
+      parsePluginPanelSdkEventForIpc({
+        ...created,
+        data: { ...created.data, recordId: "" },
+      }),
+    ).toBeNull();
+    expect(
+      parsePluginPanelSdkEventForIpc({
+        ...created,
+        data: { ...created.data, timestamp: "yesterday" },
+      }),
+    ).toBeNull();
+    expect(
+      parsePluginPanelSdkEventForIpc({
+        ...created,
+        data: { ...created.data, extra: true },
+      }),
+    ).toBeNull();
+    expect(
+      parsePluginPanelSdkEventForIpc({
+        ...fieldChanged,
+        data: { ...fieldChanged.data, historyId: "7" },
+      }),
+    ).toBeNull();
+    const withoutNext: Record<string, unknown> = { ...fieldChanged.data };
+    delete withoutNext.next;
+    expect(
+      parsePluginPanelSdkEventForIpc({ ...fieldChanged, data: withoutNext }),
+    ).toBeNull();
+  });
 });
 
 describe("workspace versions IPC contract (PR 0M-4)", () => {

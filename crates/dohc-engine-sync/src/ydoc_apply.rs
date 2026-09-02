@@ -130,6 +130,9 @@ pub struct YdocApplyResult {
     pub conflicts_opened: i64,
     /// Present only when this apply changed the active immutable lineage.
     pub lineage_replacement: Option<YdocLineageReplacement>,
+    /// What this apply did to a bound collection record: the source of the
+    /// record events the pull pass reports for post-commit emission.
+    pub record_facts: Option<dohc_engine_domain::CollectionRecordApplyFacts>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -2265,6 +2268,7 @@ fn apply_ydoc_envelope_inner(
                 reason: Some("ydoc-session-live"),
                 conflicts_opened: 0,
                 lineage_replacement: None,
+                record_facts: None,
             })
         });
     }
@@ -2467,6 +2471,7 @@ fn apply_ydoc_envelope_inner(
                         reason: Some("ydoc-base-already-won"),
                         conflicts_opened: 0,
                         lineage_replacement: None,
+                        record_facts: None,
                     });
                 }
                 dohc_engine_collab::ClaimOutcome::Replaced {
@@ -2657,6 +2662,7 @@ fn apply_ydoc_envelope_inner(
                             winner_lineage_claim_id,
                             recovered_paths,
                         }),
+                        record_facts: None,
                     });
                 }
             }
@@ -2680,6 +2686,7 @@ fn apply_ydoc_envelope_inner(
                     winner_lineage_claim_id,
                     recovered_paths,
                 }),
+                record_facts: None,
             })
         });
         let outcome = match outcome {
@@ -2805,6 +2812,7 @@ fn apply_ydoc_envelope_inner(
                     reason: Some("ydoc-lineage-absent"),
                     conflicts_opened: 0,
                     lineage_replacement: None,
+                    record_facts: None,
                 })
             });
         };
@@ -2823,6 +2831,7 @@ fn apply_ydoc_envelope_inner(
                     reason: Some("ydoc-lineage-lost"),
                     conflicts_opened: 0,
                     lineage_replacement: None,
+                    record_facts: None,
                 })
             })?;
             return Ok(
@@ -2839,6 +2848,7 @@ fn apply_ydoc_envelope_inner(
         bytes,
     };
     let mut sharing_declined = None;
+    let mut record_facts = None;
     let mut cache_probe = RemoteAppendProbe::default();
     let outcome_result =
         crate::apply::apply_envelope_with_mutation_outcome(store, envelope, faults, |tx, op| {
@@ -2864,6 +2874,7 @@ fn apply_ydoc_envelope_inner(
             .map_err(|error| map_collab_payload_error(error, "ydoc.update could not be applied"))?;
             let applied = projected.outcome;
             let update_kind = projected.content_kind;
+            record_facts = projected.record_facts;
             // An out-of-order cross-origin update parks durably with missing
             // dependencies; a projection taken NOW would omit the pending remote
             // content and materialize an incomplete view. Skip — the envelope
@@ -2983,7 +2994,7 @@ fn apply_ydoc_envelope_inner(
         }
     }
     Ok(merge_lineage_replacements(
-        map_applied_ydoc_outcome(outcome, sharing_declined),
+        map_applied_ydoc_outcome(outcome, sharing_declined, record_facts),
         drain.lineage_replacements,
     )
     .with_sharing_declined(drain.sharing_declined)
@@ -3029,6 +3040,7 @@ fn merge_lineage_replacements(
             reason: Some("ydoc-deferred-lineage-replaced"),
             conflicts_opened: 0,
             lineage_replacement: Some(replacement),
+            record_facts: None,
         }),
         ApplyOutcome::WithDiagnostics {
             outcome,
@@ -3046,6 +3058,7 @@ fn merge_lineage_replacements(
 fn map_applied_ydoc_outcome(
     outcome: ApplyOutcome<ReplicationApplyOutcome>,
     sharing_declined: Option<crate::SharingDeclined>,
+    record_facts: Option<dohc_engine_domain::CollectionRecordApplyFacts>,
 ) -> ApplyOutcome<YdocApplyResult> {
     match outcome {
         ApplyOutcome::Applied(_) => ApplyOutcome::Applied(YdocApplyResult {
@@ -3053,6 +3066,7 @@ fn map_applied_ydoc_outcome(
             reason: None,
             conflicts_opened: 0,
             lineage_replacement: None,
+            record_facts,
         })
         .with_sharing_declined(sharing_declined.into_iter().collect()),
         ApplyOutcome::Refused(refusal) => ApplyOutcome::Refused(refusal),
@@ -3063,7 +3077,11 @@ fn map_applied_ydoc_outcome(
             refusals,
             sharing_declined: nested,
         } => ApplyOutcome::WithDiagnostics {
-            outcome: Box::new(map_applied_ydoc_outcome(*outcome, sharing_declined)),
+            outcome: Box::new(map_applied_ydoc_outcome(
+                *outcome,
+                sharing_declined,
+                record_facts,
+            )),
             refusals,
             sharing_declined: nested,
         },

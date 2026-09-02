@@ -849,6 +849,23 @@ export function createDohcClient(options = {}) {
         },
         collections: {
             list: listCollection,
+            /**
+             * Reports record changes at or below `collectionPath`, which is a
+             * prefix: a collection to watch on its own, or a folder to watch with
+             * every collection under it. Changes outside it never arrive. Delivery
+             * is at most once; reconcile missed events from record history using
+             * the last seen historyId.
+             *
+             * Returns a function that stops the subscription. A subscription also
+             * ends when its plugin stops, or when the panel that opened it closes
+             * or changes its workspace, plugin, or panel identity.
+             */
+            watch: async (collectionPath, listener, requestOptions) => {
+                assertRequestOptions(requestOptions);
+                assertWorkspacePath(collectionPath, "Collection paths");
+                await requireCapability("collections", "read", requestOptions);
+                return subscribe("collections.watch", { collectionPath }, listener, requestOptions);
+            },
             get: (name) => ({
                 list: async (params = {}, requestOptions) => {
                     // Authorization boundary: AGENTS.md product invariants. The SDK

@@ -104,6 +104,9 @@ pub struct MomentMaterializationChange {
 pub struct MomentApplyResult {
     pub conflicts_opened: i64,
     pub materialization_changes: Vec<MomentMaterializationChange>,
+    /// Field facts derived when this apply changed a bound record's
+    /// frontmatter. `None` for a refusal, a non-record write, or no change.
+    pub record_facts: Option<dohc_engine_domain::CollectionRecordApplyFacts>,
 }
 
 impl ContentKind {
@@ -505,6 +508,7 @@ fn apply_moment_append(
         return Ok(MomentApplyResult {
             conflicts_opened: 0,
             materialization_changes: Vec::new(),
+            record_facts: None,
         });
     }
 
@@ -571,6 +575,7 @@ fn apply_moment_append(
             return Ok(MomentApplyResult {
                 conflicts_opened: 0,
                 materialization_changes,
+                record_facts: None,
             });
         }
 
@@ -622,6 +627,7 @@ fn apply_moment_append(
             },
             ContentKind::Binary => crate::ResultingHead::BinaryOrAbsent,
         };
+        let mut record_facts = None;
         if mode == MomentApplyMode::Ordinary {
             crate::reconcile_imported_resulting_head_in_tx(
                 tx,
@@ -639,14 +645,32 @@ fn apply_moment_append(
                 // A write without parseable frontmatter must still clear the
                 // index. Mirror the ydoc lane: `Ydoc::frontmatter_json`
                 // projects an absent frontmatter map as an empty object.
+                // The prior snapshot's text is the before state, so a file
+                // edit derives the same per-field history and facts a
+                // frontmatter-map edit does; the author was written against
+                // its own head, so its authored pair is the applied pair.
+                let empty = || serde_json::Value::Object(serde_json::Map::new());
+                let before_frontmatter = local
+                    .as_ref()
+                    .filter(|snapshot| snapshot.kind == ContentKind::Text)
+                    .and_then(|snapshot| {
+                        dohc_engine_domain::collections::markdown_frontmatter_json(&snapshot.text)
+                    })
+                    .unwrap_or_else(empty);
                 let frontmatter = dohc_engine_domain::collections::markdown_frontmatter_json(text)
-                    .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
-                dohc_engine_domain::synchronize_collection_frontmatter_index_in_tx(
+                    .unwrap_or_else(empty);
+                record_facts = dohc_engine_domain::index_collection_frontmatter_apply_in_tx(
                     tx,
                     &envelope.workspace_id,
                     &payload.version_id,
                     &payload.object_id,
+                    &before_frontmatter,
                     &frontmatter,
+                    &before_frontmatter,
+                    &frontmatter,
+                    Some(&envelope.origin_id),
+                    Some((&envelope.origin_id, envelope.origin_seq)),
+                    envelope.recorded_at_ms,
                 )
                 .map_err(crate::ydoc_apply::map_domain_hard_error)?;
             }
@@ -685,6 +709,7 @@ fn apply_moment_append(
         return Ok(MomentApplyResult {
             conflicts_opened: 0,
             materialization_changes,
+            record_facts,
         });
     }
 
@@ -772,6 +797,7 @@ fn apply_moment_append(
     Ok(MomentApplyResult {
         conflicts_opened: opened,
         materialization_changes: Vec::new(),
+        record_facts: None,
     })
 }
 

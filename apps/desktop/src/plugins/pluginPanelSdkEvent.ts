@@ -1,4 +1,4 @@
-export function createPluginPanelFileWatchEmitter(input: {
+export function createPluginPanelSdkEventEmitter(input: {
   workspaceId: string;
   pluginId: string;
   panelId: string;

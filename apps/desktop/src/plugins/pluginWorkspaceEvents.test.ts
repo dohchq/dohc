@@ -18,9 +18,10 @@ import { PluginHost, type PluginHostOptions } from "./PluginHost";
 import { readPluginManifestFile } from "./pluginManifest";
 import { invokePluginSdkHost, type PluginSdkHostContext } from "./pluginSdkHost";
 import {
-  MAX_PLUGIN_FILE_WATCHES_PER_OWNER,
+  MAX_PLUGIN_WORKSPACE_SUBSCRIPTIONS_PER_OWNER,
   PluginWorkspaceEvents,
   type PluginFileWatchEvent,
+  type PluginRecordEvent,
   type PluginWorkspaceEventsOwner,
 } from "./pluginWorkspaceEvents";
 
@@ -186,22 +187,49 @@ describe("PluginWorkspaceEvents", () => {
       emitEvent: sink.emitEvent,
     };
 
-    for (let index = 0; index < MAX_PLUGIN_FILE_WATCHES_PER_OWNER; index += 1) {
+    for (let index = 0; index < MAX_PLUGIN_WORKSPACE_SUBSCRIPTIONS_PER_OWNER; index += 1) {
       events.subscribe(context, { path: `docs/${index}` });
     }
 
     expect(() => events.subscribe(context, { path: "docs/overflow" })).toThrow(
-      `Plugin "sites" panel "main" already holds ${MAX_PLUGIN_FILE_WATCHES_PER_OWNER} workspace file subscriptions. MAX_PLUGIN_FILE_WATCHES_PER_OWNER allows at most ${MAX_PLUGIN_FILE_WATCHES_PER_OWNER} open files.watch subscriptions per owner.`,
+      `Plugin "sites" panel "main" already holds ${MAX_PLUGIN_WORKSPACE_SUBSCRIPTIONS_PER_OWNER} workspace subscriptions. MAX_PLUGIN_WORKSPACE_SUBSCRIPTIONS_PER_OWNER allows at most ${MAX_PLUGIN_WORKSPACE_SUBSCRIPTIONS_PER_OWNER} open subscriptions per owner, across files.watch and collections.watch combined.`,
     );
     const secondOwner = {
       ...context,
       owner: { ...context.owner, panelId: "secondary" },
     };
-    for (let index = 0; index < MAX_PLUGIN_FILE_WATCHES_PER_OWNER; index += 1) {
+    for (let index = 0; index < MAX_PLUGIN_WORKSPACE_SUBSCRIPTIONS_PER_OWNER; index += 1) {
       expect(() =>
         events.subscribe(secondOwner, { path: `other/${index}` }),
       ).not.toThrow();
     }
+  });
+
+  it("shares the one cap across file watches and record subscriptions", () => {
+    const events = new PluginWorkspaceEvents();
+    const sink = collector();
+    const context = {
+      owner: processOwner("sites", "spawn-1"),
+      emitEvent: sink.emitEvent,
+    };
+
+    // 10 file watches + 6 record subscriptions exhaust the shared cap of 16.
+    for (let index = 0; index < 10; index += 1) {
+      events.subscribe(context, { path: `docs/${index}` });
+    }
+    for (let index = 0; index < 6; index += 1) {
+      events.subscribeRecords(context, {
+        collectionPath: `collections/${index}`,
+      });
+    }
+
+    // The 17th subscription of either kind is refused.
+    expect(() => events.subscribe(context, { path: "docs/overflow" })).toThrow(
+      "MAX_PLUGIN_WORKSPACE_SUBSCRIPTIONS_PER_OWNER",
+    );
+    expect(() =>
+      events.subscribeRecords(context, { collectionPath: "collections/overflow" }),
+    ).toThrow("MAX_PLUGIN_WORKSPACE_SUBSCRIPTIONS_PER_OWNER");
   });
 
   it("stops delivering after unsubscribe, and reports ids it does not own", () => {
@@ -432,6 +460,146 @@ describe("PluginWorkspaceEvents", () => {
   });
 });
 
+function recordCreated(collectionPath: string): PluginRecordEvent {
+  return {
+    name: "record.created",
+    data: {
+      collectionPath,
+      recordId: "rec-1",
+      author: null,
+      timestamp: 1_756_000_000_000,
+    },
+  };
+}
+
+describe("PluginWorkspaceEvents record subscriptions", () => {
+  it("delivers an event at or below the subscribed collection path and nothing outside it", () => {
+    const events = new PluginWorkspaceEvents();
+    const sink = collector();
+    const { subscriptionId } = events.subscribeRecords(
+      { owner: processOwner("sites", "spawn-1"), emitEvent: sink.emitEvent },
+      { collectionPath: "collections/people" },
+    );
+
+    events.handleRecordEvent(recordCreated("collections/people"));
+    events.handleRecordEvent(recordCreated("collections/people/archive"));
+    // Segment-aware: a sibling whose name merely starts with the prefix is
+    // not inside it, and an unrelated collection never arrives.
+    events.handleRecordEvent(recordCreated("collections/peoplex"));
+    events.handleRecordEvent(recordCreated("elsewhere"));
+
+    expect(sink.emitted.map((entry) => entry.subscriptionId)).toEqual([
+      subscriptionId,
+      subscriptionId,
+    ]);
+    expect(
+      sink.emitted.map(
+        (entry) => (entry.data as { collectionPath: string }).collectionPath,
+      ),
+    ).toEqual(["collections/people", "collections/people/archive"]);
+  });
+
+  it("delivers the engine payload under the engine event name", () => {
+    const events = new PluginWorkspaceEvents();
+    const sink = collector();
+    const { subscriptionId } = events.subscribeRecords(
+      { owner: processOwner("sites", "spawn-1"), emitEvent: sink.emitEvent },
+      { collectionPath: "collections/people" },
+    );
+
+    const data = {
+      collectionPath: "collections/people",
+      recordId: "rec-1",
+      field: "notes",
+      previous: "short",
+      // An oversized value arrives already replaced by the engine's marker.
+      next: { truncated: true, bytes: 9_000 },
+      author: "agent:sites",
+      timestamp: 1_756_000_000_000,
+      historyId: 7,
+    };
+    events.handleRecordEvent({ name: "record.field.changed", data });
+
+    expect(sink.emitted).toEqual([
+      { subscriptionId, event: "record.field.changed", data },
+    ]);
+  });
+
+  it("keeps file and record deliveries on their own subscription kinds", () => {
+    const events = new PluginWorkspaceEvents();
+    const files = collector();
+    const records = collector();
+    const owner = processOwner("sites", "spawn-1");
+    events.subscribe({ owner, emitEvent: files.emitEvent }, { path: "collections" });
+    events.subscribeRecords(
+      { owner, emitEvent: records.emitEvent },
+      { collectionPath: "collections" },
+    );
+
+    events.handleWatcherEvents([update("collections/people/rec-1.md", "aaa")]);
+    events.handleRecordEvent(recordCreated("collections/people"));
+
+    expect(files.emitted.map((entry) => entry.event)).toEqual(["change"]);
+    expect(records.emitted.map((entry) => entry.event)).toEqual(["record.created"]);
+  });
+
+  it('subscribes to every collection under "."', () => {
+    const events = new PluginWorkspaceEvents();
+    const sink = collector();
+    events.subscribeRecords(
+      { owner: processOwner("sites", "spawn-1"), emitEvent: sink.emitEvent },
+      { collectionPath: "." },
+    );
+
+    events.handleRecordEvent(recordCreated("collections/people"));
+    events.handleRecordEvent(recordCreated("elsewhere/tasks"));
+
+    expect(sink.emitted).toHaveLength(2);
+  });
+
+  it("refuses a collection path that escapes the workspace", () => {
+    const events = new PluginWorkspaceEvents();
+    const sink = collector();
+    const context = {
+      owner: processOwner("sites", "spawn-1"),
+      emitEvent: sink.emitEvent,
+    };
+
+    for (const escape of ["../secrets", "a/../../secrets", "/etc", "C:\\Windows"]) {
+      expect(() =>
+        events.subscribeRecords(context, { collectionPath: escape }),
+      ).toThrow();
+    }
+    events.handleRecordEvent(recordCreated("secrets"));
+    expect(sink.emitted).toEqual([]);
+  });
+
+  it("stops delivering after unsubscribe and when the spawn ends", () => {
+    const events = new PluginWorkspaceEvents();
+    const closed = collector();
+    const ended = collector();
+    const context = {
+      owner: processOwner("sites", "spawn-1"),
+      emitEvent: closed.emitEvent,
+    };
+    const { subscriptionId } = events.subscribeRecords(context, {
+      collectionPath: "collections/people",
+    });
+    events.subscribeRecords(
+      { owner: processOwner("sites", "spawn-2"), emitEvent: ended.emitEvent },
+      { collectionPath: "collections/people" },
+    );
+
+    events.handleRecordEvent(recordCreated("collections/people"));
+    expect(events.unsubscribe(context, { subscriptionId })).toBe(true);
+    events.disposeSpawn("sites", "spawn-2");
+    events.handleRecordEvent(recordCreated("collections/people"));
+
+    expect(closed.emitted).toHaveLength(1);
+    expect(ended.emitted).toHaveLength(1);
+  });
+});
+
 describe("the plugin SDK host's files.watch route", () => {
   function hostContext(overrides: Partial<PluginSdkHostContext> = {}): PluginSdkHostContext {
     return {
@@ -489,7 +657,7 @@ describe("the plugin SDK host's files.watch route", () => {
       requestPath: "panel",
       subscribeFileWatch: (params) =>
         events.subscribe({ owner, emitEvent: sink.emitEvent }, params),
-      unsubscribeFileWatch: (params) => events.unsubscribe({ owner }, params),
+      unsubscribeWorkspaceEvents: (params) => events.unsubscribe({ owner }, params),
     });
 
     const capabilities = (await invokePluginSdkHost(panel, "capabilities")) as {
@@ -547,7 +715,7 @@ describe("the plugin SDK host's files.watch route", () => {
           },
           params,
         ),
-      unsubscribeFileWatch: (params) =>
+      unsubscribeWorkspaceEvents: (params) =>
         events.unsubscribe({ owner: processOwner("sites", "spawn-1") }, params),
       // A broker that would answer any id, so a file subscription left to it
       // would look closed while it kept delivering.
@@ -562,6 +730,79 @@ describe("the plugin SDK host's files.watch route", () => {
     });
     events.handleWatcherEvents([update("docs/after.md")]);
 
+    expect(sink.emitted).toEqual([]);
+  });
+
+  it("opens, advertises, and closes collections.watch through the host route", async () => {
+    const events = new PluginWorkspaceEvents();
+    const sink = collector();
+    const owner = processOwner("sites", "spawn-1");
+    const context = hostContext({
+      subscribeRecordWatch: (params) =>
+        events.subscribeRecords({ owner, emitEvent: sink.emitEvent }, params),
+      unsubscribeWorkspaceEvents: (params) => events.unsubscribe({ owner }, params),
+    });
+
+    const capabilities = (await invokePluginSdkHost(context, "capabilities")) as {
+      collections: { read: boolean };
+    };
+    expect(capabilities.collections.read).toBe(true);
+
+    const opened = (await invokePluginSdkHost(context, "collections.watch", {
+      collectionPath: "collections/people",
+    })) as { subscriptionId: string };
+    expect(opened.subscriptionId.length).toBeGreaterThan(0);
+
+    events.handleRecordEvent(recordCreated("collections/people"));
+    expect(sink.emitted).toEqual([
+      {
+        subscriptionId: opened.subscriptionId,
+        event: "record.created",
+        data: recordCreated("collections/people").data,
+      },
+    ]);
+
+    await invokePluginSdkHost(context, "subscriptions.unsubscribe", {
+      subscriptionId: opened.subscriptionId,
+    });
+    events.handleRecordEvent(recordCreated("collections/people"));
+    expect(sink.emitted).toHaveLength(1);
+  });
+
+  it("refuses collections.watch on a path with no record channel", async () => {
+    const context = hostContext();
+    const capabilities = (await invokePluginSdkHost(context, "capabilities")) as {
+      collections: { read: boolean };
+    };
+    expect(capabilities.collections.read).toBe(false);
+    await expect(
+      invokePluginSdkHost(context, "collections.watch", {
+        collectionPath: "collections/people",
+      }),
+    ).rejects.toThrow("collections.watch is unavailable for this request path");
+  });
+
+  it("refuses to open a record subscription for a spawn that already ended", async () => {
+    const events = new PluginWorkspaceEvents();
+    const sink = collector();
+    const ended = new AbortController();
+    ended.abort();
+    const context = hostContext({
+      signal: ended.signal,
+      subscribeRecordWatch: (params) =>
+        events.subscribeRecords(
+          { owner: processOwner("sites", "spawn-1"), emitEvent: sink.emitEvent },
+          params,
+        ),
+    });
+
+    await expect(
+      invokePluginSdkHost(context, "collections.watch", {
+        collectionPath: "collections/people",
+      }),
+    ).rejects.toMatchObject({ code: "DOHC_ABORTED" });
+
+    events.handleRecordEvent(recordCreated("collections/people"));
     expect(sink.emitted).toEqual([]);
   });
 });
@@ -683,7 +924,7 @@ async function startWatchingPlugin(prefix: string): Promise<WatchingPlugin> {
               },
               watchParams,
             ),
-          unsubscribeFileWatch: (watchParams) =>
+          unsubscribeWorkspaceEvents: (watchParams) =>
             events.unsubscribe({ owner: processOwner(pluginId, spawnId) }, watchParams),
           writeAuthoredText: async (path, text) => {
             writes.set(path, text);
