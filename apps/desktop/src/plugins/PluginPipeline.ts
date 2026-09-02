@@ -754,6 +754,8 @@ export class PluginPipeline {
   private readonly freshInstallsInFlight = new Set<string>();
   private readonly sourceChangedDuringInstall = new Set<string>();
   private discovery: InstalledPluginRecord[] = [];
+  /** True once the first discovery pass has landed; false says "unknown". */
+  discoveryLanded = false;
   private discoveryTail: Promise<void> = Promise.resolve();
   private startPromise: Promise<void> | null = null;
   private disposePromise: Promise<void> | null = null;
@@ -1842,6 +1844,7 @@ export class PluginPipeline {
   private async startInternal(): Promise<void> {
     try {
       this.discovery = await this.discoverCandidates();
+      this.discoveryLanded = true;
       await this.seedStatuses();
       for (const candidate of this.discovery) {
         if (!candidate.valid || !candidate.manifest) continue;

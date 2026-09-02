@@ -19,6 +19,10 @@ function changedPayload(workspaceId: string): { [key in string]?: JsonValue } {
     recordId: "rec-1",
     author: "agent:sites",
     timestamp: 1_756_000_000_000,
+    actorKind: "agent",
+    onBehalfOf: "user:ice",
+    depth: 0,
+    source: { originId: "origin-a", originSeq: 7 },
   };
 }
 
@@ -96,6 +100,10 @@ describe("bridgeRecordEventsToPlugins", () => {
           recordId: "rec-1",
           author: "agent:sites",
           timestamp: 1_756_000_000_000,
+          actorKind: "agent",
+          onBehalfOf: "user:ice",
+          depth: 0,
+          source: { originId: "origin-a", originSeq: 7 },
         },
       },
       {
@@ -109,6 +117,10 @@ describe("bridgeRecordEventsToPlugins", () => {
           author: "agent:sites",
           timestamp: 1_756_000_000_000,
           historyId: 41,
+          actorKind: "agent",
+          onBehalfOf: "user:ice",
+          depth: 0,
+          source: { originId: "origin-a", originSeq: 7 },
         },
       },
     ]);
@@ -120,6 +132,10 @@ describe("bridgeRecordEventsToPlugins", () => {
           recordId: "rec-1",
           author: "agent:sites",
           timestamp: 1_756_000_000_000,
+          actorKind: "agent",
+          onBehalfOf: "user:ice",
+          depth: 0,
+          source: { originId: "origin-a", originSeq: 7 },
         },
       },
     ]);
@@ -145,6 +161,10 @@ describe("bridgeRecordEventsToPlugins", () => {
           recordId: "rec-1",
           author: null,
           timestamp: 1_756_000_000_000,
+          actorKind: "agent",
+          onBehalfOf: "user:ice",
+          depth: 0,
+          source: { originId: "origin-a", originSeq: 7 },
         },
       },
     ]);

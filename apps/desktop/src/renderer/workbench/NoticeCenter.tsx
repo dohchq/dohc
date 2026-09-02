@@ -15,6 +15,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ENGINE_STORE_BACKUP_DIR,
   engineStoreRefusalSentence,
+  type AutomationFailureNotice,
   type SyncStatusResult,
 } from "../../ipc/bridgeContract";
 import { useAllOrphanedDrafts } from "../orphanedDrafts";
@@ -47,6 +48,18 @@ type Notice = {
   Icon: typeof Bell;
 };
 
+// Mirrors of crates/dohc-engine-domain/src/automations.rs: the chain depth
+// cap and the two engine-minted failure reasons a failed claim can carry.
+const AUTOMATION_CHAIN_DEPTH_CAP = 4;
+const AUTOMATION_CHAIN_STOPPED = "chain-stopped";
+const AUTOMATION_RECLAIM_EXHAUSTED = "reclaim-exhausted";
+
+/** An error text as one sentence: the handler's message rarely ends one. */
+function sentence(text: string): string {
+  const trimmed = text.trim();
+  return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+}
+
 // Coarse relative time for the notice ledger. Recomputed on every render;
 // a 30s tick while the panel is open keeps labels honest between updates.
 function relativeTime(thenMs: number): string {
@@ -77,6 +90,41 @@ const AGENT_NOTICE_TONE: Record<AgentNotificationKind, Notice["tone"]> = {
   error: "danger",
   "login-required": "warning",
 };
+
+// The title and body for one automation's failure notice: what happened,
+// why when the engine recorded a known reason, and the way forward. The two
+// engine-recorded reason codes get their own honest sentences; every other
+// error is the handler's own text. The copy must never claim the handler
+// threw when it did not run at all (chain-stopped) or did not finish
+// (reclaim-exhausted).
+function automationFailureCopy(failure: AutomationFailureNotice): {
+  title: string;
+  body: string;
+} {
+  const count =
+    failure.generation > 1 ? `${failure.generation} failures so far. ` : "";
+  if (failure.error === AUTOMATION_CHAIN_STOPPED) {
+    return {
+      title: "An automation chain stopped",
+      body:
+        `${count}dohc stops a chain of automations after ${AUTOMATION_CHAIN_DEPTH_CAP} steps, so ` +
+        `"${failure.automationId}" did not run. Open the plugin's source to ` +
+        "shorten the chain.",
+    };
+  }
+  if (failure.error === AUTOMATION_RECLAIM_EXHAUSTED) {
+    return {
+      title: `Automation "${failure.automationId}" did not finish`,
+      body:
+        `${count}dohc stopped retrying a run that did not finish. ` +
+        "Open the plugin's source to check the handler.",
+    };
+  }
+  return {
+    title: `Automation "${failure.automationId}" failed`,
+    body: `${count}${sentence(failure.error)} Open the plugin's source to fix the handler.`,
+  };
+}
 
 function toneClass(tone: Notice["tone"]): string {
   if (tone === "danger") return "text-danger";
@@ -114,6 +162,15 @@ export function NoticeCenter(props: {
   // and a blocked run raises its own permission card. Dismiss acknowledges.
   agentNotifications?: readonly AgentNotification[];
   onDismissAgentNotification?: (id: string) => void;
+  // Automation failures (ADR 0008): the engine's failed claim rows the
+  // owner has not acknowledged, one notice per automation with the newest
+  // error and a count. Durable — they come back after a restart until
+  // dismissed, and a newer failure re-raises a dismissed one.
+  automationFailures?: readonly AutomationFailureNotice[];
+  onDismissAutomationFailure?: (
+    automationId: string,
+    generation: number,
+  ) => void;
 }) {
   const [open, setOpen] = useState(false);
   // Relative-time labels ("3m ago") are computed at render; tick every 30s
@@ -232,6 +289,28 @@ export function NoticeCenter(props: {
             }
           : {}),
         Icon: GitPullRequestArrow,
+      });
+    }
+
+    // Automation failures: durable until dismissed, like the share-refusal
+    // banner. Dismissing acknowledges the generation on screen; a failure
+    // recorded after this render has a higher generation and comes back.
+    for (const failure of props.automationFailures ?? []) {
+      next.push({
+        id: `automation-failure-${failure.automationId}`,
+        tone: "warning",
+        ...automationFailureCopy(failure),
+        timeMs: failure.updatedAtMs,
+        Icon: AlertTriangle,
+        ...(props.onDismissAutomationFailure
+          ? {
+              onDismiss: () =>
+                props.onDismissAutomationFailure?.(
+                  failure.automationId,
+                  failure.generation,
+                ),
+            }
+          : {}),
       });
     }
 
@@ -411,8 +490,10 @@ export function NoticeCenter(props: {
   }, [
     agentNotifications,
     props.agentActive,
+    props.automationFailures,
     props.conflictSummaries,
     props.onDismissAgentNotification,
+    props.onDismissAutomationFailure,
     props.onOpenConflicts,
     props.onOpenHistory,
     props.onRefreshShareView,

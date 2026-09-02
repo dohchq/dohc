@@ -15,6 +15,7 @@
 //! (surfaced via [`AppendOutcome::emit_outbound`]), and close NEVER prunes — a
 //! peer bootstraps from the persisted lineage.
 
+use dohc_engine_domain::ChangeAttribution;
 use dohc_engine_storage::{
     enqueue_job, put_binary_blob, put_binary_blob_with_sha, EngineStore, FaultInjector,
     MaterializationJobSpec, Preimage, TxnOutcome,
@@ -458,19 +459,21 @@ pub fn record_local_update(
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<AppendOutcome>, CollabError> {
-    record_local_update_with_origin(store, cache, key, update, None, faults, now_ms)
+    record_local_update_with_origin(store, cache, key, update, None, None, faults, now_ms)
 }
 
 /// [`record_local_update`] with the requesting client's actor origin id
 /// persisted onto the appended row (`ydoc_updates.actor_origin_id`) —
 /// provenance/echo-filter parity with the TS driver, which stores the
 /// caller-supplied origin rather than dropping it.
+#[allow(clippy::too_many_arguments)]
 pub fn record_local_update_with_origin(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
     key: &DocKey,
     update: &[u8],
     actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<AppendOutcome>, CollabError> {
@@ -489,6 +492,7 @@ pub fn record_local_update_with_origin(
             &sha,
             true,
             actor_origin_id,
+            attribution,
             now_ms,
             cache,
             &mut probe,
@@ -545,6 +549,7 @@ pub fn record_local_update_creating_marker(
         regime,
         update,
         actor_origin_id,
+        None,
         false,
         false,
         None,
@@ -569,6 +574,7 @@ pub fn record_local_update_creating_marker_guarded<F>(
     regime: Regime,
     update: &[u8],
     actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
     ensure_parent_row: bool,
     require_empty_lineage: bool,
     request_id: Option<&str>,
@@ -577,7 +583,7 @@ pub fn record_local_update_creating_marker_guarded<F>(
     post_append: F,
 ) -> Result<TxnOutcome<AppendOutcome>, CollabError>
 where
-    F: FnOnce(&Transaction<'_>, &AppendOutcome) -> Result<(), CollabError>,
+    F: FnOnce(&Transaction<'_>, &mut AppendOutcome) -> Result<(), CollabError>,
 {
     record_local_update_creating_marker_guarded_inner(
         store,
@@ -588,6 +594,7 @@ where
         regime,
         update,
         actor_origin_id,
+        attribution,
         None,
         ensure_parent_row,
         require_empty_lineage,
@@ -622,6 +629,7 @@ pub fn record_local_update_creating_marker_guarded_for_lineage<F>(
     regime: Regime,
     update: &[u8],
     actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
     expected_lineage_claim_id: Option<&str>,
     ensure_parent_row: bool,
     require_empty_lineage: bool,
@@ -632,7 +640,7 @@ pub fn record_local_update_creating_marker_guarded_for_lineage<F>(
     post_append: F,
 ) -> Result<TxnOutcome<AppendOutcome>, CollabError>
 where
-    F: FnOnce(&Transaction<'_>, &AppendOutcome, &str) -> Result<(), CollabError>,
+    F: FnOnce(&Transaction<'_>, &mut AppendOutcome, &str) -> Result<(), CollabError>,
 {
     record_local_update_creating_marker_guarded_inner(
         store,
@@ -643,6 +651,7 @@ where
         regime,
         update,
         actor_origin_id,
+        attribution,
         Some(expected_lineage_claim_id),
         ensure_parent_row,
         require_empty_lineage,
@@ -664,6 +673,7 @@ fn record_local_update_creating_marker_guarded_inner<F>(
     regime: Regime,
     update: &[u8],
     actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
     lineage_guard: Option<Option<&str>>,
     ensure_parent_row: bool,
     require_empty_lineage: bool,
@@ -674,7 +684,7 @@ fn record_local_update_creating_marker_guarded_inner<F>(
     post_append: F,
 ) -> Result<TxnOutcome<AppendOutcome>, CollabError>
 where
-    F: FnOnce(&Transaction<'_>, &AppendOutcome, &str) -> Result<(), CollabError>,
+    F: FnOnce(&Transaction<'_>, &mut AppendOutcome, &str) -> Result<(), CollabError>,
 {
     // Hashed ONCE per append: the idempotency key, the seed-retry dedupe
     // probe, the blob row, and the caller's post-append hook all reuse this
@@ -825,7 +835,7 @@ where
             let index_frontmatter = seed_source_sha256.is_none()
                 || marker.head_update_seq > 0
                 || marker.head_snapshot_seq > 0;
-            let outcome = append_local_update_cached(
+            let mut outcome = append_local_update_cached(
                 tx,
                 key,
                 &marker,
@@ -833,6 +843,7 @@ where
                 &update_sha,
                 index_frontmatter,
                 actor_origin_id,
+                attribution,
                 now_ms,
                 cache,
                 &mut probe,
@@ -860,7 +871,7 @@ where
                     )
                     .map_err(map_sql)?;
                 }
-                post_append(tx, &outcome, &update_sha)?;
+                post_append(tx, &mut outcome, &update_sha)?;
             }
             if let (Some(request_id), Some(hash)) = (request_id, request_hash.as_deref()) {
                 // NEGATIVE namespace (-seq): rollback cleanup deletes ledger
@@ -909,6 +920,7 @@ pub(crate) fn append_and_index_update(
     sha: &str,
     index_frontmatter: bool,
     actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
     history_source: Option<(&str, i64)>,
     now_ms: i64,
 ) -> Result<
@@ -930,6 +942,7 @@ pub(crate) fn append_and_index_update(
         sha,
         index_frontmatter,
         actor_origin_id,
+        attribution,
         history_source,
         now_ms,
     )?;
@@ -947,11 +960,15 @@ pub(crate) fn append_validated_and_index_update(
     sha: &str,
     index_frontmatter: bool,
     actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
     history_source: Option<(&str, i64)>,
     now_ms: i64,
 ) -> Result<(i64, Option<dohc_engine_domain::CollectionRecordApplyFacts>), CollabError> {
+    // The one choke point every durable update write passes, local or remote:
+    // an out-of-bounds attribution never reaches a row.
+    validate_attribution(attribution)?;
     put_binary_blob_with_sha(conn, update, sha)?;
-    let seq = append_row(conn, key, sha, actor_origin_id, now_ms)?;
+    let seq = append_row(conn, key, sha, actor_origin_id, attribution, now_ms)?;
     let is_bound_collection_record = index_frontmatter
         && content_kind == ContentKind::Richdoc
         && dohc_engine_domain::is_collection_record_bound_in_tx(
@@ -981,11 +998,25 @@ pub(crate) fn append_validated_and_index_update(
             projection,
             update,
             actor_origin_id,
+            attribution,
             history_source,
             now_ms,
         )?;
     }
     Ok((seq, record_facts))
+}
+
+/// Refuse an out-of-bounds declared attribution before any durable write, the
+/// same fail-closed order `validate_actor_origin_id` holds.
+fn validate_attribution(attribution: Option<&ChangeAttribution>) -> Result<(), CollabError> {
+    if let Some(attribution) = attribution {
+        attribution
+            .validate()
+            .map_err(|reason| CollabError::InvalidIdentifier {
+                reason: reason.to_owned(),
+            })?;
+    }
+    Ok(())
 }
 
 /// Build a content-readable post-update fork after the parity gate accepts.
@@ -1001,6 +1032,7 @@ fn project_applied_update(base: &Ydoc, update: &[u8]) -> Result<Ydoc, CollabErro
     Ok(projection)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_local_update(
     conn: &Connection,
     key: &DocKey,
@@ -1008,6 +1040,7 @@ fn append_local_update(
     update: &[u8],
     sha: &str,
     actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
     now_ms: i64,
 ) -> Result<AppendOutcome, CollabError> {
     if let Some(actor_origin_id) = actor_origin_id {
@@ -1032,6 +1065,7 @@ fn append_local_update(
         sha,
         true,
         actor_origin_id,
+        attribution,
         None,
         now_ms,
     )?;
@@ -1060,6 +1094,7 @@ fn append_local_update_cached(
     sha: &str,
     index_frontmatter: bool,
     actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
     now_ms: i64,
     cache: &WriterDocCache,
     probe: &mut GateBaseProbe,
@@ -1096,6 +1131,7 @@ fn append_local_update_cached(
                 sha,
                 index_frontmatter,
                 actor_origin_id,
+                attribution,
                 None,
                 now_ms,
             )?;
@@ -1126,6 +1162,7 @@ fn append_local_update_cached(
                 sha,
                 index_frontmatter,
                 actor_origin_id,
+                attribution,
                 None,
                 now_ms,
             )?;
@@ -1189,6 +1226,7 @@ pub(crate) fn index_applied_frontmatter(
     after_doc: &Ydoc,
     update: &[u8],
     author_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
     history_source: Option<(&str, i64)>,
     recorded_at_ms: i64,
 ) -> Result<Option<dohc_engine_domain::CollectionRecordApplyFacts>, CollabError> {
@@ -1219,6 +1257,7 @@ pub(crate) fn index_applied_frontmatter(
         &authored_before,
         &authored_after,
         author_origin_id,
+        attribution,
         history_source,
         recorded_at_ms,
     )
@@ -2264,12 +2303,22 @@ pub fn record_update_in_tx(
     key: &DocKey,
     update: &[u8],
     actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
     now_ms: i64,
 ) -> Result<AppendOutcome, CollabError> {
     validate_update_bytes(update)?;
     let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
     let sha = crate::hex_sha256(update);
-    append_local_update(tx, key, &marker, update, &sha, actor_origin_id, now_ms)
+    append_local_update(
+        tx,
+        key,
+        &marker,
+        update,
+        &sha,
+        actor_origin_id,
+        attribution,
+        now_ms,
+    )
 }
 
 /// Append only if the active claim matches the lineage an open session bound
@@ -2290,7 +2339,7 @@ pub fn record_update_for_lineage_in_tx(
     }
     validate_update_bytes(update)?;
     let sha = crate::hex_sha256(update);
-    append_local_update(tx, key, &marker, update, &sha, None, now_ms)
+    append_local_update(tx, key, &marker, update, &sha, None, None, now_ms)
 }
 
 /// Encode the base bytes (and their state vector) that ORIGINATE `key`'s
@@ -3017,6 +3066,7 @@ pub(crate) fn append_row(
     key: &DocKey,
     sha: &str,
     actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
     now_ms: i64,
 ) -> Result<i64, CollabError> {
     let (head, _, _) = head_of(conn, key)?;
@@ -3024,8 +3074,8 @@ pub(crate) fn append_row(
     conn.execute(
         "INSERT INTO ydoc_updates \
          (workspace_id, version_id, object_id, seq, update_blob_sha256, \
-          actor_origin_id, recorded_at_ms) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+          actor_origin_id, actor_kind, on_behalf_of, chain_depth, recorded_at_ms) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         rusqlite::params![
             key.workspace_id,
             key.version_id,
@@ -3033,6 +3083,9 @@ pub(crate) fn append_row(
             seq,
             sha,
             actor_origin_id,
+            attribution.map(|attribution| attribution.actor_kind.as_str()),
+            attribution.and_then(|attribution| attribution.on_behalf_of.as_deref()),
+            attribution.map(|attribution| i64::from(attribution.depth)),
             now_ms,
         ],
     )

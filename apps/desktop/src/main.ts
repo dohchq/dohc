@@ -126,6 +126,9 @@ import {
   OpenSharedViewResult,
   RefreshSharedViewPayload,
   DismissShareSkipsPayload,
+  ListAutomationFailuresPayload,
+  DismissAutomationFailurePayload,
+  ListAutomationFailuresResult,
   ListShareProposalsPayload,
   ListShareProposalsResult,
   ReadShareProposalChangesPayload,
@@ -399,6 +402,7 @@ import {
   registerWorkspace,
   removeWorkspace,
   setWorkspaceRemote,
+  acknowledgeWorkspaceAutomationFailure,
   acknowledgeWorkspaceShareSkips,
   endWorkspaceShareView,
   setWorkspaceShareMounts,
@@ -413,7 +417,11 @@ import {
   type WorkspaceAuthorityOperation,
   type WorkspaceAuthorityReservation,
 } from "./workspaces/workspaceAuthorityOwner";
-import type { JoinedSharedChannel, RegistryEntry } from "./workspaces/registryStore";
+import {
+  unacknowledgedAutomationFailures,
+  type JoinedSharedChannel,
+  type RegistryEntry,
+} from "./workspaces/registryStore";
 import {
   readableShareLevel,
   shareViewGranterEmail,
@@ -609,6 +617,7 @@ import {
 } from "@dohc/workspace-engine-client/daemon";
 import { bridgeCaptureEventsToRenderer } from "./workspaces/captureActivityBridge";
 import { bridgeRecordEventsToPlugins } from "./workspaces/recordEventsBridge";
+import { bridgeAutomationClaimsToExecutors } from "./workspaces/automationClaimsBridge";
 import {
   broadcastWorkspaceActivity,
   workspaceActivityPayload,
@@ -699,7 +708,11 @@ import {
   ensurePluginStarted,
 } from "./plugins/pluginHostStart";
 import { createPluginAuthoredTextWriter } from "./plugins/pluginAuthoredWrite";
-import { invokePluginSdkHost } from "./plugins/pluginSdkHost";
+import { PluginAutomations } from "./plugins/pluginAutomations";
+import {
+  invokePluginSdkHost,
+  type PluginAutomationRunAuthority,
+} from "./plugins/pluginSdkHost";
 import { createOwnedWorkspaceSdkReads } from "./workspaces/ownedWorkspaceSdkReads";
 import { createPluginUtilityTransport } from "./plugins/pluginUtilityTransport";
 import { PluginChildProcessBroker } from "./plugins/pluginChildProcessBroker";
@@ -971,6 +984,23 @@ function notifyPluginStatusChanged(
   }
 }
 
+// An automation claim failed (settled by this desktop's executor, or
+// inserted failed by the engine at the depth cap): poke the windows on that
+// workspace to re-read the failure notices. A poke, not the record — the
+// renderer re-lists through CHANNELS.listAutomationFailures, so nothing
+// here can go stale or leak across workspaces.
+function notifyAutomationFailuresChanged(workspaceId: string): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (
+      rendererWorkspaceSessions.current(win.webContents)?.workspaceId !==
+      workspaceId
+    ) {
+      continue;
+    }
+    win.webContents.send(CHANNELS.automationFailuresChanged, { workspaceId });
+  }
+}
+
 function notifyPluginPanelSdkEvent(event: unknown): void {
   const payload = PluginPanelSdkEvent.safeParse(event);
   if (!payload.success) {
@@ -1036,6 +1066,75 @@ function createPluginWorkspaceRuntimeParts(
   // This workspace's plugin file subscriptions, fed by the settled watcher
   // batch (see onWatcherBatch) — the same feed the pipeline reads.
   const workspaceEvents = new PluginWorkspaceEvents();
+  // This workspace's origin-device automation executor (ADR 0008): engine
+  // access through the same attachment-pinned adapter collection reads take,
+  // manifests through the pipeline created below, and handler runs through
+  // the same host-ownership lease a command invocation holds.
+  const automations = new PluginAutomations({
+    withAdapter: (work) =>
+      withEngineAdapter(
+        {
+          workspaceId: workspace.workspaceId,
+          rootPath: workspace.rootPath,
+          attachmentId: authorityBinding.attachmentId,
+        },
+        work,
+      ),
+    declaredAutomations: (pluginId) => {
+      const currentPipeline = pipeline;
+      if (!currentPipeline || !currentPipeline.discoveryLanded) return undefined;
+      return currentPipeline.pluginRegistration(pluginId)?.manifest.automations ?? null;
+    },
+    // The read-scope proof a collections.watch makes, through the plugin's
+    // own owned read port. A "." subscription needs none: the port is
+    // workspace-scoped, so every collection a "." claim can name is one the
+    // plugin may read. (Unlike a "." watch, claim delivery has no listed-set
+    // filter; a narrower per-plugin read scope would need one here.)
+    proveReadable: async (_pluginId, collectionPath) => {
+      if (collectionPath === ".") return;
+      const registered = findWorkspace(workspace.workspaceId);
+      if (!registered) {
+        throw new Error("This workspace is not registered on this machine.");
+      }
+      await ownedWorkspaceReadsFor({
+        ...registered,
+        attachmentId: authorityBinding.attachmentId,
+      }).getCollection({ collectionPath });
+    },
+    runOnPlugin: async (pluginId, params) => {
+      const currentPipeline = pipeline;
+      // Pipeline still wiring up: the same transient as a host refusal. The
+      // executor defers the claim; a settle here would be terminal.
+      if (!currentPipeline) return "refused";
+      const outcome = await currentPipeline.hostOwnership.runCommand(
+        pluginId,
+        async (commandAuthority) => {
+          const host = await ensurePluginStarted(
+            currentPipeline.host,
+            pluginId,
+            () =>
+              commandAuthority.start(() =>
+                currentPipeline.ensureStarted(pluginId, commandAuthority),
+              ),
+          );
+          await host.runAutomation(pluginId, params);
+          return { ok: true as const };
+        },
+      );
+      // A refusal is the host mid-change on that plugin (or closing) — the
+      // run never started, so the claim must not settle failed. The
+      // executor keeps it and retries when the plugin next reaches ready.
+      return outcome.kind === "completed" ? "completed" : "refused";
+    },
+    onClaimFailed: () =>
+      notifyAutomationFailuresChanged(workspace.workspaceId),
+    onError: (context, error) => {
+      console.error(
+        `[desktop] automations (${workspace.workspaceId}): ${context}:`,
+        error,
+      );
+    },
+  });
   const pluginHost = new PluginHost({
     stateDir: stateDir(),
     workspaceRoot: workspace.rootPath,
@@ -1069,7 +1168,15 @@ function createPluginWorkspaceRuntimeParts(
     // this, the plugin's own request path (not the panel path), supplies
     // invokeChildProcess — a panel is renderer-driven UI, not the plugin's
     // own activated code, so it never brokers child processes.
-    routeSdkRequest: (pluginId, method, params, spawnId, signal, emitEvent) =>
+    routeSdkRequest: (
+      pluginId,
+      method,
+      params,
+      spawnId,
+      signal,
+      emitEvent,
+      automationClaimId,
+    ) =>
       runWithAuthority(() =>
         invokeWorkspacePluginSdk({
           workspaceId: workspace.workspaceId,
@@ -1078,6 +1185,7 @@ function createPluginWorkspaceRuntimeParts(
           requestPath: "plugin-process",
           isWritable: () => !sharedViewOf(workspace.workspaceId),
           signal,
+          ...(automationClaimId === undefined ? {} : { automationClaimId }),
           invokeChildProcess: (childMethod, childParams) =>
             childProcessBroker.invoke(
               { pluginId, spawnId, signal, emitEvent },
@@ -1165,7 +1273,13 @@ function createPluginWorkspaceRuntimeParts(
     hostOwnership,
     resourcesBasePath: pluginResourcesBasePath(),
     pnpmRunnerEntry: join(import.meta.dirname, "pnpm-runner.js"),
-    onStatusChange: hooks.onPipelineStatus,
+    // The automation executor reads every status first, so a plugin's
+    // engine subscriptions are reconciled before the renderer hears about
+    // the same transition.
+    onStatusChange: (event) => {
+      automations.handlePipelineStatus(event);
+      hooks.onPipelineStatus(event);
+    },
     onRuntimeStopped: (pluginId) =>
       surfaces.stop({
         kind: "plugin",
@@ -1182,7 +1296,7 @@ function createPluginWorkspaceRuntimeParts(
           workspaceActivity.engineCaptureFor(lease.state.activity) !== null,
       ) ?? false,
   });
-  return { pipeline, agentDrivers: pluginDrivers, workspaceEvents };
+  return { pipeline, agentDrivers: pluginDrivers, workspaceEvents, automations };
 }
 
 async function relativeWorkspacePath(
@@ -4603,6 +4717,8 @@ async function invokeWorkspacePluginSdk(input: {
   requestPath: "panel" | "plugin-process";
   isWritable: () => boolean;
   signal?: AbortSignal;
+  /** The claim id the plugin-process request declared (see SdkRequestParams). */
+  automationClaimId?: string;
   invokeChildProcess?: (method: string, params?: unknown) => Promise<unknown>;
   subscribeFileWatch?: (params: unknown) => { subscriptionId: string };
   subscribeRecordWatch?: (
@@ -4618,12 +4734,28 @@ async function invokeWorkspacePluginSdk(input: {
     const signal = input.signal
       ? AbortSignal.any([input.signal, operation.signal])
       : operation.signal;
+    // Resolve a request-declared automation claim against the runs this
+    // workspace's executor actually started on this plugin — main-derived
+    // authority, like the author; the plugin's tag grants nothing.
+    const automationRun: PluginAutomationRunAuthority | undefined =
+      input.automationClaimId === undefined
+        ? undefined
+        : operation.state.pluginRuntimes
+            .current(input.workspaceId)
+            ?.automations.activeRun({
+              claimId: input.automationClaimId,
+              pluginId: input.pluginId,
+            });
     return invokePluginSdkHost(
       {
         pluginId: input.pluginId,
         workspaceRoot: workspace.rootPath,
         spawnId: input.spawnId,
         requestPath: input.requestPath,
+        ...(input.automationClaimId === undefined
+          ? {}
+          : { automationClaimId: input.automationClaimId }),
+        ...(automationRun === undefined ? {} : { automationRun }),
         // Read from the registration main holds, never from the request: what a
         // plugin may open is what its approved manifest declares.
         declaredWebApps: operation.state.pluginRuntimes
@@ -4663,12 +4795,32 @@ async function invokeWorkspacePluginSdk(input: {
         // writeAuthoredText: a writable workspace and a running engine
         // capture, resolved when the write happens, never cached.
         editCollections: {
-          setRecordFields: async ({ recordPath, fields, author, signal: editSignal }) =>
+          // The idempotency key is the automation run's claim-id-plus-ordinal:
+          // it must reach the seam, or a reaper re-run could write twice.
+          setRecordFields: async ({
+            recordPath,
+            fields,
+            author,
+            idempotencyKey,
+            signal: editSignal,
+          }) =>
             setCollectionRecordFields(
               await collectionEditContextFor(operation, editSignal),
-              { recordPath, fields, author },
+              {
+                recordPath,
+                fields,
+                author,
+                ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+              },
             ),
-          createRecord: async ({ collectionPath, name, fields, author, signal: editSignal }) =>
+          createRecord: async ({
+            collectionPath,
+            name,
+            fields,
+            author,
+            idempotencyKey,
+            signal: editSignal,
+          }) =>
             createCollectionRecord(
               await collectionEditContextFor(operation, editSignal),
               {
@@ -4676,6 +4828,7 @@ async function invokeWorkspacePluginSdk(input: {
                 name,
                 ...(fields === undefined ? {} : { fields }),
                 author,
+                ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
               },
             ),
         },
@@ -9344,6 +9497,68 @@ function registerIpcHandlers(
     );
   });
 
+  // Automation failures (ADR 0008): the engine's failed claim rows — one
+  // row per automation with the newest error and a counting generation —
+  // minus what the owner has acknowledged in the registry.
+  ipcMain.handle(CHANNELS.listAutomationFailures, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListAutomationFailuresPayload.parse(payload);
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Automation notice read stopped because this window changed workspaces.",
+      async (operation) => {
+        const result = await withEngineAdapter(
+          receivedShareEngine.workspaceForRegistered(operation.workspace),
+          async (adapter) => await adapter.listAutomationFailures(),
+        );
+        return ListAutomationFailuresResult.parse({
+          failures: unacknowledgedAutomationFailures(
+            result?.failures ?? [],
+            operation.workspace.automationFailureAcks,
+          ),
+        });
+      },
+    );
+  });
+
+  // Record that the user has seen an automation's failures. It does NOT
+  // delete the claim rows — they are the remaining evidence of what failed.
+  // Acknowledging hides the notice; a failure recorded after the render has
+  // a higher generation, so it comes back on its own. The generation is
+  // clamped to what the engine actually holds, so a claimed generation
+  // above the current one cannot pre-acknowledge failures yet to happen.
+  ipcMain.handle(CHANNELS.dismissAutomationFailure, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = DismissAutomationFailurePayload.parse(payload);
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Automation notice update stopped because this window changed workspaces.",
+      async (operation) => {
+        const result = await withEngineAdapter(
+          receivedShareEngine.workspaceForRegistered(operation.workspace),
+          async (adapter) => await adapter.listAutomationFailures(),
+        );
+        if (!result) {
+          throw new Error("The workspace engine is not running.");
+        }
+        const current = result.failures.find(
+          (failure) => failure.automationId === input.automationId,
+        );
+        // No failed claims for that automation: nothing to acknowledge.
+        if (!current) return;
+        operation.assertCurrent();
+        acknowledgeWorkspaceAutomationFailure(
+          input.workspaceId,
+          input.automationId,
+          Math.min(input.generation, current.generation),
+        );
+        notifyAutomationFailuresChanged(input.workspaceId);
+      },
+    );
+  });
+
   // ---- Share changes (#646 PR3a) ----
   //
   // Two lanes, and a workspace is only ever in one of them. The GRANTER lane
@@ -13461,6 +13676,16 @@ async function startRustEngineDaemon(): Promise<boolean> {
     // subscription, so route each one to the owning workspace's registry.
     bridgeRecordEventsToPlugins(rustEngineDaemon, (workspaceId) =>
       pluginWorkspaceRuntimes.current(workspaceId)?.workspaceEvents,
+    );
+    // The daemon also claims each local record change for its subscribed
+    // automations (ADR 0008); its automation.claimed events wake the owning
+    // workspace's executor to drain the durable claim table, and a claim
+    // inserted already failed (the depth cap's chain-stopped stop report)
+    // pokes the owner's failure notice instead.
+    bridgeAutomationClaimsToExecutors(
+      rustEngineDaemon,
+      (workspaceId) => pluginWorkspaceRuntimes.current(workspaceId)?.automations,
+      notifyAutomationFailuresChanged,
     );
     const relaySource = new RelayConfiguredDaemonClientSource(
       rustEngineDaemon,

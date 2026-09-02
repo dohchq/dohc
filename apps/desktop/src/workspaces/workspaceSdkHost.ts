@@ -74,6 +74,11 @@ export interface WorkspaceSdkHostContext {
   // collection write seam). Absent means this surface has no collection
   // write authority; the advertised collections.edit capability follows it.
   editCollections?: WorkspaceSdkCollectionEditPort;
+  // The wire idempotency key a collection write carries to the seam. Only an
+  // automation-run context sets it (to the run's claim id plus its write
+  // ordinal, host-derived like the author); every other write lets the
+  // session generate one per update.
+  collectionWriteIdempotencyKey?: string;
 }
 
 export interface WorkspaceSdkCollectionEditPort {
@@ -81,6 +86,7 @@ export interface WorkspaceSdkCollectionEditPort {
     recordPath: string;
     fields: Record<string, unknown>;
     author: ChangeAuthor;
+    idempotencyKey?: string;
     signal?: AbortSignal;
   }): Promise<{ path: string }>;
   createRecord(input: {
@@ -88,6 +94,7 @@ export interface WorkspaceSdkCollectionEditPort {
     name: string;
     fields?: Record<string, unknown>;
     author: ChangeAuthor;
+    idempotencyKey?: string;
     signal?: AbortSignal;
   }): Promise<{ path: string; recordId: string }>;
 }
@@ -588,6 +595,9 @@ export async function invokeWorkspaceSdkHost(
         recordPath,
         fields: record(input.fields, "fields"),
         author: context.author,
+        ...(context.collectionWriteIdempotencyKey === undefined
+          ? {}
+          : { idempotencyKey: context.collectionWriteIdempotencyKey }),
         ...(context.signal ? { signal: context.signal } : {}),
       });
     }
@@ -605,6 +615,9 @@ export async function invokeWorkspaceSdkHost(
           ? {}
           : { fields: record(input.fields, "fields") }),
         author: context.author,
+        ...(context.collectionWriteIdempotencyKey === undefined
+          ? {}
+          : { idempotencyKey: context.collectionWriteIdempotencyKey }),
         ...(context.signal ? { signal: context.signal } : {}),
       });
     }

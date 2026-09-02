@@ -669,6 +669,7 @@ fn apply_moment_append(
                     &before_frontmatter,
                     &frontmatter,
                     Some(&envelope.origin_id),
+                    None,
                     Some((&envelope.origin_id, envelope.origin_seq)),
                     envelope.recorded_at_ms,
                 )

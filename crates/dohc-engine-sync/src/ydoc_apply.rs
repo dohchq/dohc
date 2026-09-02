@@ -48,6 +48,8 @@ struct YdocUpdatePayload {
     #[serde(default)]
     actor_origin_id: Option<String>,
     #[serde(default)]
+    attribution: Option<dohc_engine_domain::ChangeAttribution>,
+    #[serde(default)]
     is_base_state: bool,
 }
 
@@ -67,6 +69,10 @@ fn valid_actor_origin_id(value: Option<&str>) -> bool {
     }
 }
 
+fn valid_attribution(value: Option<&dohc_engine_domain::ChangeAttribution>) -> bool {
+    value.is_none_or(|attribution| attribution.validate().is_ok())
+}
+
 /// Admit a valid base only for authenticated, exact-coordinate repair.
 pub(crate) fn is_exact_repairable_ydoc_base_claim(
     payload: &serde_json::Value,
@@ -84,6 +90,7 @@ pub(crate) fn is_exact_repairable_ydoc_base_claim(
         && payload.lineage_claim_id == lineage_claim_id
         && valid_lineage_claim_id(lineage_claim_id)
         && valid_actor_origin_id(payload.actor_origin_id.as_deref())
+        && valid_attribution(payload.attribution.as_ref())
         && ContentKind::parse(&payload.content_kind).is_ok()
         && classification == PathClassification::Tracked
         && normalized.as_deref() == Some(payload.path.as_str())
@@ -615,6 +622,7 @@ fn drain_deferred_ydoc(
                 if lineage_claim_id != payload.lineage_claim_id
                     || !valid_lineage_claim_id(&lineage_claim_id)
                     || !valid_actor_origin_id(payload.actor_origin_id.as_deref())
+                    || !valid_attribution(payload.attribution.as_ref())
                 {
                     return Err(local_corruption(
                         "parked ydoc.update lineage identity does not match its payload",
@@ -734,6 +742,7 @@ fn drain_deferred_ydoc(
                 key,
                 &remote,
                 payload.actor_origin_id.as_deref(),
+                payload.attribution.as_ref(),
                 faults,
                 recorded_at_ms,
             )
@@ -743,6 +752,7 @@ fn drain_deferred_ydoc(
                 key,
                 &remote,
                 payload.actor_origin_id.as_deref(),
+                payload.attribution.as_ref(),
                 faults,
                 recorded_at_ms,
             )
@@ -987,6 +997,7 @@ fn write_final_drained_projection(
             key,
             &payload.path,
             payload.actor_origin_id.as_deref(),
+            payload.attribution.as_ref(),
             payload_recorded_at,
         )
     })
@@ -1558,14 +1569,17 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
                 reason: "ydoc-resolution-not-representable",
             });
         }
-        let outcome =
-            dohc_engine_collab::record_update_in_tx(tx, key, &update, actor_origin_id, now_ms)
-                .map_err(|error| {
-                    map_collab_payload_error(
-                        error,
-                        "conflict resolution fold could not be appended",
-                    )
-                })?;
+        let outcome = dohc_engine_collab::record_update_in_tx(
+            tx,
+            key,
+            &update,
+            actor_origin_id,
+            None,
+            now_ms,
+        )
+        .map_err(|error| {
+            map_collab_payload_error(error, "conflict resolution fold could not be appended")
+        })?;
         // Journal only when this workspace actually replicates: a receiver
         // that never enrolled has no sync identity, and its choice needs no
         // peer. `emit_outbound` alone cannot gate this — a claimed lineage
@@ -1590,6 +1604,7 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
                     &dohc_engine_storage::hex_sha256(&update),
                     lineage_claim_id,
                     actor_origin_id,
+                    None,
                     false,
                 ),
                 now_ms,
@@ -2068,6 +2083,14 @@ fn apply_ydoc_envelope_inner(
             envelope,
             faults,
             "ydoc.update actor origin is invalid",
+        );
+    }
+    if !valid_attribution(payload.attribution.as_ref()) {
+        return refuse_ydoc(
+            store,
+            envelope,
+            faults,
+            "ydoc.update attribution is invalid",
         );
     }
     let search_policy = search_policy_for_store(store);
@@ -2872,6 +2895,7 @@ fn apply_ydoc_envelope_inner(
                     &key,
                     &remote,
                     payload.actor_origin_id.as_deref(),
+                    payload.attribution.as_ref(),
                     op.recorded_at_ms,
                 )
             } else {
@@ -2880,6 +2904,7 @@ fn apply_ydoc_envelope_inner(
                     &key,
                     &remote,
                     payload.actor_origin_id.as_deref(),
+                    payload.attribution.as_ref(),
                     op.recorded_at_ms,
                 )
             }
@@ -2914,6 +2939,7 @@ fn apply_ydoc_envelope_inner(
                                 &key,
                                 &update_path,
                                 payload.actor_origin_id.as_deref(),
+                                payload.attribution.as_ref(),
                                 op.recorded_at_ms,
                             )?
                         {
@@ -3120,6 +3146,8 @@ mod merge_drained_tests {
             record_id: record_id.to_owned(),
             created: false,
             author_origin_id: None,
+            attribution: None,
+            source: None,
             recorded_at_ms: 0,
             fields: Vec::new(),
         }

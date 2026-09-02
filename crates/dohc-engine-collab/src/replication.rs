@@ -23,6 +23,8 @@ use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome};
 use rusqlite::Transaction;
 
 use crate::doc_cache::{GateBaseSource, RemoteAppendProbe, ServedGateBase};
+use dohc_engine_domain::ChangeAttribution;
+
 use crate::durable::{
     append_and_index_update, append_validated_and_index_update, blob_seq_in_log,
     load_for_replay_gate, maybe_compact, query_marker, validate_update_bytes, CompactOutcome,
@@ -127,10 +129,20 @@ pub fn apply_remote_update(
     key: &DocKey,
     remote: &RemoteUpdate,
     actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<RemoteUpdateApplied, CollabError> {
-    apply_remote_update_outer(store, None, key, remote, actor_origin_id, faults, now_ms)
+    apply_remote_update_outer(
+        store,
+        None,
+        key,
+        remote,
+        actor_origin_id,
+        attribution,
+        faults,
+        now_ms,
+    )
 }
 
 /// A remote update applied outside the pull envelope, with the record facts
@@ -145,12 +157,14 @@ pub struct RemoteUpdateApplied {
 /// Drain-only outer wrapper that keeps an already-resident writer-cache entry
 /// aligned after the remote append commits. The deferred replay gate remains
 /// cold because its transaction boundary cannot satisfy #943's cache proof.
+#[allow(clippy::too_many_arguments)]
 pub fn apply_remote_update_for_deferred_drain(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
     key: &DocKey,
     remote: &RemoteUpdate,
     actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<RemoteUpdateApplied, CollabError> {
@@ -160,17 +174,20 @@ pub fn apply_remote_update_for_deferred_drain(
         key,
         remote,
         actor_origin_id,
+        attribution,
         faults,
         now_ms,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_remote_update_outer(
     store: &mut EngineStore,
     mut cache: Option<&mut WriterDocCache>,
     key: &DocKey,
     remote: &RemoteUpdate,
     actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<RemoteUpdateApplied, CollabError> {
@@ -183,6 +200,7 @@ fn apply_remote_update_outer(
             key,
             remote,
             actor_origin_id,
+            attribution,
             now_ms,
             maintain_frontier.then_some(&mut candidate),
         )?;
@@ -238,7 +256,7 @@ pub fn apply_remote_update_in_transaction(
     remote: &RemoteUpdate,
     now_ms: i64,
 ) -> Result<ReplicationApplyOutcome, CollabError> {
-    apply_remote_update_in_transaction_inner(tx, key, remote, None, now_ms, None)
+    apply_remote_update_in_transaction_inner(tx, key, remote, None, None, now_ms, None)
         .map(|(outcome, _)| outcome)
 }
 
@@ -247,6 +265,7 @@ fn apply_remote_update_in_transaction_inner(
     key: &DocKey,
     remote: &RemoteUpdate,
     actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
     now_ms: i64,
     candidate_probe: Option<&mut Option<crate::replay_parity::IntegratedFrontierDelta>>,
 ) -> Result<
@@ -300,6 +319,7 @@ fn apply_remote_update_in_transaction_inner(
         &sha,
         true,
         origin.actor_id(),
+        attribution,
         Some((&remote.origin_id, remote.origin_seq)),
         now_ms,
     )?;
@@ -320,6 +340,7 @@ pub fn apply_remote_update_in_transaction_with_projection(
     key: &DocKey,
     remote: &RemoteUpdate,
     actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
     now_ms: i64,
 ) -> Result<RemoteApplyProjection, CollabError> {
     validate_update_bytes(&remote.bytes)?;
@@ -359,6 +380,7 @@ pub fn apply_remote_update_in_transaction_with_projection(
         &sha,
         true,
         origin.actor_id(),
+        attribution,
         Some((&remote.origin_id, remote.origin_seq)),
         now_ms,
     )?;
@@ -377,6 +399,7 @@ pub fn apply_remote_update_in_transaction_with_projection(
 /// The frontier and persistent scratch serve only the parity verdict. The
 /// returned projection remains a separate fresh full-content document, while
 /// `probe` carries cache advancement evidence out of the transaction.
+#[allow(clippy::too_many_arguments)]
 pub fn apply_remote_update_in_transaction_cached_with_projection(
     tx: &Transaction<'_>,
     cache: &WriterDocCache,
@@ -384,6 +407,7 @@ pub fn apply_remote_update_in_transaction_cached_with_projection(
     key: &DocKey,
     remote: &RemoteUpdate,
     actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
     now_ms: i64,
 ) -> Result<RemoteApplyProjection, CollabError> {
     validate_update_bytes(&remote.bytes)?;
@@ -436,6 +460,7 @@ pub fn apply_remote_update_in_transaction_cached_with_projection(
                 &sha,
                 true,
                 origin.actor_id(),
+                attribution,
                 Some((&remote.origin_id, remote.origin_seq)),
                 now_ms,
             )?;
@@ -471,6 +496,7 @@ pub fn apply_remote_update_in_transaction_cached_with_projection(
                 &sha,
                 true,
                 origin.actor_id(),
+                attribution,
                 Some((&remote.origin_id, remote.origin_seq)),
                 now_ms,
             )?;
@@ -622,7 +648,7 @@ mod dedupe_hoist_tests {
             bytes: delta,
         };
         let seq = match committed(
-            apply_remote_update(&mut store, &key, &remote, None, &NoFaults, 1_100)
+            apply_remote_update(&mut store, &key, &remote, None, None, &NoFaults, 1_100)
                 .expect("apply")
                 .outcome,
         ) {
@@ -638,7 +664,7 @@ mod dedupe_hoist_tests {
             replicated_with_applied_delta("dedupe-hoist-remote");
 
         let again = with_armed_gate(|| {
-            apply_remote_update(&mut store, &key, &remote, None, &NoFaults, 1_200)
+            apply_remote_update(&mut store, &key, &remote, None, None, &NoFaults, 1_200)
         })
         .expect("an in-log redelivery must dedupe without invoking the gate")
         .outcome;
@@ -705,7 +731,7 @@ mod dedupe_hoist_tests {
             replicated_with_applied_delta("dedupe-hoist-rot-remote");
         let sha = rot_stored_blob(&mut store, &remote.bytes);
 
-        let refused = apply_remote_update(&mut store, &key, &remote, None, &NoFaults, 1_200)
+        let refused = apply_remote_update(&mut store, &key, &remote, None, None, &NoFaults, 1_200)
             .expect_err("a redelivery over a rotted blob must surface Corrupt, not a false ack");
         assert!(
             matches!(&refused, CollabError::Corrupt { reason } if reason.contains(&sha)),
@@ -770,7 +796,7 @@ mod dedupe_hoist_tests {
         // Armed gate: a folded redelivery MUST reach the gate, which the armed
         // seam turns into a fail-closed refusal.
         let refused = with_armed_gate(|| {
-            apply_remote_update(&mut store, &key, &remote, None, &NoFaults, 1_400)
+            apply_remote_update(&mut store, &key, &remote, None, None, &NoFaults, 1_400)
         })
         .expect_err("a folded redelivery must take the full gate");
         assert!(
@@ -781,7 +807,7 @@ mod dedupe_hoist_tests {
         // Disarmed, the same redelivery passes the gate and re-appends as a
         // fresh row (a CRDT no-op; re-folded at the next compaction).
         let reapplied = committed(
-            apply_remote_update(&mut store, &key, &remote, None, &NoFaults, 1_500)
+            apply_remote_update(&mut store, &key, &remote, None, None, &NoFaults, 1_500)
                 .expect("re-append")
                 .outcome,
         );

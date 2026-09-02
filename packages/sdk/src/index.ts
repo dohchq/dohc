@@ -148,16 +148,36 @@ export type DohcJsonValue =
   | DohcJsonValue[]
   | { [key in string]?: DohcJsonValue };
 
+/** The declared kind of actor behind a record change. */
+export type DohcChangeActorKind = "human" | "agent" | "automation";
+
+/**
+ * The replication coordinate of the change an event reports: the authoring
+ * device's origin id and its op sequence. Null for a change on a
+ * never-synced lineage, whose only durable per-change key is `historyId`.
+ */
+export type DohcRecordEventSource = {
+  originId: string;
+  originSeq: number;
+};
+
 /**
  * A record appeared in a collection. `author` is the recorded agent or user
  * identity when the host knows one, and null otherwise. `timestamp` is the
- * host's record timestamp in milliseconds.
+ * host's record timestamp in milliseconds. `actorKind`, `onBehalfOf`, and
+ * `depth` are the writer's declared attribution (null when undeclared);
+ * `source` is the change's replication coordinate (null for a never-synced
+ * change).
  */
 export type DohcRecordCreatedEvent = {
   collectionPath: string;
   recordId: string;
   author: string | null;
   timestamp: number;
+  actorKind: DohcChangeActorKind | null;
+  onBehalfOf: string | null;
+  depth: number | null;
+  source: DohcRecordEventSource | null;
 };
 
 /** A record changed. Same shape as {@link DohcRecordCreatedEvent}. */
@@ -183,6 +203,10 @@ export type DohcRecordFieldChangedEvent = {
   timestamp: number;
   /** Device-local record-history row id. */
   historyId: number;
+  actorKind: DohcChangeActorKind | null;
+  onBehalfOf: string | null;
+  depth: number | null;
+  source: DohcRecordEventSource | null;
 };
 
 /**

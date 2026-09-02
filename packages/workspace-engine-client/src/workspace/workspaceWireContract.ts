@@ -35,7 +35,20 @@ export const WORKSPACE_METHOD = {
   captureFlush: "capture.flush",
   captureReconcile: "capture.reconcile",
   captureSetAuthor: "capture.setAuthor",
+  automationsSubscribe: "automations.subscribe",
+  automationsUnsubscribe: "automations.unsubscribe",
+  automationsClaimNext: "automations.claimNext",
+  automationsFailures: "automations.failures",
+  automationsSettle: "automations.settle",
 } as const;
+
+/**
+ * Emitted by the daemon post-commit, once per automation claim a LOCAL apply
+ * inserted (ADR 0008: a synced apply claims nothing). A wake-up for the
+ * desktop's drain loop, not the claim transport — the claim is taken with
+ * `automations.claimNext`.
+ */
+export const AUTOMATION_CLAIMED_EVENT = "automation.claimed";
 
 export type WorkspaceMethod =
   (typeof WORKSPACE_METHOD)[keyof typeof WORKSPACE_METHOD];
@@ -260,6 +273,77 @@ export type CaptureFlushResult = WorkspaceJsonObject & {
   running: boolean;
   degraded: boolean;
 };
+/** Mirrors AutomationSubscriptionParams in crates/dohc-workspace-engine. */
+export type AutomationSubscriptionParams = WorkspaceJsonObject & {
+  automationId: string;
+  /** Collection path prefix; "." covers the whole workspace. */
+  path: string;
+};
+
+export type AutomationClaimNextParams = WorkspaceJsonObject & {
+  nowMs?: number;
+};
+
+export type AutomationSettleParams = WorkspaceJsonObject & {
+  claimId: string;
+  state: "done" | "failed";
+  /** Required exactly when state is "failed". */
+  error?: string;
+  nowMs?: number;
+};
+
+/**
+ * The change that inserted the claim, keyed either by its replication
+ * coordinate or — on a never-synced lineage — by the device-local history
+ * row id. Exactly one of the two shapes.
+ */
+export type AutomationClaimTrigger =
+  | (WorkspaceJsonObject & { originId: string; originSeq: number })
+  | (WorkspaceJsonObject & { historyId: number });
+
+export type AutomationClaim = WorkspaceJsonObject & {
+  claimId: string;
+  automationId: string;
+  trigger: AutomationClaimTrigger;
+  recordId: string;
+  collectionPath: string;
+  depth: number;
+  state: "pending" | "running" | "done" | "failed";
+  attempts: number;
+  createdAtMs: number;
+  updatedAtMs: number;
+  error?: string;
+};
+
+export type AutomationSubscribeResult = WorkspaceJsonObject & {
+  subscribed: boolean;
+};
+
+export type AutomationUnsubscribeResult = WorkspaceJsonObject & {
+  unsubscribed: boolean;
+};
+
+/** Null when no pending claim remains: the drain loop's stop condition. */
+export type AutomationClaimNextResult = AutomationClaim | null;
+
+/**
+ * One automation with at least one failed claim. Mirrors AutomationFailure
+ * in crates/dohc-workspace-engine: the newest error and its time, plus a
+ * generation — the automation's failed-claim count, which only grows
+ * (failed rows are never deleted), so an acknowledgment at generation N
+ * hides the owner's notice exactly until a newer failure passes N.
+ */
+export type AutomationFailure = WorkspaceJsonObject & {
+  automationId: string;
+  error: string;
+  updatedAtMs: number;
+  generation: number;
+};
+
+export type AutomationFailuresResult = WorkspaceJsonObject & {
+  failures: AutomationFailure[];
+};
+
 export type CaptureSetAuthorParams = WorkspaceJsonObject & {
   author:
     | (WorkspaceJsonObject & {
@@ -292,6 +376,11 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.captureFlush]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureReconcile]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureSetAuthor]: CaptureSetAuthorParams;
+  [WORKSPACE_METHOD.automationsSubscribe]: AutomationSubscriptionParams;
+  [WORKSPACE_METHOD.automationsUnsubscribe]: AutomationSubscriptionParams;
+  [WORKSPACE_METHOD.automationsClaimNext]: AutomationClaimNextParams;
+  [WORKSPACE_METHOD.automationsFailures]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.automationsSettle]: AutomationSettleParams;
 };
 
 export type WorkspaceMethodResultMap = {
@@ -312,6 +401,11 @@ export type WorkspaceMethodResultMap = {
   [WORKSPACE_METHOD.captureFlush]: CaptureFlushResult;
   [WORKSPACE_METHOD.captureReconcile]: CaptureFlushResult;
   [WORKSPACE_METHOD.captureSetAuthor]: CaptureSetAuthorResult;
+  [WORKSPACE_METHOD.automationsSubscribe]: AutomationSubscribeResult;
+  [WORKSPACE_METHOD.automationsUnsubscribe]: AutomationUnsubscribeResult;
+  [WORKSPACE_METHOD.automationsClaimNext]: AutomationClaimNextResult;
+  [WORKSPACE_METHOD.automationsFailures]: AutomationFailuresResult;
+  [WORKSPACE_METHOD.automationsSettle]: AutomationClaim;
 };
 
 export class WorkspaceProtocolShapeError extends Error {
@@ -798,6 +892,9 @@ const CollectionGetRecordResultSchema = mutableStruct({
           value: Schema.MutableJson,
         }),
         authorOriginId: NullableString,
+        actorKind: Schema.NullOr(Schema.Literals(["human", "agent", "automation"])),
+        onBehalfOf: NullableString,
+        depth: Schema.NullOr(Schema.Int),
         recordedAtMs: Schema.Int,
       }),
     ),
@@ -840,6 +937,23 @@ const CaptureFlushResultSchema = mutableStruct({
   settled: Schema.Boolean,
   running: Schema.Boolean,
   degraded: Schema.Boolean,
+});
+
+const AutomationClaimSchema = mutableStruct({
+  claimId: Schema.NonEmptyString,
+  automationId: Schema.NonEmptyString,
+  trigger: Schema.Union([
+    mutableStruct({ originId: Schema.NonEmptyString, originSeq: Schema.Int }),
+    mutableStruct({ historyId: Schema.Int }),
+  ]),
+  recordId: Schema.NonEmptyString,
+  collectionPath: Schema.NonEmptyString,
+  depth: Schema.Int,
+  state: Schema.Literals(["pending", "running", "done", "failed"]),
+  attempts: Schema.Int,
+  createdAtMs: Schema.Int,
+  updatedAtMs: Schema.Int,
+  error: Schema.optionalKey(Schema.String),
 });
 
 const WorkspaceResultSchemas = {
@@ -887,6 +1001,26 @@ const WorkspaceResultSchemas = {
   [WORKSPACE_METHOD.captureSetAuthor]: mutableStruct({
     updated: Schema.Literal(true),
   }),
+  [WORKSPACE_METHOD.automationsSubscribe]: mutableStruct({
+    subscribed: Schema.Boolean,
+  }),
+  [WORKSPACE_METHOD.automationsUnsubscribe]: mutableStruct({
+    unsubscribed: Schema.Boolean,
+  }),
+  [WORKSPACE_METHOD.automationsClaimNext]: Schema.NullOr(AutomationClaimSchema),
+  [WORKSPACE_METHOD.automationsFailures]: mutableStruct({
+    failures: Schema.mutable(
+      Schema.Array(
+        mutableStruct({
+          automationId: Schema.NonEmptyString,
+          error: Schema.String,
+          updatedAtMs: Schema.Int,
+          generation: Schema.Int,
+        }),
+      ),
+    ),
+  }),
+  [WORKSPACE_METHOD.automationsSettle]: AutomationClaimSchema,
 } as const;
 
 function decodeWorkspaceSchema<S extends Schema.ConstraintDecoder<unknown>>(
@@ -1026,7 +1160,10 @@ export function decodeWorkspaceResult<M extends WorkspaceMethod>(
     schema,
     value,
     `${method} result`,
-    method !== WORKSPACE_METHOD.searchQuery,
+    // searchQuery answers with an array; claimNext answers null when no
+    // pending claim remains.
+    method !== WORKSPACE_METHOD.searchQuery &&
+      method !== WORKSPACE_METHOD.automationsClaimNext,
   ) as WorkspaceMethodResultMap[M];
   if (method === WORKSPACE_METHOD.collectionsQuery) {
     return decodeCollectionQueryResultValues(

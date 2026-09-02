@@ -1,4 +1,5 @@
 use dohc_engine_collab::{ClaimOutcome, ContentKind, DocKey};
+use dohc_engine_domain::ChangeAttribution;
 use rusqlite::{Transaction, params};
 
 use crate::{SyncError, journal_local_op_in_tx, workspace_replicates_with_relay_in_tx};
@@ -43,6 +44,7 @@ pub fn originate_ydoc_base_in_tx(
     key: &DocKey,
     path: &str,
     actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
     now_ms: i64,
 ) -> Result<BaseOrigination, SyncError> {
     let Some(marker) =
@@ -98,6 +100,7 @@ pub fn originate_ydoc_base_in_tx(
                     &base_snapshot_sha,
                     &base_snapshot_sha,
                     actor_origin_id,
+                    attribution,
                     true,
                 ),
                 now_ms,
@@ -147,6 +150,7 @@ pub fn originate_ydoc_base_in_tx(
 }
 
 /// Build the one wire payload used by every locally journaled Y.Doc update.
+#[allow(clippy::too_many_arguments)]
 pub fn ydoc_update_payload(
     key: &DocKey,
     path: &str,
@@ -154,6 +158,7 @@ pub fn ydoc_update_payload(
     update_blob_sha256: &str,
     lineage_claim_id: &str,
     actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
     is_base_state: bool,
 ) -> serde_json::Value {
     let mut payload = serde_json::json!({
@@ -167,6 +172,10 @@ pub fn ydoc_update_payload(
     });
     if let Some(actor_origin_id) = actor_origin_id {
         payload["actorOriginId"] = serde_json::Value::String(actor_origin_id.to_owned());
+    }
+    if let Some(attribution) = attribution {
+        payload["attribution"] =
+            serde_json::to_value(attribution).expect("a bounded attribution encodes as JSON");
     }
     payload
 }

@@ -298,6 +298,30 @@ export interface RegistryEntry extends CreatedWorkspace {
   sharedChannels?: JoinedSharedChannel[];
   // Share mounts materialized into this workspace's shared-with-me/.
   shareMounts?: ShareMountRecord[];
+  // How far the owner has seen each automation's failures, by engine
+  // automation id ("<plugin>/<automation>"). The engine's failed claim rows
+  // are the durable evidence and are never deleted; a dismiss only records
+  // the generation (the automation's failed-claim count) the owner saw.
+  // Same rule as ShareSkippedOps.acknowledgedGeneration: a failure recorded
+  // after the render has a higher generation, so a stale click cannot hide
+  // it, and an acknowledgment never moves backwards.
+  automationFailureAcks?: Record<string, number>;
+}
+
+/**
+ * The failure rows the owner has not acknowledged yet: generation above the
+ * recorded acknowledgment. Generic over the row so the pure store does not
+ * import the wire type.
+ */
+export function unacknowledgedAutomationFailures<
+  F extends { automationId: string; generation: number },
+>(
+  failures: readonly F[],
+  acks: Record<string, number> | undefined,
+): F[] {
+  return failures.filter(
+    (failure) => failure.generation > (acks?.[failure.automationId] ?? 0),
+  );
 }
 
 function fsyncAndClose(fd: number): void {
@@ -537,6 +561,31 @@ export function createRegistryStore(registryFile: string) {
                 }
               : mount,
           ),
+        };
+      });
+    },
+
+    /**
+     * Record that the user has seen an automation's failures up to
+     * `generation`. Deletes nothing — the engine's failed claim rows stay —
+     * and never moves backwards, so a stale click cannot un-see a newer
+     * failure. The caller clamps `generation` to the engine's current one.
+     */
+    acknowledgeAutomationFailure(
+      workspaceId: string,
+      automationId: string,
+      generation: number,
+    ): void {
+      updateWorkspaceEntry(workspaceId, (entry) => {
+        const current = entry.automationFailureAcks?.[automationId] ?? 0;
+        const next = Math.max(current, generation);
+        if (next === current) return undefined;
+        return {
+          ...entry,
+          automationFailureAcks: {
+            ...entry.automationFailureAcks,
+            [automationId]: next,
+          },
         };
       });
     },

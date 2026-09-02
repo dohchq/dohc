@@ -187,6 +187,7 @@ fn apply_remote_scene_asset_authority(
                 bytes: update,
             },
             None,
+            None,
             &NoFaults,
             now_ms,
         )
@@ -228,6 +229,7 @@ fn apply_remote_scene_image_tombstone(
                 origin_seq: 2,
                 bytes: scene.initial_update,
             },
+            None,
             None,
             &NoFaults,
             now_ms,

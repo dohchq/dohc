@@ -195,11 +195,17 @@ describe("collection result schemas", () => {
             previous: { present: false, value: null },
             next: { present: true, value: "open" },
             authorOriginId: "origin_agent",
+            actorKind: "agent",
+            onBehalfOf: "user:ice",
+            depth: 0,
             recordedAtMs: 12,
           },
         ],
       }),
-    ).toMatchObject({ ok: true, history: [{ historyId: 3 }] });
+    ).toMatchObject({
+      ok: true,
+      history: [{ historyId: 3, actorKind: "agent", onBehalfOf: "user:ice" }],
+    });
   });
 
   it("parses write results and structured failures", () => {

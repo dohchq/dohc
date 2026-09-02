@@ -65,10 +65,22 @@ export type YdocOpenResult = JsonObject & {
   lineageClaimId: string | null;
 };
 
+// Declared write provenance beside the actor origin: the kind of actor that
+// wrote (a human, an agent, or an automation), the principal it acted for,
+// and its automation-chain depth. Optional provenance, never a second authority; the
+// engine records it on the update row and every history row the apply
+// derives, and replicates it with the update.
+export type ChangeAttributionWire = JsonObject & {
+  actorKind: "human" | "agent" | "automation";
+  onBehalfOf?: string;
+  depth?: number;
+};
+
 export type YdocRecordUpdateParams = JsonObject & {
   sessionId: string;
   updateBase64: string;
   actorOriginId?: string;
+  attribution?: ChangeAttributionWire;
   // Declares this update as the SEED: a faithful import of the seedContent
   // the open returned, built before any user input could reach the session.
   // Only the adapter's applySeedUpdate path sends it — never a replay of

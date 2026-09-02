@@ -432,6 +432,101 @@ describe("invokePluginSdkHost", () => {
     expect(calls).toHaveLength(2);
   });
 
+  it("attributes an automation run's collection writes to the automation with the claim id plus write ordinal as the key", async () => {
+    const root = await workspaceRoot();
+    const calls: unknown[] = [];
+    const tasksCollection = {
+      path: "tasks",
+      status: "valid" as const,
+      reasons: [],
+      schema: { name: null, description: null, fields: [], views: [] },
+      recordCount: 0,
+    };
+    const hostContext: PluginSdkHostContext = {
+      ...context(root),
+      automationClaimId: "claim-7",
+      automationRun: {
+        claimId: "claim-7",
+        automationId: "hello-plugin/triage",
+        onBehalfOf: "local",
+        depth: 1,
+        writes: 0,
+      },
+      reads: {
+        ...localWorkspaceSdkReads(root),
+        getCollection: async () => tasksCollection,
+      },
+      editCollections: {
+        setRecordFields: async (input) => {
+          calls.push(input);
+          return { path: input.recordPath };
+        },
+        createRecord: async (input) => {
+          calls.push(input);
+          return { path: "tasks/two.md", recordId: "rec_2" };
+        },
+      },
+    };
+
+    await invokePluginSdkHost(hostContext, "collections.setFields", {
+      path: "tasks/one.md",
+      fields: { status: "done" },
+    });
+    await invokePluginSdkHost(hostContext, "collections.createRecord", {
+      path: "tasks",
+      name: "two",
+    });
+    const automationAuthor = {
+      kind: "automation",
+      automationId: "hello-plugin/triage",
+      onBehalfOf: "local",
+      depth: 1,
+    };
+    expect(calls).toEqual([
+      expect.objectContaining({
+        recordPath: "tasks/one.md",
+        author: automationAuthor,
+        idempotencyKey: "claim-7/0",
+      }),
+      expect.objectContaining({
+        collectionPath: "tasks",
+        author: automationAuthor,
+        idempotencyKey: "claim-7/1",
+      }),
+    ]);
+
+    // A read in the same run context stays a read: no author override applies.
+    await expect(
+      invokePluginSdkHost(hostContext, "collections.get", { path: "tasks" }),
+    ).resolves.toEqual(tasksCollection);
+  });
+
+  it("refuses an automation-tagged collection write whose run no longer resolves", async () => {
+    const root = await workspaceRoot();
+    const seam = {
+      setRecordFields: vi.fn(async () => ({ path: "tasks/one.md" })),
+      createRecord: vi.fn(async () => ({ path: "tasks/two.md", recordId: "rec_2" })),
+    };
+    const hostContext: PluginSdkHostContext = {
+      ...context(root),
+      // The tag arrived but main resolved no active run: settled, reaped, or
+      // another plugin's claim. The write must refuse, not downgrade to
+      // plugin attribution.
+      automationClaimId: "claim-gone",
+      editCollections: seam,
+    };
+
+    await expect(
+      invokePluginSdkHost(hostContext, "collections.setFields", {
+        path: "tasks/one.md",
+        fields: { status: "done" },
+      }),
+    ).rejects.toThrow(
+      "This write's automation run is no longer active, so it was not applied.",
+    );
+    expect(seam.setRecordFields).not.toHaveBeenCalled();
+  });
+
   it("refuses collection writes without write authority or a write seam", async () => {
     const root = await workspaceRoot();
     const seam = {

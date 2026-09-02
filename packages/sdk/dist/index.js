@@ -946,7 +946,9 @@ export function createDohcClient(options = {}) {
             /**
              * Reports record changes at or below `collectionPath`, which is a
              * prefix: a collection to watch on its own, or a folder to watch with
-             * every collection under it. Changes outside it never arrive. Delivery
+             * every collection under it. Changes outside it never arrive. A watch
+             * on "." covers the collections this plugin could list when it
+             * subscribed; a collection created later needs a new watch. Delivery
              * is at most once; reconcile missed events from record history using
              * the last seen historyId.
              *

@@ -1,5 +1,8 @@
 import { Bot, Cloud, Settings, SunMoon } from "lucide-react";
-import type { SyncStatusResult } from "../../ipc/bridgeContract";
+import type {
+  AutomationFailureNotice,
+  SyncStatusResult,
+} from "../../ipc/bridgeContract";
 import type { AgentNotification } from "./agentNotifications";
 import { NoticeCenter } from "./NoticeCenter";
 
@@ -49,6 +52,13 @@ export function StatusBar(props: {
   onContextMenu: () => void;
   agentNotifications?: readonly AgentNotification[];
   onDismissAgentNotification?: (id: string) => void;
+  // Automation failures (ADR 0008), owned by the shell like the pairs
+  // above; the notice center only announces them.
+  automationFailures?: readonly AutomationFailureNotice[];
+  onDismissAutomationFailure?: (
+    automationId: string,
+    generation: number,
+  ) => void;
 }) {
   const state = props.syncStatus?.state ?? "synced";
   const conflictCount = props.syncStatus?.conflictCount ?? 0;
@@ -110,6 +120,12 @@ export function StatusBar(props: {
           {...(props.agentNotifications ? { agentNotifications: props.agentNotifications } : {})}
           {...(props.onDismissAgentNotification
             ? { onDismissAgentNotification: props.onDismissAgentNotification }
+            : {})}
+          {...(props.automationFailures
+            ? { automationFailures: props.automationFailures }
+            : {})}
+          {...(props.onDismissAutomationFailure
+            ? { onDismissAutomationFailure: props.onDismissAutomationFailure }
             : {})}
         />
         <button

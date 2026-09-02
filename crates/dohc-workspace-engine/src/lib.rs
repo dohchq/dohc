@@ -17,20 +17,20 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use dohc_engine_collab::{CollabError, ContentKind, DocKey, Lease, LeaseRegistry, Regime};
 use dohc_engine_domain::{
-    AgentRunRecord, BookmarkMode, BookmarkTargetKind, ChannelThreadSummary, ChatActorKind,
-    ChatAgentReadState, ChatAttachment, ChatBookmark, ChatChannel, ChatChannelKind,
-    ChatChannelSummary, ChatDecision, ChatDecisionState, ChatFeedReadState, ChatFileMention,
-    ChatFollow, ChatMention, ChatMessage, ChatProjectionFileAccess, ChatReaction,
-    ChatReactionState, ChatThread, ChatThreadReadState, CollectionFilter,
-    CollectionPendingAdoptionCursor, CollectionQuery, CollectionQueryCursor, CollectionQueryResult,
-    CollectionSort, CompareTextFileVersions, ComparisonStatus, ConflictChoice, ConflictContentKind,
-    ConflictFileState, ConflictMetadata, ConflictResolution, ConflictStatus, CreateFileThread,
-    CreateNamedVersion, DEFAULT_COLLECTION_QUERY_LIMIT, DeleteTextFile, DispatchClaim,
-    DispatchRecord, DomainError, FeedCursorValue, FollowState, FollowTargetKind,
-    LocalAttachmentInput, MAX_COLLECTION_FIELD_VALUE_DEPTH, MAX_COLLECTION_HISTORY_LIMIT,
-    MAX_COLLECTION_QUERY_LIMIT, MAX_COLLECTION_QUERY_SORTS, MentionCursor,
-    MergeTextFileFromVersion, MergeTextFileResult, MergeUnchangedReason, MomentOp, MomentPage,
-    RenameTextFile, ResolveConflictKind, ResolveDecision, ResolveTextConflict,
+    AgentRunRecord, AutomationClaim, AutomationFailure, AutomationSettle, AutomationTrigger,
+    BookmarkMode, BookmarkTargetKind, ChannelThreadSummary, ChatActorKind, ChatAgentReadState,
+    ChatAttachment, ChatBookmark, ChatChannel, ChatChannelKind, ChatChannelSummary, ChatDecision,
+    ChatDecisionState, ChatFeedReadState, ChatFileMention, ChatFollow, ChatMention, ChatMessage,
+    ChatProjectionFileAccess, ChatReaction, ChatReactionState, ChatThread, ChatThreadReadState,
+    CollectionFilter, CollectionPendingAdoptionCursor, CollectionQuery, CollectionQueryCursor,
+    CollectionQueryResult, CollectionSort, CompareTextFileVersions, ComparisonStatus,
+    ConflictChoice, ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution,
+    ConflictStatus, CreateFileThread, CreateNamedVersion, DEFAULT_COLLECTION_QUERY_LIMIT,
+    DeleteTextFile, DispatchClaim, DispatchRecord, DomainError, FeedCursorValue, FollowState,
+    FollowTargetKind, LocalAttachmentInput, MAX_COLLECTION_FIELD_VALUE_DEPTH,
+    MAX_COLLECTION_HISTORY_LIMIT, MAX_COLLECTION_QUERY_LIMIT, MAX_COLLECTION_QUERY_SORTS,
+    MentionCursor, MergeTextFileFromVersion, MergeTextFileResult, MergeUnchangedReason, MomentOp,
+    MomentPage, RenameTextFile, ResolveConflictKind, ResolveDecision, ResolveTextConflict,
     RollbackTextFileMutation, SaveBookmark, SecretDelete, SecretDiskIntent, SecretMomentRecord,
     SecretWrite, SendMessage, SetFollow, SetReaction, StartChannelThread, TextConflict,
     TextSnapshot, ThreadDispatchPause, VersionFileChangeStatus, VersionRecord, WriteBinary,
@@ -65,6 +65,13 @@ use std::{
 
 const MAX_OPEN_HANDLES: usize = 64;
 const CHAT_DISPATCH_MAX_ATTEMPTS: i64 = 2;
+const AUTOMATION_CLAIM_MAX_ATTEMPTS: i64 = 2;
+
+/// The startup reaper only reclaims a running automation claim idle at least
+/// this long. A desktop that outlives a daemon rebind may still be running
+/// its handler; a claim younger than this bound is presumed alive and left
+/// running rather than double-fired.
+const AUTOMATION_CLAIM_REAP_IDLE_MS: i64 = 10 * 60 * 1000;
 
 /// Emitted once per settled capture batch / reconcile pass that settled any
 /// path — a REPAINT PING, not a moment ledger. Most emissions follow new
@@ -85,6 +92,16 @@ pub const CAPTURE_MOMENT_RECORDED_EVENT: &str = "capture.momentRecorded";
 pub const RECORD_CREATED_EVENT: &str = "record.created";
 pub const RECORD_UPDATED_EVENT: &str = "record.updated";
 pub const RECORD_FIELD_CHANGED_EVENT: &str = "record.field.changed";
+
+/// Emitted post-commit, once per automation claim a local record apply
+/// inserted (ADR 0008: only the origin device claims). A wake-up, not the
+/// claim transport: delivery is at most once, and the durable claim row is
+/// what `automations.claimNext` and `automations.failures` serve — a missed
+/// event costs a poll, never a claim. A pending claim wakes the desktop's
+/// drain loop; a claim inserted already failed (`chain-stopped`, the depth
+/// cap's stop report) tells the owner surface to re-read
+/// `automations.failures`.
+pub const AUTOMATION_CLAIMED_EVENT: &str = "automation.claimed";
 
 /// A previous/next value travels whole up to this many bytes of JSON; a
 /// larger one is replaced by `{ "truncated": true, "bytes": N }` and the
@@ -1788,6 +1805,23 @@ impl EngineService {
                 )
                 .await?
             }
+            "automations.subscribe" => {
+                self.automations_subscribe(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "automations.unsubscribe" => {
+                self.automations_unsubscribe(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "automations.claimNext" => {
+                self.automations_claim_next(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "automations.failures" => self.automations_failures(&ctx, request.workspace).await?,
+            "automations.settle" => {
+                self.automations_settle(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "chats.dispatch.requeueFailedTrigger" => {
                 self.chats_dispatch_requeue_failed_trigger(&ctx, request.workspace, request.params)
                     .await?
@@ -2194,6 +2228,26 @@ impl EngineService {
                     actor.chat_dispatch_reclaim_running(
                         params.workspace_id.clone(),
                         CHAT_DISPATCH_MAX_ATTEMPTS,
+                        now_ms,
+                    ),
+                )
+                .await?;
+            }
+            // The automation claim reaper (ADR 0008: a claim left by a closed
+            // device fires on next launch). Every open that reaches this
+            // point created the actor (a non-creating open returned above),
+            // so a desktop that died mid-run reaps its stale claim on its
+            // next open. The idle bound protects a handler a still-alive
+            // desktop is running, whose run settles inside the shorter
+            // per-run deadline.
+            {
+                Self::read_under_ctx(
+                    &cancellation,
+                    "workspace.open (automation reclaim)",
+                    actor.automation_reclaim_running(
+                        params.workspace_id.clone(),
+                        AUTOMATION_CLAIM_MAX_ATTEMPTS,
+                        now_ms - AUTOMATION_CLAIM_REAP_IDLE_MS,
                         now_ms,
                     ),
                 )
@@ -7411,6 +7465,142 @@ impl EngineService {
             .unwrap_or(Value::Null))
     }
 
+    async fn automations_subscribe(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: AutomationSubscriptionParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let subscribed = Self::read_under_ctx(
+            &cancellation,
+            "automations.subscribe",
+            open.actor.automation_subscribe(
+                open.workspace_id,
+                params.automation_id,
+                params.path,
+                now_ms()?,
+            ),
+        )
+        .await?;
+        Ok(json!({ "subscribed": subscribed }))
+    }
+
+    async fn automations_unsubscribe(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: AutomationSubscriptionParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let unsubscribed = Self::read_under_ctx(
+            &cancellation,
+            "automations.unsubscribe",
+            open.actor
+                .automation_unsubscribe(open.workspace_id, params.automation_id, params.path),
+        )
+        .await?;
+        Ok(json!({ "unsubscribed": unsubscribed }))
+    }
+
+    async fn automations_claim_next(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: AutomationClaimNextParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let claim = Self::read_under_ctx(
+            &cancellation,
+            "automations.claimNext",
+            open.actor
+                .automation_claim_next(open.workspace_id, params.now_ms.unwrap_or(now_ms()?)),
+        )
+        .await?;
+        Ok(claim
+            .as_ref()
+            .map(automation_claim_json)
+            .unwrap_or(Value::Null))
+    }
+
+    /// The owner-visible failure surface's read: one row per automation
+    /// with at least one failed claim (chain-stopped, handler error, or
+    /// reaper-exhausted), carrying the newest error and a generation the
+    /// desktop acknowledges against. The generation is the automation's
+    /// failed-claim count — failed rows are never deleted, so it only
+    /// grows.
+    async fn automations_failures(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+    ) -> Result<Value, WireError> {
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let failures = Self::read_under_ctx(
+            &cancellation,
+            "automations.failures",
+            open.actor.automation_failures(open.workspace_id),
+        )
+        .await?;
+        Ok(json!({
+            "failures": failures
+                .iter()
+                .map(automation_failure_json)
+                .collect::<Vec<_>>(),
+        }))
+    }
+
+    async fn automations_settle(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: AutomationSettleParams = parse(params)?;
+        let settle = match (params.state.as_str(), params.error) {
+            ("done", None) => AutomationSettle::Done,
+            ("done", Some(_)) => {
+                return Err(wire(
+                    ErrorCode::InvalidParams,
+                    "automation-settle-done-carries-error",
+                ));
+            }
+            ("failed", Some(error)) => AutomationSettle::Failed { error },
+            ("failed", None) => {
+                return Err(wire(
+                    ErrorCode::InvalidParams,
+                    "automation-settle-failed-needs-error",
+                ));
+            }
+            _ => {
+                return Err(wire(
+                    ErrorCode::InvalidParams,
+                    "automation-settle-state-unknown",
+                ));
+            }
+        };
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let claim = Self::read_under_ctx(
+            &cancellation,
+            "automations.settle",
+            open.actor.automation_settle(
+                open.workspace_id,
+                params.claim_id,
+                settle,
+                params.now_ms.unwrap_or(now_ms()?),
+            ),
+        )
+        .await?;
+        Ok(automation_claim_json(&claim))
+    }
+
     async fn chats_dispatch_list_pending(
         &self,
         ctx: &RequestContext,
@@ -8212,6 +8402,11 @@ impl EngineService {
         let update = base64::engine::general_purpose::STANDARD
             .decode(params.update_base64)
             .map_err(|_| wire(ErrorCode::InvalidParams, "invalid update encoding"))?;
+        if let Some(attribution) = &params.attribution
+            && let Err(reason) = attribution.validate()
+        {
+            return Err(wire(ErrorCode::InvalidParams, reason));
+        }
         let require_empty = session.lineage_absent && session.first_update_pending;
         // A declared seed on anything but the first update of a
         // lineage-absent session is a client bug: accepting it would record a
@@ -8244,6 +8439,7 @@ impl EngineService {
                         session.regime,
                         update,
                         params.actor_origin_id,
+                        params.attribution,
                         session.lineage_claim_id,
                         require_empty,
                         seed_source_sha256,
@@ -8286,12 +8482,15 @@ impl EngineService {
             eprintln!("engine: {declined}");
         }
         let lineage_claim_id = outcome.lineage_claim_id;
+        let automation_claims = outcome.automation_claims;
         let outcome = outcome.outcome;
         // Post-commit: the append transaction already holds the history rows
-        // these facts mirror.
+        // these facts mirror — and the automation claims it inserted
+        // (pending, or failed `chain-stopped` at the depth cap).
         if let Some(facts) = &outcome.record_facts {
             emit_record_events(&self.events, &open.workspace_id, facts);
         }
+        emit_automation_claimed(&self.events, &open.workspace_id, &automation_claims);
         serde_json::to_value(YdocRecordUpdateResult {
             seq: outcome.seq,
             deduped: outcome.deduped,
@@ -10298,6 +10497,11 @@ struct YdocRecordUpdateParams {
     update_base64: String,
     #[serde(default)]
     actor_origin_id: Option<String>,
+    /// Declared write provenance: actor kind, `onBehalfOf` principal, and
+    /// automation-chain depth. Optional; recorded beside the author origin on
+    /// the update row and every history row the apply derives.
+    #[serde(default)]
+    attribution: Option<dohc_engine_domain::ChangeAttribution>,
     /// The client declares this update as the SEED: a faithful import of the
     /// `seedContent` the open returned, built before any user input could
     /// reach the session (#815). Only the adapter's seed path sends it; a
@@ -10957,6 +11161,29 @@ struct ChatDispatchClaimParams {
     command: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
     log_path: Option<String>,
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AutomationSubscriptionParams {
+    automation_id: String,
+    path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AutomationClaimNextParams {
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AutomationSettleParams {
+    claim_id: String,
+    state: String,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    error: Option<String>,
     now_ms: Option<i64>,
 }
 
@@ -11624,6 +11851,42 @@ fn bookmark_json(workspace_id: &str, bookmark: &ChatBookmark) -> Value {
 
 fn dispatch_claim_json(claim: &DispatchClaim) -> Value {
     json!({ "dispatch": dispatch_json(&claim.dispatch), "run": run_json(&claim.run) })
+}
+
+fn automation_failure_json(failure: &AutomationFailure) -> Value {
+    json!({
+        "automationId": failure.automation_id,
+        "error": failure.error,
+        "updatedAtMs": failure.updated_at_ms,
+        "generation": failure.generation,
+    })
+}
+
+fn automation_claim_json(claim: &AutomationClaim) -> Value {
+    let trigger = match &claim.trigger {
+        AutomationTrigger::Coordinate {
+            origin_id,
+            origin_seq,
+        } => json!({ "originId": origin_id, "originSeq": origin_seq }),
+        AutomationTrigger::History { history_id } => json!({ "historyId": history_id }),
+    };
+    let mut value = json!({
+        "claimId": claim.claim_id,
+        "automationId": claim.automation_id,
+        "trigger": trigger,
+        "recordId": claim.record_id,
+        "collectionPath": claim.collection_path,
+        "depth": claim.depth,
+        "state": claim.state.as_str(),
+        "attempts": claim.attempts,
+        "createdAtMs": claim.created_at_ms,
+        "updatedAtMs": claim.updated_at_ms,
+    });
+    if let Some(error) = &claim.error {
+        let object = value.as_object_mut().expect("claim is an object");
+        object.insert("error".to_owned(), json!(error));
+    }
+    value
 }
 
 fn dispatch_json(dispatch: &DispatchRecord) -> Value {
@@ -12364,6 +12627,18 @@ fn record_event_value(json: Option<&str>) -> Value {
     value
 }
 
+/// Emit `automation.claimed` post-commit for each pending claim a local
+/// apply inserted, in insertion order. The payload is the claim row plus its
+/// workspace — enough for the desktop to route the wake-up without a read.
+fn emit_automation_claimed(events: &EngineEvents, workspace_id: &str, claims: &[AutomationClaim]) {
+    for claim in claims {
+        let mut payload = automation_claim_json(claim);
+        let object = payload.as_object_mut().expect("claim is an object");
+        object.insert("workspaceId".to_owned(), json!(workspace_id));
+        events.emit(AUTOMATION_CLAIMED_EVENT, payload);
+    }
+}
+
 /// Emit one applied update's record events, post-commit, in the settled
 /// order: created, field changes in field-name order, then updated.
 fn emit_record_events(
@@ -12380,6 +12655,28 @@ fn emit_record_events(
         payload.insert("recordId".to_owned(), json!(facts.record_id.clone()));
         payload.insert("author".to_owned(), json!(facts.author_origin_id.clone()));
         payload.insert("timestamp".to_owned(), json!(facts.recorded_at_ms));
+        // Declared attribution and the op's replication coordinate, `null`
+        // when absent: the automation executor and loop guard read these, and
+        // a subscriber must be able to tell "unattributed" from "missing".
+        let attribution = facts.attribution.as_ref();
+        payload.insert(
+            "actorKind".to_owned(),
+            json!(attribution.map(|attribution| attribution.actor_kind.as_str())),
+        );
+        payload.insert(
+            "onBehalfOf".to_owned(),
+            json!(attribution.and_then(|attribution| attribution.on_behalf_of.clone())),
+        );
+        payload.insert(
+            "depth".to_owned(),
+            json!(attribution.map(|attribution| attribution.depth)),
+        );
+        payload.insert(
+            "source".to_owned(),
+            json!(facts.source.as_ref().map(|(origin_id, origin_seq)| {
+                json!({ "originId": origin_id, "originSeq": origin_seq })
+            })),
+        );
     };
     let record_payload = || {
         let mut payload = serde_json::Map::new();
@@ -14410,6 +14707,77 @@ mod tests {
     }
 
     #[test]
+    fn automation_claimed_events_carry_the_claim_and_its_workspace() {
+        let events = EngineEvents::default();
+        let mut rx = events.subscribe();
+        let claims = vec![
+            dohc_engine_domain::AutomationClaim {
+                claim_id: "atc_one".to_owned(),
+                automation_id: "plugin:triage".to_owned(),
+                trigger: dohc_engine_domain::AutomationTrigger::Coordinate {
+                    origin_id: "origin-a".to_owned(),
+                    origin_seq: 41,
+                },
+                record_id: "rec_a".to_owned(),
+                collection_path: "tasks".to_owned(),
+                depth: 1,
+                state: dohc_engine_domain::AutomationClaimState::Pending,
+                attempts: 0,
+                error: None,
+                created_at_ms: 1_100,
+                updated_at_ms: 1_100,
+            },
+            dohc_engine_domain::AutomationClaim {
+                claim_id: "atc_two".to_owned(),
+                automation_id: "plugin:janitor".to_owned(),
+                trigger: dohc_engine_domain::AutomationTrigger::History { history_id: 7 },
+                record_id: "rec_a".to_owned(),
+                collection_path: "tasks".to_owned(),
+                depth: 0,
+                state: dohc_engine_domain::AutomationClaimState::Pending,
+                attempts: 0,
+                error: None,
+                created_at_ms: 1_100,
+                updated_at_ms: 1_100,
+            },
+        ];
+
+        emit_automation_claimed(&events, "ws-1", &claims);
+
+        let mut notices = Vec::new();
+        while let Ok(notice) = rx.try_recv() {
+            notices.push(notice);
+        }
+        assert_eq!(notices.len(), 2, "one event per inserted claim, in order");
+        assert!(
+            notices
+                .iter()
+                .all(|notice| notice.name == AUTOMATION_CLAIMED_EVENT)
+        );
+        assert_eq!(
+            notices[0].payload,
+            json!({
+                "workspaceId": "ws-1",
+                "claimId": "atc_one",
+                "automationId": "plugin:triage",
+                "trigger": { "originId": "origin-a", "originSeq": 41 },
+                "recordId": "rec_a",
+                "collectionPath": "tasks",
+                "depth": 1,
+                "state": "pending",
+                "attempts": 0,
+                "createdAtMs": 1_100,
+                "updatedAtMs": 1_100,
+            })
+        );
+        assert_eq!(
+            notices[1].payload["trigger"],
+            json!({ "historyId": 7 }),
+            "a never-synced trigger names its history row id"
+        );
+    }
+
+    #[test]
     fn record_events_emit_in_settled_order_and_cap_oversized_values() {
         let events = EngineEvents::default();
         let mut rx = events.subscribe();
@@ -14419,6 +14787,12 @@ mod tests {
             record_id: "rec_a".to_owned(),
             created: true,
             author_origin_id: Some("alice".to_owned()),
+            attribution: Some(dohc_engine_domain::ChangeAttribution {
+                actor_kind: dohc_engine_domain::ChangeActorKind::Agent,
+                on_behalf_of: Some("automation:triage".to_owned()),
+                depth: 1,
+            }),
+            source: Some(("origin-a".to_owned(), 41)),
             recorded_at_ms: 1_100,
             fields: vec![
                 dohc_engine_domain::CollectionFieldChangeFact {
@@ -14463,7 +14837,21 @@ mod tests {
                 "recordId": "rec_a",
                 "author": "alice",
                 "timestamp": 1_100,
+                "actorKind": "agent",
+                "onBehalfOf": "automation:triage",
+                "depth": 1,
+                "source": { "originId": "origin-a", "originSeq": 41 },
             })
+        );
+        assert_eq!(
+            notices[1].payload["actorKind"], "agent",
+            "field events carry the declared attribution too"
+        );
+        assert_eq!(notices[1].payload["onBehalfOf"], "automation:triage");
+        assert_eq!(notices[1].payload["depth"], 1);
+        assert_eq!(
+            notices[1].payload["source"],
+            json!({ "originId": "origin-a", "originSeq": 41 })
         );
         assert_eq!(notices[1].payload["field"], "alpha");
         assert_eq!(

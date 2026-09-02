@@ -5,10 +5,13 @@ import * as Y from "yjs";
 
 import {
   actorOriginIdFor,
+  attributionFor,
   createCollectionRecord,
   setCollectionRecordFields,
   type CollectionRecordEditContext,
 } from "./collectionRecordEdits";
+import type { ChangeAttributionWire } from "@dohc/workspace-engine-client";
+
 import type { WorkspaceEngineYDocProviderSession } from "./workspaceEngineCapture";
 import { createTestScratch } from "./testTemp";
 
@@ -21,7 +24,10 @@ const AGENT = {
 interface FakeSessionLog {
   doc: Y.Doc;
   order: string[];
-  journaled: Array<{ actorOriginId?: string }>;
+  journaled: Array<{
+    actorOriginId?: string;
+    attribution?: ChangeAttributionWire;
+  }>;
 }
 
 function fakeSession(options: { settleError?: Error } = {}): {
@@ -38,7 +44,11 @@ function fakeSession(options: { settleError?: Error } = {}): {
     applyLocalUpdate(
       update: Uint8Array,
       onArmed?: () => void,
-      applyOptions?: { actorOriginId?: string },
+      applyOptions?: {
+        actorOriginId?: string;
+        attribution?: ChangeAttributionWire;
+        idempotencyKey?: string;
+      },
     ) {
       // The real session journals the update and applies it to its doc.
       Y.applyUpdate(doc, update);
@@ -109,10 +119,45 @@ describe("setCollectionRecordFields", () => {
     expect(context.openedPaths).toEqual(["tasks/one.md"]);
     // ONE journaled update carrying the agent's origin, settled before release.
     expect(log.order).toEqual(["apply", "settle", "close"]);
-    expect(log.journaled).toEqual([{ actorOriginId: "plugin:notes" }]);
+    expect(log.journaled).toEqual([
+      {
+        actorOriginId: "plugin:notes",
+        attribution: { actorKind: "agent", onBehalfOf: "local", depth: 0 },
+      },
+    ]);
     const frontmatter = log.doc.getMap("frontmatter");
     expect(frontmatter.get("status")).toBe("done");
     expect(frontmatter.get("estimate")).toBe(3);
+  });
+
+  it("records an automation author under its subscription id with its depth and claim key", async () => {
+    const root = await workspaceRoot();
+    const { session, log } = fakeSession();
+    const automation = {
+      kind: "automation",
+      automationId: "hello-plugin/triage",
+      onBehalfOf: "local",
+      depth: 1,
+    } as const;
+
+    await setCollectionRecordFields(contextFor(root, session), {
+      recordPath: "tasks/one.md",
+      fields: { status: "done" },
+      author: automation,
+      idempotencyKey: "claim-7",
+    });
+
+    // The actor origin IS the engine subscription id, so the engine's
+    // self-skip guard binds (lane 2), and the wire key is the claim id, so
+    // a re-run handler's identical write dedupes instead of writing twice.
+    expect(log.journaled).toEqual([
+      {
+        actorOriginId: "hello-plugin/triage",
+        attribution: { actorKind: "automation", onBehalfOf: "local", depth: 1 },
+        idempotencyKey: "claim-7",
+      },
+    ]);
+    expect(actorOriginIdFor(automation)).toBe("hello-plugin/triage");
   });
 
   it("keeps a non-agent author device-attributed, like a human edit", async () => {
@@ -125,9 +170,19 @@ describe("setCollectionRecordFields", () => {
       author: { kind: "user", userId: "local" },
     });
 
-    expect(log.journaled).toEqual([{}]);
+    expect(log.journaled).toEqual([
+      { attribution: { actorKind: "human" } },
+    ]);
     expect(actorOriginIdFor(AGENT)).toBe("plugin:notes");
     expect(actorOriginIdFor({ kind: "user", userId: "local" })).toBeUndefined();
+    expect(attributionFor(AGENT)).toEqual({
+      actorKind: "agent",
+      onBehalfOf: "local",
+      depth: 0,
+    });
+    expect(attributionFor({ kind: "user", userId: "local" })).toEqual({
+      actorKind: "human",
+    });
   });
 
   it("refuses the engine-owned id field, empty fields, and non-record paths without opening a session", async () => {
@@ -213,7 +268,12 @@ describe("createCollectionRecord", () => {
     // The record file exists on disk through the desktop's create path.
     await expect(readFile(join(root, "tasks", "two.md"), "utf8")).resolves.toBe("");
     // Fields were seeded through the one write seam, attributed to the agent.
-    expect(log.journaled).toEqual([{ actorOriginId: "plugin:notes" }]);
+    expect(log.journaled).toEqual([
+      {
+        actorOriginId: "plugin:notes",
+        attribution: { actorKind: "agent", onBehalfOf: "local", depth: 0 },
+      },
+    ]);
     expect(log.doc.getMap("frontmatter").get("status")).toBe("open");
   });
 

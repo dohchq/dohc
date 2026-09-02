@@ -841,6 +841,12 @@ export const CHANNELS = {
   openSharedView: "desktop:open-shared-view",
   refreshSharedView: "desktop:refresh-shared-view",
   dismissShareSkips: "desktop:dismiss-share-skips",
+  // Automation failures (ADR 0008): the engine's failed claim rows minus
+  // what the owner acknowledged; the push poke tells the renderer to
+  // re-list.
+  listAutomationFailures: "desktop:list-automation-failures",
+  dismissAutomationFailure: "desktop:dismiss-automation-failure",
+  automationFailuresChanged: "desktop:automation-failures-changed",
   // Share changes (#646 PR3a). The first three act on a workspace this
   // machine owns; the last three act from inside an edit-level share view.
   listShareProposals: "desktop:list-share-proposals",

@@ -1,4 +1,5 @@
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
+import type { ChangeAttributionWire } from "@dohc/workspace-engine-client";
 import type {
   CollectionQueryParams,
   CollectionQueryResult,
@@ -52,6 +53,14 @@ export interface SetCollectionRecordFieldsInput {
   recordPath: string;
   fields: Record<string, unknown>;
   author: ChangeAuthor;
+  /**
+   * The wire idempotency key for this write's one journaled update. An
+   * automation run passes its claim id plus its write ordinal, so a handler
+   * re-run after a crash cannot journal the same write twice — the engine
+   * dedupes on the request's idempotency key. Omitted, the session
+   * generates a per-update key as every other edit does.
+   */
+  idempotencyKey?: string;
 }
 
 export interface CreateCollectionRecordInput {
@@ -60,17 +69,49 @@ export interface CreateCollectionRecordInput {
   name: string;
   fields?: Record<string, unknown>;
   author: ChangeAuthor;
+  /** See SetCollectionRecordFieldsInput.idempotencyKey (applies to the field seed). */
+  idempotencyKey?: string;
 }
 
 /**
  * The actor origin a Y.Doc update is recorded under. Mirrors the engine's
  * capture rule (capture_agent_origin_id in dohc-engine-runtime): an agent
- * author is recorded as its agentId; every other author stays device-
+ * author is recorded as its agentId, an automation as its automationId —
+ * EXACTLY the id its engine subscription is registered under, or the
+ * engine's self-skip guard never binds; every other author stays device-
  * attributed, exactly like a human edit from this desktop. One attribution
  * path, no second authority.
  */
 export function actorOriginIdFor(author: ChangeAuthor): string | undefined {
-  return author.kind === "agent" ? author.agentId : undefined;
+  switch (author.kind) {
+    case "agent":
+      return author.agentId;
+    case "automation":
+      return author.automationId;
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * The declared attribution recorded beside the actor origin. An agent author
+ * writes as an agent for its `onBehalfOf` principal at chain depth 0; an
+ * automation writes at the depth its author carries (one greater than its
+ * trigger's); every other author through this seam is a person.
+ */
+export function attributionFor(author: ChangeAuthor): ChangeAttributionWire {
+  switch (author.kind) {
+    case "agent":
+      return { actorKind: "agent", onBehalfOf: author.onBehalfOf, depth: 0 };
+    case "automation":
+      return {
+        actorKind: "automation",
+        onBehalfOf: author.onBehalfOf,
+        depth: author.depth,
+      };
+    default:
+      return { actorKind: "human" };
+  }
 }
 
 function assertWritableFieldValue(field: string, value: unknown): void {
@@ -180,7 +221,13 @@ export async function setCollectionRecordFields(
         () => {
           armed = true;
         },
-        actorOriginId === undefined ? undefined : { actorOriginId },
+        {
+          ...(actorOriginId === undefined ? {} : { actorOriginId }),
+          attribution: attributionFor(input.author),
+          ...(input.idempotencyKey === undefined
+            ? {}
+            : { idempotencyKey: input.idempotencyKey }),
+        },
       );
       // settleNow queues on the same session chain as the update above, so it
       // observes the journaled edit; it throws when the settle cannot commit.
@@ -237,6 +284,9 @@ export async function createCollectionRecord(
         recordPath: path,
         fields: Object.fromEntries(entries),
         author: input.author,
+        ...(input.idempotencyKey === undefined
+          ? {}
+          : { idempotencyKey: input.idempotencyKey }),
       });
     } catch (error) {
       // The record exists by now: name it, so the caller reconciles instead

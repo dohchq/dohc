@@ -601,6 +601,11 @@ async fn capture_authored_record_edit_keeps_the_agent_in_field_history() {
         .find(|entry| entry["field"] == json!("status") && entry["next"]["value"] == json!("done"))
         .expect("captured status edit in history");
     assert_eq!(authored_edit["authorOriginId"], json!(agent_id));
+    // The capture path declares no attribution: every column reads null, so
+    // an unattributed write is distinguishable from a defaulted one.
+    assert_eq!(authored_edit["actorKind"], json!(null));
+    assert_eq!(authored_edit["onBehalfOf"], json!(null));
+    assert_eq!(authored_edit["depth"], json!(null));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -705,22 +710,38 @@ async fn local_live_id_edit_reasserts_engine_identity_and_keeps_history() {
     .await;
     let edited = Ydoc::wire();
     edited.apply(&initial_update).expect("load adopted record");
-    for (id, update) in [
-        (14, edited.frontmatter_set("id", EDITED_ID)),
-        (15, edited.frontmatter_set("status", "done")),
-    ] {
-        call(
-            &transport,
-            &handle,
-            id,
-            "ydoc.recordUpdate",
-            json!({
-                "sessionId": second["sessionId"],
-                "updateBase64": base64::engine::general_purpose::STANDARD.encode(update),
-            }),
-        )
-        .await;
-    }
+    call(
+        &transport,
+        &handle,
+        14,
+        "ydoc.recordUpdate",
+        json!({
+            "sessionId": second["sessionId"],
+            "updateBase64": base64::engine::general_purpose::STANDARD
+                .encode(edited.frontmatter_set("id", EDITED_ID)),
+        }),
+    )
+    .await;
+    // The status edit is an agent write with declared attribution: getRecord
+    // history must return it beside the author origin.
+    call(
+        &transport,
+        &handle,
+        15,
+        "ydoc.recordUpdate",
+        json!({
+            "sessionId": second["sessionId"],
+            "updateBase64": base64::engine::general_purpose::STANDARD
+                .encode(edited.frontmatter_set("status", "done")),
+            "actorOriginId": "agent-live-editor",
+            "attribution": {
+                "actorKind": "agent",
+                "onBehalfOf": "user:ice",
+                "depth": 0,
+            },
+        }),
+    )
+    .await;
     call(
         &transport,
         &handle,
@@ -802,15 +823,15 @@ async fn local_live_id_edit_reasserts_engine_identity_and_keeps_history() {
     )
     .await;
     assert_eq!(record["record"]["id"], json!(RECORD_ID));
-    assert!(
-        record["history"]
-            .as_array()
-            .expect("history")
-            .iter()
-            .any(|entry| {
-                entry["field"] == json!("status") && entry["next"]["value"] == json!("done")
-            })
-    );
+    let history = record["history"].as_array().expect("history");
+    let status_edit = history
+        .iter()
+        .find(|entry| entry["field"] == json!("status") && entry["next"]["value"] == json!("done"))
+        .expect("status edit in history");
+    assert_eq!(status_edit["authorOriginId"], json!("agent-live-editor"));
+    assert_eq!(status_edit["actorKind"], json!("agent"));
+    assert_eq!(status_edit["onBehalfOf"], json!("user:ice"));
+    assert_eq!(status_edit["depth"], json!(0));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

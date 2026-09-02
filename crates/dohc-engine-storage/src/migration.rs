@@ -3066,6 +3066,76 @@ CREATE INDEX idx_materialization_jobs_mutation_generation
 
 pub(crate) const GLOBAL_GENERATION_INDEXES_MIGRATION_ID: &str = "v1-global-generation-indexes";
 
+/// Ordinal 45. Declared write attribution beside the author origin: the actor
+/// kind, the `onBehalfOf` principal, and the automation-chain depth, on both
+/// the update log and the field history it derives. The update log keeps them
+/// beside `actor_origin_id` as the journal of record for a write's provenance
+/// (capture reads provenance from `ydoc_updates`); field history is what the
+/// events and the automation claims read today. All three are NULL for an
+/// unattributed write; a NULL `actor_kind` passes the CHECK by SQL semantics.
+const V1_CHANGE_ATTRIBUTION_DDL: &str = "\
+ALTER TABLE ydoc_updates ADD COLUMN actor_kind TEXT
+    CHECK (actor_kind IN ('human','agent','automation'));
+ALTER TABLE ydoc_updates ADD COLUMN on_behalf_of TEXT;
+ALTER TABLE ydoc_updates ADD COLUMN chain_depth INTEGER
+    CHECK (chain_depth IS NULL OR chain_depth >= 0);
+ALTER TABLE collection_field_history ADD COLUMN actor_kind TEXT
+    CHECK (actor_kind IN ('human','agent','automation'));
+ALTER TABLE collection_field_history ADD COLUMN on_behalf_of TEXT;
+ALTER TABLE collection_field_history ADD COLUMN chain_depth INTEGER
+    CHECK (chain_depth IS NULL OR chain_depth >= 0);
+";
+
+pub(crate) const CHANGE_ATTRIBUTION_MIGRATION_ID: &str = "v1-change-attribution";
+
+/// Ordinal 46. The origin-device automation trigger (ADR 0008), shaped like
+/// the chat dispatch ledger: local state in engine.db, never replicated.
+/// `automation_subscriptions` is the registered interest set; a committed
+/// local record change inserts one `automation_claims` row per subscribed
+/// automation, keyed by the change's replication coordinate — or, on a
+/// lineage no other device can see, by the device-local history row id. The
+/// key CHECK makes the two shapes exclusive; the partial unique indexes make
+/// a re-insert of the same trigger a no-op.
+const V1_AUTOMATION_CLAIMS_DDL: &str = "\
+CREATE TABLE automation_subscriptions (
+    workspace_id  TEXT    NOT NULL,
+    automation_id TEXT    NOT NULL,
+    prefix        TEXT    NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, automation_id, prefix)
+) STRICT;
+
+CREATE TABLE automation_claims (
+    workspace_id       TEXT    NOT NULL,
+    claim_id           TEXT    NOT NULL,
+    automation_id      TEXT    NOT NULL,
+    trigger_origin_id  TEXT,
+    trigger_origin_seq INTEGER,
+    trigger_history_id INTEGER,
+    record_id          TEXT    NOT NULL,
+    collection_path    TEXT    NOT NULL,
+    depth              INTEGER NOT NULL CHECK (depth >= 0),
+    state              TEXT    NOT NULL CHECK (state IN ('pending', 'running', 'done', 'failed')),
+    attempts           INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    error              TEXT,
+    created_at_ms      INTEGER NOT NULL,
+    updated_at_ms      INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, claim_id),
+    CHECK ((trigger_origin_id IS NULL) = (trigger_origin_seq IS NULL)),
+    CHECK ((trigger_origin_id IS NOT NULL) <> (trigger_history_id IS NOT NULL))
+) STRICT;
+CREATE UNIQUE INDEX idx_automation_claims_trigger_coordinate
+    ON automation_claims(workspace_id, automation_id, trigger_origin_id, trigger_origin_seq)
+    WHERE trigger_origin_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_automation_claims_trigger_history
+    ON automation_claims(workspace_id, automation_id, trigger_history_id)
+    WHERE trigger_history_id IS NOT NULL;
+CREATE INDEX idx_automation_claims_state
+    ON automation_claims(workspace_id, state, created_at_ms, claim_id);
+";
+
+pub(crate) const AUTOMATION_CLAIMS_MIGRATION_ID: &str = "v1-automation-claims";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -3386,6 +3456,20 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: GLOBAL_GENERATION_INDEXES_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_GLOBAL_GENERATION_INDEXES_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 45,
+        id: CHANGE_ATTRIBUTION_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_CHANGE_ATTRIBUTION_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 46,
+        id: AUTOMATION_CLAIMS_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_AUTOMATION_CLAIMS_DDL,
         sets_user_version: None,
     },
 ];
@@ -4234,7 +4318,18 @@ mod tests {
             })
             .collect();
         assert_eq!(dump_table_rows(&conn, "ydoc_docs"), docs_expected);
-        assert_eq!(dump_table_rows(&conn, "ydoc_updates"), updates_before);
+        // Likewise the attribution migration adds three columns to
+        // `ydoc_updates`, which a pre-existing row gains as NULL.
+        let updates_expected: Vec<Vec<(String, rusqlite::types::Value)>> = updates_before
+            .into_iter()
+            .map(|mut row| {
+                for column in ["actor_kind", "on_behalf_of", "chain_depth"] {
+                    row.push((column.to_owned(), rusqlite::types::Value::Null));
+                }
+                row
+            })
+            .collect();
+        assert_eq!(dump_table_rows(&conn, "ydoc_updates"), updates_expected);
         assert_eq!(dump_table_rows(&conn, "ydoc_snapshots"), snapshots_before);
         assert_eq!(
             dump_table_rows(&conn, "ydoc_inactive_lineages"),

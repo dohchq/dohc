@@ -43,29 +43,30 @@ use dohc_engine_collab::{
 };
 use dohc_engine_crypto::{SecretDataKey, SecretPlaintext, load_key_file};
 use dohc_engine_domain::{
-    AgentRunRecord, AgentUnreadThreadRow, BinaryHead, BinaryHeadMeta, BinaryWriteResult,
-    CaptureIngest, CaptureIngestBatchContext, CaptureIngestBinary, CaptureIngestBinaryResult,
-    CaptureManifestSeedEntry, CaptureRetire, CaptureRetireResult, CaptureSecret,
-    CaptureSecretRetire, ChannelThreadSummary, ChatAgentReadState, ChatAttachment, ChatBookmark,
-    ChatBookmarkTransition, ChatChannel, ChatChannelKind, ChatChannelSummary, ChatDecision,
-    ChatFeedPage, ChatFeedReadState, ChatFileMention, ChatFollow, ChatMention, ChatMessage,
-    ChatMessagePage, ChatProjectionFileAccess, ChatReaction, ChatThread, ChatThreadProjection,
-    ChatThreadReadState, CollectionAdoptionCandidate, CollectionDetails,
-    CollectionPendingAdoptionCursor, CollectionPendingAdoptionPage, CollectionQuery,
-    CollectionQueryResult, CollectionRecordDetails, CollectionRelationCleanupCandidate,
-    CollectionSummary, CompareTextFileVersions, CreateFileThread, CreateNamedVersion, DeleteResult,
-    DeleteTextFile, DispatchClaim, DispatchRecovery, DomainError, InbandBinary, InbandSecret,
-    InbandText, LinkedChatStore, ListMomentsQuery, MentionCursor, MergeTextFileFromVersion,
-    MergeTextFileResult, MomentPage, MomentRecord, PendingBookmarkRow, ProjectedWriteText,
-    RECORD_ID_FRONTMATTER_KEY, RenameResult, RenameTextFile, ResolveDecision, ResolveTextConflict,
-    ResolveTextConflictResult, RollbackTextFileMutation, RunRecordLink, SaveBookmark,
-    SecretComparePage, SecretDelete, SecretFileStat, SecretFileStore, SecretMomentPage,
-    SecretMomentRecord, SecretOp, SecretRestoreResult, SecretWrite, SecretWriteResult, SendMessage,
-    SetFollow, SetReaction, SnapshotContent, SnapshotMetadata, SnapshotView, StartChannelThread,
-    TextConflict, TextSnapshot, ThreadDispatchPause, UnreadFileThread, VersionFileChangePage,
-    VersionRecord, VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult,
-    WriteText, apply_secret_file_from_version_with, binary_delete_job_id,
-    binary_rename_delete_job_id, binary_rename_write_job_id, binary_rollback_job_identity,
+    AgentRunRecord, AgentUnreadThreadRow, AutomationClaim, AutomationFailure, AutomationSettle,
+    BinaryHead, BinaryHeadMeta, BinaryWriteResult, CaptureIngest, CaptureIngestBatchContext,
+    CaptureIngestBinary, CaptureIngestBinaryResult, CaptureManifestSeedEntry, CaptureRetire,
+    CaptureRetireResult, CaptureSecret, CaptureSecretRetire, ChangeAttribution,
+    ChannelThreadSummary, ChatAgentReadState, ChatAttachment, ChatBookmark, ChatBookmarkTransition,
+    ChatChannel, ChatChannelKind, ChatChannelSummary, ChatDecision, ChatFeedPage,
+    ChatFeedReadState, ChatFileMention, ChatFollow, ChatMention, ChatMessage, ChatMessagePage,
+    ChatProjectionFileAccess, ChatReaction, ChatThread, ChatThreadProjection, ChatThreadReadState,
+    CollectionAdoptionCandidate, CollectionDetails, CollectionPendingAdoptionCursor,
+    CollectionPendingAdoptionPage, CollectionQuery, CollectionQueryResult, CollectionRecordDetails,
+    CollectionRelationCleanupCandidate, CollectionSummary, CompareTextFileVersions,
+    CreateFileThread, CreateNamedVersion, DeleteResult, DeleteTextFile, DispatchClaim,
+    DispatchRecovery, DomainError, InbandBinary, InbandSecret, InbandText, LinkedChatStore,
+    ListMomentsQuery, MentionCursor, MergeTextFileFromVersion, MergeTextFileResult, MomentPage,
+    MomentRecord, PendingBookmarkRow, ProjectedWriteText, RECORD_ID_FRONTMATTER_KEY, RenameResult,
+    RenameTextFile, ResolveDecision, ResolveTextConflict, ResolveTextConflictResult,
+    RollbackTextFileMutation, RunRecordLink, SaveBookmark, SecretComparePage, SecretDelete,
+    SecretFileStat, SecretFileStore, SecretMomentPage, SecretMomentRecord, SecretOp,
+    SecretRestoreResult, SecretWrite, SecretWriteResult, SendMessage, SetFollow, SetReaction,
+    SnapshotContent, SnapshotMetadata, SnapshotView, StartChannelThread, TextConflict,
+    TextSnapshot, ThreadDispatchPause, UnreadFileThread, VersionFileChangePage, VersionRecord,
+    VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult, WriteText,
+    apply_secret_file_from_version_with, binary_delete_job_id, binary_rename_delete_job_id,
+    binary_rename_write_job_id, binary_rollback_job_identity,
     capture_ingest_binary_with_admission_in_tx, capture_ingest_in_batch_with_admission_in_tx,
     capture_ingest_with_admission_in_tx, capture_manifest_seed, capture_retire_in_tx,
     capture_secret_retire_with, collection_record_id_mismatch_in_tx,
@@ -1710,6 +1711,7 @@ enum Command {
         update: Vec<u8>,
         request_id: Option<String>,
         actor_origin_id: Option<String>,
+        attribution: Option<ChangeAttribution>,
         expected_lineage_claim_id: Option<String>,
         require_empty_lineage: bool,
         seed_source_sha256: Option<String>,
@@ -2275,6 +2277,42 @@ enum Command {
         max_attempts: i64,
         now_ms: i64,
         reply: oneshot::Sender<Result<Vec<String>, RuntimeError>>,
+    },
+    AutomationSubscribe {
+        workspace_id: String,
+        automation_id: String,
+        prefix: String,
+        now_ms: i64,
+        reply: oneshot::Sender<Result<bool, RuntimeError>>,
+    },
+    AutomationUnsubscribe {
+        workspace_id: String,
+        automation_id: String,
+        prefix: String,
+        reply: oneshot::Sender<Result<bool, RuntimeError>>,
+    },
+    AutomationClaimNext {
+        workspace_id: String,
+        now_ms: i64,
+        reply: oneshot::Sender<Result<Option<AutomationClaim>, RuntimeError>>,
+    },
+    AutomationSettle {
+        workspace_id: String,
+        claim_id: String,
+        settle: AutomationSettle,
+        now_ms: i64,
+        reply: oneshot::Sender<Result<AutomationClaim, RuntimeError>>,
+    },
+    AutomationReclaimRunning {
+        workspace_id: String,
+        max_attempts: i64,
+        stale_before_ms: i64,
+        now_ms: i64,
+        reply: oneshot::Sender<Result<Vec<AutomationClaim>, RuntimeError>>,
+    },
+    AutomationFailures {
+        workspace_id: String,
+        reply: oneshot::Sender<Result<Vec<AutomationFailure>, RuntimeError>>,
     },
     Relay {
         transport: DeferredRelayTransport,
@@ -4308,6 +4346,7 @@ impl ActorHandle {
         regime: Regime,
         update: Vec<u8>,
         actor_origin_id: Option<String>,
+        attribution: Option<ChangeAttribution>,
         expected_lineage_claim_id: Option<String>,
         require_empty_lineage: bool,
         seed_source_sha256: Option<String>,
@@ -4326,6 +4365,7 @@ impl ActorHandle {
                 update,
                 request_id,
                 actor_origin_id,
+                attribution,
                 expected_lineage_claim_id,
                 require_empty_lineage,
                 seed_source_sha256,
@@ -6090,6 +6130,120 @@ impl ActorHandle {
                 workspace_id,
                 max_attempts,
                 now_ms,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn automation_subscribe(
+        &self,
+        workspace_id: String,
+        automation_id: String,
+        prefix: String,
+        now_ms: i64,
+    ) -> Result<bool, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::AutomationSubscribe {
+                workspace_id,
+                automation_id,
+                prefix,
+                now_ms,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn automation_unsubscribe(
+        &self,
+        workspace_id: String,
+        automation_id: String,
+        prefix: String,
+    ) -> Result<bool, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::AutomationUnsubscribe {
+                workspace_id,
+                automation_id,
+                prefix,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn automation_claim_next(
+        &self,
+        workspace_id: String,
+        now_ms: i64,
+    ) -> Result<Option<AutomationClaim>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::AutomationClaimNext {
+                workspace_id,
+                now_ms,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn automation_settle(
+        &self,
+        workspace_id: String,
+        claim_id: String,
+        settle: AutomationSettle,
+        now_ms: i64,
+    ) -> Result<AutomationClaim, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::AutomationSettle {
+                workspace_id,
+                claim_id,
+                settle,
+                now_ms,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn automation_reclaim_running(
+        &self,
+        workspace_id: String,
+        max_attempts: i64,
+        stale_before_ms: i64,
+        now_ms: i64,
+    ) -> Result<Vec<AutomationClaim>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::AutomationReclaimRunning {
+                workspace_id,
+                max_attempts,
+                stale_before_ms,
+                now_ms,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn automation_failures(
+        &self,
+        workspace_id: String,
+    ) -> Result<Vec<AutomationFailure>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::AutomationFailures {
+                workspace_id,
                 reply,
             })
             .await
@@ -8965,6 +9119,7 @@ fn worker_main(
                 update,
                 request_id,
                 actor_origin_id,
+                attribution,
                 expected_lineage_claim_id,
                 require_empty_lineage,
                 seed_source_sha256,
@@ -8982,10 +9137,12 @@ fn worker_main(
                     regime,
                     &update,
                     actor_origin_id,
+                    attribution,
                     expected_lineage_claim_id,
                     require_empty_lineage,
                     seed_source_sha256,
                     request_id,
+                    true,
                     now_ms,
                     faults.as_ref(),
                     &token,
@@ -10237,6 +10394,98 @@ fn worker_main(
                     .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
+            Command::AutomationSubscribe {
+                workspace_id,
+                automation_id,
+                prefix,
+                now_ms,
+                reply,
+            } => {
+                let outcome = dohc_engine_domain::subscribe_automation(
+                    &mut store,
+                    &workspace_id,
+                    &automation_id,
+                    &prefix,
+                    now_ms,
+                    &NoFaults,
+                )
+                .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::AutomationUnsubscribe {
+                workspace_id,
+                automation_id,
+                prefix,
+                reply,
+            } => {
+                let outcome = dohc_engine_domain::unsubscribe_automation(
+                    &mut store,
+                    &workspace_id,
+                    &automation_id,
+                    &prefix,
+                    &NoFaults,
+                )
+                .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::AutomationClaimNext {
+                workspace_id,
+                now_ms,
+                reply,
+            } => {
+                let outcome = dohc_engine_domain::claim_next_pending_automation(
+                    &mut store,
+                    &workspace_id,
+                    now_ms,
+                    &NoFaults,
+                )
+                .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::AutomationSettle {
+                workspace_id,
+                claim_id,
+                settle,
+                now_ms,
+                reply,
+            } => {
+                let outcome = dohc_engine_domain::settle_automation_claim(
+                    &mut store,
+                    &workspace_id,
+                    &claim_id,
+                    &settle,
+                    now_ms,
+                    &NoFaults,
+                )
+                .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::AutomationReclaimRunning {
+                workspace_id,
+                max_attempts,
+                stale_before_ms,
+                now_ms,
+                reply,
+            } => {
+                let outcome = dohc_engine_domain::reclaim_running_automations(
+                    &mut store,
+                    &workspace_id,
+                    max_attempts,
+                    stale_before_ms,
+                    now_ms,
+                    &NoFaults,
+                )
+                .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::AutomationFailures {
+                workspace_id,
+                reply,
+            } => {
+                let outcome = dohc_engine_domain::list_automation_failures(&store, &workspace_id)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
             Command::Search {
                 root_dir,
                 workspace_id,
@@ -10802,6 +11051,7 @@ fn seed_scene_from_artifact_on_store(
         Regime::LocalOnly,
         &seed_update,
         None,
+        None,
         true,
         true,
         Some(&request_id),
@@ -11206,10 +11456,12 @@ fn ydoc_record_update_on_store(
     regime: Regime,
     update: &[u8],
     actor_origin_id: Option<String>,
+    attribution: Option<ChangeAttribution>,
     expected_lineage_claim_id: Option<String>,
     require_empty_lineage: bool,
     seed_source_sha256: Option<String>,
     request_id: Option<String>,
+    claim_triggers: bool,
     now_ms: i64,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
@@ -11228,6 +11480,7 @@ fn ydoc_record_update_on_store(
     // after it commits, so a decline reported to the caller is one that
     // actually survived the commit.
     let mut sharing_declined: Option<SharingDeclined> = None;
+    let mut automation_claims: Vec<dohc_engine_domain::AutomationClaim> = Vec::new();
     // An exact replicated lineage journals the ydoc.update delta in the same
     // transaction as the append. This keeps blob-before-log order and TS
     // parity. Local-only lineages journal nothing; their workspace file is the
@@ -11244,6 +11497,7 @@ fn ydoc_record_update_on_store(
         regime,
         update,
         actor_origin_id.as_deref(),
+        attribution.as_ref(),
         expected_lineage_claim_id.as_deref(),
         // Parent row, seed guard, marker, append, and outbound journal all
         // commit in ONE transaction — no bare-parent crash window, and a
@@ -11266,6 +11520,7 @@ fn ydoc_record_update_on_store(
                 &journal_key,
                 &journal_path,
                 actor_origin_id.as_deref(),
+                attribution.as_ref(),
                 now_ms,
             )
             .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
@@ -11284,7 +11539,7 @@ fn ydoc_record_update_on_store(
                     .ok_or_else(|| dohc_engine_collab::CollabError::Corrupt {
                         reason: "exact Y.Doc lineage has no claim id".to_owned(),
                     })?;
-                dohc_engine_sync::journal_local_op_in_tx(
+                let origin_seq = dohc_engine_sync::journal_local_op_in_tx(
                     tx,
                     &journal_key.workspace_id,
                     "ydoc.update",
@@ -11295,6 +11550,7 @@ fn ydoc_record_update_on_store(
                         update_sha,
                         &lineage_claim_id,
                         actor_origin_id.as_deref(),
+                        attribution.as_ref(),
                         false,
                     ),
                     now_ms,
@@ -11310,6 +11566,44 @@ fn ydoc_record_update_on_store(
                     // is minted by sync init, not the collab layer).
                     reason: format!("outbound ydoc.update journal append failed: {error}"),
                 })?;
+                // The op's replication coordinate exists only now, after the
+                // journal assigned it. Thread it into the facts so record
+                // events and the automation trigger key see the same
+                // coordinate every peer derives from the envelope. A
+                // base-originated or never-synced apply keeps `None`; its
+                // per-change key is the history row id.
+                if let Some(facts) = outcome.record_facts.as_mut() {
+                    let origin_id: String = tx
+                        .query_row(
+                            "SELECT origin_id FROM sync_identity WHERE workspace_id=?1",
+                            [&journal_key.workspace_id],
+                            |row| row.get(0),
+                        )
+                        .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
+                            reason: format!("journaled ydoc.update has no sync identity: {error}"),
+                        })?;
+                    facts.source = Some((origin_id, origin_seq));
+                }
+            }
+            // The origin-device automation trigger (ADR 0008). This hook runs
+            // only for ops this device journals — the sync apply path never
+            // reaches it — so claiming here is origin-device execution by
+            // construction. Same transaction as the append: a claim exists
+            // exactly when the change it triggers on committed.
+            // An engine-maintenance write (record id adoption, relation
+            // cleanup) carries no attribution and is not a change anyone
+            // authored: claiming on it would restart every chain at depth
+            // zero and wake nothing, so those callers pass false.
+            if let (true, Some(facts)) = (claim_triggers, outcome.record_facts.as_ref()) {
+                automation_claims = dohc_engine_domain::claim_automation_triggers_in_tx(
+                    tx,
+                    &journal_key.workspace_id,
+                    facts,
+                    now_ms,
+                )
+                .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
+                    reason: format!("automation claim insert failed: {error}"),
+                })?;
             }
             Ok(())
         },
@@ -11321,6 +11615,7 @@ fn ydoc_record_update_on_store(
                 outcome,
                 sharing_declined,
                 lineage_claim_id,
+                automation_claims,
             })
         }
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
@@ -11338,6 +11633,10 @@ pub struct YdocAppend {
     pub outcome: AppendOutcome,
     pub sharing_declined: Option<dohc_engine_sync::SharingDeclined>,
     pub lineage_claim_id: Option<String>,
+    /// Pending automation claims this append inserted (ADR 0008): one per
+    /// subscribed automation, committed in the append's own transaction. The
+    /// service emits `automation.claimed` for each, post-commit.
+    pub automation_claims: Vec<dohc_engine_domain::AutomationClaim>,
 }
 
 fn ydoc_settle_disk_preimage(
@@ -14058,10 +14357,12 @@ fn ensure_collection_record_id_on_store(
         regime,
         &update,
         Some("engine".to_owned()),
+        None,
         lineage_claim_id,
         false,
         None,
         None,
+        false,
         now_ms,
         faults,
         token,
@@ -14304,10 +14605,12 @@ fn cleanup_collection_relation_on_store(
             state.regime,
             &seed_update,
             None,
+            None,
             lineage_claim_id,
             true,
             state.head_blob_sha256.clone(),
             None,
+            false,
             now_ms,
             faults,
             token,
@@ -14345,10 +14648,12 @@ fn cleanup_collection_relation_on_store(
         state.regime,
         &update,
         Some("engine".to_owned()),
+        None,
         lineage_claim_id,
         false,
         None,
         None,
+        false,
         now_ms,
         faults,
         token,
@@ -15659,6 +15964,7 @@ mod doc_cache_reset_tests {
             ContentKind::Plaintext,
             Regime::LocalOnly,
             &update,
+            None,
             None,
             true,
             false,

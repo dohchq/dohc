@@ -28,6 +28,7 @@ import {
   type ReactNode,
 } from "react";
 import type {
+  AutomationFailureNotice,
   ChatFileMentionRecord,
   ChatThreadRecord,
   CloudStatusResult,
@@ -5453,6 +5454,44 @@ export function DesktopWorkspaceShell(props: {
     // record's presence.
     setShareSkipped(hasUnacknowledgedShareSkips(skipped) ? skipped : null);
   }, [props.refreshWorkspaceRegistry, workspaceId]);
+  // ---- Automation failure notices (ADR 0008, Phase 4) ----
+  // The engine's failed claim rows are the durable record; this state holds
+  // only the rows the owner has not acknowledged, as main serves them. Read
+  // once the workspace is ready and again on every failure poke; a dismiss
+  // re-reads either way, so a stale acknowledgment clears nothing and a
+  // newer failure comes back. Latest-wins token, the same guard
+  // reloadShareSkipped uses: an answer for one workspace must never repaint
+  // another.
+  const [automationFailures, setAutomationFailures] = useState<
+    AutomationFailureNotice[]
+  >([]);
+  const automationFailuresToken = useRef(0);
+  const reloadAutomationFailures = useCallback(async () => {
+    const token = ++automationFailuresToken.current;
+    const result = await bridge().listAutomationFailures({ workspaceId });
+    if (token !== automationFailuresToken.current) return;
+    setAutomationFailures(result.failures);
+  }, [workspaceId]);
+  useEffect(() => {
+    if (!workspaceIsReady) return;
+    void reloadAutomationFailures().catch(() => undefined);
+    return bridge().onAutomationFailuresChanged((event) => {
+      if (event.workspaceId !== workspaceId) return;
+      void reloadAutomationFailures().catch(() => undefined);
+    });
+  }, [workspaceId, workspaceIsReady, reloadAutomationFailures]);
+  const dismissAutomationFailure = useCallback(
+    (automationId: string, generation: number) => {
+      void bridge()
+        .dismissAutomationFailure({ workspaceId, automationId, generation })
+        .then(async () => await reloadAutomationFailures())
+        .catch((error: unknown) => {
+          reportShellError("Couldn't dismiss that notice.", error);
+        });
+    },
+    [workspaceId, reloadAutomationFailures, reportShellError],
+  );
+
   const refreshShareView = useCallback(async () => {
     if (!shareView || shareViewDamaged) return;
     const token = ++shareRefreshToken.current;
@@ -6979,6 +7018,8 @@ export function DesktopWorkspaceShell(props: {
         onContextMenu={() => void showWorkbenchMenu("status")}
         agentNotifications={agentNotifs.notifications}
         onDismissAgentNotification={agentNotifs.dismiss}
+        automationFailures={automationFailures}
+        onDismissAutomationFailure={dismissAutomationFailure}
       />
 
       {engineRebuild ? (

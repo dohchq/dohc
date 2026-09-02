@@ -13,6 +13,14 @@ import {
   decodeCollectionBlobResult,
   decodeWorkspaceResult,
   encodeCollectionQueryParams,
+  type AutomationClaim,
+  type AutomationClaimNextParams,
+  type AutomationClaimNextResult,
+  type AutomationFailuresResult,
+  type AutomationSettleParams,
+  type AutomationSubscribeResult,
+  type AutomationSubscriptionParams,
+  type AutomationUnsubscribeResult,
   type CaptureFlushResult,
   type CollectionGetParams,
   type CollectionGetRecordParams,
@@ -1026,6 +1034,45 @@ export class VersionedLiveAdapter {
     input: CollectionGetRecordParams,
   ): Promise<CollectionGetRecordResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.collectionsGetRecord, input);
+  }
+
+  /** Registers one (automationId, collection path) pair; idempotent. */
+  async subscribeAutomation(
+    input: AutomationSubscriptionParams,
+  ): Promise<AutomationSubscribeResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsSubscribe, input);
+  }
+
+  /** Removes one exact (automationId, collection path) pair. */
+  async unsubscribeAutomation(
+    input: AutomationSubscriptionParams,
+  ): Promise<AutomationUnsubscribeResult> {
+    return this.workspaceRequest(
+      WORKSPACE_METHOD.automationsUnsubscribe,
+      input,
+    );
+  }
+
+  /** Takes the oldest pending claim (pending -> running), or null. */
+  async claimNextAutomation(
+    input: AutomationClaimNextParams = {},
+  ): Promise<AutomationClaimNextResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsClaimNext, input);
+  }
+
+  /** Settles a running claim as done, or failed with its error text. */
+  async settleAutomationClaim(
+    input: AutomationSettleParams,
+  ): Promise<AutomationClaim> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsSettle, input);
+  }
+
+  /**
+   * Every automation with at least one failed claim: the newest error and a
+   * generation the owner's notice acknowledges against.
+   */
+  async listAutomationFailures(): Promise<AutomationFailuresResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsFailures, {});
   }
 
   async writeSecretFile(input: {

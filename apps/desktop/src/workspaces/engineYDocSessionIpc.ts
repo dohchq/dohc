@@ -623,8 +623,13 @@ class EngineYDocSessionIpc {
           owned.emit({ state: "read-only", seq: input.seq });
           return { accepted: false, reason: "read-only" };
         }
-        owned.provider.applyLocalUpdate(input.update, () =>
-          noteLocalEdit(owned.saveSeq, input.seq),
+        owned.provider.applyLocalUpdate(
+          input.update,
+          () => noteLocalEdit(owned.saveSeq, input.seq),
+          // A renderer editor update is a person typing: agent and
+          // automation writes take the collection write seam, never this
+          // IPC. The declared kind rides beside the device attribution.
+          { attribution: { actorKind: "human" } },
         );
         return { accepted: true };
       },

@@ -1984,6 +1984,9 @@ async function dispatch(
               value: encodeCollectionValue(entry.next.value),
             },
             authorOriginId: entry.authorOriginId,
+            actorKind: entry.actorKind,
+            onBehalfOf: entry.onBehalfOf,
+            depth: entry.depth,
             recordedAtMs: entry.recordedAtMs,
           })),
         };

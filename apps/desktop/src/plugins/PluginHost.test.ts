@@ -413,6 +413,94 @@ describe("PluginHost", () => {
     ]);
   });
 
+  it("delivers an automation run to the registered handler, whose SDK requests carry the claim", async () => {
+    const root = await workspaceRoot();
+    const writes: Array<{ path: string; text: string }> = [];
+    const claimTags: Array<string | undefined> = [];
+    const harness = createProcessHarness({
+      modes: { "hello-plugin": "automation-report" },
+    });
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: (
+        pluginId,
+        method,
+        params,
+        spawnId,
+        signal,
+        _emitEvent,
+        automationClaimId,
+      ) => {
+        claimTags.push(automationClaimId);
+        return invokePluginSdkHost(
+          {
+            pluginId,
+            workspaceRoot: root,
+            reads: localWorkspaceSdkReads(root),
+            editDatabase: localWorkspaceSdkDatabaseEditor(root),
+            spawnId,
+            requestPath: "plugin-process",
+            isWritable: () => true,
+            writeAvailable: async () => true,
+            signal,
+            invokeChildProcess: async () => ({}),
+            writeAuthoredText: async (path, text) => {
+              writes.push({ path, text });
+              return { path };
+            },
+          },
+          method,
+          params,
+        );
+      },
+    });
+
+    // The automation fixture registers the report command the e2e reads, so
+    // the admitted manifest declares exactly that.
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest(["hello.write"]));
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "ready",
+      "Plugin did not become ready.",
+    );
+
+    const facts = { collectionPath: "tasks", recordId: "rec_1", depth: 0 };
+    await host.runAutomation("hello-plugin", {
+      claimId: "claim-1",
+      manifestAutomationId: "triage",
+      handler: "triage",
+      facts,
+    });
+
+    // The registered handler ran with the claim's facts, and the file write
+    // it made inside the run was tagged with the claim id end to end (the
+    // SDK's async claim context, over the real child transport).
+    expect(writes).toEqual([
+      {
+        path: "automation-run-report.json",
+        text: `${JSON.stringify({
+          claimId: "claim-1",
+          manifestAutomationId: "triage",
+          ...facts,
+        })}\n`,
+      },
+    ]);
+    // Two tagged requests: the SDK's capability probe and the write itself,
+    // both made inside the handler's claim context.
+    expect(claimTags).toEqual(["claim-1", "claim-1"]);
+
+    // An unregistered handler name reaches the caller as the run's rejection.
+    await expect(
+      host.runAutomation("hello-plugin", {
+        claimId: "claim-2",
+        manifestAutomationId: "other",
+        handler: "missing",
+        facts,
+      }),
+    ).rejects.toThrow('Automation handler "missing" is not registered.');
+  });
+
   it("does not send command return values across the child-process transport", async () => {
     const root = await workspaceRoot();
     const writes: Array<{ path: string; text: string }> = [];

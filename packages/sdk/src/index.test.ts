@@ -1553,6 +1553,10 @@ describe("@dohc/sdk", () => {
       author: "agent:sites",
       timestamp: 1_756_000_000_000,
       historyId: 7,
+      actorKind: "agent",
+      onBehalfOf: "automation:sites",
+      depth: 1,
+      source: { originId: "origin-a", originSeq: 12 },
     };
     const client = createDohcClient({
       transport: {
@@ -1580,6 +1584,10 @@ describe("@dohc/sdk", () => {
               recordId: "rec-1",
               author: null,
               timestamp: 1_756_000_000_000,
+              actorKind: null,
+              onBehalfOf: null,
+              depth: null,
+              source: null,
             } as T,
           });
           listener({ event: "record.field.changed", data: fieldChanged as T });
@@ -1601,6 +1609,10 @@ describe("@dohc/sdk", () => {
           recordId: "rec-1",
           author: null,
           timestamp: 1_756_000_000_000,
+          actorKind: null,
+          onBehalfOf: null,
+          depth: null,
+          source: null,
         },
       },
       { event: "record.field.changed", data: fieldChanged },
