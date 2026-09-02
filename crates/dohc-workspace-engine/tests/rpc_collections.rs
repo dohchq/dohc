@@ -2186,7 +2186,7 @@ async fn remote_moment_append_updates_the_collection_index_at_apply_time() {
     };
     let facts = routed
         .record_facts
-        .as_ref()
+        .first()
         .expect("a synced file edit derives record facts");
     assert_eq!(facts.record_id, RECORD_ID);
     assert_eq!(

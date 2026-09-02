@@ -1,5 +1,9 @@
 import type { WatcherEvent } from "@dohc/workspace-core";
-import type { JsonValue } from "@dohc/workspace-engine-client";
+import type { z } from "zod";
+import {
+  PluginPanelRecordChangedData,
+  PluginPanelRecordFieldChangedData,
+} from "../ipc/bridgeContract";
 import { randomUUID } from "node:crypto";
 import { isAtOrBelow, sdkWorkspacePath } from "../workspaces/workspaceSdkHost";
 
@@ -35,35 +39,20 @@ export interface PluginFileWatchEvent {
  * `record.created` and `record.updated` as one subscriber receives them:
  * the engine payload minus workspaceId — this registry is per-workspace.
  */
-export interface PluginRecordChangedEventData {
-  collectionPath: string;
-  recordId: string;
-  author: string | null;
-  timestamp: number;
-}
-
 /**
- * `record.field.changed` as one subscriber receives it. `previous` and
- * `next` arrive as the engine sent them: an absent field value is null, and
- * an oversized value (over 8 KiB of JSON) is already replaced by
- * `{ "truncated": true, "bytes": number }` — a subscriber reads the record
- * for the whole value.
+ * `record.created` and `record.updated` as one subscriber receives them, and
+ * `record.field.changed` with its `previous`/`next` values. An oversized or
+ * too-deep value arrives already replaced by the engine's
+ * `{ "truncated": true, "bytes": number }` marker; a subscriber reads the
+ * record for the whole value. `historyId` is the device-local record-history
+ * row id. Delivery is at most once, so a subscriber that misses events reads
+ * history past its last seen id. The shapes are the panel IPC schemas: one
+ * contract, validated once at the daemon bridge.
  */
-export interface PluginRecordFieldChangedEventData {
-  collectionPath: string;
-  recordId: string;
-  field: string;
-  previous: JsonValue;
-  next: JsonValue;
-  author: string | null;
-  timestamp: number;
-  /**
-   * Device-local record-history row id. Delivery is at most once (the
-   * engine drops under backpressure), so a subscriber that missed events
-   * reads record history past its last seen id.
-   */
-  historyId: number;
-}
+export type PluginRecordChangedEventData = z.infer<typeof PluginPanelRecordChangedData>;
+export type PluginRecordFieldChangedEventData = z.infer<
+  typeof PluginPanelRecordFieldChangedData
+>;
 
 export type PluginRecordEvent =
   | {
@@ -87,17 +76,14 @@ export interface PluginWorkspaceEventsContext {
   emitEvent: (subscriptionId: string, event: string, data: unknown) => void;
 }
 
-type SubscriptionScope =
-  | {
-      kind: "files";
-      /** "." for the whole workspace, otherwise a contained workspace path. */
-      prefix: string;
-    }
-  | {
-      kind: "records";
-      /** "." for every collection, otherwise a contained collection path. */
-      collectionPath: string;
-    };
+interface SubscriptionScope {
+  kind: "files" | "records";
+  /**
+   * "." for the whole workspace (every collection), otherwise a contained
+   * workspace path: a file prefix, or a collection folder.
+   */
+  prefix: string;
+}
 
 interface SubscriptionRecord {
   owner: PluginWorkspaceEventsOwner;
@@ -172,7 +158,7 @@ export class PluginWorkspaceEvents {
     // a file prefix does: a traversal or absolute path is refused here.
     return this.register(context, {
       kind: "records",
-      collectionPath: watchPrefix(input.collectionPath),
+      prefix: watchPrefix(input.path),
     });
   }
 
@@ -257,7 +243,7 @@ export class PluginWorkspaceEvents {
     for (const [subscriptionId, subscription] of this.subscriptions) {
       if (subscription.scope.kind !== "records") continue;
       if (
-        !isAtOrBelow(event.data.collectionPath, subscription.scope.collectionPath)
+        !isAtOrBelow(event.data.collectionPath, subscription.scope.prefix)
       ) {
         continue;
       }

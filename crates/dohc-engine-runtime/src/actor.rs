@@ -12179,6 +12179,11 @@ fn materialize_ydoc_drain(
 
 /// Local Y.Doc RPCs have no sync-pass result. Keep an actionable origination
 /// decline visible at this boundary, matching the existing #632 diagnostic.
+/// A drain on the open, settle, or close RPC path applies parked updates
+/// whose record facts have no route to the service's event emitter from
+/// here (#1002): their history rows commit, and a subscriber that missed the
+/// events reads history past its last seen id, as the settled contract
+/// allows. The pull pass is the path that fires a drained update's events.
 fn drain_deferred_ydoc_for_local_rpc(
     store: &mut EngineStore,
     doc_cache: &mut WriterDocCache,

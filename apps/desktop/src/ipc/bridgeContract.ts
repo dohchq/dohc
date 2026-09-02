@@ -3407,7 +3407,7 @@ const PluginPanelFileWatchData = z
   })
   .strict();
 
-const PluginPanelRecordChangedData = z
+export const PluginPanelRecordChangedData = z
   .object({
     collectionPath: z.string().min(1),
     recordId: z.string().min(1),
@@ -3419,7 +3419,7 @@ const PluginPanelRecordChangedData = z
 // previous/next are arbitrary JSON field values (an oversized one arrives
 // already replaced by the engine's truncation marker), so they revalidate
 // through the same bounded value schema every collection result uses.
-const PluginPanelRecordFieldChangedData = z
+export const PluginPanelRecordFieldChangedData = z
   .object({
     collectionPath: z.string().min(1),
     recordId: z.string().min(1),

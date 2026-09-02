@@ -1,9 +1,10 @@
-import type { Event, JsonValue } from "@dohc/workspace-engine-client";
-import type {
-  PluginRecordChangedEventData,
-  PluginRecordEvent,
-  PluginRecordFieldChangedEventData,
-} from "../plugins/pluginWorkspaceEvents";
+import type { Event } from "@dohc/workspace-engine-client";
+import { z } from "zod";
+import {
+  PluginPanelRecordChangedData,
+  PluginPanelRecordFieldChangedData,
+} from "../ipc/bridgeContract";
+import type { PluginRecordEvent } from "../plugins/pluginWorkspaceEvents";
 
 /** Emitted by the daemon once per record create / update / field change. */
 export const RECORD_CREATED_EVENT = "record.created";
@@ -16,59 +17,29 @@ interface RoutedRecordEvent {
   event: PluginRecordEvent;
 }
 
-function jsonRecord(
-  payload: JsonValue,
-): { [key in string]?: JsonValue } | null {
-  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
-    return null;
-  }
-  return payload;
-}
-
 // The daemon's record event payloads are a fixed contract
-// (crates/dohc-workspace-engine's record events). Read strictly: unlike the
-// capture bridge's repaint ping, a record event is data a plugin acts on, so
-// a shape drift is dropped rather than delivered malformed. Delivery is at
-// most once anyway — a subscriber already reconciles missed events from
-// record history.
-function changedDataOf(record: {
-  [key in string]?: JsonValue;
-}): (PluginRecordChangedEventData & { workspaceId: string }) | null {
-  const { workspaceId, collectionPath, recordId, author, timestamp } = record;
-  if (typeof workspaceId !== "string" || workspaceId.length === 0) return null;
-  if (typeof collectionPath !== "string" || collectionPath.length === 0) return null;
-  if (typeof recordId !== "string" || recordId.length === 0) return null;
-  if (author !== null && typeof author !== "string") return null;
-  if (typeof timestamp !== "number" || !Number.isFinite(timestamp)) return null;
-  return { workspaceId, collectionPath, recordId, author: author ?? null, timestamp };
-}
+// (crates/dohc-workspace-engine's record events) and the panel IPC schemas
+// are that contract; the bridge validates against them once, plus the
+// workspace the payload names. Read strictly: unlike the capture bridge's
+// repaint ping, a record event is data a plugin acts on, so a shape drift is
+// dropped rather than delivered malformed. Delivery is at most once anyway —
+// a subscriber already reconciles missed events from record history.
+const WORKSPACE_SCOPED = { workspaceId: z.string().min(1) };
+const RecordChangedPayload = PluginPanelRecordChangedData.extend(WORKSPACE_SCOPED);
+const RecordFieldChangedPayload =
+  PluginPanelRecordFieldChangedData.extend(WORKSPACE_SCOPED);
 
 function routeOf(event: Event): RoutedRecordEvent | null {
-  const record = jsonRecord(event.payload);
-  if (!record) return null;
-  const base = changedDataOf(record);
-  if (!base) return null;
-  const { workspaceId, ...data } = base;
   if (event.name === RECORD_CREATED_EVENT || event.name === RECORD_UPDATED_EVENT) {
+    const parsed = RecordChangedPayload.safeParse(event.payload);
+    if (!parsed.success) return null;
+    const { workspaceId, ...data } = parsed.data;
     return { workspaceId, event: { name: event.name, data } };
   }
-  const { field, previous, next, historyId } = record;
-  if (typeof field !== "string" || field.length === 0) return null;
-  if (typeof historyId !== "number" || !Number.isFinite(historyId)) return null;
-  // JSON cannot carry undefined, so an undefined here means the key is
-  // absent — a missing value, not a null one, and the shape is rejected.
-  if (previous === undefined || next === undefined) return null;
-  const fieldData: PluginRecordFieldChangedEventData = {
-    ...data,
-    field,
-    previous,
-    next,
-    historyId,
-  };
-  return {
-    workspaceId,
-    event: { name: RECORD_FIELD_CHANGED_EVENT, data: fieldData },
-  };
+  const parsed = RecordFieldChangedPayload.safeParse(event.payload);
+  if (!parsed.success) return null;
+  const { workspaceId, ...data } = parsed.data;
+  return { workspaceId, event: { name: RECORD_FIELD_CHANGED_EVENT, data } };
 }
 
 /**

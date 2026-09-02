@@ -230,20 +230,14 @@ export async function invokePluginSdkHost(
     case "collections.get":
     case "collections.query":
     case "collections.getRecord":
-      return waitForOperation(
-        context.signal,
-        invokeWorkspaceSdkHost(hostContext, method, params),
-      );
+    // The core host refuses a collection write on a read-only workspace
+    // itself (hostContext.writable), so the writes need no gate here.
     case "collections.setFields":
-    case "collections.createRecord": {
-      if (!context.isWritable()) {
-        throw new Error("This plugin has read-only workspace authority.");
-      }
+    case "collections.createRecord":
       return waitForOperation(
         context.signal,
         invokeWorkspaceSdkHost(hostContext, method, params),
       );
-    }
     case "databases.edit": {
       if (!context.isWritable()) {
         throw new Error("This plugin has read-only workspace authority.");
@@ -267,7 +261,7 @@ export async function invokePluginSdkHost(
     case "collections.watch": {
       if (!context.subscribeRecordWatch) {
         throw new Error(
-          'collections.watch is unavailable for this request path (requestPath "panel"). A subscription needs a channel to push events on, and only a plugin\'s own process has one.',
+          `collections.watch is unavailable for this request path (requestPath "${context.requestPath}"). This surface has no channel to push record events on.`,
         );
       }
       // Same refusal as files.watch: a subscription outlives the call that

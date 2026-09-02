@@ -217,7 +217,7 @@ describe("createCollectionRecord", () => {
     expect(log.doc.getMap("frontmatter").get("status")).toBe("open");
   });
 
-  it("returns without a session when no fields are given", async () => {
+  it("returns without a session when fields are absent or empty", async () => {
     const root = await workspaceRoot();
     const { session, log } = fakeSession();
     const context = contextFor(root, session, {
@@ -238,6 +238,16 @@ describe("createCollectionRecord", () => {
       createCollectionRecord(context, {
         collectionPath: "tasks",
         name: "solo",
+        author: AGENT,
+      }),
+    ).resolves.toEqual({ path: "tasks/solo.md", recordId: "rec_1" });
+    // The CLI and MCP always send a fields object; an empty one is the same
+    // request as none, not a refusal.
+    await expect(
+      createCollectionRecord(context, {
+        collectionPath: "tasks",
+        name: "solo",
+        fields: {},
         author: AGENT,
       }),
     ).resolves.toEqual({ path: "tasks/solo.md", recordId: "rec_1" });

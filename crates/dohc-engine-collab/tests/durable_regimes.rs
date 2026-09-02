@@ -1647,7 +1647,8 @@ fn local_and_remote_different_field_edits_converge_in_both_collection_indexes() 
             &NoFaults,
             1_200,
         )
-        .expect("Bob remote edit"),
+        .expect("Bob remote edit")
+        .outcome,
     );
     committed(
         apply_remote_update(
@@ -1662,7 +1663,8 @@ fn local_and_remote_different_field_edits_converge_in_both_collection_indexes() 
             &NoFaults,
             1_200,
         )
-        .expect("Alice remote edit"),
+        .expect("Alice remote edit")
+        .outcome,
     );
 
     let expected = BTreeMap::from([
@@ -1735,7 +1737,8 @@ fn same_field_concurrent_edits_converge_and_keep_both_authored_writes() {
             &NoFaults,
             1_200,
         )
-        .expect("Bob remote edit"),
+        .expect("Bob remote edit")
+        .outcome,
     );
     committed(
         apply_remote_update(
@@ -1750,7 +1753,8 @@ fn same_field_concurrent_edits_converge_and_keep_both_authored_writes() {
             &NoFaults,
             1_200,
         )
-        .expect("Alice remote edit"),
+        .expect("Alice remote edit")
+        .outcome,
     );
 
     let fields_a = indexed_fields(&a.store, &key);
@@ -1819,7 +1823,8 @@ fn later_same_field_edit_wins_on_both_devices_and_keeps_earlier_history() {
             &NoFaults,
             1_200,
         )
-        .expect("Alice edit reaches device B"),
+        .expect("Alice edit reaches device B")
+        .outcome,
     );
 
     let peer_b = Ydoc::wire();
@@ -1851,7 +1856,8 @@ fn later_same_field_edit_wins_on_both_devices_and_keeps_earlier_history() {
             &NoFaults,
             1_400,
         )
-        .expect("Bob edit reaches device A"),
+        .expect("Bob edit reaches device A")
+        .outcome,
     );
 
     let expected = BTreeMap::from([
@@ -1935,7 +1941,8 @@ fn base_is_claimed_exactly_once() {
             &NoFaults,
             1_450,
         )
-        .expect("append before base-proof compaction"),
+        .expect("append before base-proof compaction")
+        .outcome,
     );
     let compacted = committed(
         close_session(&mut ts.store, &key, false, None, &NoFaults, 1_475)
@@ -2174,7 +2181,8 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
             &NoFaults,
             1_100,
         )
-        .expect("extend predecessor"),
+        .expect("extend predecessor")
+        .outcome,
     );
     committed(
         store
@@ -2342,7 +2350,8 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
             &NoFaults,
             1_225,
         )
-        .expect("append to the successor"),
+        .expect("append to the successor")
+        .outcome,
     );
     let compacted = committed(
         close_session(&mut store, &key, false, None, &NoFaults, 1_250)
@@ -2708,7 +2717,9 @@ fn remote_update_is_idempotent_and_echo_suppressed() {
     };
     // First apply: journaled, echo-suppressed (never re-emitted).
     let first = committed(
-        apply_remote_update(&mut ts.store, &key, &remote, None, &NoFaults, 1_100).expect("apply"),
+        apply_remote_update(&mut ts.store, &key, &remote, None, &NoFaults, 1_100)
+            .expect("apply")
+            .outcome,
     );
     let seq = match first {
         ReplicationApplyOutcome::Applied { seq, emit_outbound } => {
@@ -2719,7 +2730,9 @@ fn remote_update_is_idempotent_and_echo_suppressed() {
     };
     // Redelivery of the same bytes is an idempotent no-op (content-addressed).
     let again = committed(
-        apply_remote_update(&mut ts.store, &key, &remote, None, &NoFaults, 1_200).expect("apply2"),
+        apply_remote_update(&mut ts.store, &key, &remote, None, &NoFaults, 1_200)
+            .expect("apply2")
+            .outcome,
     );
     assert_eq!(
         again,

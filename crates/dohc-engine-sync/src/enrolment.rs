@@ -1823,7 +1823,7 @@ mod tests {
                 reason: None,
                 conflicts_opened: 0,
                 lineage_replacement: None,
-                record_facts: None,
+                record_facts: Vec::new(),
             }),
             "the Y.Doc base must fast-forward its shipped fork ancestor"
         );

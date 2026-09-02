@@ -1572,7 +1572,7 @@ describe("@dohc/sdk", () => {
           listener: (event: { event: string; data: T }) => void,
         ) {
           expect(method).toBe("collections.watch");
-          expect(params).toEqual({ collectionPath: "collections/people" });
+          expect(params).toEqual({ path: "collections/people" });
           listener({
             event: "record.created",
             data: {
@@ -1648,7 +1648,7 @@ describe("@dohc/sdk", () => {
     const events: unknown[] = [];
     const pendingSubscription = transport.subscribe!(
       "collections.watch",
-      { collectionPath: "collections/people" },
+      { path: "collections/people" },
       (event) => events.push(event),
     );
     const subscribeRequest = harness.messages[0] as { id: string };

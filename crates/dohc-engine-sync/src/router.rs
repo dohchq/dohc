@@ -16,7 +16,7 @@ pub struct RoutedApply {
     pub conflict: Option<ConflictApplyResult>,
     pub conflicts_opened: i64,
     pub materialization_changes: Vec<crate::MomentMaterializationChange>,
-    pub record_facts: Option<dohc_engine_domain::CollectionRecordApplyFacts>,
+    pub record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
 }
 
 pub(crate) fn redelivered_materialization_changes(
@@ -189,7 +189,7 @@ fn apply_replication_envelope_inner(
             |moment| RoutedApply {
                 conflicts_opened: moment.conflicts_opened,
                 materialization_changes: moment.materialization_changes,
-                record_facts: moment.record_facts,
+                record_facts: moment.record_facts.into_iter().collect(),
                 ..RoutedApply::default()
             },
         ),

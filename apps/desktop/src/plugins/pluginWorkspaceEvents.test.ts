@@ -219,7 +219,7 @@ describe("PluginWorkspaceEvents", () => {
     }
     for (let index = 0; index < 6; index += 1) {
       events.subscribeRecords(context, {
-        collectionPath: `collections/${index}`,
+        path: `collections/${index}`,
       });
     }
 
@@ -228,7 +228,7 @@ describe("PluginWorkspaceEvents", () => {
       "MAX_PLUGIN_WORKSPACE_SUBSCRIPTIONS_PER_OWNER",
     );
     expect(() =>
-      events.subscribeRecords(context, { collectionPath: "collections/overflow" }),
+      events.subscribeRecords(context, { path: "collections/overflow" }),
     ).toThrow("MAX_PLUGIN_WORKSPACE_SUBSCRIPTIONS_PER_OWNER");
   });
 
@@ -478,7 +478,7 @@ describe("PluginWorkspaceEvents record subscriptions", () => {
     const sink = collector();
     const { subscriptionId } = events.subscribeRecords(
       { owner: processOwner("sites", "spawn-1"), emitEvent: sink.emitEvent },
-      { collectionPath: "collections/people" },
+      { path: "collections/people" },
     );
 
     events.handleRecordEvent(recordCreated("collections/people"));
@@ -504,7 +504,7 @@ describe("PluginWorkspaceEvents record subscriptions", () => {
     const sink = collector();
     const { subscriptionId } = events.subscribeRecords(
       { owner: processOwner("sites", "spawn-1"), emitEvent: sink.emitEvent },
-      { collectionPath: "collections/people" },
+      { path: "collections/people" },
     );
 
     const data = {
@@ -533,7 +533,7 @@ describe("PluginWorkspaceEvents record subscriptions", () => {
     events.subscribe({ owner, emitEvent: files.emitEvent }, { path: "collections" });
     events.subscribeRecords(
       { owner, emitEvent: records.emitEvent },
-      { collectionPath: "collections" },
+      { path: "collections" },
     );
 
     events.handleWatcherEvents([update("collections/people/rec-1.md", "aaa")]);
@@ -548,7 +548,7 @@ describe("PluginWorkspaceEvents record subscriptions", () => {
     const sink = collector();
     events.subscribeRecords(
       { owner: processOwner("sites", "spawn-1"), emitEvent: sink.emitEvent },
-      { collectionPath: "." },
+      { path: "." },
     );
 
     events.handleRecordEvent(recordCreated("collections/people"));
@@ -567,7 +567,7 @@ describe("PluginWorkspaceEvents record subscriptions", () => {
 
     for (const escape of ["../secrets", "a/../../secrets", "/etc", "C:\\Windows"]) {
       expect(() =>
-        events.subscribeRecords(context, { collectionPath: escape }),
+        events.subscribeRecords(context, { path: escape }),
       ).toThrow();
     }
     events.handleRecordEvent(recordCreated("secrets"));
@@ -583,11 +583,11 @@ describe("PluginWorkspaceEvents record subscriptions", () => {
       emitEvent: closed.emitEvent,
     };
     const { subscriptionId } = events.subscribeRecords(context, {
-      collectionPath: "collections/people",
+      path: "collections/people",
     });
     events.subscribeRecords(
       { owner: processOwner("sites", "spawn-2"), emitEvent: ended.emitEvent },
-      { collectionPath: "collections/people" },
+      { path: "collections/people" },
     );
 
     events.handleRecordEvent(recordCreated("collections/people"));
@@ -749,7 +749,7 @@ describe("the plugin SDK host's files.watch route", () => {
     expect(capabilities.collections.read).toBe(true);
 
     const opened = (await invokePluginSdkHost(context, "collections.watch", {
-      collectionPath: "collections/people",
+      path: "collections/people",
     })) as { subscriptionId: string };
     expect(opened.subscriptionId.length).toBeGreaterThan(0);
 
@@ -775,7 +775,7 @@ describe("the plugin SDK host's files.watch route", () => {
     // needs a channel, so the refusal is the method's, not the capability's.
     await expect(
       invokePluginSdkHost(context, "collections.watch", {
-        collectionPath: "collections/people",
+        path: "collections/people",
       }),
     ).rejects.toThrow("collections.watch is unavailable for this request path");
   });
@@ -796,7 +796,7 @@ describe("the plugin SDK host's files.watch route", () => {
 
     await expect(
       invokePluginSdkHost(context, "collections.watch", {
-        collectionPath: "collections/people",
+        path: "collections/people",
       }),
     ).rejects.toMatchObject({ code: "DOHC_ABORTED" });
 

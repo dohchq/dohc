@@ -958,7 +958,7 @@ export function createDohcClient(options = {}) {
                 assertRequestOptions(requestOptions);
                 assertWorkspacePath(collectionPath, "Collection paths");
                 await requireCapability("collections", "read", requestOptions);
-                return subscribe("collections.watch", { collectionPath }, listener, requestOptions);
+                return subscribe("collections.watch", { path: collectionPath }, listener, requestOptions);
             },
         },
         provenance: {

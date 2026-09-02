@@ -4885,8 +4885,12 @@ async function openCliWorkspace(
     // Engine-backed collection reads and writes for the CLI/MCP verbs.
     // withEngineAdapter derives the attachment (and share-view session mode)
     // from the registered workspace itself — the renderer collection routes'
-    // authority, reached from main's side. Writes go through the desktop's
-    // one collection write seam, the same path plugin SDK edits take.
+    // authority, reached from main's side. The plugin SDK's owned read port
+    // wraps the same call in receivedShareEngine.workspaceForRegistered; the
+    // CLI resolved this workspace by cwd above, so it already holds the
+    // registered entry that wrapper would look up. Writes go through the
+    // desktop's one collection write seam, the same path plugin SDK edits
+    // take.
     collections: {
       writes: {
         setFields: (input) => {

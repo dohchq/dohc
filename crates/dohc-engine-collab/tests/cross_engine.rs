@@ -589,7 +589,8 @@ fn replay_parity_rejects_parked_delete_in_dependency_scalar_on_dependency_arriva
     )
     .expect(
         "a delete referencing an as-yet-unknown target must be accepted (nothing to reject yet)",
-    );
+    )
+    .outcome;
     assert!(matches!(
         parked,
         TxnOutcome::Committed(ReplicationApplyOutcome::Applied { .. })
@@ -928,7 +929,8 @@ fn replay_parity_parks_cross_origin_missing_dependency_then_converges() {
         &NoFaults,
         1_001,
     )
-    .expect("missing cross-origin dependency must be parked");
+    .expect("missing cross-origin dependency must be parked")
+    .outcome;
     assert!(matches!(
         parked,
         TxnOutcome::Committed(ReplicationApplyOutcome::Applied { .. })
@@ -947,7 +949,8 @@ fn replay_parity_parks_cross_origin_missing_dependency_then_converges() {
         &NoFaults,
         1_002,
     )
-    .expect("dependency arrival must resolve the parked update");
+    .expect("dependency arrival must resolve the parked update")
+    .outcome;
     assert!(matches!(
         resolved,
         TxnOutcome::Committed(ReplicationApplyOutcome::Applied { .. })

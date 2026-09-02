@@ -103,9 +103,6 @@ function writableFieldEntries(
   fields: Record<string, unknown>,
 ): Array<[string, unknown]> {
   const entries = Object.entries(fields);
-  if (entries.length === 0) {
-    throw new Error("Set at least one field.");
-  }
   for (const [field, value] of entries) {
     if (field === "id") {
       throw new Error(
@@ -132,6 +129,9 @@ export async function setCollectionRecordFields(
   input: SetCollectionRecordFieldsInput,
 ): Promise<{ path: string }> {
   const entries = writableFieldEntries(input.fields);
+  if (entries.length === 0) {
+    throw new Error("Set at least one field.");
+  }
   if (liveDocumentKindForPath(input.recordPath) === null) {
     throw new Error(
       `Not a collection record path (records are Markdown files): ${input.recordPath}`,
@@ -223,7 +223,7 @@ export async function createCollectionRecord(
       "Record name must be a plain file name without path separators.",
     );
   }
-  const entries = input.fields === undefined ? [] : writableFieldEntries(input.fields);
+  const entries = writableFieldEntries(input.fields ?? {});
   throwIfAborted(context.signal);
   const requestedPath = `${input.collectionPath}/${name}.md`;
   const path = await withStaleSensitiveWorkspaceOperation(

@@ -12344,6 +12344,12 @@ fn sharing_declined_json(declines: Vec<dohc_engine_sync::SharingDeclined>) -> Ve
 
 /// One event value: the stored history JSON parsed whole, or the truncated
 /// marker past the cap, or `null` for an absent side of the change.
+/// A field value nests inside Event -> payload -> value on the wire, so the
+/// value itself may use only the depth the frame limit leaves for it. A
+/// deeper value travels as the truncated marker, exactly like an oversized
+/// one: the subscriber reads the record for the whole value.
+const RECORD_EVENT_VALUE_MAX_DEPTH: usize = 16;
+
 fn record_event_value(json: Option<&str>) -> Value {
     let Some(json) = json else {
         return Value::Null;
@@ -12351,7 +12357,11 @@ fn record_event_value(json: Option<&str>) -> Value {
     if json.len() > RECORD_EVENT_VALUE_CAP_BYTES {
         return json!({ "truncated": true, "bytes": json.len() });
     }
-    serde_json::from_str(json).unwrap_or(Value::Null)
+    let value: Value = serde_json::from_str(json).unwrap_or(Value::Null);
+    if dohc_engine_domain::collection_value_exceeds_depth(&value, RECORD_EVENT_VALUE_MAX_DEPTH) {
+        return json!({ "truncated": true, "bytes": json.len() });
+    }
+    value
 }
 
 /// Emit one applied update's record events, post-commit, in the settled
@@ -14468,6 +14478,28 @@ mod tests {
         );
         assert_eq!(notices[1].payload["historyId"], 7);
         assert_eq!(notices[2].payload["field"], "beta");
+        // A value deeper than the wire leaves room for travels as the marker
+        // too: an unencodable event must never reach the transport.
+        let deep = format!(
+            "{}1{}",
+            "[".repeat(RECORD_EVENT_VALUE_MAX_DEPTH),
+            "]".repeat(RECORD_EVENT_VALUE_MAX_DEPTH)
+        );
+        assert_eq!(
+            record_event_value(Some(&deep)),
+            json!({ "truncated": true, "bytes": deep.len() })
+        );
+        // The helper counts the value itself as depth 1, so the deepest
+        // value that still travels whole nests one level fewer than the cap.
+        let shallow = format!(
+            "{}1{}",
+            "[".repeat(RECORD_EVENT_VALUE_MAX_DEPTH - 1),
+            "]".repeat(RECORD_EVENT_VALUE_MAX_DEPTH - 1)
+        );
+        assert_eq!(
+            record_event_value(Some(&shallow)),
+            serde_json::from_str::<Value>(&shallow).unwrap()
+        );
         assert_eq!(notices[2].payload["previous"], "open");
         assert_eq!(notices[2].payload["next"], "done");
         assert_eq!(notices[2].payload["historyId"], 8);

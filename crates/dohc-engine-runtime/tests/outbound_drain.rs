@@ -190,7 +190,8 @@ fn apply_remote_scene_asset_authority(
             &NoFaults,
             now_ms,
         )
-        .expect("apply remote scene asset authority"),
+        .expect("apply remote scene asset authority")
+        .outcome,
         TxnOutcome::Committed(ReplicationApplyOutcome::Applied { .. })
     ));
 }
@@ -231,7 +232,8 @@ fn apply_remote_scene_image_tombstone(
             &NoFaults,
             now_ms,
         )
-        .expect("apply remote image tombstone"),
+        .expect("apply remote image tombstone")
+        .outcome,
         TxnOutcome::Committed(ReplicationApplyOutcome::Applied { .. })
     ));
 }

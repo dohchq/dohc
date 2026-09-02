@@ -2060,8 +2060,11 @@ fn replace_index_for_record(
             }
         }
     }
+    // Latched: a record that has announced itself (any field ever indexed)
+    // stays initialized when its fields are cleared, so the next edit reads
+    // as changed, never as a second creation.
     conn.execute(
-        "UPDATE collection_records SET index_initialized=?4 \
+        "UPDATE collection_records SET index_initialized=index_initialized OR ?4 \
          WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3",
         params![workspace_id, version_id, record_id, index_initialized],
     )

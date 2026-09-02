@@ -129,8 +129,17 @@ pub fn apply_remote_update(
     actor_origin_id: Option<&str>,
     faults: &dyn FaultInjector,
     now_ms: i64,
-) -> Result<TxnOutcome<ReplicationApplyOutcome>, CollabError> {
+) -> Result<RemoteUpdateApplied, CollabError> {
     apply_remote_update_outer(store, None, key, remote, actor_origin_id, faults, now_ms)
+}
+
+/// A remote update applied outside the pull envelope, with the record facts
+/// its append transaction committed: a drained parked update fires the same
+/// events an ordinary pull does, or a subscriber would never learn of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteUpdateApplied {
+    pub outcome: TxnOutcome<ReplicationApplyOutcome>,
+    pub record_facts: Option<dohc_engine_domain::CollectionRecordApplyFacts>,
 }
 
 /// Drain-only outer wrapper that keeps an already-resident writer-cache entry
@@ -144,7 +153,7 @@ pub fn apply_remote_update_for_deferred_drain(
     actor_origin_id: Option<&str>,
     faults: &dyn FaultInjector,
     now_ms: i64,
-) -> Result<TxnOutcome<ReplicationApplyOutcome>, CollabError> {
+) -> Result<RemoteUpdateApplied, CollabError> {
     apply_remote_update_outer(
         store,
         Some(cache),
@@ -164,21 +173,21 @@ fn apply_remote_update_outer(
     actor_origin_id: Option<&str>,
     faults: &dyn FaultInjector,
     now_ms: i64,
-) -> Result<TxnOutcome<ReplicationApplyOutcome>, CollabError> {
+) -> Result<RemoteUpdateApplied, CollabError> {
     let maintain_frontier = cache.is_some();
     let mut candidate = None;
+    let mut record_facts = None;
     let outcome = store.write_with(faults, |tx| {
-        apply_remote_update_in_transaction_inner(
+        let (outcome, facts) = apply_remote_update_in_transaction_inner(
             tx,
             key,
             remote,
             actor_origin_id,
             now_ms,
             maintain_frontier.then_some(&mut candidate),
-        )
-        // The deferred drain surfaces no record facts: a parked update's
-        // events are the pull pass that completes the dependency.
-        .map(|(outcome, _)| outcome)
+        )?;
+        record_facts = facts;
+        Ok::<_, CollabError>(outcome)
     })?;
     if let Some(cache) = cache.as_deref_mut() {
         cache.finish_deferred_remote_append(store, key, &outcome, &remote.bytes, candidate);
@@ -208,7 +217,13 @@ fn apply_remote_update_outer(
             }
         }
     }
-    Ok(outcome)
+    let record_facts = matches!(outcome, TxnOutcome::Committed(_))
+        .then_some(record_facts)
+        .flatten();
+    Ok(RemoteUpdateApplied {
+        outcome,
+        record_facts,
+    })
 }
 
 /// Transaction-composable form used by `dohc-engine-sync`: the Y.Doc lineage
@@ -607,7 +622,9 @@ mod dedupe_hoist_tests {
             bytes: delta,
         };
         let seq = match committed(
-            apply_remote_update(&mut store, &key, &remote, None, &NoFaults, 1_100).expect("apply"),
+            apply_remote_update(&mut store, &key, &remote, None, &NoFaults, 1_100)
+                .expect("apply")
+                .outcome,
         ) {
             ReplicationApplyOutcome::Applied { seq, .. } => seq,
             ReplicationApplyOutcome::Deduped { .. } => panic!("first apply must land"),
@@ -623,7 +640,8 @@ mod dedupe_hoist_tests {
         let again = with_armed_gate(|| {
             apply_remote_update(&mut store, &key, &remote, None, &NoFaults, 1_200)
         })
-        .expect("an in-log redelivery must dedupe without invoking the gate");
+        .expect("an in-log redelivery must dedupe without invoking the gate")
+        .outcome;
         assert_eq!(
             committed(again),
             ReplicationApplyOutcome::Deduped { seq },
@@ -764,7 +782,8 @@ mod dedupe_hoist_tests {
         // fresh row (a CRDT no-op; re-folded at the next compaction).
         let reapplied = committed(
             apply_remote_update(&mut store, &key, &remote, None, &NoFaults, 1_500)
-                .expect("re-append"),
+                .expect("re-append")
+                .outcome,
         );
         assert!(
             matches!(

@@ -19,6 +19,7 @@ import {
   createLocalChangeAuthor,
   validateUserMaterializePath,
   validateUserReadPath,
+  validateUserWritePath,
 } from "@dohc/workspace-core";
 import type {
   CollectionGetRecordParams,
@@ -1998,7 +1999,9 @@ async function dispatch(
       const collections = context.collections;
       if (!collections) return collectionsUnavailable();
       if (!collections.writes) return collectionWritesUnavailable();
-      const validated = validateUserReadPath(request.args.recordPath);
+      // A write-mode check: the seam opens the record's live session, so
+      // the path must clear the same floor every other CLI write clears.
+      const validated = validateUserWritePath(request.args.recordPath);
       if (!validated.ok) {
         return cliPathRejected(validated.reason, request.args.recordPath);
       }

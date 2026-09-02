@@ -327,6 +327,20 @@ async fn write_output<W: AsyncWrite + Unpin>(
     while let Some(item) = output_rx.recv().await {
         match item {
             OutputItem::Envelope(envelope) => {
+                // A service-initiated event the wire cannot carry is dropped
+                // here, with its name on stderr, instead of ending the
+                // transport: delivery is at most once and the subscriber
+                // reconciles from history. A response is different: its
+                // caller is waiting, so an unencodable one still fails loud.
+                if let (Envelope::Event(event), Err(error)) =
+                    (&envelope, encode_control(&envelope, limits))
+                {
+                    eprintln!(
+                        "engine: dropped event {} it cannot encode: {error:?}",
+                        event.name
+                    );
+                    continue;
+                }
                 write_envelope(&mut output, &envelope, limits).await?;
             }
             OutputItem::Blob { response, egress } => {

@@ -4406,9 +4406,7 @@ fn accumulate_pull_outcome(
             *conflicts_opened = conflicts_opened
                 .checked_add(routed.conflicts_opened)
                 .ok_or(RelayError::InvalidResponse)?;
-            if let Some(facts) = routed.record_facts {
-                record_facts.push(facts);
-            }
+            record_facts.extend(routed.record_facts);
             for change in routed.materialization_changes {
                 insert_changed_path(changed_paths, change);
             }
