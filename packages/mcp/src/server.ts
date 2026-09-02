@@ -16,8 +16,12 @@ import {
   type ShareAccess,
 } from "@dohc/security-contract/share-selector";
 import {
+  createRecord,
   createWorkspaceDirectory,
   listChannels,
+  queryCollection,
+  readRecord,
+  setRecordFields,
   listFileChats,
   readChat,
   replyToChat,
@@ -421,6 +425,80 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       },
     },
     async (args) => text(await replyToChat(ctx, args)),
+  );
+
+  server.registerTool(
+    "dohc_query_collection",
+    {
+      description:
+        "Query a collection folder's indexed records: filter, sort, group, and page. Requires the workspace engine and the dohc app.",
+      inputSchema: {
+        collectionPath: z.string().min(1).max(4096),
+        filter: z
+          .object({
+            field: z.string().min(1).max(200),
+            operator: z.enum(["equals", "contains"]),
+            value: z.unknown(),
+          })
+          .optional(),
+        sort: z
+          .array(
+            z.object({
+              field: z.string().min(1).max(200),
+              direction: z.enum(["asc", "desc"]),
+            }),
+          )
+          .max(8)
+          .optional(),
+        groupBy: z.string().min(1).max(200).optional(),
+        resolveRelations: z.boolean().optional(),
+        limit: z.number().int().positive().max(500).optional(),
+        cursor: z.unknown().optional(),
+      },
+    },
+    async (args) => text(await queryCollection(ctx, args)),
+  );
+
+  server.registerTool(
+    "dohc_read_record",
+    {
+      description:
+        "Read one collection record by id: current field values plus per-field history with author attribution. Requires the workspace engine and the dohc app.",
+      inputSchema: {
+        collectionPath: z.string().min(1).max(4096),
+        recordId: z.string().min(1).max(200),
+        historyLimit: z.number().int().positive().max(500).optional(),
+        beforeHistoryId: z.number().int().nonnegative().optional(),
+      },
+    },
+    async (args) => text(await readRecord(ctx, args)),
+  );
+
+  registerWrite(
+    "dohc_set_record_fields",
+    {
+      description:
+        "Set fields on a collection record as the agent, e.g. fields: {\"status\": \"done\"}. The change lands in the record's live frontmatter, open desktop views update, and record history attributes it to the agent.",
+      inputSchema: {
+        recordPath: z.string().min(1).max(4096),
+        fields: z.record(z.string().min(1).max(200), z.unknown()),
+      },
+    },
+    async (args) => text(await setRecordFields(ctx, args)),
+  );
+
+  registerWrite(
+    "dohc_create_record",
+    {
+      description:
+        "Create a Markdown record in a collection folder as the agent, optionally seeding fields. The engine adopts the file, mints its record id, and returns it.",
+      inputSchema: {
+        collectionPath: z.string().min(1).max(4096),
+        name: z.string().min(1).max(200),
+        fields: z.record(z.string().min(1).max(200), z.unknown()).optional(),
+      },
+    },
+    async (args) => text(await createRecord(ctx, args)),
   );
 
   server.registerTool(
