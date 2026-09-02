@@ -9,6 +9,9 @@ import type { CollectionQueryExecutor } from "../store";
 import { recordLabel } from "../recordLabel";
 
 const RELATION_PICKER_LIMIT = 100;
+// Five pages bounds memory and query count on a huge related collection.
+const RELATION_PICKER_MAX_PAGES = 5;
+const RELATION_PICKER_MAX_RECORDS = RELATION_PICKER_LIMIT * RELATION_PICKER_MAX_PAGES;
 
 export interface RelationPickerProps {
   field: RelationFieldDefinition;
@@ -44,6 +47,7 @@ export function RelationPicker({
 }: RelationPickerProps) {
   const [records, setRecords] = useState<CollectionRecord[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [truncated, setTruncated] = useState(false);
   const [search, setSearch] = useState("");
 
   useEffect(() => {
@@ -57,6 +61,7 @@ export function RelationPicker({
       try {
         const collected: CollectionRecord[] = [];
         let cursor: CollectionQueryCursor | undefined;
+        let pages = 0;
         do {
           const result = await executor({
             collectionPath: field.collection,
@@ -66,9 +71,11 @@ export function RelationPicker({
           if (stale) return;
           collected.push(...result.records);
           cursor = result.nextCursor ?? undefined;
-        } while (cursor !== undefined);
+          pages += 1;
+        } while (cursor !== undefined && pages < RELATION_PICKER_MAX_PAGES);
 
         if (stale) return;
+        setTruncated(cursor !== undefined);
         setRecords(collected);
       } catch (failure: unknown) {
         if (stale) return;
@@ -184,6 +191,11 @@ export function RelationPicker({
           ))}
         </span>
       )}
+      {error === null && records !== null && truncated ? (
+        <span className="text-[11px] text-muted">
+          Only the first {RELATION_PICKER_MAX_RECORDS} records are listed. Search to narrow the list.
+        </span>
+      ) : null}
       {!field.many && error === null && records !== null && selected.length > 0 ? (
         <button
           type="button"

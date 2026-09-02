@@ -99,6 +99,35 @@ describe("RelationPicker", () => {
     });
     expect(emit).toHaveBeenCalledExactlyOnceWith("rec-b");
     expect(close).toHaveBeenCalledOnce();
+    expect(screen.queryByText(/Only the first/)).toBeNull();
+  });
+
+  it("stops the drain at the page cap and says only the first records are listed", async () => {
+    const cursor = {
+      sortValues: [{ present: true, value: "Design" }],
+      recordPath: "tasks/rec-a.md",
+      recordId: "rec-a",
+    };
+    // Every page carries a cursor: a huge (or non-advancing) related
+    // collection must not drain forever or hold every record.
+    const executor = vi.fn(async () =>
+      makeQueryResult([TARGETS[0]!], { nextCursor: cursor }),
+    );
+    render(
+      <RelationPicker
+        field={SINGLE}
+        value={null}
+        executor={executor}
+        emit={vi.fn()}
+        close={vi.fn()}
+      />,
+    );
+
+    expect(
+      await screen.findByText("Only the first 500 records are listed. Search to narrow the list."),
+    ).toBeDefined();
+    expect(executor).toHaveBeenCalledTimes(5);
+    expect(screen.getAllByRole("option")).toHaveLength(5);
   });
 
   it("single: picking a record emits its id and closes", async () => {
