@@ -6,6 +6,7 @@ import {
 import {
   RemoteYdocApplyError,
   YdocLiveAdapter,
+  type ApplyLocalUpdateOptions,
   type YdocResyncNeededError,
   type EngineTransport,
   type YdocAdapterSession,
@@ -128,7 +129,10 @@ export interface EngineYdocProviderSession {
   // daemon deliberately resurrects, and its CRDT rows are the only copy of
   // those edits.
   readonly lineage: "existing" | "absent";
-  applyLocalUpdate(update: Uint8Array): Promise<void>;
+  applyLocalUpdate(
+    update: Uint8Array,
+    options?: ApplyLocalUpdateOptions,
+  ): Promise<void>;
   settleNow(options?: { summary?: string }): Promise<YdocSettleResult>;
   applyExternalMarkdownEdit(
     markdown: string,
@@ -369,7 +373,7 @@ export async function openEngineYdocProviderSession(
     head: session.head,
     lineage: session.lineage,
 
-    applyLocalUpdate(update) {
+    applyLocalUpdate(update, applyOptions) {
       if (closed) {
         if (closeComplete) return Promise.resolve();
         return Promise.reject(
@@ -382,7 +386,7 @@ export async function openEngineYdocProviderSession(
       }
       let operation: Promise<unknown>;
       try {
-        operation = session.applyLocalUpdate(update);
+        operation = session.applyLocalUpdate(update, applyOptions);
       } catch (error) {
         rememberLocalEditError(error);
         throw error;

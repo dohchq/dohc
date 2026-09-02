@@ -14,10 +14,20 @@ import type {
 export function localWorkspaceSdkReads(
   workspaceRoot: string,
 ): WorkspaceSdkReadPort {
+  const noEngine = () =>
+    Promise.reject(
+      new Error("This test fixture has no workspace engine for collections."),
+    );
   return createOwnedWorkspaceSdkReadPort({
     readText: (path) => readWorkspaceText(workspaceRoot, path),
     listFiles: () => listFiles(workspaceRoot),
     readDatabase: (path) => readDatabaseSnapshot(workspaceRoot, path),
+    collections: {
+      list: noEngine,
+      get: noEngine,
+      query: noEngine,
+      getRecord: noEngine,
+    },
     hasShareState: false,
     searchSources: [],
     repairProjection: async () => undefined,

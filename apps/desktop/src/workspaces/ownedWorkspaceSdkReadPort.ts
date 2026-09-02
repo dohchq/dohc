@@ -1,3 +1,12 @@
+import type {
+  CollectionGetParams,
+  CollectionGetRecordParams,
+  CollectionGetRecordResult,
+  CollectionGetResult,
+  CollectionListResult,
+  CollectionQueryParams,
+  CollectionQueryResult,
+} from "@dohc/workspace-contracts";
 import type { ListWorkspaceFilesResult } from "../ipc/bridgeContract";
 import type { WorkspaceTextReadResult } from "./workspaceAssets";
 import type { DatabaseSnapshotView } from "./workspaceDatabase";
@@ -14,10 +23,24 @@ export interface OwnedWorkspaceSearchSource {
   prefix?: string;
 }
 
+/**
+ * The engine's collection index reads for THIS workspace. Main derives them
+ * from the workspace's engine adapter; the port passes them through with the
+ * same scope its file reads have — the whole owned workspace — so a caller
+ * holding this port reads collections exactly where it reads files.
+ */
+export interface OwnedWorkspaceCollectionReadSource {
+  list(): Promise<CollectionListResult>;
+  get(params: CollectionGetParams): Promise<CollectionGetResult>;
+  query(params: CollectionQueryParams): Promise<CollectionQueryResult>;
+  getRecord(params: CollectionGetRecordParams): Promise<CollectionGetRecordResult>;
+}
+
 export interface OwnedWorkspaceSdkReadPortInput {
   readText(path: string): Promise<WorkspaceTextReadResult>;
   listFiles(): Promise<ListWorkspaceFilesResult>;
   readDatabase(path: string): Promise<DatabaseSnapshotView>;
+  collections: OwnedWorkspaceCollectionReadSource;
   hasShareState: boolean;
   searchSources: readonly OwnedWorkspaceSearchSource[];
   repairProjection(target: ShareViewFilesTarget): Promise<void>;
@@ -76,6 +99,10 @@ export function createOwnedWorkspaceSdkReadPort(
     readText: input.readText,
     listFiles: input.listFiles,
     readDatabase: input.readDatabase,
+    listCollections: () => input.collections.list(),
+    getCollection: (params) => input.collections.get(params),
+    queryCollectionRecords: (params) => input.collections.query(params),
+    getCollectionRecord: (params) => input.collections.getRecord(params),
 
     async prepareSearch(requestedPath): Promise<OwnedWorkspaceSearchView> {
       if (!input.hasShareState && requestedPath === undefined) {

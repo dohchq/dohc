@@ -9,6 +9,7 @@ import {
   applyDohcTheme,
   isDohcTheme,
   isDohcThemeMessage,
+  type DohcCollectionQueryOptions,
   type DohcDatabaseEditRequest,
   type DohcTheme,
 } from ".";
@@ -381,7 +382,9 @@ describe("@dohc/sdk", () => {
               provenance: { record: true },
             };
           }
-          if (method === "collections.list") return [{ id: 1 }];
+          if (method === "collections.query") {
+            return { collection: { path: "tasks" }, records: [{ id: "r1" }], groups: null, nextCursor: null };
+          }
           if (method === "provenance.record") return { ok: true };
           return { text: "ok" };
         },
@@ -391,16 +394,18 @@ describe("@dohc/sdk", () => {
     await expect(client.capabilities()).resolves.toMatchObject({
       files: { read: true },
     });
-    await expect(client.collections.get("tasks").list()).resolves.toEqual([{ id: 1 }]);
+    await expect(client.collections.query("tasks")).resolves.toMatchObject({
+      records: [{ id: "r1" }],
+    });
     await expect(client.provenance.record("checked")).resolves.toBeUndefined();
     expect(calls).toEqual([
       { method: "capabilities", params: undefined },
-      { method: "collections.list", params: { name: "tasks" } },
+      { method: "collections.query", params: { path: "tasks" } },
       { method: "provenance.record", params: { summary: "checked" } },
     ]);
   });
 
-  it("does not let collection reads provide workspace or identity scope", async () => {
+  it("does not let collection requests provide workspace or identity scope", async () => {
     const calls: Array<{ method: string; params?: unknown }> = [];
     const client = createDohcClient({
       transport: {
@@ -409,20 +414,45 @@ describe("@dohc/sdk", () => {
           if (method === "capabilities") {
             return {
               files: { read: true, write: false },
-              collections: { read: true },
+              collections: { read: true, edit: true },
               provenance: { record: false },
             };
           }
-          if (method === "collections.list") return [];
+          if (method === "collections.list") return { collections: [] };
+          if (method === "collections.query") {
+            return { collection: {}, records: [], groups: null, nextCursor: null };
+          }
           return {};
         },
       },
     });
 
-    await expect(client.collections.get("tasks").list()).resolves.toEqual([]);
+    await expect(client.collections.list()).resolves.toEqual([]);
+    await client.collections.get("tasks");
+    await client.collections.query("tasks", { limit: 5 });
+    await client.collections.getRecord("tasks", "r1", { historyLimit: 10 });
+    await client.collections.setFields("tasks/one.md", { status: "done" });
+    await client.collections.createRecord("tasks", {
+      name: "two",
+      fields: { status: "open" },
+    });
     expect(calls).toEqual([
       { method: "capabilities", params: undefined },
-      { method: "collections.list", params: { name: "tasks" } },
+      { method: "collections.list", params: undefined },
+      { method: "collections.get", params: { path: "tasks" } },
+      { method: "collections.query", params: { path: "tasks", limit: 5 } },
+      {
+        method: "collections.getRecord",
+        params: { path: "tasks", recordId: "r1", historyLimit: 10 },
+      },
+      {
+        method: "collections.setFields",
+        params: { path: "tasks/one.md", fields: { status: "done" } },
+      },
+      {
+        method: "collections.createRecord",
+        params: { path: "tasks", name: "two", fields: { status: "open" } },
+      },
     ]);
     expect(JSON.stringify(calls)).not.toMatch(/workspaceId|userId|onBehalfOf/);
   });
@@ -442,14 +472,14 @@ describe("@dohc/sdk", () => {
       },
     });
 
-    await expect(client.collections.get("tasks").list()).rejects.toMatchObject({
+    await expect(client.collections.query("tasks")).rejects.toMatchObject({
       code: "DOHC_CAPABILITY_DISABLED",
       message: expect.stringMatching(/collections\.read.*disabled/i),
     });
     expect(calls).toEqual([{ method: "capabilities", params: undefined }]);
   });
 
-  it("rejects invalid collection names before requesting collection data", async () => {
+  it("reports disabled collection edits before sending a write", async () => {
     const calls: Array<{ method: string; params?: unknown }> = [];
     const client = createDohcClient({
       transport: {
@@ -464,9 +494,55 @@ describe("@dohc/sdk", () => {
       },
     });
 
-    await expect(client.collections.get("bad\nname").list()).rejects.toMatchObject({
+    await expect(
+      client.collections.setFields("tasks/one.md", { status: "done" }),
+    ).rejects.toMatchObject({
+      code: "DOHC_CAPABILITY_DISABLED",
+      message: expect.stringMatching(/collections\.edit.*disabled/i),
+    });
+    await expect(
+      client.collections.createRecord("tasks", { name: "two" }),
+    ).rejects.toMatchObject({
+      code: "DOHC_CAPABILITY_DISABLED",
+      message: expect.stringMatching(/collections\.edit.*disabled/i),
+    });
+    expect(calls).toEqual([{ method: "capabilities", params: undefined }]);
+  });
+
+  it("rejects invalid collection arguments before any collection request", async () => {
+    const calls: Array<{ method: string; params?: unknown }> = [];
+    const client = createDohcClient({
+      transport: {
+        async request(method, params) {
+          calls.push({ method, params });
+          return {
+            files: { read: true, write: false },
+            collections: { read: true, edit: true },
+            provenance: { record: false },
+          };
+        },
+      },
+    });
+
+    await expect(client.collections.get("bad\npath")).rejects.toMatchObject({
       code: "DOHC_INVALID_INPUT",
-      message: expect.stringMatching(/collection name/i),
+      message: expect.stringMatching(/collection path/i),
+    });
+    await expect(client.collections.getRecord("tasks", "")).rejects.toMatchObject({
+      code: "DOHC_INVALID_INPUT",
+      message: expect.stringMatching(/record id/i),
+    });
+    await expect(
+      client.collections.setFields("tasks/one.md", { id: "forged" }),
+    ).rejects.toMatchObject({
+      code: "DOHC_INVALID_INPUT",
+      message: expect.stringMatching(/"id" field is engine-owned/i),
+    });
+    await expect(
+      client.collections.createRecord("tasks", { name: "no/separators" }),
+    ).rejects.toMatchObject({
+      code: "DOHC_INVALID_INPUT",
+      message: expect.stringMatching(/record name/i),
     });
     expect(calls).toEqual([]);
   });
@@ -555,7 +631,7 @@ describe("@dohc/sdk", () => {
         },
       },
     });
-    await expect(collectionsClient.collections.get("bad").list()).rejects.toMatchObject({
+    await expect(collectionsClient.collections.query("bad")).rejects.toMatchObject({
       code: "DOHC_BAD_RESPONSE",
     });
 
@@ -569,11 +645,11 @@ describe("@dohc/sdk", () => {
               provenance: { record: false },
             };
           }
-          return [{ id: 1 }, null];
+          return { collection: {}, records: [{ id: 1 }, null], groups: null, nextCursor: null };
         },
       },
     });
-    await expect(collectionItemsClient.collections.get("bad").list()).rejects.toMatchObject({
+    await expect(collectionItemsClient.collections.query("bad")).rejects.toMatchObject({
       code: "DOHC_BAD_RESPONSE",
     });
   });
@@ -651,7 +727,9 @@ describe("@dohc/sdk", () => {
           }
           if (method === "files.list") return [];
           if (method === "workspace.search") return [];
-          if (method === "collections.list") return [];
+          if (method === "collections.query") {
+            return { collection: {}, records: [], groups: null, nextCursor: null };
+          }
           return { ok: true };
         },
       },
@@ -661,7 +739,10 @@ describe("@dohc/sdk", () => {
     await client.files.list(undefined, { path: "../outside", recursive: false });
     await client.workspace.search("validated query", { query: "overridden" });
     await client.ui.open("dohc://atom/safe", { target: "https://evil.test" });
-    await client.collections.list("safe-collection", { name: "overridden" });
+    await client.collections.query(
+      "safe-collection",
+      { path: "overridden", limit: 5 } as DohcCollectionQueryOptions,
+    );
 
     expect(calls).toContainEqual({
       method: "files.list",
@@ -680,8 +761,8 @@ describe("@dohc/sdk", () => {
       params: { target: "dohc://atom/safe" },
     });
     expect(calls).toContainEqual({
-      method: "collections.list",
-      params: { name: "safe-collection" },
+      method: "collections.query",
+      params: { path: "safe-collection", limit: 5 },
     });
   });
 
@@ -794,7 +875,7 @@ describe("@dohc/sdk", () => {
           }
           if (method === "files.list") return [{ path: "notes/today.md", kind: "file" }];
           if (method === "workspace.search") return [{ path: "notes/today.md", score: 1 }];
-          if (method === "collections.list") return [{ id: "one" }];
+          if (method === "collections.list") return { collections: [{ path: "tasks" }] };
           if (method === "databases.read") return { rows: [{ id: 1 }] };
           if (method === "databases.edit") return { changes: 1 };
           if (method === "future.teleport") return { arrived: true };
@@ -818,7 +899,7 @@ describe("@dohc/sdk", () => {
       operations: [{ op: "update", id: 1 }],
     })).resolves.toEqual({ changes: 1 });
     await expect(client.ui.open("dohc://atom/today", { position: "new-tab" })).resolves.toEqual({ ok: true });
-    await expect(client.collections.list("tasks", { limit: 5 })).resolves.toEqual([{ id: "one" }]);
+    await expect(client.collections.list()).resolves.toEqual([{ path: "tasks" }]);
     await expect(client.provenance.record({ summary: "Updated", source: "site" })).resolves.toBeUndefined();
     await expect(client.invoke<{ arrived: boolean }>("future.teleport", { to: "home" })).resolves.toEqual({ arrived: true });
 
