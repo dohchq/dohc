@@ -1092,13 +1092,14 @@ function createPluginWorkspaceRuntimeParts(
               },
               watchParams,
             ),
-          subscribeRecordWatch: (watchParams) =>
+          subscribeRecordWatch: (watchParams, readable) =>
             workspaceEvents.subscribeRecords(
               {
                 owner: { kind: "process", pluginId, spawnId },
                 emitEvent,
               },
               watchParams,
+              readable,
             ),
           unsubscribeWorkspaceEvents: (watchParams) =>
             workspaceEvents.unsubscribe(
@@ -4604,7 +4605,10 @@ async function invokeWorkspacePluginSdk(input: {
   signal?: AbortSignal;
   invokeChildProcess?: (method: string, params?: unknown) => Promise<unknown>;
   subscribeFileWatch?: (params: unknown) => { subscriptionId: string };
-  subscribeRecordWatch?: (params: unknown) => { subscriptionId: string };
+  subscribeRecordWatch?: (
+    params: unknown,
+    readable?: ReadonlySet<string>,
+  ) => { subscriptionId: string };
   unsubscribeWorkspaceEvents?: (params: unknown) => boolean;
   method: string;
   params?: unknown;
@@ -4735,8 +4739,12 @@ async function routePluginPanelSdk(input: {
           : undefined,
       subscribeRecordWatch:
         workspaceEvents && emitEvent
-          ? (watchParams) =>
-              workspaceEvents.subscribeRecords({ owner, emitEvent }, watchParams)
+          ? (watchParams, readable) =>
+              workspaceEvents.subscribeRecords(
+                { owner, emitEvent },
+                watchParams,
+                readable,
+              )
           : undefined,
       unsubscribeWorkspaceEvents: workspaceEvents
         ? (watchParams) => workspaceEvents.unsubscribe({ owner }, watchParams)

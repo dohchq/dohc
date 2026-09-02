@@ -791,6 +791,37 @@ describe("the plugin SDK host's files.watch route", () => {
     ).rejects.toThrow("collections.watch is unavailable for this request path");
   });
 
+  it("scopes a root watch to the collections the read port listed", async () => {
+    const events = new PluginWorkspaceEvents();
+    const sink = collector();
+    const context = hostContext({
+      subscribeRecordWatch: (params, readable) =>
+        events.subscribeRecords(
+          { owner: processOwner("sites", "spawn-1"), emitEvent: sink.emitEvent },
+          params,
+          readable,
+        ),
+      reads: {
+        ...localWorkspaceSdkReads("C:/workspace"),
+        listCollections: async () => ({
+          collections: [{ path: "collections/people", status: "valid", reasons: [] }],
+        }),
+      },
+    });
+
+    const opened = (await invokePluginSdkHost(context, "collections.watch", {
+      path: ".",
+    })) as { subscriptionId: string };
+    events.handleRecordEvent(recordCreated("collections/people"));
+    // Listed nowhere by this plugin's port: never delivered, whatever "." spans.
+    events.handleRecordEvent(recordCreated("collections/private"));
+
+    expect(sink.emitted.map((entry) => (entry.data as { collectionPath: string }).collectionPath)).toEqual([
+      "collections/people",
+    ]);
+    expect(sink.emitted[0]?.subscriptionId).toBe(opened.subscriptionId);
+  });
+
   it("refuses a collection watch the read port denies, creating no subscription", async () => {
     const events = new PluginWorkspaceEvents();
     const sink = collector();

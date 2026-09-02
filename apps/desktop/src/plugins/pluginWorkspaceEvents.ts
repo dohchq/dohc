@@ -83,6 +83,13 @@ interface SubscriptionScope {
    * workspace path: a file prefix, or a collection folder.
    */
   prefix: string;
+  /**
+   * For a root record watch: the collection paths the owner's read port
+   * listed at registration. Delivery stays inside this set, so a root watch
+   * reaches only what the owner could read; a collection created later
+   * needs a new watch.
+   */
+  readable?: ReadonlySet<string>;
 }
 
 interface SubscriptionRecord {
@@ -152,13 +159,16 @@ export class PluginWorkspaceEvents {
   subscribeRecords(
     context: PluginWorkspaceEventsContext,
     params: unknown,
+    readable?: ReadonlySet<string>,
   ): { subscriptionId: string } {
     const input = requireParamsObject(params, PLUGIN_RECORD_WATCH_METHOD);
     // A collection path is a workspace path, so it gets the same containment
     // a file prefix does: a traversal or absolute path is refused here.
+    const prefix = watchPrefix(input.path);
     return this.register(context, {
       kind: "records",
-      prefix: watchPrefix(input.path),
+      prefix,
+      ...(prefix === "." && readable ? { readable } : {}),
     });
   }
 
@@ -244,6 +254,12 @@ export class PluginWorkspaceEvents {
       if (subscription.scope.kind !== "records") continue;
       if (
         !isAtOrBelow(event.data.collectionPath, subscription.scope.prefix)
+      ) {
+        continue;
+      }
+      if (
+        subscription.scope.readable &&
+        !subscription.scope.readable.has(event.data.collectionPath)
       ) {
         continue;
       }

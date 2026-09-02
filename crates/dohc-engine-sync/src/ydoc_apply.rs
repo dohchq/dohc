@@ -3081,6 +3081,20 @@ fn merge_drained_ordered(
             lineage_replacement: None,
             record_facts: drained,
         }),
+        // The drain committed before the primary was refused, so its facts
+        // are real; the refusal rides along as a diagnostic, the same way a
+        // drain's own refusals do.
+        ApplyOutcome::Refused(refusal) => ApplyOutcome::WithDiagnostics {
+            outcome: Box::new(ApplyOutcome::Applied(YdocApplyResult {
+                deferred: false,
+                reason: Some("ydoc-deferred-drained"),
+                conflicts_opened: 0,
+                lineage_replacement: None,
+                record_facts: drained,
+            })),
+            refusals: vec![refusal],
+            sharing_declined: Vec::new(),
+        },
         ApplyOutcome::WithDiagnostics {
             outcome,
             refusals,
@@ -3090,7 +3104,9 @@ fn merge_drained_ordered(
             refusals,
             sharing_declined,
         },
-        other => other,
+        // A crash ends the pull pass before anything post-commit runs, so
+        // there is no emission to preserve facts for; the pass is retried.
+        crashed @ ApplyOutcome::Crashed { .. } => crashed,
     }
 }
 
@@ -3156,6 +3172,24 @@ mod merge_drained_tests {
             )),
             vec!["rec_parked"]
         );
+        // A refused primary carries them too, with the refusal as a
+        // diagnostic the pass still reports.
+        let refusal = crate::ReplicationRefusal {
+            workspace_id: "ws".to_owned(),
+            origin_id: "peer".to_owned(),
+            origin_seq: 1,
+            op_kind: "ydoc.update".to_owned(),
+            reason: crate::RefusalReason::InvalidInput {
+                reason: "bad update".to_owned(),
+            },
+        };
+        let merged = merge_drained(
+            ApplyOutcome::Refused(refusal.clone()),
+            vec![facts("rec_parked")],
+        );
+        let (primary, refusals, _) = merged.into_primary_and_diagnostics();
+        assert_eq!(refusals, vec![refusal]);
+        assert_eq!(ids(primary), vec!["rec_parked"]);
     }
 }
 

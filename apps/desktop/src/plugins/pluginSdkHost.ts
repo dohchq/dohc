@@ -73,7 +73,10 @@ export interface PluginSdkHostContext {
    * subscribeFileWatch is: a subscription needs a channel to push events
    * back on.
    */
-  subscribeRecordWatch?: (params: unknown) => { subscriptionId: string };
+  subscribeRecordWatch?: (
+    params: unknown,
+    readable?: ReadonlySet<string>,
+  ) => { subscriptionId: string };
   /**
    * Ends a workspace subscription (file watch or record watch — one registry
    * owns both kinds), reporting whether that registry owned the id. A false
@@ -269,17 +272,25 @@ export async function invokePluginSdkHost(
       if (context.signal?.aborted) throw abortError();
       // A watch on one collection needs the read scope a read of it needs,
       // so the port refuses before any subscription exists. A watch on "."
-      // is scoped at delivery: only collections the port lists reach it.
+      // takes the collections the port lists now as its delivery set.
       const watchPath =
         typeof params === "object" && params !== null && "path" in params
           ? (params as { path?: unknown }).path
           : undefined;
-      if (typeof watchPath === "string" && watchPath !== ".") {
-        await waitForOperation(
+      if (typeof watchPath !== "string" || watchPath === ".") {
+        const listed = (await waitForOperation(
           context.signal,
-          invokeWorkspaceSdkHost(hostContext, "collections.get", { path: watchPath }),
+          invokeWorkspaceSdkHost(hostContext, "collections.list", {}),
+        )) as { collections: Array<{ path: string }> };
+        return context.subscribeRecordWatch(
+          params,
+          new Set(listed.collections.map((collection) => collection.path)),
         );
       }
+      await waitForOperation(
+        context.signal,
+        invokeWorkspaceSdkHost(hostContext, "collections.get", { path: watchPath }),
+      );
       return context.subscribeRecordWatch(params);
     }
     // The renderer answers this for a panel before it reaches main, so a
